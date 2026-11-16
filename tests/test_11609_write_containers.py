@@ -31,8 +31,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import pytest
 
 from tortoise import mcp_server
-from tortoise.mcp_auth import (  # noqa: I001
-    _current_org_id, _current_org_limits, _transport_mode,
+from tortoise.mcp_auth import (
+    _current_org_id,
+    _current_org_limits,
+    _transport_mode,
 )
 from tortoise.sdk_retired import RETIRED_SDK_METHODS
 

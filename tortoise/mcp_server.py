@@ -6605,7 +6605,7 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
             return _SafeError({"error": "operator_action(action='mitigate') requires 'reason'"})
         stray = [name for name, value in zip(
             ("bias", "precision", "consistency", "directness"),
-            (bias, precision, consistency, directness)) if value is not None]
+            (bias, precision, consistency, directness), strict=True) if value is not None]
         if stray:
             return _SafeError({"error": (
                 f"operator_action(action='mitigate') cannot record "
@@ -6621,7 +6621,7 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
                                          "bias, precision, consistency, directness"})
         stray = [name for name, value in zip(
             ("reason", "strength", "credibility"),
-            (reason, strength, credibility)) if value is not None]
+            (reason, strength, credibility), strict=True) if value is not None]
         if stray:
             return _SafeError({"error": (
                 f"operator_action(action='annotate') cannot record "
@@ -7522,7 +7522,8 @@ def tortoise_adjust_relationship(id: str,
                       ("credibility", credibility)) if value is not None]
         else:
             stray = [name for name, value in zip(
-                ("bias", "precision", "consistency", "directness"), dims)
+                ("bias", "precision", "consistency", "directness"), dims,
+                strict=True)
                 if value is not None]
         if stray:
             return _SafeError({
@@ -7546,7 +7547,7 @@ def tortoise_adjust_relationship(id: str,
             directness=directness)
 
     named_dims = [name for name, value in zip(("bias", "precision", "consistency",
-                                               "directness"), dims)
+                                               "directness"), dims, strict=True)
                   if value is not None]
     if named_dims and len(named_dims) != 4:
         return _SafeError({
