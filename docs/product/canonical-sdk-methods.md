@@ -20,9 +20,10 @@ related:
 
 # Canonical SDK method surface — an inventory, not the target
 
-**Read this for coverage, not for names.** This document is two things: an **inventory of all 125
+**Read this for coverage, not for names.** This document is two things: an **inventory of all 119
 methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and,
-alongside that, an **earlier target sketch** (32 groups over 124 live members). The 26 names that left
+alongside that, an **earlier target sketch** (32 groups over the 124 members live when it
+was written; the live surface is 119 today — see *The count*). The 26 names that left
 the surface on 2026-10-27 are recorded in *Removed from the surface* below rather than in a group.
 
 > ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` (40 methods), not this document.**
@@ -43,8 +44,8 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **125** |
-| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **125** |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **119** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **119** |
 
 The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, then 149 → 147 on
 2026-10-25 (the plan-quota counter `graph_count` went internal as `_graph_count`; the
@@ -59,14 +60,34 @@ because the two per-field setters fold into ONE partial update. `TortoiseSDK.ask
 the SDK layer by #3849 (PR #3929) — the ask pipeline moved to `tortoise/ask_lane.py`, so
 the SDK exposes **no** `ask` method. Nothing is unaccounted for in the manifest.
 
-The last move is 150 → **124** on 2026-10-27: the owner ruled that the surplus public methods
+The 150 → **124** move on 2026-10-27: the owner ruled that the surplus public methods
 **nothing calls** may be deleted (#4282, amendment in `canonical-mcp-tools.md`, PR #10187), and the
 **26** with no caller under `tortoise/**` — including `sdk.py` itself — were deleted, with their code
 archived at tag `archive/4282-surplus-sdk-methods`. The 111 that DO have callers are untouched here;
 privatising them is the remaining half of the migration. Then 124 → **125** on 2026-11-14, when
 approved row 28 `get_organisation_account` gained its `def` (#10015) — an IMPLEMENTATION of an
-already-approved name, not an addition to the approved 40. *Removed from the surface* below is the
-per-method record.
+already-approved name, not an addition to the approved 40. **TWO waves landed in one week and they
+are disjoint**, so the merged count is one subtraction from each side rather than either side's
+number:
+
+- **125 → 120 on 2026-11-15** — `#12901` wave 1 retired five off-surface methods
+  (`backfill_v25`, `calibration_passed`, `list_relations`, `membership_get`, `quarantine_batch`),
+  none of them an approved row, so the declaration stays at 40.
+- **120 → 119 on 2026-11-16** — #11609 Phase 2's WRITE/MUTATE batch: three approved rows gained
+  their `def` (`supersede_knowledge`, `write_question`, `record_decision` — `update_knowledge`
+  already had one) while four absorbed doors were retired (`supersede`, `file_decision`,
+  `file_human_approval`, `update_entity`), a net −1. Four names stay live for stated reasons
+  (`update_point`/`supersede_point` for their §17.1 write-lane declarations, `retract_point` for
+  its instant-free retraction, `invalidate_point` for `valid_to_precision='unknown'`), and
+  `update_entity`'s Point-lifecycle behaviour — the `restatus` journal record and the
+  transition-naming refusal — is CARRIED by `update_knowledge`, not dropped with the name.
+
+The overlap is chosen rather than assumed: wave 1 admitted a name only when NO `tool_registry` entry
+(live or retired) bound it, and the four doors this batch re-keys were live MCP tools at that time,
+so the two waves could not have consumed each other's candidates. **119 is the count today**, and it
+is derived, not typed: `ast` over `tortoise/sdk.py`, `tools/sdk_surface.py --check` and
+`counts.sdk_public_methods` in `config/surface-manifest.yml` all read 119. *Removed from the surface*
+below is the per-method record.
 
 > A previous draft reported 152 and explained the two-method gap as the manifest excluding
 the eval lane. That was wrong, and how it arose is worth naming: the method count was
@@ -118,11 +139,42 @@ of these to the public surface is a **new** surface change and needs the owner a
 
 `test_guard` is **not** in this list and was **not** deleted: `beta-sdk-surface.md` rules it *"Kept
 and relocated … it guards the production-wipe incident, so the code must survive"*. ⚠️ **But it is
-still ON the public surface today** — it is one of the 125 (`config/sdk-surface.json`,
+still ON the public surface today** — it is one of the 119 (`config/sdk-surface.json`,
 `sdk.py::TortoiseSDK.test_guard`), and `tools/sdk_surface.py --check` counts it. The
 `beta-sdk-surface.md` ruling is about the approved 40-method TARGET, where it is relocated rather
 than deleted; on the live surface it remains a *removal candidate* (see the "Candidates for
 removal" row below), not something that has already left.
+
+### Removed from the surface — 2026-11-15 (#12901 wave 1)
+
+**These 5 methods are gone from `TortoiseSDK`.** Each was OFF the approved 40. **Four had no
+production caller anywhere under `tortoise/`.** The fifth, `calibration_passed`, had exactly
+one — `tortoise/gates.py`'s Gate B CLI — so its **body went private** as
+`_calibration_marker_recorded()` and that CLI reads the seam instead: the
+`capture_session` → `_capture_session` precedent already in `tortoise/sdk_retired.py`, where a
+surplus-but-referenced method goes private rather than out. The unapproved public door closes
+in every case; the capability survives in the one case that was still wired to something.
+
+⚠️ **A receiver-keyed scan does not see that caller**: `TortoiseSDK().calibration_passed()`
+has a CONSTRUCTOR CALL for a receiver, not a name, so a walk keyed on `sdk.<name>` /
+`self.<name>` reports zero callers and is wrong. Match the ATTRIBUTE, then judge the receiver.
+
+The remaining `callers: engine` cells the manifest recorded are **three, of two kinds**: two are
+`scan_callers`' DOCUMENTED receiver-blind name collisions (`registry.list_relations()`,
+`from .mining import quarantine_batch`) — different objects, not calls on the SDK — and the third
+was `calibration_passed`'s **real** caller in `tortoise/gates.py`, which is exactly why that one's
+body went private rather than simply out. Sweeping all three into the "collision" bucket is the
+error this paragraph exists to prevent. All code is
+archived under `archive/sdk-methods/b2-sdk-retirement-wave-1/` and every departure is recorded
+in `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`.
+
+| Removed method | What it did | The 40-method target it was recorded against |
+|---|---|---|
+| `backfill_v25` | One-shot ONTOLOGY v2.5 status/pointKind migration. | — |
+| `calibration_passed` | Read the Gate B calibration-milestone marker. **Body went PRIVATE** (`_calibration_marker_recorded()`), which `tortoise/gates.py` now calls. | `check_confidence` |
+| `list_relations` | List the pack-declared relation declarations. | `graph_overview` |
+| `membership_get` | Read one membership row by id. | — |
+| `quarantine_batch` | Quarantine a batch (thin delegate to `tortoise.mining`). | `update_knowledge` |
 
 ## The principle
 
@@ -177,10 +229,10 @@ Three rules, each of which caught a real error in this document.
 |---|---|---|---|---|
 | R1 | `search_knowledge` | #1 | `tortoise_fts_query`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse |
 | R2 | `list_knowledge` | #2 | `query`, `paginated_query`, `query_points_by_tag` | keep, collapse |
-| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `provenance`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads and `provenance`; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |
+| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `provenance`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads and `provenance`; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |
 | R4 | `get_entity` | #4 | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` | keep, collapse |
 | R5 | `explore_connections` | #5 | `expand_relationships`, `get_owned_entities` | keep, collapse — `traverse` and `get_org_structure` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |
-| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability |
+| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability |
 | R7 | `review_link_candidates` | #7 | `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | keep, collapse |
 | R8 | `poll_events` | #8 | `poll_events` | keep |
 | R9 | `inspect_batch` | #9 | `list_batch`, `list_batches` | keep, collapse |
@@ -198,8 +250,8 @@ Three rules, each of which caught a real error in this document.
 | W7 | `capture_session_hosted` | — | — | **no live member** — `commit_session` was deleted on 2026-10-27 (#4282, code archived at the same tag); the capability returns under `mine_knowledge_from_session` |
 | W8 | `manage_source_trust` | #14 | `assess_source`, `set_source_tier`, `get_source_reliability` | keep — **`get_source_reliability` writes** |
 | W9 | `link_entities` | #15 | `link_entities`, `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split |
-| W10 | `record_decision` | #16 | `file_decision`, `file_human_approval` | keep, collapse |
-| W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `quarantine_batch` | keep, collapse — **the widest group; see Open items** |
+| W10 | `record_decision` | #16 | `write_question`, `record_decision` | keep, collapse — `file_decision` and `file_human_approval` were retired on 2026-11-16 (#11609 Phase 2) into the two rows they now name |
+| W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `supersede_knowledge`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline` | keep, collapse — **the widest group; see Open items**. `update_entity` and `supersede` were retired on 2026-11-16 (#11609 Phase 2) into `update_knowledge` and `supersede_knowledge`; `quarantine_batch` left in `#12901` wave 1 |
 | W12 | `delete_knowledge` | #18 | `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |
 | W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation` | keep — **`compute_confidence` mislabelled read** |
 | W14 | `approve_merge` | #20 | `approve_merge` | keep |
@@ -215,7 +267,7 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 |---|---|---|
 | N1 | `org` | `org_create`, `org_get`, `get_organisation_account` |
 | N2 | `graph` | `list_memory_graphs`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |
-| N3 | `membership` | `membership_create`, `membership_get` |
+| N3 | `membership` | `membership_create` |
 | N4 | `apikey` | `apikey_create`, `apikey_revoke`, `apikey_verify` |
 | N5 | `invitation` | `invitation_list`, `invitation_get_by_id`, `invitation_revoke`, `sweep_invite_ghost_memberships` |
 | N6 | `signup_token` | `signup_token_lookup`, `signup_token_recover`, `signup_token_revoke` |
@@ -224,7 +276,7 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 
 | Method | Why it is not on the target surface |
 |---|---|
-| `backfill_v25` | A one-shot migration setting `status='live'` where NULL and backfilling `pointKind` — targeting `ONTOLOGY_v2.5` while the schema is **v3.13**. Zero customers, pre-beta. The approved MCP list proposes the same archive for its tool (`tortoise_backfill_v25`); like that one, this is a **proposal** — the baseline still records the method `lifecycle: active`. A migration written against a schema several versions old is a liability, not a capability. |
+| `backfill_v25` | A one-shot migration setting `status='live'` where NULL and backfilling `pointKind` — targeting `ONTOLOGY_v2.5` while the schema is **v3.13**. Zero customers, pre-beta. The approved MCP list proposes the same archive for its tool (`tortoise_backfill_v25`), and this is no longer a proposal: **#12901 wave 1 (2026-11-15) retired the method**, so the baseline records no `backfill_v25` row at all — it is gone from `config/sdk-surface.json`, from `sdk-surface-baseline.md`, and from `TortoiseSDK`. The body is archived under `archive/sdk-methods/b2-sdk-retirement-wave-1/`. A migration written against a schema several versions old is a liability, not a capability. |
 
 ## What each group does
 
@@ -401,8 +453,9 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 **Where this lands for us.** 150 public methods on one flat class was ~5.6× the largest flat
 surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
-**collapse the aliases**. The sketch above does exactly that: **32 groups over 124 live
-members** (149 when it was written; the 26 deleted names took 26 members with them) — 26 memory-facing
+**collapse the aliases**. The sketch above does exactly that: **32 groups over the 124 members
+live when it was written** (149 when the sketch was first drawn; the 26 deleted names took 26
+members with them) — 26 memory-facing
 (R1–R9, W1–W17) and 6 control-plane namespaces (N1–N6) —
 reached by grouping and merging; the retired primitives stop resolving — a call raises with the
 hint naming its replacement (#3836 (c)) — and `backfill_v25` is archived. The

@@ -16,9 +16,11 @@ aboutObjects: [tortoise-mcp, tortoise-sdk]
 ## The vision, in one paragraph
 
 **A developer should be able to read our entire surface in a sitting and know what to call.**
-Today they cannot: the MCP server serves **91 tools** (68 of them advertised — the `graph_overview`
-container retired five names into one, #4282 Phase 3.2 deleted five `run_onboarding` tools, and the
-batch-1 archives of #11609 removed four no-destination tools), and the SDK **125 methods** (26 surplus names deleted by `#4282`), with five
+Today they cannot: the MCP server serves **97 tools** (60 of them advertised — the `graph_overview`
+container retired five names into one, #4282 Phase 3.2 deleted five `run_onboarding` tools, the
+batch-1 archives of #11609 removed four no-destination tools, and six #11609 Phase 2 WRITE/MUTATE
+containers retired fourteen more into them), and the SDK **119 methods** (26 surplus names deleted by
+`#4282`, five more retired by `#12901` wave 1), with five
 overlapping ways to search, four ways to revise, seven ways to create a node, and a
 lifecycle nobody owns. The target is a surface small enough to hold in your head, where every
 name says what it does, every operation says what it will do to your data, and
@@ -44,8 +46,8 @@ account — the builder pays; an end-customer never has an organisation account 
 | Document | What it is |
 |---|---|
 | **`docs/product/canonical-mcp-tools.md`** | **The approved MCP list — 23 tools**, 9 READ / 14 WRITE. Merged as `8375c7921`. This is the **naming authority** for the SDK. |
-| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 125 (the 150 it was written against, minus the 26 surplus names `#4282` deleted, plus the one `#10015` added), from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
-| `docs/product/canonical-sdk-methods.md` | The full inventory of all 125 with descriptions (150 before `#4282` deleted the surplus set, 124 before `#10015` added one), plus an earlier 32-group sketch over 149 names. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
+| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 119 (the 150 it was written against, minus the 26 surplus names `#4282` deleted, plus the one `#10015` added, minus the 5 `#12901` wave 1 retired, minus the four `#11609` Phase 2 retired, plus the three approved ones it delivered), from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
+| `docs/product/canonical-sdk-methods.md` | The full inventory of all 119 with descriptions (150 before `#4282` deleted the surplus set, 125 at `#12901`'s base, 120 after wave 1, 119 after `#11609` Phase 2), plus an earlier 32-group sketch over 149 names. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
 
 **These documents are the vision.** This file is the bridge from them to implementation.
 
@@ -64,11 +66,13 @@ leaves the response unchanged is **not** a gate failure, but must be recorded.
 
 ## The reconciliation — MCP 91 → 27
 
-> Every figure below is the MERGED surface (68 live + 23 retired shims), not either branch's own
+> Every figure below is the MERGED surface (60 live + 37 retired shims), not either branch's own
 > measurement: the vision started at **99**, the five `run_onboarding` deletions removed five
 > (#4282 Phase 3.2, 81 → 76 advertised), the `graph_overview` container added one served name
-> while retiring five (#4282, 76 → 72 advertised), and #11609 batch 1 archived four no-destination
-> tools (72 → 68 live, names gone rather than retired). 99 − 5 + 1 − 4 = **91**. The target remains **27**.
+> while retiring five (#4282, 76 → 72 advertised), #11609 batch 1 archived four no-destination
+> tools (72 → 68 live, names gone rather than retired), and #11609 batch 2 retired fourteen WRITE/
+> MUTATE doors into six containers (68 → 60 live, 23 → 37 retired shims). 99 − 5 + 1 − 4 = **91**,
+> then + 6 served names for the six containers = **97**. The target remains **27**.
 
 **GENERATED — see `docs/product/bridge-table.md`**, produced by
 `uv run python tools/bridge_table.py`.
@@ -83,14 +87,14 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 
 | | |
 |---|---|
-| Registry tools | **91** |
-| Absorbed into the 27 MCP targets | **88** |
+| Registry tools | **97** |
+| Absorbed into the 27 MCP targets | **94** |
 | Absorbed into a builder-only SDK method (not on the MCP) | **1** |
 | Tenancy (SDK/REST only) | **2** |
 | Retired | **0** |
 | MCP target tools | **27** |
 
-**The four bucket rows sum to 91.** (The last row is the target *surface*, not a bucket —
+**The four bucket rows sum to 97.** (The last row is the target *surface*, not a bucket —
 27 targets received those 88 absorbed tools many-to-one, so it is not part of the sum.)
 
 The **Retired** row fell **4 → 0** in #11609 **batch 1**: the last four
@@ -113,8 +117,10 @@ DELETED from the served registry rather than retired into nothing, because the o
 `tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`). The registry fell
 **99 → 94** with them (81 live + 18 retired shims → 76 live + 18 retired shims), the first
 movement of the advertised surface since #3540. The `graph_overview` container then moved the
-same population to 72 live + 23 retired shims = 95 served, and #11609 batch 1 moved it to
-**68 live + 23 retired shims = 91 served** — the figures the table above records. Every
+same population to 72 live + 23 retired shims, #11609 batch 1 moved it to 68 live + 23 retired
+shims (91 served), and #11609 batch 2 moved it once more to
+**60 live + 37 retired shims = 97 served** — the figures the table above records, and the
+numbers `config/surface-manifest.yml` derives. Every
 capability those five carried survives
 on REST — each route is hand-written in `tortoise/hosted_api.py` — and the two tenant-visible
 reads are rehomed to the tenancy block. Their recorded reasons live in
@@ -149,9 +155,13 @@ not complements.
 ## The reconciliation — SDK 150 → 40
 
 The starting figure in this heading is **historical**, the same way the MCP heading's is: the public
-SDK surface measured **150** when this heading was written — it now measures **125**: `#4282` deleted
-26 surplus names (150 -> 124) and `#10015` added `get_organisation_account` (124 -> 125; the 149 sketch
-predates one method; see the `canonical-sdk-methods.md` row above). The target — 40 — is unchanged.
+SDK surface measured **150** when this heading was written — it now measures **119**: `#4282` deleted
+26 surplus names (150 -> 124), `#10015` added `get_organisation_account` (124 -> 125), `#12901` wave 1
+retired the first five off-surface methods with no production caller (125 -> 120), and then `#11609`
+Phase 2 retired four names into the containers it added AND delivered three approved ones, re-cutting
+the count (120 − 4 + 3 = 119; see the `canonical-sdk-methods.md` row above — the same split
+`tortoise/__all__.py` records as overlap 13 → 16 and off-surface 107 → 103). The target — 40 — is
+unchanged. The 149 sketch predates one method.
 
 The ledger of the departing names — grouped, with the rationale for each group — is the
 **"Discarded — and why"** section of `docs/product/beta-sdk-surface.md`.
@@ -228,7 +238,7 @@ handler twice.
 | **0.2** | **Name the target.** A short note in both canonical docs stating that **every name is a target, not a description of today.** | The review found the MCP column reads as present tense. A developer following it today calls tools that do not exist. |
 | **0.3** | **The MCP rename table.** old name → new name, per tool. | **Only 5 of the 27 is live at all** — every registered MCP tool carries a `tortoise_` prefix, so no target name matches a served name verbatim; exactly 5 (create_entity, get_entity, approve_merge, graph_set_recording, manage_sources) have a `tortoise_`-prefixed equivalent, and the other 22 have neither. Without this, implementation silently renames the whole MCP surface with no migration note. |
 | **0.3b** | **The SDK rename table.** old name → new name, per method — the SDK pair to 0.3. This exists because 0.3 is the *MCP* table; the SDK half would otherwise have had no owner. `beta-sdk-surface.md` and the SDK reconciliation above both delegate their per-name check here. | 0.1 |
-| **0.4** | **`__all__` in `tortoise/__init__.py`.** | The root cause of the 149-method surface of the day (150 when the row was written; 125 today — `tools/surface-guard.py` is the live count). The public surface is declared by *convention*; every design test presupposes a declaration. Without this the surface drifts back. |
+| **0.4** | **`__all__` in `tortoise/__init__.py`.** | The root cause of the 149-method surface of the day (150 when the row was written; 119 today — `tools/surface-guard.py` is the live count). The public surface is declared by *convention*; every design test presupposes a declaration. Without this the surface drifts back. |
 
 ### Phase 1 — the declaration and the gate
 

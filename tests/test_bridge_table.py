@@ -507,8 +507,14 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
     )
 
     # The specific regression both prior rounds found.
-    assert "record_decision" not in listed, (
-        "record_decision has one source, so it is not merged, and must not be in Part A"
+    # ⚠️ #11609 Phase 2 MOVED this pin: `record_decision` is now itself a registry
+    # tool, so two rows map to it (its own, plus the `tortoise_file_human_approval`
+    # it absorbs) and the map calls that merged. The predicate under test
+    # (`len(v) > 1`, never `>= 1`) still needs a destination with EXACTLY one
+    # mapping, so the pin names one that has it — `approve_merge` (#3540's
+    # single-source target).
+    assert "approve_merge" not in listed, (
+        "approve_merge has one source, so it is not merged, and must not be in Part A"
     )
     assert "check_confidence" in listed, "check_confidence has 7 sources and must be in Part A"
     # A target with no source at all is net-new and cannot be merged by definition.
@@ -786,9 +792,11 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     from tools.bridge_table import DESTINATION, _registry_rows
 
     retired = [r for r in _registry_rows() if r["use_instead"]]
-    # 18 after #3540; 23 after #4282's `graph_overview` container retired five more names
-    # (the served registry is live + retired, so this counts the shim-served population).
-    assert len(retired) == 23, f"expected 23 retired rows, got {len(retired)}"
+    # 18 after #3540; 23 after #4282's `graph_overview` container retired five more;
+    # 37 after #11609 Phase 2's WRITE/MUTATE batch retired fourteen doors into six
+    # containers (the served registry is live + retired, so this counts the
+    # shim-served population: 60 live + 37 retired = 97).
+    assert len(retired) == 37, f"expected 37 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "

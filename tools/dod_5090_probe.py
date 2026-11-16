@@ -221,6 +221,8 @@ import functools
 import json
 import os
 import re
+import subprocess
+import tomllib
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2029,6 +2031,8 @@ def _write_seams_that_embed() -> dict[str, str]:
 #: longer an OFF spelling.
 CONFIG_SURFACES: tuple[str, ...] = (
     ".env.example",
+    "compose.yaml",
+    "compose.yml",
     "docker-compose.yml",
     "docker-compose.yaml",
     "Dockerfile",
@@ -2107,6 +2111,8 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #: missed — the next channel (a `Procfile`-shaped runner, a second Fly manifest)
 #: is found by its manifest, not by someone remembering to add a string here.
 DEPLOYMENT_SURFACES: tuple[str, ...] = (
+    "compose.yaml",
+    "compose.yml",
     "docker-compose.yml",
     "docker-compose.yaml",
     "Dockerfile",
@@ -2149,15 +2155,21 @@ FLY_MANIFEST_GLOB = "fly*.toml"
 #: false PASS out of the verdict, and it is why the exclusion is a documented
 #: boundary rather than an oversight — a later "completeness" fix that globbed the
 #: family in would have to model merge ORDER before it could be correct.
-COMPOSE_BASE_NAMES: tuple[str, ...] = ("docker-compose.yml", "docker-compose.yaml")
+#: ⛔ The compose DEFAULT filename matters and used to be missing: Docker's CLI
+#: reference says compose *"traverses the working directory and its parent
+#: directories looking for a `compose.yaml` or `docker-compose.yaml` file"* — so
+#: `compose.yaml`/`compose.yml` is the FIRST choice, not a variant. Measured: a
+#: directory holding only `compose.yaml` resolves under a bare `docker compose
+#: config`. A tree whose only compose file is `compose.yaml` was therefore INVISIBLE
+#: to this walk — neither read nor HELD — and a disarm inside it never reached row 1
+#: (a fail-open, and the exact opposite of the "computed population" claim below).
+COMPOSE_BASE_NAMES: tuple[str, ...] = ("compose.yaml", "compose.yml",
+                                       "docker-compose.yml", "docker-compose.yaml")
 
 #: The TOML table a deployed process's environment comes from. Fly reads `[env]`
 #: into the machine's environment; `[build.args]` reaches the BUILD, never the
 #: process, so a flag set there is not a shipped default.
 TOML_RUNTIME_ENV_TABLE = "env"
-
-_TOML_TABLE_HEADER = re.compile(
-    r"^\s*(?P<open>\[\[?)\s*(?P<name>[^\]]+?)\s*(?:\]\]?)\s*(?:#.*)?$")
 
 #: The Dockerfile instructions that name what the image RUNS — the entrypoint is
 #: discovered from them, never from a fixed `entrypoint.sh` (#12022).
@@ -2196,9 +2208,349 @@ def _fly_manifests() -> list[Path]:
 
 
 def _compose_files() -> list[Path]:
-    """The compose BASE files that exist (see `COMPOSE_BASE_NAMES`)."""
+    """The compose BASE file compose SELECTS — ONE, not every present name.
+
+    ⛔ Compose chooses a single base file by fixed precedence (`COMPOSE_BASE_NAMES`,
+    measured against the binary: with `compose.yaml` and `docker-compose.yml` both
+    present it warns *"Found multiple config files with supported names … Using
+    compose.yaml"*; with `docker-compose.yml` and `docker-compose.yaml` it takes
+    `docker-compose.yml`). Measuring every present name invents deployment files that
+    do not exist: measured on `compose.yaml` `"1"` + `docker-compose.yml` `"0"`, the
+    walk reported `files {compose.yaml: ON, docker-compose.yml: OFF}`, `on: False` —
+    a false HOLD on any tree mid-migration — and attributed a disarm to a file the
+    deployment never reads. The superseded names are REPORTED
+    (`_compose_superseded_files`), never counted as deployment files.
+    """
+    for name in COMPOSE_BASE_NAMES:
+        target = REPO_ROOT / name
+        if target.is_file():
+            return [target]
+    return []
+
+
+def _compose_superseded_files() -> list[Path]:
+    """Compose base files that exist but are NOT the one compose selects.
+
+    They are recognised and reported (`discover_deployment_channels` puts each in
+    `non_env` with the reason), so they neither vanish silently nor decide a reading:
+    a deployment does not read them.
+    """
+    selected = _compose_files()
+    if not selected:
+        return []
     return [REPO_ROOT / name for name in COMPOSE_BASE_NAMES
-            if (REPO_ROOT / name).is_file()]
+            if (REPO_ROOT / name).is_file() and (REPO_ROOT / name) != selected[0]]
+
+
+#: How long a resolver may take. Generous: `compose config` parses and interpolates
+#: a large file, and a timeout is reported as `UNRESOLVED`, never as silence.
+RESOLVER_TIMEOUT_S = 120
+
+#: The ONLY environment a resolver is allowed to see.
+#: ⛔ Compose interpolates `${VAR}` from the SHELL first and the project `.env`
+#: second, so a lane's exported flag leaks straight into the resolved value:
+#: measured — `FLAG=0` in the environment turns `FLAG: "${FLAG:-1}"` into `"0"`.
+#: The reading row 1 asks for is the SHIPPED config's, which is the same doctrine
+#: `measure()` applies to the process env (`#10996`): a lane's export is not a
+#: default. This list deliberately does not try to enumerate "variables that could
+#: interpolate into the flag": it drops the ambient environment wholesale.
+#:
+#: ⛔ THE PROJECT `.env` IS **NOT** A SHIPPED INPUT, and an earlier revision of this
+#: comment said it was. `.env` is gitignored (`.gitignore:30`) and untracked, so it is
+#: a MACHINE-LOCAL file — and following this repo's own documented setup step
+#: (`cp .env.example .env`, and `.env.example:1644` sets `TORTOISE_EMBED_GATE=1`)
+#: CREATES one. Measured on a fixture with `FLAG: "${FLAG:-0}"`: no `.env` → `"0"`;
+#: with `.env` containing `FLAG=1` → `"1"`. A published DoD reading that flips on an
+#: untracked local file is exactly the leak this list exists to stop, so the
+#: resolver also runs with `COMPOSE_DISABLE_ENV_FILE=1` (see `_resolver_env`).
+#: `.env.example` is the shipped template; `.env` is the developer's copy of it.
+RESOLVER_ENV_ALLOW = frozenset({
+    "PATH", "HOME", "TMPDIR", "TMP", "LANG", "LC_ALL",
+    "DOCKER_CONFIG", "DOCKER_HOST", "DOCKER_CONTEXT", "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+})
+
+#: The compose resolver, named ONCE so the row text and the runner cannot drift apart.
+#: ⛔ `--no-consistency` is load-bearing for an INSTRUMENT: it asks compose to RESOLVE
+#: the model, not to certify that the project is deployable. Without it a service that
+#: carries an `environment:` but no `image:`/`build:` is refused with *"service \"t\" has
+#: neither an image nor a build context specified"* (measured), so a manifest whose
+#: ENVIRONMENT is perfectly resolvable reads as `UNRESOLVED` — the collapse this lane
+#: exists to remove, one layer down. A syntax error or a failed interpolation still
+#: exits non-zero and is still `UNRESOLVED`.
+#: ⛔ TWO resolves, and the split is load-bearing in BOTH directions. `docker compose
+#: config` OMITS every `profiles:`-gated service unless a profile is enabled, so one
+#: resolve answers two different questions depending on the flag and neither answer is
+#: safe alone:
+#:
+#:   * the DEFAULT set is what a plain `docker compose up` STARTS. Only it can ARM the
+#:     row: a truthy value inside a profile-gated service does not arm a deployment
+#:     that never starts that service. Measured: `{app: {}, debug-shell: {profiles:
+#:     [debug], environment: {FLAG: "1"}}}` — plain `up` starts `['app']` with no
+#:     FLAG, while `--profile '*'` shows `debug-shell=1`. Treating the second as an arm
+#:     publishes "armed" over a deployment that is OFF (`#11455`'s false-PASS class).
+#:   * the ALL-PROFILES set is the only place a DISARM inside a profiled service can be
+#:     seen — the previous review's finding. Without it such a `0` vanished and the
+#:     file read ARMED. So it BLOCKS an arm, and it never creates one.
+#:
+#: Hence: default resolves the verdict, all-profiles may only DISARM or report. A
+#: supplementary resolve that REFUSES (measured: a profiled dev service referencing a
+#: gitignored `env_file` that is absent makes `--profile '*'` exit 1 while the default
+#: set resolves fine) is a WARNING, not `UNRESOLVED` for the whole file — converting
+#: the file would discard an arm the walk did measure on the default set, i.e. a false
+#: HOLD, the mirror of the fail-open.
+COMPOSE_RESOLVER = "docker compose -f <file> config --format json --no-consistency"
+COMPOSE_RESOLVER_ALL_PROFILES = ("docker compose --profile '*' -f <file> config "
+                                 "--format json --no-consistency")
+#: ⛔ `--local --toml -c <file>` are all three load-bearing. flyctl's own docs for
+#: `fly config show`: *"The configuration is presented by default in JSON format. The
+#: configuration data is retrieved from the Fly service."* — so a bare `fly config
+#: show` (a) fetches over the NETWORK with credentials, and (b) resolves flyctl's
+#: DEFAULT `fly.toml` rather than the manifest under measurement, so a tree holding both
+#: `fly.toml` and `fly.staging.toml` publishes one file's `[env]` as the other's.
+#: `--local` = *"Parse and show local fly.toml file instead of fetching from the Fly
+#: service"*, and `-c/--config` names the file. `--toml` asks for the format the
+#: output is then verified as, instead of a JSON rendering that could never parse.
+FLY_RESOLVER = "fly config show --local --toml -c <file>"
+TOML_RESOLVER = "tomllib [env]"
+
+
+
+#: ── Deployment-channel DISCOVERY (`#12549`, extending `#12022`) ───────────────
+#: ⛔ Row 1's word is **every**. A population assembled from a list of remembered
+#: names makes that word an assertion; a COMPUTED one makes it a measurement. So the
+#: walked set is derived here — compose bases, `Dockerfile*`, `fly*.toml` and the
+#: entrypoints those manifests name — and every OTHER manifest type that really does
+#: carry a deployed process's environment is looked for as well:
+#:
+#:   * a discovered channel with **no reader here** HOLDS the row, named, with the
+#:     file that caused it. It must not vanish: `docker-compose.override.yml`
+#:     merging over a base is exactly the shape `#12070` item 8 records as failing
+#:     OPEN (the override's disarm merges LAST), and the exclusion was a COMMENT
+#:     until this lane made it a CHECK.
+#:   * a manifest type that carries **no environment at all** is declared here too,
+#:     so its absence from the walk is a decision a reader can see rather than an
+#:     omission nobody can tell from a glob that missed.
+#:
+#: ⚠️ Declared bound: this is a list of manifest TYPES, not a parser of arbitrary
+#: deployment systems. A channel whose manifest type is in neither tuple is still
+#: invisible — but the types this repo can plausibly grow are enumerated rather than
+#: implied, which is the `#11437`/`#11541` discipline (`test_a_declared_bound_names_…`).
+UNREAD_ENV_CHANNEL_GLOBS: tuple[tuple[str, str], ...] = (
+    # ⛔ BOTH SPELLINGS, because the compose DEFAULT filename is `compose.yaml`. The
+    # guard below the base-name change has to follow the name, or the fix that made
+    # `compose.yaml` VISIBLE opens the hole its `docker-compose.*` twin already closes:
+    # measured on `compose.yaml` armed `"1"` + `compose.override.yaml` disarming `"0"`
+    # — default discovery (what a real `docker compose up` reads) resolves `"0"`, while
+    # the walk's `-f compose.yaml` resolves `"1"` (an explicit `-f` SUPPRESSES the
+    # auto-merge). So the row published ARMED over a deployment whose gate is OFF, and
+    # the override was not in `unread` either, so nothing held the row.
+    ("compose.override.yml", "compose OVERRIDE — merge ORDER decides the value"),
+    ("compose.override.yaml", "compose OVERRIDE — merge ORDER decides the value"),
+    ("compose.*.yml", "compose stage/override file — merge ORDER decides the value"),
+    ("compose.*.yaml", "compose stage/override file — merge ORDER decides the value"),
+    ("docker-compose.override.yml", "compose OVERRIDE — merge ORDER decides the value"),
+    ("docker-compose.override.yaml", "compose OVERRIDE — merge ORDER decides the value"),
+    ("docker-compose.*.yml", "compose stage/override file — merge ORDER decides the value"),
+    ("docker-compose.*.yaml", "compose stage/override file — merge ORDER decides the value"),
+    ("**/*.service", "systemd unit — `Environment=`/`EnvironmentFile=` set the process env"),
+    ("**/*.timer", "systemd unit — `Environment=`/`EnvironmentFile=` set the process env"),
+    ("**/kustomization.yaml", "kustomize — `configMapGenerator`/`envs:` set the process env"),
+    ("**/kustomization.yml", "kustomize — `configMapGenerator`/`envs:` set the process env"),
+    ("**/Chart.yaml", "helm chart — `values.yaml` sets the process env"),
+)
+
+#: Manifests that are RECOGNISED and carry **no** environment, so discovering one
+#: must NOT hold the row. Declared rather than left out: the difference between
+#: "checked and it cannot arm anything" and "nobody looked" is the whole point.
+NON_ENV_MANIFEST_GLOBS: tuple[tuple[str, str], ...] = (
+    ("Procfile", "names a COMMAND only — Heroku/Railway config vars live on the platform"),
+    ("runtime.txt", "names a runtime VERSION only — no environment"),
+)
+
+#: Directories a recursive manifest glob never enters: a virtualenv or a vendored
+#: tree is not this repo's deployment config, and walking one makes the check slow
+#: enough that a lane skips it.
+#: ⛔ `.worktrees` is in this set for CORRECTNESS, not speed. Every lane works in a
+#: git worktree under `<repo>/.worktrees/<lane>/`, so a recursive `**/Chart.yaml`,
+#: `**/kustomization.yaml` or `**/*.service` glob reaches OTHER lanes' checkouts —
+#: including branches that add such a manifest. Those files are not part of the tree
+#: being measured, but finding one makes `deployment["measured"]` False and HOLDS row
+#: 1, so one lane's in-flight change would silently hold the row for every other lane
+#: (measured: `discover_deployment_channels()` walked `.git` and every sibling worktree
+#: and took 14.3 s per call on this checkout). The walk is bounded to the measured
+#: tree instead.
+_DISCOVERY_PRUNE = frozenset({".git", ".worktrees", ".venv", "venv", "node_modules",
+                              "__pycache__", ".tox", ".mypy_cache", ".ruff_cache"})
+
+
+#: The channels this module CONVERTS, and the reader each one gets. Published in the
+#: note so a reader can see which grammar is answered by which tool (`#12549`).
+CHANNEL_READERS: tuple[tuple[str, str], ...] = (
+    ("compose", COMPOSE_RESOLVER),
+    ("fly", f"{FLY_RESOLVER} (else {TOML_RESOLVER})"),
+    ("dockerfile", "line reader: ENV/ARG — DECLARED, not converted"),
+    ("entrypoint", "line reader: shell export — DECLARED, not converted"),
+)
+
+#: ⚠️ **Declared host dependence, same discipline as the Fly channel's**: the compose
+#: channel is answered by the `docker` binary, so a box WITHOUT `docker compose` makes
+#: every compose file `UNRESOLVED` and holds row 1 on every tree. That is a fail-closed
+#: reading (never a false PASS), and it is declared here rather than discovered by a
+#: reader wondering why the row is held on a bare box.
+#:
+#: ⚠️ **What it COSTS, measured rather than estimated** (fresh review, P2 — the sentence
+#: this replaces said "TWO spawns per compose file … which is why the per-file result is
+#: not re-resolved by any caller", and both halves were false). Each `_compose_channel`
+#: call spawns the resolver **twice** (the default set and the all-profiles set, see
+#: `COMPOSE_RESOLVER_ALL_PROFILES`), and **twice more** when the file carries a blank
+#: value, because the per-key blank question needs the `--no-interpolate` model of each
+#: (`_compose_blank_declarations`). And the callers DO re-resolve: `_channel_for` in the
+#: deployment walk, `_entrypoint_scripts` and `_compose_build_refs` each ask
+#: independently — plus the per-surface walk — so one compose file costs **8 spawns**
+#: armed and **10** on the blank path (counted, not estimated). The number is stated
+#: because a reader deciding whether to thread a resolved reading through needs it, not
+#: because it is small; on this box it is most of the suite's 220 s.
+COMPOSE_CHANNEL_HOST_DEPENDENCE = (
+    "requires `docker compose` on the host; absent ⇒ every compose file is UNRESOLVED "
+    "and row 1 HOLDS (fail-closed, never a false PASS)")
+
+#: The two channels phase 1 does NOT convert, one row each, naming the shape it
+#: cannot see and why — so the bound is a published reading rather than a silence.
+#: (The `#11437`/`#11541` discipline: a declared bound says *"this named shape was
+#: not measured"*, never *"nothing was measured"*.)
+DECLARED_CHANNEL_BOUNDS: tuple[dict[str, str], ...] = (
+    {
+        "channel": "dockerfile",
+        "reader": "line reader: ENV/ARG",
+        "cannot_see": ("an `ARG`-substituted `ENV` — `ARG V=0` then "
+                       "`ENV FLAG=$V` — which is HELD `UNMEASURED` and reported, "
+                       "never scored"),
+        # ⛔ A `cannot_see` CLAUSE CAN ONLY DESCRIBE AN UNDER-REPORT, and this shape
+        # was published as one — the opposite of what the reader does (fresh review
+        # of PR #12902, cycle 5, P1). The reader has no `FROM`/stage model, so it
+        # reads a NON-FINAL stage's `ENV` as the file's value and the file reads
+        # `ON` while the image ships without it. That is a FALSE ARM, so it gets its
+        # own field and its own verb in the note: a reader who is told "cannot see"
+        # would treat an unmeasured shape as an absence, which is the one direction
+        # this bound must never lend its authority to. The BEHAVIOUR is #12978;
+        # what changes here is only what the row is allowed to CLAIM about it.
+        "reads_wrong": ("a builder-stage-only `ENV` in a MULTI-STAGE build **as "
+                        "ARMED**: nothing here reads stage semantics, so an `ENV` "
+                        "in a non-final stage is read as the file's value — "
+                        "MEASURED (`docker build` + `docker run` on `FROM alpine "
+                        "AS builder` / `ENV FLAG=1` / `FROM alpine` print no such "
+                        "variable while this walk returns `{'Dockerfile': 'ON'}`, "
+                        "`on: True` with every other bucket empty). Resolving it "
+                        "needs the stage GRAPH (`FROM <stage>` INHERITS that "
+                        "stage's `ENV`), so a final-stage-only rule would be "
+                        "wrong in the other direction; tracked as #12978"),
+        "why": ("a Dockerfile `ENV` is literal except `ARG` substitution, whose "
+                "values come from the BUILD (`--build-arg`); the values are not in "
+                "the file, and no resolver reads them without building the image. "
+                "The channel keeps its line reader, this bound, and the false-ARM "
+                "bound above it."),
+    },
+    {
+        "channel": "entrypoint",
+        "reader": "line reader: shell export",
+        "cannot_see": ("shell INDIRECTION — a value computed at run time "
+                       "(`export FLAG=$(…)`, a sourced file), a HEREDOC BODY, and any "
+                       "CONDITIONAL operand (`[ -n \"$X\" ] && export FLAG=1`, "
+                       "`cond || unset FLAG`) — a conditional operand runs only if a "
+                       "test this reader cannot evaluate passes, so it is reported "
+                       "`indeterminate` and the FILE is held UNMEASURED rather than "
+                       "scored either way; a BRANCH — any command on a line that "
+                       "opens an `if`/`case`/`for`/`while`/`until` construct, or sits "
+                       "inside one, whose test this reader cannot evaluate — and a "
+                       "heredoc whose DELIMITER is not knowable "
+                       "(`cat <<$D`, `cat <<~`, whose body EXTENT is therefore unknown), "
+                       "held the same way; and the `declare`/`typeset`/`readonly` "
+                       "spellings of an assignment — `declare -x FLAG=0`, "
+                       "`declare FLAG=0` and `readonly FLAG=0` all leave this reader "
+                       "with no decision, so an `export` on EITHER side of one decides "
+                       "the file: a LATER truthy `export FLAG=1` stands (bash agrees), "
+                       "and an EARLIER one stands over a disarming "
+                       "`declare -x FLAG=0` — a FALSE ARM, because the `declare` "
+                       "ASSIGNS and export status does not change the value (tracked "
+                       "as `#12952`; the `export NAME=value` spelling IS read); and a "
+                       "CRLF-terminated script, which text-mode reading makes look as "
+                       "though its heredocs terminate (`EOF\\r` arrives as `EOF`) — such "
+                       "a file cannot EXECUTE at all, so it is declared rather than "
+                       "half-converted"),
+        "why": ("a shell's value is decided by EXECUTION, not by text, and "
+                "ShellCheck checks syntax and never evaluates values — there is no "
+                "resolver for this grammar short of running the script. Phase 1 "
+                "declares the channel instead of half-converting it."),
+    },
+)
+
+
+def _manifest_glob(pattern: str) -> list[Path]:
+    """Repo files matching ``pattern``, pruned of virtualenvs/vendored trees."""
+    if not pattern.startswith("**/"):
+        return [p for p in REPO_ROOT.glob(pattern) if p.is_file()]
+    return sorted(p for p in REPO_ROOT.rglob(pattern[3:]) if p.is_file()
+                  and not (_DISCOVERY_PRUNE & set(p.relative_to(REPO_ROOT).parts[:-1])))
+
+
+def discover_deployment_channels() -> dict:
+    """The COMPUTED deployment population — and every channel it could not read.
+
+    Returns ``{"files": {posix: channel}, "readers": {channel: reader},
+    "unread": [{"path", "channel", "reason"}], "non_env": [{"path", "reason"}],
+    "types": {channel: [posix, …]}}``.
+
+    ⛔ The `files` set is what row 1's "every" speaks about, and it is derived from
+    the manifests (`_image_build_files`, `_fly_manifests`, `_compose_files`,
+    `_entrypoint_scripts`) rather than named. `unread` is the honest other half: a
+    discovered manifest carrying a process environment that this module has no
+    reader for. It HOLDS the row — `deployment["measured"]` refuses it — because a
+    walk that read five channels and silently skipped a sixth publishes "every"
+    over a population it did not enumerate.
+    """
+    files: dict[str, str] = {}
+    types: dict[str, list[str]] = {}
+    for path in _compose_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        files[rel] = "compose"
+        types.setdefault("compose", []).append(rel)
+    for path in _image_build_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        files[rel] = "dockerfile"
+        types.setdefault("dockerfile", []).append(rel)
+    for path in _fly_manifests():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        files[rel] = "fly"
+        types.setdefault("fly", []).append(rel)
+    for path in _entrypoint_scripts():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel not in files:
+            files[rel] = "entrypoint"
+            types.setdefault("entrypoint", []).append(rel)
+    unread: list[dict[str, str]] = []
+    for pattern, reason in UNREAD_ENV_CHANNEL_GLOBS:
+        for path in _manifest_glob(pattern):
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            if rel in files or any(entry["path"] == rel for entry in unread):
+                continue
+            unread.append({"path": rel, "channel": pattern, "reason": reason})
+    non_env: list[dict[str, str]] = []
+    for pattern, reason in NON_ENV_MANIFEST_GLOBS:
+        for path in _manifest_glob(pattern):
+            non_env.append({"path": path.relative_to(REPO_ROOT).as_posix(),
+                            "reason": reason})
+    selected = _compose_files()
+    for path in _compose_superseded_files():
+        non_env.append({
+            "path": path.relative_to(REPO_ROOT).as_posix(),
+            "reason": ("superseded compose base — compose selects ONE base file by "
+                       f"precedence and chose {selected[0].name!r}, so a deployment "
+                       "never reads this one"),
+        })
+    return {"files": files, "readers": dict(CHANNEL_READERS),
+            "unread": sorted(unread, key=lambda entry: entry["path"]),
+            "non_env": non_env, "types": types}
 
 
 def _exec_script_names(text: str, instructions: tuple[str, ...]) -> set[str]:
@@ -2209,12 +2561,13 @@ def _exec_script_names(text: str, instructions: tuple[str, ...]) -> set[str]:
     file. A non-script form (`CMD ["uvicorn", …]`) yields nothing, which is the honest
     answer: that deployment has no entrypoint SCRIPT, so there is nothing to walk.
 
-    ⛔ This function reads DOCKERFILE instructions only; `_compose_exec_scripts` is the
-    compose `entrypoint:`/`command:` reader. The two were one function until the
-    compose route turned out to be dead code here (the line was uppercased and compared
-    to a raw lowercase instruction, so it could never match — fresh review of PR
-    #12474, P2); keeping the split means neither docstring can claim the other's route
-    again, which is exactly the defect that cost a round.
+    ⛔ This function reads DOCKERFILE instructions only. The compose
+    `entrypoint:`/`command:` route is the RESOLVER's (`#12549`): `_compose_channel`
+    returns canonical `entrypoints` from `docker compose config`, so the four spellings
+    a line reader had to enumerate — and the two it could not
+    (`_compose_exec_scripts`' declared bounds) — are no longer this module's problem.
+    The two routes stay separate so neither docstring can claim the other's, which is
+    the defect that cost a review round.
 
     ⛔ The instruction match is CASE-INSENSITIVE and accepts a SPACE OR A TAB: Dockerfile
     instruction names are case-insensitive, and `ENTRYPOINT	/entrypoint.sh` is legal.
@@ -2239,62 +2592,757 @@ def _exec_script_names(text: str, instructions: tuple[str, ...]) -> set[str]:
     return names
 
 
-#: A compose mapping KEY, bare or quoted — `entrypoint:` / `"entrypoint":`.
-_COMPOSE_KEY = re.compile(r"""^(?P<q>["']?)(?P<key>[A-Za-z_][\w.-]*)(?P=q)\s*:""")
+#: ── Deployment-channel RESOLVERS (`#12549`) ─────────────────────────────────┐
+#: ⛔ **Why this block exists.** Five review rounds (`#12016`, `#12474`, `#12549`,
+#: `#12858`) each added a SHAPE to the hand-written config readers and each next
+#: round found the adjacent one — cross-service last-wins, a flow mapping, a
+#: quoted key, a block list. A reader that scans LINES cannot enumerate the shapes
+#: of a format; the format's own resolver can, because the shapes are its
+#: grammar. So each channel's VALUE is read from the tool that owns the grammar:
+#:
+#:   compose → `docker compose config --format json`   (anchors, merge keys, flow
+#:             style, interpolation, `env_file:`, per-SERVICE scoping)
+#:   fly     → `fly config show` when present; else `tomllib` — the stdlib's TOML
+#:             1.0 parser — over the resolved `[env]` table
+#:
+#: The channels with NO resolver keep their line readers and are DECLARED, one row
+#: each (`DECLARED_CHANNEL_BOUNDS`): `Dockerfile` (`ENV` is literal except `ARG`
+#: substitution, whose values need a build) and `entrypoint.sh` (shell
+#: indirection is decided by execution, not by text).
+#:
+#: ⚠️ **Declared bound of the resolver route itself:** it resolves only what the
+#: manifest it is given says. Fly secrets / platform-injected environment are
+#: invisible to every offline reader, and a compose OVERRIDE file's merge order is a
+#: decision the caller makes (`COMPOSE_BASE_NAMES`), now CHECKED rather than
+#: assumed — a discovered override holds the row (`UNREAD_ENV_CHANNEL_GLOBS`).
+
+class _ResolverUnavailable(Exception):
+    """The resolver could not be RUN — `UNRESOLVED(<reason>)`, never silence."""
 
 
-def _script_tokens(text: str) -> set[str]:
-    """Basenames of the `.sh` tokens in one command rendering.
+def _resolver_env() -> dict[str, str]:
+    """The environment a resolver runs in — see `RESOLVER_ENV_ALLOW`.
 
-    Both quote kinds are stripped: a compose list item may be written `'/entrypoint.sh'`
-    and the first version dropped it (the split kept single quotes inside the token, so
-    `.endswith(".sh")` was false) — a missed spelling that read as `ABSENT` (fresh review
-    of PR #12474, P3).
+    ⛔ `COMPOSE_DISABLE_ENV_FILE=1` is added HERE, not left to the ambient
+    environment, so the compose resolver never reads a machine-local `.env` as an
+    **interpolation source** (`RESOLVER_ENV_ALLOW` documents the measurement). It is a
+    compose key; the other resolvers ignore it. Verified: the `${FLAG:-0}` fixture reads
+    `"0"` with it set even when a `.env` beside the manifest sets `FLAG=1`.
+
+    ⚠️ **Residual, and it is a declared bound rather than a closed hole:** a manifest
+    that ITSELF declares `env_file: .env` still pulls that file into the resolved
+    environment, because then the manifest names it and compose expands it — measured:
+    `env_file: [.env]` with a gitignored `.env` setting the flag returns `"1"` and the
+    row reads `ON`. That is not the interpolation leak this closes (a file cannot opt
+    itself in silently), but "never a machine-local `.env`" would be a false absolute;
+    the manifest's own `env_file:` is a shipped declaration and is read as one.
     """
-    tokens = re.split(r"[\s,\[\]]+", text)
-    return {Path(token.strip("'\"")).name for token in tokens
-            if token.strip("'\"").endswith(".sh")}
+    env = {k: v for k, v in os.environ.items() if k in RESOLVER_ENV_ALLOW}
+    env["COMPOSE_DISABLE_ENV_FILE"] = "1"
+    return env
 
 
-def _compose_exec_scripts(text: str) -> set[str]:
-    """Scripts a compose file names through `entrypoint:` / `command:`.
+def _run_config_resolver(argv: list[str], *, extra_env: dict[str, str] | None = None) -> dict:
+    """Run one config resolver; ``{"ok", "stdout", "stderr", "reason", "argv"}``.
 
-    ⛔ A reader that handled only the inline form reported `entrypoint` ABSENT over a
-    deployment that names it — the "route looks live, the spelling is missed" defect
-    (fresh review of PR #12474, P3). **Handled**, and this is the measured list rather
-    than "every spelling compose accepts": the inline scalar
-    (`entrypoint: /entrypoint.sh`), the flow list (`entrypoint: ["/entrypoint.sh"]`),
-    the BLOCK list (`entrypoint:` then `- /entrypoint.sh`) and a QUOTED key
-    (`"entrypoint": …`).
+    ⛔ ``extra_env`` is the ONLY way a caller may add to the resolver's environment, and
+    it is APPLIED here rather than merely accepted (`#12902` review, P2, MEASURED: the
+    body passed `_resolver_env()` only, so a caller that believed it had bound a
+    variable got an answer from the scrubbed environment reported as if bound — a
+    published cause the run did not measure, at the code layer). It is added to
+    `_resolver_env`'s allowlist, never to the ambient environment — the discipline that
+    keeps a lane's own exported flag out of a shipped default (`#10996`).
 
-    ⚠️ Declared bound: a BLOCK SCALAR (`command: |` … a shell string) and a one-line
-    FLOW MAPPING (`services: {t: {entrypoint: [/entrypoint.sh]}}`) are not read. Both
-    are latent here — this repo's compose file names no entrypoint — and both read as
-    `ABSENT` rather than as a false arm.
+    ⛔ NO CALLER PASSES IT TODAY: the per-key unset probe that used it
+    (`_compose_unset_dependent_scopes`) was replaced by `--no-interpolate`
+    (`_compose_blank_declarations`). The parameter is kept only because it is applied
+    correctly now; delete it with its next reader if that stays true.
+
+    ⛔ **Three-valued by construction.** A resolver that cannot run (no binary, a
+    timeout, a non-zero exit) is `ok: False` WITH the reason from its own stderr —
+    never "the config is silent". `#12549` defect 1 is what collapsing that into an
+    answer costs: a file the walk READ was published as "unreadable", sending a
+    reader to chase permissions on a file with none.
+
+    ⛔ The last line of stderr is kept, not the whole of it: `docker compose` writes
+    progress chatter before its error, and every earlier failure in this module has
+    been blamed on the wrong line of a multi-line message.
     """
-    names: set[str] = set()
-    key: str | None = None
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+    env = _resolver_env()
+    if extra_env:
+        env.update(extra_env)
+    try:
+        # Fixed argv, no shell (`shell=False` is the default): nothing here is
+        # caller-supplied text, so there is no injection surface to guard.
+        proc = subprocess.run(
+            argv, cwd=str(REPO_ROOT), env=env, capture_output=True,
+            text=True, timeout=RESOLVER_TIMEOUT_S, check=False)
+    except FileNotFoundError:
+        return {"ok": False, "stdout": "", "stderr": "", "argv": argv,
+                "reason": f"`{argv[0]}` is not on PATH — this channel's grammar "
+                          "has no resolver on this box"}
+    except (OSError, subprocess.SubprocessError) as exc:  # timeout, exec failure
+        return {"ok": False, "stdout": "", "stderr": "", "argv": argv,
+                "reason": f"`{' '.join(argv)}` could not run "
+                          f"({type(exc).__name__}: {exc})"}
+    if proc.returncode != 0:
+        detail = " ".join(line.strip() for line in proc.stderr.splitlines()
+                          if line.strip())[-300:] or "no stderr"
+        return {"ok": False, "stdout": proc.stdout, "stderr": proc.stderr,
+                "argv": argv,
+                "reason": f"`{' '.join(argv)}` exited {proc.returncode}: {detail}"}
+    return {"ok": True, "stdout": proc.stdout, "stderr": proc.stderr,
+            "argv": argv, "reason": None}
+
+
+#: `docker compose config`'s "a variable it needed was unset" warning. The VALUE it
+#: then writes is a blank string, which is indistinguishable from an explicit `""`
+#: in the model — the warning is the only place the distinction survives, which is
+#: why it is parsed rather than dropped. (The message is
+#: `The "OTHER" variable is not set. Defaulting to a blank string.` — the name is
+#: QUOTED in compose's own stderr, so the quotes are part of the pattern.)
+#: ⛔ The quotes arrive LOGFMT-ESCAPED in the raw stderr (`msg="The \"OTHER\" variable …"`),
+#: so the backslashes are part of the bytes on the wire and an unescaped pattern matched
+#: NOTHING — measured, and the silent direction: the interpolation then read as an explicit
+#: empty string and the file as a measured `OFF`.
+_COMPOSE_UNSET_WARNING = re.compile(
+    r'The \\?"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\\?" variable is not set')
+
+
+def _compose_unset_interpolation(stderr: str) -> set[str]:
+    """The names compose defaulted to a blank string, out of its stderr."""
+    return {m.group("name") for m in _COMPOSE_UNSET_WARNING.finditer(stderr or "")}
+
+
+#: `docker compose config --no-interpolate` leaves a declaration's `${…}`/`$VAR` in the
+#: model instead of substituting it. ⛔ **MEASURED (`#12549` review, P2): compose's
+#: "variable is not set" warning does NOT fire for every interpolation form** —
+#: `${MISSING:+1}` resolves to `""` with no warning at all, so a stderr-driven test reads
+#: it as a measured `''` and an arming path becomes invisible. The uninterpolated
+#: declaration is the resolver's own answer to *"does this key interpolate?"*, which is
+#: the question actually being asked.
+_COMPOSE_INTERPOLATION = re.compile(
+    r"\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)[^}]*\}|\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _compose_interpolated_names(declaration: str) -> set[str]:
+    """The variable names a declaration interpolates."""
+    return {m.group("braced") or m.group("bare")
+            for m in _COMPOSE_INTERPOLATION.finditer(declaration or "")}
+
+
+def _compose_blank_scopes(services: dict, flag: str) -> set[str]:
+    """The services whose RESOLVED ``flag`` value is the blank string."""
+    blank: set[str] = set()
+    for name, service in services.items():
+        if not isinstance(service, dict):
             continue
-        # A compose KEY may be bare or quoted (`entrypoint:` / `"entrypoint":`), so it
-        # is parsed rather than prefix-matched — a prefix match on the raw line missed
-        # the quoted spelling (fresh review of PR #12474, P3).
-        header = _COMPOSE_KEY.match(line)
-        if header and header.group("key").lower() in ("entrypoint", "command"):
-            key = header.group("key").lower()
-            rest = line[header.end():].strip()
-            if rest:
-                names |= _script_tokens(rest)
-                key = None
+        env = service.get("environment") or {}
+        if isinstance(env, dict) and env.get(flag) == "":
+            blank.add(name)
+    return blank
+
+
+def _compose_blank_declarations(argv: list[str], flag: str) -> dict[str, str] | None:
+    """``service -> the UNINTERPOLATED declaration`` of ``flag``; `None` = unknowable.
+
+    Asked only when some service's resolved value is the blank string, because that is
+    the one answer interpolation can fake: an explicit `""` and a variable that resolved
+    to nothing produce the SAME model. `--no-interpolate` settles both halves of the
+    question at once — the per-key attribution (`#12549` review, P2: the stderr warning
+    is FILE-level and the blank is PER-KEY) and the interpolation forms compose does not
+    warn about (`${MISSING:+1}`). `None` means the resolver could not answer, and the
+    caller then holds every blank UNRESOLVED rather than guessing either way.
+    """
+    run = _run_config_resolver([*argv, "--no-interpolate"])
+    if not run["ok"]:
+        return None
+    try:
+        # ⛔ NOT `or "{}"` (`#12902` review, P2, MEASURED): an EMPTY stdout became `{}`,
+        # which parsed into `services == {}` and an empty `declarations` — and
+        # `_compose_blank_is_interpolated` then answered `False` for a gate whose value
+        # the resolver had just failed to produce, publishing a `${MISSING}` gate as a
+        # MEASURED `OFF`. That is a false PASS on the blocking axis, and it is the one
+        # branch of this helper's announced fail-closed rule that was not applied.
+        # An empty stdout is a JSON error, so it now takes the `None` path below.
+        model = json.loads(run["stdout"])
+    except json.JSONDecodeError:
+        return None
+    services = (model.get("services") or {}) if isinstance(model, dict) else {}
+    # ⛔ And an ANSWER WITH NO MODEL is not an answer: this probe is only asked when the
+    # primary model HAD services, so a supplementary model with none contradicts it.
+    # `None` holds every blank UNRESOLVED, which is what the docstring promises.
+    if not isinstance(services, dict) or not services:
+        return None
+    declarations: dict[str, str] = {}
+    for name, service in services.items():
+        if not isinstance(service, dict):
             continue
-        if key is not None:
-            if line.startswith("-"):
-                names |= _script_tokens(line[1:])
+        env = service.get("environment") or {}
+        # ⛔ BOTH SPELLINGS of `environment:` (`#12902` review, P1, MEASURED): the
+        # primary model normalises to a MAPPING, but `config --no-interpolate` KEEPS
+        # the LIST form the author wrote — `[TORTOISE_EMBED_GATE=${MISSING_VAR}]`.
+        # Reading the dict form only left the service absent from `declarations`, and
+        # `_compose_blank_is_interpolated` then answered "no `$`" about a declaration it
+        # never saw: a gate the resolver could not resolve was published as a MEASURED
+        # `OFF` with a fabricated "OVERRIDES an inherited value" — a REGRESSION against
+        # `main`, which held these files UNMEASURED, and a false PASS on the blocking
+        # axis.
+        for entry in ([env] if isinstance(env, dict) else
+                      env if isinstance(env, list) else []):
+            if isinstance(env, dict):
+                key, value = flag, env.get(flag)
+            else:
+                key, _, value = str(entry).partition("=")
+                key = key.strip()
+            if key == flag and isinstance(value, str):
+                declarations[name] = value
+    return declarations
+
+
+def _compose_blank_is_interpolated(declarations: dict[str, str] | None,
+                                  name: str) -> bool:
+    """Did this service's blank come from an interpolation (rather than a literal `""`)?
+
+    `declarations is None` (the resolver could not answer) is TRUE on purpose: "cannot
+    tell" is held UNRESOLVED, never collapsed into a measured `OFF`.
+    """
+    if declarations is None:
+        return True
+    # ⛔ A blank scope with NO declaration read is not a literal — it is UNANSWERED.
+    # The blank arrived from a shape this pass did not read (`env_file:` resolves to
+    # `environment: null` in the uninterpolated model), and answering `False` turns
+    # "I could not read it" into a measured disarm (`#12902` review, P1).
+    if name not in declarations:
+        return True
+    return "$" in (declarations.get(name) or "")
+
+
+def _compose_blank_reason(declarations: dict[str, str] | None, name: str,
+                          unset: set[str]) -> str:
+    """The row text for a blank whose blank-ness could not be resolved.
+
+    ⛔ The named variables are the ones THIS declaration interpolates, not the file's
+    whole unset set (`#12549` review, P2): a reason that names a variable the key never
+    references is the same published-cause-the-run-did-not-measure defect the row
+    exists to prevent, one layer in.
+    """
+    declaration = (declarations or {}).get(name) or ""
+    named = sorted(_compose_interpolated_names(declaration) & unset)
+    if named:
+        return ("compose defaulted an unset interpolation variable "
+                f"({', '.join(named)}) to a blank string — the file fixes no value")
+    if declaration:
+        return (f"the declaration ({declaration!r}) interpolates, and it resolves to a "
+                "blank string — the file fixes no determinable value")
+    return ("the resolver could not say whether this key's blank is a literal or an "
+            "interpolation — the file fixes no determinable value")
+
+
+def _resolved_script_tokens(value: object) -> set[str]:
+    """Basenames of the `.sh` tokens in a RESOLVED `entrypoint:`/`command:` value.
+
+    The resolver hands back the canonical shape (a list of strings, or a string for
+    the scalar form), so the token split no longer has to guess which of compose's
+    four spellings the author used — that guessing is what the old
+    `_compose_exec_scripts` did, and the flow/block-scalar shapes it could not guess
+    were declared bounds — now resolved instead.
+    """
+    items: list[str] = []
+    if isinstance(value, str):
+        items = re.split(r"[\s]+", value)
+    elif isinstance(value, list):
+        items = [str(item) for item in value]
+    return {Path(token.strip("'\"")).name for token in items
+            if isinstance(token, str) and token.strip("'\"").endswith(".sh")}
+
+
+def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
+    """Everything the COMPOSE channel says about ``flag``, read PER SERVICE.
+
+    ⛔ `#12549` defect 2: the pre-resolver walk kept ONE decision list per FILE, so
+    the last `environment:` entry anywhere in a multi-service document decided the
+    whole file — publishing `app: FLAG=1 / worker: FLAG=0` as one `OFF` with a
+    compose claim ("OVERRIDES an earlier truthy value") that compose does not make,
+    and the SAME facts in the other order as `ON`. Compose defines no override
+    relation between two services; the resolver reports one map per service, so the
+    verdict is per service and a disagreement is STATED, never coin-flipped.
+
+    ⛔ `#12549` defect 3: a flow mapping (`services: {app: {environment: {FLAG:
+    "1"}}}`) is invisible to a line reader (`_assigned_value` needs the key at the
+    start of a line, and no scope is pushed for an inline value), so the only
+    manifest that arms the gate read as SILENT. The resolver models the document.
+
+    Returns ``{"channel", "resolver", "ok", "reason", "scopes", "verdict",
+    "armed", "off", "unresolved", "novalue", "falsy", "outside_runtime",
+    "build_refs", "entrypoints", "warnings"}``. The per-service detail lives in
+    ``scopes`` and is what a reader needs when the services disagree.
+
+    ⚠️ **Declared bound, MEASURED:** compose COLLAPSES a duplicated `environment:`
+    entry inside one service BEFORE the model exists — `[FLAG, FLAG=1]` and
+    `[FLAG=1, FLAG]` both resolve to a single value, and the superseded one is not in
+    the output. So this reading can report a no-value entry only where it is the
+    service's LAST word (where it decides the value); a superseded one has no effect
+    on what a deployment gets, and there is nothing for the resolver to report.
+    (`--no-normalize` does not restore it: it changes path normalisation, not the
+    duplicate collapse.) The old line reader DID report the superseded line, which is
+    the reading that let a claim about it leak into the note — see `#12070` item 4.
+    """
+    primary_argv = ["docker", "compose", "-f", str(path),
+                    "config", "--format", "json", "--no-consistency"]
+    primary = _run_config_resolver(primary_argv)
+    run = primary
+    out: dict = {"channel": "compose", "resolver": COMPOSE_RESOLVER,
+                 "ok": False, "reason": run["reason"], "scopes": {},
+                 "verdict": "UNRESOLVED", "mentioned": False,
+                 "armed": [], "off": [], "silent_scopes": [], "unresolved": [],
+                 "novalue": [], "falsy": [], "outside_runtime": [],
+                 "profiled_not_started": [],
+                 "build_refs": [], "entrypoints": [], "warnings": []}
+    if not run["ok"]:
+        # ⛔ THE RESOLVER ITSELF DECLINED — absent, crashed, timed out or exited
+        # non-zero. That is a DIFFERENT fact from "exited 0 and printed something this
+        # walk cannot read" (the three branches below), and only this one may be
+        # published as a refusal (fresh review of PR #12902, cycle 2, P2: `ok` alone
+        # cannot tell "said no" from "said something we could not read").
+        out["resolver_refused"] = True
+        return out
+    # ⛔ An EMPTY stdout is not a model (`#12902` review, P2, MEASURED): with
+    # `or "{}"` it parsed into `services == {}` and the file was published as a
+    # MEASURED `NOT_ARMED`. An empty project is a legitimate answer, but it is the one
+    # that still carries a model (`{"name": …, "services": {}}`), so "printed nothing"
+    # and "declares nothing" are distinguishable and must not be collapsed.
+    if not (run["stdout"] or "").strip():
+        out["reason"] = (f"`{COMPOSE_RESOLVER}` exited 0 but printed no model, so this "
+                        "file could not be measured")
+        return out
+    try:
+        model = json.loads(run["stdout"])
+    except json.JSONDecodeError as exc:
+        out["reason"] = f"`{COMPOSE_RESOLVER}` printed a model this walk cannot read ({exc})"
+        return out
+    services = (model.get("services") or {}) if isinstance(model, dict) else {}
+    if not isinstance(services, dict):
+        out["reason"] = (f"`{COMPOSE_RESOLVER}` printed a `services` value this walk "
+                        f"cannot read ({type(services).__name__})")
+        return out
+    if not services:
+        # ⛔ An EMPTY project is a RESOLVED, measured answer: `services: {}` declares
+        # nothing, so this file arms nothing. It is NOT `UNRESOLVED` — the resolver
+        # succeeded and there is nothing to be uncertain about. (A compose file with no
+        # `services` key at all is NOT refused by compose: MEASURED, a file holding only
+        # `name: x` exits 0 with `{"name": "x", "services": {}}` — so the sentence this
+        # replaces ("refused by compose itself") was false, and the empty branch is
+        # reachable from an input a build file could spoof. The verdict is still right
+        # for a file that genuinely declares no service; the justification is not.)
+        #
+        # ⚠️ But "declares nothing" must not be said about a file whose EVERY service
+        # is profile-gated — that file spells the flag out. The all-profiles pass runs
+        # first so `mentioned` / `profiled_not_started` / `warnings` are filled, while
+        # the VERDICT stays NOT_ARMED: a default `up` selects no service at all.
+        out["ok"] = True
+        out["verdict"], out["off"] = "NOT_ARMED", []
+        _compose_profiled_scopes(path, flag, is_truthy, primary_services=set(),
+                                 out=out)
+        return out
+    unset = _compose_unset_interpolation(run["stderr"])
+    # ⛔ A blank value is the ONE answer interpolation can fake, and the stderr warning
+    # is FILE-level while the blank is PER-KEY — so `literal == "" and unset` blamed
+    # every blank key in the file (a literal `FLAG: ""` beside an unrelated
+    # `OTHER: "${MISSING}"` published "compose defaulted an unset interpolation variable
+    # (MISSING) to a blank string" and a MEASURED `OFF` became `UNMEASURED`), AND it
+    # missed the forms compose does not warn about (`${MISSING:+1}`). The per-key
+    # question is answered by the resolver's own uninterpolated model, and only when a
+    # blank exists, so an ordinary file costs no extra spawn. `None` = it could not
+    # answer, and then every blank is held UNRESOLVED.
+    declarations: dict[str, str] | None = {}
+    if _compose_blank_scopes(services, flag):
+        declarations = _compose_blank_declarations(primary_argv, flag)
+    out["ok"] = True
+    out["reason"] = None
+    for name, service in services.items():
+        service = service if isinstance(service, dict) else {}
+        env = service.get("environment") or {}
+        scope: dict = {"verdict": "NOT_ARMED", "value": None, "reason": None,
+                       "path": f"services.{name}.environment"}
+        if flag in env:
+            out["mentioned"] = True
+        if flag not in env:
+            # ⛔ This service's own environment declares NOTHING — it is SILENT, not a
+            # contrary reading. ⛔ THE DISTINCTION DECIDES WHETHER THE ROW IS REACHABLE:
+            # a multi-service compose file routinely carries a SIDECAR (`falkordb` in
+            # this repo's own file) that will never set this flag, and counting a silent
+            # sibling as a disagreement would make `deployment["on"]` unreachable on
+            # every tree with a sidecar — a DECLARED false hold, the mirror of the false
+            # PASS this lane removes. Only an EXPLICIT contrary value (a non-truthy one,
+            # or an entry with no value) disagrees with an armed sibling.
+            scope["verdict"] = "NOT_ARMED"
+            scope["reason"] = "declares no value of its own"
+            out["off"].append(name)
+            out["silent_scopes"].append(name)
+        elif env[flag] is None:
+            # ⛔ MEASURED (`#12549`): compose resolves a value-less `environment:`
+            # entry to `null`. Two measurements, on this box, and the sentence has to
+            # carry BOTH or it is a cause the run did not make (fresh review of PR
+            # #12902, cycle 5, P2 — an earlier revision replaced "UNSETS it" with
+            # "passes it through, NOT an unset", which is wrong in the ordinary case):
+            #   * the deploying host EXPORTS it → compose substitutes the ambient
+            #     value (`FLAG=1` in the shell resolves to `"1"`) — a pass-through;
+            #   * the deploying host does not → the container is given the variable
+            #     with NO value, which REMOVES the image's `ENV` (measured: image
+            #     `ENV FLAG=1` + `environment: [FLAG]`, host not exporting → the
+            #     container prints nothing for it).
+            # Either way the FILE supplies no truthy value, which is why the score is
+            # `NOT_ARMED` in both — but the cannot-arm direction is "the file CLEARS an
+            # inherited arm", not "the file does nothing".
+            scope["verdict"] = "NOT_ARMED"
+            scope["reason"] = ("no value in the file — compose passes the ambient "
+                               "value through, and CLEARS an inherited one when the "
+                               "host supplies none")
+            out["novalue"].append(name)
+            out["off"].append(name)
+        else:
+            literal = env[flag] if isinstance(env[flag], str) else str(env[flag])
+            scope["value"] = literal
+            if literal == "" and _compose_blank_is_interpolated(declarations, name):
+                # ⛔ A blank that came from an INTERPOLATION fixes no value: whether the
+                # deployment arms the gate depends on a variable the file does not
+                # carry. A blank that did NOT interpolate is an explicit `""` — a
+                # measured OFF, which the arm below still takes.
+                scope["verdict"] = "UNRESOLVED"
+                scope["reason"] = _compose_blank_reason(declarations, name, unset)
+                out["unresolved"].append(name)
+            elif is_truthy(literal):
+                scope["verdict"] = "ARMED"
+                out["armed"].append(name)
+            else:
+                scope["verdict"] = "NOT_ARMED"
+                scope["reason"] = f"set to a non-truthy value ({literal!r})"
+                out["falsy"].append(name)
+                out["off"].append(name)
+        out["scopes"][name] = scope
+        build = service.get("build")
+        build = build if isinstance(build, dict) else {}
+        dockerfile = build.get("dockerfile")
+        if isinstance(dockerfile, str) and dockerfile:
+            out["build_refs"].append(Path(dockerfile).as_posix())
+        for instruction in ("entrypoint", "command"):
+            out["entrypoints"].extend(_resolved_script_tokens(service.get(instruction)))
+        # A flag in a scope compose resolves but a process never reads: `build.args`
+        # reaches `docker build`, `labels` is metadata. Both are REPORTED, never armed
+        # — the same positive-scoping rule the line walker had, now read off the model
+        # (so a flow mapping cannot hide one either).
+        args = build.get("args") or {}
+        if isinstance(args, dict) and flag in args:
+            out["mentioned"] = True
+            out["outside_runtime"].append(
+                f"{path.name}: services.{name}.build.args.{flag} (build-time build arg)")
+        labels = service.get("labels") or {}
+        label_keys = (set(labels) if isinstance(labels, dict)
+                      else {str(item).split("=", 1)[0] for item in labels}
+                      if isinstance(labels, list) else set())
+        if flag in label_keys:
+            out["mentioned"] = True
+            out["outside_runtime"].append(
+                f"{path.name}: services.{name}.labels.{flag} "
+                "(not a runtime environment scope: labels)")
+    if out["unresolved"]:
+        out["verdict"] = "UNRESOLVED"
+        out["reason"] = "; ".join(
+            f"{svc}: {out['scopes'][svc]['reason']}" for svc in out["unresolved"])
+    elif out["armed"] and (out["falsy"] or out["novalue"]):
+        # ⛔ A DISAGREEMENT needs an EXPLICIT contrary value — see the silent-scope arm
+        # above. `app=FLAG:1 / worker=FLAG:0` is the shape the brief names; `app=FLAG:1`
+        # beside a sidecar that sets nothing is simply an armed file.
+        out["verdict"] = "DISAGREE"
+        out["reason"] = ", ".join(
+            f"{svc}={out['scopes'][svc]['verdict']}" for svc in sorted(out["scopes"]))
+    elif out["armed"]:
+        out["verdict"] = "ARMED"
+    else:
+        out["verdict"] = "NOT_ARMED"
+    _compose_profiled_scopes(path, flag, is_truthy, primary_services=set(services),
+                             out=out)
+    return out
+
+
+def _compose_profiled_scopes(path: Path, flag: str, is_truthy, *, primary_services,
+                             out: dict) -> None:
+    """Read the ALL-PROFILES set and let it only DISARM or report — never arm.
+
+    See `COMPOSE_RESOLVER_ALL_PROFILES` for why TWO resolves exist. A service that is
+    not in the DEFAULT set is not started by a plain `docker compose up`, so:
+
+      * a truthy value in one is REPORTED (`profiled_not_started`) and does NOT arm the
+        file — the fail-open a single `--profile '*'` resolve introduced;
+      * a non-truthy or value-less entry in one BLOCKS an arm, because a deployment
+        that DOES enable that profile runs with the gate off (the case where the same
+        file also arms elsewhere must read as a disagreement, not as an arm);
+      * a supplementary resolve that REFUSES is a WARNING, not `UNRESOLVED` for the
+        file — the default set is a real measurement and discarding it would be a
+        false HOLD.
+
+    Runs AFTER the verdict reduction on purpose: it can only add to the blocking
+    buckets, so it must re-derive the verdict when it does.
+    """
+    supp_argv = ["docker", "compose", "--profile", "*", "-f", str(path),
+                 "config", "--format", "json", "--no-consistency"]
+    supp = _run_config_resolver(supp_argv)
+    if not supp["ok"]:
+        out["warnings"].append(
+            f"`{COMPOSE_RESOLVER_ALL_PROFILES}` refused ({supp['reason']}), so services "
+            "behind a `profiles:` entry were NOT read — the verdict above is from the "
+            "DEFAULT service set only, and a disarm inside a profile-gated service "
+            "would be invisible here")
+        return
+    try:
+        # ⛔ NOT `or "{}"` (`#12902` review, P2, MEASURED): a model-less success made
+        # `services == {}`, so the loop below did nothing and NO warning was emitted —
+        # and because this pass exists only to BLOCK an arm, skipping it silently
+        # published `ARMED` over a deployment whose profile-gated service runs the gate
+        # off. A FALSE ARM, and the refuse/non-JSON arms already warn; this one did not.
+        model = json.loads(supp["stdout"])
+    except json.JSONDecodeError:
+        out["warnings"].append(
+            f"`{COMPOSE_RESOLVER_ALL_PROFILES}` printed a model this walk cannot read, "
+            "so profile-gated services were NOT read")
+        return
+    services = (model.get("services") or {}) if isinstance(model, dict) else {}
+    # ⛔ An answer with NO MODEL is not an answer here either: the default-set resolve
+    # produced services, so a supplementary model with none contradicts the file, and
+    # this pass may only BLOCK — it must never be skipped into an arm.
+    # ⛔ NOT `or not services` alone (`#12902` review, P2, MEASURED): this pass is ALSO
+    # called for an EMPTY project (the `if not services:` arm above routes it here with
+    # `primary_services=set()`), and `services: {}` is a RESOLVED, measured answer — so a
+    # bare emptiness test published *"answered with NO model"* about a resolve that DID
+    # answer, a cause the run did not measure. `primary_services` is the caller's own
+    # signal that the default-set resolve produced services, which is what makes an
+    # empty reply a CONTRADICTION rather than an answer.
+    if not isinstance(services, dict) or (not services and primary_services):
+        out["warnings"].append(
+            f"`{COMPOSE_RESOLVER_ALL_PROFILES}` answered with NO model, so "
+            "profile-gated services were NOT read")
+        return
+    # ⛔ THE MIRROR of the primary arm, and it was the part this pass never asked: a
+    # `FLAG: "${MISSING}"` inside a `profiles:`-gated service resolves to a blank, and
+    # the pass published it as `set to a non-truthy value ('')` — a DISARM claim about a
+    # value the resolver had just told it it could not resolve. The supplementary
+    # resolve carries its OWN stderr and its OWN uninterpolated model, because a
+    # profiled service's interpolation is only attempted when the profile is on.
+    supp_unset = _compose_unset_interpolation(supp["stderr"])
+    supp_declarations: dict[str, str] | None = {}
+    if _compose_blank_scopes(services, flag):
+        supp_declarations = _compose_blank_declarations(supp_argv, flag)
+    blocked = False
+    for name, service in services.items():
+        if name in primary_services:
+            continue          # already decided from the default set
+        service = service if isinstance(service, dict) else {}
+        env = service.get("environment") or {}
+        profiles = service.get("profiles") or []
+        where = f"{path.name}: services.{name}"
+        scope = out["scopes"].get(name)
+        if not isinstance(scope, dict):
+            scope = {"verdict": "NOT_ARMED", "value": None, "reason": None,
+                     "path": f"services.{name}.environment"}
+            out["scopes"][name] = scope
+        scope["profiles"] = list(profiles)
+        if flag not in env:
+            continue          # silent sibling: not a contrary reading either way
+        out["mentioned"] = True
+        if env[flag] is not None and is_truthy(env[flag]):
+            # ⛔ REPORTED, NEVER ARMED: a default `up` does not start this service.
+            scope["value"] = env[flag] if isinstance(env[flag], str) else str(env[flag])
+            scope["verdict"] = "NOT_STARTED"
+            scope["reason"] = ("declared in a PROFILE-GATED service (profiles: "
+                               f"{list(profiles)}), which a default `docker compose "
+                               "up` does not start")
+            out["profiled_not_started"].append(name)
+            out["warnings"].append(
+                f"{where}.{flag} = {scope['value']!r} is declared in a profile-gated "
+                f"service (profiles: {list(profiles)}) that a default `docker compose "
+                "up` does NOT start — reported, does not arm this file")
+            continue
+        blocked = True
+        if env[flag] is None:
+            scope["verdict"] = "NOT_ARMED"
+            scope["reason"] = ("no value in the file, in a profile-gated service "
+                               f"(profiles: {list(profiles)})")
+            out["novalue"].append(name)
+            out["off"].append(name)
+        else:
+            literal = env[flag] if isinstance(env[flag], str) else str(env[flag])
+            scope["value"] = literal
+            if literal == "" and _compose_blank_is_interpolated(
+                    supp_declarations, name):
+                # ⛔ Fail CLOSED and fail HONEST: an unresolvable value inside a
+                # profile-gated service blocks an arm (a deployment that enables the
+                # profile runs with whatever that value is) and is named as unresolved
+                # rather than called a `''` disarm.
+                scope["verdict"] = "UNRESOLVED"
+                scope["reason"] = _compose_blank_reason(
+                    supp_declarations, name, supp_unset)
+                out["unresolved"].append(name)
                 continue
-            key = None
-    return names
+            scope["verdict"] = "NOT_ARMED"
+            scope["reason"] = (f"set to a non-truthy value ({literal!r}) in a "
+                               f"profile-gated service (profiles: {list(profiles)})")
+            out["falsy"].append(name)
+            out["off"].append(name)
+    # Re-derive: the supplementary pass may only have ADDED blocking declarations.
+    if out["unresolved"]:
+        out["verdict"] = "UNRESOLVED"
+        out["reason"] = "; ".join(
+            f"{svc}: {out['scopes'][svc]['reason']}" for svc in out["unresolved"])
+        return
+    if blocked and out["armed"] and out["verdict"] in ("ARMED", "NOT_ARMED"):
+        out["verdict"] = "DISAGREE"
+        out["reason"] = ", ".join(
+            f"{svc}={out['scopes'][svc]['verdict']}" for svc in sorted(out["scopes"]))
+
+
+def _toml_env_value(text: str, flag: str) -> tuple[str, object]:
+    """``(how, value)`` for ``flag`` in a TOML document's ``[env]`` table.
+
+    ``how`` is ``"absent"``, ``"env"`` (the runtime table) or ``"outside"`` (a table
+    a deployed process never reads — `[build.args]`, `[deploy]`, …), and it is what
+    keeps the reading honest in both directions: an `[env]` key arms, a
+    `[build.args]` key is REPORTED as build-time, and a flag nowhere is absent.
+
+    ⛔ The grammar owner is `tomllib` (TOML 1.0), not a table-scoped regex: the regex
+    that used to live here (`_toml_table_lines`) could not see a QUOTED key, a
+    DOTTED key (`env.FLAG = "1"`), an INLINE table, a multi-line string or a `[env]`
+    written after `[[services]]`. Those are shapes of the format, not corner cases
+    — the same lesson the five compose rounds taught, one format over.
+    """
+    try:
+        parsed = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, ValueError) as exc:
+        raise _ResolverUnavailable(
+            f"the TOML grammar rejected this manifest ({exc})") from exc
+    env = parsed.get(TOML_RUNTIME_ENV_TABLE)
+    if isinstance(env, dict) and flag in env:
+        return "env", env[flag]
+
+    def _find(body: object, path: str) -> tuple[str, object] | None:
+        """The first DOTTED path under ``body`` that holds ``flag``.
+
+        ⛔ NESTED tables matter here and a text reader cannot do this correctly: this
+        repo's own `fly.toml` puts the flag-shaped keys under `[build.args]`, which
+        `tomllib` hands back as `parsed["build"]["args"]` — a one-level scan reads the
+        `[build]` table, does not find the flag directly under it, and reports the
+        assignment as ABSENT rather than as build-time. Both directions of that error
+        matter, so the search is over the whole document.
+        """
+        if not isinstance(body, dict):
+            return None
+        if flag in body:
+            return path, body[flag]
+        for key, value in body.items():
+            if isinstance(value, dict):
+                found = _find(value, f"{path}.{key}" if path else key)
+                if found:
+                    return found
+        return None
+
+    for table, body in parsed.items():
+        if table == TOML_RUNTIME_ENV_TABLE:
+            continue
+        found = _find(body, table)
+        if found:
+            return f"outside:{found[0]}", found[1]
+    return "absent", None
+
+
+def _fly_channel(path: Path, flag: str, is_truthy) -> dict:
+    """Everything the FLY channel says about ``flag``, out of the resolved ``[env]``.
+
+    ⛔ Two resolvers, in this order, and the one that ANSWERED is published:
+
+    1. **`fly config show`** — the platform's own resolution of the manifest (what
+       `fly deploy` reads). Report-only, no auth, reads the local file.
+    2. **`tomllib`** — the stdlib TOML 1.0 parser, over the `[env]` table. This is not
+       a fallback to the hand-written reader this lane deletes: it is the GRAMMAR
+       OWNER for the format. ⚠️ MEASURED on the box this lane ran on: `fly` is not
+       installed at all (`command -v fly flyctl` → nothing), so a channel that could
+       only be read through it would report `UNRESOLVED` on every lane box — an
+       instrument that measures its own PATH, not the deployment.
+
+    ⚠️ Declared bound, and no resolver closes it: variables Fly injects at RUN time
+    (secrets, `[[vm]]`-derived values) are invisible to any offline reader.
+    """
+    out: dict = {"channel": "fly", "resolver": FLY_RESOLVER, "ok": False,
+                 "reason": None, "scopes": {}, "verdict": "UNRESOLVED",
+                 "mentioned": False, "armed": [], "off": [], "unresolved": [],
+                 "novalue": [], "falsy": [], "outside_runtime": [],
+                 "build_refs": [], "entrypoints": [], "warnings": []}
+    # ⛔ `--local --toml -c <path>`: resolve THIS file, offline, in the format the
+    # trust check below actually verifies — see `FLY_RESOLVER`. A bare `fly config
+    # show` fetches from the Fly service and resolves flyctl's default `fly.toml`,
+    # which is neither this file nor a TOML document.
+    platform = _run_config_resolver(["fly", "config", "show", "--local", "--toml",
+                                     "-c", str(path)])
+    text: str | None = None
+    if platform["ok"] and platform["stdout"].strip():
+        try:
+            # ⛔ VERIFIED BEFORE TRUSTED: the platform resolver's output is only usable
+            # if it is the TOML it claims to be. A banner, a JSON rendering or a version
+            # that changes the format must fall through to the grammar owner on the FILE
+            # — the other choice publishes `UNRESOLVED` on a box where the channel is
+            # perfectly readable, i.e. an instrument that measures its own wiring.
+            tomllib.loads(platform["stdout"])
+        except (tomllib.TOMLDecodeError, ValueError) as exc:
+            out["resolver"] = TOML_RESOLVER
+            out["warnings"].append(
+                f"{FLY_RESOLVER} answered but its output is not TOML ({exc}) — read the "
+                f"file with {TOML_RESOLVER} instead")
+            platform = {"ok": False, "reason": "output not TOML"}
+        else:
+            out["resolver"] = FLY_RESOLVER
+            text = platform["stdout"]
+    if text is None:
+        # The platform resolver did not answer. That is NOT `UNRESOLVED`: the TOML
+        # grammar owner still reads the file, and saying which one answered is how a
+        # reader knows the difference.
+        out["resolver"] = TOML_RESOLVER
+        out["warnings"].append(
+            f"{FLY_RESOLVER} did not answer ({platform['reason']}) — read by {TOML_RESOLVER}")
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            out["reason"] = f"the manifest could not be read ({type(exc).__name__}: {exc})"
+            return out
+    try:
+        how, value = _toml_env_value(text, flag)
+    except _ResolverUnavailable as exc:
+        out["reason"] = str(exc)
+        return out
+    out["ok"] = True
+    out["mentioned"] = how != "absent"
+    if how == "env":
+        literal = value if isinstance(value, str) else str(value)
+        out["scopes"][TOML_RUNTIME_ENV_TABLE] = {
+            "verdict": "ARMED" if is_truthy(literal) else "NOT_ARMED",
+            "value": literal, "reason": None,
+            "path": f"[{TOML_RUNTIME_ENV_TABLE}]"}
+        if is_truthy(literal):
+            out["verdict"], out["armed"] = "ARMED", [TOML_RUNTIME_ENV_TABLE]
+        else:
+            # ⛔ A non-truthy `[env]` value is the DISARMING direction, reported exactly as
+            # the compose one is: it OVERRIDES an image `ENV`, so calling the file merely
+            # "silent" would steer a reader toward "armed".
+            out["scopes"][TOML_RUNTIME_ENV_TABLE]["reason"] = (
+                f"set to a non-truthy value ({literal!r})")
+            out["verdict"], out["falsy"], out["off"] = (
+                "NOT_ARMED", [TOML_RUNTIME_ENV_TABLE], [TOML_RUNTIME_ENV_TABLE])
+    elif how.startswith("outside:"):
+        table = how.split(":", 1)[1]
+        out["verdict"], out["off"] = "NOT_ARMED", [TOML_RUNTIME_ENV_TABLE]
+        out["outside_runtime"].append(
+            f"{path.name}: [{table}] {flag} (a deployed process never reads this table)")
+    else:
+        out["verdict"], out["off"] = "NOT_ARMED", [TOML_RUNTIME_ENV_TABLE]
+    return out
 
 
 def _entrypoint_scripts() -> list[Path]:
@@ -2319,53 +3367,43 @@ def _entrypoint_scripts() -> list[Path]:
         except OSError:
             continue
     for manifest in _compose_files():
-        try:
-            names |= _compose_exec_scripts(
-                manifest.read_text(encoding="utf-8", errors="ignore"))
-        except OSError:
-            continue
+        # ⛔ The RESOLVED model, not the file's text (`#12549`): a flow mapping
+        # (`services: {t: {entrypoint: [/entrypoint.sh]}}`), a block scalar and a
+        # block list are three spellings the old line reader had to enumerate — and
+        # the first two were declared bounds. The resolver canonicalises all of them.
+        channel = _compose_channel(manifest, None, lambda _v: False)
+        for value in channel.get("entrypoints") or ():
+            names.add(value)
     return sorted(p for p in (REPO_ROOT / name for name in sorted(names)) if p.is_file())
 
 
-def _compose_build_refs() -> dict[str, str]:
-    """``{compose file: the image build file its `build:` stanza names}``.
+def _compose_build_refs() -> dict[str, list[str]]:
+    """``{compose file: [image build file, …]}`` — read from the RESOLVED model.
 
     MEASURED, not assumed (#12070 item 3): the notes used to qualify a per-file
     reading with *"a compose file that builds from an armed image build file
-    INHERITS that image's `ENV`"* while nothing read the `build:` stanza, so the
-    edge could not be named for the tree it described — and a fixture that wrote
-    `services: {}` could not express it either. The edge is now read, so
-    `docker-compose.yml` → `Dockerfile.selfhost` is a reading rather than prose.
+    INHERITS that image's `ENV`"* while nothing read the `build:` stanza. It is read
+    now, and since `#12549` it is read from the channel's own resolver rather than a
+    `dockerfile|build:` regex — the regex missed every spelling the resolver
+    canonicalises, and worse, it read a SCALAR `build: <path>` as a dockerfile when
+    compose defines that scalar as the BUILD CONTEXT.
 
-    Both compose `build:` spellings are read (`build: <file>` and a `build:` map
-    carrying `dockerfile:`), and a value that names no file in this tree is dropped
-    — an unresolvable reference is not an edge. ``{compose file: [image, …]}``: a
-    compose file is multi-service, so EVERY reference is kept.
+    ⛔ EVERY reference is kept (fresh review of PR #12474, P3): a compose file is
+    multi-service, so one image per file presented a PARTIAL set as "the edge set".
+    A reference that names no file in this tree is dropped — an unresolvable
+    reference is not an edge.
     """
-    # ⛔ EVERY reference, not the first one (fresh review of PR #12474, P3): a compose
-    # file is multi-service by definition, so one image per file presented a PARTIAL set
-    # as "the edge set" — an armed image reached through the second service's `build:`
-    # was invisible while the note said "measured".
     refs: dict[str, list[str]] = {}
     for manifest in _compose_files():
-        try:
-            text = manifest.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
+        channel = _compose_channel(manifest, None, lambda _v: False)
         found: list[str] = []
-        for match in re.finditer(
-                r"^\s*(?:dockerfile|build)\s*:\s*(?P<value>[^\s#]+)\s*(?:#.*)?$",
-                text, re.MULTILINE):
-            value = match.group("value").strip("'\"")
-            if not value or value in ("true", "false") or value.startswith("{"):
-                continue
-            candidate = Path(value)
+        for value in channel.get("build_refs") or ():
+            candidate = REPO_ROOT / value
             resolved: str | None = None
-            if (REPO_ROOT / candidate).is_file() and candidate.name.startswith("Dockerfile"):
-                resolved = candidate.as_posix()
-            elif re.match(r"^[A-Za-z0-9_./-]+$", value):
-                named = [p for p in _image_build_files()
-                         if p.name == Path(value).name]
+            if candidate.is_file() and candidate.name.startswith("Dockerfile"):
+                resolved = Path(value).as_posix()
+            else:
+                named = [p for p in _image_build_files() if p.name == Path(value).name]
                 if named:
                     resolved = named[0].relative_to(REPO_ROOT).as_posix()
             if resolved and resolved not in found:
@@ -2375,37 +3413,129 @@ def _compose_build_refs() -> dict[str, str]:
     return refs
 
 
-def _toml_table_lines(text: str) -> dict[int, str]:
-    """1-based line number → the TOML TABLE that line lives in (lowercased).
-
-    A TOML file is a sequence of tables, and only ONE of them is a runtime
-    environment (`[env]`). ⛔ A line-by-line scan would read a `[build.args]` key
-    EXACTLY like an `[env]` one — both are `KEY = "value"` — while a build argument
-    reaches the build and never the process; the table a key lives in is what makes
-    an assignment a shipped default or not. (This is a constraint the reader
-    enforces, not a defect it fixes: before `#12022` this file did not read
-    `fly.toml` at all.)
-
-    Top-level keys (before any header) map to `""`; `[[array.of.tables]]` is
-    recorded under its name like a table, because the caller tests for ONE name.
-    """
-    tables: dict[int, str] = {}
-    current = ""
-    for number, line in enumerate(text.splitlines(), 1):
-        header = _TOML_TABLE_HEADER.match(line)
-        if header:
-            current = header.group("name").strip().lower()
-        tables[number] = current
-    return tables
-
-
 #: The shell words that put an assignment INTO a child process's environment. A
 #: bare `FLAG=1` in a shell script is a shell variable, not an environment entry —
 #: `export FLAG=1` or a later bare `export FLAG` is what the executed process sees.
-_SHELL_BARE_EXPORT = re.compile(
-    r"^\s*export\s+(?P<names>[A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)\s*$")
+#: ⛔ ONE argument of an `export` command, in either spelling: `NAME` or `NAME=word`.
+#: The `=` tail is deliberately not parsed — only the NAME is what the walk needs, so a
+#: quoted value containing spaces cannot truncate the name.
+_SHELL_EXPORT_ARG = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:=|$)")
+#: One `NAME=value` pair on a multi-key Dockerfile `ENV` line. The value is quoted-or-run.
+_DOCKERFILE_ENV_PAIR = re.compile(
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)="
+    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s]*)")
 _SHELL_ASSIGN = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=")
-_SHELL_ALLEXPORT = re.compile(r"^\s*set\s+-[a-zA-Z]*a[a-zA-Z]*\s*$")
+#: ⛔ REMOVED: the single-cluster `_SHELL_ALLEXPORT` / `_SHELL_ALLEXPORT_OFF` matchers are
+#: GONE. `_shell_set_allexport` reads every cluster, the long `-o allexport` form and a
+#: trailing operator, so a second matcher could only disagree with it on a line carrying
+#: several commands (`set -a; set +a;`), which is the shape `_shell_commands` now splits.
+#: A `set` line and its arguments, up to a command separator. ⛔ The SEPARATOR TERMINATES
+#: the command rather than anchoring the match: `set +a;` runs `set +a` and then ends, so
+#: an end-anchored matcher read it as "no `set` at all", the allexport state stayed armed,
+#: and an entrypoint that DISARMS the gate published `gate enabled by default: True` — a
+#: FALSE ARM (fresh review of #12902, P1).
+#: ⛔ ONLY `;`, `&&` and `||` terminate: `set -a &` and `set -a|cat` run in a SUBSHELL, so
+#: the parent's allexport is untouched — accepting them here armed the parent's state from
+#: a command bash never runs there (measured: `bash -c 'set -a & wait; FLAG=1; env'` prints
+#: no FLAG. ⚠️ The earlier citation of this line was `bash -c 'set -a &; env'`, which bash
+#: REJECTS — `syntax error near unexpected token ';'`, rc=2 — so it measured nothing;
+#: corrected by the fresh review of `#12902`, P2).
+_SHELL_SET = re.compile(r"^\s*set\s+(?P<args>[^;&|]*?)\s*(?:(?:;|&&|\|\|).*)?$")
+#: A shell command SEPARATOR glued to a value (`FLAG=1;`, `FLAG="1"&&`).
+#: ⛔ `&` and a lone `|` are NOT in this set: bash runs `export FLAG=1&` and `…=1|cat` in
+#: a SUBSHELL, so the parent environment never receives the assignment. Stripping `&`
+#: published a value the process does not have — a false ARM (measured: `bash -c 'export
+#: FLAG=1& wait; env'` has no FLAG, while `…=1;` and `…=1&& true` do).
+_SHELL_OPERATOR_TAIL = re.compile(r"(?:;|&&|\|\|)+$")
+
+
+def _shell_set_allexport(line: str) -> bool | None:
+    """Does this LINE leave allexport ON (True) / OFF (False), or say nothing (None)?
+
+    ⛔ The LINE may carry SEVERAL parent-shell commands, and the LAST one wins:
+    `set -a; set +a;` leaves the mode OFF, and answering from the FIRST command
+    published an ARM bash has already ended (`bash -c 'set -a; set +a; FLAG=1; env'`
+    has no FLAG). A `&` / lone `|` boundary contributes nothing — that command runs in a
+    SUBSHELL, so it never reaches this shell's state (`_shell_commands`).
+    """
+    answer: bool | None = None
+    # ⛔ Every CONSUMER already splits the line and skips its conditional operands before
+    # calling this (`_shell_export_states` — a conditional `set -a` may not have run, so it
+    # is reported indeterminate and the file held), so `line` here is always ONE
+    # unconditional command. A `conditional` guard inside this loop would be unreachable
+    # code with no falsifier — the fifth review measured exactly that: deleting it left
+    # the suite byte-identical, because the path cannot be taken.
+    for command, _conditional in _shell_commands(line):
+        change = _shell_set_cluster_allexport(command)
+        if change is not None:
+            answer = change
+    return answer
+
+
+def _shell_set_cluster_allexport(line: str) -> bool | None:
+    """One simple command: does it turn allexport ON (True) / OFF (False) / say nothing?
+
+    ⛔ **EVERY option cluster on the line**, because bash accepts more than one: `set -eu
+    -a` arms allexport, and a single-cluster matcher does not see it — so an entrypoint
+    that DOES arm the flag read `NOT_ARMED` and the row held over a deployment that is
+    armed (measured: walker `OFF` while `bash -c 'set -eu -a; FLAG=1; env'` has `FLAG=1`).
+    Conservative direction, so not a false PASS — but still a reading this walk published
+    without measuring, which is `#12549` defect 1 one layer in (fresh review of `#12902`,
+    P2). A later cluster wins, exactly as in bash.
+
+    ⛔ **``--`` TERMINATES OPTION PROCESSING, and ``-o``/``+o`` take the NEXT WORD as the
+    option NAME.** Both were unread, and both were a FALSE ARM — the direction that
+    reaches row 1's ``MET``: ``set +o allexport`` (the long-form DISARM, the spelling a
+    save/restore idiom writes) left the state untouched so an entrypoint that turns the
+    gate OFF published ``gate enabled by default: True``; and ``set -- -a`` (POSITIONAL
+    parameters, an option to nothing) was read as ARMING, because ``-a`` after ``--`` is
+    still a bare ``-``-prefixed word. Measured against ``bash``: after ``set +o
+    allexport`` the assignment is absent from the process env, and after ``set -- -a`` it
+    is absent too — while the walker said ``ON`` for both (fresh review of `#12902`, P1).
+
+    The long form is resolved by the option NAME the ``o`` consumes, never by the rest of
+    its own cluster: measured, ``set -oallexport`` ARMS (via the ``a``) and then errors on
+    ``-l``, while ``set -eo allexport`` arms through the trailing ``o``. ``set -o
+    noallexport`` is NOT a disarm — ``bash`` rejects it as an invalid option name — so only
+    the NAME ``allexport`` is read, and the NAME is unquoted (`set -o "allexport"` arms in
+    bash too). ⛔ DECLARED BOUND: ``set -oe allexport`` (a flag AFTER the ``o`` in the same
+    cluster) is NOT read — the next word is consumed only when ``o`` ENDS its cluster, so
+    that spelling is a false HOLD (the arm is missed, never invented).
+    """
+    match = _SHELL_SET.match(line)
+    if not match:
+        return None
+    answer: bool | None = None
+    words = _shell_words(match.group("args"))
+    index = 0
+    while index < len(words):
+        word = words[index]
+        # ⛔ `set -- …` ends option processing: everything after it is a POSITIONAL
+        # parameter, so `set -- -a` arms nothing (measured: `bash` leaves the assignment
+        # out of the environment).
+        if word == "--":
+            break
+        # `-`/`+` alone, or a word that is not an option cluster, says nothing about `a`.
+        if len(word) >= 2 and word[0] in "-+":
+            sign_on = word[0] == "-"
+            cluster = word[1:]
+            for position, char in enumerate(cluster):
+                if char == "a":
+                    answer = sign_on
+                elif (char == "o" and position == len(cluster) - 1
+                      and index + 1 < len(words)):
+                    # The long spelling of the SAME option: `-o allexport` arms, `+o
+                    # allexport` disarms. ⛔ `o` takes the NEXT WORD **only when it ENDS
+                    # its own word** — measured: `set -oallexport` does NOT take the rest
+                    # as a name (it arms via the `a` and then errors on `-l`), while `set
+                    # -o allexport` does; and `set -oerrexit -o allexport` arms through
+                    # the SECOND `-o`, so the first `o` must not swallow it. The quoted
+                    # NAME arms too: `set -o "allexport"` (measured).
+                    index += 1
+                    if words[index].strip("'\"") == "allexport":
+                        answer = sign_on
+        index += 1
+    return answer
 
 #: `unset NAME`, `unset -v NAME`, the multi-name form, and an OPTION CLUSTER. `unset` is
 #: a shell BUILTIN, so it is matched CASE-SENSITIVELY — `UNSET` is a different
@@ -2452,27 +3582,1088 @@ def _shell_unset_target(line: str, flag: str) -> str | None:
     return "other"
 
 
-def _shell_exported_names(text: str) -> set[str] | None:
-    """The names a shell script EXPORTS by a bare `export NAME`, or `None` = all.
+def _shell_words(text: str) -> list[str]:
+    """Split a shell command's argument text into WORDS the way the shell does.
 
-    `None` means the script turns on `set -a` (allexport), where every assignment is
-    exported; the caller then treats every assignment as eligible. Returning a set
-    is the normal case, and an unexported assignment is then correctly NOT a
-    shipped environment entry — the shell's own variable never reaches the Python
-    process that reads the flag.
+    Quotes and backslashes are honoured, so a value containing spaces stays inside its
+    word (`FLAG="a b"` is ONE word) and a trailing `#` comment ends the list. Only the
+    NAME half of each word is ever read, so the tokenizer does not need a full shell
+    grammar — but it does need to know where a word ends, which a regex cannot.
     """
-    exported: set[str] = set()
-    for line in text.splitlines():
-        if _SHELL_ALLEXPORT.match(line):
-            return None
-        match = _SHELL_BARE_EXPORT.match(line.strip("\n"))
+    words: list[str] = []
+    word: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in text:
+        if escaped:
+            word.append(char)
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            word.append(char)
+            continue
+        if char in "\"'":
+            quote = char
+            word.append(char)
+            continue
+        if char in " \t":
+            if word:
+                words.append("".join(word))
+                word = []
+            continue
+        if char == "#" and not word:
+            break                      # a trailing comment ends the argument list
+        word.append(char)
+    if word:
+        words.append("".join(word))
+    return words
+
+
+def _shell_export_args(
+        line: str) -> tuple[list[str], set[str], str, dict[str, str]] | None:
+    """``(names, names that carry a value, option cluster)`` for an `export` line.
+
+    ⛔ `export` is a shell BUILTIN, so it is matched CASE-SENSITIVELY — `EXPORT FLAG=1`
+    is a different (nonexistent) command, unlike the Dockerfile instructions, which are
+    case-insensitive. Both argument spellings are read: the shell exports `NAME=value`
+    exactly as it exports a bare `NAME`, and `export A=1 B` exports both — the
+    ``names that carry a value`` half is what separates those two, because a BARE
+    `export NAME` publishes the value the shell variable already holds.
+
+    ⛔ The OPTIONS are returned, not discarded, because two of them invert the line:
+    `export -n NAME` REMOVES the export attribute (bash), and `export -f NAME` exports
+    a FUNCTION — whose name is in the same namespace question but is not a variable
+    this walk scores. Treating either as a plain arm is a false arm.
+    """
+    stripped = line.strip()
+    if not re.match(r"^export[ \t]", stripped):
+        return None
+    options = ""
+    names: list[str] = []
+    assigned: set[str] = set()
+    #: Every `NAME=value` word on this line, BY NAME. ⛔ The VALUE matters, not only the
+    #: fact of the assignment: `export OTHER=1 FLAG=0` assigns `FLAG` at position 1, and
+    #: a value read only at position 0 was dropped — so the line looked like an export
+    #: of a name with no value, appended no decision, and the earlier truthy line stood
+    #: (`export FLAG=1` then `export OTHER=1 FLAG=0` published `ON` while bash runs `0`;
+    #: measured, fresh review of `#12902`, P1).
+    values: dict[str, str] = {}
+    for word in _shell_words(stripped[len("export"):]):
+        if word.startswith("-") and not names:
+            options += word.lstrip("-")
+            continue
+        # ⛔ QUOTES ARE PART OF THE SPELLING: `export -n "FLAG"`, `export "FLAG=1"` and
+        # `unset "FLAG"` are legal shell, and a matcher that required a bare name put the
+        # first and the last in NO bucket at all — so the export attribute was never
+        # revoked and a later plain assignment published a FALSE ARM (fresh review, P1).
+        bare = word.strip("'\"")
+        match = _SHELL_EXPORT_ARG.match(bare)
         if match:
-            exported.update(match.group("names").split())
-    return exported
+            name = match.group("name")
+            names.append(name)
+            if bare[len(name):len(name) + 1] == "=":
+                assigned.add(name)
+                # ⛔ The PUBLISHED value needs the same normalisation `_assigned_value`
+                # applies. `export FLAG=1;` kept the glued `;` HERE (that fix landed on
+                # the assignment path only), so a later bare `export FLAG` republished
+                # `1;` — not truthy — and the run stated an override that does not exist:
+                # a false hold carrying a FALSE CAUSE in the string the row prints.
+                published = _SHELL_OPERATOR_TAIL.sub("", bare[len(name) + 1:])
+                values[name] = published.strip("'\"")
+    return names, assigned, options, values
+
+
+def _shell_unset_values(line: str) -> set[str]:
+    """The VARIABLE names an `unset` line removes; `-f`/`-n` name another namespace."""
+    match = _SHELL_UNSET.match(line)
+    if not match:
+        return set()
+    options = match.group("opts") or ""
+    if "f" in options or "n" in options:
+        return set()
+    # ⛔ Split on shell OPERATORS as well as whitespace, exactly as `_shell_unset_target`
+    # does: `unset FLAG;` / `unset FLAG|cmd` glue the operator to the last name, and a
+    # whitespace-only split then fails to revoke the export attribute — which leaves a
+    # LATER plain assignment reading as a decision, i.e. the false ARM again (measured on
+    # the `;` spelling, which shell scripts really use).
+    # ⛔ The QUOTED target (`unset "FLAG"`, `unset 'FLAG'`) is the same `unset`, and a
+    # bare-identifier filter dropped it while `_shell_unset_target` — the OTHER reader of
+    # the same grammar — stripped the quotes and scored the disarm. Two readers that
+    # disagree published `on: True` beside a `unset_declarations` entry for the same line:
+    # a false ARM stated and contradicted in one string (fresh review, P1). Quotes are
+    # stripped here, and a COMPUTED name (`unset "$FLAG"`) is left alone on purpose — it
+    # is not a literal, and the loop's own `unknown` arm holds the file for it.
+    return {word.strip("'\"")
+            for word in re.split(r"[ \t;&|()<>]+", match.group("names") or "")
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", word.strip("'\""))}
+
+
+#: ⛔ `<<` introduces a HEREDOC (`<<-` allows tab-indented terminators); `<<<` is a
+#: HERESTRING and introduces no body, so BOTH sides are guarded — `(?!<)` alone still
+#: matched the last two characters of `<<<`, read the herestring's word as a delimiter,
+#: and swallowed every line up to a terminator that never comes (measured on
+#: `done <<< "$uri"`, this repo's own entrypoint idiom). The operator is matched on a
+#: QUOTE-MASKED copy of the line, so a `<<` inside a quoted word is not an operator.
+_SHELL_HEREDOC_OP = re.compile(r"(?<!<)<<(-?)(?!<)")
+
+
+def _shell_mask_quoted(line: str) -> str:
+    """``line`` with every QUOTED span (and its escapes) blanked to spaces.
+
+    Offsets are preserved so a match on the mask can be read from the original. Used to
+    find shell OPERATORS without matching one that sits inside a word — `echo "a << b"`
+    opens no heredoc.
+
+    ⛔ **A `$( … )` INSIDE a double-quoted word is a FRESH quoting context**, and reading
+    it as the same quote state blanked everything after it. `_gate_out="$(python - "$@"
+    <<'PY' 2>&1` is how THIS REPO'S OWN `entrypoint.sh:1111` opens a heredoc: the `"`
+    before `$@` was read as CLOSING the outer quote, the `"` after it OPENED one, and
+    `<<'PY'` was masked to spaces — so `_shell_heredoc_bodies` answered **0 bodies over
+    1138 lines** and the Python body was scanned as shell commands, where its `if`
+    opened a construct nothing closes (`_shell_control_flow_lines` depth stuck at 1, 548
+    lines marked "may not have run"). A heredoc operator inside the substitution is a
+    live OPERATOR, so the substitution's own characters stay VISIBLE and the outer quote
+    resumes at its matching `)`.
+    """
+    masked: list[str] = []
+    quote: str | None = None
+    escaped = False
+    #: Each `$( … )` opened INSIDE a quoted word, as [the quote to RESUME, paren depth
+    #: since]. An empty stack leaves this scanner exactly as it was.
+    substitutions: list[list] = []
+    index = 0
+    length = len(line)
+    while index < length:
+        char = line[index]
+        if escaped:
+            masked.append(" ")
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            masked.append(" ")
+            escaped = True
+            index += 1
+            continue
+        if quote is not None:
+            #: ⛔ `$((` is ARITHMETIC, not a command substitution — `_shell_mask_arithmetic`
+            #: already models it (a `<<` there is a LEFT SHIFT). Reclassifying it made the
+            #: mask hide the `$(` from that pass, leave the `<<` standing, and read every
+            #: following line as a HEREDOC BODY: `x="$((1<<2))"` between two exports scored
+            #: the last one UNCONDITIONAL (`ON` where bash has `0`, and an `if` guard that
+            #: follows was skipped as a body line) — a false ARM, measured both directions
+            #: (fresh review of `#12902`, P1). `$((` keeps the normal quoted path.
+            if (quote == '"' and char == "$" and index + 2 < length
+                    and line[index + 1] == "(" and line[index + 2] != "("):
+                substitutions.append([quote, 0])
+                quote = None
+                masked.append("  ")
+                index += 2
+                continue
+            masked.append(" ")
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            masked.append(" ")
+            quote = char
+            index += 1
+            continue
+        if substitutions:
+            if char == "(":
+                substitutions[-1][1] += 1
+            elif char == ")":
+                if substitutions[-1][1] == 0:
+                    #: The substitution CLOSES: the outer quote resumes, and this `)`
+                    #: is a quoted character again.
+                    quote = substitutions.pop()[0]
+                    masked.append(" ")
+                    index += 1
+                    continue
+                substitutions[-1][1] -= 1
+        masked.append(char)
+        index += 1
+    return "".join(masked)
+
+
+def _shell_mask_arithmetic(line: str) -> str:
+    """``line`` with every ARITHMETIC span (`$(( … ))`, `(( … ))`) blanked to spaces.
+
+    ⛔ **A `<<` inside an arithmetic context is a LEFT SHIFT, not a heredoc operator.**
+    `x=$((1<<2))` names no delimiter, but the operator scan matched the `<<`, read `2`
+    as a delimiter word, queued a body and swallowed every following line as data —
+    MEASURED: `x=$((1<<2))` then `export FLAG=1` publishes `OFF` while bash exports `1`
+    (the same false-HOLD direction the commented-out opener produced, one construct
+    over). `(( x = 1 << 2 ))` is the same shape.
+
+    Depth-counted on parentheses, so a nested `$(( (a+b) << 2 ))` closes at the right
+    place, and offsets are preserved so a match on the mask can be read from the
+    original. ⚠️ Declared bound: a construct this scanner does not model (a `<<` inside
+    a `$( … )` command substitution, or in `$[ … ]`) is left alone — nothing here
+    invents a span it is not sure of, so the worst case is the pre-fix reading.
+    """
+    masked = list(line)
+    index = 0
+    length = len(line)
+    while index < length:
+        if line.startswith("$((", index) or line.startswith("((", index):
+            start = index
+            depth = 0
+            while index < length:
+                if line[index] == "(":
+                    depth += 1
+                elif line[index] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        index += 1
+                        break
+                index += 1
+            for blank in range(start, index):
+                masked[blank] = " "
+            continue
+        index += 1
+    return "".join(masked)
+
+
+def _shell_control_flow_lines(text: str) -> set[int]:
+    """The 1-BASED lines whose commands may NOT have run, because control flow owns them.
+
+    ⛔ **A BRANCH IS A CONDITIONAL OPERAND one construct over, and the reader scored it
+    anyway.** `if true; then export FLAG=0; else export FLAG=1; fi` publishes the LAST
+    branch's value (`ON`) while bash runs only the first (`0`) — MEASURED, and the same
+    false-ARM direction the `&&` / `||` operands had (fresh review of `#12902`). A `case`
+    arm is the mirror: `case x in x) export FLAG=1 ;; esac` published `OFF` for a file
+    bash arms. This reader cannot evaluate a test, so a flag-relevant command inside (or
+    sharing a line with) such a construct is reported `indeterminate` and the FILE is
+    held `UNMEASURED` — the treatment `_shell_commands`' conditional operands get, which
+    is the whole point of the three-valued rule.
+
+    Nesting is counted (an `if` inside a `while` is depth 2), and a one-line construct
+    (`if …; then …; fi`) is caught by the keyword test rather than by depth, since its
+    depth returns to zero before the next line is read.
+
+    ⚠️ Declared bound: a keyword produced by an expansion (`eval`, a word built at run
+    time) is not seen here — the same class as the channel's other declared bounds.
+    """
+    keywords = {"if", "for", "while", "until", "case", "select"}
+    #: ⛔ **A CLOSER CLOSES ONLY THE CONSTRUCT THAT OPENED IT.** Counting every `done` as
+    #: a decrement let a WORD inside a `case` body — `x) echo done ;;` — drop the depth to
+    #: 0, so the construct stopped being held and an arm that may never run was scored
+    #: DEFINITE: `export F=0` / `case x in` / `x) echo done ;;` / `a) export F=1 ;;` /
+    #: `esac` read `ON` with `indeterminate: []` where bash has `0` (a FALSE ARM, fresh
+    #: review of `#12902`), and the mirror shape dropped the arm. A mismatched closer is
+    #: therefore INERT — it does not pop, and the construct stays open.
+    closers = {"fi": {"if"}, "done": {"for", "while", "until", "select"},
+               "esac": {"case"}}
+    bodies: set[int] = set()
+    #: ⛔ A HEREDOC BODY IS DATA: a body line is not a command, so its words are not
+    #: construct keywords. Skipping them is what stops a body's own `if` from opening a
+    #: construct nothing closes (see `_shell_mask_quoted`).
+    heredoc_bodies = _shell_heredoc_bodies(text)
+    stack: list[str] = []
+    for number, raw in enumerate(text.splitlines(), 1):
+        if number in heredoc_bodies:
+            continue
+        masked = _shell_mask_arithmetic(_shell_mask_quoted(_shell_strip_comment(raw)))
+        tokens = re.findall(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_])",
+                            masked)
+        touched = False
+        for token in tokens:
+            if token in keywords:
+                stack.append(token)
+                touched = True
+            elif token in closers:
+                touched = True
+                if stack and stack[-1] in closers[token]:
+                    stack.pop()
+        if stack or touched:
+            bodies.add(number)
+    return bodies
+
+
+def _shell_heredoc_operator_delimiter(rest: str) -> str | None:
+    """The heredoc DELIMITER WORD at the start of ``rest``, or None if there is none.
+
+    Every spelling bash accepts is read: ``<<WORD``, ``<<'WORD'``, ``<<"WORD"`` and
+    ``<<\\WORD`` — and the quoting only suppresses EXPANSION inside the body, it does not
+    change where the body ENDS (bash(1) §"Here Documents").
+    """
+    rest = rest.lstrip(" \t")
+    if not rest:
+        return None
+    if rest[0] in "'\"":
+        close = rest.find(rest[0], 1)
+        return rest[1:close] if close > 0 else None
+    if rest[0] == "\\":
+        rest = rest[1:]
+    # ⛔ The DELIMITER is a shell WORD, and it may begin with a NON-WORD character:
+    # `cat <<.EOF` / `cat <<-x` / `cat <<=END` are all legal, and a `[A-Za-z0-9_]` start
+    # read them as "no delimiter here" — so the heredoc body was scanned as commands and
+    # a body `export FLAG=1` published a FALSE ARM (fresh review of `#12902`, P2).
+    # Metacharacters cannot appear in it, so they terminate the word.
+    match = re.match(r"[^\s;&|<>()]+", rest)
+    return match.group(0) if match else None
+
+
+def _shell_delimiter_is_static(word: str | None) -> bool:
+    """Can this heredoc DELIMITER be compared against a line WITHOUT running bash?
+
+    ⛔ `cat <<$D` is EXPANDED by the shell before the body is read (`D=EOF` makes bash look
+    for `EOF`), and a backticked or command-substituted word is the same class. A reader
+    that takes the literal `$D` as the delimiter searches for a terminator bash never
+    looks for, so it finds the wrong body — the fail-OPEN direction (fresh review of
+    `#12902`, P2: `D=EOF / export FLAG=0 / cat <<$D / export FLAG=1 / $D` measured
+    `reader ON, bash 0`). Everything after such an operator is UNMEASURED instead.
+    """
+    if not word:
+        return False
+    return "$" not in word and "`" not in word
+
+
+def _shell_unresolved_heredoc_lines(text: str) -> set[int]:
+    """1-BASED lines carrying a heredoc whose DELIMITER this reader cannot know.
+
+    ⛔ **An expanded or unword delimiter fails OPEN if it is ignored.** `cat <<$D` with
+    `D=EOF` OPENS the operator, and `_shell_heredoc_operator_delimiter` returns None for
+    `$D` — so no body was queued and every line below was scanned as a COMMAND. Measured
+    by the fresh review of `#12902` (P2):
+
+        D=EOF / export FLAG=0 / cat <<$D >/dev/null / export FLAG=1 / $D
+          bash: 0        reader: ON       (a FALSE ARM)
+
+    `cat <<~ >/dev/null` is the same shape (`~` is a valid delimiter word bash accepts).
+    The body's EXTENT is therefore unknown, not absent, so the caller reports the line
+    `indeterminate` and holds the FILE — the fail-closed half. The docstring of
+    `_shell_heredoc_bodies` used to claim this class was named in
+    `DECLARED_CHANNEL_BOUNDS`; it is handled here instead, which is stronger.
+    """
+    unresolved: set[int] = set()
+    #: ⛔ A LINE THAT IS ALREADY A KNOWN HEREDOC BODY IS DATA, so an operator spelled in
+    #: it is not an operator. Scanning it held a file bash arms — a false HOLD produced by
+    #: `_shell_heredoc_bodies`' mirror image (measured by the fresh review of `#12902`, P3):
+    #:
+    #:     cat <<EOF / cat <<$D / EOF / export FLAG=1
+    #:       bash: FLAG=1      reader: UNMEASURED, bodies={2}, unresolved={2}
+    #:
+    #: — the SAME line was both a body and an unresolved delimiter. Skip what is already
+    #: known to be a body; an unresolved operator that is genuinely a COMMAND is still
+    #: named below.
+    bodies = _shell_heredoc_bodies(text)
+    for number, raw in enumerate(text.splitlines(), 1):
+        if number in bodies:
+            continue
+        masked = _shell_mask_arithmetic(_shell_mask_quoted(_shell_strip_comment(raw)))
+        for match in _SHELL_HEREDOC_OP.finditer(masked):
+            rest = raw[match.end():]
+            # A `<<-` already consumed the dash; whatever follows must be a WORD bash can
+            # compare a line against. A bare word, a quoted one and a backslashed one are
+            # all STATIC; an EXPANDED one (`$D`, backticks) is not.
+            word = _shell_heredoc_operator_delimiter(rest)
+            stripped_rest = rest.strip()
+            if not _shell_delimiter_is_static(word):
+                if not stripped_rest or stripped_rest[0] in ";&|)":
+                    continue        # no operand at all: a SYNTAX ERROR, handled as opaque
+                unresolved.add(number)
+    return unresolved
+
+
+def _shell_heredoc_bodies(text: str) -> set[int]:
+    """The 1-BASED line numbers that are HEREDOC BODIES — data, never commands.
+
+    ⛔ **A heredoc body is an ARGUMENT, not a script.** bash reads every line between the
+    operator and its terminator as text handed to the command, so nothing in it runs.
+    The per-line export model scored it anyway, and did so in BOTH directions (measured):
+
+    * body `export FLAG=1` on an otherwise silent script published `ON` — `bash -c
+      'cat <<\'EOF\' >/dev/null; export FLAG=1; EOF; env'` has **no** FLAG;
+    * body `FLAG=0` after a real `export FLAG=1` published `OFF` — `bash -c 'export
+      FLAG=1; cat <<\'EOF\' >/dev/null; FLAG=0; EOF; env'` has `FLAG=1`.
+
+    The second is the direction this PR introduced (the per-line model is what lets a
+    plain assignment inside a body reach `_assigned_value` with `exported=True`), so it
+    is a regression against `main` as well as a reading the run did not measure.
+
+    ⛔ **Declared bounds**, not left implicit:
+
+    * a heredoc whose OPERATOR is itself produced by an expansion (`eval`, a `$(…)`
+      command substitution that emits `<<EOF`) is not seen here — the same class as the
+      channel's other declared shell bounds, decided by execution rather than text;
+    * a **CRLF-terminated** script. This walk reads the file in TEXT mode, so line endings
+      are normalised and `EOF\r` arrives as `EOF`, while bash sees the `\r`, does NOT
+      terminate the heredoc, and keeps consuming the rest of the file as its body. The
+      reader is therefore OPTIMISTIC on such a file. Declared rather than half-converted
+      because the same normalisation applies to every channel's reader, and because a
+      CRLF shell script cannot EXECUTE at all (`#!` line ends in `\r`, so the kernel looks
+      for an interpreter named `/bin/bash\r`). A file that cannot run is not a deployment.
+
+    ⚠️ The NEARER shape, an EXPANDED DELIMITER (`cat <<$D`), is NOT left to that bound:
+    the operator is visible and the delimiter is not, so `_shell_unresolved_heredoc_lines`
+    marks the line and the caller HOLDS the file rather than scanning the body as commands
+    (fresh review of `#12902`, P2 — measured `reader ON, bash 0` on
+    `D=EOF / export FLAG=0 / cat <<$D / export FLAG=1 / $D`).
+
+    A TERMINATOR line is the one that equals the delimiter, after leading tabs when the
+    operator was `<<-`; it is NOT a body line, so it is still scanned like any other
+    command (it is inert text to bash, but this reader does not need to know that as long
+    as it is not scored as part of the body).
+    """
+    bodies: set[int] = set()
+    pending: list[tuple[str, bool]] = []
+    #: ⛔ An operator with NO delimiter (`cat << ; …`) is a SYNTAX ERROR: bash parses
+    #: nothing after it, so nothing in the rest of the file runs. Reading on published the
+    #: arm that follows it — a FALSE ARM on a script that cannot execute at all (fresh
+    #: review of `#12902`, P2). Everything from that line on is therefore opaque.
+    opaque = False
+    for number, raw in enumerate(text.splitlines(), 1):
+        if opaque:
+            bodies.add(number)
+            continue
+        if pending:
+            delimiter, strip_tabs = pending[0]
+            candidate = raw.lstrip("\t") if strip_tabs else raw
+            # ⛔ EXACT, not `.rstrip()`: bash does NOT terminate a heredoc on a line
+            # carrying anything but the delimiter, and tolerating trailing space here
+            # would resume scanning INSIDE a body — the fail-OPEN direction.
+            if candidate == delimiter:
+                pending.pop(0)
+            else:
+                bodies.add(number)
+            continue
+        # ⛔ A `#` COMMENT OPENS NO HEREDOC. The operator is matched on a quote-masked
+        # copy — and the COMMENT is stripped first, because `# cat <<EOF` is prose: bash
+        # runs the lines below it, while a scan that honoured the commented operator
+        # would swallow them as a body (measured: `bash -c '# cat <<EOF\nexport
+        # FLAG=1'` exports FLAG, and this scanner read line 2 as a BODY). Offsets still
+        # line up in `raw` because stripping only truncates the tail.
+        masked = _shell_mask_arithmetic(_shell_mask_quoted(_shell_strip_comment(raw)))
+        for match in _SHELL_HEREDOC_OP.finditer(masked):
+            rest = raw[match.end():]
+            delimiter = _shell_heredoc_operator_delimiter(rest)
+            if delimiter is None:
+                # ⛔ A trailing `<<` with NO operand (`cat << ; …`) is a SYNTAX ERROR: bash
+                # parses nothing after it, so the rest of the file is opaque. Everything
+                # else with no parseable word is handled as an EXPANDED delimiter below.
+                if rest.strip() and rest.strip()[0] not in ";&|)":
+                    break
+                opaque = True
+                bodies.add(number)
+                break
+            if not _shell_delimiter_is_static(delimiter):
+                # ⛔ `cat <<$D` is EXPANDED by the shell (`D=EOF` → bash looks for `EOF`),
+                # so the literal word is NOT the terminator and the body's extent is
+                # unknown. Queueing the literal would find the WRONG body — the fail-OPEN
+                # direction (measured `reader ON, bash 0`). The caller holds the file.
+                break
+            pending.append((delimiter, match.group(1) == "-"))
+    return bodies
+
+
+def _shell_command_changes_ATTRIBUTE(command: str, flag: str) -> bool:
+    """Does ONE command change WHETHER ``flag`` is exported, rather than only its VALUE?
+
+    ⛔ **The distinction is load-bearing, and it is the difference between a deferred
+    decision and a held file.** A conditional VALUE change (`cond && export FLAG=1`) is
+    legitimately overridden by a later definite assignment — `cond && export F=1; export
+    F=0` runs `F=0` whatever `cond` did — so `LAST-WINS` is correct there. An
+    ATTRIBUTE change is not overridden: it decides the MEANING of every assignment after
+    it, so scoring a later hit `ON` publishes a verdict the run never measured.
+
+    MEASURED (fresh review of `#12902`, P1) — both read `ON`, bash exports nothing:
+
+        'set -a' / 'true && set +a' / 'FLAG=1'
+        'export FLAG=1' / 'true && export -n FLAG' / 'FLAG=1'
+    """
+    if _shell_set_cluster_allexport(command) is not None:
+        return True
+    if flag in _shell_unset_values(command):
+        return True
+    # ⛔ NOT `is not None`: `_shell_unset_target` returns `"other"` for an unset of a
+    # DIFFERENT name (and for `-f`/`-n`, which name another namespace), and testing the
+    # presence of an answer made EVERY `unset` flag business — so `cond && unset OTHER_VAR`
+    # held the file UNMEASURED for ever, a permanent row-1 hold over an entrypoint whose
+    # flag nothing was ambiguous about. The docstring above promises the opposite, and the
+    # control that was supposed to cover it used `echo`, which never reaches this clause
+    # (fresh review of `#12902`, P2).
+    if _shell_unset_target(command, flag) in ("value", "unknown"):
+        return True
+    parsed = _shell_export_args(command)
+    if parsed is not None:
+        names, _assigned, options, _values = parsed
+        if flag in names and ("n" in options or "f" in options):
+            return True
+    return False
+
+
+def _shell_command_affects_flag(command: str, flag: str) -> bool:
+    """Does ONE simple command change whether ``flag`` reaches the environment?
+
+    Used to decide whether a CONDITIONAL operand (`… && export FLAG=1`) is the flag's
+    business at all: a conditional operand that never touches the flag is silence, not an
+    unmeasured reading, so the file must not be held for it.
+
+    ⛔ ``set -a`` / ``set +a`` COUNT, even though they never name the flag: allexport is
+    what decides whether a bare `FLAG=1` later in the file is exported, so a CONDITIONAL
+    allexport change is exactly as unmeasurable as a conditional `export FLAG=1` — and
+    leaving it out let that sentence in `DECLARED_CHANNEL_BOUNDS` claim more than the
+    reader does.
+    """
+    if _shell_set_cluster_allexport(command) is not None:
+        return True
+    parsed = _shell_export_args(command)
+    if parsed is not None and flag in parsed[0]:
+        return True
+    if flag in _shell_unset_values(command):
+        return True
+    # ⛔ `in ("value", "unknown")`, never `is not None` — see
+    # `_shell_command_changes_ATTRIBUTE`. `unset OTHER_VAR` names another variable, so it
+    # revokes nothing this reader scores. (Measured by the fresh review of `#12902`, P2:
+    # `export FLAG=1` then `true || unset SOME_OTHER` exported `FLAG=1` in bash while the
+    # walk published `deployment on=False`.)
+    if _shell_unset_target(command, flag) in ("value", "unknown"):
+        return True
+    return _assigned_value(command, flag) is not None
+
+
+def _shell_strip_comment(line: str) -> str:
+    """``line`` with a trailing shell COMMENT removed, quote- and escape-aware.
+
+    ⛔ **A `#` comment is not shell syntax, and reading it as such destroyed a real
+    DISARM** (fresh review of #12902, P1). `_shell_commands` tracked quotes and
+    escapes but not comments, so an operator INSIDE a comment was executed as
+    grammar: `export FLAG=0   # CPU & memory` returned NO commands at all (the lone
+    `&` hit the subshell early-return, dropping the command before it), and
+    `export FLAG=0   # off; FLAG=1` split into two commands and scanned the commented
+    text as an assignment. Measured at the pre-fix head: `deployment["on"]` read
+    `True` for an entrypoint bash runs OFF, and `origin/main` read it `OFF` — so this
+    was a REGRESSION, not a carried bound.
+
+    bash's rule is the one implemented: a `#` starts a comment only at the START of a
+    word — the beginning of the line, or after blank space or an operator — and never
+    inside quotes. `echo a#b` keeps its `#` (bash prints `a#b`), `$#` and `${#name}`
+    are parameter syntax (the character before is `$` / `{`), and a backslash-escaped
+    `#` keeps its literal.
+    """
+    index = 0
+    length = len(line)
+    quote: str | None = None
+    escaped = False
+    previous = ""
+    while index < length:
+        char = line[index]
+        if escaped:
+            previous = char
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            index += 1
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            previous = char
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            previous = char
+            index += 1
+            continue
+        # ⛔ `<` and `>` are OPERATORS too, so a `#` right after one starts a comment
+        # (`bash -c 'echo a >#f'` is a syntax error, not a file named `#f`) — leaving them
+        # out contradicted the rule stated above and read an arm for a script bash refuses
+        # to run (fresh review of `#12902`, P2).
+        if char == "#" and previous in ("", " ", "\t", ";", "&", "|", "(", ")",
+                                        "<", ">"):
+            return line[:index]
+        previous = char
+        index += 1
+    return line
+
+
+#: ⛔ A CONTROL-FLOW KEYWORD is not part of the command that follows it. `if …; then
+#: export FLAG=1; fi` hands the scanner the command `` then export FLAG=1``, whose leading
+#: word made `_shell_export_args` return None — so the assignment landed in NO bucket and
+#: the file read `OFF` over a deployment bash arms (a false HOLD, measured). The keywords
+#: are stripped from the FRONT of each command, which is the only place they can appear.
+_SHELL_LEADING_KEYWORD = re.compile(
+    r"(?:if|then|elif|else|fi|do|done|while|until|for|case|esac|select|in|time)[ \t]+")
+
+#: ⛔ A `case` ARM opens with its PATTERN (`x) export FLAG=1 ;;`, `*.json) …`), which is
+#: not part of the command — the pattern made `_shell_export_args` return None, so the arm
+#: landed in no bucket and a `case`-guarded export read `OFF` (measured). The pattern is one
+#: alternative or an ALTERNATION (`_SHELL_CASE_PATTERN_LIST`) with bash's OPTIONAL leading
+#: `(`, so a FUNCTION definition (`f() {`) is untouched: the parenthesis that opens the empty
+#: parameter list is not preceded by `case … in`, and its `)` is not preceded by a word the
+#: sharing grammar accepts (`_SHELL_CASE_ARM_PATTERN.match("f() { …")` is `None`).
+#: ⛔ ONE definition of a `case` PATTERN LIST: one alternative, or any number separated
+#: by `|` with optional spaces (`x)`, `x|y)`, `prod|staging|dev)`, `prod | staging )`), with
+#: bash's optional leading `(` (`case $E in (prod|staging) …`), which may be followed by
+#: SPACES before the first alternative (`case $E in ( prod | staging ) …`, measured: bash
+#: ARMS that spelling). `\(?` alone dropped it, so the arm landed in NO bucket and the file
+#: published a DEFINITE `OFF` over a shape the run never measured (fresh review of
+#: `#12902`, P2).
+#: A two-element-unspaced-only form dropped the rest — 36 of this repo's tracked arms — and
+#: the arm then landed in NO bucket (fresh review of `#12902`, P2).
+#: ⛔ An ALTERNATIVE is a PATTERN, and a pattern may be QUOTED — quote removal happens
+#: before matching (bash(1) 3.2.5.2), so `case "x y" in "x y") export FLAG=1 ;; esac`
+#: MATCHES and arms the file (measured). The single class here excluded a space, so a
+#: quoted pattern was not a pattern: the arm never matched, landed in no bucket, and the
+#: file published a definite `OFF` with an empty `indeterminate` bucket — the same false
+#: PASS as the quoted SUBJECT, on the pattern side (fresh review of `#12902`, P2).
+_SHELL_CASE_ALTERNATIVE = (r"(?:[^ \t(){};&|)'\"\\]|\\.|\"[^\"]*\"|'[^']*')+")
+_SHELL_CASE_SEPARATOR = r"[ \t]*\|[ \t]*"
+_SHELL_CASE_PATTERN_LIST = (r"\(?[ \t]*" + _SHELL_CASE_ALTERNATIVE +
+                            r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*"
+                            r"[ \t]*\)")
+
+_SHELL_CASE_ARM_PATTERN = re.compile(r"^" + _SHELL_CASE_PATTERN_LIST + r"[ \t]+")
+
+#: ⛔ A `case` arm's SUBJECT and `in` sit between the keyword and the pattern, and the
+#: splitter hands the scanner all of it: `case x in x) export FLAG=1 ;; esac` becomes
+#: ``x in x) export FLAG=1``, whose leading `x in ` blocked `_SHELL_CASE_ARM_PATTERN` (it
+#: anchors at position 0). The arm therefore landed in NO bucket and the file published a
+#: DEFINITE `OFF` over a deployment bash arms — exactly the reading `_shell_control_flow_lines`
+#: says it refuses, one spelling over (fresh review of `#12902`, P2: the multi-line spelling
+#: was pinned and read `UNMEASURED`, the one-line spelling was neither pinned nor fixed). The
+#: subject form is stripped ONLY after the `case` keyword itself (see
+#: `_shell_strip_leading_keywords`) and only when a PATTERN WORD and its `)` follow it, so
+#: `for x in a b` (a loop's word list) and a line bash refuses to parse (`echo in y) …`) are
+#: untouched.
+#: ⛔ The SUBJECT is a shell WORD, not a run of "simple" characters. Enumerating the
+#: excluding set (braces, quotes, `$`) rejected every spelling that QUOTES or
+#: PARAMETERISES the subject — `case "${ENV}" in prod) export FLAG=1 ;; esac` and
+#: `case ${ENV:-prod} in prod) …` are ordinary bash (the `case` word "undergoes
+#: parameter expansion … before the shell attempts to match", bash(1) 3.2.5.2), and
+#: both published a DEFINITE `OFF` with an empty `indeterminate` bucket — a false PASS
+#: in the direction this PR exists to close, and a regression the safer spelling
+#: CAUSED: the unquoted `case $ENV in prod)` control read `UNMEASURED`. The SUBJECT is any
+#: shell WORD that ends at the ` in ` before the pattern list — quotes, `${…}`, `$( … )` and
+#: backticks included, spaces and all — so it is matched as a non-greedy span gated by the
+#: ` in ` + pattern list that must follow, not as a character class: `case $(uname -s) in
+#: Linux) export FLAG=1 ;; esac` is ordinary bash and ARMS (measured), and a class that
+#: excludes SPACES scored it a definite `OFF` (fresh review of `#12902`, P1/P2).
+_SHELL_CASE_SUBJECT = r".+?"
+_SHELL_CASE_SUBJECT_PATTERN = re.compile(
+    r"^" + _SHELL_CASE_SUBJECT + r"[ \t]+in[ \t]+" + _SHELL_CASE_PATTERN_LIST + r"[ \t]*")
+
+#: ⛔ A PATTERN POSITION is where a `case` arm's pattern list begins: the first alternative,
+#: bare or after `case <subject> in` — OR after a bare `in`, because bash lets the head be
+#: SPLIT (`case $E` / `in prod|staging|dev) …`, measured). It is what tells the splitter that
+#: a `|` is an ALTERNATION inside the pattern (`prod|staging)`) rather than the pipe
+#: operator. ⛔ Without the bare-`in` arm a split head published a DEFINITE verdict over a
+#: shape `DECLARED_CHANNEL_BOUNDS` promises is held — measured both ways (`export FLAG=1`
+#: then `case $E` / `in prod|staging|dev) export FLAG=0 ;;` read `ON` where bash is `0`; the
+#: armed variant read `OFF` where bash is `1`), and the same line without a `|` read
+#: `UNMEASURED` — so the bar was what made a held shape definite (fresh review of `#12902`,
+#: P2).
+_SHELL_CASE_PATTERN_POSITION = re.compile(
+    r"^(?:case[ \t]+" + _SHELL_CASE_SUBJECT + r"[ \t]+in[ \t]+|in[ \t]+)?" +
+    r"\(?[ \t]*" +
+    _SHELL_CASE_ALTERNATIVE +
+    r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*$")
+
+#: ⛔ The rest of a pattern ALTERNATION — `|word)`, `|word|word)`, `| word | word )` — with
+#: the `)` that closes the arm, ANY number of alternatives. It matched a TWO-element,
+#: unspaced alternation only, so `prod|staging|dev)` (36 occurrences in this repo's tracked
+#: shell) and `prod | staging)` fell through to the lone-`|` subshell return and were
+#: DROPPED — a definite verdict over a held shape, and MEASURED as a false `ON` where bash
+#: disarms (`E=prod / export FLAG=1 / case $E in prod|staging|dev) export FLAG=0 ;; esac`
+#: → reader `ON`, bash `0`; fresh review of `#12902`, P2). Matched against the line from the
+#: `|`, which is why it anchors at position 0.
+_SHELL_CASE_PATTERN_REST = re.compile(
+    _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE +
+    r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*" + r"[ \t]*\)")
+
+
+def _shell_case_open_lines(text: str) -> set[int]:
+    """The 1-BASED lines an open `case` construct covers, including the line that opens it.
+
+    ⛔ **A `case` ARM's pattern is strippable ONLY inside a `case`.** Stripped from an
+    ARBITRARY command, `foo|bar) export FLAG=1` read `ON` while bash refuses the line
+    (`syntax error near unexpected token ')'`, exit 2, nothing exported) — a FALSE ARM in
+    the certification direction (fresh review of `#12902`, P3). The same rule is what lets
+    a PATTERN ALTERNATION's `|` be kept without keeping an `a|b` pipeline, so the answer
+    has to be a property of the CONSTRUCT, not of the line's shape.
+
+    A one-line construct (`case x in x|y) export FLAG=1 ;; esac`) counts, because the
+    line carries its own `case`. Nesting is counted, and `esac` closes one level. Quoted
+    text and comments are masked first, so a `case` inside a string or a comment opens
+    nothing.
+    """
+    covered: set[int] = set()
+    depth = 0
+    for number, raw in enumerate(text.splitlines(), 1):
+        masked = _shell_mask_arithmetic(_shell_mask_quoted(_shell_strip_comment(raw)))
+        words = set(re.findall(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_])",
+                               masked))
+        opens = "case" in words
+        closes = "esac" in words
+        if depth > 0 or opens:
+            covered.add(number)
+        depth = max(depth + (1 if opens else 0) - (1 if closes else 0), 0)
+    return covered
+
+
+def _shell_strip_leading_keywords(text: str, in_case: bool = False) -> str:
+    """``text`` with any leading shell KEYWORDS (`then`, `do`, `!`, …) removed.
+
+    ``in_case`` says the line is covered by an open `case` (``_shell_case_open_lines``);
+    the bare ARM strip below is gated on it, because a pattern outside a `case` is not a
+    pattern.
+    """
+    while True:
+        stripped = text.strip()
+        if stripped.startswith("!") and (len(stripped) == 1
+                                         or stripped[1] in " \t("
+                                         or stripped.startswith("!=")):
+            if stripped.startswith("!="):
+                return stripped
+            text = stripped[1:]
+            continue
+        # A `{ … }` GROUP is unconditional in bash, and its brace is not part of the
+        # command: `{ export FLAG=1; }` splits into ``{ export FLAG=1`` and `` }``, and the
+        # leading brace made the export unparseable — a false HOLD on a spelling this
+        # repo's own entrypoint uses for its grouped cleanups.
+        if stripped.startswith("{") and (len(stripped) == 1 or stripped[1] in " \t"):
+            text = stripped[1:]
+            continue
+        match = _SHELL_LEADING_KEYWORD.match(stripped)
+        if match:
+            text = stripped[match.end():]
+            # ⛔ ONLY A `case` HAS A SUBJECT. Applied as a generic fallback, the form
+            # ``<word> in <word>)`` stripped an ARM out of a line bash refuses to parse:
+            # `echo in y) export FLAG=1` read `ON` while bash exits with
+            # `syntax error near unexpected token ')'` and exports nothing — a FALSE ARM in
+            # the certification direction, introduced by the one-line-`case` fix (fresh
+            # review of `#12902`, P3). Reaching it through the `case` keyword is the only
+            # way the subject exists.
+            if match.group(0).strip() == "case":
+                subject = _SHELL_CASE_SUBJECT_PATTERN.match(text)
+                if subject:
+                    text = text[subject.end():]
+            continue
+        # ⛔ A PATTERN OUTSIDE A `case` IS NOT A PATTERN: `foo|bar) export FLAG=1` is a
+        # line bash refuses (syntax error, nothing exported), and stripping its
+        # pseudo-arm published `ON` — a FALSE ARM (fresh review of `#12902`, P3). The
+        # strip is reachable again only when a `case` construct covers the line.
+        if not in_case:
+            return stripped
+        arm = _SHELL_CASE_ARM_PATTERN.match(stripped)
+        if not arm:
+            return stripped
+        text = stripped[arm.end():]
+
+
+def _shell_commands(line: str, in_case: bool = False) -> list[tuple[str, bool]]:
+    """Split ONE shell line into the parent-shell commands, and say which are CONDITIONAL.
+
+    Returns ``(command, conditional)`` pairs in execution order. ``conditional`` is True
+    for the operand of a ``&&`` / ``||`` list — a command that runs ONLY IF its test
+    passes. The first command of the line is unconditional; every command after the
+    first ``&&`` / ``||`` is conditional, because a conditional list is right-associative
+    and each later operand depends on the ones before it.
+
+    ⛔ **A line is not one command.** `set -a; set +a;` runs BOTH, and reading only the
+    first left the allexport state ARMED where bash has already ended it — a FALSE ARM
+    (measured: `bash -c 'set -a; set +a; FLAG=1; env'` has no FLAG). `set -a; FLAG=1` is
+    the same root in the guarded direction: the assignment was skipped entirely, so a
+    genuinely exported value read as a plain shell variable.
+
+    ⛔ **A SUBSHELL operator ENDS the parent's view.** `set -a &` backgrounds the `set`
+    and `export FLAG=1 |cat` pipes it, so NEITHER reaches the parent environment — but
+    treating `&` / `|` as ordinary separators published the arm (`bash` has no FLAG).
+    The command BEFORE the operator is therefore DROPPED and the rest of the line is not
+    claimed: a real job/pipeline evaluation is the half a text reader cannot do, and
+    dropping is the conservative half it can honestly take.
+
+    ⛔ **A COMMENT IS STRIPPED FIRST** (`_shell_strip_comment`): an operator in a
+    comment is prose, and treating it as grammar dropped a real disarm — see that
+    function. The comment is stripped BEFORE splitting, so no returned command carries
+    one and the callers' `_assigned_value` never reads commented-out text as a value.
+    """
+    line = _shell_strip_comment(line)
+    commands: list[tuple[str, bool]] = []
+    current: list[str] = []
+    #: True once a `&&` / `||` has been crossed: everything after it is CONDITIONAL.
+    after_conditional = False
+    quote: str | None = None
+    escaped = False
+    index = 0
+    length = len(line)
+    while index < length:
+        char = line[index]
+        if escaped:
+            current.append(char)
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            current.append(char)
+            escaped = True
+            index += 1
+            continue
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+        if char == ";":
+            # ⛔ `;` ENDS the and-or list, so what follows is UNCONDITIONAL again:
+            # `a && b; export FLAG=1` runs the export whatever `a`/`b` did. Carrying the
+            # flag across the `;` read a real arm as unmeasured — a false HOLD, the
+            # mirror of the false ARM this whole branch is about (measured by this
+            # lane's own adversarial pass before review).
+            commands.append((_shell_strip_leading_keywords("".join(current), in_case),
+                              after_conditional))
+            current = []
+            after_conditional = False
+            index += 1
+            continue
+        if char in "&|":
+            # ⛔ A REDIRECTION IS NOT A SUBSHELL (`>&`, `<&`, `&>`, `&>>`, `>|`): the
+            # early return below DROPS the command and everything after it, so
+            # `export FLAG=0 >/dev/null 2>&1` lost a real DISARM (reader `ON`, bash `0`)
+            # and `exec 3>&1; export FLAG=1` lost the arm — both measured by the fresh
+            # review of `#12902` (P2). The operator character is part of the redirect and
+            # changes nothing about the parent shell, so it is appended like ordinary
+            # text.
+            opens_redirect = False
+            if char == "&":
+                # `>&` / `<&` (previous char) and `&>` / `&>>` (next chars)
+                opens_redirect = (bool(current) and current[-1] in "<>") or \
+                    line[index:index + 2] == "&>" or line[index:index + 3] == "&>>"
+            elif char == "|":
+                opens_redirect = bool(current) and current[-1] == ">"   # `>|` clobber
+            if opens_redirect:
+                current.append(char)
+                index += 1
+                continue
+            if line[index:index + 2] in ("&&", "||"):
+                # ⛔ The LEFT operand is unconditional; the RIGHT one runs only if the
+                # test passes (`&&`) or fails (`||`), and this reader cannot evaluate
+                # it. Both are emitted, but the flag is sticky from here on: `a && b &&
+                # c` makes c depend on b, which already depends on a.
+                commands.append((_shell_strip_leading_keywords("".join(current), in_case),
+                              after_conditional))
+                current = []
+                after_conditional = True
+                index += 2
+                continue
+            # ⛔ A `|` INSIDE A `case` PATTERN IS NOT A PIPE (`prod|staging)`, `x|y)`).
+            # The subshell return below DROPPED the whole line — every command on it — so a
+            # `case`-guarded export landed in NO bucket and the file published a DEFINITE
+            # `OFF` over a deployment bash arms: the same P2 class as the one-line `case`
+            # spelling, one mechanism over, because the split runs BEFORE any stripping can
+            # see the arm (fresh review of `#12902`, P2). A pattern position is a SINGLE word
+            # (bare, or after `case <subject> in`) followed by `|word…)`, which no pipe
+            # between two real commands looks like — `export FLAG=1 |cat` starts its
+            # operand with a SPACE-bearing command, and `|cat)` is not followed by a `)`
+            # closing a pattern.
+            if (char == "|"
+                    and _SHELL_CASE_PATTERN_POSITION.match("".join(current).strip())
+                    and _SHELL_CASE_PATTERN_REST.match(line, index)):
+                current.append(char)
+                index += 1
+                continue
+            # A SINGLE `&` / `|`: the command so far runs in a SUBSHELL, so neither it
+            # nor anything after it is the parent's environment.
+            return commands
+        current.append(char)
+        index += 1
+    commands.append((_shell_strip_leading_keywords("".join(current), in_case),
+                              after_conditional))
+    return commands
+
+
+def _shell_export_states(text: str, flag: str) -> list[dict]:
+    """The export state IN EFFECT at each line for ``flag``, one entry per line.
+
+    The export attribute is a property of a MOMENT, not of the file, so a single
+    whole-file set is not the right model. Each entry is:
+
+    * ``exported`` — is ``flag`` in the environment while this line runs?
+    * ``publish`` — for a BARE `export flag`, the value that line publishes: whatever
+      the shell VARIABLE currently holds. That is this repo's own entrypoint idiom
+      (`FLAG=...` then `export FLAG`), and it is how bash behaves — `export NAME`
+      exports an existing variable **without changing its value**.
+    * ``exported`` / ``publish`` / ``unexport`` / ``values`` — each is a LIST with one
+      entry per ``_shell_commands`` element on the line, read by the caller at the
+      COMMAND index. ⛔ They were one scalar per LINE, and the caller applied that
+      single line-final dict to every command on it: `unset FLAG; export FLAG=1`
+      published `OFF` (bash has `1`) because the LAST command's state decided the
+      first, and the disarming declaration was counted once per command — two
+      identical entries for one source line (fresh review of #12902, P2). A line that
+      is not ONE command cannot carry ONE state.
+
+    ⛔ **What a whole-file set got wrong, each measured as a false ARM or a false HOLD:**
+
+    1. **`export FLAG=1` exports `FLAG` exactly as `export FLAG` does** — the matcher
+       that accepted only the BARE form ignored it, so a later plain `FLAG=0` was not a
+       decision and the file published `ON` while bash runs `0` (`#12549` defect 4).
+    2. **`unset FLAG` REVOKES it** — the variable *and* its export attribute are gone, so
+       a later plain `FLAG=1` is a shell variable the process never sees. A whole-file set
+       kept the name and read that assignment as a decision: `main` `OFF` → `ON` on
+       `export FLAG=0; unset FLAG; FLAG=1` (fresh review, P1). `unset -f`/`-n` name a
+       FUNCTION / a NAMEREF and must NOT revoke the variable; the QUOTED target
+       (`unset "FLAG"`) does revoke it.
+    3. **`export -n FLAG` revokes it** (`help export`: *"-n remove the export property
+       from each NAME"*) **while RETAINING the value** — so a later bare `export FLAG`
+       re-publishes it, and clearing the value here published a false OFF (fresh review,
+       P2-3).
+    4. **`set -a` (allexport) is not a file-level shortcut** — it means every variable
+       ASSIGNED while it is in force gets the export attribute. `set -a` followed by
+       `export FLAG=1; export -n FLAG` leaves the flag OUT of the environment, which a
+       file-wide `None` ("everything exported") published as `ON` (fresh review, P2-2).
+       Allexport is therefore the machine's INITIAL state, and each assignment re-confers
+       the attribute exactly as bash does.
+    """
+    lines = text.splitlines()
+    allexport = False
+    exported = False
+    current: str | None = None
+    states: list[dict] = []
+    #: ⛔ A HEREDOC BODY IS DATA, NOT COMMANDS. `cat <<'EOF' … EOF` makes every line
+    #: between the operator and its terminator an argument to `cat`, so nothing in it
+    #: runs — but the per-line model scored it, in BOTH directions (fresh review of
+    #: `#12902`): a body `export FLAG=1` published an ARM for a flag bash never sets, and
+    #: a body `FLAG=0` after a real `export FLAG=1` published a DISARM for a deployment
+    #: bash runs armed (measured: `bash -c 'export FLAG=1; cat <<\'EOF\' >/dev/null;
+    #: FLAG=0; EOF; env'` has `FLAG=1`). Precedent in this module: `_yaml_block_scalar_bodies`
+    #: exists for the identical rule one grammar over.
+    heredoc_bodies = _shell_heredoc_bodies(text)
+    control_lines = _shell_control_flow_lines(text)
+    case_open_lines = _shell_case_open_lines(text)
+    for number, line in enumerate(lines, 1):
+        #: ⛔ ONE ENTRY PER COMMAND, as LISTS read at the COMMAND index by the caller.
+        #: They were one scalar per LINE, and the caller applied that single line-final
+        #: dict to every command on it: `unset FLAG; export FLAG=1` published `OFF`
+        #: (bash has `1`) because the LAST command's state decided the first, and one
+        #: source line was counted as two identical disarming declarations (fresh review
+        #: of `#12902`, P2). A line that is not ONE command cannot carry ONE state.
+        #: ``values`` is the value the variable holds BEFORE each parent-shell command on
+        #: the line runs — bash evaluates a `${FLAG:-…}` default against THAT value, so
+        #: `_resolved_assignment` needs it (on `F=0; export F=${F:-1}` the second command
+        #: must see `0`, not the line-start state).
+        #: ⛔ No inert marker field: an earlier revision carried `heredoc_body` here and
+        #: wrote it in both arms while NOTHING read it (the caller recomputes
+        #: `_shell_heredoc_bodies` itself), so it documented an intent no code acted on
+        #: (fresh review of `#12902`, P2). The body line is still emitted, with one neutral
+        #: entry, so `len(states) == len(lines)` and `shell_exports[number - 1]` stays
+        #: aligned for the lines that follow it.
+        states.append({"exported": [], "publish": [], "unexport": [], "values": []})
+        if number in heredoc_bodies:
+            states[-1]["values"].append(current)
+            continue
+        # ⛔ ONE LINE IS NOT ONE COMMAND: `set -a; set +a;` runs BOTH, and reading only
+        # the FIRST left the allexport state ARMED where bash has already ended it — a
+        # FALSE ARM (measured: `bash -c 'set -a; set +a; FLAG=1; env'` has no FLAG).
+        # Each PARENT-shell command on the line is applied in ORDER; a `&` / lone `|`
+        # subshell boundary ends the parent's view (`_shell_commands`). `set -a`/`set
+        # +a` are ORDERED, not a file-wide flag: allexport marks the variables *created
+        # or modified AFTERWARDS* (bash(1)), so an assignment BEFORE `set -a` is a plain
+        # shell variable and `set +a` ends the mode.
+        for command, conditional in _shell_commands(
+                line, number in case_open_lines and number in control_lines):
+            # ⛔ A BRANCH is a conditional operand one construct over: a command inside an
+            # `if`/`case`/loop may not have run, and this reader cannot evaluate the test.
+            # The caller holds the file for it; here it changes no state (fresh review of
+            # `#12902` — `if true; then export FLAG=0; else export FLAG=1; fi` published
+            # the LAST branch while bash runs the first).
+            conditional = conditional or number in control_lines
+            states[-1]["values"].append(current)
+            states[-1]["exported"].append(exported)
+            states[-1]["unexport"].append(False)
+            states[-1]["publish"].append(None)
+            text = command.strip()
+            if not text:
+                continue
+            # ⛔ A CONDITIONAL operand runs only if its test passes, and this reader
+            # cannot evaluate the test. Applying it either way would state a reading the
+            # run did not measure, so it changes NO state here — the caller reports the
+            # line as UNMEASURED (fresh review of `#12902`, P1).
+            if conditional:
+                continue
+            allexport_change = _shell_set_allexport(text)
+            if allexport_change is not None:
+                allexport = allexport_change
+                continue
+            parsed = _shell_export_args(text)
+            if parsed is not None:
+                names, assigned, options, values = parsed
+                if flag not in names:
+                    continue
+                if "f" in options:
+                    # ⛔ `-f` selects FUNCTIONS and OUTRANKS `-n`: `export -nf F` asks bash to
+                    # remove the export attribute from a FUNCTION, so the VARIABLE stays
+                    # exported. Testing `n` first published a DISARM (and a
+                    # `unset_declarations` entry) for a line that changed nothing (fresh
+                    # review, P2-5) — a cause the run did not measure.
+                    continue
+                if "n" in options:
+                    exported = False
+                    states[-1]["unexport"][-1] = True   # the value is RETAINED
+                    # ⛔ RETAINED does not mean UNCHANGED: the option removes the
+                    # export attribute and does NOT discard an assignment it is given —
+                    # `bash -c 'export FLAG=1; export -n FLAG=0; export FLAG; env'`
+                    # prints `FLAG=0` (MEASURED). Ignoring the argument kept `current`
+                    # on the value the revocation line had just replaced, so a later
+                    # bare `export FLAG` republished it and a deployment whose last
+                    # word is `0` read `ON` — a FALSE ARM, the direction this
+                    # instrument exists to close (fresh review cycle 3, P1).
+                    if flag in assigned:
+                        value = values.get(flag)
+                        if value is not None:
+                            current = value
+                else:
+                    if flag in assigned:
+                        # `export FLAG=v` also SETS the variable: the value a later bare
+                        # `export FLAG` publishes is this one. ⛔ Read from the ARGUMENT
+                        # LIST, not from the line's leading token — `export OTHER=1 FLAG=0`
+                        # assigns FLAG on the same line, and a line-start-scoped value
+                        # dropped it, so no decision was appended and the earlier truthy
+                        # line published a FALSE ARM (fresh review, P1). `publish` carries
+                        # it because the caller prefers `_assigned_value`, which is
+                        # line-start-scoped and returns None for this spelling.
+                        value = values.get(flag)
+                        if value is not None:
+                            current = value
+                            states[-1]["publish"][-1] = value
+                    else:
+                        states[-1]["publish"][-1] = current
+                    exported = True
+                continue
+            if flag in _shell_unset_values(text):
+                exported, current = False, None
+                states[-1]["unexport"][-1] = True
+                continue
+            value = _assigned_value(text, flag)
+            if value is not None:
+                current = value
+                # `set -a`: an assignment RE-CONFERS the attribute, so THIS line is already
+                # exported — and the state recorded above (taken before the line ran) must
+                # say so, or the assignment reads as a plain shell variable.
+                if exported or allexport:
+                    exported = True
+                    states[-1]["exported"][-1] = True
+    return states
 
 
 def _shell_line_is_exported(line: str, flag: str,
-                            exported: set[str] | None) -> bool:
+                            exported: bool | None) -> bool:
     """Does ``line`` put ``flag`` into the environment of what this script runs?"""
     if exported is None:
         return True
@@ -2484,93 +4675,23 @@ def _shell_line_is_exported(line: str, flag: str,
     match = _SHELL_ASSIGN.match(line)
     if not match or match.group("name") != flag:
         return False
-    return flag in exported
+    return exported
 
 
-#: A compose mapping ENTRY, bare or quoted key, optionally an array item.
-_COMPOSE_ENTRY_KEY = re.compile(
-    r"""^(?P<indent>\s*)(?:-\s+)?(?P<q>["']?)(?P<key>[A-Za-z_][\w.-]*)(?P=q)\s*:(?P<rest>.*)$""")
+#: ⛔ **The compose line-scope readers are GONE (`#12549`).** `_compose_contexts`,
+#: `_is_unset_declaration` and their key regexes answered "which scope is this LINE
+#: in" from indentation — a grammar question (`anchors`, `merge keys`, `flow style`,
+#: `env_file:`, `extends:`) that only compose's own resolver answers, and the shapes
+#: it got wrong were the defect list this lane closes. `_compose_channel` reads the
+#: resolved model instead, including `build.args`/`labels` scoping, so there is no
+#: second opinion left to disagree with it.
+#:
+#: The SHELL channel keeps its line reader below — see `DECLARED_CHANNEL_BOUNDS` for
+#: why (a shell's value is decided by execution, not by text).
 
 
-def _compose_contexts(text: str) -> dict[int, str]:
-    """1-based line → the dotted mapping PATH it lives in (`environment`, `build.args`).
-
-    ⛔ compose is a structure, not a line list: `TORTOISE_EMBED_GATE: "1"` is a RUNTIME
-    arm under `services.<svc>.environment`, a BUILD-TIME value under
-    `services.<svc>.build.args` and a label under `labels` — the same line, three
-    meanings (fresh review of PR #12474, P2). The TOML reader got a table scope for
-    exactly this reason; this is the same rule for compose. ⛔ The three are EXCLUSIVE
-    in the reader: only `environment` arms, `build.args` is reported as build-time, and
-    every other scope is reported rather than armed — the shape that armed "anything
-    not build.args/environment" made this docstring false for its own third example.
-
-    Indentation-driven: a mapping key with no inline value opens a scope, and a line
-    belongs to the innermost open scope. Array items (`- FLAG`) inherit their parent's.
-    """
-    ctx: dict[int, str] = {}
-    stack: list[tuple[int, str]] = []
-    for number, line in enumerate(text.splitlines(), 1):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            ctx[number] = ".".join(key for _, key in stack)
-            continue
-        indent = len(line) - len(line.lstrip())
-        # ⛔ A block SEQUENCE may sit at its parent key's own indentation
-        # (`environment:` then `- FLAG` flush with it), and YAML reads the two spellings
-        # as the same document — popping on `>=` dropped the parent before the item, so
-        # the flush-left item landed in no bucket while the indented one worked (fresh
-        # review of PR #12474, P2, measured against the pre-delta blob).
-        is_item = stripped.startswith("-")
-        while stack and (stack[-1][0] > indent
-                         or (stack[-1][0] == indent and not is_item)):
-            stack.pop()
-        entry = _COMPOSE_ENTRY_KEY.match(line)
-        if entry:
-            # ⛔ The line's context is the ENCLOSING scope, not including its own key:
-            # assigning before the push put `FLAG:` inside `environment.FLAG`, so the
-            # unset arm (which tests for `environment`) never fired on the map spelling.
-            ctx[number] = ".".join(key for _, key in stack)
-            rest = entry.group("rest").split("#", 1)[0].strip()
-            if not rest:
-                stack.append((indent, entry.group("key").lower()))
-            continue
-        ctx[number] = ".".join(key for _, key in stack)
-    return ctx
-
-
-def _is_unset_declaration(line: str, flag: str) -> bool:
-    """A compose `environment:` entry that DECLARES ``flag`` with no value → UNSETS it.
-
-    ⛔ Compose's own semantics (and this module's `_assigned_value` docstring): a bare
-    `- FLAG` array item, or a `FLAG:` / `FLAG: null` map entry, REMOVES the variable
-    from the container — the one direction that can DISARM an armed image. Counting it
-    as silence made the per-file caveat's "inheritance can only ADD an arm" false on a
-    reachable shape (fresh review of PR #12474, P2), so it is reported in its own bucket
-    and the caveat names the bound.
-    """
-    stripped = line.strip()
-    if not stripped or stripped[0] in "#;":
-        return False
-    # ⛔ An INLINE comment is not part of the value: `- FLAG   # disable the gate` is
-    # YAML-null (unset) and the comment-blind version read the words as a value, so the
-    # disarming line landed in no bucket at all (fresh review of PR #12474, P3).
-    stripped = _strip_inline_comment(stripped).strip()
-    stripped = stripped.lstrip("-").lstrip()
-    if not stripped or stripped.startswith("#"):
-        return False
-    name, colon, value = stripped.partition(":")
-    if name.strip().strip("'\"") != flag:
-        return False
-    if not colon:                      # `- FLAG` (array form): no value at all
-        return True
-    void = value.strip()
-    # `FLAG: ""` is SET-to-empty, not unset, so the quoting is read before the test.
-    if void in ('""', "''"):
-        return False
-    return void.lower() in ("", "null", "~")
-
-
-def _resolved_assignment(value: str, flag: str) -> tuple[bool, str]:
+def _resolved_assignment(value: str, flag: str,
+                         prior: str | None = None) -> tuple[bool, str]:
     """``(resolved, literal)`` for an assigned value that may be a shell default.
 
     `entrypoint.sh`'s own form is `export VAR="${VAR:-default}"` — a DEFAULT, which
@@ -2581,18 +4702,46 @@ def _resolved_assignment(value: str, flag: str) -> tuple[bool, str]:
     * anything else that references another variable (`${OTHER}`, `${FLAG:+x}`) is
       INDETERMINATE, and the caller must not read it as silence — the same
       doctrine as an unreadable file, one line down.
+
+    ⛔ **A DEFAULT ONLY APPLIES WHEN THE VARIABLE IS NOT ALREADY SET** — reading the
+    default unconditionally published an ARM for a gate bash keeps OFF (fresh review
+    of #12902, P1). Measured: `bash -c 'export F=0; export F=${F:-1}; echo $F'`
+    prints `0`, while the walker read the `:-1` and published `entrypoint.sh=ON`.
+    ``prior`` is the value the SHELL STATE MACHINE has already tracked for this
+    variable at this command (`_shell_export_states` → ``values``) — the model
+    knows it and the resolver was never told. The shell channel therefore passes
+    it; compose/YAML callers pass nothing and keep the literal reading.
+
+    The three operator spellings differ and this follows bash, not a simplification:
+
+    * `:-` / `:=` substitute when the name is UNSET **or NULL (empty)**;
+    * `-` / `=` substitute only when the name is UNSET, so an empty-but-set value
+      survives (`bash -c 'F=; echo "${F-1}"'` prints nothing).
+
+    ``prior is None`` means the file never assigned it — an INHERITED value this
+    file-reader cannot see — so the default stands, which is the pre-existing and
+    documented reading for a runtime default.
     """
     if not value.startswith("$"):
         return True, value
     match = re.fullmatch(
         r"\$\{?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
-        r"(?:(?::?[-=])(?P<default>[^}]*))?\}?", value)
+        r"(?:(?P<op>:?[-=])(?P<default>[^}]*))?\}?", value)
     if not match:
         return False, ""
     if match.group("name") != flag or match.group("default") is None:
         return False, ""
+    if prior is not None:
+        # ⛔ A PRIOR VALUE THAT IS ITSELF AN EXPANSION IS NOT A VALUE. `export FLAG=${
+        # OTHER}` then `export FLAG=${FLAG:-1}` leaves `current` as the raw text
+        # `${OTHER}`, and `is_truthy` would read that string as a literal OFF — a
+        # measured answer to a question the run never measured. UNMEASURED instead.
+        if prior.startswith("$"):
+            return False, ""
+        # `:-`/`:=` treat an EMPTY value as unset; `-`/`=` do not.
+        if prior != "" or not match.group("op").startswith(":"):
+            return True, prior
     return True, match.group("default").strip().strip("'\"")
-
 
 
 #: ⛔ There is deliberately NO truthy vocabulary in this module. The values a
@@ -2762,6 +4911,34 @@ def _assigned_value(line: str, flag: str) -> str | None:
         shell_export = re.match(r"^export[ \t]+", stripped)
         if shell_export:
             stripped = stripped[shell_export.end():].lstrip()
+    # ⛔ A Multi-KEY `ENV` LINE ASSIGNS EVERY PAIR ON IT, and only the LEADING key was
+    # ever a decision: `ENV FLAG=1` then `ENV LANG=C.UTF-8 FLAG=0` read `ON` over an
+    # image whose environment really holds `0` (measured with `docker build` +
+    # `docker run` while this walk published `{'Dockerfile': 'ON'}`, `on: True`, and
+    # `indeterminate: []`/`outside_runtime: []` — nothing in ANY bucket). The
+    # `ENV key=value key2=value2` form is the Dockerfile's own multi-assignment
+    # spelling, so every pair is read rather than only the first (fresh review, P1).
+    # ⛔ Docker decides the FORM from the FIRST word after `ENV`; the walker decided from
+    # "does the line contain `=`". `ENV OTHER FLAG=1` is the LEGACY form — it sets OTHER to
+    # the whole rest of the line — so harvesting `FLAG=1` out of it published an arm the
+    # image does not have (measured: `docker run … env` shows `OTHER=TORTOISE_EMBED_GATE=1`
+    # and no FLAG; the same one-line-discriminator class as the legacy `#` fix).
+    if (legacy_value_form and "=" in stripped
+            and "=" in stripped.split()[0]):
+        pairs = {m.group("name"): m.group("value").strip("'\"")
+                 for m in _DOCKERFILE_ENV_PAIR.finditer(stripped)}
+        if flag in pairs:
+            # ⛔ The DICT takes the LAST pair, which is what Docker and bash both do for
+            # a name assigned twice on one line: `ENV FLAG=1 FLAG=0` builds an image with
+            # `0` (measured with `docker build` + `docker run`), so returning the FIRST
+            # was a false ARM (fresh review, P2). This branch is reached whenever the
+            # line carries `=`, so the single-pair spelling is unchanged.
+            # ⛔ NOT `or None`: an EMPTY value is an ASSIGNMENT. `ENV FLAG=` builds an image
+            # with `FLAG=` — falsy — so folding it into None made the line produce NO
+            # decision, an EARLIER `ENV FLAG=1` stood, and the row published `gate enabled
+            # by default: True` over a disarmed image (measured with `docker build` +
+            # `docker run`; a false PASS).
+            return pairs[flag]
     # The flag must be the KEY: at the start of the line, followed by `=` or
     # `:` and nothing but the value. `Set FLAG=1 to enable` and
     # `name: verify FLAG=1 takes effect` fail here, which is the point.
@@ -2780,7 +4957,13 @@ def _assigned_value(line: str, flag: str) -> str | None:
         # ENV: no other surface has this form, and `ARG` never reaches the process.
         if not (legacy_value_form and rest_raw[:1] in (" ", "\t")):
             return None
-        legacy = _strip_inline_comment(rest).strip().strip("'\"")
+        # ⛔ A trailing `#` IS PART OF THE VALUE in this form. Docker's legacy
+        # `ENV KEY value` sets KEY to the REST OF THE LINE — a `#` starts a comment only
+        # at the START of a line — so `ENV FLAG 1 # enable the gate` builds an image whose
+        # value is the whole string `1 # enable the gate`, which this module's own
+        # truthiness contract scores FALSE. Stripping it published `ON` over that image
+        # (measured with `docker build` + `docker run`; fresh review, P1).
+        legacy = rest.strip().strip("'\"")
         return legacy or None
     value = _strip_inline_comment(rest[1:]).strip()
     # A genuine assignment's value is ONE token, optionally followed by a
@@ -2795,10 +4978,125 @@ def _assigned_value(line: str, flag: str) -> str | None:
     if len(tokens) > 1 and not all("=" in token for token in tokens[1:]):
         return None
     value = tokens[0] if tokens else ""
+    # ⛔ A TRAILING SHELL OPERATOR is not part of the value: `export FLAG=1;` runs
+    # `FLAG=1` and the `;` ends the command. Reading the token whole gave `1;`, which is
+    # not truthy, so an ARMED entrypoint read `OFF`. The operator-gluing class was already
+    # fixed for `unset` (see `_shell_unset_values`) and not for assignments (fresh review,
+    # P2).
+    value = _SHELL_OPERATOR_TAIL.sub("", value)
     value = value.strip("'\"")
     if len(value.split()) > 1:
         return None
     return value
+
+
+def _channel_for(posix: str) -> str | None:
+    """Which channel, if any, a resolved READER answers for this path.
+
+    ⛔ Only the two channels phase 1 converts (`#12549`). `dockerfile` and
+    `entrypoint` intentionally return `None`: they keep the line reader and their
+    declared bounds (`DECLARED_CHANNEL_BOUNDS`), and routing them here would make this
+    function's "resolved" promise false for them.
+    """
+    if posix in COMPOSE_BASE_NAMES or (
+            posix.startswith("docker-compose") and posix.endswith((".yml", ".yaml"))):
+        return "compose"
+    # Every `.toml` in the walk is a Fly manifest: the only TOML surface is
+    # `fly.toml`, whose candidates come from `_fly_manifests()` (`fly*.toml`).
+    if posix.endswith(".toml"):
+        return "fly"
+    return None
+
+
+def _resolve_channel_file(path: Path, posix: str, flag: str,
+                          is_truthy) -> dict | None:
+    """The RESOLVED reading for a channel that has a resolver, else `None`.
+
+    `None` means "this file's channel is a line reader" — the caller then runs the
+    line scan it always did. There is no third case: a file is either resolved by its
+    grammar's owner or walked line by line, and which one is published in
+    `deployment["channels"]`.
+    """
+    channel = _channel_for(posix)
+    if channel == "compose":
+        return _compose_channel(path, flag, is_truthy)
+    if channel == "fly":
+        return _fly_channel(path, flag, is_truthy)
+    return None
+
+
+def _apply_channel_reading(reading: dict, posix: str, flag: str,
+                           buckets: dict) -> str:
+    """Fold ONE resolved channel reading into the walk's buckets; return its state.
+
+    The returned state is the FILE's verdict — `ON` (every scope arms it), `OFF` (none
+    does), `DISAGREE` (they differ, stated per service) or `UNMEASURED` (the resolver
+    refused, or a scope's value could not be resolved).
+
+    ⛔ The unreadable / unresolvable split is the `#12549` defect-1 fix at its source:
+    a file the walk READ but whose value the resolver refused lands in ``indeterminate``
+    (and so in ``unmeasured``), NEVER in ``unreadable``.
+    """
+    if not reading.get("ok"):
+        reason = reading.get("reason") or "the resolver returned no value"
+        buckets["indeterminate"].append(f"{posix}: CHANNEL UNRESOLVED — {reason}")
+        buckets["surface_indeterminate"].append(posix)
+        return "UNMEASURED"
+    resolver = reading.get("resolver") or ""
+    scopes = reading.get("scopes") or {}
+    if reading.get("mentioned") and posix not in buckets["mentions"]:
+        buckets["mentions"].append(posix)
+    for hit in reading.get("outside_runtime") or ():
+        buckets["outside_runtime"].append(hit)
+    for scope, detail in sorted(scopes.items()):
+        verdict = detail.get("verdict")
+        value = detail.get("value")
+        reason = detail.get("reason") or ""
+        where = f"{posix}: {(detail.get('path') or scope)}.{flag}"
+        if verdict == "ARMED":
+            hit = f"{where} = {value!r} [{resolver}]"
+            buckets["hits"].append(hit)
+            buckets["surface_hits"].append(hit)
+            buckets["surface_file_hits"].setdefault(posix, []).append(hit)
+        elif verdict == "UNRESOLVED":
+            buckets["indeterminate"].append(
+                f"{where}: CHANNEL UNRESOLVED — {reason}")
+            buckets["surface_indeterminate"].append(posix)
+        elif reason.startswith("no value"):
+            # ⛔ A value-less declaration is REPORTED in its own bucket, exactly as the
+            # line reader reported the compose `- FLAG` spelling (`#12474`): it is the
+            # one shape that can take an INHERITED arm away. Two measurements, and the
+            # bucket text carries both (fresh review of PR #12902, cycle 5, P2): the
+            # resolver returns `null` for it, so compose substitutes the ambient value
+            # when the deploying host exports one, and REMOVES the image's `ENV` when it
+            # does not (measured with `docker build`/`docker run`). "Takes it from the
+            # environment" alone understated the removal half.
+            buckets["unset_declarations"].append(
+                f"{where} (no value — compose passes the ambient value through, "
+                "and CLEARS an inherited one when the host supplies none)")
+        elif reason.startswith("set to a non-truthy"):
+            # ⛔ A profile-gated value is NOT an override: nothing is inherited in the
+            # deployment a default `up` describes, because that deployment never
+            # starts the service. Rendering it as "OVERRIDES an inherited value" is a
+            # cause the resolver did not measure (it reports `profiles:` on the scope),
+            # so the two directions get two sentences.
+            if "profile-gated service" in reason:
+                buckets["disarming_assignments"].append(
+                    f"{where} = {value!r} (DISARMS only when its `profiles:` entry is "
+                    "enabled — a default `docker compose up` does not start it)")
+            else:
+                buckets["disarming_assignments"].append(
+                    f"{where} = {value!r} (OVERRIDES an inherited value)")
+    verdict = reading.get("verdict")
+    if verdict == "UNRESOLVED":
+        buckets["surface_indeterminate"].append(posix)
+        return "UNMEASURED"
+    if verdict == "DISAGREE":
+        buckets["surface_disagree"].append(posix)
+        return "DISAGREE"
+    if verdict == "ARMED":
+        return "ON"
+    return "OFF"
 
 
 def flag_in_shipped_configs(flag: str) -> dict:
@@ -2895,8 +5193,10 @@ def flag_in_shipped_configs(flag: str) -> dict:
         if rel == "entrypoint":
             return _entrypoint_scripts()
         if rel in COMPOSE_BASE_NAMES:
-            target = REPO_ROOT / rel
-            return [target] if target.is_file() else []
+            # ⛔ Only the name compose SELECTS is a deployment file; a superseded name
+            # is reported through `_compose_superseded_files`, not measured here —
+            # measuring it would attribute an arm/disarm to a file nothing reads.
+            return [p for p in _compose_files() if p.name == rel]
         target = REPO_ROOT / rel
         return ([target] if target.is_file()
                 else sorted(target.rglob("*")) if target.is_dir() else [])
@@ -2915,12 +5215,17 @@ def flag_in_shipped_configs(flag: str) -> dict:
     # understand.
     indeterminate: list[str] = []
     outside_runtime: list[str] = []
-    # ⛔ The TWO DISARMING directions, reported separately, because either one takes an
-    # arm AWAY: a compose `environment:` entry with no value UNSETS the variable, and one
-    # that assigns it a NON-truthy value OVERRIDES the image's `ENV` with that value.
+    # ⛔ The TWO directions that can take an arm AWAY, reported separately: an entry
+    # that fixes NO VALUE for the variable (a shell `unset`, or a compose entry with no
+    # value — which compose hands to the ambient environment), and one that assigns it a
+    # NON-truthy value, which OVERRIDES the image's `ENV` with that value.
     unset_declarations: list[str] = []
     disarming_assignments: list[str] = []
     per_surface: dict[str, dict] = {}
+    #: Every RESOLVED channel file's reading, keyed by path — the structured form of
+    #: what the row prints (`#12549`): per-service verdicts, the resolver that answered,
+    #: and the reason a scope could not be resolved.
+    resolved_channels: dict[str, dict] = {}
     for rel in CONFIG_SURFACES:
         target = REPO_ROOT / rel
         candidates = _candidates(rel)
@@ -2929,7 +5234,35 @@ def flag_in_shipped_configs(flag: str) -> dict:
         surface_searched: list[str] = []
         surface_unreadable: list[str] = []
         surface_indeterminate: list[str] = []
+        #: ⛔ Files an ATTRIBUTE-level conditional left unknowable. Kept apart from
+        #: `surface_indeterminate` because the two are downgraded differently: a
+        #: deferred VALUE decision is overridden by a later definite assignment
+        #: (LAST-WINS), while an attribute change decides the MEANING of every
+        #: assignment after it and may not be overridden by anything.
+        surface_attribute_indeterminate: set[str] = set()
+        #: The HIT strings the attribute override retracts — they are removed from the
+        #: surface and global hit lists, not merely from `file_states`.
+        retracted_hits: list[str] = []
         surface_file_hits: dict[str, list[str]] = {}
+        # ⛔ A resolved channel's per-FILE verdict (ON/OFF/DISAGREE/UNMEASURED) and the
+        # files whose services DISAGREE. Both are kept beside the line-derived
+        # `surface_file_hits` because a resolver channel never appends a decision to
+        # the line machinery — it has no lines (`#12549`).
+        channel_states: dict[str, str] = {}
+        channel_readings: dict[str, dict] = {}
+        surface_disagree: list[str] = []
+        surface_buckets = {
+            "hits": hits, "mentions": mentions, "searched": searched,
+            "unreadable": unreadable, "surface_unreadable": surface_unreadable,
+            "indeterminate": indeterminate,
+            "surface_indeterminate": surface_indeterminate,
+            "unset_declarations": unset_declarations,
+            "disarming_assignments": disarming_assignments,
+            "outside_runtime": outside_runtime,
+            "surface_hits": surface_hits,
+            "surface_disagree": surface_disagree,
+            "surface_file_hits": surface_file_hits,
+        }
         # ⛔ LAST WINS, per file: `ENV FLAG=1` then `ENV FLAG=0` (or two `export`s) leaves
         # the container with 0, and counting ANY truthy line read the file ARMED —
         # a false PASS on the deployment population this lane widened, and the one concept
@@ -2960,6 +5293,18 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 continue
             searched.append(posix)
             surface_searched.append(posix)
+            # ⛔ ── A channel WITH a resolver is read by its resolver, NOT by the line
+            # loop below (`#12549`), and it is read BEFORE the `flag not in text`
+            # shortcut: a compose file can arm the flag through a shape whose text does
+            # not contain the flag at all — an `env_file:` entry, or an anchor/merge key
+            # resolved from a shared block. Reading the text first made that arm
+            # invisible, which is the same class as defect 3.
+            channel_reading = _resolve_channel_file(path, posix, flag, is_truthy)
+            if channel_reading is not None:
+                channel_readings[posix] = channel_reading
+                channel_states[posix] = _apply_channel_reading(
+                    channel_reading, posix, flag, surface_buckets)
+                continue
             if flag not in text:
                 continue
             mentions.append(posix)
@@ -2971,21 +5316,110 @@ def flag_in_shipped_configs(flag: str) -> dict:
             bodies = (_yaml_block_scalar_bodies(text)
                       if posix.endswith((".yml", ".yaml")) else {})
             workflow = posix.startswith(WORKFLOW_SURFACE + "/")
-            # `fly.toml` is read TABLE-SCOPED: only `[env]` reaches the machine's
-            # process, so a flag in `[build.args]` is not a shipped default.
-            toml_tables = (_toml_table_lines(text)
-                           if posix.endswith(".toml") else None)
+            # `fly.toml` is read by its resolver (`_fly_channel`), so the TOML
+            # TABLE-SCOPED line reader that used to stand here is gone: a line walk
+            # cannot see a quoted key, a dotted key, an inline table or a `[env]`
+            # written after `[[services]]`.
             # A shell script's environment is what it EXPORTS, not every variable
             # it assigns — `entrypoint.sh` is discovered from the image's
             # `ENTRYPOINT`, and its `export VAR="${VAR:-default}"` form is how a
             # deployment really gets a runtime default.
-            shell_exports = (_shell_exported_names(text)
+            shell_exports = (_shell_export_states(text, flag)
                              if posix.endswith(".sh") else None)
-            # ⛔ compose is read STRUCTURALLY: the enclosing mapping decides whether a
-            # line is runtime env, a build arg, or a label (`_compose_contexts`).
-            compose_ctx = (_compose_contexts(text)
-                           if posix.startswith("docker-compose") else None)
-            for number, line in enumerate(text.splitlines(), 1):
+            # ⛔ ONE LINE IS NOT ONE COMMAND (see `_shell_commands`): a shell line carrying
+            # `set -a; FLAG=1` exports FLAG, while `set -a; set +a;` ENDS the mode — read as
+            # a single command, the first spelling lost a REAL arm and the second published
+            # an arm bash had already ended (`bash -c 'set -a; set +a; FLAG=1; env'` has no
+            # FLAG). Each PARENT-shell command is scanned as its own line under the SAME
+            # source line number, so the per-line state (`shell_exports[number - 1]`) and
+            # the reported `file:line` remain the original ones.
+            # ⛔ A BRANCH IS A CONDITIONAL OPERAND (see `_shell_control_flow_lines`): a
+            # flag-relevant command inside an `if`/`case`/loop may not have run, so it is
+            # reported `indeterminate` and the FILE held UNMEASURED, exactly as an
+            # `a && b` operand is. Measured before this: `if true; then export FLAG=0;
+            # else export FLAG=1; fi` published `ON` (bash runs the `if` branch: `0`) and
+            # `case x in x) export FLAG=1 ;; esac` published `OFF` (bash arms it).
+            # ⛔ THE SAME RULES APPLY TO A WORKFLOW'S `run:` BODY, which this module
+            # deliberately scans as executed shell (`EXECUTED_BLOCK_KEYS`): gating the
+            # heredoc/branch analysis on `.sh` alone left a body inside
+            # `run: | \n cat <<'EOF' \n export FLAG=1 \n EOF` scored as a COMMAND, so the
+            # workflow surface published `ON` for a step that exports nothing (fresh
+            # review of `#12902`, P2 — measured). `workflow` is the same predicate the
+            # executed-body arm uses.
+            reads_shell = posix.endswith(".sh") or workflow
+            control_lines = (_shell_control_flow_lines(text)
+                             if reads_shell else set())
+            case_open_lines = (_shell_case_open_lines(text)
+                               if reads_shell else set())
+            scan_lines = (
+                [(number, index, command, raw,
+                  conditional or number in control_lines)
+                 for number, raw in enumerate(text.splitlines(), 1)
+                 for index, (command, conditional)
+                 in enumerate(_shell_commands(
+                     raw, number in case_open_lines and number in control_lines))]
+                if posix.endswith(".sh")
+                else [(number, 0, raw, raw, False)
+                      for number, raw in enumerate(text.splitlines(), 1)])
+            # ⛔ A HEREDOC BODY IS DATA, NOT COMMANDS (`_shell_heredoc_bodies`). Its lines
+            # are counted like a YAML documentation body and never scored, in EITHER
+            # direction — a body `export FLAG=1` published a false ARM and a body
+            # `FLAG=0` published a false DISARM over a deployment bash runs armed.
+            heredoc_bodies = (_shell_heredoc_bodies(text)
+                              if reads_shell else set())
+            # ⛔ …and a heredoc whose DELIMITER is not knowable (`cat <<$D`, `cat <<~`) is
+            # UNMEASURED, not "no body": ignoring it scanned the body as commands and
+            # published a FALSE ARM (fresh review of `#12902`, P2).
+            unresolved_heredocs = (_shell_unresolved_heredoc_lines(text)
+                                   if reads_shell else set())
+            if unresolved_heredocs:
+                # ⛔ THE EXTENT OF THAT BODY IS UNKNOWN, not absent, so EVERY line from the
+                # opener down is a reading the run did not necessarily make: they are
+                # marked conditional, which (for a flag-relevant command) reports them
+                # `indeterminate` and leaves the file's LAST decision UNKNOWN — i.e. the
+                # file is HELD. Marking only the opener left the body scanned as commands
+                # (measured: `reader ON, bash 0` on the review's `D=EOF` fixture).
+                control_lines = set(control_lines) | set(
+                    range(min(unresolved_heredocs), len(text.splitlines()) + 1))
+            for number, index, line, shown, conditional in scan_lines:
+                # ⛔ Re-applied HERE, not only when `scan_lines` was built: the unknown-
+                # extent hold below EXTENDS `control_lines` after that comprehension runs,
+                # so a value captured there would miss every line it added.
+                conditional = conditional or number in control_lines
+                if number in heredoc_bodies:
+                    if _assigned_value(line, flag) is not None:
+                        documented_only += 1
+                    continue
+                # ⛔ A heredoc whose terminator this reader cannot know (`cat <<$D`) makes
+                # the EXTENT of its body unknown, so every following line is a reading the
+                # run did not make: hold the FILE rather than score them (fresh review of
+                # `#12902`, P2 — measured `reader ON, bash 0`).
+                if number in unresolved_heredocs:
+                    indeterminate.append(f"{posix}:{number}: {shown.strip()[:90]}")
+                    surface_indeterminate.append(posix)
+                    decisions.append((None,
+                                      f"{posix}: {shown.strip()[:90]}",
+                                      f"{posix}:{number}: {shown.strip()[:90]}"))
+                    continue
+                # ⛔ A CONDITIONAL operand (`cond && export FLAG=1`) runs only if a test
+                # this reader CANNOT evaluate passes, so publishing either answer would
+                # state a reading the run did not measure. Both directions were wrong
+                # before this (fresh review of `#12902`, P1):
+                #   `[ -n "" ] && export TO…GATE=1`  -> read ARM, bash NOT armed
+                #   `export …=0` then `cond || export …=1` -> read ARM, bash `0`
+                # A `&` / lone `|` is already handled the other way (the operand is
+                # DROPPED, since it runs in a subshell); here the command may well have
+                # run, so UNKNOWN is the honest answer and holds the file UNMEASURED,
+                # exactly as the `unset "$FLAG"` arm below does.
+                if conditional and _shell_command_affects_flag(line, flag):
+                    indeterminate.append(f"{posix}:{number}: {shown.strip()[:90]}")
+                    surface_indeterminate.append(posix)
+                    if _shell_command_changes_ATTRIBUTE(line, flag):
+                        surface_attribute_indeterminate.add(posix)
+                    decisions.append((None,
+                                      f"{posix}: {shown.strip()[:90]}",
+                                      f"{posix}:{number}: {shown.strip()[:90]}"))
+                    continue
                 if number in bodies:
                     executed = (workflow
                                 and bodies[number] in EXECUTED_BLOCK_KEYS)
@@ -2995,11 +5429,6 @@ def flag_in_shipped_configs(flag: str) -> dict:
                         continue
                     # An executed `run:` body: fall through to the real scan,
                     # so a shipped `export FLAG=1` is a HIT, not a note.
-                if (toml_tables is not None
-                        and toml_tables.get(number, "") != TOML_RUNTIME_ENV_TABLE):
-                    if _assigned_value(line, flag) is not None:
-                        outside_runtime.append(f"{posix}:{number}: {line.strip()[:90]}")
-                    continue
                 # ⛔ The shell channel's DISARMING direction, and a LAST-WINS decision:
                 # `unset FLAG` removes the variable, so it cannot leave an earlier
                 # `export FLAG=1` standing. It landed in NO bucket at all before this —
@@ -3008,36 +5437,49 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 # #12474, P2, measured). Reported in `unset_declarations` exactly as the
                 # compose value-less spelling is, so the direction is visible, not just
                 # scored.
-                # ⛔ The channel test is the FILE, not `shell_exports`: that value is
-                # `None` for a `set -a` (allexport) script as well as for a non-shell
-                # file, so keying the arm on it made every allexport entrypoint skip the
-                # arm and keep the earlier `export` standing — the same fail-open, still
-                # open, on the shape the reader explicitly models (fresh review of PR
-                # #12474, P2). ⛔ And BEFORE the exported-assignment gate, which
-                # `continue`s on any line that is not an export and would swallow this.
+                # ⛔ The channel test is the FILE, not `shell_exports`: keying the arm
+                # on it made every allexport entrypoint skip the arm and keep the earlier
+                # `export` standing — the same fail-open, still open, on the shape the
+                # reader explicitly models (fresh review of PR #12474, P2).
+                # ⛔ And BEFORE the exported-assignment gate, which `continue`s on any
+                # line that is not an export and would swallow this.
                 if posix.endswith(".sh"):
                     target = _shell_unset_target(line, flag)
                     if target == "value":
                         unset_declarations.append(
-                            f"{posix}:{number}: {line.strip()[:90]}")
+                            f"{posix}:{number}: {shown.strip()[:90]}")
                         decisions.append((False,
-                                          f"{posix}: {line.strip()[:90]}",
-                                          f"{posix}:{number}: {line.strip()[:90]}"))
+                                          f"{posix}: {shown.strip()[:90]}",
+                                          f"{posix}:{number}: {shown.strip()[:90]}"))
                         continue
                     if target == "unknown":
                         # A computed name (`unset "$FLAG"`) may or may not be this flag:
                         # UNKNOWN holds the file UNMEASURED rather than leaving an arm.
                         indeterminate.append(
-                            f"{posix}:{number}: {line.strip()[:90]}")
+                            f"{posix}:{number}: {shown.strip()[:90]}")
                         surface_indeterminate.append(posix)
                         decisions.append((None,
-                                          f"{posix}: {line.strip()[:90]}",
-                                          f"{posix}:{number}: {line.strip()[:90]}"))
+                                          f"{posix}: {shown.strip()[:90]}",
+                                          f"{posix}:{number}: {shown.strip()[:90]}"))
                         continue
+                # ⛔ `export -n FLAG` REMOVES the export attribute (`help export`),
+                # so the environment loses the flag here exactly as it does at an
+                # `unset` — a DISARMING declaration, reported in the same bucket. It
+                # landed in NO bucket before this, which left an earlier
+                # `export FLAG=1` standing: a false ARM (fresh review, P1).
+                if (posix.endswith(".sh") and shell_exports is not None
+                        and shell_exports[number - 1]["unexport"][index]):
+                    unset_declarations.append(
+                        f"{posix}:{number}: {shown.strip()[:90]}")
+                    decisions.append((False,
+                                      f"{posix}: {shown.strip()[:90]}",
+                                      f"{posix}:{number}: {shown.strip()[:90]}"))
+                    continue
                 if (shell_exports is not None
-                        and not _shell_line_is_exported(line, flag, shell_exports)):
+                        and not _shell_line_is_exported(
+                            line, flag, shell_exports[number - 1]["exported"][index])):
                     if _assigned_value(line, flag) is not None:
-                        outside_runtime.append(f"{posix}:{number}: {line.strip()[:90]}")
+                        outside_runtime.append(f"{posix}:{number}: {shown.strip()[:90]}")
                     continue
                 # ⛔ A Dockerfile `ARG` is BUILD-TIME: it can feed a later `ENV`, but it
                 # never reaches the running container's environment on its own, so
@@ -3051,60 +5493,29 @@ def flag_in_shipped_configs(flag: str) -> dict:
                         and re.match(r"^ARG[ \t]+" + re.escape(flag) + r"(?:[ \t=]|$)",
                                      line.strip(), re.IGNORECASE)):
                     outside_runtime.append(
-                        f"{posix}:{number}: {line.strip()[:90]} (build-time ARG)")
-                    continue
-                where = compose_ctx.get(number, "") if compose_ctx is not None else ""
-                if (compose_ctx is not None
-                        and not (where == "environment"
-                                 or where.endswith(".environment"))
-                        and not (where == "build.args"
-                                 or where.endswith(".build.args"))
-                        and (_assigned_value(line, flag) is not None
-                             or _is_unset_declaration(line, flag))):
-                    # ⛔ POSITIVE scoping, not a subtraction: only `environment:` is a
-                    # deployed process's environment, so a flag under `labels:` (or any
-                    # other service scope) is reported and never armed. The earlier shape
-                    # armed everything that was not `build.args`/`environment`, which made
-                    # the docstring's "same line, three meanings" claim false for the third
-                    # (fresh review of PR #12474, P2).
-                    outside_runtime.append(
-                        f"{posix}:{number}: {line.strip()[:90]} "
-                        f"(not a runtime environment scope: {where or 'top level'})")
-                    continue
-                if where == "build.args" or where.endswith(".build.args"):
-                    # A compose BUILD ARG reaches `docker build --build-arg`, never the
-                    # container's environment — the same reading `[build.args]` and a
-                    # Dockerfile `ARG` already get (fresh review of PR #12474, P2).
-                    if (_assigned_value(line, flag) is not None
-                            or _is_unset_declaration(line, flag)):
-                        outside_runtime.append(
-                            f"{posix}:{number}: {line.strip()[:90]} "
-                            "(build-time build arg)")
-                    continue
-                # ⛔ Checked BEFORE the assignment reader: a bare `FLAG:` parses as an
-                # assignment with an EMPTY value (`_assigned_value` returns `""`), so the
-                # unset arm placed after it never ran for the map spellings (measured).
-                if ((where == "environment" or where.endswith(".environment"))
-                        and _is_unset_declaration(line, flag)):
-                    unset_declarations.append(
-                        f"{posix}:{number}: {line.strip()[:90]}")
-                    # ⛔ A LAST-WINS decision, exactly like the shell arm: a value-less
-                    # compose entry UNSETS the variable, so a declaration that comes
-                    # AFTER a truthy one leaves the container DISARMED. Reporting it
-                    # without scoring it meant `environment: [- FLAG=1, - FLAG]` read the
-                    # file `ON` — the compose spec's own semantics, read the wrong way,
-                    # and the asymmetry the shell arm had just been fixed for (fresh
-                    # review of PR #12474, P3, measured).
-                    decisions.append((False,
-                                      f"{posix}: {line.strip()[:90]}",
-                                      f"{posix}:{number}: {line.strip()[:90]}"))
+                        f"{posix}:{number}: {shown.strip()[:90]} (build-time ARG)")
                     continue
                 value = _assigned_value(line, flag)
                 if value is None:
-                    continue
-                resolved, literal = _resolved_assignment(value, flag)
+                    # ⛔ A BARE `export FLAG` is a shipped decision: it publishes the
+                    # value the shell variable already holds, which is this repo's own
+                    # entrypoint idiom (`FLAG=...` then `export FLAG`). Skipping it read a
+                    # real arm as silence once the export state became per-line.
+                    value = (shell_exports[number - 1]["publish"][index]
+                             if shell_exports is not None else None)
+                    if value is None:
+                        continue
+                # ⛔ The value the SHELL MACHINE already holds for this variable at this
+                # command (`_shell_export_states` → ``values``), so a self-referencing
+                # default (`export F=${F:-1}`) is judged against what bash will really
+                # substitute rather than against the default alone (fresh review of
+                # #12902, P1). NON-shell channels pass nothing and are untouched.
+                resolved, literal = _resolved_assignment(
+                    value, flag,
+                    prior=(shell_exports[number - 1]["values"][index]
+                           if shell_exports is not None else None))
                 if not resolved:
-                    indeterminate.append(f"{posix}:{number}: {line.strip()[:90]}")
+                    indeterminate.append(f"{posix}:{number}: {shown.strip()[:90]}")
                     surface_indeterminate.append(posix)
                     # ⛔ A DEFERRED DECISION, not a `continue`: the value this line gives
                     # the flag is UNKNOWN, and it is the LAST assignment, so the file's
@@ -3115,14 +5526,14 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     # an unresolvable assignment holds the file UNMEASURED (fresh review
                     # of PR #12474, P2).
                     decisions.append((None,
-                                      f"{posix}: {line.strip()[:90]}",
-                                      f"{posix}:{number}: {line.strip()[:90]}"))
+                                      f"{posix}: {shown.strip()[:90]}",
+                                      f"{posix}:{number}: {shown.strip()[:90]}"))
                     continue
                 # ⛔ Deferred, never applied here: the FILE's state is its LAST
                 # runtime-relevant assignment (`is_truthy` is decided per line).
                 decisions.append((is_truthy(literal),
-                                  f"{posix}: {line.strip()[:90]}",
-                                  f"{posix}:{number}: {line.strip()[:90]}"))
+                                  f"{posix}: {shown.strip()[:90]}",
+                                  f"{posix}:{number}: {shown.strip()[:90]}"))
             # ── the file's effective value, once its lines are read (LAST WINS) ──
             if decisions:
                 effective_truthy, hit_text, plain_text = decisions[-1]
@@ -3158,6 +5569,12 @@ def flag_in_shipped_configs(flag: str) -> dict:
                                           else ""))
         if not present:
             state = "ABSENT"
+        elif surface_disagree:
+            # ⛔ A per-SERVICE disagreement is a MEASUREMENT, and it is neither of the
+            # two answers (`#12549` defect 2): `app=1 / worker=0` must not read `ON` or
+            # `OFF`, because which one it "is" would depend on the order the services
+            # were written in. It is stated per service and holds the row.
+            state = "DISAGREE"
         elif surface_hits:
             # ⛔ A HIT is a POSITIVE measurement: this surface demonstrably arms the
             # flag, because a file the walk READ assigned it a truthy value. An
@@ -3186,6 +5603,13 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     "hits": surface_file_hits.get(posix, [])}
             for posix in surface_searched
         }
+        # A RESOLVED channel's verdict REPLACES the line-derived one for its files:
+        # there is no line reader to disagree with, and `DISAGREE` is a state the line
+        # machinery cannot express (a file is not one service).
+        for posix, channel_state in channel_states.items():
+            file_states[posix] = {"state": channel_state,
+                                  "hits": surface_file_hits.get(posix, [])}
+            resolved_channels[posix] = channel_readings[posix]
         for posix in surface_unreadable:
             file_states[posix] = {"state": "UNMEASURED", "hits": []}
         # ⛔ An INDETERMINATE assignment is UNMEASURED, not silent: the file assigns
@@ -3195,10 +5619,35 @@ def flag_in_shipped_configs(flag: str) -> dict:
         for posix in surface_indeterminate:
             if file_states.get(posix, {}).get("state") != "ON":
                 file_states[posix] = {"state": "UNMEASURED", "hits": []}
+        # ⛔ …but an ATTRIBUTE-level indeterminate is NEVER overridden, not even by a
+        # later hit. `set -a` / `true && set +a` / `FLAG=1` and `export FLAG=1` /
+        # `true && export -n FLAG` / `FLAG=1` both read `ON` under the rule above while
+        # bash exports NOTHING: the conditional decides whether the later assignment is
+        # exported at all, so the later hit's truthiness is exactly what is unknown. A
+        # false ARM in the row's certification direction, and the declared bound's own
+        # "the FILE is held UNMEASURED" sentence was false without this (fresh review of
+        # `#12902`, P1).
+        for posix in surface_attribute_indeterminate:
+            retracted_hits.extend(file_states.get(posix, {}).get("hits", []))
+            file_states[posix] = {"state": "UNMEASURED", "hits": []}
+        # ⛔ AND THE SURFACE REDUCTION ABOVE RAN BEFORE THAT OVERRIDE, so it still published
+        # the retracted hit: `entrypoint=ON`, `armed: ['entrypoint']` and
+        # `set ON in: ['entrypoint.sh: …=1']` beside `files: UNMEASURED` — one reading
+        # publishing and retracting the same hit in the same sentence, which is the
+        # failure mode the override was written for, left one layer up. A retracted hit is
+        # not a hit, so it comes out of `surface_hits` AND out of the global `hits` the
+        # top-level `files`/`on` fields are built from, and the state is re-reduced from
+        # what is LEFT (fresh review of `#12902`, P2).
+        if retracted_hits:
+            gone = set(retracted_hits)
+            surface_hits = [hit for hit in surface_hits if hit not in gone]
+            hits = [hit for hit in hits if hit not in gone]
+            state = "ON" if surface_hits else "UNMEASURED"
         per_surface[rel] = {"state": state, "hits": surface_hits,
                             "files": file_states,
                             "searched": surface_searched,
                             "unreadable": surface_unreadable,
+                            "disagreeing": sorted(surface_disagree),
                             "indeterminate": sorted(set(surface_indeterminate))}
 
     def _rels(state: str, pool: tuple[str, ...]) -> list[str]:
@@ -3215,6 +5664,12 @@ def flag_in_shipped_configs(flag: str) -> dict:
                           if state != "ABSENT"]
     deployment_unmeasured = [posix for posix in deployment_present
                              if deployment_files[posix] == "UNMEASURED"]
+    # ⛔ The COMPUTED population (`#12549`), and the channels it could not read. A
+    # discovered manifest carrying a process environment with no reader here HOLDS the
+    # row: "every deployment file is armed" over a population this walk did not
+    # enumerate is the `#12022` claim, one channel over.
+    discovery = discover_deployment_channels()
+    unread_channels = discovery["unread"]
     deployment = {
         "surfaces": list(DEPLOYMENT_SURFACES),
         "files": deployment_files,
@@ -3224,7 +5679,10 @@ def flag_in_shipped_configs(flag: str) -> dict:
         "channels": {
             posix: ("toml:[env]" if posix.endswith(".toml") else
                     "shell:export" if posix.endswith(".sh") else
-                    "compose" if posix.startswith("docker-compose") else
+                    "compose" if (posix.startswith("docker-compose")
+                                  or posix.startswith("compose.")
+                                  or posix in ("compose.yaml",
+                                               "compose.yml")) else
                     "dockerfile")
             for posix in deployment_present
         },
@@ -3234,8 +5692,22 @@ def flag_in_shipped_configs(flag: str) -> dict:
         "present": deployment_present,
         "armed": [p for p in deployment_present if deployment_files[p] == "ON"],
         "silent": [p for p in deployment_present if deployment_files[p] == "OFF"],
+        # ⛔ NEITHER armed nor silent, and published as a THIRD bucket so nothing has to
+        # coerce it (`#12549` defect 2): the file's services disagree about the value.
+        "disagreeing": [p for p in deployment_present
+                        if deployment_files[p] == "DISAGREE"],
         "absent": _rels("ABSENT", DEPLOYMENT_SURFACES),
         "unmeasured": deployment_unmeasured,
+        # ── the COMPUTED channel population (`#12549`) ──
+        "discovery": discovery,
+        "unread_channels": unread_channels,
+        # The per-file, per-SCOPE verdicts — `ON`/`OFF`/`DISAGREE` at file level is the
+        # reduction; this is the evidence it was reduced FROM.
+        "resolved": resolved_channels,
+        # ⛔ The two channels phase 1 does NOT convert, one declared row each: the shape
+        # it cannot see and why. A bound that is PUBLISHED is a bound; one that lives in
+        # a comment is a promise nobody can falsify.
+        "declared_bounds": [dict(row) for row in DECLARED_CHANNEL_BOUNDS],
         # ⛔ The two DISARMING directions carried WITH the deployment reading, so the
         # caveat that speaks about them can vary with THIS tree rather than printing a
         # constant sentence a test cannot distinguish from an empty one.
@@ -3250,9 +5722,11 @@ def flag_in_shipped_configs(flag: str) -> dict:
         # runtime-relevant: it is reported in `outside_runtime` and does not hold the
         # file at UNMEASURED, so an unresolvable `ARG` leaves `measured` True — which
         # is the `not deployment_unmeasured` expression this comment describes.
-        "measured": (bool(deployment_present) and not deployment_unmeasured),
+        "measured": (bool(deployment_present) and not deployment_unmeasured
+                     and not unread_channels),
     }
     deployment["on"] = (deployment["measured"] and not deployment["silent"]
+                        and not deployment["disagreeing"]
                         and not deployment_unmeasured)
 
     return {"on": bool(hits), "files": hits, "searched": searched,
@@ -3272,9 +5746,54 @@ def flag_in_shipped_configs(flag: str) -> dict:
             "per_surface": per_surface,
             "armed": _rels("ON", CONFIG_SURFACES),
             "silent": _rels("OFF", CONFIG_SURFACES),
+            "disagreeing": _rels("DISAGREE", CONFIG_SURFACES),
             "absent": _rels("ABSENT", CONFIG_SURFACES),
             "unmeasured": _rels("UNMEASURED", CONFIG_SURFACES),
             "deployment": deployment}
+
+
+def deployment_unmeasured_causes(deployment: dict, shipped: dict) -> list[str]:
+    """WHY the deployment reading is `UNMEASURED` — the causes, split by measurement.
+
+    ⛔ **ONE helper, called by BOTH notes** (`#12549` defect 1, and the same reason
+    `#12054` factored `per_file_scope_note`): row 1's hold note printed the whole
+    `deployment["unmeasured"]` bucket as *"unreadable {…}"*, but that bucket also
+    contains files the walk **read successfully** whose last assignment it could not
+    resolve (`surface_indeterminate`). So a reader was sent to chase a permissions or
+    size problem on a file with none — a published cause the run had not measured,
+    which is the same defect class as the compose claims this lane removes.
+
+    The three causes are different facts and are named separately:
+
+    * a file the walk could not READ (I/O error, oversize) — `shipped["unreadable"]`;
+    * a file it read whose value it could not RESOLVE (`${OTHER}`, a computed `unset`
+      name, a resolver that refused) — everything else in `deployment["unmeasured"]`;
+    * a deployment CHANNEL this module has no reader for at all
+      (`deployment["unread_channels"]`) — a manifest that carries a process
+      environment and was discovered but not walked (`#12549` item 3).
+    """
+    unmeasured = deployment.get("unmeasured") or []
+    unreadable_set = set(shipped.get("unreadable") or ())
+    unreadable_files = [posix for posix in unmeasured if posix in unreadable_set]
+    unresolved_files = [posix for posix in unmeasured if posix not in unreadable_set]
+    causes: list[str] = []
+    if unreadable_files:
+        causes.append(
+            f"UNREADABLE deployment file(s) {unreadable_files} — an unread file "
+            "could arm the gate")
+    if unresolved_files:
+        causes.append(
+            f"deployment file(s) this walk cannot RESOLVE {unresolved_files} — the "
+            "value could arm OR disarm the gate and the walk cannot read which (see "
+            "`indeterminate assignments`)")
+    unread_channels = deployment.get("unread_channels") or []
+    if unread_channels:
+        causes.append(
+            "deployment CHANNEL(S) this walk has no reader for "
+            + ", ".join(f"{entry['path']} ({entry['reason']})" for entry in unread_channels)
+            + " — a channel it did not enumerate makes 'every deployment file' a "
+            "claim about a population it never walked")
+    return causes
 
 
 def per_file_scope_note(deployment: dict) -> str:
@@ -3294,12 +5813,17 @@ def per_file_scope_note(deployment: dict) -> str:
     a parenthetical then retracts (`#12070` item 4): a reader quotes the leading
     clause. ⛔ AND THE DEPLOYMENT STATEMENT IS BOUNDED, not absolute (fresh review of
     PR #12474, P2): compose `environment:` ADDS TO or OVERRIDES the image's `ENV`, so
-    inheritance can ADD an arm — and the two directions that TAKE IT AWAY are a
-    value-less entry (which UNSETS the variable) and a non-truthy value (which
-    OVERRIDES it). Neither is modelled here; both are REPORTED (`unset_declarations`,
-    `disarming_assignments`) and named in the sentence this function returns, which is
-    the only honest form — an earlier draft said "never unsets it, so inheritance can
-    only ADD an arm", which the function five lines below falsified.
+    inheritance can ADD an arm — and the two directions that can TAKE IT AWAY are an
+    entry that fixes NO VALUE (a shell `unset`; a compose entry with no value, which
+    compose resolves to `null` and therefore DOES fix — it passes the ambient value
+    through when the deploying host exports one and CLEARS an inherited one when it does
+    not; MEASURED both ways with `docker build`/`docker run`, and an earlier revision of
+    this paragraph said flatly "NOT an unset", which the clearing half falsifies) and a
+    NON-truthy value (which OVERRIDES it). Neither is modelled here; both are REPORTED
+    (`unset_declarations`, `disarming_assignments`) and named in the sentence this
+    function returns, which is the only honest form — an earlier draft said "never
+    unsets it, so inheritance can only ADD an arm", which the function five lines below
+    falsified.
 
     ⛔ The build edge is MEASURED (`deployment["builds_from"]`, read from each
     compose file's `build:`/`dockerfile:`), not assumed (`#12070` item 3): before
@@ -3327,6 +5851,34 @@ def per_file_scope_note(deployment: dict) -> str:
                      "declares a `build:`/`dockerfile:` that names an image build file")
     unsets = len(deployment.get("unset_declarations") or ())
     overrides = len(deployment.get("disarming_assignments") or ())
+    # ⛔ A DISARMING DECLARATION INSIDE A `DISAGREE` FILE IS A PER-SERVICE FACT, NOT A
+    # PER-FILE LAST WORD (`#12902` fresh review, P2). `#12549` defect 2 made a compose
+    # file's verdict per SERVICE, so on such a file there IS no per-FILE last word to
+    # state: the truthy value PROSPERS in the service that carries it. Publishing the
+    # `LAST of them by … FILE order` narrative over it made ONE note say two opposite
+    # things — that clause, and four clauses later *"compose defines no override
+    # relation between two services"* (measured on
+    # `{'docker-compose.yml': 'DISAGREE'}` with `app=1` / `worker=0`). Split the
+    # population by the STATE of the file each declaration lives in, so each half is
+    # described by the rule that actually decided it.
+    _files_by_state = deployment.get("files") or {}
+
+    def _disarmed_state(entry: object) -> str | None:
+        return _files_by_state.get(str(entry).split(":", 1)[0])
+
+    overrides_service = sum(
+        1 for entry in (deployment.get("disarming_assignments") or ())
+        if _disarmed_state(entry) == "DISAGREE")
+    # ⛔ BOTH HALVES NEED THE SPLIT, and the previous round's dismissal of the `unset`
+    # half was wrong on the wording: the clause it points at says *"scored as the file's
+    # last word where it is last"* — that IS a per-FILE claim, and a `DISAGREE` file has
+    # no single last word (`#12902` fresh review, P2). Left undivided, ONE published
+    # sentence asserted the per-FILE rule for the value-less entry and its negation for
+    # the disarming value four clauses later — measured on a `DISAGREE` compose file
+    # carrying both `app: TORTOISE_EMBED_GATE:` and `worker: … "0"`.
+    unsets_service = sum(
+        1 for entry in (deployment.get("unset_declarations") or ())
+        if _disarmed_state(entry) == "DISAGREE")
     disarm = ""
     if unsets or overrides:
         parts = []
@@ -3336,13 +5888,40 @@ def per_file_scope_note(deployment: dict) -> str:
             # leaves the arm standing, and the per-surface line above then reads the file
             # `ON` — so an unqualified "this tree DISARMS it" contradicted the state the
             # same note had just printed (fresh review of PR #12474, P2, measured).
-            parts.append(f"{unsets} declaration(s) with no value UNSET it — the LAST of "
-                         "them by FILE order decides, and a LATER truthy assignment "
-                         "leaves the arm standing")
+            per_file_unsets = unsets - unsets_service
+            if per_file_unsets:
+                parts.append(
+                    f"{per_file_unsets} declaration(s) that fix NO VALUE for it (a shell "
+                    "`unset`, or a compose entry with no value — which compose resolves to "
+                    "`null`, passing the ambient value through and CLEARING an inherited "
+                    "one when the host supplies none) — scored as the file's last word "
+                    "where it is last, and a LATER truthy assignment leaves the arm "
+                    "standing")
+            if unsets_service:
+                # ⛔ NO "the file's last word" HERE: within a `DISAGREE` file the entry
+                # fixes no value for ITS service only, and the other services keep theirs
+                # (`#12902` fresh review, P2).
+                parts.append(
+                    f"{unsets_service} declaration(s) that fix NO VALUE for it IN THE "
+                    "SERVICE(S) THAT CARRY THEM — a PER-SERVICE fact, never a per-FILE "
+                    "last word (an entry with no value passes the ambient value through "
+                    "and CLEARS an inherited one in THAT service, leaving the values the "
+                    "other services fix standing)")
         if overrides:
-            parts.append(f"{overrides} value(s) leave it OFF — the LAST of them by compose "
-                         "override or by FILE order (an earlier truthy assignment does not "
-                         "survive a later non-truthy one)")
+            per_file = overrides - overrides_service
+            if per_file:
+                parts.append(
+                    f"{per_file} value(s) leave it OFF — the LAST of them by compose "
+                    "override or by FILE order (an earlier truthy assignment does not "
+                    "survive a later non-truthy one)")
+            if overrides_service:
+                # ⛔ NO FILE-ORDER CLAIM HERE: the file these sit in has no single
+                # verdict to be last in (`#12902` fresh review, P2).
+                parts.append(
+                    f"{overrides_service} value(s) that leave it OFF — a PER-SERVICE "
+                    "fact, never a per-FILE last word (the truthy value PROSPERS in the "
+                    "service that carries it; compose defines no override relation "
+                    "between two services)")
         # ⛔ THE LEADING CLAUSE IS THE ONE A READER QUOTES, so it states what this tree's
         # files actually END as — the ORDER qualification above is a subordinate clause and
         # did not stop "and this tree DISARMS it in 1 declaration(s)" from being printed
@@ -3361,9 +5940,21 @@ def per_file_scope_note(deployment: dict) -> str:
                           for entry in list(deployment.get("unset_declarations") or ())
                           + list(deployment.get("disarming_assignments") or ())
                           if str(entry)}
+        # ⛔ `DISAGREE` counts here too (`#12549`): a file whose services disagree DID
+        # publish a non-truthy value, so a declaration inside it is the last word for
+        # at least one of its services — and treating it as "not OFF" would silently
+        # drop the direction from the caveat.
         disarmed_by_declaration = sorted(
-            posix for posix in declared_paths if files_by_state.get(posix) == "OFF")
-        lead = ("this tree DISARMS it in " if disarmed_by_declaration else
+            posix for posix in declared_paths
+            if files_by_state.get(posix) in ("OFF", "DISAGREE"))
+        # ⛔ AND THE LEAD MUST NOT COLLAPSE A PER-SERVICE DISARM INTO A TREE-WIDE ONE:
+        # "this tree DISARMS it" over a `DISAGREE` file states a whole-tree consequence
+        # the per-service reading does not support (`#12902` fresh review, P2).
+        _all_service = bool(disarmed_by_declaration) and all(
+            files_by_state.get(posix) == "DISAGREE"
+            for posix in disarmed_by_declaration)
+        lead = ("this tree DISARMS it FOR SOME SERVICES ONLY in " if _all_service else
+                "this tree DISARMS it in " if disarmed_by_declaration else
                 "the disarming direction is REPORTED here but is NOT the last word in "
                 "its own file, so it does NOT disarm this tree — see ")
         disarm = ("; ⛔ and " + lead + " and ".join(parts)
@@ -3372,12 +5963,134 @@ def per_file_scope_note(deployment: dict) -> str:
         "this reading is PER FILE and does not model the MERGE: a compose file's "
         "`environment:` mapping ADDS TO or OVERRIDES the image's `ENV`, so a silent "
         "compose file that BUILDS from an ARMED image build file INHERITS that image's "
-        "`ENV` — EXCEPT in the two directions that take the arm away, which this "
-        "reading does not model: a value-less entry UNSETS the variable and a "
-        "non-truthy value OVERRIDES it"
+        "`ENV` — EXCEPT in the two directions that can take the arm away, which this "
+        "reading does not model: a NON-TRUTHY value OVERRIDES it, and an entry with NO "
+        "VALUE is resolved to `null` (MEASURED), so the FILE fixes no value of its own — "
+        "compose passes the ambient value through when the deploying host exports one "
+        "and CLEARS an inherited one when it does not, and this reading scores the "
+        "file, not the ambient shell)"
         + disarm
         + edge_note
     )
+
+
+def _channel_scope_note(deployment: dict, posix: str) -> str:
+    """The per-service verdicts of ONE resolved channel file, for the row text."""
+    reading = (deployment.get("resolved") or {}).get(posix) or {}
+    scopes = reading.get("scopes") or {}
+    if not scopes:
+        return reading.get("reason") or "the resolver produced no scopes"
+    parts: list[str] = []
+    for scope, detail in sorted(scopes.items()):
+        verdict = detail.get("verdict")
+        reason = detail.get("reason")
+        parts.append(f"{scope}={verdict}"
+                     + (f" ({reason})" if reason and verdict != "ARMED" else ""))
+    return ", ".join(parts)
+
+
+def _channel_reader_note(deployment: dict) -> str:
+    """WHICH reader answered each channel, and any resolver warning (`#12549`).
+
+    ⛔ Reported, never assumed: the fly channel has TWO resolvers and the one that
+    answered is a fact about THIS box (`fly config show` is not installed on every
+    lane). A note that named only the intended resolver would be a claim the run did
+    not make — the same defect class as calling a read file unreadable.
+
+    ⛔ AND "ANSWERED" MEANS IT SUCCEEDED. Both channels set `resolver` on their
+    FAILURE returns too, so a note filtered on `resolver` alone printed
+    `answered for THIS tree by: compose=docker compose … config --format json` in the
+    SAME string as `CHANNEL UNRESOLVED — … exited 1: …` (fresh review of PR #12902,
+    cycle 5, P2, measured on a malformed `docker-compose.yml`). A refusal is reported
+    under its own verb, because it is a different fact: the resolver ran and said NO.
+    """
+    readings = list((deployment.get("resolved") or {}).values())
+    declared = ", ".join(f"{name}={reader}" for name, reader in CHANNEL_READERS)
+    answered = sorted({(reading.get("channel") or "?",
+                        reading.get("resolver") or "?")
+                       for reading in readings
+                       if reading.get("resolver") and reading.get("ok")})
+    refused = sorted({(reading.get("channel") or "?",
+                       reading.get("resolver") or "?")
+                      for reading in readings
+                      if reading.get("resolver") and not reading.get("ok")
+                      and reading.get("resolver_refused")})
+    # ⛔ A THIRD STATE, because `ok` is false for two different events and only one of
+    # them is a refusal (fresh review, cycle 2, P2, measured): a resolver that EXITED 0
+    # and printed no model, an unparseable model, or a `services` value this walk cannot
+    # read all keep `ok: False`, and in every one of those the RESOLVER did its job —
+    # the WALK named the reason. Publishing those as "REFUSED" would be a claim wider
+    # than the measurement, in a note whose whole purpose is not to make one.
+    unreadable = sorted({(reading.get("channel") or "?",
+                          reading.get("resolver") or "?")
+                         for reading in readings
+                         if reading.get("resolver") and not reading.get("ok")
+                         and not reading.get("resolver_refused")})
+    if not answered and not refused and not unreadable:
+        return declared
+    text = declared
+    if answered:
+        text += "; answered for THIS tree by: " + ", ".join(
+            f"{channel}={resolver}" for channel, resolver in answered)
+    if refused:
+        text += "; ⛔ REFUSED (the resolver declined — absent, crashed or exited " \
+                "non-zero — scored UNRESOLVED, not answered) " \
+                + ", ".join(f"{channel}={resolver}" for channel, resolver in refused)
+    if unreadable:
+        text += "; ⛔ UNREADABLE OUTPUT (the resolver exited 0 but the walk could not " \
+                "read a model from it — scored UNRESOLVED, not answered) " \
+                + ", ".join(f"{channel}={resolver}" for channel, resolver in unreadable)
+    warnings = [warning for reading in readings
+                for warning in (reading.get("warnings") or ())]
+    if warnings:
+        text += "; resolver note(s): " + "; ".join(sorted(set(warnings)))
+    return text
+
+
+def _declared_bound_note(deployment: dict) -> str:
+    """The channels phase 1 did NOT convert, each with the shape it cannot see.
+
+    ⛔ ABSENT IS NOT EMPTY (`#12016`'s rule, one field over): a reading that carries no
+    `declared_bounds` must not print "none", because that is a claim about a
+    measurement it never made. It says so instead.
+    """
+    rows = deployment.get("declared_bounds")
+    if rows is None:
+        return ("UNMEASURED — this reading carries no declared bounds, so which "
+                "channels were NOT converted is not a claim it makes")
+    if not rows:
+        return "none"
+    # ⛔ TWO VERBS, because the two bounds fail in OPPOSITE directions: `cannot see`
+    # is an under-report a reader can trust, `reads … WRONG` is a false ARM. Printing
+    # the second as the first is the "a sentence wider than the measurement under it"
+    # class this probe exists to police (#12978).
+    return "; ".join(
+        f"{row['channel']} (reader: {row.get('reader', 'line reader')}) "
+        f"cannot see {row['cannot_see']}"
+        + (f"; ⛔ and it READS {row['reads_wrong']}" if row.get("reads_wrong") else "")
+        + f" — {row['why']}"
+        for row in rows)
+
+
+def _discovery_note(deployment: dict) -> str:
+    """The COMPUTED deployment population, and every channel it could not read."""
+    discovery = deployment.get("discovery")
+    if discovery is None:
+        return ("UNMEASURED — this reading carries no discovery, so 'every deployment "
+                "file' is not a claim it makes")
+    types = discovery.get("types") or {}
+    counts = ", ".join(f"{name}:{len(paths)}" for name, paths in sorted(types.items()))
+    text = f"{len(discovery.get('files') or {})} file(s) across {len(types)} type(s)" \
+           f" [{counts or 'none'}]"
+    non_env = discovery.get("non_env") or []
+    if non_env:
+        text += "; recognised as carrying NO environment: " + ", ".join(
+            f"{entry['path']} ({entry['reason']})" for entry in non_env)
+    unread = deployment.get("unread_channels") or []
+    if unread:
+        text += "; ⛔ NO READER for " + ", ".join(
+            f"{entry['path']} ({entry['reason']})" for entry in unread)
+    return text
 
 
 def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
@@ -3424,30 +6137,34 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
                 "to a question the tree cannot ask"
             )
         else:
-            # ⛔ The CAUSE is named, and it is not always readability (`#12022`, fresh
-            # review of PR #12474): an indeterminate assignment puts a file the walk
-            # READ SUCCESSFULLY into `unmeasured`, so calling it "unreadable" published
-            # "unreadable deployment file(s) ['entrypoint.sh']" beside its own
-            # "unreadable: none" — a misattribution a reader would chase as a
-            # permissions or size problem on a file that was read.
-            unreadable_files = [p for p in deployment["unmeasured"]
-                                if p in (shipped.get("unreadable") or [])]
-            unresolved_files = [p for p in deployment["unmeasured"]
-                                if p not in unreadable_files]
-            causes: list[str] = []
-            if unreadable_files:
-                causes.append(
-                    f"UNREADABLE deployment file(s) {unreadable_files} — an unread "
-                    "file could arm the gate")
-            if unresolved_files:
-                causes.append(
-                    f"deployment file(s) carrying a line this walk cannot RESOLVE "
-                    f"{unresolved_files} — it could arm OR disarm the gate, and the walk "
-                    f"cannot read which (see `indeterminate assignments`)")
+            # ⛔ The CAUSES come from ONE helper, shared with row 1's hold note
+            # (`#12549` defect 1): the hold note printed the whole `unmeasured` bucket
+            # as "unreadable", so a file the walk READ was published as unreadable. Two
+            # notes, one split, so they cannot disagree again (`#12054`'s lesson).
+            causes = deployment_unmeasured_causes(deployment, shipped)
             deployment_reading = (
                 "UNMEASURED — " + "; and ".join(causes)
                 + ", so this is NOT a measurement of silence"
             )
+    elif deployment.get("disagreeing"):
+        # ⛔ A THIRD answer, and it must not be folded into either of the other two
+        # (`#12549` defect 2): every service in one of these files is MEASURED, and they
+        # do not agree — so "armed" and "not armed" are both false statements about the
+        # file, and the two facts must not be collapsed by document order.
+        deployment_reading = (
+            "PER-SERVICE DISAGREEMENT in "
+            + "; ".join(f"{posix}: {_channel_scope_note(deployment, posix)}"
+                        for posix in deployment["disagreeing"])
+            + " — compose defines no override relation between two services, so this "
+            "file cannot be reduced to one verdict"
+            # ⛔ A mixed tree must not LOSE the silent half: this sentence is the one a
+            # reader quotes, so anything else the reading measured is named beside it
+            # rather than left to a later clause.
+            + (f"; other deployment file(s) SILENT: {deployment['silent']}"
+               if deployment["silent"] else "")
+            + (f"; UNMEASURED: {deployment['unmeasured']}"
+               if deployment.get("unmeasured") else "")
+        )
     elif deployment["on"]:
         deployment_reading = (
             "every deployment file that builds the Tortoise process is armed "
@@ -3491,17 +6208,26 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
         f"indeterminate assignments: {shipped.get('indeterminate') or 'none'}; "
         f"assignments a deployed process never reads: "
         f"{shipped.get('outside_runtime') or 'none'}; "
-        # ⛔ The DISARMING direction, named: a value-less `environment:` entry (compose)
-        # or an `unset` (shell) UNSETS the variable, and this per-file reading models it
-        # as the LAST word. ⛔ NOT "compose": both channels append here, and a label that
-        # named one of them published a shell line as "compose declarations that UNSET
-        # it" — a diagnostic naming a neighbour's state (fresh review of PR #12474, P2).
-        f"declarations that UNSET it: "
+        # ⛔ The no-value direction, named: a shell `unset`, or a compose entry with no
+        # value — which the resolver MEASURES as `null`, so compose passes the AMBIENT
+        # value through when the deploying host exports one and REMOVES the image's `ENV`
+        # when it does not (both measured). This per-file reading scores it as the LAST
+        # word where it is last. ⛔ NOT "compose": both channels append here, and
+        # a label that named one of them published a shell line as "compose declarations
+        # that UNSET it" — a diagnostic naming a neighbour's state (fresh review of PR
+        # #12474, P2).
+        f"declarations that fix NO VALUE for it (shell `unset` / compose no-value): "
         f"{shipped.get('unset_declarations') or 'none'}; "
         f"values that OVERRIDE it OFF: "
         f"{shipped.get('disarming_assignments') or 'none'}; "
         f"mentioning it: {shipped['mentions'] or 'none'}"
-        f"; set ON in: {shipped['files'] or 'none'})"
+        f"; set ON in: {shipped['files'] or 'none'}; "
+        # ⛔ WHICH resolver answered, and which channel was merely DECLARED (`#12549`):
+        # a reader must be able to tell a value `docker compose config` produced from one
+        # a line reader guessed, and to see the two channels phase 1 did not convert.
+        f"channel readers: {_channel_reader_note(deployment)}; "
+        f"channels NOT converted (declared bounds): {_declared_bound_note(deployment)}; "
+        f"computed deployment population: {_discovery_note(deployment)})"
     )
 
 
@@ -3996,13 +6722,23 @@ def score_rule_bullet() -> Row:
     # default could not be read" are different statements, and reporting either as
     # the other is the misattribution this file refuses on the register/census side.
     if not deployment["measured"]:
+        # ⛔ THE CAUSE SPLIT, from the SAME helper the gate note calls (`#12549`
+        # defect 1). This note used to print the whole `unmeasured` bucket as
+        # "unreadable {…}", and that bucket also holds files the walk READ whose value
+        # it could not resolve — so a reader was sent to chase a permissions or size
+        # problem on a file with none. One helper, two notes: they cannot disagree
+        # (`#12054`'s lesson, applied to the cause rather than the inference).
+        causes = deployment_unmeasured_causes(deployment, shipped)
         notes.append(
             "shipped default UNMEASURED (hold this row at PARTIAL — the deployment "
             "reading covers "
             f"{deployment['files']}: present {deployment['present'] or 'none'}, "
-            f"unreadable {deployment['unmeasured'] or 'none'}. A file that could "
-            "not be read is not a file that is silent, so the gate clause is "
-            "UNMEASURED, never True and never 'the config sets nothing')"
+            f"unmeasured {deployment['unmeasured'] or 'none'}, "
+            f"unreadable {shipped.get('unreadable') or 'none'}. "
+            + "; and ".join(causes)
+            + ". A file that could not be READ is not a file that is SILENT, and a "
+              "value that could not be RESOLVED is neither, so the gate clause is "
+              "UNMEASURED — never True and never 'the config sets nothing')"
         )
     elif not deployment["on"]:
         # ⛔ FOUR arms now, and the rule is that each one names ONLY what the walk
@@ -4037,7 +6773,21 @@ def score_rule_bullet() -> Row:
         # diagnostic must name ITS OWN state, not a neighbour's (fresh review of PR
         # #12016, P3). The `#11455` reading moved into the arm where a template really
         # does arm it, which is the only shape it describes.
-        if armed_deployment_files:
+        if deployment.get("disagreeing"):
+            # ⛔ A per-SERVICE DISAGREEMENT comes FIRST, because it is the arm the
+            # measured facts actually reach and every sentence below would be FALSE
+            # about it (`#12549` defect 2): such a file is neither "silent" (it does
+            # arm in one service) nor cleanly "armed", and collapsing it to either is
+            # the document-order coin flip this lane removes.
+            armed_clause = (
+                "the deployment file(s) "
+                f"{deployment['disagreeing']} do not agree PER SERVICE — "
+                + "; ".join(f"{posix}: {_channel_scope_note(deployment, posix)}"
+                            for posix in deployment["disagreeing"])
+                + " — compose defines no override relation between two services, so no "
+                  "single file verdict is derivable"
+            )
+        elif armed_deployment_files:
             # ⛔ The population is stated ONCE, for exactly what it interpolates.
             # `deployment["armed"]` is the per-FILE DEPLOYMENT subset, so calling it
             # "the surface(s) that do arm it" claimed the WHOLE armed population was
@@ -4060,7 +6810,11 @@ def score_rule_bullet() -> Row:
             # than the measurement under it" class this probe exists to police (fresh
             # review of PR #12474, P3, measured). The one remaining shape is
             # a builder-stage-only `ENV` in a multi-stage build, since nothing here reads
-            # stage semantics. Stated as examples, never as an enumeration — a list here
+            # stage semantics — ⛔ AND ITS DIRECTION IS A FALSE ARM, not an under-report:
+            # the reader takes a NON-FINAL stage's `ENV` as the file's value, so the file
+            # reads ON while the image ships without it (`#12978`, measured with
+            # `docker build`/`docker run`; `DECLARED_CHANNEL_BOUNDS` carries it as
+            # `reads_wrong`, never as `cannot_see`). Stated as examples, never as an enumeration — a list here
             # is what `#12070` item 1 recorded rotting. The claim
             # is deleted rather than qualified — a second arm here would be another
             # sentence to falsify, and the per-FILE caveat below already carries the
@@ -4104,11 +6858,39 @@ def score_rule_bullet() -> Row:
         # asserted then retracted (fresh review of PR #12016 P3, #12070 item 4): a
         # reader quoting the leading clause of the old wording carried the false
         # statement even though the parenthetical retracted it.
+        # ⛔ The leading clause names the population THIS READING measured (`#12549`
+        # defect 1's cause-split, applied to the NOT-ARMED half). It used to name
+        # `deployment["silent"]` ALONE — hardcoded from the state before `#12549`, where
+        # `on is False` implied a non-empty `silent`. The fix adds `DISAGREE`, which is
+        # in NEITHER `silent` nor `armed`, so that clause rendered
+        # `silent deployment file(s): [] declare no gate of their own — read from that
+        # file ALONE the deployment is unarmed` on a tree whose services disagree: a
+        # VACUOUS cause, and a consequence claim about a population of zero. Worse, the
+        # ARMED sibling was named NOWHERE in this note, because `armed_clause` takes its
+        # DISAGREE arm FIRST (measured on
+        # `{'docker-compose.yml': 'DISAGREE', 'Dockerfile.hosted': 'ON'}` — `armed`
+        # non-empty, `silent` empty, and no clause named the arm) (`#12902` fresh
+        # review, P1). A published diagnostic must name ITS OWN measured state, which is
+        # the same rule `#12070` item 4 states for the leading clause.
+        not_armed: list[str] = []
+        if deployment["silent"]:
+            not_armed.append(
+                f"silent deployment file(s) {deployment['silent']} declare no gate of "
+                "their own — read from that file ALONE the deployment is unarmed")
+        if deployment["armed"] and deployment["disagreeing"]:
+            # Only when `armed_clause` will speak about the DISAGREEMENT instead of the
+            # arm — otherwise that clause names `armed` itself and this would repeat it.
+            not_armed.append(
+                f"deployment file(s) {deployment['armed']} DO arm it — the hold is the "
+                "per-service disagreement, never an absence of arms")
+        if not not_armed:
+            # Reached on a pure-DISAGREE tree. Non-vacuous, and it does not assert a
+            # population of zero as if it were a measurement.
+            not_armed.append(
+                "no deployment file ends silent; the hold is the state named below")
         notes.append(
             "shipped default NOT armed for every deployment file (hold this row "
-            "at PARTIAL — silent deployment file(s): "
-            f"{deployment['silent']} declare no gate of their own — read from that "
-            f"file ALONE the deployment is unarmed; "
+            f"at PARTIAL — {'; '.join(not_armed)}; "
             f"{per_file_scope_note(deployment)}; {armed_clause})"
         )
     if not stated or not shared or not gated:

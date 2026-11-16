@@ -13912,6 +13912,22 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         ).result_set
         return dict(rows[0][0]) if rows else None
 
+    def _cache_sees_node() -> bool:
+        """Can the CACHE see this id at all, tombstone included? (#12941 P1-3)
+
+        `_cache_props` applies the endpoint's TOMBSTONE rule, so a cache that
+        holds a retracted point answers `None` — reading that as "the store
+        cannot see it" would mark a node the store can plainly see `not-hot`, a
+        FALSE impairment on a correctness-guaranteed 404. Only reached on the
+        residency-armed `off` 404 arm, which is why one extra bounded read is
+        acceptable here and nowhere else.
+        """
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id: $id}) RETURN properties(p)",
+            params={"id": point_id},
+        ).result_set
+        return bool(rows)
+
     served = None
     if mode != record_serve.MODE_OFF:
         tenant = _resolve_record_tenant(org)
@@ -14077,11 +14093,34 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         # the caller. ⚠️ OFF keeps the pre-#7970 detail EXACTLY — a plain string,
         # not a wrapper — so the default path stays byte-identical.
         if served is None:
+            # #12941: OFF consults no record, so it cannot establish absence at
+            # all — but the marker's OWN flag is what lets this door say so, and
+            # it is read BEFORE the marker does any work of its own
+            # (`residency_armed`), so an unarmed deployment pays no extra round
+            # trip and answers the same string. (The cache read above already
+            # happened — that is the pre-#7970 read itself, not a cost this flag
+            # adds.)
+            marker = None
+            if record_serve.residency_armed():
+                # `found` is the CACHE's own visibility, not the endpoint's
+                # tombstone-filtered answer (#12941 review P1-3): only a node the
+                # cache cannot see at ALL is outside the hot set.
+                marker = await _read_offload(
+                    lambda: record_serve.point_residency(
+                        sdk._get_proj().g, found=_cache_sees_node(),
+                        key=point_id),
+                    op="get_point.residency")
+            if marker:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"message": "Point not found", "residency": marker})
             raise HTTPException(status_code=404, detail="Point not found")
         absent: dict = {"message": "Point not found"}
-        # `as_wire` emits BOTH keys, `fallbackReason` as null when there was
-        # none — an omission would let a stored property masquerade.
-        absent.update(served.as_wire())
+        # `absent_wire` emits BOTH attribution keys (as `as_wire` does), plus
+        # `residency: "not-hot"` when the record could not be asked (#12941):
+        # a cache-only empty answer is "we cannot see it from here", and a
+        # plain "Point not found" here is the false absence §17.2 forbids.
+        absent.update(served.absent_wire())
         raise HTTPException(status_code=404, detail=absent)
     # The tombstone rule is the ENDPOINT's, not the store's: a retracted point
     # stays retrievable by get_point on the SDK but not here, whichever store
@@ -14094,7 +14133,7 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         if served is None:  # OFF keeps the pre-#7970 shape exactly
             raise HTTPException(status_code=404, detail="Point not found")
         retracted: dict = {"message": "Point not found"}
-        retracted.update(served.as_wire())
+        retracted.update(served.absent_wire())
         raise HTTPException(status_code=404, detail=retracted)
     props = dict(props)
     if served is not None:
@@ -22779,7 +22818,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                     "(#3366)",
                     resolved_pid, _succ_state[0], _succ_state[1])
             else:
-                sdk.supersede_point(pr.existing_id, resolved_pid)
+                sdk.supersede_knowledge(pr.existing_id, resolved_pid)
         else:
             point_props = {}
             if pr.point.when:
@@ -31970,8 +32009,8 @@ _EXPORT_MAX_EVENTS = 5000  # event log is a rolling window (30d retention)
 # Internal bookkeeping excluded from exports/backups. Meta nodes are
 # key-scoped (#1625): the R2/R3 FTS-migration markers (point_fts_v2 /
 # event_fts_v2) are re-created on projection open, but Meta {key:
-# 'calibration_milestone'} is DATA (Gate B state, calibration_passed()
-# reads it) and MUST survive backup/restore.
+# 'calibration_milestone'} is DATA (Gate B state, read by the SDK's
+# calibration-milestone marker accessor) and MUST survive backup/restore.
 _EXPORT_SKIP_LABELS = {"GraphEventMeta", "TeamMeta", "EpMeta"}  # label-wide
 _EXPORT_SKIP_META_KEYS = frozenset({"point_fts_v2", "event_fts_v2"})
 

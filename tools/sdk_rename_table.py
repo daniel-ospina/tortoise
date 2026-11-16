@@ -380,11 +380,10 @@ C6_FOLD: dict[str, tuple[str, str]] = {
         "update_knowledge",
         "same approved absorption; the starting belief is a FIELD, not a separate verb",
     ),
-    "quarantine_batch": (
-        "update_knowledge",
-        "beta's own row: reachable through `update_knowledge`; the quarantine state is "
-        "a FIELD",
-    ),
+    # ⛔ #12901 wave 1: `quarantine_batch` LEFT the public surface, so its C6 fold row
+    # goes with it — a fold record maps a LIVE member to its replacement, and a departed
+    # name is `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`' record instead (which still
+    # names `update_knowledge` as the recorded destination).
 }
 
 #: The C6 members whose AUTHORITY is the owner-approved MCP list's own absorption, as
@@ -449,7 +448,7 @@ CITES: dict[str, tuple[str, str]] = {
                             "is *test infrastructure* and moves out of the product SDK. |"),
     "r6_canon": (CANON, "| R6 | `graph_overview` | #6 | `status`, `taxonomy`, "
                         "`list_pointkinds`, `list_sources`, `list_tags`, "
-                        "`list_namespaces`, `list_relations`, `list_topics`, "
+                        "`list_namespaces`, `list_topics`, "
                         "`list_graphs`, `stale_points`, `summarize_structure`, "
                         "`check_structure`, `audit`, `validate_domain`, "
                         "`dream_health_check`, `dream_health_state`, `test_guard` |"),
@@ -691,7 +690,9 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     # inventory calls it a governance/traversal member. See the tension list.
     "get_owned_entities": ("get_entity", "r4"),
     # R6 — aliases, and the members the beta doc treats individually.
-    "list_relations": ("graph_overview", "r6_canon"),
+    # ⛔ #12901 wave 1: `list_relations` LEFT the public surface, so it leaves this map —
+    # the rename table maps names that still EXIST; a departed name is recorded in
+    # `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`, not here.
     # beta's "Renamed, relocated, or re-homed": the code must survive but it is *test
     # infrastructure* and moves OUT of the product SDK — kept, but not a target.
     "test_guard": (RELOCATED, "r6_test_guard"),
@@ -727,8 +728,18 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "link_entities": (UNCHANGED, "unchanged4"),
     "update_knowledge": (UNCHANGED, "unchanged4"),
     "delete_knowledge": (UNCHANGED, "unchanged4"),
-    # W10
-    "file_decision": ("write_question", "w10_file_decision"),
+    # W10/W11 — three more canonical names are PUBLIC methods as well as targets
+    # (#11609 Phase 2): `write_question`, `record_decision` and `supersede_knowledge`
+    # gained their `def` while the four doors they absorb
+    # (`file_decision`, `file_human_approval`, `supersede`, `update_entity`) were
+    # retired. Same rule as the W9/W11/W12 trio above: a name that IS its own
+    # destination carries UNCHANGED, because the group default would otherwise
+    # redirect a row onto a sibling. The two former map KEYS (`file_decision`,
+    # `supersede`) leave this map with the `def` they keyed — their footnotes stay
+    # in CITES as the history of the split.
+    "write_question": (UNCHANGED, "unchanged4"),
+    "record_decision": (UNCHANGED, "unchanged4"),
+    "supersede_knowledge": (UNCHANGED, "unchanged4"),
     # W5 — the journal reconciliation. Each member's destination is its OWN, taken from
     # the canonical menu's absorption row; see the `w5_*` citations above.
     "diary_write": ("create_entity", "w5_diary_write"),
@@ -738,7 +749,6 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "update": ("update_knowledge", "w11_canon"),
     "retract_point": ("update_knowledge", "w11_retract"),
     "invalidate_point": ("update_knowledge", "w11_retract"),
-    "supersede": ("supersede_knowledge", "w11_supersede"),
     "supersede_point": ("supersede_knowledge", "w11_supersede"),
     # W11 — the four rows beta filed under "### Removed" as *reachable* without a
     # destination NAMED. The fold is now named in beta: lifecycle
@@ -749,7 +759,8 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     # that difference is recorded in C6, because it decides what is still owner-open.
     "promote_point": ("update_knowledge", "w11_lifecycle"),
     "set_point_baseline": ("update_knowledge", "w11_lifecycle"),
-    "quarantine_batch": ("update_knowledge", "w11_lifecycle"),
+    # ⛔ #12901 wave 1: `quarantine_batch` LEFT the public surface (recorded in
+    # `REMOVED_SDK_METHODS`); the map only carries names that still exist.
     # W12 — two members the beta row omits.
     "delete": ("delete_knowledge", "w12_canon"),
     "delete_entity": ("delete_knowledge", "w12_canon"),
@@ -796,7 +807,8 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "trash_graphs": (DISCARDED, "maintenance"),
     # N3
     "membership_create": ("add_member", "n3_members"),
-    "membership_get": (DISCARDED, "n1_console"),
+    # ⛔ #12901 wave 1: `membership_get` LEFT the public surface (recorded in
+    # `REMOVED_SDK_METHODS`); the map only carries names that still exist.
     # N4
     "apikey_create": ("create_key", "n4_keys"),
     "apikey_revoke": ("revoke_key", "n4_keys"),
@@ -829,7 +841,7 @@ TENSION_CITES: dict[str, tuple[str, str]] = {
     "t_r5": (CANON, "| R5 | `explore_connections` | #5 |"),
     "t_r6": (CANON, "| R6 | `graph_overview` | #6 | `status`, `taxonomy`, "
                     "`list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, "
-                    "`list_relations`, `list_topics`, `list_graphs`, `stale_points`, "
+                    "`list_topics`, `list_graphs`, `stale_points`, "
                     "`summarize_structure`, `check_structure`, `audit`, "
                     "`validate_domain`, `dream_health_check`, `dream_health_state`, "
                     "`test_guard` |"),
@@ -1118,7 +1130,10 @@ def _rows(methods: dict[str, int], groups: dict[str, list[str]]) -> list[dict]:
         for m in members:
             group_of[m] = label
     for m in methods:
-        group_of.setdefault(m, "ARCHIVE")  # `backfill_v25` lives in the Archived table
+        # A method the canonical doc does not group falls here. Since #12901 wave 1 retired
+        # `backfill_v25` (the one member this default existed for) every live method is
+        # grouped, so this is now a fail-safe rather than a real assignment.
+        group_of.setdefault(m, "ARCHIVE")
 
     rows = []
     for name in sorted(methods):
@@ -1204,7 +1219,10 @@ def _validate(methods: dict[str, int], groups: dict[str, list[str]],
     dupes = {m for m in partitioned if partitioned.count(m) > 1}
     for m in sorted(dupes):
         errs.append(f"DUPLICATE group membership in the canonical doc: {m}")
-    grouped = set(partitioned) | {"backfill_v25"}  # the Archived table
+    # `backfill_v25` was unioned in here as "the Archived table" until #12901 wave 1
+    # deleted it: it is no longer a public `def`, so unioning it back would report it
+    # STALE — the archived code now lives in `archive/sdk-methods/`, not on the surface.
+    grouped = set(partitioned)
     for m in sorted(set(methods) - grouped):
         errs.append(f"UNMAPPED public method (no canonical group, no row): {m}")
     for m in sorted(grouped - set(methods)):
@@ -1911,9 +1929,9 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "",
         "- The canonical inventory partitions the surface into **"
         f"{len([g for g in groups if not g.startswith('ARCHIVE')])} groups** over "
-        f"**{sum(len(m) for m in groups.values())}** named members; `backfill_v25` is in "
-        "its Archived table instead. Total: "
-        f"{sum(len(m) for m in groups.values()) + 1} = the {n}-method surface.",
+        f"**{sum(len(m) for m in groups.values())}** named members — every member is a "
+        f"live method, so Total: {sum(len(m) for m in groups.values())} = the "
+        f"{n}-method surface.",
         "- Every group collapse above is checked against the AST walk at build time: a "
         "method the docs know and the code does not (or the reverse) **fails the build**.",
         "",

@@ -6040,8 +6040,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # missing 'type' field"`) — never one side's value carried over. All
         # three documents were re-pointed to the same measured pair.
         ("00-align.md", "the gap is the **declaration → consumer** seam", (
-            ("2489", "# Validate hierarchies"),
-            ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
+            ("2492", "# Validate hierarchies"),
+            ("2506", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         # The SAME claim in the plan, which no row covered — and it is the proof of
         # why an unpinned cite is not merely a cosmetic miss: `00-plan.md:158` kept
@@ -6050,8 +6050,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # Same anchors, same range, so the next insertion above the block reds here
         # too instead of leaving one document true and the other stale.
         ("00-plan.md", "**`hierarchies`** — validated only", (
-            ("2489", "# Validate hierarchies"),
-            ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
+            ("2492", "# Validate hierarchies"),
+            ("2506", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         # ...and the THIRD copy of the same sentence, in the test-design table, where
         # the range is a bare continuation (`:N-N`) and so is invisible to every
@@ -6062,8 +6062,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # continuation, no source-qualified sweep could see it either. The phrase is
         # the document's own words, not a markdown line.
         ("03-test-design.md", "`hierarchies` (validated only", (
-            ("2489", "# Validate hierarchies"),
-            ("2503", 'errors.append("hierarchies: entry missing \'type\' field")'),
+            ("2492", "# Validate hierarchies"),
+            ("2506", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("16765", "The v2 path reports"),
@@ -6131,6 +6131,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `git show 3676689b2e:tortoise/hosted_api.py | sed -n '17761p'` reads
         # `@app.post("/v1/sessions")`: successive re-points walked the number forward onto
         # the sibling, so the capture route is now cited by hand and pinned exactly.
+        # ⛔ RE-DERIVED at `#12947`'s head: that lane adds 43 lines to `hosted_api.py` above
+        # `org_info` and removes 4 (net +39 at `:13884`-`:14105`), so every cite BELOW the
+        # insertion moves by +39 — this row's two, and the `19558`/`19583`/`19451`/`18991`
+        # rows below (those were `19519`/`19544`/`19412`/`18952` before this head's
+        # re-derivation; the numbers HERE are the live ones, so this comment cannot read as a
+        # pointer to a row that no longer exists). Measured at this head, not copied: `@app.post("/v1/sessions")` is
+        # `:18854` and `@app.post("/v1/sessions/install-probe")` is `:21409` (was `:18815`
+        # / `:21370`), each the file's ONLY occurrence of its needle.
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("18846", ("exact", '@app.post("/v1/sessions")')),
             ("21401", '@app.post("/v1/sessions/install-probe")'),
@@ -6280,8 +6288,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("1418", "| **D6** | **Two distinct connection sets**"),
         ), "extractor_v4_arch"),
         # ⛔ THE TWO THIS-HEAD NUMBERS TWO EARLIER CUTS LEFT UNREAD (#12569 review), and the
-        # count that hid one of them. D5's row states NINE distinct this-head numbers: `19406`,
-        # `19519`, `10225`, `10252`, `10305`, `1186`, `1194`, `1400`, `1418`. The
+        # count that hid one of them. D5's row states NINE distinct this-head numbers: `19451`,
+        # `19558`, `10225`, `10252`, `10305`, `1186`, `1194`, `1400`, `1418` (the first two were
+        # `19406`/`19519` before `#12947`'s +39 re-derivation moved them, and those two now
+        # survive ONLY inside the document's history arrows — `19406→19412`, `19513→19519` — so
+        # a count taken over the doc must read the current-tense pair). The
         # counts in the comments above said SEVEN, then EIGHT, and each time the number left
         # out was green under mutation: `:1418` (in the "Measured at" continuation) and
         # `:1194` — which is stated one clause EARLIER on the same markdown line, in the
@@ -6363,6 +6374,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `test_each_block_arm_reds_on_the_mutation_it_guards` again reported "the only failure
         # was a stale TABLE ROW" on every parametrization. Both ends moved together and the
         # anchors did not: `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py`.
+        # ⛔ RE-DERIVED AGAIN at `#12947`'s head: that lane adds 43 lines to `hosted_api.py`
+        # above `org_info` and removes 4 (net +39, all at `:13884`-`:14105`), which moves
+        # BOTH ends and only then the documents — START 14536 -> 14575, END 14613 -> 14652,
+        # +39 at both ends. The census re-derivation this lane ships covers its own cited
+        # SITES (`tools/hosted_api_cite_census.py`, 24692 -> 24731, the same +39) and does
+        # not read this range, so the pin caught it instead — again as
+        # "the only failure was a stale TABLE ROW" on every parametrization, which is why
+        # that message says what it says. Measured at this head:
+        # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` ->
+        # `:14575`, `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14604` (inside the
+        # span), `grep -n 'max_nodes = org.get("max_points")'` -> `:14614` (inside it), and
+        # `:14652` is the blank line immediately before `return OrgInfoResponse(` at `:14653`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("14567", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
@@ -6512,7 +6535,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
                           ('max_nodes = org.get("max_points")', "the max_nodes derivation")):
         assert sum(_needle in _l for _l in _span) == 1, (
-            f"04-plan.md I7 says `:14536-14613` publishes `nodes_used` / `max_nodes`, but "
+            f"04-plan.md I7 says `:14575-14652` publishes `nodes_used` / `max_nodes`, but "
             f"{_what} occurs {sum(_needle in _l for _l in _span)} time(s) in that span — the "
             "range has moved, so re-derive it (start AND end) rather than bumping one end")
     # …and the END by structure, because membership inside a window cannot see it move.

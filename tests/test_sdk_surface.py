@@ -65,7 +65,24 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # already approved"). `high_water_counts.sdk_public_methods` stays at 150 in
 # `config/surface-manifest.yml` — the growth pin did not move, and this literal tracks the
 # frozen row set, which must move whenever a row is added.
-DECLARED_COUNT = 125
+#
+# 125 -> 119 in TWO disjoint waves. #12901 (2026-11-15): five OFF-SURFACE methods
+# (`backfill_v25`, `list_relations`, `quarantine_batch`, `calibration_passed`,
+# `membership_get`) were deleted from the public surface, frozen into
+# `archive/sdk-methods/b2-sdk-retirement-wave-1/` and recorded in
+# `tortoise/sdk_retired.py::REMOVED_SDK_METHODS` — 125 -> 120. Then #4282 Phase 2
+# (#11609 lane B / #12915) retired FOUR public names into their approved containers —
+# `supersede` -> `supersede_knowledge`, `update_entity` -> `update_knowledge`,
+# `file_decision` -> `write_question`, `file_human_approval` -> `record_decision` — and
+# added THREE (`supersede_knowledge`, `write_question`, `record_decision`;
+# `update_knowledge` already existed), a net -1: 120 -> 119. Both are the CHEAP
+# direction for this pin, and `high_water_counts` stays 150. 119 is what
+# `config/surface-manifest.yml` derives and `tools/surface-guard.py` pins as the frozen
+# baseline — so this literal and the re-cut baseline move in the same PR, as the
+# paragraph above requires. The waves are disjoint by construction: wave 1's membership
+# rule excluded any name a `tool_registry` entry bound, and the four doors Phase 2
+# re-keys were live MCP tools at that time.
+DECLARED_COUNT = 119
 
 
 def _declaration() -> dict:

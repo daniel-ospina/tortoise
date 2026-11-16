@@ -315,7 +315,7 @@ def test_update_delete_entity_parity(sdk):
     sdk.create_point("statement", "upd del test")
     pid = [p["id"] for p in sdk.query(kind="statement")  # noqa: RUF015
            if p["content"] == "upd del test"][0]
-    e = sdk.update_entity(pid, note="hi")
+    e = sdk.update_knowledge(pid, note="hi")
     assert e.get("note") == "hi"
     assert sdk.delete_entity(pid) is True
     assert sdk.get_entity(pid) == {}

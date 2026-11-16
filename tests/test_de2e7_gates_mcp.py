@@ -80,12 +80,15 @@ class TestDe2e7:
     def test_phase4_tools_registered(self):
         from tortoise.tool_registry import TOOL_REGISTRY
         names = {t.name for t in TOOL_REGISTRY}
+        # #4282 Phase 2: `tortoise_promote_point` retired into the
+        # `tortoise_refresh_confidence` container (scope='promote', point_id=...)
+        # — the capability is what this pin follows, not the surface shape.
         phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
-                  "tortoise_approve_merge", "tortoise_promote_point",
+                  "tortoise_approve_merge", "tortoise_refresh_confidence",
                   "tortoise_belief_timeline"}
         assert phase4 <= names, phase4 - names
         by_name = {t.name: t for t in TOOL_REGISTRY}
-        assert by_name["tortoise_promote_point"].sdk_method == "promote_point"
+        assert "scope='promote'" in by_name["tortoise_refresh_confidence"].description
         assert by_name["tortoise_belief_timeline"].sdk_method == "belief_timeline"
 
     def test_mcp_handler_error_contract(self, monkeypatch):
