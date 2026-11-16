@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util as _ilu
+import inspect as _inspect
 import io
 import itertools
 import json
@@ -4445,21 +4446,31 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
         raise ValueError(
             f"anchor(s) {blank!r} are empty or whitespace — `'' in text` is true on "
             "EVERY line, so a blank anchor would pass every rule it was handed")
+    # ...and the EMPTY tuple too (#13033 review P2). `cite_holds` refuses `()` because
+    # `all(...)` over it is vacuously True; this path disagreed on the same input — it
+    # returned `[]` (a vacuous PASS) for `line`/`span` and raised `IndexError` reaching
+    # `anchors[0]` for `def`/`method-span`. One contract, both paths.
+    if not anchors:
+        raise ValueError(
+            "a cite needs at least one anchor — an empty tuple reports the cite as "
+            "RESOLVED here (`[]`) and raises IndexError on the `def` kinds")
     # ⛔ A NUMBER PAST THE END IS A MISS, NOT A CRASH (#13033 review, measured): every
     # branch below indexes `source_lines[start - 1]` (and the range arm indexes
     # `stop - 1`), so a swept document citing a line this file does not have raised
     # `IndexError` out of the sweep instead of producing the PAST THE END diagnostic
     # `cite_failure` already owns. `end` is a claim too — a range that closes one line
     # into the next block is a miss, not a license to crash.
+    # ⛔ EACH FRAGMENT STARTS WITH A SUBJECT (#13033 review P3): `_bundle_sweep`
+    # composes these with the fixed lead-in "…where that is: ", so a fragment that
+    # began with a verb produced "where that is: is cited at :40" — not a sentence.
     if not 1 <= start <= len(source_lines):
-        return [f"is cited at :{start}, but this file has {len(source_lines)} lines — "
-                f"the number is PAST THE END (or before the first line), so it counts "
-                f"a different revision, or it names the wrong file"]
+        return [f"there is no line :{start} — the number is PAST THE END of a file "
+                f"with {len(source_lines)} lines, so it counts a different revision, "
+                f"or it names the wrong file"]
     if end and not 1 <= stop <= len(source_lines):
-        return [f"cites a range ending at :{stop}, but this file has "
-                f"{len(source_lines)} lines — the END of the range is PAST THE END of "
-                f"it, so the range counts a different revision, or it names the wrong "
-                f"file"]
+        return [f"there is no line :{stop} — the END of the range is PAST THE END of "
+                f"a file with {len(source_lines)} lines, so the range counts a "
+                f"different revision, or it names the wrong file"]
     if kind == "line":
         got = source_lines[start - 1]
         return [f"{a!r} {_locate_hint(source_lines, a, 'line', start)}"
@@ -4738,14 +4749,20 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
                 (anchor[0], anchor[1]) if isinstance(anchor, tuple)
                 else ("line", anchor)
             )
+            # ⛔ RESOLVED ONCE, ABOVE BOTH BRANCHES (#13033 review round 6, P2): the
+            # `_cite_failure` call below indexes `sources[source_key]`, so a row keyed
+            # outside the map is a KeyError out of the pin unless the lookup is guarded
+            # on THAT path too — not only on the bare-continuation one, which returns
+            # before it ever looks the key up.
+            hint_source = sources.get(source_key)
             if f":{number}" not in line and f"-{number}" not in line:
                 # ⛔ AN UNREGISTERED SOURCE KEY IS A ROW DEFECT, NOT A KeyError (#13033
-                # review, measured): this branch reaches `sources[source_key]` to resolve
-                # the anchor, which a row keyed outside the map turns into a crash out of
-                # the pin instead of the finding it is — `source_label` above still carries
-                # a `<key>.py` fallback for exactly that state, so the two halves disagreed
-                # about whether it can happen.
-                hint_source = sources.get(source_key)
+                # review, measured). ⛔ AND IT IS GUARDED ON THE PATH THAT ACTUALLY
+                # INDEXES (#13033 review round 6, P2): the first version put the guard
+                # here, but this branch `continue`s BEFORE any lookup — the
+                # `sources[source_key]` that could raise is the `_cite_failure(...)`
+                # call below. `hint_source` is therefore resolved ONCE, above both
+                # branches, and both consume it.
                 where = (
                     f"which {_locate_hint(hint_source, token, kind, int(number))}"
                     if hint_source is not None
@@ -4774,8 +4791,14 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
                     f"thing it names is `{token}`, {where}"
                     + _tail)
                 continue
+            if hint_source is None:
+                failures.append(
+                    f"{doc_label}: this row's SOURCE key {source_key!r} is not in the "
+                    f"source map, so the cite at :{number} cannot be resolved at all "
+                    f"— fix the row's key")
+                continue
             failure = _cite_failure(
-                doc_label, source_label, int(number), sources[source_key], (token,),
+                doc_label, source_label, int(number), hint_source, (token,),
                 kind=kind, what=f"the sentence containing {phrase!r}")
             if failure:
                 failures.append(failure)
@@ -7665,17 +7688,23 @@ def _drop_block_entries(text: str, section: str) -> str:
 #: and carries no such cite. The arm table below needs that split, because
 #: `pytest.raises(AssertionError)` cannot tell them apart.
 #:
-#: ⛔ THIS PATTERN HAS FOUR PRODUCERS AND MUST MATCH ALL OF THEM (#13033 review P1,
-#: P2). It used to match the literal `(cited by <doc>)` tail; when that tail moved to
-#: `_cite_failure` (`<doc> cites <source>:<n> …`), to the bare-continuation arm
-#: (`<doc>: the sentence containing … does not cite :<n>`), and to the scoping-phrase
-#: arm (`<doc>: the scoping phrase … occurs <n> time(s)`), the pattern matched NONE of
-#: them — so `_block_findings` returned every finding, the baseline below false-REDded
-#: the moment a row went stale (naming the block arms for a row's red) and the table's
-#: `assert findings` became satisfiable by a row alone.
+#: ⛔ `_pin_row_failures` EMITS THREE LINE-FINDING SHAPES, and the pattern must match
+#: all three (#13033 review P1, P2). It used to match the literal `(cited by <doc>)`
+#: tail; when that tail moved to `_cite_failure` (`<doc> cites <source>:<n> …`), to the
+#: bare-continuation arm (`<doc>: the sentence containing … does not cite :<n>`), and
+#: to the scoping-phrase arm (`<doc>: the scoping phrase … occurs <n> time(s)`), the
+#: pattern matched NONE of them — so `_block_findings` returned every finding, the
+#: baseline below false-REDded the moment a row went stale (naming the block arms for a
+#: row's red) and the table's `assert findings` became satisfiable by a row alone.
 #:   * the source-label class MUST admit `-`: `ci_surfaces` labels as
 #:     `config/ci-surfaces.yml` (a real `_EPIC_CITE_SOURCES` path), and a `[\w./]`
 #:     class silently classified that row's findings as block findings;
+#:   * the scoping-phrase arm MUST be qualified to `— this pin needs`, because a BLOCK
+#:     producer emits the SAME shape (`_section_entries`: `<doc>: the scoping phrase
+#:     '…' occurs <n> time(s) — this claim needs exactly one line`). Unqualified, that
+#:     block finding matched here, `_block_findings` DROPPED it, and the baseline below
+#:     passed while the arm table was satisfied by it — the split failing in the
+#:     direction that hides a red instead of inventing one (#13033 review round 6);
 #:   * `_bundle_sweep`'s `- <cite> (<label>): <source>:<n> reads …` shape is
 #:     deliberately NOT matched — it was a BLOCK finding before this split existed and
 #:     stays one.
@@ -7685,7 +7714,7 @@ def _drop_block_entries(text: str, section: str) -> str:
 _ROW_FINDING = re.compile(
     r"- \S+ cites [\w./-]+:\d+"
     r"|- \S+: the sentence containing .* does not cite :\d+"
-    r"|- \S+: the scoping phrase .* occurs \d+ time\(s\)"
+    r"|- \S+: the scoping phrase .* occurs \d+ time\(s\) — this pin needs"
 )
 
 
@@ -7730,8 +7759,10 @@ def test_the_line_and_block_findings_are_told_apart(tmp_path):
     (#13033 review round 5, P2). An earlier cut of this test matched literal strings
     lifted out of the source, so a re-wording inside a producer left the test GREEN
     while `_ROW_FINDING` went dead again — the same silent rot, one level up. Each case
-    below calls `_pin_row_failures` / `_bundle_missing` and classifies what comes back,
-    and the four rows cover the four arms that emit a line finding.
+    below calls `_pin_row_failures` / `_bundle_missing` / `_bundle_sweep` and classifies
+    what comes back: three row SHAPES (the fourth fixture is `_cite_failure` again with a
+    hyphenated label, which pins the label class rather than a fourth producer) and one
+    block finding driven through the real sweep.
     """
     src = tmp_path / "seam.py"
     src.write_text("# a comment\ntarget = 1\nother = 2\n", encoding="utf-8")
@@ -7786,10 +7817,24 @@ def test_the_line_and_block_findings_are_told_apart(tmp_path):
 
     # ⛔ THE OTHER DIRECTION: a BLOCK/DOCUMENT finding must stay one. `_bundle_missing`
     # returns the fragment; `_bundle_sweep` composes it into the finding's line.
+    # ⛔ AND THE COMPOSED PREFIX IS PINNED TO THE PRODUCER (#13033 review round 6, P3):
+    # an earlier cut copied the `- <cite> (<label>): …` lead-in out of the producer's
+    # prose by hand, so re-wording it would have turned the real block finding into a
+    # row match while this test stayed green. The `inspect` arm below reds if
+    # `_bundle_sweep` stops emitting the text this fixture composes with — a driving
+    # call is not available (the sweep only reads cites inside a recognised row scope,
+    # and a synthetic document is reported `unmatched`, not `failures`).
+    lead_in = (", so the cite does not hold what it names — and the tree already "
+               "says where that is: ")
+    # the producer splits that literal across adjacent f-strings, so join them first
+    _sweep_src = re.sub(r'"\s*\n\s*f?"', "", _inspect.getsource(_bundle_sweep))
+    assert lead_in in _sweep_src, (
+        "`_bundle_sweep` no longer composes its block finding with the lead-in this "
+        "fixture uses — the block half of this test has gone prose-coupled again, so "
+        "re-drive it from the producer before trusting the assertion below")
     fragment = _bundle_missing("line", ("target = 1",), ["# nothing here"], 1, None)
     assert fragment, "the block fixture is inert — `_bundle_missing` returned no miss"
-    block = "- README.md:427 (the meta fold): seam.py:1 reads 'x', so the cite does " \
-            "not hold what it names — and the tree already says where that is: " \
+    block = "- README.md:427 (the meta fold): seam.py:1 reads 'x'" + lead_in \
             + "; ".join(fragment)
     assert not _ROW_FINDING.match(block), (
         f"a BLOCK/DOCUMENT finding is being read as a row finding: {block!r}")
