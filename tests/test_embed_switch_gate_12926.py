@@ -318,6 +318,41 @@ def test_a_new_compose_file_is_discovered(tmp_path):
 
 
 @needs_docker
+def test_a_service_behind_a_profile_is_a_channel_not_invisible(tmp_path):
+    """Review P2 at `543a1b0467` — Compose drops `profiles:`-gated services **silently**.
+
+    Measured on Compose 2.40.3: `docker compose config --format json` over an armed `app` beside
+    a `profiles: ["prod"]` Tortoise `worker` returns a model containing ONLY `app` — no stderr,
+    no warnings, rc 0 — so the gate printed OK over a channel it never saw. Silently absent is
+    the “discovered channel passes quietly” fail-open the module docstring forbids, and a
+    profiled service is one deploy flag away from running. The resolver therefore enables every
+    profile, and this leg reds the hour that flag is dropped.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n"
+        "    build: .\n"
+        "    environment:\n"
+        '      TORTOISE_VALUE_GATE: "1"\n'
+        '      TORTOISE_EMBED_GATE: "1"\n'
+        "  worker:\n"
+        "    build: .\n"
+        '    profiles: ["prod"]\n'
+        "    environment:\n"
+        '      TORTOISE_DB_URI: "bolt://db:6379"\n'
+    )
+    channels, failures = gate.evaluate(tmp_path)
+    labels = [channel.channel for channel in channels]
+    assert "docker-compose.yml: worker" in labels, (
+        "a service behind `profiles:` is still a deployment channel — Compose enables the profile "
+        f"and runs the service — so the resolver must ask for every profile: {labels}"
+    )
+    assert any("worker" in failure and "does not state" in failure for failure in failures), (
+        f"the profiled service omits both switches and must be REFUSED by name: {failures}"
+    )
+
+
+@needs_docker
 def test_a_service_this_repo_does_not_build_is_reported_not_required(tmp_path):
     """The switch is read by TORTOISE: a pulled sidecar is not asked for it; a Tortoise-carrying
     pulled service IS (otherwise "no `build:`" would be a way to escape the gate)."""
