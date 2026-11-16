@@ -4644,8 +4644,11 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     a number: a number quoted here would be the very drift this paragraph is
     about, and it was, twice). They bite: with the README's vet-flag cite moved
     to `7913`, `the vet flag` reds, naming the line the anchor really lives on
-    (`extractor_v2.py:7953` is what the cite reads) and where `vet_enabled = (` is
-    instead — measured at a head on which 7913 was that comment. ⛔ THE FAILURE TAIL IS
+    (the line the mutated cite reads, by its own text) and where `vet_enabled = (` is
+    instead — measured at a head on which 7913 was that comment. ⛔ THE READ LINE'S
+    NUMBER IS NOT QUOTED HERE EITHER: `7953` was quoted for it and `grep -n 'vet_enabled = ('`
+    puts the real anchor at 14783 at this head, so the quoted number was unsupported under
+    either reading — the same rot, one clause over (#13033 round-8 review, P3). ⛔ THE FAILURE TAIL IS
     NOT QUOTED HERE any more: an earlier cut quoted its literal text (`…, which carries
     none of […]`), and the message was re-worded under it (#12989), so the quote rotted
     into a claim the tree refutes — this paragraph's own subject, applied to itself.
