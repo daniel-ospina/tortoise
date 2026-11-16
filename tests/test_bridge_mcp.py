@@ -226,7 +226,17 @@ def _no_ambient_store(monkeypatch, tmp_path):
     # read). This is the `delenv` half of the recorded idiom —
     # `docs/plans/1708-key-mint-idempotency/plan.md` step 5 prescribes setenv(HOME)
     # + delenv(TORTOISE_API_KEY) + chdir; the sibling fixtures copied the other two.
-    for name in ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY"):
+    #
+    # ⛔ The NAMES are ASKED OF THE CODE, for the same reason the store pin below
+    # asks `_credential_paths()` instead of restating today's two paths: a literal
+    # list is exactly the fail-open that grew once already (#5200 added the
+    # `TORTOISE_MCP_API_KEY` alias). A third name would answer ambiently, the store
+    # branch would never be reached, this module would send a REAL fleet key to the
+    # test daemon — and every pin here would stay green, because the store pin
+    # checks `path.is_file()` and never whether a store was READ.
+    from tortoise.mcp_client import _ENV_KEY_NAMES
+
+    for name in _ENV_KEY_NAMES:
         monkeypatch.delenv(name, raising=False)
 
 
