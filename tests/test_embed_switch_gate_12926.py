@@ -1062,6 +1062,191 @@ def test_a_one_line_compound_statement_does_not_leak_depth_up():
     assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
 
 
+def test_a_closer_inside_a_quote_or_a_comment_is_DATA_not_a_closer():
+    """Review P1 at `19afbd0865` — `_SHELL_CLOSERS` searched the RAW logical line.
+
+    A `; fi` inside a quoted argument, or inside a trailing comment, therefore CLOSED the enclosing
+    block. The depth then read 0 for a branch that never runs, and both `export`s inside it were
+    credited ``STATED`` — so the gate printed `ok` and exited 0 over a process that receives
+    neither switch. Measured at `19afbd0865` before the fix: both shapes below returned
+    ``({'TORTOISE_VALUE_GATE': '1', 'TORTOISE_EMBED_GATE': '1'}, set())``.
+
+    Same fail-open CLASS the heredoc fix closed (`test_a_heredoc_body_is_not_SHELL_either`),
+    reached through quotes and comments instead of heredoc bodies — which is why the structural
+    view this pins is applied to the closers and the openers alike, not to the assignment match.
+    It includes the multi-line case: a quoted string that spans a NEWLINE hides its `fi` at
+    column 0, so the quote state is carried ACROSS lines rather than reset per line.
+    """
+    for label, data_line in (
+        ("a quoted argument", 'echo "n/a; fi"'),
+        ("a trailing comment", "echo hi  # see; fi below"),
+        ("a single-quoted argument", "echo 'n/a; done'"),
+    ):
+        stated, ambiguous = gate._shell_assignments(
+            "#!/bin/sh\n"
+            "if false; then\n"
+            f"  {data_line}\n"
+            "  export TORTOISE_VALUE_GATE=1\n"
+            "  export TORTOISE_EMBED_GATE=1\n"
+            "fi\n"
+        )
+        assert stated == {}, (
+            f"{label} closed the block, so a branch that never runs was credited STATED: "
+            f"{stated}"
+        )
+        assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, ambiguous
+
+    # ⛔ And the shape that made this a per-SCRIPT verdict rather than a per-LINE one (measured):
+    # a quoted string that SPANS A NEWLINE put a `fi` at column 0 — indistinguishable from a real
+    # closer unless the open quote is carried across lines. Before the carry it returned
+    # ``({'TORTOISE_VALUE_GATE': '1', 'TORTOISE_EMBED_GATE': '1'}, set())``, exit 0.
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        "if false; then\n"
+        '  echo "n/a\n'
+        'fi"\n'
+        "  export TORTOISE_VALUE_GATE=1\n"
+        "  export TORTOISE_EMBED_GATE=1\n"
+        "fi\n"
+    )
+    assert stated == {}, f"a quote spanning a NEWLINE leaked a `fi`: {stated}"
+    assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, ambiguous
+
+    # The MIRROR direction, which the same change must not break: a quoted `if`/`for` is data, so
+    # it opens nothing — and the honest top-level exports after it are still statements.
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        'echo "if this; then that; fi"\n'
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"a quoted `if`/`fi` leaked the depth and refused an honest file: {stated} / {ambiguous}"
+    )
+    assert ambiguous == set(), ambiguous
+
+    # ⛔ And the OPENER half needs a witness that can actually fire (a reviewer measured the
+    # previous one as vacuous: `echo "if …"` cannot match `^\s*(?:if|while|…)` even on the raw
+    # line, so reverting the opener search to the raw line left the suite green). A multi-line
+    # usage string whose continuation line STARTS with `if` can: reading it as an opener leaks the
+    # depth and refuses an honest file.
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        'echo "usage:\n'
+        "if you pass -h, then it prints help\n"
+        '"\n'
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"a quoted `if` at column 0 leaked the depth and refused an honest file: {stated} / {ambiguous}"
+    )
+    assert ambiguous == set(), ambiguous
+
+
+def test_a_block_keyword_inside_an_UNEVALUATED_span_neither_opens_nor_closes():
+    """Review at `19afbd0865`+ — a block keyword is DATA inside every span not evaluated.
+
+    The quote-only structural view closed the quoted and commented shapes and left FOUR more
+    reachable, each measured on a reviewer's probes: an unquoted command substitution
+    (`LEVEL=$(if …; fi)`), a backtick substitution, a subshell (`( if …; fi )`) and an ANSI-C
+    string (`$'don\\'t; fi'`). All four put a `; fi` into the structural view, dropped the depth,
+    and credited both `export`s inside a branch that never runs — `ok`, exit 0 over a process
+    that receives neither switch. A comment after a `;` (`set -x;# … fi`) was the same class one
+    layer down: bash starts a comment at any WORD start, and the whitespace-only rule read it as
+    code.
+
+    A command substitution or subshell runs in its OWN shell, so its `if`/`fi` never belongs to
+    the enclosing depth — which is why the span is BLANKED whole rather than keyword-skipped.
+    """
+    for label, data_line in (
+        (
+            "an unquoted command substitution",
+            '  LEVEL=$(if [ "$D" = 2 ]; then echo high; else echo low; fi)',
+        ),
+        ("a backtick substitution", '  LEVEL=`if [ "$D" = 2 ]; then echo high; fi`'),
+        ("a subshell", '  ( if [ "$D" = 1 ]; then echo hi; fi )'),
+        ("an ANSI-C string", "  echo $'don\\'t; fi'"),
+        ("a comment after a semicolon", "  set -x;# n/a; fi guard"),
+    ):
+        stated, ambiguous = gate._shell_assignments(
+            "#!/bin/sh\n"
+            "if false; then\n"
+            f"{data_line}\n"
+            "  export TORTOISE_VALUE_GATE=1\n"
+            "  export TORTOISE_EMBED_GATE=1\n"
+            "fi\n"
+        )
+        assert stated == {}, f"{label} leaked a block keyword into the enclosing depth: {stated}"
+        assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, (label, ambiguous)
+
+    # A BACKSLASH-quoted heredoc delimiter (`<<\EOF`) is a valid spelling whose body is data; not
+    # accepting it read the body as SHELL, so its `fi` closed the block (same class, measured).
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        "if false; then\n"
+        "  cat <<\\EOF\n"
+        "fi is not a keyword here\n"
+        "EOF\n"
+        "  export TORTOISE_VALUE_GATE=1\n"
+        "  export TORTOISE_EMBED_GATE=1\n"
+        "fi\n"
+    )
+    assert stated == {}, f"a `<<\\EOF` body was read as shell: {stated}"
+    assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, ambiguous
+
+
+def test_an_export_that_is_only_TEXT_is_never_credited():
+    """Review at `19afbd0865`+ — the assignment match ran on the RAW line.
+
+    An ``export TORTOISE_*_GATE=1`` that is merely the TEXT of a top-level multi-line string was
+    credited ``STATED``: a script whose only "arm" is a line of help text inside ``echo "…"``
+    printed ``ok`` with exit 0 over a process that receives neither switch. The value still comes
+    from the raw line (its quotes must stay intact), so the guard is on the HEAD: `export KEY=`.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        'echo "to enable embedding, export these yourself:\n'
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+        '"\n'
+    )
+    assert stated == {}, f"help TEXT was credited as a statement: {stated}"
+    assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, ambiguous
+
+    # The honest spelling still credits, including a quoted value, whose quotes must survive the
+    # structural view (the head is compared, not the value).
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\nexport TORTOISE_VALUE_GATE=\"1\"\nexport TORTOISE_EMBED_GATE='1'\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert ambiguous == set(), ambiguous
+
+
+def test_an_escaped_quote_at_top_level_does_not_open_a_span():
+    """Review P2 at `19afbd0865`+ — a FALSE REFUSAL this change must not introduce.
+
+    ``echo \\"n/a\\"`` is a literal quote in bash, not a span delimiter. Modelling escapes only
+    INSIDE a double-quoted span left this shape opening a span that never closed, which blanked
+    the real ``fi`` and REFUSED an honest ``=1`` file that the previous head accepted — a refusal
+    is a bug on this gate too, and it is the one direction a fail-closed bias hides.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        "if false; then\n"
+        '  echo \\"n/a\\"\n'
+        "  echo hi\n"
+        "fi\n"
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"an escaped quote outside a span was read as a delimiter and refused an honest file: "
+        f"{stated} / {ambiguous}"
+    )
+    assert ambiguous == set(), ambiguous
+
+
 def test_a_NESTED_unset_neither_credits_nor_retracts():
     """Review P2 at `04dc33c1f3` — these two branches ignored the `conditional` guard.
 
