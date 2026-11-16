@@ -961,6 +961,54 @@ def test_a_heredoc_body_is_not_SHELL_either(tmp_path):
     )
     assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
 
+    # ⛔ the TERMINATOR is compared the way the SHELL compares it (review P2). Bash strips leading
+    # TABS only for `<<-` and compares the line EXACTLY for `<<`, so an indented `  EOF` under a
+    # plain `<<` does NOT close the body: bash consumes the rest of the file and runs nothing.
+    # `strip()` accepted the indented form, ending the body early and crediting exports the
+    # process never reaches.
+    stated, _ = gate._shell_assignments(
+        "#!/bin/sh\n"
+        "cat <<EOF\n"
+        "    hello\n"
+        "  EOF\n"
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {}, (
+        f"an INDENTED terminator closed a plain `<<` body early, so exports bash never reaches "
+        f"(the heredoc runs to EOF) were credited: {stated}"
+    )
+
+    # ...and a TAB-indented terminator DOES close a `<<-` body, because the shell strips tabs there
+    stated, _ = gate._shell_assignments(
+        "#!/bin/sh\n"
+        "cat <<-EOF\n"
+        "\thello\n"
+        "\tEOF\n"
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+
+
+def test_an_arithmetic_shift_is_not_a_heredoc():
+    """Review P3: `<<` inside `$(( … ))` is a SHIFT, and it swallowed the rest of the file.
+
+    `n=$(( 1 << shift ))` opened a phantom body named `shift`, so every later export was inside a
+    body that never ends — the channel was refused for "not stating" both switches, a false block
+    on an honest config.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        "n=$(( 1 << shift ))\n"
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"an arithmetic `<<` opened a phantom heredoc and swallowed the file: {stated}"
+    )
+    assert ambiguous == set(), ambiguous
+
 
 def test_a_one_line_compound_statement_does_not_leak_depth_up():
     """Review P2 at `04dc33c1f3` — a closer after a statement separator is still a closer.
@@ -992,6 +1040,25 @@ def test_a_one_line_compound_statement_does_not_leak_depth_up():
         "fi\n"
     )
     assert stated == {}, stated
+    assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
+
+    # ⛔ ...and a one-line compound statement INSIDE a block is net ZERO, not -1 (review P1
+    # regression, measured). Matching its closer and `continue`-ing skipped the opener
+    # accounting, so the depth dropped and the nested export AFTER it read as top level — the gate
+    # printed `ok` and exited 0 over a helper that is never called. This module's own docstring
+    # calls "move the export into the helper" an ordinary edit, so the shape is not contrived.
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        "helper() {\n"
+        '  if [ -n "$X" ]; then echo hi; fi\n'
+        "  export TORTOISE_VALUE_GATE=1\n"
+        "}\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_EMBED_GATE": "1"}, (
+        f"a one-line compound inside a function body leaked the depth down, crediting an export "
+        f"the process never receives: {stated}"
+    )
     assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
 
 

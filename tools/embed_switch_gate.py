@@ -69,12 +69,16 @@ and a CONDITIONAL arm (``if [ … ]; then export TORTOISE_EMBED_GATE=1; fi``) is
 branch is not the shipped configuration stating a value — ``entrypoint.sh``'s own switch exports
 are top level. There is no widening for an honest shorthand: ``=0`` still passes by design.
 
-ONE shape is still outside that model and is declared here rather than left silent (review P3): the
-reader opens no **heredoc**, so an ``export K=V`` inside a ``cat <<EOF … EOF`` body is credited at
-whatever depth the body sits at — and a heredoc body is DATA (a document a program may print), not a
-statement the shell runs, so a file whose only arm is that shape reads ``ok`` while the process gets
-nothing. Closing it is the same move as above: track the terminator and route the body to
-``ambiguous``. The Dockerfile reader next door already does exactly that (``_heredoc_end``).
+⛔ **Heredoc bodies are DATA, and are DROPPED before the depth walk** (review P1). An
+``export K=V`` inside a ``cat <<EOF … EOF`` body is not a statement the shell runs, so the body is
+removed (``_shell_code_lines``) rather than credited at whatever depth it sits at — scanning it was
+a measured fail-open, because a ``fi`` at line start *inside* the body closed the enclosing block.
+The verdict for a file whose only arm is that shape is therefore ``does not state <switch>``, not
+the ``mentions …`` wording. Two bounds, named rather than left silent: an opener with no terminator
+swallows the REST of the file (incomplete shell — fail-CLOSED, the channel is then refused), and the
+terminator is compared the way the shell compares it (leading TABS stripped for ``<<-`` only, the
+line otherwise EXACT), which is stricter than the sibling Dockerfile reader's ``_heredoc_end``.
+``<<<`` (here-string) and ``<<`` inside ``$(( … ))`` (a shift) are excluded, so neither is a body.
 
 ``.env.example`` is a template nothing deploys, so it is not a channel of this gate; the
 read-only instrument (``tools/dod_5090_probe.py``) is what scores it.
@@ -208,6 +212,8 @@ _SHELL_CLOSERS = re.compile(
 #: the ENCLOSING block, so an `export` in a branch that never runs was credited `STATED` and the
 #: gate exited 0 over an unarmed process. `(?<!<)` keeps `<<<` (here-string) out.
 _SHELL_HEREDOC = re.compile(r"(?<!<)<<-?\s*(?P<q>['\"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=q)")
+#: A `$(( … ))` arithmetic span — `<<` inside it is a SHIFT, not a heredoc opener.
+_SHELL_ARITHMETIC = re.compile(r"\$\(\(.*?\)\)")
 _SHELL_TERMINATES = re.compile(r"^\s*(?:exit|exec)\b")
 #: Two ways a LATER line takes an earlier `export K=1` back, both of which must drop the literal
 #: from `stated` — Docker and the shell are last-assignment-wins, and `stated` outranks `ambiguous`
@@ -589,15 +595,26 @@ def _shell_code_lines(text: str) -> list[str]:
     then refused for not stating the switches rather than passing on a body nobody executes).
     """
     out: list[str] = []
-    pending: list[str] = []
+    pending: list[tuple[str, bool]] = []
     for line in _logical_lines(text):
         if pending:
-            if line.strip() == pending[0]:
+            # ⛔ The terminator must match what the SHELL accepts, not `strip()` (review P2,
+            # measured). Bash strips leading TABS only for `<<-`, and compares the line EXACTLY
+            # for `<<`; `strip()` also accepted spaces, so an indented terminator ended the body
+            # early and exports bash never reaches were read as top level. This mirrors the
+            # Dockerfile reader's rule so the two heredoc readers in this file agree.
+            delim, dash = pending[0]
+            candidate = line.lstrip("\t") if dash else line
+            if candidate.rstrip("\r") == delim:
                 pending.pop(0)
             continue
         out.append(line)
-        for match in _SHELL_HEREDOC.finditer(line):
-            pending.append(match.group("delim"))
+        # ⛔ `<<` inside an ARITHMETIC expansion is a shift, not a heredoc (review P3, measured):
+        # `n=$(( 1 << shift ))` opened a phantom body named `shift` and swallowed the rest of the
+        # file, refusing an honest `=1` config. Arithmetic spans are removed before the search.
+        searchable = _SHELL_ARITHMETIC.sub("", line)
+        for match in _SHELL_HEREDOC.finditer(searchable):
+            pending.append((match.group("delim"), match.group(0).startswith("<<-")))
     return out
 
 
@@ -616,7 +633,13 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     terminated = False
     for line in _shell_code_lines(text):
         if _SHELL_CLOSERS.search(line):
-            depth = max(0, depth - 1)
+            # ⛔ A line that OPENS as well as closes a block is net ZERO (review P1 regression,
+            # measured): `if [ -n "$X" ]; then echo hi; fi` inside a function body matched the
+            # closer, subtracted one, and `continue` skipped the opener accounting — so a
+            # nested export AFTER it read as top level and was credited STATED (exit 0 over a
+            # helper that is never called). A bare `fi`/`done`/`}` still decrements.
+            if not _SHELL_OPENERS.search(line):
+                depth = max(0, depth - 1)
             ambiguous.update(_mentioned_switches(line))
             continue
         conditional = depth > 0 or terminated
