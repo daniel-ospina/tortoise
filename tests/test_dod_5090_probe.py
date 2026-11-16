@@ -4146,6 +4146,17 @@ _CONDITIONAL_SHAPES = [
     ('export TORTOISE_EMBED_GATE=1\n[ -n "" ] && echo nope\n', "ON",
      "bash: FLAG=1 — a conditional that never touches the flag is silence",
      "unrelated conditional"),
+    # ⛔ An `unset` of ANOTHER name is not the flag's business, and `_shell_unset_target`
+    # answers `"other"` for it — a predicate testing `is not None` read that as "flag
+    # relevant" and held the file for ever, a permanent row-1 hold over an entrypoint
+    # nothing was ambiguous about. The control above could not catch it (it uses `echo`,
+    # which never reaches the unset clause) — fresh review of `#12902`, P2.
+    ('export TORTOISE_EMBED_GATE=1\n[ -n "x" ] && unset OTHER_VAR\n', "ON",
+     "bash: FLAG=1 — an unset of another name cannot touch it",
+     "unrelated conditional unset"),
+    ('export TORTOISE_EMBED_GATE=1\n[ -n "x" ] && unset -f helper_fn\n', "ON",
+     "bash: FLAG=1 — `unset -f` names a FUNCTION namespace",
+     "conditional unset of a function"),
 ]
 
 
@@ -4293,6 +4304,41 @@ def test_the_ENTRYPOINT_declared_bound_does_not_certify_a_shape_the_reader_SCORE
     assert "indeterminate" in cannot_see and "UNMEASURED" in cannot_see, (
         "the entrypoint bound must say an unmeasurable shape is reported `indeterminate` "
         f"and the file held UNMEASURED, not scored either way: {cannot_see!r}")
+
+
+def test_a_RETRACTED_hit_is_not_published_at_the_SURFACE_either(tmp_path, monkeypatch):
+    """A held FILE must not leave `entrypoint=ON` / `armed` / `set ON in` behind.
+
+    ⛔ Measured RED before this test existed (fresh review of PR #12902, P2): the
+    attribute override corrected `file_states` but the SURFACE reduction had already run,
+    so ONE reading published and retracted the same hit in the same sentence —
+
+        surface state : ON
+        surface hits  : ['entrypoint.sh: TORTOISE_EMBED_GATE=1']
+        file state    : {'entrypoint.sh': {'state': 'UNMEASURED', 'hits': []}}
+        armed         : ['entrypoint']
+        set ON in     : ['entrypoint.sh: TORTOISE_EMBED_GATE=1']
+
+    while `bash` on that script has no flag at all. `set ON in:` is the instrument's
+    strongest ARM claim, and it was asserting a cause the walk had just refused to
+    measure. `_entrypoint_state` reads only the FILE verdict, which is why the rows above
+    could not see it — the surface is the half a DoD reader quotes.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=0\n'
+        'ENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nset -a\ntrue && set +a\nTORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    surface = shipped["per_surface"]["entrypoint"]
+    assert surface["files"]["entrypoint.sh"]["state"] == "UNMEASURED", surface["files"]
+    assert surface["state"] == "UNMEASURED", (
+        f"the surface still reads {surface['state']} over a hit the file verdict retracted")
+    assert surface["hits"] == [], surface["hits"]
+    assert shipped["armed"] == [], shipped["armed"]
+    assert shipped["files"] == [], shipped["files"]
+    assert shipped["on"] is False, shipped["on"]
 
 
 def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, monkeypatch):
@@ -10595,7 +10641,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `267 + 1` and `266 + 2` at THIS tree, both equal to the `268` the pin re-derives
+    count: `268 + 1` and `267 + 2` at THIS tree, both equal to the `269` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
@@ -10674,6 +10720,33 @@ def test_the_census_doc_collects_what_the_file_collects():
         f"this pin's own docstring states the lane splits {bad_splits}, which do NOT add "
         f"to the {actual} this tree collects — the docstring describes a tree that is "
         f"not this one, the same rule §6's figures are held to")
+    # ⛔ THE SUM ALONE IS NOT THE INVARIANT, and a guard weaker than the sentence it
+    # protects is not a guard: `266 + 1` copied into BOTH lanes, the two roles SWAPPED, and
+    # `268 + 0` all kept the sum and left this arm green, while the docstring publishes a
+    # false lane split — which is what the next editor reads to avoid "correcting" the
+    # docker figure (fresh review of `#12902`, P2). The relation the docstring itself
+    # states is pinned order-INDEPENDENTLY, so it does not fix which lane is which (the
+    # doc deliberately declines that, and a carve-out run must not "correct" the docker
+    # lane's figure): one lane reads one MORE pass and one FEWER skip than the other.
+    (first, second) = own_splits
+    related = ((first[0] == second[0] + 1 and first[1] == second[1] - 1)
+               or (second[0] == first[0] + 1 and second[1] == first[1] - 1))
+    assert related, (
+        f"this pin's own docstring states the lane splits {own_splits}, which add up but "
+        f"do not have the lane relation the docstring itself asserts ('one more skip and "
+        f"one fewer pass'): the docker lane must read exactly one MORE pass and one FEWER "
+        f"skip than the carve-out lane, in either order. A same-sum mutant — the same pair "
+        f"twice, the roles swapped, or a zero-skip pair — publishes a lane split that "
+        f"cannot exist, and this arm exists to catch exactly that")
+    # …and the ABSOLUTE skips are 1 (the `<3.12` re-derive) and 2 (plus `_live_utils.py`'s
+    # live-graph fixture, which only a lane with a `TORTOISE_DB_URI` satisfies) — which the
+    # docstring states. Without this, `268 + 0` beside `267 + 1` satisfies the relation
+    # above and publishes "the docker lane skips nothing", a claim the docstring's own
+    # next sentence contradicts.
+    assert sorted(skip for _passed, skip in own_splits) == [1, 2], (
+        f"this pin's own docstring must state the two lanes' skips as 1 and 2 (the "
+        f"`<3.12` re-derive, plus the live-graph fixture), and it states "
+        f"{[skip for _passed, skip in own_splits]}")
     own_total = [int(n) for n in re.findall(r"the `(\d+)` the pin re-derives", own)]
     assert own_total == [actual], (
         f"this pin's own docstring says it re-derives {own_total} where the file collects "

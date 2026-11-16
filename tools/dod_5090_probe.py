@@ -3848,7 +3848,14 @@ def _shell_command_changes_ATTRIBUTE(command: str, flag: str) -> bool:
         return True
     if flag in _shell_unset_values(command):
         return True
-    if _shell_unset_target(command, flag) is not None:
+    # ⛔ NOT `is not None`: `_shell_unset_target` returns `"other"` for an unset of a
+    # DIFFERENT name (and for `-f`/`-n`, which name another namespace), and testing the
+    # presence of an answer made EVERY `unset` flag business — so `cond && unset OTHER_VAR`
+    # held the file UNMEASURED for ever, a permanent row-1 hold over an entrypoint whose
+    # flag nothing was ambiguous about. The docstring above promises the opposite, and the
+    # control that was supposed to cover it used `echo`, which never reaches this clause
+    # (fresh review of `#12902`, P2).
+    if _shell_unset_target(command, flag) in ("value", "unknown"):
         return True
     parsed = _shell_export_args(command)
     if parsed is not None:
@@ -3878,7 +3885,10 @@ def _shell_command_affects_flag(command: str, flag: str) -> bool:
         return True
     if flag in _shell_unset_values(command):
         return True
-    if _shell_unset_target(command, flag) is not None:
+    # ⛔ `in ("value", "unknown")`, never `is not None` — see
+    # `_shell_command_changes_ATTRIBUTE`. `unset OTHER_VAR` names another variable, so it
+    # revokes nothing this reader scores.
+    if _shell_unset_target(command, flag) in ("value", "unknown"):
         return True
     return _assigned_value(command, flag) is not None
 
@@ -4766,6 +4776,9 @@ def flag_in_shipped_configs(flag: str) -> dict:
         #: (LAST-WINS), while an attribute change decides the MEANING of every
         #: assignment after it and may not be overridden by anything.
         surface_attribute_indeterminate: set[str] = set()
+        #: The HIT strings the attribute override retracts — they are removed from the
+        #: surface and global hit lists, not merely from `file_states`.
+        retracted_hits: list[str] = []
         surface_file_hits: dict[str, list[str]] = {}
         # ⛔ A resolved channel's per-FILE verdict (ON/OFF/DISAGREE/UNMEASURED) and the
         # files whose services DISAGREE. Both are kept beside the line-derived
@@ -5102,7 +5115,21 @@ def flag_in_shipped_configs(flag: str) -> dict:
         # "the FILE is held UNMEASURED" sentence was false without this (fresh review of
         # `#12902`, P1).
         for posix in surface_attribute_indeterminate:
+            retracted_hits.extend(file_states.get(posix, {}).get("hits", []))
             file_states[posix] = {"state": "UNMEASURED", "hits": []}
+        # ⛔ AND THE SURFACE REDUCTION ABOVE RAN BEFORE THAT OVERRIDE, so it still published
+        # the retracted hit: `entrypoint=ON`, `armed: ['entrypoint']` and
+        # `set ON in: ['entrypoint.sh: …=1']` beside `files: UNMEASURED` — one reading
+        # publishing and retracting the same hit in the same sentence, which is the
+        # failure mode the override was written for, left one layer up. A retracted hit is
+        # not a hit, so it comes out of `surface_hits` AND out of the global `hits` the
+        # top-level `files`/`on` fields are built from, and the state is re-reduced from
+        # what is LEFT (fresh review of `#12902`, P2).
+        if retracted_hits:
+            gone = set(retracted_hits)
+            surface_hits = [hit for hit in surface_hits if hit not in gone]
+            hits = [hit for hit in hits if hit not in gone]
+            state = "ON" if surface_hits else "UNMEASURED"
         per_surface[rel] = {"state": state, "hits": surface_hits,
                             "files": file_states,
                             "searched": surface_searched,

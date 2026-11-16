@@ -321,11 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 268 collected
+                                 # this tree: 269 collected
                                  # (docker lane: 267 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **268 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **269 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -427,7 +427,7 @@ source line was counted as two no-value declarations; RED against a mutant that 
 state) and the COMMENTED-OUT heredoc opener, which queued a body and swallowed the lines below it as
 data (`# cat <<EOF` runs in bash; measured RED against a mutant that masks the un-stripped line — the
 interaction of the two readers, where the fourth review's own heredoc BODY table pins the other half)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 36 + 12 + 4 + 1 = 268`).
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 36 + 12 + 4 + 1 + 1 = 269`).
 The final `4` are `#12902`'s NOT-ARMED-half falsifiers — the SAME defect class as `#12549`
 defect 1 ("a bucket label naming a cause it did not measure"), found by a fresh review on
 the state `defect 2` ADDS: a `DISAGREE` file is in NEITHER `silent` nor `armed`, so row
@@ -530,7 +530,7 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
-collected count — `267 passed, 1 skipped` and `266 passed, 2 skipped` here, both adding to the same `268` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+collected count — `268 passed, 1 skipped` and `267 passed, 2 skipped` here, both adding to the same `269` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
 `186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
