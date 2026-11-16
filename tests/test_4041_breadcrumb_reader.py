@@ -213,26 +213,30 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
       are the script's LAST statements (`:855-856` are their closing `fi`s), so
       it is the instant between dispatch and exit — a completeness argument.
     - A hook that stalls before the `wait` (`:801`) can leave a live child in
-      the group.  While the stall is inside the foreground `_run_digest`
-      (`:793`) — which must return before `:801` can run — that function's own
-      child is running by construction (`:689`, or the `-c` arm at
-      `:691`-`:697` ending in `main(["context"])`), and it is the one with a
-      proven unbounded path: the local-store `session_context()`
-      (`tortoise/__main__.py:5823`-`5830`) carries no timeout — the case `:756`
-      names as able to outlive this bound.  The BACKGROUNDED install-probe
-      beacon (`:786`) is the other: not `nohup`-detached (`:767` says it does
-      not join that fire-and-forget shape), but backgrounded, so nothing reaps
-      it if `:801` is never reached.  Its network leg is bounded
-      (`urlopen(req, timeout=15)`, `tortoise/__main__.py:9724`) — a per-socket
-      timeout, not a wall-clock deadline, and neither DNS resolution nor the
-      CLI import ahead of it is covered — so it has usually exited by then,
-      leaving an unreaped zombie as the usual residue.  Neither child is
-      guaranteed: `_run_digest` spawns NOTHING when both its arms miss
-      (`:687`-`:698` has no `else`), and a stall after `:801` (e.g. in
-      `_record_hook_run`, `:809`) has no child at all.  So the guarantee is
-      the narrower one this function exists to make good: whenever children
-      ARE in the group, none of them survives the kill — which a bash-only
-      `proc.kill()` cannot say.
+      the group.  While bash is blocked inside the foreground `_run_digest`
+      (`:793`) — which must return before `:801` can run — the child that arm
+      spawned is still live (`:689`, or the `-c` arm at `:691`-`:697` ending in
+      `main(["context"])`), and it is the one with a proven unbounded path: the
+      local-store `session_context()` (`tortoise/__main__.py:5823`-`5830`)
+      carries no timeout — the case `:756` names as able to outlive this bound.
+      The BACKGROUNDED install-probe beacon (`:786`) is the other: not
+      `nohup`-detached (`:767` says it does not join that fire-and-forget
+      shape), but backgrounded, so nothing reaps it if `:801` is never reached.
+      Its network leg is bounded (`urlopen(req, timeout=15)`,
+      `tortoise/__main__.py:9724`) — a per-socket timeout, not a wall-clock
+      deadline, and neither DNS resolution nor the CLI import ahead of it is
+      covered — so it has usually exited by then, leaving an unreaped zombie
+      as the usual residue.
+      Neither of those two is guaranteed: `_run_digest` spawns NOTHING when
+      both its arms miss (`:687`-`:698` has no `else`, and a stall in the `-d`
+      test at `:690` is already inside the function with no child yet), and the
+      beacon does not exist at all unless `_probe_reachable` passed (`:781`).
+      Nor is the timeout path limited to them: `_record_hook_run`
+      (`:517`-`:529`) runs `date`, `mkdir` and a command-substitution subshell
+      after `:801`, so that window carries its own short-lived children.
+      Either way the guarantee this function makes good is one and the same:
+      whenever children ARE in the group, none of them survives the kill —
+      which a bash-only `proc.kill()` cannot say.
 
     Both failures are absorbed on purpose —
     ``ProcessLookupError`` when the group is already gone, ``PermissionError``
