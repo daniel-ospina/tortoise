@@ -1781,6 +1781,68 @@ def test_a_divergent_journal_position_is_refused_not_renumbered(
         "the refused write did not roll the allocation back")
 
 
+# ── (3d-bis) THE FOURTH DIVERGENCE CAUSE: no fault required ────────────────
+
+def test_an_out_of_order_pair_WEDGES_the_graph_and_the_wedge_is_measured(
+        schema, tenant, app, monkeypatch):
+    """⛔ THE RESIDUAL, AS A FALSIFIER RATHER THAN A SENTENCE (review 4f5e542643).
+
+    The cutover invariant compares the counter's number with the journal's
+    POSITION, and the two are ordered by different events: the journal by APPEND
+    (the `sdk` site appends, then calls the door — no lock across the two), the
+    counter by ALLOCATION. So two in-flight writes can be numbered in the opposite
+    order to their lines, and that needs **no fault at all** — not a restore, not a
+    truncation, not a seal.
+
+    Driven deterministically here (no threads, so the interleaving is exact and the
+    leg cannot flake): the SECOND journal position is offered first, then the first,
+    then a third.
+      * seq=2 against a counter at 0 issues 1 ⇒ refused, counter rolled back to 0;
+      * seq=1 issues 1 ⇒ APPLIED (the graph looks healthy);
+      * seq=3 issues 2 ⇒ REFUSED — and now no later write can succeed either,
+        because the counter is permanently one behind the journal.
+
+    ⛔ THIS TEST PINS A KNOWN DEFECT, on purpose. It is not asserting that the
+    behaviour is right; it is asserting that the behaviour is WHAT HAPPENS, so that
+    (a) nobody arms `TORTOISE_RECORD_ALLOCATE` believing only a fault can wedge a
+    graph, and (b) the fix — `#9318`'s journal identity in the key, or a per-graph
+    lock spanning append→allocate — has a leg that must change when it lands. If
+    this test goes green (three APPLIEDs), the fix has arrived: replace it.
+    """
+    org, graph = tenant
+    _seed_and_arm(app, org, graph, 0)
+    _arm_door(monkeypatch, flag=True)
+
+    def write(seq: int):
+        return rw.write_live_record(RECORD, durable=True, seq=seq,
+                                    tenant=(org, graph))
+
+    out_of_order = write(2)
+    assert out_of_order is not None and not out_of_order.applied, (
+        f"journal position 2 took the counter's 1 — the invariant is not armed: "
+        f"{out_of_order!r}")
+    assert _counter(schema, org, graph) == (0, "active"), (
+        "the refusal did not roll the allocation back")
+
+    in_order = write(1)
+    assert in_order is not None and in_order.applied, (
+        f"the write whose position MATCHES was refused: {in_order!r}")
+    assert _counter(schema, org, graph) == (1, "active")
+
+    # The wedge. The journal holds two lines; the counter holds 1. Every position
+    # the journal can offer from here is ahead of what the counter can issue, so
+    # the door refuses — for a reason no replay repairs, because on a cut-over
+    # graph an enumerated replay is itself refused (`_refuse_an_enumerated_replay`).
+    wedged = write(3)
+    assert wedged is not None and not wedged.applied, (
+        "a graph whose counter is behind its journal still accepted a write")
+    assert _counter(schema, org, graph) == (1, "active"), (
+        "the wedged write moved the counter")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1], (
+        "the wedge did not leave the record one row behind the journal — if this "
+        "changed, the invariant's failure mode changed with it")
+
+
 # ── (3e) a truncated journal does not re-mint a position ───────────────────
 
 def test_a_shrunken_journal_cannot_mint_a_position(schema, tenant, app,

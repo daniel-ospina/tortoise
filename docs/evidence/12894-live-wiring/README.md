@@ -278,3 +278,42 @@ item 6's decision; (ii) the record's population equals the journal's, i.e. a
 refused record write does not lose a line the rebuild needs; and (iii) the
 drainer `§A7.5.6` specifies exists (`last_exported` appears only in the plan
 document, never in a Python module — V5 item 7).
+
+---
+
+## 4. The residual that decides the flag: DO NOT ARM THIS YET
+
+The cutover invariant compares the counter's number with the journal's
+**position**, and the two are ordered by different events: the journal by
+**append** (the `sdk` site appends, then calls the door — no lock across the two),
+the counter by **allocation**. Two in-flight writes can therefore be numbered in
+the opposite order to their lines, and that needs **no fault at all** — not a
+restore, not a truncation, not a seal. The one that allocated first refuses, the
+other applies, and the counter is left **one behind** the journal. Every later
+armed write then refuses for the same reason, because on a cut-over graph an
+enumerated replay is itself refused (`_refuse_an_enumerated_replay`) — so the
+state does not heal on its own. The operator path back is
+`halt → seed --journal → reopen → arm`.
+
+This is measured, not described:
+`test_an_out_of_order_pair_WEDGES_the_graph_and_the_wedge_is_measured` drives the
+interleaving deterministically (no threads) through the real door and asserts the
+wedge — a counter at 1 while the journal holds two lines, and the next write
+refused. It pins a KNOWN DEFECT on purpose: it exists so nobody arms
+`TORTOISE_RECORD_ALLOCATE` believing only a fault can wedge a
+graph, and so the fix has a leg that must change when it lands.
+
+**Consequence for this lane's outcome.** The brief's DoD (a) asks for the live path
+to allocate behind a flag that is *proven* by the six falsifiers — that holds, and
+the byte meter charges real bytes. But a flag that can wedge a healthy graph under
+ordinary concurrency is not a flag to flip, so the outcome is the DoD's **(b)**
+half: a measured finding naming the blocker, with the wiring landed and the switch
+OFF. The blocker is `#9318`'s journal identity in the key, or a per-graph lock
+spanning append→allocate; either is a redesign of the invariant's R2 contract and
+belongs to that change, not to this one.
+
+⚠️ Named residual ON the residual: the interleaving above is driven by calling the
+door twice in a chosen order, which is what two concurrent writers produce but is
+not itself two threads. `test_two_writers_allocate_in_commit_order` covers the
+allocator's own ordering; it cannot see the append/allocation split, because both
+of its writers arrive with no journal at all.
