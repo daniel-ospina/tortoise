@@ -3773,7 +3773,9 @@ def _write_capture_turns(
             _logger.warning(
                 "capture of session %s: the record did not take %d of %d "
                 "turn(s) — writing them to the GRAPH so the transcript is not "
-                "lost (#10000). The record heals on replay from the journal.",
+                "lost (#10000). A `write_failed` refusal heals on replay from "
+                "the journal; a `journal_collision` one does NOT — it "
+                "re-raises, and needs journal identity in the key (#12894).",
                 session_id, len(_unrecorded), len(turn_rows))
             sdk._graph_write_with_retry(
                 lambda: proj.g.query(

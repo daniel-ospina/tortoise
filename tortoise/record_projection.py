@@ -144,6 +144,7 @@ and `test_two_tenants_through_the_seam_never_cross_write`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -171,6 +172,7 @@ __all__ = [
     "TURNS_SNAPSHOT_KEYS",
     "TURNS_SNAPSHOT_OPTIONAL_KEYS",
     "TURNS_SNAPSHOT_UNATTESTABLE_KEYS",
+    "JournalPositionCollision",
     "RecordProjectionError",
     "RecordStatementError",
     "RefusedJournalOperation",
@@ -871,6 +873,182 @@ class RefusedJournalOperation(RecordProjectionError):
     fact from an **undeclared** type, and collapsing the two would hide which
     one a new producer tripped.
     """
+
+
+class JournalPositionCollision(RecordProjectionError):
+    """An absorbed journal position holds content this write would not produce (#9318).
+
+    `public.journal_event` is keyed `(org_id, graph_id, seq)`, and the schema
+    calls that key *"the idempotency key: applying a position twice is a
+    no-op"*. That is true of a **replay** — the same record, numbered the same
+    way — and false of a **collision**. The ordinal is a fact of ONE journal
+    FILE (`EventLog.append`, #9190) while the key is per `(org, graph)`: a
+    tenant holding two durable journals numbers each from 1, so their positions
+    land on each other. So does any journal whose numbering resumes below the
+    tenant's existing high-water mark — a restore, a rotation, a truncation, a
+    rebuild (`#9318`'s reachability comment, `tortoise/backup.py:638`).
+
+    The table is append-only by TRIGGER, so the row that arrived first KEEPS the
+    key and the later record's layer rows are written underneath a position row
+    naming a different event. Before this class existed that was silent: the
+    live write reported `applied`, the wiring gate printed `WIRED`, and no
+    counter moved. A mis-index is not a gap — the record then answers questions
+    about position N with another journal's record.
+
+    ⛔ WHAT THIS IS NOT: a violation of idempotency. Re-applying the SAME
+    position with the SAME content is a replay, stays a SILENT no-op, and never
+    raises this (`replay()` asks Postgres to compare the surviving row's
+    `event_type`/`payload` with what it was about to write, and only a
+    DIFFERENCE is a collision). A guard that turned every replay into an error
+    would be a worse defect than the one it fixes, which is why the comparison
+    is content, not merely "the key was taken".
+
+    ⛔ AND IT RETIRES. This is a DETECTOR, not the repair: the fix is journal
+    IDENTITY in the key — a journal column, or a per-tenant ordinal allocator —
+    which is `#12894`'s schema decision and deliberately NOT taken here (two
+    designs of one ordinal is the duplication this lane refuses to add). Once
+    the key carries the journal, two journals cannot collide, every conflict is
+    a replay, and this guard simply never fires — delete it then, and no caller's
+    behaviour changes.
+
+    The message names the position and BOTH SIDES — two records, or one record
+    and its earlier derivation — by `event_type`, payload digest and payload
+    size. It does not name a journal, because the row carries
+    no journal identity to name — that absence is precisely what `#12894`
+    decides. It also quotes no payload text: the record's own failure lines
+    withhold content, and a payload can carry the tenant's own words.
+
+    ⚠️ RESIDUAL — WHAT THE VERDICT CANNOT KNOW, stated rather than implied
+    (#9318 review cycle 1, P2). The comparison is between the durable payload
+    and the payload THIS TREE derives now, and the durable one is a snapshot of
+    a derivation (`_journal_row` strips `ENVELOPE_KEYS`; that set is an actively
+    argued surface, not a constant — see its own note about `agent_id`). So a
+    future change to payload derivation makes an OLD row's content differ from
+    what this tree would write for the SAME record at the SAME position, and a
+    replay of that segment reports this class. Two things follow, and both are
+    deliberate:
+
+    * the refusal is still CORRECT — the record's own copy of that position is
+      not what this tree would write, and silently absorbing the difference is
+      the mis-index this class exists to stop;
+    * the DIAGNOSIS must therefore not assert one cause, and it asserts NONE.
+      The message states the two possible causes ONCE, unconditionally — a
+      different record claimed the position (a second durable journal, a restore,
+      a rotation, a rebuild numbering below the high-water mark) OR this record's
+      own payload derivation changed since that row was written — and then
+      appends only the MECHANICAL reading of the two payloads
+      (:func:`_identity_evidence`): whether the identities they both carry agree,
+      disagree, exist on one side only, or are not comparable at all. That
+      reading is a fact about the payloads and supports no cause on its own,
+      which is why it is not allowed to choose one.
+      ⛔ The three earlier cuts of this class let the reading DECIDE the
+      diagnosis instead — "the SAME record", "two DIFFERENT records", "two
+      records about one node" — and each was falsified in review, because the
+      durable payload carries no record id at all (`event_id` is stripped by
+      `ENVELOPE_KEYS`, and there is no journal column): `id`, `node_key` and
+      `session_id` are COORDINATES a record shares with its neighbours, so no
+      combination of them can tell one record from two. A diagnosis built on
+      them is a claim the evidence cannot support whichever way it is phrased.
+      The uniform two-cause sentence cannot be wrong about the cause because it
+      names both possibilities every time; the appended reading is checkable
+      against the payloads themselves.
+
+    ⚠️ THE OTHER RESIDUAL — WHAT THE VERDICT CANNOT SEE (#12904 review). The
+    residual above is a FALSE POSITIVE: a replay reported as a collision. This
+    one is the missing DETECTION, and it is reachable in the exact shape #9318
+    names. The verdict compares `event_type` and the DURABLE `payload`, and
+    `_journal_row` builds that payload by filtering `ENVELOPE_KEYS` out of the
+    record — `ts`, `event_id`, `initiated_by` and `projection_version` among
+    them. Two records that differ ONLY in those fields therefore bind identical
+    `event_type`/`payload` parameters, the `IS DISTINCT FROM` predicate matches
+    no row, and the second is absorbed exactly as a replay would be — SILENTLY.
+    That is two durable journals ingesting the SAME document (same type, same
+    payload, apart only in `ts`/`event_id`): the position row is still dropped
+    and layer 1 still under-records that journal. It is stated rather than
+    repaired because no comparison of the durable content can recover a field
+    the durable row does not carry. ⛔ Three of those stripped fields —
+    `event_id`, `initiated_by`, `projection_version` — really are absent from
+    the row, so no comparison can reach them. `ts` is the exception and the
+    wording must not overstate it: `ts` IS carried, bound into `recorded_at`
+    (`COALESCE(%s::timestamptz, now())`), so a `recorded_at` comparison could
+    see a `ts`-only difference — it is simply not what this verdict compares,
+    because `recorded_at` falls back to `now()` when `ts` is absent, and
+    comparing it would then report a COLLISION for two replays of one record
+    that omit `ts`. That is the false positive this class must never produce, so
+    the UNCONDITIONAL comparison stays on content. (A CONDITIONAL comparison —
+    compare `recorded_at` only when THIS write carries a `ts` — could reach the
+    `ts`-only case without that false positive; that is a scope judgement left
+    to `#12894`, not an impossibility, and it is not taken here.)
+    `#12894`'s journal IDENTITY in the key is
+    what removes the residual, exactly as for the residual above.
+    `test_an_ENVELOPE_only_difference_is_invisible_to_the_verdict` pins the
+    boundary so it is measured rather than implied, and reds when the key
+    carries the journal.
+
+    What would remove the residual rather than describe it: a derivation-version
+    discriminator INSIDE the durable payload (`projection_version` is stripped
+    by `ENVELOPE_KEYS` today, so it is invisible to the row). That is a payload
+    shape change with its own blast radius and is NOT taken here — it belongs
+    with `#12894`, whose key decision retires the detector entirely.
+    """
+
+    def __init__(self, *, org_id: str, graph_id: str, seq: int,
+                 event_type: Any, payload_digest: str, payload_bytes: int,
+                 stored_event_type: Any, stored_payload_digest: str,
+                 stored_payload_bytes: int,
+                 identity_state: str = "none",
+                 identity_detail: str | None = None) -> None:
+        self.org_id = org_id
+        self.graph_id = graph_id
+        self.seq = seq
+        self.event_type = event_type
+        self.payload_digest = payload_digest
+        self.payload_bytes = payload_bytes
+        self.stored_event_type = stored_event_type
+        self.stored_payload_digest = stored_payload_digest
+        self.stored_payload_bytes = stored_payload_bytes
+        #: ``agrees`` / ``disagrees`` / ``one_sided`` / ``none`` — what the
+        #: identities both payloads carry say (:func:`_identity_evidence`). A
+        #: mechanical FACT about the two payloads, appended to a diagnosis that
+        #: names both possible causes unconditionally. Never decides the refusal:
+        #: any content difference refuses, and this only says what the ids look
+        #: like. `agrees` does NOT mean "one record" — a shared `id` is a node
+        #: coordinate (see the class docstring).
+        self.identity_state = identity_state
+        if identity_state == "agrees":
+            evidence = f"they share {identity_detail}"
+        elif identity_state == "disagrees":
+            evidence = f"they disagree on {identity_detail}"
+        elif identity_state == "one_sided":
+            evidence = identity_detail or "only one side carries an identity"
+        else:
+            evidence = "no identity key is comparable between them"
+        diagnosis = (
+            f"either a DIFFERENT record claimed this position — a second "
+            f"durable journal, a restore, a rotation, or a rebuild numbering "
+            f"below the high-water mark — or this record's own payload "
+            f"derivation changed since that row was written. The durable "
+            f"payload carries no record id, so the record cannot tell which; "
+            f"{evidence}"
+        )
+        # ⛔ The CONSEQUENCE is cause-neutral too (review cycle 5). The earlier
+        # wording — "every row written under it would be indexed by ANOTHER
+        # RECORD's event" — re-asserted the one cause the sentence above just
+        # said it cannot decide, and it is outright false under the
+        # derivation-change cause: there, the surviving row IS this record's own
+        # event. What is true under BOTH causes is what is written here.
+        consequence = "the record cannot file this write's rows at that position"
+        super().__init__(
+            f"journal position {seq} of ({org_id!r}, {graph_id!r}) already "
+            f"holds {stored_event_type!r} ({stored_payload_digest}, "
+            f"{stored_payload_bytes} B of payload) while this write is "
+            f"{event_type!r} ({payload_digest}, {payload_bytes} B). "
+            f"The surviving row's content is not what this write would "
+            f"produce — {diagnosis} — so {consequence}. The "
+            f"journal still holds this record; the position row cannot be "
+            f"repaired while the key carries no journal identity (#12894), "
+            f"and `journal_event` is append-only by trigger."
+        )
 
 
 
@@ -6000,6 +6178,15 @@ def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
     idempotency key: applying a position twice is a no-op"*. `ON CONFLICT DO
     NOTHING` because the table is append-only by TRIGGER: an update would be
     refused, and correctly so — a consumed position is not revisable.
+
+    ⛔ THE STATEMENT IS UNCHANGED BY #9318, and that is deliberate. The guard
+    that tells a REPLAY from a COLLISION reads the cursor's affected-row count
+    and, only when it is zero, asks the database whether the surviving row's
+    content differs (:func:`_refuse_a_journal_collision`). Rewriting this INSERT
+    (a `RETURNING`, a `DO UPDATE`, a probe in the `VALUES` list) would change the
+    plan every replay, seam and PGlite caller materializes — and the `#9187`
+    snapshot pin (`tests/test_record_writer_seam.py`) exists to notice exactly
+    that. The verdict belongs beside the statement, not inside it.
     """
     return Statement(
         "INSERT INTO public.journal_event "
@@ -6011,6 +6198,345 @@ def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
             json.dumps({k: v for k, v in record.items() if k not in ENVELOPE_KEYS}),
             record.get("ts"),
         ),
+    )
+
+
+#: The ONE question that separates an idempotent REPLAY from a COLLISION (#9318).
+#:
+#: It is asked only when the position row was ABSORBED (`ON CONFLICT DO NOTHING`
+#: affected no row), and it is asked of the DATABASE rather than of Python for
+#: one reason: `payload` is `jsonb`, and Postgres's own structural equality is
+#: the only comparison that cannot disagree with it. A Python re-normalisation
+#: (a `json.dumps` on each side, a numeric coercion, a key-order guess) is a
+#: second opinion about the same bytes, and its failure mode is the one a guard
+#: like this may never have: a RE-APPLIED SAME POSITION reported as a collision.
+#: `IS DISTINCT FROM` (not `<>`) because the row's payload is `NOT NULL` but the
+#: CAST parameters are not, so a NULL-vs-something comparison must still answer
+#: "different" instead of "unknown".
+_JOURNAL_CONFLICT_CONTENT_SQL = (
+    "SELECT event_type, payload FROM public.journal_event "
+    "WHERE org_id = %s AND graph_id = %s AND seq = %s "
+    "AND (event_type IS DISTINCT FROM %s::text "
+    "     OR payload IS DISTINCT FROM %s::jsonb)"
+)
+
+
+def _affected_rows(cursor: Any) -> int | None:
+    """The cursor's affected-row count for the statement it just ran, or None.
+
+    ``None`` means *this cursor cannot answer*; every value but a positive
+    ``0`` skips the collision check (#9318). It is not a hypothetical: the DB-free
+    halves of this suite drive `replay()` through recording fakes, and a fake
+    that never sets ``rowcount`` must keep behaving exactly as before — a guard
+    that invented a refusal from an unreadable cursor would be a new source of
+    false alarms on every lane that does not have a database.
+
+    ``bool`` is excluded because it is an ``int`` subclass: a cursor reporting
+    ``True`` means nothing about row counts, and reading it as ``1`` would let a
+    boolean coincidence silence the guard.
+    """
+    rowcount = getattr(cursor, "rowcount", None)
+    if isinstance(rowcount, int) and not isinstance(rowcount, bool):
+        return rowcount
+    return None
+
+
+def _payload_digest(payload: Any) -> tuple[str, int]:
+    """``(sha256:<12 hex>, payload bytes)`` of a payload's CANONICAL json.
+
+    The collision message names its two PAYLOADS by this instead of quoting
+    them: the record's own failure lines withhold content (`_CONTENT_COLUMNS`), and a
+    payload can carry the tenant's own words. Canonical form is
+    ``sort_keys``/compact so the SAME content hashes the same whichever side of
+    the comparison it came from — which is what lets a reader see at a glance
+    that the two digests differ because the PAYLOADS differ, not because one side
+    was re-serialised. ⛔ They may be two records, or ONE record's payload before
+    and after a derivation change: the digest says which bytes differed, never
+    which cause, so do not read it as naming two records.
+
+    Unparseable/unserialisable input still yields a digest string rather than
+    raising: this function only ever runs on a collision path, and turning a
+    diagnostic into an exception there would replace one silent failure with a
+    confusing one.
+    """
+    if isinstance(payload, (bytes, bytearray)):
+        raw = bytes(payload)
+    elif isinstance(payload, str):
+        raw = payload.encode("utf-8")
+    else:
+        raw = b""
+    if isinstance(payload, (str, bytes, bytearray)):
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return f"sha256:unparseable-{len(raw)}B", len(raw)
+    try:
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                          default=str)
+    except (TypeError, ValueError):
+        return f"sha256:unserialisable-{type(payload).__name__}", 0
+    encoded = body.encode("utf-8")
+    return ("sha256:" + hashlib.sha256(encoded).hexdigest()[:12], len(encoded))
+
+
+#: The payload keys that COORDINATE a record, ids only — and a deliberate
+#: SUBSET of `record_writer._RECORD_IDENTITY_KEYS` (which that module applies to
+#: the record it already holds). ⛔ `name` is EXCLUDED here on purpose: a source's
+#: `name` is its document title, which the record's own failure lines withhold as
+#: content, and it is mutable so it cannot identify a record across a
+#: re-derivation anyway. `event_id` is excluded because `ENVELOPE_KEYS` strips it
+#: from the durable payload — a key that cannot appear on EITHER side of the
+#: comparison is a key that can never answer.
+#: `tests/test_9318_journal_collision.py` pins both properties (subset of the
+#: writer's list, disjoint from `_CONTENT_COLUMNS`), so a future addition here
+#: cannot quietly start printing a title.
+#: ORDERED FINEST FIRST, and the order is load-bearing twice: it is the order
+#: `_identity_pairs` emits, and `_identity_evidence` labels a disagreement with
+#: the finest key that disagreed.
+_IDENTITY_KEYS: tuple[str, ...] = (
+    "eventId", "id", "node_key", "session_id",
+)
+
+#: Rank of each identity key, for choosing WHICH key a verdict is labelled with.
+_IDENTITY_KEY_RANK: dict[str, int] = {
+    key: rank for rank, key in enumerate(_IDENTITY_KEYS)
+}
+
+
+def _payload_object(payload: Any) -> Any:
+    """`payload` as parsed JSON when it arrived as text, else unchanged."""
+    if isinstance(payload, (str, bytes, bytearray)):
+        try:
+            return json.loads(payload.decode("utf-8")
+                              if isinstance(payload, (bytes, bytearray))
+                              else payload)
+        except (UnicodeDecodeError, ValueError):
+            return None
+    return payload
+
+
+def _identity_value(value: Any) -> Any:
+    """The value if it can be an id, else ``None`` (#9318 reviews 3 and 4).
+
+    An identity key is caller-settable, so its VALUE is caller data: a mapping or
+    a list under `id` would be rendered into the failure line as its repr, which
+    is how a document title reaches a log line the class docstring promises is
+    content-free. `record_writer._record_identity` accepts a NON-EMPTY `str` for
+    the same reason, and the empty string is admitted by neither: a blank
+    defaulted field is not a coordinate, and counting it as one made two blanks
+    "agree" (`same`, from no evidence) and a blank against a real id "disagree"
+    (`different`, i.e. the collision claim from a re-derivation signature).
+    `int` is admitted because a jsonb round-trip preserves numeric ids, and
+    `bool` is excluded because it is an `int` subclass. Anything else is not an
+    id, so it answers nothing rather than printing itself.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        return value if value else None
+    return value if isinstance(value, int) else None
+
+
+#: The payload sections whose contents are a record SNAPSHOT, and therefore the
+#: only ones whose nested keys may be read as coordinates. It is exactly the
+#: fold's own entity-snapshot table (`_ENTITY_MATCH_COLUMNS`), NOT every mapping
+#: in the payload: `props` is a WITHHELD column, and a walk that visited it
+#: printed tenant text (`props.id` → "Q3 pricing memo — confidential") onto a log
+#: line this class promises is content-free (review cycle 4). A section added
+#: here must be one the fold itself resolves a node from.
+_IDENTITY_SECTIONS: frozenset[str] = frozenset(_ENTITY_MATCH_COLUMNS)
+
+
+def _identity_pairs(payload: Any) -> list[tuple[str, str, str, Any]]:
+    """``(key, scope, label, value)`` identity pairs the payload carries (#9318).
+
+    TWO LEVELS, because the dominant shape is NESTED and a top-level-only read
+    is blind to it: `PointAdded` carries its whole snapshot under `point`
+    (`sdk._rec_point_id` reads `rec["point"]["id"]`, and `consistency.py`
+    normalises `{"type": …, "point": {…}}` for exactly this reason). Reading the
+    top level only would report "no identity" for every `PointAdded` — i.e.
+    exactly where the re-derivation residual lives — while both payloads carry
+    `point.id`. `record_writer._record_identity` walks the sub-dicts for the same
+    reason, so this is the record's existing convention, not a new one.
+
+    Each pair is ``(key, scope, label, value)``. ``scope`` is what makes pairs
+    COMPARABLE — `""` for the top level, the section name for a snapshot — so the
+    same key at two levels is not silently compared against itself in the wrong
+    scope. ``label`` is what the failure line prints (`id` on the top level,
+    `point.id` when nested), so an operator can see WHERE the identity came from.
+    Values that cannot be an id (:func:`_identity_value`) are omitted entirely.
+    """
+    obj = _payload_object(payload)
+    if not isinstance(obj, Mapping):
+        return []
+    pairs: list[tuple[str, str, str, Any]] = []
+    for key in _IDENTITY_KEYS:
+        value = _identity_value(obj.get(key))
+        if value is not None:
+            pairs.append((key, "", key, value))
+    for section, inner in obj.items():
+        if section not in _IDENTITY_SECTIONS or not isinstance(inner, Mapping):
+            continue
+        for key in _IDENTITY_KEYS:
+            value = _identity_value(inner.get(key))
+            if value is not None:
+                pairs.append((key, section, f"{section}.{key}", value))
+    return pairs
+
+
+def _identity_evidence(attempted: Any, stored: Any) -> tuple[str, str | None]:
+    """``(state, detail)`` — a MECHANICAL reading of two payloads (#9318).
+
+    This function is deliberately incapable of naming a cause, and that is the
+    fix for a class of review findings rather than one finding (PR #12904 cycles
+    1-4). Three earlier cuts returned a VERDICT — "the SAME record", "two
+    DIFFERENT records", "two records about one node" — and each was falsified,
+    because the durable payload carries no record id: `event_id` is stripped by
+    `ENVELOPE_KEYS`, there is no journal column (`#12894`), and `id`/`node_key`/
+    `session_id` are coordinates a record shares with its neighbours. No reading
+    of coordinates identifies a record, so any sentence that claims one is
+    unsupportable whichever way it is phrased.
+
+    So the states are FACTS about the payload pair, and the caller's message
+    names both possible causes unconditionally:
+
+    * ``agrees`` — every identity both payloads carry agrees. A shared node id,
+      i.e. the same node seen twice; whether that is one record re-derived or two
+      records about one node is EXACTLY what cannot be decided here;
+    * ``disagrees`` — a shared identity differs. Two different coordinates, so a
+      different record or the same record re-keyed since; again undecidable;
+    * ``one_sided`` — only one payload carries an identity, which is what a field
+      added (or removed) by a derivation change looks like;
+    * ``none`` — nothing comparable, said rather than guessed.
+
+    Pairing is LIKE WITH LIKE: a key is compared within a scope first (`""` =
+    top level, else the snapshot section), and across scopes only when each side
+    carries exactly one pair for it — otherwise a payload naming `id` both at the
+    top level and inside a snapshot would compare the wrong two values and print
+    a counterpart it never compared. All shared pairs are evaluated, so an
+    agreeing coarse key cannot suppress a disagreeing finer one.
+
+    Values are BOUNDED (`_ATTRIBUTION_VALUE_LIMIT`): an `id` is caller-chosen
+    (`add_object(..., id=…)`, a source keyed by its URL), and this detail lands
+    on the same log line whose `_record_identity` half bounds the same datum.
+    """
+    ours, theirs = _identity_pairs(attempted), _identity_pairs(stored)
+    if not ours and not theirs:
+        return "none", None
+    if ours and not theirs:
+        _key, _scope, label, value = ours[0]
+        return "one_sided", (
+            f"only this write names {label}="
+            f"{_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}")
+    if theirs and not ours:
+        _key, _scope, label, value = theirs[0]
+        return "one_sided", (
+            f"only the surviving row names {label}="
+            f"{_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}")
+
+    shared: list[tuple[str, str, Any, Any]] = []
+    for key, scope, label, value in ours:
+        same_scope = [candidate for candidate in theirs
+                      if candidate[0] == key and candidate[1] == scope]
+        if same_scope:
+            candidates = same_scope
+        else:
+            our_count = sum(1 for pair in ours if pair[0] == key)
+            their_count = sum(1 for pair in theirs if pair[0] == key)
+            if our_count != 1 or their_count != 1:
+                continue
+            candidates = [candidate for candidate in theirs
+                          if candidate[0] == key]
+        for candidate in candidates:
+            shared.append((key, label, value, candidate[3]))
+    if not shared:
+        return "none", None
+
+    def _rank(entry: tuple[str, str, Any, Any]) -> int:
+        return _IDENTITY_KEY_RANK.get(entry[0], len(_IDENTITY_KEYS))
+
+    disagreements = [entry for entry in shared
+                     if entry[2] != entry[3] or type(entry[2]) is not type(entry[3])]
+    if disagreements:
+        _key, label, value, other = min(disagreements, key=_rank)
+        return "disagrees", (
+            f"{label}: {_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)} vs "
+            f"{_bounded(str(other), _ATTRIBUTION_VALUE_LIMIT)}")
+    _key, label, value, _other = min(shared, key=_rank)
+    return "agrees", f"{label}={_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}"
+
+
+def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
+                                total: int) -> None:
+    """Fail LOUDLY when an absorbed position holds content this write would not produce (#9318).
+
+    THE ONE CALL SITE is :func:`replay`'s statement loop, which every
+    journal-position insert already passes through — the live door, a full
+    replay, the reconciler, the backfill tools. Putting the verdict anywhere
+    else (a caller, a second chokepoint) is how two writers come to disagree
+    about what the record holds.
+
+    THREE OUTCOMES, and the distinction is the whole point of the change:
+
+    * the INSERT affected a row ⇒ nothing to decide, return;
+    * it affected none, and the surviving row's content MATCHES ⇒ a genuine
+      REPLAY. Return in SILENCE — no exception, no counter, no log line. The
+      schema's *"applying a position twice is a no-op"* is preserved exactly;
+    * it affected none, and the content DIFFERS ⇒ a COLLISION. Raise
+      :class:`JournalPositionCollision`.
+
+    ⚠️ A cursor that cannot report ``rowcount``, or a conflict query that
+    somehow returns no row, also returns silently: the guard may only fire on
+    POSITIVE evidence that the position holds content this write would not
+    produce. Its job is to make an existing silent failure loud, never to become
+    a new silent one. ⛔ Such a refusal is not an ALARM that is wrong, but its
+    CAUSE the row cannot name: a payload DERIVATION change since that row was
+    written makes an old row differ from what this tree would write for the SAME
+    record — one record, two derivations — and that case is documented in the
+    class's RESIDUAL block rather than treated as unreachable here.
+
+    ⛔ THE READ IS TENANT-SCOPED. The conflict query runs after
+    :func:`scope_connection` set the tenant GUC on this same connection, so RLS
+    returns only this tenant's rows — a position occupied by ANOTHER tenant is
+    not visible here, and could not collide anyway (it is part of the key).
+    """
+    if _affected_rows(cursor) != 0:
+        return
+    # ⚠️ THIS PAIRING IS `_journal_row`'s PARAMETER ORDER, and it is pinned by
+    # `tests/test_9318_journal_collision.py` for exactly that reason: a reorder
+    # there would make this SELECT name a position that does not exist, which is
+    # a silent MISS (never a false alarm — see the helper's docstring), i.e. the
+    # one failure mode a guard cannot be allowed to have unobserved.
+    org_id, graph_id, seq, event_type, payload = statement.params[:5]
+    try:
+        cursor.execute(_JOURNAL_CONFLICT_CONTENT_SQL,
+                       (org_id, graph_id, seq, event_type, payload))
+        stored = cursor.fetchone()
+    except Exception as exc:
+        # Attributed like any other plan statement: a failure to ASK is a
+        # failure to know, and it must name the position it could not check
+        # rather than escaping as a bare driver error.
+        raise RecordStatementError(
+            _failure_line(
+                _statement_attribution(statement, index, total),
+                _driver_fault(exc),
+            )
+        ) from exc
+    if stored is None:
+        return
+    if isinstance(stored, Mapping):
+        stored_type, stored_payload = stored["event_type"], stored["payload"]
+    else:
+        stored_type, stored_payload = stored[0], stored[1]
+    digest, size = _payload_digest(payload)
+    stored_digest, stored_size = _payload_digest(stored_payload)
+    identity_state, identity_detail = _identity_evidence(payload, stored_payload)
+    raise JournalPositionCollision(
+        org_id=org_id, graph_id=graph_id, seq=seq,
+        event_type=event_type, payload_digest=digest, payload_bytes=size,
+        stored_event_type=stored_type, stored_payload_digest=stored_digest,
+        stored_payload_bytes=stored_size,
+        identity_state=identity_state, identity_detail=identity_detail,
     )
 
 
@@ -6486,6 +7012,14 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
                     _driver_fault(exc),
                 )
             ) from exc
+        if _JOURNAL_INSERT_PREFIX in statement.sql:
+            # ⛔ THE ONE CALL SITE (#9318). Everything that writes layer 1 — the
+            # live door, a full replay, the reconciler, the backfill tools —
+            # executes its position row HERE, so the replay-vs-collision verdict
+            # cannot be forgotten by a caller and cannot be spelled twice. It
+            # costs one `rowcount` read on the insert path, and one extra
+            # tenant-scoped SELECT only when the insert was ABSORBED.
+            _refuse_a_journal_collision(cursor, statement, index, total)
     report = ReplayReport(events=len(records), statements=0)
     for statement in plan:
         if _JOURNAL_INSERT_PREFIX in statement.sql:

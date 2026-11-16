@@ -698,17 +698,20 @@ def test_an_unreadable_verdict_is_never_published_as_not_refusing(monkeypatch):
 
 @pytest.mark.parametrize("reason", [
     "write_failed", "no_tenant", "malformed_dsn", "circuit_open",
-    "no_journal", "seam_unimportable",
+    "no_journal", "seam_unimportable", "journal_collision",
 ])
 def test_every_counter_reason_reaches_the_payload_with_its_own_identity(
         monkeypatch, reason):
-    """The runbook's SIX-row reason table has a code side (#10620 review, 2).
+    """The runbook's SEVEN-row reason table has a code side (#10620 review, 2).
 
     `no_journal` and `seam_unimportable` are the two the first cut omitted, and
     they are the two whose remedy is NOT a replay — a reason that never reaches
-    the payload cannot name its own fix. Driven through the PUBLIC writer, so an
-    allowlist hidden inside the window reader fails here instead of silently
-    dropping a reason from the operator's diagnosis.
+    the payload cannot name its own fix. `journal_collision` (#9318) is the
+    third of that kind and the only POST-write one, so its omission would be
+    the same defect for the token where a replay actively re-raises. Driven
+    through the PUBLIC writer, so an allowlist hidden inside the window reader
+    fails here instead of silently dropping a reason from the operator's
+    diagnosis.
     """
     from tortoise import monitoring
 

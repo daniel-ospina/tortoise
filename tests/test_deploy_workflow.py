@@ -3026,24 +3026,25 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # arm's only remaining branch reds a healthy deployment (#9585 review P2).
     assert re.search(r"\*\*no\*\* request identity", flat), (
         "the section claims the `no_tenant` log line can attribute growth to a "
-        "request — it carries no request identity, and of the four "
-        "`record_writer` reasons only `circuit_open` carries the record type, so "
-        "that step cannot be performed"
+        "request — it carries no request identity, and of the five "
+        "`record_writer` reasons only `malformed_dsn` and `no_tenant` carry no "
+        "record type, so that step cannot be performed"
     )
     # The message above states the EVIDENCE for the impossibility (which reasons
     # carry what), so pin the evidence too — otherwise the parenthetical can be
     # deleted and the claim stands on an assertion that no longer measures it
-    # (#10071 review P2, verified: `circuit_open` logs `record.get("type")` in its
-    # WARN; `malformed_dsn` and `write_failed` log the exception. Line numbers are
+    # (#10071 review P2, verified: `circuit_open`, `write_failed` and
+    # `journal_collision` log `record.get("type")` in their WARNs; `malformed_dsn`
+    # and `no_tenant` log no record type. Line numbers are
     # deliberately not cited — they rot, and the earlier attempt cited the
     # `no_durable_journal` DEBUG message at that line instead, #10083 review P2).
     # (`origin/main` re-pointed this same citation at record_writer.py:1218 while
     # this branch removed the citation instead; the removal supersedes the
     # re-point, so no line is named here and the correction cannot rot again).
-    assert re.search(r"`circuit_open` is the only one that carries the record type", flat), (
+    assert re.search(r"only `malformed_dsn` and `no_tenant` carry no record type", flat), (
         "the section gives no evidence for why the log cannot attribute growth — "
-        "only `circuit_open` carries the record type, so a reader cannot check "
-        "the claim it is asked to act on"
+        "`malformed_dsn` and `no_tenant` are the only reasons carrying no record "
+        "type, so a reader cannot check the claim it is asked to act on"
     )
     # ⛔ Pin the CLAUSE, not the token: `capture ran **unbound**` alone survives
     # both "it is **never** a fail-and-fix when the capture ran **unbound**" and
