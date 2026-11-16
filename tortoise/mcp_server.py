@@ -5186,8 +5186,33 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
 
 def tortoise_get_point(id: str) -> dict:
     """Get a single Point by ID. Returns all properties, or empty dict.
-    Alias → get(id, type='point') (epic #888 W3)."""
-    return _safe(_get_org_sdk().get_point, id)
+    Alias → get(id, type='point') (epic #888 W3).
+
+    #12941 — THIS DOOR HONOURS `TORTOISE_RECORD_SERVE`. The read runs through
+    `TortoiseSDK.get_point(..., served_out=...)`, the opt-in caller-facing form
+    of the one seam (`tortoise/record_serve.py`), so an agent that writes and
+    then verifies does not read back ABSENT: the record answers when the cache
+    is cold (`off` mode, the default, is unchanged). The store that answered is
+    named on the response — `servedFrom` / `fallbackReason` — and an answer the
+    store could not see carries `residency: "not-hot"` instead of an empty dict
+    (#7952). The MCP lane already carries the record tenant ambiently
+    (`mcp_auth._record_tenant_scope`, installed by `OrgResolutionMiddleware`
+    since #9192/#10025/#10046), which is why this door can consult the record at
+    all — `record_serve`'s `internal-accessor` exclusion was written when it
+    could not.
+
+    ⛔ OWNERSHIP OF THE OUT-DICT. `served_out` is filled by the seam and merged
+    here, and the attribution WINS over a stored property of the same name: a
+    caller that cannot tell a fallback from stored data would have exactly the
+    invisible fallback this seam forbids (the reserved-name rule
+    `hosted_api.get_point` states). In `off` mode with no marker armed the dict
+    is empty, so the response is the pre-#12941 shape exactly.
+    """
+    served: dict = {}
+    out = _safe(_get_org_sdk().get_point, id, served_out=served)
+    if not isinstance(out, dict) or isinstance(out, _SafeError):
+        return out
+    return {**(out or {}), **served} if served else out
 
 
 # ── Entity Resolution (GAP-01 #6987) ──────────────────────────

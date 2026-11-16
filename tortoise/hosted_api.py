@@ -14040,11 +14040,27 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         # the caller. ⚠️ OFF keeps the pre-#7970 detail EXACTLY — a plain string,
         # not a wrapper — so the default path stays byte-identical.
         if served is None:
+            # #12941: OFF consults no record, so it cannot establish absence at
+            # all — but the marker's OWN flag is what lets this door say so, and
+            # it is read before any handle is touched (`residency_armed`), so an
+            # unarmed deployment still pays nothing and answers the same string.
+            marker = None
+            if record_serve.residency_armed():
+                marker = await _read_offload(
+                    lambda: record_serve.point_residency(
+                        sdk._get_proj().g, found=False, key=point_id),
+                    op="get_point.residency")
+            if marker:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"message": "Point not found", "residency": marker})
             raise HTTPException(status_code=404, detail="Point not found")
         absent: dict = {"message": "Point not found"}
-        # `as_wire` emits BOTH keys, `fallbackReason` as null when there was
-        # none — an omission would let a stored property masquerade.
-        absent.update(served.as_wire())
+        # `absent_wire` emits BOTH attribution keys (as `as_wire` does), plus
+        # `residency: "not-hot"` when the record could not be asked (#12941):
+        # a cache-only empty answer is "we cannot see it from here", and a
+        # plain "Point not found" here is the false absence §17.2 forbids.
+        absent.update(served.absent_wire())
         raise HTTPException(status_code=404, detail=absent)
     # The tombstone rule is the ENDPOINT's, not the store's: a retracted point
     # stays retrievable by get_point on the SDK but not here, whichever store
@@ -14057,7 +14073,7 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         if served is None:  # OFF keeps the pre-#7970 shape exactly
             raise HTTPException(status_code=404, detail="Point not found")
         retracted: dict = {"message": "Point not found"}
-        retracted.update(served.as_wire())
+        retracted.update(served.absent_wire())
         raise HTTPException(status_code=404, detail=retracted)
     props = dict(props)
     if served is not None:

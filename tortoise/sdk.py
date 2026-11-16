@@ -26947,28 +26947,140 @@ class TortoiseSDK:
 
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
-    def get_point(self, id: str) -> dict:
+    def get_point(self, id: str, *, served_out: dict | None = None) -> dict:
         """Get a Point by ID. Returns dict of all properties, or {} if not found.
 
         #432: retracted points (status='retracted') ARE returned by get_point
         — they are tombstoned, not deleted. Query surfaces exclude them by
         default (opt-in via include_retracted).
+
+        #12941 — THE READ-MY-WRITES SEAM, opt-in through ``served_out``.
+        ``TORTOISE_RECORD_SERVE`` selects the store exactly as it does on the
+        hosted route (``tortoise/record_serve.py``, one parser, one registry):
+        ``off`` answers from the cache as before, ``record`` answers from the
+        record or RAISES, and ``prefer`` asks the record first with a NAMED,
+        COUNTED fallback. A write lands in the record, so with the cache cold
+        an ``off`` deployment answers ``{}`` for a node that EXISTS — which is
+        the defect this seam removes.
+
+        ⛔ WHY OPT-IN AND NOT UNCONDITIONAL. This method is the SDK's INTERNAL
+        accessor: write paths call it MID-WRITE to build journal events and to
+        check dedupe/approve/promote state (``_emit_event("PointAdded",
+        point=self.get_point(mid))`` and friends — see the #7983 note below), so
+        a record answer would make a writer read a store the same write has not
+        finished projecting, and an armed deployment would change what a WRITE
+        journals (#12941's own exclusion, ``record_serve``'s
+        ``internal-accessor``). ``served_out=None`` — the default, and what
+        every write path passes — is byte-identical to the pre-#12941 call: one
+        cache query, no record consult, no added key.
+
+        ``served_out``  a dict the CALLER owns; on return it carries the
+                        attribution (``servedFrom``, ``fallbackReason``, and
+                        ``residency: "not-hot"`` when nobody who could see the
+                        node was consulted). ``off`` fills only ``residency`` —
+                        there is no fallback to explain, and an unarmed read
+                        keeps the pre-#12941 response shape. The field is the
+                        same caller-owned-sink instrument ``query`` already uses
+                        (``read_status_out`` / ``leg_trace``, #3862/#8447), so
+                        this adds NO public SDK method and changes no existing
+                        caller's behaviour.
+
+        ⛔ A cache-only empty answer is never returned as a bare ``{}`` when the
+        record could not be asked: the return carries ``residency: "not-hot"``
+        (#7952 — "a cache miss must say not-hot, never return empty"), so a
+        verifier can tell *"we cannot see it from here"* from *"it does not
+        exist"*. ``TORTOISE_RESIDENCY`` gates that marker in ``off`` mode, the
+        same as everywhere else.
         """
         proj = self._get_proj()
-        rows = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN properties(n)",
-            params={"id": id},
-        ).result_set
-        props = rows[0][0] if rows else {}
-        # #7983: NOT recorded, deliberately. `get_point` is the SDK's INTERNAL
-        # accessor: write paths call it to build events (`_emit_event("PointAdded",
-        # point=self.get_point(mid))`) and to check dedupe/promote/approval state,
-        # so recording it makes a node written and never read look READ — biasing
-        # `f` HIGH, i.e. AGAINST the split, and destroying the one-directional
-        # caveat §17.4.6 relies on. A caller-facing read-by-id path is a coverage
-        # hole (#8877); the right fix is a seam that separates the two, not a hook
-        # that counts every internal check as a caller read.
-        return props
+
+        def _cache_answer() -> dict | None:
+            """The cache's answer: ``None`` for a miss (the seam's vocabulary)."""
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN properties(n)",
+                params={"id": id},
+            ).result_set
+            return dict(rows[0][0]) if rows else None
+
+        if served_out is None:
+            props = _cache_answer()
+            # #7983: NOT recorded, deliberately. `get_point` is the SDK's INTERNAL
+            # accessor: write paths call it to build events (`_emit_event("PointAdded",
+            # point=self.get_point(mid))`) and to check dedupe/promote/approval state,
+            # so recording it makes a node written and never read look READ — biasing
+            # `f` HIGH, i.e. AGAINST the split, and destroying the one-directional
+            # caveat §17.4.6 relies on. A caller-facing read-by-id path is a coverage
+            # hole (#8877); the right fix is a seam that separates the two, not a hook
+            # that counts every internal check as a caller read.
+            return props or {}
+
+        # ── the CALLER-FACING read (#12941) — opt-in, so an unarmed caller and
+        # every mid-write caller above keep the pre-#12941 shape exactly.
+        from .record_serve import (
+            FALLBACK_RECORD_TENANT_UNRESOLVED,
+            MODE_OFF,
+            MODE_RECORD,
+            READ_POINT_BY_ID,
+            RecordServeError,
+            answered_by_cache,
+            point_residency,
+            serve_mode,
+            serve_point,
+        )
+        from .residency import RESIDENCY_FIELD, RESIDENCY_NOT_HOT
+
+        mode = serve_mode()
+        coordinate = f"Point:{id}"
+        if mode == MODE_OFF:
+            # OFF consults no record, so an empty answer can only be marked, never
+            # repaired: the marker says "this store cannot see it", which is all a
+            # partial cache (or an armed deployment) can honestly say.
+            props = _cache_answer() or {}
+            marker = point_residency(proj.g, found=bool(props), key=id)
+            # ⛔ OFF emits NO attribution — that is the pre-#12941 shape, and the
+            # `servedFrom`/`fallbackReason` pair is the ARMED read's statement
+            # about a fallback, of which `off` performs none (`hosted_api.get_point`
+            # states the same rule for the same reason). The marker is the one
+            # thing that CAN be said here, and it is carried on the answer itself
+            # as well as in the sink, so a caller reading only props still sees it.
+            if marker:
+                served_out[RESIDENCY_FIELD] = marker
+                return {**props, RESIDENCY_FIELD: marker}
+            return props
+
+        # The tenant is the SDK's OWN carried pair first and the ambient
+        # scope/env second — the same resolution the record WRITE seam uses
+        # (`record_tenant_effective`), so the read cannot be scoped to a tenant
+        # the write was not filed under.
+        from .record_writer import record_tenant_effective
+
+        tenant = record_tenant_effective(getattr(self, "_record_tenant", None))
+        if tenant is None:
+            if mode == MODE_RECORD:
+                # Structural, and it has its own class: retrying never resolves a
+                # tenant, so this must not read as the retryable outage that
+                # earns a 503 on the hosted door.
+                raise RecordServeError(
+                    "this SDK carries no record tenant, so the read cannot be "
+                    "served from the record — absence is NOT established")
+            answer = answered_by_cache(
+                read=READ_POINT_BY_ID, coordinate=coordinate,
+                props=_cache_answer(),
+                reason=FALLBACK_RECORD_TENANT_UNRESOLVED)
+        else:
+            answer = serve_point(
+                tenant=tenant, point_id=id, cache_answer=_cache_answer,
+                mode=mode)
+        served_out.update(answer.as_wire())
+        marker = point_residency(proj.g, found=answer.found, key=id)
+        if marker is None and answer.not_hot:
+            # Armed, and the record could not be asked: this is the `not-hot`
+            # #7952 requires, whichever of the five reasons got us here.
+            marker = RESIDENCY_NOT_HOT
+        if marker:
+            served_out[RESIDENCY_FIELD] = marker
+            return {**(answer.props or {}), RESIDENCY_FIELD: marker}
+        return dict(answer.props) if answer.props else {}
     # ── Chain Integrity ───────────────────────────────────────────
 
     def check_structure(self) -> list[dict]:

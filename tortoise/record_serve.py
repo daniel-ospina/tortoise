@@ -180,6 +180,7 @@ __all__ = [
     "NOT_SERVED",
     "READ_NODE_BY_KEY",
     "READ_POINT_BY_ID",
+    "RECORD_ANSWERED_REASONS",
     "RECORD_SERVE_ENV",
     "RECORD_STATEMENT_TIMEOUT_MS",
     "SERVED",
@@ -195,6 +196,8 @@ __all__ = [
     "not_served_reads",
     "open_record",
     "parity_difference",
+    "point_residency",
+    "residency_armed",
     "read_node",
     "read_point",
     "reset_fallback_counts",
@@ -541,6 +544,20 @@ FALLBACK_REASONS: tuple[str, ...] = (
     FALLBACK_RECORD_TENANT_UNRESOLVED, FALLBACK_RECORD_LANE_REFUSED,
     FALLBACK_RECORD_BOUND_MISS)
 
+#: The ONE reason under an armed mode that means the record **was asked and
+#: answered "no row"**. Every OTHER reason means the record could not be asked
+#: (down, unasked, too slow to answer inside the bound, or no tenant to ask for)
+#: — and then an empty answer is **`not-hot`**, never a finding of absence.
+#:
+#: ⚠️ This is the whole distinction #7952 draws, applied to the seam that can
+#: finally see both stores: an empty CACHE answer means *"we cannot see it from
+#: here"*, an empty RECORD answer means *"it does not exist"* (§17.2/§17.3 and
+#: `STORAGE-ARCHITECTURE.md` §2.0 — record is truth, cache is derived). Reading
+#: it off `served_from` alone would be wrong, and the `record-miss` fallback is
+#: where that shows: the ANSWER came from the cache, but the record was
+#: successfully asked first, so the absence IS established.
+RECORD_ANSWERED_REASONS: tuple[str, ...] = (FALLBACK_RECORD_MISS,)
+
 _FALLBACKS: dict[str, int] = {}
 #: The counter is incremented from BOTH the event loop (the endpoint's
 #: tenant-unresolved arm) and a worker thread (`serve_point` under
@@ -876,6 +893,39 @@ class ServedAnswer:
     def found(self) -> bool:
         return self.props is not None
 
+    @property
+    def absence_established(self) -> bool:
+        """Is this empty answer a FINDING of absence, or merely unseeing?
+
+        Three states are NOT the same thing and collapsing them is the defect
+        #12941 measures:
+
+        * a node came back → there is no absence to establish;
+        * the **record** answered empty → the truth store holds no such row, so
+          the absence IS established (§2.0: the record is authoritative);
+        * the **record was asked** (an armed `prefer` read that fell back on
+          `record-miss`) → also established, even though the cache is what
+          physically failed to find it;
+        * anything else — the record was down, unasked, out of time, or there
+          was no tenant to ask — means *nobody who could see it was consulted*,
+          and that is **not** an absence.
+        """
+        if self.props is not None:
+            return True
+        if self.served_from == "record":
+            return True
+        return self.fallback_reason in RECORD_ANSWERED_REASONS
+
+    @property
+    def not_hot(self) -> bool:
+        """§17.2's verdict: the store this read consulted could not see it.
+
+        `not-hot` is a directive (*"ask the record"*), never a status term
+        (#7953) — so it rides the response beside the attribution and is never
+        allowed to BE the answer.
+        """
+        return self.props is None and not self.absence_established
+
     def as_wire(self) -> dict[str, Any]:
         """The attribution fields a caller puts on the response.
 
@@ -889,6 +939,64 @@ class ServedAnswer:
         """
         return {"servedFrom": self.served_from,
                 "fallbackReason": self.fallback_reason}
+
+    def absent_wire(self) -> dict[str, Any]:
+        """The attribution an ABSENT answer carries — `not-hot` when it applies.
+
+        A separate method from :meth:`as_wire` for a load-bearing reason:
+        `as_wire`'s exact key set is pinned (`test_record_serve.py` asserts it
+        literally) and every FOUND read emits it, so widening it would change
+        the wire shape of every armed response. This one is used only on the
+        absent arms, and adds the marker ONLY where it is true — a
+        record-answered absence carries no `residency` key rather than a
+        `hot` one, because "the store could see it and it is not there" needs no
+        directive at all.
+        """
+        fields = self.as_wire()
+        if self.not_hot:
+            from .residency import RESIDENCY_FIELD, RESIDENCY_NOT_HOT
+
+            fields[RESIDENCY_FIELD] = RESIDENCY_NOT_HOT
+        return fields
+
+
+def residency_armed() -> bool:
+    """Is the completeness marker's own flag on? (default off — #4097 contract)
+
+    Read BEFORE any graph handle is touched, so a deployment that never armed
+    the marker pays no query and no handle construction for it: `off` mode stays
+    byte-identical, which is the whole reason this predicate exists rather than
+    each door calling `residency.residency_enabled()` after opening a graph.
+    """
+    from .residency import residency_enabled
+
+    return residency_enabled()
+
+
+def point_residency(g: Any, *, found: bool, key: str) -> str | None:
+    """§17.2's marker for a point-by-id read the RECORD did not answer.
+
+    ONE implementation for both doors that ask (the SDK accessor behind the MCP
+    tool, and the hosted endpoint's `off` arm), so the two cannot mint different
+    verdicts from one declaration.
+
+    ``found``  a hit proves the store could see this read, so there is nothing to
+               mark and the declaration is not even read.
+    ``key``    the node the read named — the only case in which a declaration can
+               separate *"outside the hot set"* from *"inside it and genuinely
+               absent"* (``residency.mark_residency``).
+
+    Returns ``not-hot`` only when the marker's own flag is armed AND the cache
+    declares itself PARTIAL without covering ``key``. A missing/malformed
+    declaration reads as ``complete`` (the §2.0 default), so an operator who
+    never armed anything gets ``None`` and a byte-identical response.
+    """
+    from .residency import RESIDENCY_NOT_HOT, mark_residency, read_declaration
+
+    if found or not residency_armed():
+        return None
+    marker = mark_residency(read_declaration(g), hits=0, key=key)
+    return RESIDENCY_NOT_HOT if marker == RESIDENCY_NOT_HOT else None
 
 
 class CacheAnswerRequired(Exception):
