@@ -506,17 +506,6 @@ _POSITION_FROM_ORDINAL = "seq is not None"
 _POSITION_FROM_ALLOCATOR = "True if allocate else seq is not None"
 
 
-def _is_position_from_allocator(value: ast.expr | None,
-                                *, bound: dict[str, ast.expr] | None = None) -> bool:
-    """Is this `position=` the ALLOCATOR arm, with `allocate=` really bound?"""
-    if value is None:
-        return False
-    if ast.unparse(value) != _POSITION_FROM_ALLOCATOR:
-        return False
-    allocate = (bound or {}).get("allocate")
-    return isinstance(allocate, ast.Name) and allocate.id == "allocate"
-
-
 def _is_position_from_ordinal(value: ast.expr | None,
                               *, bound: dict[str, ast.expr] | None = None) -> bool:
     """Is this `position=` bound to a position the caller did not invent?
@@ -546,21 +535,6 @@ def _is_position_from_ordinal(value: ast.expr | None,
     if allocate_bound:
         return text == _POSITION_FROM_ALLOCATOR
     return text == _POSITION_FROM_ORDINAL
-
-
-#: The `first_seq=` form that belongs WITH the allocator arm: the record's
-#: counter issues the number, so the ordinal must be bypassed on that arm and
-#: used on the other. Compared after stripping parentheses, because `ast.unparse`
-#: brackets the nested conditional in the `else` branch.
-_FIRST_SEQ_FROM_ALLOCATOR = "1 if allocate else seq if seq is not None else 1"
-
-
-def _first_seq_from_allocator(value: ast.expr | None) -> bool:
-    """Does this `first_seq=` bypass the ordinal exactly on the allocate arm?"""
-    if value is None:
-        return False
-    return ast.unparse(value).replace("(", "").replace(")", "").replace(
-        " ", "") == _FIRST_SEQ_FROM_ALLOCATOR.replace(" ", "")
 
 
 #: The `first_seq=` forms that genuinely USE the append's ordinal. An

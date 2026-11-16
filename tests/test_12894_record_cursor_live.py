@@ -41,6 +41,7 @@ A skip is visible on that job (its leg gate reds any skip), and locally the
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import uuid
@@ -178,7 +179,18 @@ def schema():
         "None and every armed write is charged 0 bytes — this is the state "
         "`20261116000001`'s guarded GRANT exists to remove, and it is skipped "
         "whenever the record migrations are applied before the metering one")
-    return conn
+    try:
+        yield conn
+    finally:
+        # ⛔ CLOSE AT MODULE TEARDOWN, WHICH IS BEFORE THE NEXT FILE'S FIXTURES.
+        # pytest finalizes a module's fixtures before another module's run, so
+        # this closes the last window in which THIS suite could be the session
+        # blocking the next suite's `_ensure_record_schema` re-apply. It is not a
+        # substitute for `_release_pooled_handles` above (that one covers the
+        # per-test handle the live door pools); together they mean no connection
+        # this suite opened outlives it.
+        with contextlib.suppress(Exception):
+            conn.close()
 
 
 @pytest.fixture()
@@ -637,46 +649,55 @@ def test_a_cancelled_allocation_rolls_the_counter_back(schema, tenant, app):
     """FINDING (M5): `57014` (a cancelled statement — a local timeout, an operator
     cancel) was not handled at all.
 
-    This is a REAL cancellation: a 1 ms statement timeout on an allocation of
-    20,000 records. The class is NAMED, COUNTED, and raised retryable — and the
-    increment is gone with the aborted transaction, so a retry starts from the
-    same number.
+    ⛔ THE CANCELLATION IS FORCED BY A REAL LOCK WAIT, NOT BY A TINY TIMEOUT, and
+    the first version of this test is why. It set `statement_timeout = 1ms` on a
+    20 000-record allocation and was RIGHT HALF THE TIME — measured, 4 runs:
+    fail, pass, fail, pass. Twenty thousand rows is fast enough that the two
+    racers are comparable, so the test measured the machine's mood, not the
+    allocator. Holding the counter's row lock from a SECOND session makes the
+    wait unbounded, so a 200 ms timeout can only be reached by waiting:
 
-    ⛔ THE STATEMENT IS EXECUTED DIRECTLY, NOT THROUGH `execute_allocation`, and
-    that is not a shortcut. `execute_allocation` scopes the connection and reads
-    the isolation level INSIDE the same session that carries `SET LOCAL
-    statement_timeout = '1ms'`, so the 1 ms budget also covered those two tiny
-    statements — a scope statement slower than 1 ms raised a bare `QueryCanceled`
-    and reddened this leg for the wrong reason. The two mechanisms it would have
-    exercised have their own legs (`test_a_seed_without_the_guc_is_a_refusal_not_a_
-    divergence`, `test_a_serializable_transaction_is_refused_at_arm`); what THIS
-    leg is for is the `57014` classification on the allocation statement, so the
-    statement runs here on the already-scoped connection and is classified by the
-    module's own `raise_named` — the same call `execute_allocation` makes.
+    the admin session takes the row (`FOR UPDATE`, uncommitted) → this session's
+    allocation BLOCKS on it → the timeout fires → `57014`.
+
+    The class is NAMED, COUNTED and retryable, and the increment is gone with the
+    aborted transaction, so a retry starts from the same number.
+
+    ⛔ AND IT RUNS THROUGH `execute_allocation`, THE REAL ENTRY POINT. An earlier
+    cut had to execute the statement directly because a 1 ms budget also covered
+    `execute_allocation`'s own scope + isolation reads, so a slow scope statement
+    raised a bare `QueryCanceled` and reddened the leg for the wrong reason. The
+    lock-forced wait REMOVES that constraint rather than working around it: the
+    timeout is no longer the thing racing, so 200 ms comfortably covers the two
+    prologue statements and the cancellation can only land inside the allocation.
     """
+    import psycopg2
+
     org, graph = tenant
     _seed_and_arm(app, org, graph, 0)
     rp.scope_connection(app, org)
-    # The ALLOCATION statement alone, with a batch big enough to exceed 1 ms:
-    # the class under test is the allocator's, so the timeout must land inside
-    # ITS statement (a 20,000-record `RecordWriter.write` cancels on statement 2
-    # of 40,001 — a layer mutation — which is a different path).
-    statement = ra.allocation_statement(
-        org_id=org, graph_id=graph, records=_records(20_000))
-    with app.cursor() as cur:
-        cur.execute("SET LOCAL statement_timeout = '1ms'")
+    blocker = psycopg2.connect(os.environ["TEST_RECORD_DB_URI"])
+    blocker.autocommit = False
+    try:
+        with blocker.cursor() as cur:
+            # The superuser session: no RLS predicate to satisfy, and the lock is
+            # held until this transaction ends, which is what makes the wait real.
+            cur.execute("SELECT seq FROM public.record_cursor "
+                        "WHERE org_id = %s AND graph_id = %s FOR UPDATE",
+                        (org, graph))
+            assert cur.fetchone() is not None
+        statement = ra.allocation_statement(
+            org_id=org, graph_id=graph, records=_records(3))
+        with app.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '200ms'")
         with pytest.raises(ra.RetryableAllocationFailure) as caught:
-            try:
-                cur.execute(statement.sql, statement.params)
-            except Exception as exc:
-                ra.raise_named(exc, where="the position allocation")
-                raise AssertionError(
-                    "the cancelled allocation was NOT classified as retryable "
-                    f"— raise_named returned instead of raising: {exc!r}"
-                ) from exc
-    assert caught.value.sqlstate == "57014", caught.value
-    assert ra.metrics()["query_cancelled"] >= 1
-    app.rollback()
+            ra.execute_allocation(app, statement, org_id=org, graph_id=graph)
+        assert caught.value.sqlstate == "57014", caught.value
+        assert ra.metrics()["query_cancelled"] >= 1
+    finally:
+        app.rollback()
+        blocker.rollback()
+        blocker.close()
     assert _counter(schema, org, graph) == (0, "active"), (
         f"a cancelled allocation burned positions: {_counter(schema, org, graph)}")
     assert _journal_rows(schema, org, graph) == []
