@@ -95,7 +95,7 @@ This is why the current five extra words are not needed — `retracted`, `outdat
 
 | not a word | what it actually is | where it lives |
 |---|---|---|
-| "archived" | **two different intentions wearing one word**: *this ended* (which writes `deprecated`/`superseded`) or *do not show me this* (which writes nothing at all — it is a reader's filter). The model makes the writer say which they meant. Retroactively filing a rejected thing must not erase *why* it ended |
+| "archived" | **two different intentions wearing one word**: *this ended* (which writes `deprecated`/`superseded`) or *do not show me this* (which writes nothing at all — it is a reader's filter). The model makes the writer say which they meant. Retroactively filing a rejected thing must not erase *why* it ended | the `deprecated`/`superseded` words above — or, for the second intention, nowhere on the record at all: a filter the reader applies at read time (§2, question 4) |
 | "in-progress", "completed" | position in a process | a pipeline stage |
 | "outdated" | the past name of the Point "no longer counts" mechanism | the `deprecated`/`superseded` words above |
 | "blocked", "paused", "waiting" | an interruption, not an ending | a stage in the `suspended` slot — and for a **goal**, `blocked` is also one of its `goalState` values. The two do not collide: the stage is read by its **slot**, never its name (§4.1) |
