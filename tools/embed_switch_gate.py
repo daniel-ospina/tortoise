@@ -213,10 +213,24 @@ _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s
 #: treating them as closers dropped the depth at the `then` line so the body after it read as top
 #: level — the exact fail-open this model exists to close, on the most ordinary multi-line
 #: `if`/`then`/`fi` in the language (review at `69ee7b1395`). Closers are `fi`/`done`/`esac` and a
-#: closing brace/paren only; openers are the block keywords ANYWHERE at line start (an INDENTED
-#: `  if false; then` is the shape that was missed) plus a trailing `do`/`{`/`(`.
+#: closing brace/paren only; openers are a block keyword that STARTS A STATEMENT — at line start,
+#: after a `;`/`&&`/`||`/`|` separator, or after the `then`/`else`/`elif`/`do` that begins the next
+#: statement of an enclosing block (an INDENTED `  if false; then` is the shape that was missed) —
+#: plus a `{`/`(` tail. ⛔ The `then` form is not decoration (review P1, measured): without it the
+#: SECOND `if` on `if false; then if false; then echo x; fi` was invisible, so that line opened one
+#: block and closed one and the depth returned to 0 while bash was still one level deep — both
+#: exports of a never-running outer branch were credited STATED and the gate exited 0.
+#: ⛔ `do` IS NOT AN OPENER (review P2, measured): it is the CONTINUATION of a loop header, and the
+#: header itself (`while`/`until`/`for`/`select`) already counts. Counting both made a loop written
+#: the ordinary two-line way (`while …` then `do` on its own line) net +2 against one `done`, so
+#: every later top-level `export` read as conditional and an HONEST entrypoint was REFUSED — with a
+#: message blaming the value (`does not state a value this gate can read`) instead of the depth.
+#: Measured on this repo's own `entrypoint.sh`: with `do` counted, one line
+#: (`while IFS= read -r line || [ -n "$line" ]; do`) matches TWICE and the file balances 100
+#: openers to 91 closers, so the depth never returns to 0; without it, 91 to 91.
 _SHELL_OPENERS = re.compile(
-    r"(?:^|[;&|])\s*(?:if|while|until|for|case|select)\b|\bdo\s*$|\{\s*$|\(\s*$"
+    r"(?:^|[;&|])\s*(?:(?:then|else|elif|do)\s+)?(?:if|while|until|for|case|select)\b"
+    r"|\{\s*$|\(\s*$"
 )
 #: ⛔ A closer may follow a STATEMENT SEPARATOR on the same line (review P1, measured). The model
 #: was line-anchored, so a one-line `if [ -n "$X" ]; then echo hi; fi` opened a block and never
@@ -245,6 +259,12 @@ _SHELL_TERMINATES = re.compile(r"^\s*(?:exit|exec)\b")
 #: environment).
 _SHELL_UNEXPORTED = re.compile(r"^\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
 _SHELL_UNSET = re.compile(r"^\s*unset\s+(?P<names>[\w\s-]+)\s*$")
+#: ⛔ A THIRD way a later line takes an earlier `export K=1` back (review P3, measured):
+#: `export -n K` removes K from the exported environment WITHOUT unsetting it, so `exec "$@"`
+#: passes nothing on. `entrypoint.sh` is `#!/bin/bash`, where `-n` means exactly that; the exported
+#: literal survived and the gate printed `ok … TORTOISE_EMBED_GATE=1` over a process that receives
+#: no value at all (`env -i … bash script` printed `NOT IN ENVIRONMENT`).
+_SHELL_EXPORT_UNEXPORT = re.compile(r"^\s*export\s+-n\s+(?P<names>[\w\s-]+)\s*$")
 
 #: A trailing `#` comment (idiomatic after a shell assignment) is NOT part of the value — leaving
 #: it in made `export K=""  # off for now` read as a non-empty statement and skip the EMPTY-value
@@ -298,7 +318,16 @@ def _states_a_literal(value: str) -> bool:
     if operator not in ("-", ":-"):
         return False
     fallback = _unquote((match.group("fallback") or "").strip())
-    return bool(fallback)
+    # ⛔ THE FALLBACK MUST ITSELF BE A LITERAL (review P1, measured). `bool(fallback)` only tested
+    # that TEXT was present, so `${X:-$FALLBACK}` — a default that is ITSELF a variable (or a
+    # command substitution) — was read as a non-empty literal fallback while the process resolves
+    # EMPTY when both are unset. Measured: a script exporting `K="${K:-$FALLBACK}"` printed an
+    # empty value to the process while the gate had already said `ok`, exit 0. This reader resolves
+    # no interpolation, so an EMPTY fallback still states nothing and a `$`/backtick anywhere inside
+    # it is refused; the fail-CLOSED direction is the only one a reader with no resolver may take.
+    if not fallback:
+        return False
+    return not ("$" in fallback or "`" in fallback)
 
 #: Env keys kept when the resolver shell is scrubbed. Deliberately an ALLOWLIST: a lane's
 #: exported `TORTOISE_EMBED_GATE` is not a shipped default, and `${…:-1}` inside a channel would
@@ -965,6 +994,33 @@ def _shell_exports(line: str, structure: str) -> list[tuple[str, str]]:
     return pairs
 
 
+#: Statement separators that end ONE command on a line. A shared line is processed as SEVERAL
+#: statements because a block closer may sit BESIDE a later assignment (review P2, measured):
+#: the closer branch `continue`d before the assignment scan, so `fi; export K="${MAYBE_EMPTY}"`
+#: neither credited nor retracted — an earlier literal `export K=1` survived as `STATED` while the
+#: process receives the later, empty value, and the gate exited 0. `;;` (a `case` terminator) is
+#: matched FIRST so it cannot read as two empty statements.
+_SHELL_STATEMENT = re.compile(r";;|;|&&|\|\|")
+
+
+def _shell_statements(line: str, structure: str) -> list[tuple[str, str]]:
+    """Split one logical line into ``(raw, structural)`` STATEMENT segments.
+
+    Offsets come from the STRUCTURAL view (span bodies and the trailing comment already blanked,
+    length preserved), so a `;`/`&&`/`||` inside a string, a comment or a `$( … )` splits nothing,
+    and each raw slice stays byte-aligned with its structural slice — which is what the readers'
+    head guards compare. A trailing comment is not a statement, so the final raw slice is cut to
+    the structure's length rather than to the line's.
+    """
+    segments: list[tuple[str, str]] = []
+    start = 0
+    for match in _SHELL_STATEMENT.finditer(structure):
+        segments.append((line[start:match.start()], structure[start:match.start()]))
+        start = match.end()
+    segments.append((line[start:len(structure)], structure[start:]))
+    return segments
+
+
 def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     """Assignments an entrypoint script exports at TOP LEVEL (last wins) + ambiguous switch names.
 
@@ -973,6 +1029,23 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     after a top-level ``exit``/``exec``, is routed to ``ambiguous`` instead of being credited: it
     is a conditional the gate does not evaluate, so it is not a statement the shipped
     configuration makes (review at `762f1c56d7`/`8aa35e5d56`, closed here).
+
+    ⛔ **The block model is COUNT-based and PER STATEMENT (review P1+P2, measured).** Per-LINE,
+    boolean accounting had two holes, one in each direction:
+
+    * a line that opens TWO blocks and closes ONE read as ``opens and closes → net zero``, so
+      ``if false; then if false; then echo x; fi`` left the depth at 0 and BOTH exports of a
+      never-running outer branch were credited ``STATED`` — exit 0 over a process that receives
+      neither switch (verified: the same script run by bash prints both UNSET);
+    * a line that closes a block and carries a later assignment ``continue``d before the
+      assignment scan, so an earlier ``=1`` survived as ``STATED`` while the process receives the
+      later value (``fi; export K="${MAYBE_EMPTY}"``) — the same last-wins rule the two
+      retraction regexes exist to enforce.
+
+    So each statement is judged at the depth it ACTUALLY runs at: its closers are applied BEFORE
+    it (a ``fi`` earlier on the line means the statement after it is top level), then the statement
+    is scanned, then its openers are applied. A closer saturates at 0, so a surplus ``esac )`` can
+    never drive the depth negative and re-arm a nested export.
     """
     stated: dict[str, str] = {}
     ambiguous: set[str] = set()
@@ -982,59 +1055,53 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     for line, structure in zip(code_lines, _shell_structures(code_lines), strict=True):
         # ⛔ STRUCTURE, not the raw line: a closer inside a quote or a comment is DATA (review P1),
         # and quote state carried across lines covers a quoted string that spans a newline.
-        if _SHELL_CLOSERS.search(structure):
-            # ⛔ A line that OPENS as well as closes a block is net ZERO (review P1 regression,
-            # measured): `if [ -n "$X" ]; then echo hi; fi` inside a function body matched the
-            # closer, subtracted one, and `continue` skipped the opener accounting — so a
-            # nested export AFTER it read as top level and was credited STATED (exit 0 over a
-            # helper that is never called). A bare `fi`/`done`/`}` still decrements.
-            if not _SHELL_OPENERS.search(structure):
-                depth = max(0, depth - 1)
-            ambiguous.update(_mentioned_switches(line))
-            continue
-        conditional = depth > 0 or terminated
-        exports = _shell_exports(line, structure)
-        if exports:
-            for key, raw_value in exports:
-                value = _strip_inline_comment(raw_value)
-                if key in SWITCHES and (conditional or not _states_a_literal(value)):
-                    # Same last-wins rule as the Dockerfile reader: an ambiguous assignment must
-                    # drop an earlier literal, or the stale literal is reported as STATED while
-                    # the script resolves empty (review P2). A CONDITIONAL assignment is the same
-                    # verdict for the same reason: inside a function body, a branch or a loop it
-                    # may never run, and after a top-level `exit`/`exec` it cannot.
-                    ambiguous.add(key)
-                    stated.pop(key, None)
-                    continue
+        for raw, view in _shell_statements(line, structure):
+            depth = max(0, depth - len(_SHELL_CLOSERS.findall(view)))
+            conditional = depth > 0 or terminated
+            exports = _shell_exports(raw, view)
+            if exports:
+                for key, raw_value in exports:
+                    value = _strip_inline_comment(raw_value)
+                    if key in SWITCHES and (conditional or not _states_a_literal(value)):
+                        # Same last-wins rule as the Dockerfile reader: an ambiguous assignment
+                        # must drop an earlier literal, or the stale literal is reported as
+                        # STATED while the script resolves empty (review P2). A CONDITIONAL
+                        # assignment is the same verdict for the same reason: inside a function
+                        # body, a branch or a loop it may never run, and after a top-level
+                        # `exit`/`exec` it cannot.
+                        ambiguous.add(key)
+                        stated.pop(key, None)
+                        continue
+                    if not conditional:
+                        stated[key] = _unquote(value)
+            elif (unset := _SHELL_UNSET.match(raw)) or (
+                unexport := _SHELL_EXPORT_UNEXPORT.match(raw)
+            ):
+                for name in (unset or unexport).group("names").split():
+                    if name in SWITCHES and not conditional:
+                        # ⛔ A NESTED `unset` neither credits nor retracts (review P2, measured).
+                        # These branches ran before, and ignored, the `conditional` guard, so a
+                        # helper's local `unset K` retracted a TOP-LEVEL `export K=1` the process
+                        # does receive — a false refusal of an honest config.
+                        ambiguous.add(name)
+                        stated.pop(name, None)
+            elif (unexported := _SHELL_UNEXPORTED.match(raw)) and (
+                unexported.group("key") in SWITCHES
+            ):
+                # Same rule, same reason: only a TOP-LEVEL bare assignment is a statement about
+                # what the process gets.
                 if not conditional:
-                    stated[key] = _unquote(value)
-            continue
-        unset = _SHELL_UNSET.match(line)
-        if unset:
-            for name in unset.group("names").split():
-                if name in SWITCHES and not conditional:
-                    # ⛔ A NESTED `unset` neither credits nor retracts (review P2, measured). These
-                    # two branches ran before, and ignored, the `conditional` guard, so a helper's
-                    # local `unset K` retracted a TOP-LEVEL `export K=1` the process does receive
-                    # — a false refusal of an honest config.
-                    ambiguous.add(name)
-                    stated.pop(name, None)
-            continue
-        unexported = _SHELL_UNEXPORTED.match(line)
-        if unexported and unexported.group("key") in SWITCHES:
-            # Same rule, same reason: only a TOP-LEVEL bare assignment is a statement about what
-            # the process gets.
-            if not conditional:
-                ambiguous.add(unexported.group("key"))
-                stated.pop(unexported.group("key"), None)
-            continue
-        if _SHELL_EXPORT_NAME.match(line):
-            continue  # `export NAME` states no value; not an arm
-        if _SHELL_OPENERS.search(structure):
-            depth += 1
-        if depth == 0 and _SHELL_TERMINATES.match(line):
-            terminated = True
-        ambiguous.update(_mentioned_switches(line))
+                    ambiguous.add(unexported.group("key"))
+                    stated.pop(unexported.group("key"), None)
+            else:
+                # A statement that states no switch is where a MENTION lives (prose, a help line,
+                # a `[[ … == *TORTOISE_* ]]` test): recorded, never credited. A segment that DID
+                # resolve an assignment is deliberately not scanned again — `ambiguous` is the
+                # "seen but not creditable" set, and the readers above already decided.
+                ambiguous.update(_mentioned_switches(raw))
+            depth += len(_SHELL_OPENERS.findall(view))
+            if depth == 0 and _SHELL_TERMINATES.match(raw):
+                terminated = True
     return stated, ambiguous
 
 

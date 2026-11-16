@@ -1601,3 +1601,151 @@ def test_one_export_line_may_state_SEVERAL_switches():
         stated, ambiguous = gate._shell_assignments("#!/bin/sh\n" + script + 'exec "$@"\n')
         assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (label, stated)
         assert ambiguous == set(), (label, ambiguous)
+
+
+def test_a_fallback_that_is_itself_a_variable_is_refused():
+    """Review P1 at `b8e12ddb78` — `bool(fallback)` accepted a default that can resolve EMPTY.
+
+    `${X:-$FALLBACK}` states a fallback, but that fallback is ITSELF a variable (or a command
+    substitution), so with both unset the process receives nothing while the gate reported
+    ``STATED`` — measured: the same export body printed an empty value under `env -i`, and the
+    gate had already exited 0. A reader with no resolver may only take the fail-CLOSED direction.
+    """
+    for body, reader in (
+        ('export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-$FALLBACK}"\n', gate._shell_assignments),
+        ("export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-$FALLBACK}\n", gate._shell_assignments),
+        (
+            'export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-`cat /tmp/v`}"\n',
+            gate._shell_assignments,
+        ),
+        ("ENV TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-$FALLBACK}\n", gate._dockerfile_env),
+    ):
+        stated, ambiguous, *rest = reader(body)
+        assert stated == {}, (body, stated)
+        assert "TORTOISE_EMBED_GATE" in ambiguous, (body, ambiguous)
+
+    # ...and the honest shape still states a value, so this is not a blanket refusal of `${…:-…}`.
+    stated, ambiguous = gate._shell_assignments(
+        'export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-1}"\n'
+    )
+    assert stated == {"TORTOISE_EMBED_GATE": "${TORTOISE_EMBED_GATE:-1}"} and ambiguous == set()
+
+
+def test_a_line_that_opens_TWO_blocks_and_closes_ONE_does_not_read_as_top_level():
+    """Review P1 at `b8e12ddb78` — "opens AND closes ⇒ net zero" is false when the counts differ.
+
+    `if false; then if false; then echo x; fi` opens two blocks and closes one, so the depth must be
+    1 afterwards. The per-line rule treated "matches both" as zero, the exports of a never-running
+    OUTER branch were credited ``STATED``, and the gate exited 0. Measured against bash: the same
+    script body prints both switches UNSET.
+
+    ⛔ The second `if` is only visible because an opener may follow the `then` that begins the next
+    statement — without that the line again balanced to zero, which is why the outer-branch shape
+    is pinned as the mutation target rather than the counts alone.
+    """
+    for label, script in (
+        (
+            "an outer branch holding a one-line inner if",
+            "#!/bin/sh\nif false; then if false; then echo x; fi\n"
+            "export TORTOISE_VALUE_GATE=1\n"
+            "export TORTOISE_EMBED_GATE=1\nfi\nexec \"$@\"\n",
+        ),
+        (
+            "an else-if chain",
+            "#!/bin/sh\nif false; then\n :\nelse if false; then\n"
+            "  export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\nfi\nfi\nexec \"$@\"\n",
+        ),
+    ):
+        stated, ambiguous = gate._shell_assignments(script)
+        assert stated == {}, f"{label}: a never-running branch was credited {stated}"
+        assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, (label, ambiguous)
+
+    # non-vacuity in the other direction: a BALANCED one-line compound still returns to top level
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\nif [ -n \"$X\" ]; then echo hi; fi\n"
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert ambiguous == set(), ambiguous
+
+
+def test_a_closer_that_shares_a_line_with_a_later_assignment_still_retracts():
+    """Review P2 at `b8e12ddb78` — the closer branch `continue`d past the assignment scan.
+
+    `fi; export K="${MAYBE_EMPTY}"` closes the block and THEN assigns, but the whole line was
+    skipped, so an earlier literal `export K=1` survived as ``STATED`` while the process receives
+    the later value — the same last-wins rule the `unset`/bare-assignment regexes already enforce,
+    through a hole in the line model. Each statement is now judged at the depth it runs at.
+    """
+    retracted, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        'export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n'
+        'if [ -n "${X:-}" ]; then\n  echo hi\n'
+        'fi; export TORTOISE_EMBED_GATE="${MAYBE_EMPTY}"\n'
+        'exec "$@"\n'
+    )
+    assert retracted == {"TORTOISE_VALUE_GATE": "1"}, retracted
+    assert "TORTOISE_EMBED_GATE" in ambiguous, ambiguous
+
+    # non-vacuity: a LITERAL assignment sharing the closer's line IS a top-level statement
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        'if [ -n "${X:-}" ]; then\n  echo hi\n'
+        "fi; export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"a top-level assignment after a closer was refused as nested: {stated} / {ambiguous}"
+    )
+    assert ambiguous == set(), ambiguous
+
+
+def test_a_do_on_its_own_line_is_not_a_second_opener():
+    """Review P2 at `b8e12ddb78` — `do` was counted as an opener AND is the loop header's tail.
+
+    A loop written the ordinary two-line way (`while …` then `do` alone) therefore netted +2 against
+    one `done`, the depth never returned to 0, and an HONEST entrypoint was refused with a message
+    blaming the value. `do` is the CONTINUATION of a header that already counts.
+    """
+    for label, script in (
+        (
+            "while, with do on its own line",
+            "#!/bin/sh\nwhile IFS= read -r line\ndo\n  echo \"$line\"\ndone\n"
+            "export TORTOISE_VALUE_GATE=1\n"
+            "export TORTOISE_EMBED_GATE=1\nexec \"$@\"\n",
+        ),
+        (
+            "for, with do on its own line",
+            "#!/bin/sh\nfor f in a b\ndo\n  echo \"$f\"\ndone\n"
+            "export TORTOISE_VALUE_GATE=1\n"
+            "export TORTOISE_EMBED_GATE=1\nexec \"$@\"\n",
+        ),
+    ):
+        stated, ambiguous = gate._shell_assignments(script)
+        assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+            f"{label}: an honest top-level export was refused as nested: {stated} / {ambiguous}"
+        )
+
+    # ...and a body INSIDE the loop is still conditional — the header still opens a block
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\nwhile IFS= read -r line\ndo\n"
+        "  export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\ndone\n"
+    )
+    assert stated == {}, stated
+    assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, ambiguous
+
+
+def test_export_dash_n_retracts_like_unset():
+    """Review P3 at `b8e12ddb78` — `export -n K` un-exports a value the process then never gets.
+
+    `entrypoint.sh` is `#!/bin/bash`, where `-n` removes K from the exported environment without
+    changing it; the reader kept the literal and printed `ok … =1` over a process that receives
+    nothing (measured: `env -i … bash script` printed `NOT IN ENVIRONMENT`).
+    """
+    for tail in ("export -n TORTOISE_EMBED_GATE\n", "export -n TORTOISE_EMBED_GATE TORTOISE_OTHER\n"):
+        stated, ambiguous = gate._shell_assignments(
+            "#!/bin/sh\nexport TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n" + tail
+        )
+        assert stated == {"TORTOISE_VALUE_GATE": "1"}, (tail, stated)
+        assert "TORTOISE_EMBED_GATE" in ambiguous, (tail, ambiguous)
