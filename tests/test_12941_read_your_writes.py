@@ -508,6 +508,40 @@ def test_the_marker_speaks_the_DECLARATIONS_key_vocabulary(monkeypatch):
     assert rs.point_residency(g, found=False, key="p-2") == RESIDENCY_NOT_HOT
 
 
+def test_an_UNARMED_marker_reads_no_declaration(monkeypatch):
+    """#12941 review P2-3: "an unarmed deployment pays no graph round trip FOR THE
+    MARKER" had nothing pinning it — deleting `not residency_armed()` from
+    `point_residency`'s early return left every suite green.
+
+    The claim is a COST claim, so the assertion is the query count, not the
+    verdict: with `TORTOISE_RESIDENCY` unset the predicate must return `None`
+    WITHOUT reading a declaration, and the counter must be able to see a read —
+    otherwise this test would pass on a marker that never reads anything at all.
+    """
+    import tortoise.residency as residency
+
+    monkeypatch.delenv("TORTOISE_RESIDENCY", raising=False)
+    reads: list[object] = []
+
+    def _spy(g):
+        reads.append(g)
+        return residency.ResidencyDeclaration(
+            coverage=residency.COVERAGE_PARTIAL, hot_keys=frozenset())
+
+    monkeypatch.setattr(residency, "read_declaration", _spy)
+    g = _FakeG(None, coverage="partial", hot_keys=[])
+
+    assert rs.point_residency(g, found=False, key="p-1") is None
+    assert reads == [], (
+        "an UNARMED marker read a declaration — the deployment did not ask for "
+        "the marker and must pay no graph round trip for it")
+
+    # …and the counter is not blind: the same call, armed, reads exactly once.
+    monkeypatch.setenv("TORTOISE_RESIDENCY", "1")
+    assert rs.point_residency(g, found=False, key="p-1") == RESIDENCY_NOT_HOT
+    assert len(reads) == 1, f"expected one declaration read, saw {len(reads)}"
+
+
 # ── 3. the hosted door — the 404 must carry the verdict ────────────────────
 
 

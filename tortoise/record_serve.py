@@ -418,8 +418,15 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "so a record-served answer "
                "would read a store the same write has not finished projecting. "
                "Its caller-facing surface is `tortoise_get_entity`, EXCLUDED for "
-               "the same MID-WRITE reason as the point accessor, and because a "
-               "name/alias resolution is not a node-id coordinate. ⚠️ RESIDUAL "
+               "the same MID-WRITE reason as the point accessor. ⛔ NOT because it "
+               "lacks a coordinate (#12941 review P2-1): `sdk._get_entity` resolves "
+               "through `_resolve_entity(by_id=True, by_eventId=True, "
+               "by_url=True)` — an index-backed, per-label UNION and therefore a "
+               "real by-id coordinate, the SAME union `auto-detect-by-id` "
+               "describes below. What it is not is ONE label's coordinate, which "
+               "is exactly why serving it needs per-label parity measured "
+               "(#9721) before a `not-hot` verdict means here what it means for "
+               "Points. ⚠️ RESIDUAL "
                "(#12941): the MCP tenant objection that used to sit beside this "
                "reason no longer holds (the lane installs one ambiently), so this "
                "door is now a real read-your-writes gap for an Object/Event written "
@@ -984,12 +991,16 @@ class ServedAnswer:
 
     @property
     def absence_established(self) -> bool:
-        """Is this empty answer a FINDING of absence, or merely unseeing?
+        """Did a store that could SEE the node produce this answer?
 
-        Three states are NOT the same thing and collapsing them is the defect
-        #12941 measures:
+        `True` in the three states below that settle what the store holds, and
+        `False` in the fourth — the one #12941 exists to separate:
 
-        * a node came back → there is no absence to establish;
+        * a **hit** (`props` is not `None`) → the store plainly saw it, so
+          there is no absence in this answer to mistake for one. ⚠️ `True` here
+          describes a FOUND node, which is why this predicate is not "is the
+          answer empty": a caller that needs "the store could not see it" wants
+          :attr:`not_hot`, not the negation of this one.
         * the **record** answered empty → the truth store holds no such row, so
           the absence IS established (§2.0: the record is authoritative);
         * the **record was asked** (an armed `prefer` read that fell back on
@@ -997,7 +1008,11 @@ class ServedAnswer:
           physically failed to find it;
         * anything else — the record was down, unasked, out of time, or there
           was no tenant to ask — means *nobody who could see it was consulted*,
-          and that is **not** an absence.
+          and that is **not** an absence, so this returns `False`.
+
+        :attr:`not_hot` is the conjunction that matters: `props is None AND not
+        absence_established` — an empty answer from a store that could not see
+        the node, and nothing else.
         """
         if self.props is not None:
             return True
