@@ -1755,7 +1755,10 @@ def test_replay_reads_a_carried_ordinal():
     carried = [{**RECORD, "seq": 5}, {**RECORD, "seq": 6}]
     assert _position_plan(carried, start_seq=5) == [5, 6]
     # A record with no `seq` still enumerates (the JSONL journal's shape — no
-    # writer emits one yet, `§A7.7` 6.3).
+    # producer emits one as of this change, because the three intakes now strip
+    # or refuse the name. It was MEASURED false before, so this is a consequence
+    # of the reservation, not a property of the journal. `§A7.7` 6.3, still
+    # planned, is the writer that will emit it on purpose).
     assert _position_plan([RECORD, RECORD], start_seq=5) == [5, 6]
 
 

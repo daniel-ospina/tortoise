@@ -7837,8 +7837,10 @@ def _carried_position(record: Mapping[str, Any], enumerated: int,
     below is still the weak point: it cannot tell a CARRIED POSITION from a
     tenant property that merely shares the name. The sound fix is an explicit
     "this batch is record-sourced" flag on `replay`/`replay_plan` rather than
-    inferring it from a key's presence; until then every producer that copies
-    graph properties onto a journal event must strip ``seq``, and the refusal
+    inferring it from a key's presence; until then no producer may emit ``seq``
+    at the event's **TOP LEVEL** (a nested snapshot such as ``point.seq`` is
+    unaffected — this reads only the record's top-level key, which is why the
+    turn producer's copy of a legitimate `:Point.seq` is safe), and the refusal
     below says so.
 
     ⛔ A DISAGREEMENT IS A REFUSAL, NEVER A RENUMBERING. Silently preferring either

@@ -71,9 +71,14 @@ row, so the position is neither burned (no gap) nor reused (nobody saw it).
 
 `replay_plan` gains `_carried_position`: a record that carries `seq` is asserting
 its own position, and a disagreement with `start_seq + index` is refused, never
-renumbered. No producer writes `seq` onto a record today, so the read is inert on
-every existing path — which is why it can land before the writers that will emit
-it (`§A7.7` 6.3, still planned).
+renumbered. No producer emits one **as of this change, because the three journal
+intakes now strip or refuse the name** (`sdk._RESERVED_ENVELOPE_PROPS`,
+`api._ENVELOPE_KEYS`, `backfill_copy_turns._SESSION_ENVELOPE`) — that premise was
+MEASURED FALSE before this change (`update_point(pid, seq=…)`, `EventAPI._emit`,
+and the session copy each put one on a line). Journals written earlier are
+append-only (R6) and can still hold one: the read is safe there only because it
+compares the number and refuses rather than renumbering, and the refusal names
+the ambiguity.
 
 `tools/record_allocator_cli.py` is the operator door: `status`, `seed`, `arm`,
 `halt`, `reopen`. Before it, `record_allocator.seed()` had **no caller outside
