@@ -63,7 +63,7 @@ declaration against three views derived by genuinely different means, in both di
 | **FROZEN** | `config/surface-manifest.yml` `sdk:` rows | the frozen snapshot the declaration is reconciled against — a drift control, **not** the approved target (#3863/#4185) |
 
 At the render that produced this file: AST **102** · reflection **102**
-· frozen **118**. They do NOT all agree; see `tools/sdk_surface.py --check`.
+· frozen **102** — all agree.
 
 AST and reflection are *not* the same question, and nothing reconciled them before this file.
 `tortoise/sdk.py` already attaches one attribute outside the class body
