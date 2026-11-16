@@ -876,7 +876,7 @@ class RefusedJournalOperation(RecordProjectionError):
 
 
 class JournalPositionCollision(RecordProjectionError):
-    """Two DIFFERENT records claimed ONE position in the record (#9318).
+    """An absorbed journal position holds content this write would not produce (#9318).
 
     `public.journal_event` is keyed `(org_id, graph_id, seq)`, and the schema
     calls that key *"the idempotency key: applying a position twice is a
@@ -6446,7 +6446,7 @@ def _identity_evidence(attempted: Any, stored: Any) -> tuple[str, str | None]:
 
 def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
                                 total: int) -> None:
-    """Fail LOUDLY when an absorbed position holds a DIFFERENT record (#9318).
+    """Fail LOUDLY when an absorbed position holds content this write would not produce (#9318).
 
     THE ONE CALL SITE is :func:`replay`'s statement loop, which every
     journal-position insert already passes through — the live door, a full

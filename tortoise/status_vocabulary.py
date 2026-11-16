@@ -91,9 +91,11 @@ its ``refusal`` token is one of seven. NONE of the seven is exactly a term here:
   journal by design), counted on ``record_non_journal_skips`` rather than
   ``record_write_failures``, so nothing a replay could restore is missing;
 * ``journal_collision`` is the one POST-write token (#9318): the record WAS
-  reached and refused to index this record under a journal position that
-  already names a DIFFERENT record. Nothing was lost (the journal holds it) and
-  nothing about the store is wrong, so it is an impairment — ``degraded`` — and
+  reached and refused to index this record under a journal position whose
+  content differs from what this write would produce (a different record, or
+  this record's payload re-derived since that row was written). Nothing was
+  lost (the journal holds it) and nothing about the store is wrong, so it is an
+  impairment — ``degraded`` — and
   its repair is a schema decision (journal identity in the key, #12894), not an
   operator action on this deployment.
 

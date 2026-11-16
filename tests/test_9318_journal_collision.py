@@ -579,6 +579,20 @@ def test_an_ENVELOPE_only_difference_is_invisible_to_the_verdict() -> None:
     # move this boundary, and only the statement knows what it binds.
     row_first = rp._journal_row(first, 1, ORG, GRAPH)
     row_second = rp._journal_row(second, 1, ORG, GRAPH)
+    # ⛔ THE BIND SHAPE IS PINNED BY IDENTITY, NOT BY INDEX (#12904 review). The
+    # docstring above promises this leg REDS when #12894 lands — but `params[:5]`
+    # and `params[5]` cannot see the change that matters: a `journal_id`
+    # APPENDED to the key leaves `params[:5]` byte-identical and leaves
+    # `params[5]` (the payload) untouched, so both assertions below would stay
+    # green while `_refuse_a_journal_collision` compared a key no longer unique.
+    # The COUNT is what moves, so the count is the thing asserted.
+    assert len(row_first.params) == 6, (
+        f"`_journal_row` now binds {len(row_first.params)} parameters "
+        f"({row_first.params}) where this boundary was measured at 6 "
+        f"(org, graph, seq, event_type, payload, ts). If the new one is journal "
+        f"identity (#12894), the envelope-only difference is no longer "
+        f"invisible — DELETE this pin with the detector rather than keeping it "
+        f"green over a guard that now sees the difference")
     assert row_first.params[:5] == row_second.params[:5], (
         "the durable content of two envelope-only-different records is no "
         "longer identical — the guard can now SEE this difference, so this "

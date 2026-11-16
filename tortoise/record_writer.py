@@ -497,7 +497,8 @@ class RecordWrite:
     #: ⛔ ``journal_collision`` IS THE ONE POST-WRITE TOKEN (#9318). Every other
     #: value is decided before a socket is opened (`_live_write_verdict`) or by
     #: a failed statement; this one is a VERDICT on a conflict: the position row
-    #: was absorbed by a DIFFERENT record, which
+    #: holds content this write would not produce (a different record, or this
+    #: record's payload re-derived since that row was written), which
     #: `record_projection.JournalPositionCollision` detected by comparing the
     #: surviving row's content. It is not in ``LIVE_WRITE_REFUSALS`` for that
     #: reason — that tuple is what the PRE-write verdict can return — and a
@@ -2569,10 +2570,10 @@ def write_live_record(record: Mapping[str, Any], *,
         collision = _journal_collision_cause(exc)
         if collision is not None:
             # ⛔ A COLLISION, NOT A LOST WRITE (#9318). The row at this position
-            # belongs to a DIFFERENT record, so writing the layer rows under it
-            # would index them by another record's event — refused rather than
-            # shipped. Nothing is lost: the journal holds the record and the
-            # message names both sides. Now made LOUD on the SAME
+            # holds content this write would not produce, so writing the layer
+            # rows under it would index them by that other content — refused
+            # rather than shipped. Nothing is lost: the journal holds the record
+            # and the message names both sides. Now made LOUD on the SAME
             # refused-write channel every other arm uses (one counter, one
             # WARNING, one `RecordWrite(refusal=…)`) with its own reason token,
             # so an operator can tell it from `write_failed`. It does NOT trip
