@@ -12509,3 +12509,121 @@ def test_12549_a_SUPERSEDED_compose_base_is_reported_not_measured(tmp_path, monk
                   if entry["path"] == "docker-compose.yml"]
     assert superseded, deployment["discovery"]["non_env"]
     assert "superseded" in superseded[0]["reason"], superseded[0]
+
+
+def test_12549_a_MULTI_ARG_export_line_publishes_the_value_it_assigns(
+        tmp_path, monkeypatch):
+    """⛔ A shell `export` assigns EVERY `NAME=value` word on its line, not just the first.
+
+    The value used to be read by `_assigned_value`, which is LINE-START-scoped, so
+    `export OTHER=1 FLAG=0` put `FLAG` in the `assigned` set but yielded no VALUE — the
+    line appended no decision at all, and the earlier truthy decision stood. Measured
+    against bash: `export F=1; export OTHER=1 F=0; env` holds `0`, while the walk
+    published `ON` with nothing in any bucket. The mirror direction was just as wrong:
+    `export OTHER=1 F=1` alone produced NO decision, so a genuinely armed entrypoint
+    could read `OFF`. Argument ORDER must not decide the verdict — that is the coin
+    flip the compose conversion exists to remove, and it was still live in the shell
+    channel (fresh review of `#12902`, P1).
+    """
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    flag = "TORTOISE_EMBED_GATE"
+    cases = [
+        # (script body, expected verdict, why)
+        (f"export {flag}=1\nexport OTHER=1 {flag}=0\n", "OFF",
+         "bash runs 0 — the flag is assigned at position 1"),
+        (f"export OTHER=1 {flag}=0\n", "OFF",
+         "the only decision is the falsy one, at position 1"),
+        (f"export OTHER=1 {flag}=1\n", "ON",
+         "the only decision is the truthy one, at position 1"),
+        (f'export OTHER="a b" {flag}=0\n', "OFF",
+         "a quoted sibling value does not truncate the flag beside it"),
+        (f'export "{flag}=0"\n', "OFF",
+         "a QUOTED `NAME=value` word is the same command"),
+    ]
+    for body, expected, why in cases:
+        (tmp_path / "entrypoint.sh").write_text(
+            f"#!/bin/bash\n{body}exec app\n", encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs(flag)
+        got = shipped["deployment"]["files"]["entrypoint.sh"]
+        assert got == expected, (body, why, got, shipped)
+    # ⛔ And the truthy value is not merely "not OFF": it reaches the verdict as an
+    # ARMING decision, so a reader on the other side cannot read it as silence.
+    # (`deployment["on"]` is NOT the assertion here: it is "every present file is ON",
+    # and this fixture's Dockerfile is legitimately silent — the per-FILE verdict is what
+    # this test is about.)
+    (tmp_path / "entrypoint.sh").write_text(
+        f"#!/bin/bash\nexport OTHER=1 {flag}=1\nexec app\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs(flag)
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped["deployment"]
+    surface = (shipped.get("per_surface") or {}).get("entrypoint") or {}
+    hits = ((surface.get("files") or {}).get("entrypoint.sh") or {}).get("hits") or []
+    assert any(f"entrypoint.sh: export OTHER=1 {flag}=1" in hit for hit in hits), hits
+
+
+def test_12549_a_MULTI_KEY_dockerfile_ENV_is_read_for_every_pair(
+        tmp_path, monkeypatch):
+    """⛔ A multi-key `ENV` line assigns EVERY pair; reading only the leading key is a false PASS.
+
+    `ENV FLAG=1` then `ENV LANG=C.UTF-8 FLAG=0` used to read `ON` with
+    `on: True` and NOTHING in `indeterminate` / `outside_runtime` / `unset_declarations`,
+    over an image whose environment really holds `0` (measured with `docker build` +
+    `docker run` on the fixture below). `ENV key=value key2=value2` is the Dockerfile's
+    OWN multi-assignment spelling, so the file's last-wins ordering has to see every
+    pair — a position-dependent verdict inside one line is the `#11455` false PASS.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    flag = "TORTOISE_EMBED_GATE"
+    cases = [
+        (f"FROM alpine\nENV {flag}=1\nENV LANG=C.UTF-8 {flag}=0\n", "OFF"),
+        (f"FROM alpine\nENV LANG=C.UTF-8 {flag}=0\n", "OFF"),
+        (f"FROM alpine\nENV LANG=C.UTF-8 {flag}=1\n", "ON"),
+        (f'FROM alpine\nENV LANG="a b" {flag}=0\n', "OFF"),
+        # …and the LEGACY `ENV KEY value` form still sets KEY to the rest of the line.
+        (f"FROM alpine\nENV {flag} 0\n", "OFF"),
+        (f"FROM alpine\nENV {flag} 1\n", "ON"),
+    ]
+    for body, expected in cases:
+        (tmp_path / "Dockerfile").write_text(body, encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs(flag)
+        got = shipped["deployment"]["files"]["Dockerfile"]
+        assert got == expected, (body, got, shipped["deployment"])
+    # ⛔ The disarming pair is REPORTED, so a reader can see which line armed and which
+    # disarmed — a verdict without its cause is the `#12549` defect 1 shape.
+    (tmp_path / "Dockerfile").write_text(
+        f"FROM alpine\nENV {flag}=1\nENV LANG=C.UTF-8 {flag}=0\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs(flag)
+    note = _gate_note(shipped)
+    assert flag in note, note
+    assert "OVERRIDES" in note, note
+
+
+def test_12549_an_env_file_interpolated_blank_is_not_a_measured_empty(
+        tmp_path, monkeypatch):
+    """⛔ A blank from `env_file:` is NOT a literal `""`, so it must not be published as one.
+
+    `--no-interpolate` leaves `env_file:` UNEXPANDED, so a key that reaches the model
+    through it has no declaration to inspect — and "no declaration" was read as "the
+    file fixes a literal `''`", publishing the cause *"OVERRIDES an inherited value"*
+    for a file that actually defers to a variable compose interpolates from the
+    environment it runs in (`env_file` holding `FLAG=${MISSING}`; measured — compose
+    really does interpolate that file, `FLAG=${HOME}` resolved to the host value). The
+    verdict stays fail-closed either way; what changes is that the run stops claiming a
+    cause it did not measure, which is `#12549` defect 1 one layer in (fresh review,
+    P2).
+    """
+    (tmp_path / "svc.env").write_text(
+        "TORTOISE_EMBED_GATE=${MISSING_VAR}\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    env_file: [svc.env]\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    # Fail closed: never published as a MEASURED empty.
+    assert deployment["files"].get("docker-compose.yml") != "OFF", deployment["files"]
+    note = _gate_note(shipped)
+    # …and the cause it publishes is "could not say", not a literal `''` it never saw.
+    assert "OVERRIDES an inherited value" not in note, note
+    assert "literal" in note or "could not say" in note or "cannot" in note, note

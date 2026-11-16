@@ -3361,6 +3361,10 @@ def _compose_build_refs() -> dict[str, list[str]]:
 #: The `=` tail is deliberately not parsed — only the NAME is what the walk needs, so a
 #: quoted value containing spaces cannot truncate the name.
 _SHELL_EXPORT_ARG = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:=|$)")
+#: One `NAME=value` pair on a multi-key Dockerfile `ENV` line. The value is quoted-or-run.
+_DOCKERFILE_ENV_PAIR = re.compile(
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)="
+    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s]*)")
 _SHELL_ASSIGN = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=")
 _SHELL_ALLEXPORT = re.compile(r"^\s*set\s+-[a-zA-Z]*a[a-zA-Z]*\s*$")
 #: `set +a` ENDS allexport — the same option, unset. Matched separately because a
@@ -3454,7 +3458,8 @@ def _shell_words(text: str) -> list[str]:
     return words
 
 
-def _shell_export_args(line: str) -> tuple[list[str], set[str], str] | None:
+def _shell_export_args(
+        line: str) -> tuple[list[str], set[str], str, dict[str, str]] | None:
     """``(names, names that carry a value, option cluster)`` for an `export` line.
 
     ⛔ `export` is a shell BUILTIN, so it is matched CASE-SENSITIVELY — `EXPORT FLAG=1`
@@ -3475,6 +3480,13 @@ def _shell_export_args(line: str) -> tuple[list[str], set[str], str] | None:
     options = ""
     names: list[str] = []
     assigned: set[str] = set()
+    #: Every `NAME=value` word on this line, BY NAME. ⛔ The VALUE matters, not only the
+    #: fact of the assignment: `export OTHER=1 FLAG=0` assigns `FLAG` at position 1, and
+    #: a value read only at position 0 was dropped — so the line looked like an export
+    #: of a name with no value, appended no decision, and the earlier truthy line stood
+    #: (`export FLAG=1` then `export OTHER=1 FLAG=0` published `ON` while bash runs `0`;
+    #: measured, fresh review of `#12902`, P1).
+    values: dict[str, str] = {}
     for word in _shell_words(stripped[len("export"):]):
         if word.startswith("-") and not names:
             options += word.lstrip("-")
@@ -3490,7 +3502,8 @@ def _shell_export_args(line: str) -> tuple[list[str], set[str], str] | None:
             names.append(name)
             if bare[len(name):len(name) + 1] == "=":
                 assigned.add(name)
-    return names, assigned, options
+                values[name] = bare[len(name) + 1:]
+    return names, assigned, options, values
 
 
 def _shell_unset_values(line: str) -> set[str]:
@@ -3574,7 +3587,7 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
             continue
         parsed = _shell_export_args(line)
         if parsed is not None:
-            names, assigned, options = parsed
+            names, assigned, options, values = parsed
             if flag not in names:
                 continue
             if "f" in options:
@@ -3590,8 +3603,17 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
             else:
                 if flag in assigned:
                     # `export FLAG=v` also SETS the variable: the value a later bare
-                    # `export FLAG` publishes is this one.
-                    current = _assigned_value(line, flag) or current
+                    # `export FLAG` publishes is this one. ⛔ Read from the ARGUMENT
+                    # LIST, not from the line's leading token — `export OTHER=1 FLAG=0`
+                    # assigns FLAG on the same line, and a line-start-scoped value
+                    # dropped it, so no decision was appended and the earlier truthy
+                    # line published a FALSE ARM (fresh review, P1). `publish` carries
+                    # it because the caller prefers `_assigned_value`, which is
+                    # line-start-scoped and returns None for this spelling.
+                    value = values.get(flag)
+                    if value is not None:
+                        current = value
+                        states[-1]["publish"] = value
                 else:
                     states[-1]["publish"] = current
                 exported = True
@@ -3832,6 +3854,18 @@ def _assigned_value(line: str, flag: str) -> str | None:
         shell_export = re.match(r"^export[ \t]+", stripped)
         if shell_export:
             stripped = stripped[shell_export.end():].lstrip()
+    # ⛔ A Multi-KEY `ENV` LINE ASSIGNS EVERY PAIR ON IT, and only the LEADING key was
+    # ever a decision: `ENV FLAG=1` then `ENV LANG=C.UTF-8 FLAG=0` read `ON` over an
+    # image whose environment really holds `0` (measured with `docker build` +
+    # `docker run` while this walk published `{'Dockerfile': 'ON'}`, `on: True`, and
+    # `indeterminate: []`/`outside_runtime: []` — nothing in ANY bucket). The
+    # `ENV key=value key2=value2` form is the Dockerfile's own multi-assignment
+    # spelling, so every pair is read rather than only the first (fresh review, P1).
+    if legacy_value_form and "=" in stripped and not stripped.startswith(flag):
+        pairs = {m.group("name"): m.group("value").strip("'\"")
+                 for m in _DOCKERFILE_ENV_PAIR.finditer(stripped)}
+        if flag in pairs:
+            return pairs[flag] or None
     # The flag must be the KEY: at the start of the line, followed by `=` or
     # `:` and nothing but the value. `Set FLAG=1 to enable` and
     # `name: verify FLAG=1 takes effect` fail here, which is the point.

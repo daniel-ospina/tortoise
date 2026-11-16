@@ -321,11 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 248 collected
-                                 # (docker lane: 247 passed, 1 skipped)
+                                 # this tree: 251 collected
+                                 # (docker lane: 250 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **248 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **251 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -405,7 +405,15 @@ falsifier a later review measured at this head (PR #12474, P2) — that the `UNM
 one ordering it does not cover, since a LATER resolvable assignment still decides the file while the
 unresolvable line stays REPORTED in `indeterminate` in both orders; shown RED by reverting its own fix,
 with the phrase pin normalising the docstring's whitespace so a reflow cannot red it)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 33 = 248`).
+with the phrase pin normalising the docstring's whitespace so a reflow cannot red it)
+and three by the fresh review of `#12902` — a shape that assigns MULTIPLE names on ONE line, where the
+flag is not the first: a shell `export OTHER=1 FLAG=0` (bash runs `0`; the value was read
+line-start-only, so the line appended NO decision and the earlier truthy one stood — a false ARM, and
+`export OTHER=1 FLAG=1` alone produced no decision either, so a genuinely armed entrypoint could read
+`OFF`), the same shape in a multi-key Dockerfile `ENV lang=… FLAG=0`, and a compose blank sourced from
+`env_file:` that was published as a MEASURED `''` under a cause the run never measured (all three
+shown RED against the unfixed blob and green after)
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 33 + 3 = 251`).
 The `33` are `#12549`'s channel-resolver falsifiers: both orderings of a per-service
 compose disagreement, a flow mapping, an anchor+merge key, a resolver that REFUSES
 (`UNRESOLVED`, never an answer), an unset interpolation that must not read as an
@@ -484,7 +492,7 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
-collected count — `247 passed, 1 skipped` and `246 passed, 2 skipped` here, both adding to the same `248` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+collected count — `250 passed, 1 skipped` and `249 passed, 2 skipped` here, both adding to the same `251` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
 `186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
