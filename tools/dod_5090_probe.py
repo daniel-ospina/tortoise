@@ -5127,8 +5127,8 @@ def flag_in_shipped_configs(flag: str) -> dict:
         # what is LEFT (fresh review of `#12902`, P2).
         if retracted_hits:
             gone = set(retracted_hits)
-            surface_hits = [hit for hit in surface_hits if hit not in gone]
-            hits = [hit for hit in hits if hit not in gone]
+            surface_hits = []
+            hits = []
             state = "ON" if surface_hits else "UNMEASURED"
         per_surface[rel] = {"state": state, "hits": surface_hits,
                             "files": file_states,

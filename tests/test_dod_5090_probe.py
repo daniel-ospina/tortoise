@@ -4340,6 +4340,37 @@ def test_a_RETRACTED_hit_is_not_published_at_the_SURFACE_either(tmp_path, monkey
     assert shipped["files"] == [], shipped["files"]
     assert shipped["on"] is False, shipped["on"]
 
+    # ⛔ …AND THE OTHER DIRECTION, which is the half a one-file fixture cannot see: the rule
+    # is "re-reduced from what is LEFT", not "cleared". A surface with two entrypoint
+    # scripts — this repo's own discovery shape (`Dockerfile.hosted` + `Dockerfile.selfhost`)
+    # — must KEEP the surviving hit when only ONE of them was attribute-indeterminate.
+    # Measured at the pre-control head: a blanket-clear mutant (`surface_hits = []`,
+    # `hits = []`) left the WHOLE SUITE GREEN and turned this shape into `UNMEASURED` /
+    # `on: False` / `set ON in: none` while `b.sh` demonstrably arms the flag — an
+    # over-retraction, i.e. a false DISARM on the surface a DoD reader quotes. Same
+    # two-sided standard as `_UNSET_SHAPES` and `_HEREDOC_SHAPES` (fresh review of
+    # PR #12902, P2).
+    other = tmp_path / "control"
+    other.mkdir()
+    monkeypatch.setattr(probe, "REPO_ROOT", other)
+    (other / "Dockerfile.a").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/a.sh"]\n', encoding="utf-8")
+    (other / "Dockerfile.b").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/b.sh"]\n', encoding="utf-8")
+    (other / "a.sh").write_text(
+        "#!/bin/bash\nset -a\ntrue && set +a\nTORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    (other / "b.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    mixed = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    mixed_surface = mixed["per_surface"]["entrypoint"]
+    assert mixed_surface["files"]["a.sh"]["state"] == "UNMEASURED", mixed_surface["files"]
+    assert mixed_surface["files"]["b.sh"]["state"] == "ON", mixed_surface["files"]
+    assert mixed_surface["state"] == "ON", (
+        f"the retraction cleared a hit that legitimately SURVIVES: {mixed_surface['state']} "
+        f"over files {({k: v['state'] for k, v in mixed_surface['files'].items()})}")
+    assert mixed_surface["hits"] == ["b.sh: export TORTOISE_EMBED_GATE=1"], mixed_surface["hits"]
+    assert mixed["on"] is True, mixed["on"]
+
 
 def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, monkeypatch):
     """A compose value-less entry UNSETS the variable, so a later one must win.
@@ -10751,6 +10782,35 @@ def test_the_census_doc_collects_what_the_file_collects():
     assert own_total == [actual], (
         f"this pin's own docstring says it re-derives {own_total} where the file collects "
         f"{actual}")
+
+    # ⛔ §6 states the LANE SPLIT as well as the collected count, and NOTHING held those
+    # figures: the run block's `(docker lane: N passed, M skipped)` parenthetical and the
+    # splits paragraph's pair are a FIFTH and SIXTH statement of the same tree's numbers, and
+    # `269 collected` sat directly above `(docker lane: 267 passed, 1 skipped)` — 268 — with
+    # the whole pin GREEN (fresh review of PR `#12902`, P2). The doc DECLINES to pin which
+    # lane reads which figure (a carve-out run must not "correct" the docker lane's), so
+    # only the arithmetic the doc itself asserts is pinned here: each pair must ADD to the
+    # count this tree collects. Scoped by LANE LABEL or by the sentence that carries the
+    # `the pin re-derives` clause, because the run block also quotes a HISTORICAL split
+    # (`121 passed, 1 skipped` — the `#11088` transcript this row was cut from) and a
+    # DIFFERENT tree's pair (`185/1` and `184/2` at `eee465029a`), neither of which may be
+    # held to this tree's total.
+    run_pairs = [(int(a), int(b)) for a, b in
+                 re.findall(r"\(docker lane: (\d+) passed, (\d+) skipped\)", text)]
+    split_line = next((line for line in text.splitlines()
+                       if "the pin re-derives" in line and "passed," in line), "")
+    split_pairs = [(int(a), int(b)) for a, b in
+                   re.findall(r"`(\d+) passed, (\d+) skipped`", split_line)]
+    assert run_pairs and split_pairs, (
+        f"§6 states the lane split in the run block's `(docker lane: N passed, M skipped)` "
+        f"parenthetical and again in the splits paragraph, and this arm found "
+        f"{run_pairs!r} / {split_pairs!r} — a pattern that matches nothing is a DEAD ARM")
+    bad_lane_pairs = [f"{a} + {b}" for a, b in run_pairs + split_pairs
+                      if a + b != actual]
+    assert not bad_lane_pairs, (
+        f"§6 states the lane split {bad_lane_pairs}, which do NOT add to the {actual} this "
+        f"tree collects: `N passed + M skipped` must equal the collected count, or the doc "
+        f"publishes a lane total that contradicts the line a reader takes it from")
 
 
 def test_a_pass_through_tool_changes_NOTHING_when_the_affected_set_is_EMPTY():
