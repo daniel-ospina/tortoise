@@ -66,7 +66,7 @@ Durable writes, in execution order:
 | 5 | record tenant scope + role gate (`set_config('app.current_org_id', …)`) | `record_projection.py:7021-7024` | no (follows) |
 | 6 | enumerated-replay refusal (**no-op** without a `record_cursor` row) | `record_projection.py:7654-7655`, `:7340` | no |
 | 7 | the four ontology **layer rows** (record mutations) | `record_projection.py` `RECORD_MUTATIONS`, executed in `replay`'s loop `:7660-7671` | no |
-| 8 | `journal_event` + the `#9318` collision guard | `record_projection.py:6377` (`_journal_row`) executing `:6343-6350`; guard at `:7703` | no |
+| 8 | `journal_event` + the `#9318` collision guard | `record_projection.py:6377` (`_journal_row`) executing `:6346-6351`; guard at `:7703` | no |
 | 9 | **commit** of the record's own transaction | `record_writer.py:2719` (`connection.commit()`) | no |
 | 10 | byte meter (`_measure_written_bytes`) + the written-bytes charge | `record_writer.py:1732-1742`, `:2734` | no |
 | 11 | the **cache write**: `CREATE (:Point …)` under `_live_write_scope("create_point")`, then `:Tag`/`:Source` edges | `sdk.py:16287-16324` (`:Tag` at `:16312-16317`, `extractedFrom`/`:Source` at `:16319-16324`) | no — gated ON the commit point |
@@ -347,7 +347,7 @@ it. `§A7.7` step numbers are the plan's.
 
 1. **The wiring gate must be re-derived, not widened** (`§A7.7` M12 — *specified*).
    `tools/record_wiring_check.py` accepts **either** the journal's ordinal **or** the allocator
-   (`tools/record_wiring_check.py:30-37`, `:443-500`), so it exits 0 (`measured`) over a tree where
+   (`tools/record_wiring_check.py:24-36`, `:443-500`), so it exits 0 (`measured`) over a tree where
    nothing passes `allocate=`. M12 said the two checks *"assert exactly the rule the change inverts"*
    and must be re-derived *at 6.1*; instead the old rule was **kept as an accepted alternative**. This
    is the instrument that should have made V2 visible, and it is the cheapest remaining fix.
@@ -425,7 +425,7 @@ The chain had four review rounds. Each named defect, and where it stands now:
 ### One more thing that should not have been merged, in the sense that it reports success over a gap
 
 `tools/record_wiring_check.py` passing (exit 0) is **correct by its own contract** and still misleading
-about this chain: its contract admits two honest sources (`tools/record_wiring_check.py:30-37`), so the pre-`#12894` shape is a pass.
+about this chain: its contract admits two honest sources (`tools/record_wiring_check.py:24-36`), so the pre-`#12894` shape is a pass.
 `§A7.7` M12 required it to be re-derived at 6.1. It was not. This is V5 item 1 and it is the reason V2
 had to be established by a call-site census rather than by the repo's own instrument.
 
