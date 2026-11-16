@@ -135,12 +135,24 @@ def _sdk_method_called_by(val) -> str | None:
     return None
 
 
+class UnreadableWrapper(AssertionError):
+    """The classifier could not READ a wrapper's source.
+
+    ⛔ It must never be reported as "reshaping": `None` from
+    `_passthrough_of` means "this wrapper's shape is its own business", and a
+    source that could not be read is NOT that fact — it is a hole in the scan,
+    and a hole that reports clean is the vacuity the guard below exists to
+    prevent.
+    """
+
+
 def _passthrough_of(fn) -> str | None:
     """The SDK method a wrapper RETURNS UNCHANGED, or None (see above)."""
     try:
         src = textwrap.dedent(inspect.getsource(fn))
-    except (OSError, TypeError):
-        return None
+    except (OSError, TypeError) as exc:
+        raise UnreadableWrapper(
+            f"cannot read the source of {getattr(fn, '__name__', fn)!r}: {exc}") from exc
     body = [n for n in ast.parse(src).body[0].body
             if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
     # shape A — one statement, returning the call itself:
@@ -171,11 +183,24 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     every call."""
     offenders = []
     checked = 0
-    for name, sdk_method in _registry_pairs():
+    reshaped = 0
+    unreadable: list[str] = []
+    unresolved: list[str] = []
+    pairs = _registry_pairs()
+    for name, sdk_method in pairs:
         if not hasattr(TortoiseSDK, sdk_method):
-            continue  # a row whose method is not on the SDK is another test's business
-        passed_through = _passthrough_method(name)
+            # A row naming a method the SDK does not have would be SKIPPED, and a
+            # skipped row is a hole in an exhaustive guard — so it is measured,
+            # not silently passed over.
+            unresolved.append(f"{name} -> TortoiseSDK.{sdk_method}")
+            continue
+        try:
+            passed_through = _passthrough_method(name)
+        except UnreadableWrapper as exc:
+            unreadable.append(str(exc))
+            continue
         if passed_through is None:
+            reshaped += 1
             continue  # a reshaping wrapper is entitled to its own annotation
         checked += 1
         wrapper_kind = _annotation_kind(
@@ -186,9 +211,39 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
             offenders.append(
                 f"{name}: wrapper declares {wrapper_kind!r} but "
                 f"TortoiseSDK.{passed_through} returns {sdk_kind!r}")
-    assert checked >= 20, (
-        f"only {checked} pass-through wrappers were found — the scan is not "
-        f"reaching the registry, so a clean result here would be vacuous")
+    # ── non-vacuity, DERIVED (never a literal floor) ─────────────────────
+    # A count literal is the wrong instrument here: it reds on a CORRECT
+    # retirement (this file was 20 pass-throughs of the pre-#4282-Phase-2
+    # population and measures 19 after 14 doors became 6 containers — nothing
+    # broke, a reshaping container absorbed doors that used to pass through),
+    # while still going quiet when the scan stops READING wrappers. What the
+    # guard actually needs is that the scan is EXHAUSTIVE: every row that names
+    # an SDK method is classified into exactly one of pass-through / reshaping,
+    # and no row is dropped for an unreadable source or a missing SDK method.
+    assert not unresolved, (
+        "these registry rows name an SDK method that is not on TortoiseSDK, so the "
+        "guard skipped them and cannot be exhaustive:\n  " + "\n  ".join(unresolved))
+    assert not unreadable, (
+        "these wrappers' source could not be read, so they were never classified — "
+        "an unreadable wrapper is a hole in the scan, not a reshaping one:\n  "
+        + "\n  ".join(unreadable))
+    # ⛔ AND a floor of ONE, because exhaustiveness alone is a tautology: every
+    # iteration adds to exactly one counter, so a classifier that stops matching
+    # every REAL wrapper answers `checked=0, reshaped=51` and the equality still
+    # holds (measured: `_passthrough_of` -> None passes all three asserts above).
+    # The classifier's own self-test does not cover that drift — its inputs are
+    # synthetic, so it keeps passing while no production wrapper matches. One is
+    # the right floor: it cannot red on a correct retirement (a retirement moves a
+    # door's NAME, not its shape) but it reds the instant the comparison stops
+    # comparing anything.
+    assert checked > 0, (
+        f"not one of {len(pairs)} registry rows was classified as a pass-through "
+        f"({reshaped} read as reshaping) — a classifier that matches no real "
+        "wrapper compares nothing, so a clean result here would be vacuous")
+    assert checked + reshaped == len(pairs), (
+        f"the scan classified {checked + reshaped} of {len(pairs)} registry rows "
+        f"({checked} pass-through, {reshaped} reshaping) — an unclassified row is a "
+        "wrapper this guard never looked at, so a clean result here would be vacuous")
     assert not offenders, (
         "these pass-through MCP tools declare a return type their SDK method "
         "contradicts, so FastMCP refuses their own result and every call fails:\n  "

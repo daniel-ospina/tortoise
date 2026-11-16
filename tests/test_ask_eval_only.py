@@ -205,8 +205,15 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   `http_policy=False`), so 66 - 3 = 63 measured here. Lowered to 63 with that
     #   measurement, not to whatever a green run last produced.
     #   #11609 batch 2 (this change) — fourteen WRITE/MUTATE doors retired into six
-    #   containers, all `http_policy=True` on both sides of the move, so the listing
-    #   moves by the same net -8 the live surface does: 63 - 8 = 55 measured here.
+    #   containers. The move is NOT `http_policy`-neutral at either end, and the
+    #   arithmetic must say so: `tortoise_dream` is the one absorbed door with
+    #   `http_policy=False` (so 13 of the 14 were in this listing) and
+    #   `tortoise_refresh_confidence` is the one container that is stdio-only (so 5
+    #   of the 6 join it): 63 - 13 + 5 = 55 measured here. The net is the same -8
+    #   the live surface moves by, but only because 13 - 5 = 8 — stating the net as
+    #   if both sides were wholly `http_policy=True` would have hidden a real
+    #   exemption behind a coincidence (the sibling derivation in
+    #   `test_10084_graph_argument_omit_first` records the same split).
     # Anything BELOW 55 is unexplained shrinkage and this arm reds on it; lowering the
     # floor again needs the same kind of recorded reason, never a green run.
     assert len(names) >= 55, f"default surface shrank to {len(names)}"

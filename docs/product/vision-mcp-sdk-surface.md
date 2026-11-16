@@ -155,9 +155,11 @@ not complements.
 
 The starting figure in this heading is **historical**, the same way the MCP heading's is: the public
 SDK surface measured **150** when this heading was written — it now measures **124**: `#4282` deleted
-26 surplus names (150 -> 124) and `#10015` added `get_organisation_account` (124 -> 125), while
-#11609 Phase 2 then retired four names into the containers it added and re-cut the count (125 -> 124;
-see the `canonical-sdk-methods.md` row above). The target — 40 — is unchanged.
+26 surplus names (150 -> 124) and `#10015` added `get_organisation_account` (124 -> 125); then
+`#11609` Phase 2 retired four names into the containers it added AND delivered three approved ones,
+re-cutting the count (125 − 4 + 3 = 124; see the `canonical-sdk-methods.md` row above — the same
+split `tortoise/__all__.py` records as overlap 13 → 16 and off-surface 112 → 108). The target — 40
+— is unchanged.
 
 The ledger of the departing names — grouped, with the rationale for each group — is the
 **"Discarded — and why"** section of `docs/product/beta-sdk-surface.md`.

@@ -4085,8 +4085,8 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 def _http_excluded_error() -> dict:
     """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
 
-    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding seven
-    tool bodies (four live, three retired-but-served), each of which returns it
+    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding eight
+    tool bodies (four live, four retired-but-served), each of which returns it
     verbatim, so the dispatch used to be recorded ``status="ok"``. The wire
     payload is unchanged (`_SafeError` is a ``dict`` subclass); the seam matches
     it by value. Its ``error`` is a MAPPING, so the seam's text arm cannot see
@@ -7343,10 +7343,14 @@ def tortoise_update_knowledge(id: str, props: Any = None,
     Dispatches on WHICH FIELDS are set, exactly as `TortoiseSDK.update_knowledge`
     does at the SDK layer:
 
-      props=                      → property update. Was `tortoise_update` (which
-                                    already dispatches Point-lifecycle vs plain
-                                    entity), so `tortoise_update_point` and
-                                    `tortoise_update_entity` are the same arm.
+      props=                      → property update, through **the writer the
+                                    absorbed door used** (`_update_entity_any`,
+                                    which carries the Point lifecycle: a status
+                                    write journals a `restatus` and a refused
+                                    transition names the target word). Was
+                                    `tortoise_update`; `tortoise_update_point`
+                                    and `tortoise_update_entity` are the same arm
+                                    — and all three now reach the same relay.
       annotation={bias, precision, consistency, directness}
                                   → annotate the LINK. Was `tortoise_annotate_operator`.
       invalid_at=/valid_until=    → retract the claim: a tombstone whose window
@@ -7437,9 +7441,19 @@ def tortoise_update_knowledge(id: str, props: Any = None,
                                     "retract and invalidate arms only — a property "
                                     "update has no preview.",
                            "code": ERR_INVALID})
-    # The property arm: `tortoise_update` IS the Point/entity dispatcher, so this
-    # does not choose a type and cannot choose it wrongly.
-    return tortoise_update(id, props=props)
+    # The property arm relays to the WRITER the absorbed door used, not to
+    # `tortoise_update`/`sdk.update` (#12915 review, the blocking finding).
+    # `sdk.update` dispatches a Point to `update_point`, which appends NO journal
+    # record for a status write and refuses every non-promote transition with one
+    # fixed sentence — so pointing this container at `tortoise_update` made the
+    # approved door WEAKER than the two doors it absorbs (`tortoise_update_point`
+    # and `tortoise_update_entity`, both already relayed to
+    # `_update_entity_any`). Measured at the merged head: this container wrote 0
+    # `EntityMutated` records and refused `status='superseded'` with "update_point
+    # only promotes draft→live", while `tortoise_update_entity` journalled the
+    # restatus. `sdk.update_knowledge`'s property arm IS `_update_entity_any`.
+    return _safe(_quota_gated(_get_org_sdk().update_knowledge, "points"),
+                 id, **(props or {}))
 
 
 def tortoise_supersede_knowledge(old_id: str, new_id: str,
