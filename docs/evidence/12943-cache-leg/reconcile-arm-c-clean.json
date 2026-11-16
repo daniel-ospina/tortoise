@@ -1,0 +1,22 @@
+{
+  "cache_side": "cache",
+  "checked": 4,
+  "declaration_coverage": "complete",
+  "declaration_source": null,
+  "divergent": 0,
+  "divergent_keys": [],
+  "extra_in_cache": 0,
+  "field_mismatches": 0,
+  "form_normalized": 2,
+  "graph_only": {
+    "content_hash": 2,
+    "embedding": 2,
+    "ep_dirty": 2,
+    "ep_dirty_at": 2
+  },
+  "graph_only_total": 8,
+  "missing_in_cache": 0,
+  "not_hot": 0,
+  "truth_side": "record",
+  "verdict": "clean"
+}

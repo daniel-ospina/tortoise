@@ -726,6 +726,19 @@ surfaces:
   # through a P0. DB-free (pepper env + a stubbed DB probe, no FalkorDB, no
   # Postgres, no network).
   - test_9548_record_arming_health.py
+  # #12943: a write the RECORD accepted must also reach the CACHE, and it did not
+  # — the record armed with no shared cache files truth in Postgres and the cache
+  # in a process-local file, with every write returning success and nothing
+  # counting it. This file pins the counter's reason vocabulary, the count-once
+  # latch, that the four coherent shapes stay silent, that all three write doors
+  # count it, and that `/health` carries the key on EVERY arm including a failed
+  # counter snapshot. DUAL-REGISTERED for the same reason as #9548's file above:
+  # `tortoise/sdk.py` and `tortoise/hosted_api.py` select `api`, while a
+  # `tortoise/cache_leg.py`-only or `monitoring.py`-only diff falls through to
+  # `core`. Registered at BOTH or `ci_selection --integrity` reds the required
+  # `manifest-integrity` check and the file drops out of tier-2 selection
+  # (review cycle 3 P1 — the gate was already red when this comment was written).
+  - test_12943_cache_leg.py
   # #10620: the record stopped dropping every point that carried search keys
   # (`point.search_keys` was `jsonb`, the producer emits the graph's flat string),
   # and `/health` stopped answering `ok` while rows were dropped. DUAL-REGISTERED
@@ -5077,6 +5090,7 @@ surfaces:
   # `record_writer.py`-only diff (the `dsn_fingerprint` single definition this
   # file also pins) falls through to `core`.
   - test_9548_record_arming_health.py
+  - test_12943_cache_leg.py
   # #10620: same dual registration as the guards above — the record's row-loss
   # verdict (`record.degraded`) lives on `/health`, while the attribution half
   # (`RecordStatementError`, and the `search_keys` flatten/refusal rule) lives in
@@ -13328,6 +13342,7 @@ durations:
   test_9231_record_migrations_trigger.py: 0.1
   test_9350_capture_provenance_journalled.py: 9.7  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 17.6
   test_9548_record_arming_health.py: 0.1
+  test_12943_cache_leg.py: 5.1  # needs a graph (P4 refuses URI-less, so NOT DB-free); no Postgres except two skip-if-absent convergence legs
   test_9555_narrative_carrier.py: 2.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 3.4
   test_backfill_references_5141.py: 0.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.2
   test_bm25_lexical_8488.py: 13.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 9.8
