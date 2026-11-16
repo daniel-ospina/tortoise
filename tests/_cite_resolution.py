@@ -55,6 +55,11 @@ from __future__ import annotations
 #:   exact  — the line, stripped, IS the anchor (a one-line block terminator)
 ANCHOR_KINDS = ("line", "def", "exact")
 
+#: How many non-nearest candidates `locate_hint` enumerates. A count is always stated;
+#: only the list is bounded, so a generic structural anchor (`exact '}'` matches 102
+#: lines of `sdk.py`, `exact ')'` 465) cannot turn the actionable message into a wall.
+_MAX_OTHER_CANDIDATES = 8
+
 
 def anchor_lines(source_lines, anchor: str, kind: str = "line") -> list[int]:
     """The 1-based lines of `source_lines` that satisfy `anchor` under `kind`."""
@@ -106,9 +111,14 @@ def locate_hint(source_lines, anchor: str, kind: str = "line",
 
     `cited` makes a multi-hit anchor actionable rather than merely truthful: an
     insertion ABOVE a cite moves it by a few lines, so the candidate NEAREST the
-    cited number is the one the passage means, and it is named first. Every other
-    candidate is still printed — an anchor that matches two lines is a weak anchor
-    and the reader has to see that, not have it averaged away.
+    cited number is the one the passage means, and it is named first. The other
+    candidates are printed too — an anchor that matches two lines is a weak anchor
+    and the reader has to see that, not have it averaged away — but the list is CAPPED
+    (#13033 review P3): `rows` uses `("exact", ")")` and `_BUNDLE_RULES` uses
+    `("exact", "}")` as an end spec, and those match 465 and 102 lines in `sdk.py`,
+    so an uncapped list produced a 1 KB "nearest of 465 candidates" wall on exactly the
+    structural closers where the advice is vacuous. The count is always stated; only the
+    enumeration is bounded, and the truncation says so.
     """
     found = anchor_lines(source_lines, anchor, kind)
     if not found:
@@ -119,11 +129,20 @@ def locate_hint(source_lines, anchor: str, kind: str = "line",
         return f"is at line {found[0]}"
     if cited is not None:
         ordered = sorted(found, key=lambda n: (abs(n - cited), n))
-        rest = ", ".join(str(n) for n in ordered[1:])
+        # ⛔ THE ENUMERATION IS CAPPED; THE COUNT NEVER IS (#13033 review P3).
+        others = ordered[1:1 + _MAX_OTHER_CANDIDATES]
+        rest = ", ".join(str(n) for n in others)
+        tail = (f"; the others are {rest}" if len(ordered) - 1 <= len(others)
+                else f"; the next {len(others)} are {rest}, and "
+                     f"{len(ordered) - 1 - len(others)} more — too generic to "
+                     f"enumerate")
         return (f"is at line {ordered[0]} (nearest of {len(found)} candidates for "
-                f"this anchor; the others are {rest} — if the passage means one of "
-                f"those, its anchor is not unique enough to pin it)")
-    return f"is on {len(found)} lines ({', '.join(map(str, found))})"
+                f"this anchor{tail} — if the passage means one of those, its anchor "
+                f"is not unique enough to pin it)")
+    shown = ", ".join(map(str, found[:_MAX_OTHER_CANDIDATES + 1]))
+    more = ("" if len(found) <= _MAX_OTHER_CANDIDATES + 1
+            else f", and {len(found) - _MAX_OTHER_CANDIDATES - 1} more")
+    return f"is on {len(found)} lines ({shown}{more})"
 
 
 def cite_failure(doc_label: str, source_label: str, number: int, source_lines,
@@ -159,12 +178,11 @@ def cite_failure(doc_label: str, source_label: str, number: int, source_lines,
     # correct gate; the residual it does not close is a pair whose two anchors resolve
     # on DIFFERENT lines (no single line satisfies both), which no caller constructs —
     # `_pin_row_failures` passes a one-element tuple — so it is named here, not guessed at.
+    # ⛔ The instruction is appended only when it is TRUE, because the message has to
+    # carry the next ACTION: for a renamed symbol the action is to re-verify the passage
+    # (a re-pointed number would bury a false claim), and appending it to the
+    # `appears NOWHERE` case told a fixer to do both at once.
     resolved = all(anchor_lines(source_lines, a, kind) for a in anchors)
-    # ⛔ The re-point instruction is only TRUE when the anchor resolves SOMEWHERE.
-    # Appending it to the `appears NOWHERE` case told a fixer to re-point a number at
-    # a line that does not exist, immediately after telling them not to — the message
-    # has to carry the next ACTION, and for a renamed symbol the action is to
-    # re-verify the passage (a re-pointed number would bury a false claim).
     return (f"{doc_label} cites {source_label}:{number}{subject}, and that line reads "
             f"{got!r}. The thing it names " + "; ".join(hints)
             + (" — re-point the cite to that line (do not delete it)" if resolved else ""))

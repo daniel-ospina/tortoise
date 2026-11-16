@@ -56,6 +56,7 @@ _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from tests._cite_resolution import anchor_lines as _anchor_lines  # noqa: E402
 from tests._cite_resolution import cite_failure as _cite_failure  # noqa: E402
 from tests._cite_resolution import locate_hint as _locate_hint  # noqa: E402
 from tools import capstone_verdict_check as cvc  # noqa: E402
@@ -4435,6 +4436,15 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
     bytes already in hand: one message, both lines, one edit.
     """
     stop = int(end) if end else start
+    # ⛔ THE SAME BLANK-ANCHOR REFUSAL `cite_holds` makes (#13033 review P3). The two
+    # grading paths in this file must not disagree on the one input the guard exists
+    # for: `a not in got` is FALSE for `''` on EVERY line (and `any(a in ln …)` is TRUE),
+    # so a blank anchor here is a vacuous PASS, not a miss.
+    blank = [a for a in anchors if not a.strip()]
+    if blank:
+        raise ValueError(
+            f"anchor(s) {blank!r} are empty or whitespace — `'' in text` is true on "
+            "EVERY line, so a blank anchor would pass every rule it was handed")
     # ⛔ A NUMBER PAST THE END IS A MISS, NOT A CRASH (#13033 review, measured): every
     # branch below indexes `source_lines[start - 1]` (and the range arm indexes
     # `stop - 1`), so a swept document citing a line this file does not have raised
@@ -4556,10 +4566,13 @@ def _bundle_sweep(docs, sources) -> dict:
                          else "<past the end of the file>")
                 # ⛔ TOLERANT label: `_bundle_sweep` is also driven over SYNTHETIC
                 # documents by the tests (its docstring promises it asserts nothing),
-                # and a temp-path source is not under `_REPO` — a bare `relative_to`
-                # would raise ValueError out of the failure path, turning a reportable
-                # miss into a traceback. (That is the hazard this guard closes; no
-                # shipped caller ever took it, since the guard has been here throughout.)
+                # and a temp-path source is not under `_REPO`, so a bare `relative_to`
+                # would raise ValueError out of the failure path and turn a reportable
+                # miss into a traceback. ⛔ THE GUARD IS INTRODUCED HERE (#13033 review
+                # P2): `main` built this label from the source KEY (`{source}.py`),
+                # which cannot raise, so "it has been here throughout" was a provenance
+                # claim this same hunk refutes — the switch to a real repo-relative path
+                # is what needs the guard, and nothing on `main` ever took it.
                 _src_path = sources[source]
                 source_label = (
                     _src_path.relative_to(_REPO) if _src_path.is_relative_to(_REPO)
@@ -4618,10 +4631,12 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     (the entry point, the classify flag, the vet flag — named by SYMBOL, never by
     a number: a number quoted here would be the very drift this paragraph is
     about, and it was, twice). They bite: with the README's vet-flag cite moved
-    to `7913`, `the vet flag` reds with `extractor_v2.py:7953 reads 'continue',
-    which carries none of ['vet_enabled = (']` (measured at a head on which 7913
-    was that comment; an earlier round quoted an older read of it, which the
-    extractor's own growth had since moved).
+    to `7913`, `the vet flag` reds, naming the line the anchor really lives on
+    (`extractor_v2.py:7953` is what the cite reads) and where `vet_enabled = (` is
+    instead — measured at a head on which 7913 was that comment. ⛔ THE FAILURE TAIL IS
+    NOT QUOTED HERE any more: an earlier cut quoted its literal text (`…, which carries
+    none of […]`), and the message was re-worded under it (#12989), so the quote rotted
+    into a claim the tree refutes — this paragraph's own subject, applied to itself.
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
     fold cite to `12401` reds it, and before this leg nothing read that row.
     """
@@ -4737,12 +4752,27 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
                     else ("and this row's SOURCE key is not in the source map, so the "
                           "cite cannot be resolved at all — fix the row's key")
                 )
+                # ⛔ THE TAIL IS GATED, not appended unconditionally (#13033 review P2).
+                # `_locate_hint` says "re-verify the PASSAGE rather than re-pointing the
+                # number" for an anchor that appears NOWHERE, so appending "the sentence
+                # must carry THAT number" on top of it contradicted the sentence before it
+                # — the same one-sidedness `cite_failure` gated with `all(...)`. No tail at
+                # all when the row's own source key is unresolvable: there is nothing to
+                # re-point onto.
+                if hint_source is None:
+                    _tail = ""
+                elif _anchor_lines(hint_source, token, kind):
+                    _tail = "; the sentence must carry THAT number, not a stale one"
+                else:
+                    _tail = ("; if the anchor is genuinely gone the sentence needs "
+                             "re-wording, not a new number — a re-point would bury the "
+                             "stale claim")
                 failures.append(
                     f"{doc_label}: the sentence containing {phrase!r} does not "
                     f"cite :{number} — a bare continuation is invisible to "
                     f"_BUNDLE_CITE, so this pin is the only thing reading it. The "
-                    f"thing it names is `{token}`, {where}; "
-                    f"the sentence must carry THAT number, not a stale one")
+                    f"thing it names is `{token}`, {where}"
+                    + _tail)
                 continue
             failure = _cite_failure(
                 doc_label, source_label, int(number), sources[source_key], (token,),
@@ -7635,20 +7665,27 @@ def _drop_block_entries(text: str, section: str) -> str:
 #: and carries no such cite. The arm table below needs that split, because
 #: `pytest.raises(AssertionError)` cannot tell them apart.
 #:
-#: ⛔ THIS PATTERN HAS TWO PRODUCERS AND MUST MATCH BOTH (#13033 review P1). It used to
-#: match the literal `(cited by <doc>)` tail; when that tail moved to `_cite_failure`
-#: (`<doc> cites <source>:<n> …`) and to the bare-continuation arm (`<doc>: the sentence
-#: containing … does not cite :<n>`), the pattern matched NEITHER — so `_block_findings`
-#: returned every finding, the baseline below false-REDded the moment a row went stale
-#: (with the wrong diagnosis) and the table's `assert findings` became satisfiable by a
-#: row alone. A pattern keyed on prose rots silently; this one is keyed on the two
-#: shapes those arms actually emit, and `test_the_line_and_block_findings_are_told_apart`
-#: holds both halves so the next re-wording cannot take the guard quiet again.
-#: `_bundle_sweep`'s `- <cite> (<label>): <source>:<n> reads …` shape is deliberately NOT
-#: matched here — it was a BLOCK finding before this split existed and stays one.
+#: ⛔ THIS PATTERN HAS FOUR PRODUCERS AND MUST MATCH ALL OF THEM (#13033 review P1,
+#: P2). It used to match the literal `(cited by <doc>)` tail; when that tail moved to
+#: `_cite_failure` (`<doc> cites <source>:<n> …`), to the bare-continuation arm
+#: (`<doc>: the sentence containing … does not cite :<n>`), and to the scoping-phrase
+#: arm (`<doc>: the scoping phrase … occurs <n> time(s)`), the pattern matched NONE of
+#: them — so `_block_findings` returned every finding, the baseline below false-REDded
+#: the moment a row went stale (naming the block arms for a row's red) and the table's
+#: `assert findings` became satisfiable by a row alone.
+#:   * the source-label class MUST admit `-`: `ci_surfaces` labels as
+#:     `config/ci-surfaces.yml` (a real `_EPIC_CITE_SOURCES` path), and a `[\w./]`
+#:     class silently classified that row's findings as block findings;
+#:   * `_bundle_sweep`'s `- <cite> (<label>): <source>:<n> reads …` shape is
+#:     deliberately NOT matched — it was a BLOCK finding before this split existed and
+#:     stays one.
+#: `test_the_line_and_block_findings_are_told_apart` DRIVES THESE PRODUCERS rather than
+#: matching copies of their prose, so the next re-wording cannot take the guard quiet
+#: again.
 _ROW_FINDING = re.compile(
-    r"- \S+ cites [\w./]+:\d+"
+    r"- \S+ cites [\w./-]+:\d+"
     r"|- \S+: the sentence containing .* does not cite :\d+"
+    r"|- \S+: the scoping phrase .* occurs \d+ time\(s\)"
 )
 
 
@@ -7678,43 +7715,86 @@ def _block_findings(message: str) -> list[str]:
             and not _ROW_FINDING.match(ln.strip())]
 
 
-def test_the_line_and_block_findings_are_told_apart():
-    """`_ROW_FINDING` matches what the row arms ACTUALLY emit (#13033 review P1).
+def test_the_line_and_block_findings_are_told_apart(tmp_path):
+    """`_ROW_FINDING` matches what the row arms ACTUALLY emit (#13033 review).
 
     The split is load-bearing: `_block_findings` is the evidence that
     `test_each_block_arm_reds_on_the_mutation_it_guards` reads. A pattern keyed on the
     producers' PROSE silently stops matching when the prose moves — and it did, for the
     whole period between `_cite_failure` taking over the row message and this test:
     every row finding was classified a block finding, so the baseline false-REDded the
-    moment a table row went stale (blaming the block arms) and the table's
-    `assert findings` became satisfiable by a row alone.
+    moment a table row went stale (blaming the block arms for a row's red) and the
+    table's `assert findings` became satisfiable by a row alone.
+
+    ⛔ EVERY POSITIVE CASE IS THE REAL PRODUCER'S OUTPUT, not a copy of its prose
+    (#13033 review round 5, P2). An earlier cut of this test matched literal strings
+    lifted out of the source, so a re-wording inside a producer left the test GREEN
+    while `_ROW_FINDING` went dead again — the same silent rot, one level up. Each case
+    below calls `_pin_row_failures` / `_bundle_missing` and classifies what comes back,
+    and the four rows cover the four arms that emit a line finding.
     """
-    row_shapes = (
-        # `_cite_failure`'s resolved miss (the commonest: a stale number)
-        "- 04-plan.md cites tortoise/sdk.py:14606 (the sentence containing 'p'), "
-        "and that line reads 'x'",
-        # the bare-continuation arm: the number is absent from the sentence entirely
-        "- 03-test-design.md: the sentence containing 'the A-corpus capture' does "
-        "not cite :10353 — a bare continuation is invisible to _BUNDLE_CITE",
-    )
-    for shape in row_shapes:
-        assert _ROW_FINDING.match(shape), (
-            f"a TABLE-ROW shape is no longer recognised as a row finding: {shape!r} — "
-            "`_block_findings` would report it as a block/document finding, which "
-            "false-reds the baseline and leaves the arm table satisfiable by a row")
-        assert not _block_findings(shape), (
-            f"`_block_findings` returned a row finding as a block finding: {shape!r}")
-    block_shapes = (
-        "- config/ci-surfaces.yml's `carve_out:` block holds NO capstone entry",
-        # `_bundle_sweep`'s own shape — a BLOCK finding before this split and after
-        "- README.md:427 (the meta fold): tortoise/sdk.py:19326 reads 'x', so the "
-        "cite does not hold what it names",
-    )
-    for shape in block_shapes:
-        assert not _ROW_FINDING.match(shape), (
-            f"a BLOCK/DOCUMENT shape is being read as a row finding: {shape!r}")
-        assert _block_findings(shape) == [shape[2:]], (
-            f"a block finding was dropped by `_block_findings`: {shape!r}")
+    src = tmp_path / "seam.py"
+    src.write_text("# a comment\ntarget = 1\nother = 2\n", encoding="utf-8")
+
+    def _pin(doc_text, rows, sources=None):
+        doc = tmp_path / "doc.md"
+        doc.write_text(doc_text, encoding="utf-8")
+        # ⛔ `sources` holds LINE LISTS — the pin grades against them directly; it is the
+        # LABEL that comes from `_EPIC_CITE_SOURCES`. Passing a `Path` here fails inside
+        # the module's own bounds check, which is how this fixture broke first time.
+        return _pin_row_failures(
+            [("doc.md", *tuple(r)) for r in rows],
+            {"doc.md": doc},
+            sources if sources is not None
+            else {"src": src.read_text(encoding="utf-8").splitlines()},
+            default_source="src")
+
+    # 1. `_cite_failure`'s resolved miss: the cited number does not carry the anchor.
+    missed = _pin("`src.py:1` is where the seam sits.\n",
+                  [("is where the seam sits", ((1, "target = 1"),))])
+    # 2. the bare-continuation arm: the sentence never states the number at all.
+    bare = _pin("`src.py:2` is where the seam sits.\n",
+                [("is where the seam sits", ((1, "target = 1"),))])
+    # 3. the scoping-phrase arm: the phrase binds two lines, so no row can scope.
+    ambiguous = _pin("the seam sits here.\nthe seam sits here.\n",
+                     [("the seam sits", ((2, "target = 1"),))])
+    # 4. a HYPHENATED real source path (`ci_surfaces` -> `config/ci-surfaces.yml`):
+    #    this is the case `[\w./]` silently misclassified as a block finding.
+    (tmp_path / "h.md").write_text(
+        "`config/ci-surfaces.yml:1` is where the carve-out sits.\n", encoding="utf-8")
+    hyphenated = _pin_row_failures(
+        [("doc.md", "is where the carve-out sits", ((1, "carve_out:"),))],
+        {"doc.md": (tmp_path / "h.md")},
+        # `sources` holds the LINE LISTS the pin grades against; the LABEL comes from
+        # `_EPIC_CITE_SOURCES`, which is what makes it `config/ci-surfaces.yml`.
+        {"ci_surfaces": ["# not the carve-out", "  carve_out:"]},
+        default_source="ci_surfaces")
+
+    rows = {"cite_failure/miss": missed, "bare continuation": bare,
+            "scoping phrase": ambiguous, "hyphenated label": hyphenated}
+    for name, findings in rows.items():
+        assert findings, f"the {name} arm produced NO finding — the fixture is inert"
+        for finding in findings:
+            line = f"- {finding}"
+            assert _ROW_FINDING.match(line), (
+                f"the {name} arm's own finding is not recognised as a row finding: "
+                f"{line!r} — `_block_findings` would report it as a block/document "
+                "finding, which false-reds the baseline and leaves the arm table "
+                "satisfiable by a row")
+            assert not _block_findings(line), (
+                f"`_block_findings` returned the {name} arm's row finding: {line!r}")
+
+    # ⛔ THE OTHER DIRECTION: a BLOCK/DOCUMENT finding must stay one. `_bundle_missing`
+    # returns the fragment; `_bundle_sweep` composes it into the finding's line.
+    fragment = _bundle_missing("line", ("target = 1",), ["# nothing here"], 1, None)
+    assert fragment, "the block fixture is inert — `_bundle_missing` returned no miss"
+    block = "- README.md:427 (the meta fold): seam.py:1 reads 'x', so the cite does " \
+            "not hold what it names — and the tree already says where that is: " \
+            + "; ".join(fragment)
+    assert not _ROW_FINDING.match(block), (
+        f"a BLOCK/DOCUMENT finding is being read as a row finding: {block!r}")
+    assert _block_findings(block) == [block[2:]], (
+        f"a block finding was dropped by `_block_findings`: {block!r}")
 
 
 def test_a_past_the_end_cite_is_a_finding_not_a_traceback(tmp_path):
@@ -14706,8 +14786,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "cite — re-stale it and this record's only reproduction path points at a dead line")
     # ⛔ DIRECTION FLIPPED with the correction this arm forced. The comment at this line used to
     # read "nothing in this tree consumes `result[\"relations\"]`" — a claim that was FALSE from the
-    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:19430`), so the
-    # arm was pinning a falsehood into the live tree. It now asserts the corrected sentence AT THE
+    # moment `#11548` landed the consumer (this record's own §5 reproduction runs
+    # `sed -n '19883p' tortoise/sdk.py`, the `link_source_to_event` call it labels
+    # "the writer"), so the arm was pinning a falsehood into the live tree. It now
+    # asserts the corrected sentence AT THE
     # SAME LINE (the block's line count was held at 13 so every cite below keeps its number) and that
     # the retracted sentence is gone from the file entirely.
     assert "result[\"relations\"]" in ext[_relations_cite - 1], (
@@ -14728,7 +14810,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "\"nothing consumes it\" reading is what this arm replaced")
     assert "nothing in this tree consumes" not in "\n".join(ext), (
         "the retracted sentence is back in the live file — it was false while this record's own §5 "
-        "cited `sdk.py:19430` as the consumer, so no arm may require it again")
+        "cited `sdk.py:19883` as the consumer, so no arm may require it again")
 
     # A1's environment block: the reproduction that states A1's producer claim — the
     # bare-token grep whose four `create_operator` mentions ARE its evidence that the
@@ -15269,7 +15351,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "record cites that window as the `references` writer, so re-derive the cite")
     # ⛔ The record states this window TWICE — as the cite pinned above and as the
     # reproduction command — and only the first was watched (measured: re-staling the second
-    # to `274,282` left the leg GREEN). Symmetric with the `sed -n '17681p'` arm for the
+    # to `274,282` left the leg GREEN). Symmetric with the `sed -n '19883p'` arm for the
     # sibling capture-path cite, which was watched from the start.
     assert re.findall(
         r"sed -n '(\d+),(\d+)p' docs/evidence/7949-capstone/probes/capstone_measure\.py",
