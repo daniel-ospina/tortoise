@@ -65,9 +65,15 @@ plus a top-level ``exit``/``exec`` seen, and routes an assignment in any of thos
 existing ``ambiguous`` verdict — the fail-closed one, whose message says the shape was not read as
 a statement. Two properties are deliberate: the model is SMALL, so an unmodelled form lands on
 ``ambiguous`` rather than a pass (a false ``STATED`` is the direction that lets a config through);
-and a CONDITIONAL arm (``if [ … ]; then export TORTOISE_EMBED_GATE=1; fi``) is refused, because a
-branch is not the shipped configuration stating a value — ``entrypoint.sh``'s own switch exports
-are top level. There is no widening for an honest shorthand: ``=0`` still passes by design.
+and a CONDITIONAL arm is refused, because a branch is not the shipped configuration stating a
+value — ``entrypoint.sh``'s own switch exports are top level. ⛔ "Conditional" is not only
+``if …; then``: the same branch is spelled ``&&``/``||`` (``[ -n "$MAYBE" ] && export K=1``,
+``true || export K=1``) and its sibling is the BACKGROUND operator (``export K=1 &``, which exports
+inside a subshell) — all three were measured fail-OPEN, because the statement splitter cut
+``&&``/``||`` into ordinary statements and lost the guard, so a never-run export was credited and
+the gate exited 0 over a process that receives nothing. The splitter now carries the separator and
+the reader routes those to ``ambiguous`` too; ``;``-separated statements stay creditable, which is
+why the split exists. There is no widening for an honest shorthand: ``=0`` still passes by design.
 
 ⛔ **Block keywords are matched against a STRUCTURAL view, in which every span the reader does not
 evaluate is BLANKED whole** — quoted and ANSI-C strings, comments, command substitutions
@@ -1002,22 +1008,42 @@ def _shell_exports(line: str, structure: str) -> list[tuple[str, str]]:
 #: matched FIRST so it cannot read as two empty statements.
 _SHELL_STATEMENT = re.compile(r";;|;|&&|\|\|")
 
+#: A BARE `&` — the background operator — matched at a token boundary and nowhere else:
+#: `&&` (its own separator), `>&`/`&>` (a redirect), `|&` (a pipe) and `&>>` all put the `&`
+#: beside another metacharacter, so this matches only the operator that sends a statement to a
+#: SUBSHELL. That matters because a subshell's export never reaches the process (verified: `bash
+#: -c 'export K=1 & wait; env'` prints no K), so crediting it is the false PASS this gate exists to
+#: prevent — `export TORTOISE_VALUE_GATE=1 &` used to read `stated` (review, measured).
+_SHELL_BACKGROUND = re.compile(r"(?<![&>|])&(?![&>])")
 
-def _shell_statements(line: str, structure: str) -> list[tuple[str, str]]:
-    """Split one logical line into ``(raw, structural)`` STATEMENT segments.
+
+def _shell_statements(
+    line: str, structure: str
+) -> list[tuple[str, str, str]]:
+    """Split one logical line into ``(raw, structural, separator)`` STATEMENT segments.
 
     Offsets come from the STRUCTURAL view (span bodies and the trailing comment already blanked,
     length preserved), so a `;`/`&&`/`||` inside a string, a comment or a `$( … )` splits nothing,
     and each raw slice stays byte-aligned with its structural slice — which is what the readers'
     head guards compare. A trailing comment is not a statement, so the final raw slice is cut to
     the structure's length rather than to the line's.
+
+    ⛔ **The SEPARATOR is returned because `&&`/`||` change what a segment MEANS.** Splitting them
+    into equal statements lost the guard: `[ -n "$MAYBE" ] && export K=1` handed the right-hand
+    slice to the reader as an ordinary top-level statement, so a short-circuited (never-run) export
+    was credited `STATED` and the gate exited 0 over a process that receives no value at all
+    (review, measured: `true || export K=1` and `[ -n "$MAYBE" ] && export K=1` both printed `ok`,
+    while `env -i … bash` printed neither switch). It is the same class as an `if`-guarded export,
+    which this reader already refuses — so the caller needs the guard, not just the text.
     """
-    segments: list[tuple[str, str]] = []
+    segments: list[tuple[str, str, str]] = []
     start = 0
+    separator = ""
     for match in _SHELL_STATEMENT.finditer(structure):
-        segments.append((line[start:match.start()], structure[start:match.start()]))
+        segments.append((line[start:match.start()], structure[start:match.start()], separator))
+        separator = match.group(0)
         start = match.end()
-    segments.append((line[start:len(structure)], structure[start:]))
+    segments.append((line[start:len(structure)], structure[start:], separator))
     return segments
 
 
@@ -1055,9 +1081,28 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     for line, structure in zip(code_lines, _shell_structures(code_lines), strict=True):
         # ⛔ STRUCTURE, not the raw line: a closer inside a quote or a comment is DATA (review P1),
         # and quote state carried across lines covers a quoted string that spans a newline.
-        for raw, view in _shell_statements(line, structure):
+        for raw, view, separator in _shell_statements(line, structure):
             depth = max(0, depth - len(_SHELL_CLOSERS.findall(view)))
-            conditional = depth > 0 or terminated
+            # ⛔ `depth > 0 or terminated` is NOT the whole population of statements the process
+            # may never receive, and the two gaps were both measured fail-OPEN (review):
+            #
+            #   * a SHORT-CIRCUIT right-hand side — `[ -n "$MAYBE" ] && export K=1`, `true ||
+            #     export K=1`, `false && export K=1`. `&&`/`||` are split out as separate
+            #     statements (so a closer beside an assignment is seen), and the RHS then reads at
+            #     depth 0 and was CREDITED — `ok`, exit 0, while `env -i … bash` printed neither
+            #     switch. `;`-separated statements are ordinary and stay creditable, which is the
+            #     whole reason the split exists, so the separator has to be carried, not guessed;
+            #   * a BACKGROUNDED statement — `export K=1 &` runs in a subshell, so the parent never
+            #     has K. It was credited for the same reason (`_export_tokens` merely stops the word
+            #     at the `&`).
+            #
+            # Both land on `ambiguous`, the direction that fails CLOSED. A branch is not the
+            # shipped configuration stating a value, whether it is spelled `if …; then`, `&&`, or
+            # `&`. The `export` in the shipped `entrypoint.sh` is a plain top-level one, so this
+            # cannot refuse an honest channel (`test_the_real_entrypoint_is_unaffected`).
+            short_circuit = separator in ("&&", "||")
+            backgrounded = _SHELL_BACKGROUND.search(view) is not None
+            conditional = depth > 0 or terminated or short_circuit or backgrounded
             exports = _shell_exports(raw, view)
             if exports:
                 for key, raw_value in exports:
