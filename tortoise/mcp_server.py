@@ -5235,10 +5235,91 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
     return tortoise_query(tag=tag, include_retracted=True, limit=_TAG_ALIAS_LIMIT)
 
 
+def _read_point_served(id: str) -> dict:
+    """The ONE caller-facing point-by-id read: the seam's verdict, applied.
+
+    Shared by `tortoise_get_point` and `tortoise_get_operator` so the two cannot
+    disagree about an absence (#12941 review P1-1: the operator door reads a
+    Point by id too, and the operators are the issue's OWN measured population —
+    "5 operators were accepted by the record … 0 in the cache").
+
+    Three shapes, and each is deliberate:
+
+    * found → the node's properties, plus the attribution merged AFTER them, so
+      a stored property of the same name cannot forge a fallback;
+    * absent with the record's authority behind it (`record-miss`, `record`) —
+      and, in an `off` deployment with the residency marker unarmed, an empty
+      answer that establishes nothing at all (the pre-#12941 shape) — → `{}`
+      — FALSY, because this tool's contract is "properties, or empty dict" and a
+      verifier written as `if out:` must not read an absence as a success
+      (#12941 review P0-1);
+    * `not-hot` → a dict carrying `residency`, never an empty one (#7952: a
+      store that cannot see the node must say so). In an ARMED mode the reason
+      rides beside it; on the `off` + `TORTOISE_RESIDENCY` arm `off` emits no
+      attribution, so there `residency` is the only key.
+    """
+    from tortoise.residency import RESIDENCY_FIELD
+
+    served: dict = {}
+    out = _safe(_get_org_sdk().get_point, id, served_out=served)
+    if not isinstance(out, dict) or isinstance(out, _SafeError):
+        return out
+    if not out:
+        marker = served.get(RESIDENCY_FIELD)
+        return {RESIDENCY_FIELD: marker, **served} if marker else {}
+    return {**out, **served}
+
+
 def tortoise_get_point(id: str) -> dict:
     """Get a single Point by ID. Returns all properties, or empty dict.
-    Alias → get(id, type='point') (epic #888 W3)."""
-    return _safe(_get_org_sdk().get_point, id)
+    Alias → get(id, type='point') (epic #888 W3).
+
+    ⚠️ ARMED MODES (`TORTOISE_RECORD_SERVE`) change what an ABSENT answer looks
+    like, in one direction only: a node that does not exist still returns `{}`,
+    while an answer the store could not SEE returns a dict carrying
+    `residency: "not-hot"`. That is deliberate — `not-hot` is never an empty
+    answer (#7952), and a found node additionally names the store that answered
+    (`servedFrom` / `fallbackReason`). With `TORTOISE_RECORD_SERVE` unset the
+    seam is never consulted — but `TORTOISE_RESIDENCY` arms the marker
+    SEPARATELY, so on a cache that declares itself PARTIAL and does not cover
+    the id this door answers `{"residency": "not-hot"}` where pre-#12941 it
+    answered `{}` (#7952). Neither flag is set by default.
+
+    #12941 — THIS DOOR HONOURS `TORTOISE_RECORD_SERVE`. The read runs through
+    `TortoiseSDK.get_point(..., served_out=...)`, the opt-in caller-facing form
+    of the one seam (`tortoise/record_serve.py`), so an agent that writes and
+    then verifies does not read back ABSENT: the record answers when the cache
+    is cold (`off` mode, the default, is unchanged). The store that answered is
+    named on the response — `servedFrom` / `fallbackReason` — and an answer the
+    store could not see carries `residency: "not-hot"` instead of an empty dict
+    (#7952). The MCP lane already carries the record tenant ambiently
+    (`mcp_auth._record_tenant_scope`, installed by `OrgResolutionMiddleware`
+    since #9192/#10025/#10046), which is why this door can consult the record at
+    all — `record_serve`'s `internal-accessor` exclusion was written when it
+    could not.
+
+    ⛔ AN ARMED ABSENCE STILL RETURNS `{}` (#12941 review P0-1). The seam's
+    attribution is NOT merged into an answer that found nothing: this tool's
+    contract is "properties, or empty dict", and a verifier written as
+    `if out: my write landed` would read a TRUTHY attribution dict for a node
+    that does not exist as a success — the same wrong answer this issue removes,
+    inverted. So an absence the RECORD established (`servedFrom: record`, or a
+    `record-miss` fallback) returns `{}` exactly as `off` mode does; only a
+    `not-hot` answer — which is NOT an absence claim, and must never read as an
+    empty one (#7952) — returns a non-empty dict, carrying the marker and the
+    reason. The full attribution for an established absence stays available to
+    SDK callers through the `served_out` sink, which is caller-owned and cannot
+    be confused with the node.
+
+    ⛔ OWNERSHIP OF THE OUT-DICT. `served_out` is filled by the seam and merged
+    into a FOUND answer, and there the attribution WINS over a stored property
+    of the same name: a caller that cannot tell a fallback from stored data
+    would have exactly the invisible fallback this seam forbids (the
+    reserved-name rule `hosted_api.get_point` states). In `off` mode with no
+    marker armed the dict is empty, so the response is the pre-#12941 shape
+    exactly.
+    """
+    return _read_point_served(id)
 
 
 # ── Entity Resolution (GAP-01 #6987) ──────────────────────────
@@ -5681,13 +5762,51 @@ def tortoise_annotate_operator(id: str, bias: float, precision: float,
 def tortoise_get_operator(id: str) -> dict:
     """Get an operator Point by ID. Returns all properties including annotation dimensions.
     Raises error if the Point is not an operator.
-    Alias → get(id, type='operator') (epic #888 W3)."""
-    point = _safe(_get_org_sdk().get_point, id)
+    Alias → get(id, type='operator') (epic #888 W3).
+
+    ⚠️ Extending its registry `description` (see `tool_registry.py`) is safe here
+    ONLY because `tortoise_get_operator` is a RETIRED name, and both gates that
+    would otherwise move are keyed to LIVE entries: a live description is
+    snapshotted into `config/surface-manifest.yml`'s `job:` field and compared by
+    `tools/surface_manifest.py check`, and the served row's handler docstring is
+    digested by `tools/surface-guard.py`. The retired row carries `use_instead`
+    and NEITHER a `job:` nor a `served_from`, so nothing derives a GATE from this
+    entry's `description` — though its `use_instead`/`sdk_method`/`http_policy` ARE
+    still compared, and the description is still what the RETIRED shim advertises.
+    Editing the live `tortoise_get_entity` text is the change that needs the owner's
+    approval and a manifest re-cut.
+
+    ⚠️ ARMED MODES (`TORTOISE_RECORD_SERVE`) change TWO of those sentences (#12941):
+    a found operator also names the store that answered (`servedFrom` /
+    `fallbackReason`), and an answer no reachable store could SEE returns
+    `residency: "not-hot"` — which is an IMPAIRMENT, deliberately not the "not an
+    operator" error, because a store that could not see the node cannot establish
+    anything about the graph. A genuine non-operator Point still answers the plain
+    `{"error": "Point … is not an operator"}` dict, and an established absence is
+    still `{}`.
+
+    With `TORTOISE_RECORD_SERVE` unset the seam is never consulted and the answer is
+    the pre-#12941 one — BUT the residency marker is armed SEPARATELY: with
+    `TORTOISE_RESIDENCY` on, a cache that declares itself PARTIAL and does not cover
+    the id still answers `{"residency": "not-hot"}` here, exactly as on every other
+    point door (#7952). Neither flag is set by default."""
+    # #12941: this door reads a POINT by id, so it honours the record seam like
+    # `tortoise_get_point` does — an operator written and then verified must not
+    # read back ABSENT (the issue's own measured population: 5 operators in the
+    # record, 0 in the cache).
+    point = _read_point_served(id)
     # _safe reports ANY failure as an _SafeError — itself a dict subclass — so
     # the non-operator guard below would match a failed call and fabricate a
     # domain fact ('is not an operator'), discarding the real cause. Surface
     # the typed failure FIRST (#4576; same pattern as #3926).
     if isinstance(point, _SafeError):
+        return point
+    if isinstance(point, dict) and point.get("residency") == "not-hot" \
+            and "id" not in point:
+        # ⛔ `not-hot` is an IMPAIRMENT, not a domain fact. Without this arm the
+        # guard below would read a dict with no `is_operator` and answer "Point
+        # … is not an operator" — inventing a fact about the graph from a store
+        # that could not see it, which is the #4576 class in the other direction.
         return point
     if isinstance(point, dict) and point and not point.get("is_operator"):
         # ⛔ DELIBERATELY a plain dict, NOT `_SafeError` (#4576, pinned by
@@ -7854,6 +7973,15 @@ def _get_auto_detect(id: str) -> dict:
     Order: canonical entity resolution (id | eventId | url, Point priority)
     then AgentSession lookup by session_id/sessionId. Returns {} when the
     id matches nothing (same contract as get_point/get_entity).
+
+    ⚠️ RESIDUAL (#12941): this door reads the CACHE only and names no store, and
+    it is enumerated as its own `record_serve.ANCHORED_READS` exclusion
+    (`auto-detect-by-id`) rather than served — it resolves across five labels
+    with Point priority, so a record answer would have to re-decide the
+    resolution ORDER before it could claim parity. An agent verifying a
+    just-written POINT through this bare form therefore still reads `{}`; the
+    typed form (`tortoise_get(id, type="point")` → `tortoise_get_point`) honours
+    the seam.
     """
     sdk = _get_org_sdk()
     try:

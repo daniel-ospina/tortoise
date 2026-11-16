@@ -321,11 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 215 collected
-                                 # (docker lane: 214 passed, 1 skipped)
+                                 # this tree: 276 collected
+                                 # (docker lane: 275 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **215 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **276 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -405,7 +405,89 @@ falsifier a later review measured at this head (PR #12474, P2) — that the `UNM
 one ordering it does not cover, since a LATER resolvable assignment still decides the file while the
 unresolvable line stays REPORTED in `indeterminate` in both orders; shown RED by reverting its own fix,
 with the phrase pin normalising the docstring's whitespace so a reflow cannot red it)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 = 215`). The final `1` is PR #12474's
+and twelve by the fresh reviews of `#12902` — among them a shape that assigns MULTIPLE names on ONE line, where the
+flag is not the first: a shell `export OTHER=1 FLAG=0` (bash runs `0`; the value was read
+line-start-only, so the line appended NO decision and the earlier truthy one stood — a false ARM, and
+`export OTHER=1 FLAG=1` alone produced no decision either, so a genuinely armed entrypoint could read
+`OFF`), the same shape in a multi-key Dockerfile `ENV lang=… FLAG=0`, a compose blank sourced from
+`env_file:` that was published as a MEASURED `''` under a cause the run never measured (all three
+shown RED against the unfixed blob and green after), and the self-referencing default
+`export FLAG=${FLAG:-1}` judged against the value the variable ALREADY holds (`bash -c 'export F=0;
+export F=${F:-1}; echo $F'` prints `0`, so the file is OFF while the pre-fix walker published `ON` —
+the open P1 of that review; RED against a mutant that ignores the tracked value, and its same-line
+arm RED against a mutant that tracks the value per LINE instead of per COMMAND), three more that
+published a CLAIM the run did not make: a FALSE-ARM bound certified as `cannot_see` (`#12978`), a
+value-less compose entry described as "not an unset" when the deployment removes the image's `ENV`,
+and a REFUSED resolver named as having "answered"; and three by the SECOND fresh review of `#12902` —
+the comment-blind splitter (a lone `&`/`|`, and a `;`, inside a `#` comment were executed as shell
+grammar, so `export FLAG=0   # CPU & memory` returned NO commands and the earlier truthy arm stood: a
+REGRESSION against `main`, which read `OFF`; RED against a mutant that drops the comment strip) and
+the per-COMMAND export state (`unset FLAG; export FLAG=1` published `OFF` while bash has `1`, and one
+source line was counted as two no-value declarations; RED against a mutant that reads the line-final
+state) and the COMMENTED-OUT heredoc opener, which queued a body and swallowed the lines below it as
+data (`# cat <<EOF` runs in bash; measured RED against a mutant that masks the un-stripped line — the
+interaction of the two readers, where the fourth review's own heredoc BODY table pins the other half)
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 36 + 12 + 4 + 1 + 1 + 7 = 276`).
+The final `4` are `#12902`'s NOT-ARMED-half falsifiers — the SAME defect class as `#12549`
+defect 1 ("a bucket label naming a cause it did not measure"), found by a fresh review on
+the state `defect 2` ADDS: a `DISAGREE` file is in NEITHER `silent` nor `armed`, so row
+1's hold note named a population of zero (`silent deployment file(s): [] declare no gate
+of their own — read from that file ALONE the deployment is unarmed`) and the ARMED
+sibling was named NOWHERE, because `armed_clause` takes its DISAGREE arm first; and a
+disarming value inside a `DISAGREE` file was described by a per-FILE last-wins rule the
+same note contradicted four clauses later (`compose defines no override relation between
+two services`). Two of the four are the falsifiers, one is the POSITIVE CONTROL that keeps
+the per-FILE rule where it DOES hold (an `OFF` file really does have a last word, and
+deletes nothing), and one pins the armed file beside the disagreement. The `23` are the `#12902` reviews'
+own falsifiers across all seven rounds, the `4` above included.
+The `36` are `#12549`'s channel-resolver falsifiers: both orderings of a per-service
+compose disagreement, a flow mapping, an anchor+merge key, a resolver that REFUSES
+(`UNRESOLVED`, never an answer), an unset interpolation that must not read as an
+explicit empty, the ambient environment that must not arm a compose default, the Fly
+`[env]` table read by the TOML grammar owner (quoted key, table written last), a
+discovered channel with NO reader holding the row, the computed population plus the
+declared-harmless `Procfile`, the two declared bounds phase 1 does not convert, a
+platform resolver whose output is not TOML falling back to the file, and `env_file:`
+expansion plus a non-truthy `[env]` value as the disarming direction, and the
+silent-sidecar boundary (a sibling that declares nothing is not a disagreement — else
+the row would be unreachable on every tree with a sidecar), and a mixed tree
+naming its SILENT half beside a disagreement, plus four a fresh-context review measured
+at this head as FAIL-OPENS the resolver conversion had introduced — an UNTRACKED `cp
+.env.example .env` copy arming a compose default, a disarm hidden inside a
+`profiles:`-gated service (compose omits it without `--profile '*'`), `fly config show`
+resolving flyctl's default `fly.toml` over the NETWORK instead of the manifest under
+measurement, and a SIBLING worktree's manifest holding the row for this tree; and two
+more a SECOND review measured after that first fix round, in the opposite direction —
+a profile-gated ARM must not arm a file a default `up` does not start, and `compose.yaml`
+(a compose DEFAULT filename) must be measured rather than invisible. Each was
+shown RED against the pre-fix tool. Also from the reviews of PR #12902, each shown RED
+against the pre-fix tool and each **counted inside the `36` and the trailing `#12902` groups in §6,
+not on top of them** (those two groups ARE this branch's new tests, so nothing named here is an
+addition to the total; the §6 arithmetic is the authority, and the pin re-derives it from
+`--collect-only` rather than trusting this paragraph): defect 4's own shape (`export FLAG=1` then `FLAG=0`
+— a FALSE ARM, because the exported-name matcher accepted only the bare form), the
+PER-KEY narrowing of the unset-interpolation signal (a literal `FLAG: ""` beside an
+unrelated `${MISSING}` in the same file stays a measured `OFF` instead of inheriting a
+false cause), the mirror of that narrowing inside a `profiles:`-gated service (a blank
+there is named `UNRESOLVED`, never published as a `0` disarm), and row 1's own HOLD note
+splitting an unreadable file from an unresolvable value — the half of defect 1 a DoD
+reader actually reads, which the first cut left with no falsifier at all — the export
+ATTRIBUTE as a per-line state (an `unset`/`export -n` after an `export FLAG=1` revokes
+it, so a later plain assignment is not a decision: a false ARM a whole-file set
+produced), and a blank declaration judged from the UNINTERPOLATED model (both
+`${MISSING:+1}`, which compose does not warn about, and the per-key naming of the
+reason, which named a neighbour's variable), and three from the fourth fresh review, each
+shown RED against the pre-fix tool: a CONDITIONAL operand (`[ -n "$X" ] && export FLAG=1`,
+`true || unset FLAG`) reported `indeterminate` and the file HELD, because the reader cannot
+evaluate the test — scored as having run, it published a FALSE ARM on every flag command
+under a condition, and `main` read those `OFF`; a HEREDOC BODY read as data in both
+directions (a body `export FLAG=1` no longer arms, a body `FLAG=0` after a real
+`export FLAG=1` no longer disarms — the second is a REGRESSION against `main`, which read
+it `ON`), across `<<WORD`, `<<-WORD`, `<<\WORD`, `<<"WORD"` and two heredocs on one
+command, with `<<<` and a quoted `<<` as the controls; and the entrypoint declared
+bound's own `cannot_see` examples pinned against the reader, because the bound named
+`[ -n "$X" ] && export FLAG=1` under the trust-me verb while the reader SCORED it `ON`
+(the `reads_wrong` distinction the Dockerfile bound was given for `#12978`). The final `1` is PR #12474's
 row-1 falsifier for the `DISARMS it` leading clause — a compose `environment: [- FLAG, - FLAG=1]`
 REPORTS the value-less entry and ends `ON`, so a tree whose only disarmed file was a SILENT sibling
 published a false cause for its own OFF; the test reds against the pre-fix tool and greens after,
@@ -450,7 +532,7 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
-collected count — `214 passed, 1 skipped` and `213 passed, 2 skipped` here, both adding to the same `215` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+collected count — `275 passed, 1 skipped` and `274 passed, 2 skipped` here, both adding to the same `276` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
 `186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
