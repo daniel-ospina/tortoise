@@ -30,6 +30,7 @@ Each test below is a falsifier for one claim the check makes:
 | `test_the_real_tree_states_both_switches` | this repository, resolved | a real channel regresses; also pins the population so a new channel is a visible change |
 | `test_a_function_header_spelling_with_parentheses_is_still_a_BODY` | a never-running helper body is not credited | ANY header spelling (`function NAME`, `function NAME()`, `NAME()`) stops remembering its Allman body |
 | `test_a_FORKED_group_body_is_never_credited` | a subshell cannot state a value | a group that is piped or backgrounded (single- and multi-line) is credited, or an unforked group stops being |
+| `test_a_group_closer_inside_a_BODY_does_not_end_that_body` | a `}`'s owner decides what it closes | a group's closer inside a function or control-flow body spends the BODY's depth, so its later siblings read as top level and are credited |
 | `test_a_redefined_stage_name_resolves_to_the_MOST_RECENT_stage` | the image channel's stage model agrees with Docker | a repeated `AS <name>` is resolved to the FIRST definition, so a dead stage's `ENV` grades the image |
 | `test_a_trailing_guard_operator_is_consumed_by_the_next_statement` | a guard applies to the next statement, not the rest of the file | `carried` leaks past the statement it guards, or stops guarding across a blank line |
 """
@@ -2697,6 +2698,54 @@ def test_an_UNFORKED_group_body_is_still_credited_and_a_fork_cannot_retract():
     )
     assert retracted_by_a_fork == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
         f"a `unset` inside a forked group cannot touch the parent's export: {retracted_by_a_fork}"
+    )
+
+
+@pytest.mark.parametrize(
+    "label,script",
+    [
+        (
+            "inside a function body",
+            "arm_gates() {\n  { echo arming; }\n  export TORTOISE_VALUE_GATE=1\n"
+            "  export TORTOISE_EMBED_GATE=1\n}\n",
+        ),
+        (
+            "inside a control-flow body",
+            "if false; then\n  { echo arming; }\n  export TORTOISE_VALUE_GATE=1\n"
+            "  export TORTOISE_EMBED_GATE=1\nfi\n",
+        ),
+    ],
+)
+def test_a_group_closer_inside_a_BODY_does_not_end_that_body(label, script):
+    """Review P1 at `85217121` (measured against bash before the fix).
+
+    `_SHELL_CLOSERS` matches ANY bare `}`, so the closer of a group nested inside a function or
+    control-flow body spent that BODY's depth. Every later sibling then read as top level and was
+    credited:
+
+        $ python -c "…_shell_assignments('arm_gates() {\n  { echo arming; }\n  export …=1 …')"
+        ({'TORTOISE_VALUE_GATE': '1', 'TORTOISE_EMBED_GATE': '1'}, set())      <- before
+        $ env -i PATH=/usr/bin:/bin bash <script> /usr/bin/env | grep TORTOISE  <- the truth
+        (nothing: the helper is never called)
+
+    The `}`'s OWNER is what decides — not `fn_body`, which is 1 inside a body and cannot tell a
+    group's closer from the body's. `group_open` counts open groups at any nesting; a `}` that
+    closes one is not a block closer.
+
+    Mutation-proved: dropping the `group_open` exclusion reds both rows and leaves the plain-group
+    and top-level mirrors green.
+    """
+    stated, ambiguous = gate._shell_assignments(script + 'exec "$@"\n')
+    assert stated == {}, f"{label}: a group's `}}` ended the body it sits in: {stated}"
+    assert set(SWITCHES) <= ambiguous, (label, ambiguous)
+
+    # …and the BODY's own closer still closes it, so later top-level statements are ordinary.
+    after_body, _ = gate._shell_assignments(
+        "arm_gates() {\n  { echo arming; }\n}\n"
+        "export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n" + 'exec "$@"\n'
+    )
+    assert after_body == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"the body's own `}}` must still close the body: {after_body}"
     )
 
 

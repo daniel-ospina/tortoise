@@ -316,9 +316,14 @@ def _strip_statement_prefix(raw: str, view: str) -> tuple[str, str]:
 #: the ordinary two-line way (`while …` then `do` on its own line) net +2 against one `done`, so
 #: every later top-level `export` read as conditional and an HONEST entrypoint was REFUSED — with a
 #: message blaming the value (`does not state a value this gate can read`) instead of the depth.
-#: Measured on this repo's own `entrypoint.sh`: with `do` counted, one line
-#: (`while IFS= read -r line || [ -n "$line" ]; do`) matches TWICE and the file balances 100
-#: openers to 91 closers, so the depth never returns to 0; without it, 91 to 91.
+#: ⛔ The counts do NOT balance, and balance was never the property to read (review P3, measured
+#: at `85217121`): `_SHELL_OPENERS` counts block KEYWORDS only — a group's `{` is `_SHELL_GROUP_OPEN`,
+#: a function body's `{` is `_SHELL_FN_BRACE`/`_SHELL_FN_HEADER` — while `_SHELL_CLOSERS` counts
+#: every `}`/`fi`/`done`/`esac` it sees, so a one-line `{ …; }` and a `if …; then …; fi` add
+#: closers without adding an opener here. Measured on this repo's own `entrypoint.sh` at that head:
+#: **79** openers to **92** closers. The depth is kept honest by a SATURATING FLOOR
+#: (`max(0, depth - closers)`) rather than by arithmetic, so the useful reading is the DIRECTION:
+#: counting `do` as an opener makes the loop headers match twice and the surplus only gets worse.
 _SHELL_OPENERS = re.compile(
     # ⛔ A leading CONTROL WORD does not change what the keyword opens (review P2, measured).
     # `! if false; then export K=1; fi` and `time if …` are valid shell (`bash -n` accepts both)
@@ -1596,6 +1601,14 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     #: measured fail-OPEN: the frame was pushed before the guard was known, so every export inside
     #: `[ -n "${ARM:-}" ] && { … }` was credited although bash ran the group zero times.
     group_conditional: list[bool] = []
+    #: ⛔ HOW MANY GROUPS ARE OPEN AT ANY NESTING, including inside a FUNCTION BODY (review P1,
+    #: measured at `85217121`). A group's `}` is matched by `_SHELL_CLOSERS` like any other brace,
+    #: and frames are not kept inside a body, so `arm() {` ⏎ `  { echo hi; }` ⏎ two exports ⏎ `}`
+    #: spent the BODY's depth on the group's closer: every later sibling read as top level and was
+    #: CREDITED — `ok … =1 =1`, exit 0 — while `env -i … bash` on the same script prints no
+    #: `TORTOISE_*`, because the helper is never called. This counter is what tells a group's `}`
+    #: from a body's, which `fn_body` alone cannot do.
+    group_open = 0
 
     def _note_prior(key: str) -> None:
         """Remember ``key``'s pre-group state the first time an open group touches it."""
@@ -1635,8 +1648,14 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # `K=UNSET`), while a trailing `&` does not. `&&`/`||` arrive as a separator above.
             if index == len(segments) - 1 and _SHELL_TRAILING_PIPE.search(view):
                 carried = _SHELL_TRAILING_PIPE.search(view).group(0).strip()
-            depth = max(0, depth - len(_SHELL_CLOSERS.findall(view)))
-            # ⛔ `depth > 0 or terminated` is NOT the whole population of statements the process
+            # ⛔ A GROUP's `}` is not a block closer (review P1, measured at `85217121`): see
+            # `group_open`. The innermost open thing is the group, so the first `}` on the
+            # statement is its closer and must not spend `depth`/`fn_body`.
+            closers = _SHELL_CLOSERS.findall(view)
+            if group_open > 0 and _SHELL_GROUP_CLOSE.match(view):
+                closers = closers[1:]
+                group_open -= 1
+            depth = max(0, depth - len(closers))            # ⛔ `depth > 0 or terminated` is NOT the whole population of statements the process
             # may never receive, and the gaps were all measured fail-OPEN (review):
             #
             #   * a SHORT-CIRCUIT right-hand side — `[ -n "$MAYBE" ] && export K=1`, `true ||
@@ -1696,8 +1715,11 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # (`_function_body_braces` / `allman_body`).
             openers = len(_SHELL_GROUP_OPEN.findall(raw)) - _function_body_braces(raw, view)
             openers -= 1 if allman_body else 0
+            openers = max(0, openers)
+            #: Counted everywhere, because a group inside a FUNCTION BODY still owns a `}`.
+            group_open += openers
             if fn_body == 0:
-                for _ in range(max(0, openers)):
+                for _ in range(openers):
                     group_frames.append({})
                     group_conditional.append(conditional)
             # ⛔ CREDITING and RETRACTING are not the same question, and folding `short_circuit`
@@ -1830,7 +1852,8 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # drop `fn_body` to 0 while the helper was still open, so the helper's `unset`
             # retracted a top-level export: measured — `cleanup() { if …; then …; fi; unset
             # K; }` REFUSED a process that receives both switches.
-            closers = _SHELL_CLOSERS.findall(view)
+            # `closers` is the REDUCED list from the depth step above: the group's own `}` has
+            # already been taken out, so it cannot close the FUNCTION BODY it merely sits in.
             fn_body = max(0, fn_body - len([c for c in closers if "}" in c])) + opened_fn
             if depth == 0 and _SHELL_TERMINATES.match(raw):
                 terminated = True
