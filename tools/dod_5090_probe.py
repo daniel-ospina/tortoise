@@ -5329,12 +5329,16 @@ def per_file_scope_note(deployment: dict) -> str:
     overrides_service = sum(
         1 for entry in (deployment.get("disarming_assignments") or ())
         if _disarmed_state(entry) == "DISAGREE")
-    # ⛔ NO per-service split for `unset_declarations`: unlike a disarming VALUE, which a
-    # per-service compose file can disagree about, an `unset` declaration is qualified by
-    # ORDER in the clause below and never claims a per-FILE last word — so a
-    # `unsets_service` count would be computed and never stated. It WAS computed and never
-    # used, which `lint` (F841) refused; removed rather than left as an unused pair to its
-    # `overrides_service` sibling (peer commit `447e4a4f2e`).
+    # ⛔ BOTH HALVES NEED THE SPLIT, and the previous round's dismissal of the `unset`
+    # half was wrong on the wording: the clause it points at says *"scored as the file's
+    # last word where it is last"* — that IS a per-FILE claim, and a `DISAGREE` file has
+    # no single last word (`#12902` fresh review, P2). Left undivided, ONE published
+    # sentence asserted the per-FILE rule for the value-less entry and its negation for
+    # the disarming value four clauses later — measured on a `DISAGREE` compose file
+    # carrying both `app: TORTOISE_EMBED_GATE:` and `worker: … "0"`.
+    unsets_service = sum(
+        1 for entry in (deployment.get("unset_declarations") or ())
+        if _disarmed_state(entry) == "DISAGREE")
     disarm = ""
     if unsets or overrides:
         parts = []
@@ -5344,12 +5348,25 @@ def per_file_scope_note(deployment: dict) -> str:
             # leaves the arm standing, and the per-surface line above then reads the file
             # `ON` — so an unqualified "this tree DISARMS it" contradicted the state the
             # same note had just printed (fresh review of PR #12474, P2, measured).
-            parts.append(
-                f"{unsets} declaration(s) that fix NO VALUE for it (a shell `unset`, or a "
-                "compose entry with no value — which compose resolves to `null`, passing "
-                "the ambient value through and CLEARING an inherited one when the host "
-                "supplies none) — scored as the file's last word where "
-                "it is last, and a LATER truthy assignment leaves the arm standing")
+            per_file_unsets = unsets - unsets_service
+            if per_file_unsets:
+                parts.append(
+                    f"{per_file_unsets} declaration(s) that fix NO VALUE for it (a shell "
+                    "`unset`, or a compose entry with no value — which compose resolves to "
+                    "`null`, passing the ambient value through and CLEARING an inherited "
+                    "one when the host supplies none) — scored as the file's last word "
+                    "where it is last, and a LATER truthy assignment leaves the arm "
+                    "standing")
+            if unsets_service:
+                # ⛔ NO "the file's last word" HERE: within a `DISAGREE` file the entry
+                # fixes no value for ITS service only, and the other services keep theirs
+                # (`#12902` fresh review, P2).
+                parts.append(
+                    f"{unsets_service} declaration(s) that fix NO VALUE for it IN THE "
+                    "SERVICE(S) THAT CARRY THEM — a PER-SERVICE fact, never a per-FILE "
+                    "last word (an entry with no value passes the ambient value through "
+                    "and CLEARS an inherited one in THAT service, leaving the values the "
+                    "other services fix standing)")
         if overrides:
             per_file = overrides - overrides_service
             if per_file:

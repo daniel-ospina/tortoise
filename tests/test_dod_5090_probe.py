@@ -10595,7 +10595,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `266 + 1` and `265 + 2` at THIS tree, both equal to the `267` the pin re-derives
+    count: `267 + 1` and `266 + 2` at THIS tree, both equal to the `268` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
@@ -12873,6 +12873,42 @@ def test_12902_a_PER_SERVICE_disarm_publishes_no_FILE_order_rule(
     caveat = probe.per_file_scope_note(dep)
     assert "by FILE order" not in caveat, caveat
     assert "PER-SERVICE fact" in caveat, caveat
+    assert "FOR SOME SERVICES ONLY" in caveat, caveat
+
+
+def test_12902_a_VALUE_LESS_entry_in_a_DISAGREE_file_is_not_a_file_last_word(
+        tmp_path, monkeypatch):
+    """The `unset_declarations` half needs the SAME split as the disarming half.
+
+    ⛔ Measured pre-fix (`649c30c568`): ONE sentence asserted the per-FILE rule for the
+    value-less entry — *"scored as the file's last word where it is last"* — and its
+    negation four clauses later, `a PER-SERVICE fact, never a per-FILE last word`. The
+    dismissal of this half argued the `unset` clause "never claims a per-FILE last
+    word", which that quoted phrase falsifies.
+    """
+    _fake_rule_tree(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE:\n"
+        "  worker:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n"
+        "  api:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    dep = shipped["deployment"]
+    assert dep["files"]["docker-compose.yml"] == "DISAGREE", shipped
+    assert dep["unset_declarations"], shipped
+    assert dep["disarming_assignments"], shipped
+    caveat = probe.per_file_scope_note(dep)
+    # BOTH halves present, so the old single-population wording WOULD have fired here.
+    assert "fix NO VALUE for it IN THE SERVICE(S) THAT CARRY THEM" in caveat, caveat
+    assert "scored as the file's last word where it is last" not in caveat, caveat
     assert "FOR SOME SERVICES ONLY" in caveat, caveat
 
 
