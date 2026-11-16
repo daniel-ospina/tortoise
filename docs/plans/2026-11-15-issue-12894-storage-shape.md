@@ -889,11 +889,13 @@ WITH floor AS (
            updated_at = now()
      WHERE c.org_id = $1 AND c.graph_id = $2
        -- ⛔ MODE IS PART OF THE PREDICATE, not a note about it. A `seeded` or `halted` graph must
-       --    match NO ROW and therefore raise; `halted` is the rollback state §A7.5.11 promises and
-       --    the state §A7.7 6.5 gates the fallback removal on, so "stop allocating" has to be a
-       --    property of the statement. Without this term the `mode` column is inert AND the
-       --    `elif mode != 'allocating'` branch of the assertion below is unreachable: the UPDATE
-       --    already matched, so `rows_written == N` and the `!= N` guard never opens.
+       --    match NO ROW and therefore raise. `halted` is the rollback state §A7.5.11 promises, and it
+       --    is one of the three states §A7.7 6.5 distinguishes **by mode** — the fallback removal there
+       --    is keyed on `allocating` ONLY, so a `halted` graph keeps its fallback and loses only its
+       --    allocator. "Stop allocating" therefore has to be a property of THIS statement. Without
+       --    this term the `mode` column is inert AND the `elif mode != 'allocating'` branch of the
+       --    assertion below is unreachable: the UPDATE already matched, so `rows_written == N` and the
+       --    `!= N` guard never opens.
        AND c.mode = 'allocating'
        -- ⛔ DIVERGENCE IS LOUD, NOT REPAIRED HERE. If the counter is BEHIND the table, this
        --    statement must fail — not silently lift itself. `GREATEST` lives in the SEED only.
@@ -928,17 +930,29 @@ operator to three different places (§A7.5.5, §A7.5.11, and nothing at all):
 ```text
 rows_written = <the INSERT's rowcount>
 if rows_written != N:
+    -- ⛔ THE DIAGNOSTIC RUNS UNDER A CONTEXT THAT CAN SEE THE ROW — the GUC SET, or the owner role —
+    --    otherwise the policy that made the write fail also filters the probe and arm 1 lies.
     if no record_cursor row for (org, graph):        RAISE  "not cut over — no counter row"
     elif mode != 'allocating':                       RAISE  "mode=<mode> — not the allocator"
     elif seq < max(journal_event.seq):               RAISE  "DIVERGED — counter behind the table; see A7.5.11"
     else:                                            RAISE  "allocation matched no row (RLS GUC unset?)"
 ```
 
+⛔ **And the diagnostic queries above must NOT run under the same unset GUC the write failed under — this is
+what makes the fourth arm reachable at all** (found by the review of this revision). §A7.8 item 2's policy is
+`USING (org_id = current_setting('app.current_org_id', true))`, so with the GUC unset the probe `SELECT` is
+filtered by **that same predicate**: the row exists but is invisible, the probe reads "absent", and **arm 1
+fires** — telling the operator *"not cut over — no counter row"* in the one failure this paragraph calls *"the
+one that will actually happen"*, when the counter row is right there and the real fault is the GUC. The `else`
+arm and falsifier 17(c) would then describe a message no run can produce. So the diagnostic is specified as
+running **with the GUC set (or as the owner role) for the check itself**, and falsifier 17(c) asserts the
+**message**, not merely that something raised.
+
 ⛔ **And the `UPDATE` carries a `mode = 'allocating'` predicate, which the first version omitted — that omission
 made the `mode` column inert and made falsifier 17(b) red against this very SQL** (round-2 review of the
 revision). A `seeded` or `halted` graph must **match no row and therefore raise**, not silently allocate: that
 is what makes "halted" a state a rollback can actually enter (§A7.5.11) and what makes 6.3's transition
-meaningful (§A7.7).
+meaningful (§A7.7). **It is also what makes the second arm above reachable**, which it was not without it.
 
 §A7.6 falsifier 17 is its executable form, and the RLS-GUC-unset shape is one of its three cases.
 
@@ -1042,29 +1056,52 @@ BEGIN;
   -- (1) the record's floor
   SELECT COALESCE(max(seq), 0) FROM public.journal_event WHERE org_id = $1 AND graph_id = $2;  -- $record_floor
 
-  -- (1b) NAME THE REFUSAL. The three cases send the operator to three different places, so the
-  --      refusal must say which one it is — the same rule as §A7.5.2's rowcount assertion.
-  --      ⛔ THE SEED ADMITS EQUALITY ONLY.
-  --        $record_floor > $3 → CASE 1: the record holds positions this journal cannot reproduce
-  --                            (replaced/truncated/re-segmented, D-24/D-28) → REFUSE; see the table.
-  --        $record_floor < $3 → CASE 2: the D-25 tail **or** a journal replaced by a LONGER one.
-  --                            These share a signature, and the evidence that separates them is
-  --                            condition (iii) "the same journal identity" — which has NO per-row
-  --                            data source until `#9318` (D-24 is a guard, D-28 shows `stat` cannot
-  --                            supply it). **So case 2 is DEFERRED and it REFUSES too.** A lift this
-  --                            seed cannot justify is a lift it must not take.
-  --        $record_floor = $3 → the healthy case → proceed to (2).
-  --      ⛔ The first version printed `WHERE $record_floor <= $3`, i.e. it LIFTED case 2 on two of the
-  --      three conditions and committed — the five passages that defer case 2 were prose the artifact
-  --      did not obey. That is the §A8.3.1 defect class ("a fix applied as words"), one round later.
+  -- (1b) NAME THE REFUSAL. Four cases, four operator destinations, so the refusal must say which one.
+  --      Same rule as §A7.5.2's rowcount assertion.
+  --      ⛔ THE SEED ADMITS TWO CASES AND REFUSES TWO — and the split INSIDE `record_floor < $3` is
+  --      not arbitrary. It is whether any carried number exists:
+  --
+  --        $record_floor >  $3     CASE 1   the record holds positions this journal cannot reproduce
+  --                                        (replaced / truncated / re-segmented; D-24/D-28).
+  --                                        → REFUSE.
+  --        $record_floor =  0      CASE 2a  **NOTHING IS CARRIED.** The record has no position row for
+  --                                        this graph, so there is no carried number for a different
+  --                                        journal to collide with — the "mix two journals into one
+  --                                        coordinate space" hazard needs carried numbers to mix.
+  --                                        → **LIFT to $3.** ⛔ This is B1's MOTIVATING POPULATION
+  --                                        (the large journal with ZERO `journal_event` rows, D-25)
+  --                                        and it is what falsifier 7 asserts. Refusing it would
+  --                                        make the seed unable to do the one thing B1 claims.
+  --        0 < floor <  $3        CASE 2b  **NUMBERS ARE CARRIED AND THE TWO READINGS ARE
+  --                                        INDISTINGUISHABLE** — a D-25 tail, or a journal replaced by a
+  --                                        LONGER one. The only evidence separating them is condition
+  --                                        (iii) “the same journal identity”, which has NO per-row data
+  --                                        source until `#9318` (D-24 is a guard; D-28 shows `stat`
+  --                                        cannot supply it). **DEFERRED ⟹ REFUSE.**
+  --        $record_floor =  $3     HEALTHY → proceed to (2).
+  --
+  --      ⛔ This predicate has been wrong twice, in opposite directions, and both were the SAME defect —
+  --      a rule stated once and then applied to a case it was not about:
+  --        v1 printed `WHERE $record_floor <= $3` — it LIFTED 2b on two of three conditions and committed,
+  --           while five passages deferred it. Prose the artifact did not obey (§A8.3.1's class).
+  --        v2 printed `WHERE $record_floor = $3` — it obeyed the deferral **and refused 2a as well**, which
+  --           is the population B1 exists for, making falsifier 7's green path unreachable against this
+  --           very SQL. Caught by the next review.
+  --      The line below is the rule, **scoped to the case it is about.**
 
-  -- (2) seed ONLY in the healthy case — the only case this mechanism can decide. The `WHERE` IS the
-  --     decision: it is what makes case 2 refuse, so deleting it seeds a longer replacement as if it
-  --     were a legal tail (B1's silent-loss class). `GREATEST` remains as the fail-safe below it.
+  -- (2) seed on the two admitted cases. The `WHERE` IS the decision: it is what refuses 2b, so deleting it
+  --     seeds a longer replacement as if it were a legal tail (B1's silent-loss class). `GREATEST` remains
+  --     the fail-safe below it.
+  --     ⛔ The conflict arm is a scoped UPDATE, not `DO NOTHING`: step (0) promises a `seeded` row is
+  --     re-seedable (6.3's remedy for a graph that resumed writing), and `DO NOTHING` writes nothing — so
+  --     step (3) would read the STALE seq back and refuse, turning the documented remedy into a refusal.
+  --     The scope is what makes it safe: `allocating` and `halted` can never be touched by a seed.
   INSERT INTO public.record_cursor (org_id, graph_id, seq, updated_at)
   SELECT $1, $2, GREATEST($record_floor, $3), now()
-   WHERE $record_floor = $3
-  ON CONFLICT (org_id, graph_id) DO NOTHING
+   WHERE $record_floor = 0 OR $record_floor = $3
+  ON CONFLICT (org_id, graph_id) DO UPDATE
+     SET seq = EXCLUDED.seq, updated_at = now()
+   WHERE record_cursor.mode = 'seeded'
   RETURNING seq;
 
   -- (3) READ BACK: the empty-RETURNING result is NOT self-describing (a concurrent/previous seed and a
@@ -1100,26 +1137,33 @@ specifically — the review is right that a seed which cannot tell a healed tail
 same silent-loss class as the bug it fixes.
 
 ⛔ **But condition (iii) has no data source today, and the round-2 review of this revision is right about that —
-so case 2 REFUSES BY DEFAULT.** (i) and (ii) both hold for a **longer replacement**: its tail positions all have
+so case 2b REFUSES BY DEFAULT.** (i) and (ii) both hold for a **longer replacement**: its tail positions all have
 records, and the missing rows really are absent. Everything therefore rests on (iii) *"the same journal
 identity"* — and the record carries **no journal identity**: D-24 is a *guard* (a one-test change), not a per-row
 identity, `#9318`'s identity-in-the-key is **unbuilt**, and §A6's own D-28 records that `st_dev`/`st_ino`/size/
 `mtime_ns` **cannot** verify it. **An agreed-on condition that cannot be evaluated is not a condition, it is a
 form of words** — so the honest rule is:
 
-> **Case 2 (`record_floor < enumerated_floor`) REFUSES unless an operator supplies the journal identity out of
-> band — and until `#9318` lands, it always refuses.** The D-25 tail heal is therefore **deferred**, not
-> implemented: those graphs stay uncut (and keep working on today's allocator), which is a **cost**, stated
+> **Case 2b (`0 < record_floor < enumerated_floor`) REFUSES unless an operator supplies the journal identity
+> out of band — and until `#9318` lands, it always refuses.** The D-25 *tail* heal is therefore **deferred**,
+> not implemented: those graphs stay uncut (and keep working on today's allocator), which is a **cost**, stated
 > plainly, and much cheaper than mixing two journals into one coordinate space with no error anywhere.
+> ⛔ **What is deferred is the TAIL heal — not the zero-row graph.** Case 2a (`record_floor = 0`) carries no
+> numbers, so there is nothing for a different journal to collide with and the seed lifts it (this section's
+> opening, falsifier 7). A review of this revision found a first form of the fix had scoped the deferral to
+> *all* of `record_floor < enumerated_floor`, which **refused B1's own motivating population and made
+> falsifier 7 unreachable against this very SQL** — the same defect as the one it fixed, one level out: a rule
+> applied to a case it was not about.
 > ⛔ **This is a reduction in what B1 claims, and it is the correct reduction:** the seed's job is to be right,
 > and a lift it cannot justify is a lift it must not take.
 
-**Three outcomes, and the operator action for each:**
+**Four outcomes, and the operator action for each:**
 
 | case | meaning | action |
 |---|---|---|
 | `record_floor > enumerated_floor` | the record holds positions the **current journal cannot reproduce** — a replaced, truncated or re-segmented journal (D-24/D-28). **REFUSE the cutover**; write no counter row. | **Do nothing else.** Absence of a `record_cursor` row *is* "not cut over", so the graph keeps working on today's allocator (the journal's own position), and the record keeps declining to carry a number. Then: restore the journal from a backup, or accept the record as authoritative via B2's repair ladder — **which is a decision, not a default.** |
-| `record_floor < enumerated_floor` | **NOT necessarily a legal tail** — it is the signature of a D-25 tail *and* of a journal **replaced by a longer one** (see the three conditions above), and **no evidence in the record today separates them**. | ⛔ **REFUSE — case 2 is DEFERRED, not implemented.** Condition (iii) ("the same journal identity") is the only thing that distinguishes the two readings and it **has no data source** until `#9318`, so all three conditions cannot be evaluated and the tail must not be lifted on two of three. **Do nothing else:** the graph stays uncut and keeps working on today's allocator, which is a **cost**, stated plainly, and cheaper than mixing two journals into one coordinate space with no error anywhere (§A8.2 item 9). ⛔ **This row said "LEGAL — proceed" in an earlier form while five other passages said "deferred"; the artifact followed the row and lifted. The row is the defect, and it is corrected here rather than only in the prose.** When `#9318` lands the lift returns with an evaluable (iii): heal the tail with a `start_seq`-bounded replay (`replay_plan(start_seq = record_floor + 1)`) and **count it** (`tortoise_record_seed_lifted_total`) — a lift is a repaired D-25 window, never a routine event. |
+| `record_floor = 0` (with `enumerated_floor > 0`) | **nothing is carried** — the record has no position row for this graph at all (D-25: `position=None` writes no row, `record_projection.py:6402-6407`). There is no carried number for a different journal to collide with, so the hazard the deferral exists for **cannot occur in this case**. | ✅ **LIFT — proceed.** This is B1's motivating population and falsifier 7's green path: the counter seeds to the journal floor, so the next write takes `floor + 1`, exactly the number replay gives that line. **Count it** (`tortoise_record_seed_lifted_total`) — a lift is a repaired D-25 window, not a routine event. |
+| `0 < record_floor < enumerated_floor` | **numbers ARE carried and the two readings are indistinguishable** — a D-25 tail *and* a journal **replaced by a longer one** (see the three conditions above), with **no evidence in the record today that separates them**. | ⛔ **REFUSE — case 2b is DEFERRED, not implemented.** Condition (iii) ("the same journal identity") is the only thing that distinguishes the two readings and it **has no data source** until `#9318`, so all three conditions cannot be evaluated and the tail must not be lifted on two of three. **Do nothing else:** the graph stays uncut and keeps working on today's allocator, which is a **cost**, stated plainly, and cheaper than mixing two journals into one coordinate space with no error anywhere (§A8.2 item 9). ⛔ **This row said "LEGAL — proceed" in an earlier form while five other passages said "deferred"; the artifact followed the row and lifted. The row was the defect, and it is corrected here rather than only in the prose.** When `#9318` lands the lift returns with an evaluable (iii): heal the tail with a `start_seq`-bounded replay (`replay_plan(start_seq = record_floor + 1)`) and **count it** — a lift is a repaired D-25 window, never a routine event. |
 | `record_floor == enumerated_floor` | the healthy case | proceed |
 
 **Preconditions on the cutover, both already recorded elsewhere:** the graph is **QUIESCED**
@@ -1130,8 +1174,9 @@ NOT falsified, because nothing can detect it: §A7.6 #19 was withdrawn precisely
 journal writer contends), so quiescence is an **operator-asserted precondition** and §A8.2 item 7 is where that
 gap is recorded. And **no second journal exists** for the graph (D-24 / `#9318`; the enumerated floor
 comes from the segment-spanning reader, so a *sealed* journal is handled — and a *replaced* one is caught by
-case 1, **or by nothing at all**: case 2's three tail conditions cannot evaluate condition (iii) today, so it
-**refuses by default** and this precondition is an assertion, not a check (§A7.5.5, §A8.2 item 9).
+case 1, **or by nothing at all**: case 2b's three tail conditions cannot evaluate condition (iii) today, so it
+**refuses by default** and this precondition is an assertion, not a check (§A7.5.5, §A8.2 item 9). *(Case 2a —
+`record_floor = 0` — is lifted and needs no such precondition: nothing is carried, so nothing can be mixed.)*
 
 #### A7.5.6 The arm: AFTER COMMIT, and the export re-serialises into seq order (B4)
 
@@ -1465,20 +1510,27 @@ is deliberately not reused:** a renumbered list would hide the withdrawal, and t
 17. **The allocation must not fail open (P1, round-2 review).** Three cases, all asserting a **raised error and
     no commit**: (a) no `record_cursor` row; (b) `record_cursor.mode = 'halted'`; (c) **`app.current_org_id`
     unset under `FORCE ROW LEVEL SECURITY`**, where the UPDATE matches zero rows and — without §A7.5.2's
-    rowcount assertion — `INSERT … SELECT … FROM alloc` writes **nothing and raises nothing**.
+    rowcount assertion — `INSERT … SELECT … FROM alloc` writes **nothing and raises nothing**. ⛔ **And (c)
+    asserts the MESSAGE, not merely the raise** (found by the review of this revision): with the GUC unset the
+    probe `SELECT` on `record_cursor` is filtered by the same policy, so a probe run under that GUC reports
+    the row as absent and yields arm 1's *"no counter row"* — the wrong diagnosis for the very case this
+    paragraph calls the one that will actually happen. (c) therefore asserts the **GUC/RLS arm's** text, and
+    it goes red against any implementation whose diagnostic runs under the failed context.
 18. **A journal REPLACED BY A LONGER ONE must not be seeded as a D-25 tail (P1, round-2 review).** Two cases,
     because the first version tested only the vacuous one. **(a)** A graph whose counter row is in `seeded` mode
     (the only state in which the seed may re-run, §A7.5.5 step 0) and whose journal was replaced by a longer
     one: the re-seed must **REFUSE**, and refuse with the *tail-evidence* error, not with "already seeded".
     **(b)** A graph with **no** counter row (a first cutover — the only time the seed normally runs) whose
-    journal is a longer replacement: **`record_floor < enumerated_floor` ⇒ case 2 ⇒ REFUSES with the
+    journal is a longer replacement: **`0 < record_floor < enumerated_floor` ⇒ case 2b ⇒ REFUSES with the
     *deferred* reason**, no counter row written. ⛔ *This case asserted `record_floor > enumerated_floor` ⇒
     case 1, which is the **inverted** predicate: a replacement with MORE records gives a LARGER
     `enumerated_floor`, so (b) as written tested the case a shorter journal produces, not a longer one — and
     it would have gone green against a seed that lifts. A falsifier aimed at the wrong side of an inequality
     is the same defect as one attached to a finding it cannot detect.* *A falsifier that only exercises (b)
     proves nothing about (i)–(iii), since step 0 refuses before they are evaluated — which is exactly the
-    defect the round-2 review found in the earlier wording.*
+    defect the round-2 review found in the earlier wording.* **And (a) must carry numbers to be 2b at all:**
+    a `seeded` graph with `record_floor = 0` is case 2a and is **lifted**, so (a) names a row that already
+    holds positions — otherwise it asserts a refusal of the case the seed is supposed to heal.
 19. **⛔ WITHDRAWN — "the cutover must be refused on a non-quiesced graph" was not implementable (round-2
     review, and the withdrawal is the honest outcome).** The seed takes no lock a journal writer contends
     (there is no per-graph record row before one is created, and the journal is a file), so "refuses" had no
@@ -1492,11 +1544,20 @@ is deliberately not reused:** a renumbered list would hide the withdrawal, and t
     `EntityMutated op=restatus` row (or a creation record's birth `status`) — the two properties D-27 shows
     are **only** carried by `journal_event` — then delete a **PREFIX** of that graph's `journal_event` rows while
     the node's later rows remain, and rebuild from the record / serve `GET /v1/points/{id}`. Assert the node
-    still reads **terminal**. *Red today: nothing bounds the table, so the test is green by absence of the
-    defect — which is why it must ship **with** the bound, not after it. And it must be red against the bound's
-    first implementation, because `apply_event_stream_folds` skips every later fold once a node is terminal
-    (`cache_projection.py:3364-3366`): drop the earlier terminal row and a LATER fold applies, so an archived
-    object is answered **LIVE** — resurrection, not staleness.* ⛔ **B7 previously cited #12 as its falsifier
+    still reads **terminal**. ⛔ **Red TODAY, not "green by absence of the defect":** this procedure performs
+    the deletion itself, and that deletion is executable now — §A7.5.11 rung 2 prints the exact statement
+    (`BEGIN; SET LOCAL app.record_journal_purge = 'on'; DELETE FROM public.journal_event …`) and the append-only
+    trigger's DELETE arm carries no WHERE guard, so the prefix can be removed on the current schema. Once the
+    terminal row is gone the fold loses it (`_LIFECYCLE_EVENTS_SQL` reads the terminal value only from
+    `journal_event`, `cache_projection.py:2961-2973`, and the point read folds that stream,
+    `record_serve.py:826-829`), so the node rebuilds with no status — which the code's own comment
+    (`cache_projection.py:2947-2949`) says is read as **LIVE**. **So the defect is demonstrable before any bound
+    exists, and the test must go red again, unchanged, against the bound's first implementation.** *(An earlier
+    form of this row said the opposite — "green by absence of the defect" — and a false polarity claim is the
+    one thing this section says is worse to get wrong than having no falsifier at all.)* And it must be red
+    against the bound's first implementation, because `apply_event_stream_folds` skips every later fold once a
+    node is terminal (`cache_projection.py:3364-3366`): drop the earlier terminal row and a LATER fold applies,
+    so an archived object is answered **LIVE** — resurrection, not staleness. ⛔ **B7 previously cited #12 as its falsifier
     and that citation was wrong:** #12's predicate is `record_cursor.seq >= max(journal_event.seq)`, and a
     **prefix deletion leaves `max(seq)` unchanged**, so the reconciliation stays green while the resurrection
     happens — a falsifier attached to a finding it cannot detect, the exact defect this section says is worse
@@ -1579,7 +1640,8 @@ mixed-version window. Its coordinate is stated at the end of this section.**
    without proof per graph, and is therefore the last thing done.
 7. **D-09** the bound — owner decision, and it should follow the shape change, not precede it: bounding the
    file while the file is still the commit point converts a cost problem into a data-loss problem
-   (`STORAGE-ARCHITECTURE.md:427` says exactly this). ⛔ **And per B7 this step is the FILE only.** A bound on
+   (`STORAGE-ARCHITECTURE.md:442` says exactly this — the sentence is at `:442`, not at §5.2's heading `:427`; a
+   later review found the pointer landing on the heading). ⛔ **And per B7 this step is the FILE only.** A bound on
    `journal_event` is a **different decision** (D-27: it is a primary status store), it is not covered by
    `#9025`, and it must be refused or ruled — never derived.
 
@@ -1647,7 +1709,7 @@ is the step that changes it — not a drive-by.
 
 | # | finding | where it landed | its falsifier |
 |---|---|---|---|
-| **B1** | the seed is silently wrong for a journal with no position rows | **§A7.5.5** — the seed as executable SQL, the enumerated floor taken from the replay's **own** reader, `GREATEST(record_floor, journal_floor)`, and the **refusal** when the record floor is above the journal floor; three outcomes tabulated with the operator action each; §A6 **D-28** carries the shrink trigger; §A4.1's "recount never a wrong answer" is scoped | **§A7.6 #7** — a journal of N with zero rows must next write `N+1`; and the refusal arm must write **no** counter row. ⛔ **Round 3 narrows B1's claim and says so: case 2 (the D-25 tail heal) is DEFERRED**, because its condition (iii) — the same journal identity — has no data source until `#9318`, so the seed refuses by default and those graphs stay uncut (§A8.2 item 9). **B1 is answered for the case that can be decided and explicitly not for the case that cannot** — the alternative was a lift on two of three conditions |
+| **B1** | the seed is silently wrong for a journal with no position rows | **§A7.5.5** — the seed as executable SQL, the enumerated floor taken from the replay's **own** reader, `GREATEST(record_floor, journal_floor)`, and the **refusal** when the record floor is above the journal floor; three outcomes tabulated with the operator action each; §A6 **D-28** carries the shrink trigger; §A4.1's "recount never a wrong answer" is scoped | **§A7.6 #7** — a journal of N with zero rows must next write `N+1`; and the refusal arm must write **no** counter row. ⛔ **Round 3 narrows B1's claim and says so: case 2b (the D-25 *tail* heal) is DEFERRED**, because its condition (iii) — the same journal identity — has no data source until `#9318`, so the seed refuses **2b** by default and those graphs stay uncut (§A8.2 item 9). **Case 2a (`record_floor = 0`) is not deferred** — it carries no numbers, so falsifier 7's `N+1` path is live for it. **B1 is answered for the case that can be decided and explicitly not for the case that cannot** — the alternative was a lift on two of three conditions |
 | **B2** | no rollback path; append-only trigger makes a mis-numbered row unrepairable | **§A7.5.11** — *stop allocating, keep the carried numbers, never return a graph to enumeration*, with a per-graph exemption requiring a **proof predicate**; the repair ladder priced rung by rung; the GUC path and its blast radius named; recreate-the-graph excluded with the reason | **§A7.6 #8** — the rollback must be refused for a graph with a hole, not silently renumber |
 | **B3** | `record_cursor` absent from the record's table registry → restore restarts the allocator at zero | **§A7.8** — the full deliverable list (table, RLS `USING` **and** `WITH CHECK`, `GRANT SELECT, INSERT, UPDATE` and **no DELETE**, `THE_RECORD_TABLES`, `RECORD_MIGRATIONS` both directions) + the **first-updatable-record-table** rationale + the purge decision; **§A7.8** falsifier: restore a dump, assert the next write is `max(seq)+1` | **§A7.8** (three sub-assertions: table present, counter ≥ max, restore **refuses** when it is not) |
 | **B4** | the arm is never stated; both arms break a guarantee | **§A7.5.6** — **AFTER COMMIT**, with the three-way argument (before / after / staging-is-not-a-third-arm), the contiguous-prefix export that re-serialises into seq order, and the admitted price: **the per-graph lock returns on the export path**; §A7.5.1 supplies the lock fact that makes it safe | **§A7.6 #9** — commit 5 and 6 out of arrival order; the file must still read 5,6 |
@@ -1733,12 +1795,16 @@ with **the coordinate it reconciles on** stated in bold: `journal_event.seq`, an
    against `journal_event`, or restoring the whole graph. ⛔ **This is a consequence of choosing refusal over
    silent reuse, and refusing is still right** — but a design that refuses must say what the road back is, and
    today the road back is manual. Whoever implements §A7.5.11 should expect to build rung 4.
-9. **⛔ Case 2 of the seed (the D-25 tail heal) is DEFERRED, not implemented.** §A7.5.5's case 2 needs a journal
+9. **⛔ Case 2b of the seed (the D-25 *tail* heal) is DEFERRED, not implemented.** §A7.5.5's case 2b needs a journal
    identity the record does not carry (D-24 is a guard, `#9318` is unbuilt, D-28 shows `stat` fields cannot
-   supply it), so **the seed refuses by default and D-25's `None`-position graphs stay uncut**. Stated as
-   deferred rather than solved because the alternative — lifting on two of three conditions — is the same
-   silent-loss class as the bug being fixed. **The unblocking dependency is `#9318`**, and until it lands, B1's
-   claim is narrower than round 1's text made it.
+   supply it), so **the seed refuses case 2b by default and those graphs stay uncut** — a graph that carries
+   numbers whose two possible readings cannot be told apart. ⛔ **This item is scoped to 2b and no wider:**
+   case 2a (`record_floor = 0`, D-25's `None`-position graphs) carries **no** numbers, is therefore not
+   ambiguous, and **is lifted** (falsifier 7). Reading this item as "D-25's `None`-position graphs stay uncut"
+   is what made a first fix refuse B1's motivating population, so the distinction is printed here rather than
+   left to the reader. Stated as deferred rather than solved because the alternative — lifting on two of three
+   conditions — is the same silent-loss class as the bug being fixed. **The unblocking dependency is
+   `#9318`**, and until it lands, B1's claim is narrower than round 1's text made it.
 
 ### A8.3 The revision reviewed itself, and the review found ten — recorded because the finding class is the point
 
@@ -1804,6 +1870,28 @@ is in the section that exists to make withdrawals auditable.
 distinguish a mechanism from a sentence.** All three P0s above had a fix that *read* as responsive and changed
 nothing mechanically. The question that found them is one line — *"what does this do when it runs?"* — and it
 belongs in the next round's brief rather than being rediscovered each time.
+
+#### A8.3.2 The fourth pass: the fix was scoped to the wrong population, and that is the same defect again
+
+The third pass found that the seed's `mode`-predicate fix had been applied as **prose while the SQL kept the old
+behaviour**, and that the seed's case-2 deferral had been applied as **prose while the SQL kept lifting**. Both
+were corrected. The fourth pass asked the same one question of the corrections — *what does this do when it
+runs?* — and found that **the correction to the seed had over-corrected**, plus five smaller defects:
+
+| found | why the "fix" was not a fix | what it is now |
+|---|---|---|
+| **P0** | the seed was narrowed to `WHERE $record_floor = $3` (**equality only**), which obeys the 2b deferral **and refuses case 2a as well** — `record_floor = 0` is B1's **motivating population** (the large journal with zero `journal_event` rows, D-25) and the one **falsifier 7** asserts must next write `N+1`. So the seed could no longer do the single thing B1 claims for it, and falsifier 7's green path was unreachable **against the document's own SQL** | the deferral is **scoped to case 2b** (`0 < record_floor < enumerated_floor` — numbers *are* carried, readings indistinguishable); **case 2a lifts**, because with nothing carried there is no carried number for a different journal to collide with — the hazard the deferral exists for cannot occur. Admission is `$record_floor = 0 OR $record_floor = $3`. ⛔ **The lesson is one level out from the previous three: it is not enough that a rule be *mechanism* rather than prose — it must also be scoped to the population it is about.** v1 applied "lift" to everything, v2 applied "refuse" to everything; the rule was about the middle case both times |
+| **P1** | the rowcount assertion's **fourth arm was unreachable**: the diagnostic probe `SELECT`s `record_cursor` under the *same* RLS policy that made the write fail, so with `app.current_org_id` unset the probe reports "row absent" and **arm 1 fires** — "not cut over — no counter row" — for the one failure §A7.5.2 calls "the one that will actually happen", when the row exists and the fault is the GUC | the diagnostic is specified as running **with the GUC set (or as the owner role) for the check**, and **falsifier 17(c) asserts the message**, not merely that something raised |
+| **P1** | a `seeded` counter row **could never be re-seeded**, contradicting step (0)'s own promise and 6.3's remedy: `ON CONFLICT DO NOTHING` writes nothing, so step (3) reads the **stale** `seq` back and refuses — turning the documented recovery into a refusal | the conflict arm is a **scoped UPDATE** — `DO UPDATE SET seq = EXCLUDED.seq … WHERE record_cursor.mode = 'seeded'` — so re-seed corrects, and `allocating`/`halted` can never be touched by a seed |
+| **P1** | falsifier 20's polarity claim was **false**: it said the test was "green by absence of the defect", but the test performs the deletion itself and rung 2 prints that `DELETE` — so it is **red today** | polarity corrected: the defect is demonstrable **now**, and the test must go red again against the bound's first implementation. A false claim about what goes red is precisely what this section says is worse than no falsifier |
+| **P2** | §A7.7 step 7 cited `STORAGE-ARCHITECTURE.md:427` for a sentence that is at `:442`; `:427` is §5.2's **heading** | `:442`, with the correction named rather than swapped silently — a pointer landing on a heading is the class §12 says took nine cycles to clean |
+| **P2** | the freshly added `mode`-predicate comment said `halted` is *"the state §A7.7 6.5 gates the fallback removal on"* — **inverted**: 6.5 removes the fallback for `allocating` only and **keeps it** for `halted` | restated: 6.5 keys on `allocating`, so a `halted` graph keeps its fallback and loses only its allocator. The inversion the round-2 review found was re-introduced by the comment that fixed it |
+
+⛔ **What the fourth pass proves: a fix can be a mechanism and still be wrong, if it is scoped to the wrong
+population.** Three rounds in a row the same class appeared — prose-for-mechanism, then mechanism-for-the-wrong-case
+— and each round it presented as *responsive*. The check that catches all of it is two questions, not one:
+*"what does this do when it runs?"* **and** *"which population is this rule about, and is the artifact I just
+changed that population?"*
 
 ---
 
