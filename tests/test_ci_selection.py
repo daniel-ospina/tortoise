@@ -10556,18 +10556,37 @@ _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     r"|\buntil\s+a\s+(?:push-to-main\s+|CI\s+)?sweep\s+"
     r"(?:includes|measures|covers|collects)"
     # …and the construction that names the sweep by its INSTRUMENT or its VERB
-    # rather than the word "sweep" (#12962 cycle 6). This is the map's DOMINANT
-    # spelling of the same claim, so the arms above read as total while missing it:
-    # three rows shipped `entered at the flat default … until a CI junit artifact
-    # carries the weight` and `at the default until \`tools/ci_timing.py
-    # --refresh-durations\` replaces it from junit`, each beside a tail citing the
-    # ALREADY-LANDED sweep — the same contradiction the two cycles above chased.
-    # Scoped to `until` + the instrument: the healed wording names the landed sweep
-    # ("it stayed at the default until the 2026-11-16 sweep replaced it"), whose
-    # `until the …` shape matches none of these.
-    r"|\buntil\s+(?:a\s+)?(?:CI\s+)?junit"
-    r"|\buntil\s+`?tools/ci_timing"
-    r"|\buntil\s+`?-*refresh-durations",
+    # rather than the word "sweep" (#12962 cycle 6). Rows shipped `entered at the
+    # flat default … until a CI junit artifact carries the weight` and `stays at the
+    # default until \`tools/ci_timing.py --refresh-durations\` replaces it from
+    # junit`, each beside a tail citing the ALREADY-LANDED sweep — the same
+    # contradiction the two cycles above chased, and `[]` from the arms above.
+    #
+    # ⛔ The INSTRUMENT arm carries a VERB LIST, not just `until <instrument>`
+    # (#12962 cycle 7). Keying on the instrument alone made the arm TENSE-BLIND, so
+    # it red the minimal legal repair of the owed sentence — past-tense the verb and
+    # keep the tool name (`until \`tools/ci_timing.py --refresh-durations\` REPLACED
+    # it`). That is the same trap the UNDER/OVERSTATE arm is built to avoid: the fix
+    # IS the past tense, so an arm that bites it leaves no legal way to write the
+    # note. Only the present/future verbs bite.
+    #
+    # ⚠️ SCOPE, stated so this is not read as total: these arms read the `until …`
+    # form ONLY. The map's more common forward-looking PROVENANCE boilerplate drops
+    # `until` entirely (`… \`tools/ci_timing.py --refresh-durations\` replaces this
+    # value from the first push-to-main junit sweep that includes the file`), which
+    # these arms cannot see; measured 2026-11-16 at 121 rows carrying it, 112 with a
+    # landed `was N` tail. That is the ungated-provenance-prose class, recorded on
+    # #9442 with the measurement rather than claimed closed here.
+    # ⛔ The WINDOW is `[^;\n]`, not `[^.;]` (#12962 cycle 7): the instrument arm's
+    # own subject is `tools/ci_timing.py`, so a window that excludes `.` cannot span
+    # the tool name it is anchored on — the arm returned quiet on the very row it was
+    # written for. A `;` (or the end of the line) still binds it.
+    r"|\buntil\s+(?:a\s+)?(?:CI\s+)?junit[^;\n]{0,80}?"
+    r"\b(?:carries|lands|collects|measures|covers|exists|arrives)\b"
+    r"|\buntil\s+`?tools/ci_timing[^;\n]{0,80}?"
+    r"\b(?:replaces|re-derives|measures|collects|covers)\b"
+    r"|\buntil\s+`?-*refresh-durations[^;\n]{0,80}?"
+    r"\b(?:replaces|re-derives|measures|collects|covers)\b",
     re.IGNORECASE)
 
 
@@ -10928,15 +10947,20 @@ def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
         "naming the sweep by its instrument (`junit`, `tools/ci_timing`) is the "
         "map's DOMINANT spelling of this claim; an arm that reads only the word "
         "`sweep` reports [] while three rows assert the owed basis")
-    # …and the healed wording — which names the LANDED sweep instead of an owed one,
-    # keeping the `from junit` clause the repair leaves behind — stays silent.
+    # …and the healed wording — which names the LANDED sweep instead of an owed one
+    # — stays silent. The last two rows are the cycle-7 POLARITY pin: the minimal
+    # legal repair of an owed sentence is to PAST-TENSE its verb and keep the
+    # instrument, so an arm keyed on the tool name alone (rather than on a
+    # present/future verb) red exactly that repair and left no way to write the note.
     instrument_healed = (
-        "  test_a.py: 3.9  # a weight is a SHARD-LAYOUT input, so it stayed at the"
-        " default until the 2026-11-16 sweep replaced it from junit" + basis + "\n"
-        "  test_b.py: 0.6  # it entered at the flat default and the 2026-11-09 sweep"
-        " replaced it" + basis + "\n"
-        "  test_c.py: 0.9  # it opened at the flat default; the 2026-11-16 sweep"
-        " collected it" + basis)
+        "  test_a.py: 3.9  # it stayed at the default until the 2026-11-16 sweep"
+        " replaced it from junit" + basis + "\n"
+        "  test_b.py: 0.6  # entered at the flat default; the 2026-11-09 sweep"
+        " re-derived it to 0.9" + basis + "\n"
+        "  test_c.py: 0.9  # it stayed at the default until `tools/ci_timing.py"
+        " --refresh-durations` replaced it from junit" + basis + "\n"
+        "  test_d.py: 1.2  # until junit artifacts carried the weight, the flat"
+        " default stood" + basis)
     assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
         instrument_healed, quad) == [], (
         "the fix IS the past tense — an arm that bit the healed wording would red "
