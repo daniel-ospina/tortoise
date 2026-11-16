@@ -69,7 +69,7 @@ Durable writes, in execution order:
 | 8 | `journal_event` + the `#9318` collision guard | `record_projection.py:6377` (`_journal_row`) executing `:6343-6350`; guard at `:7703` | no |
 | 9 | **commit** of the record's own transaction | `record_writer.py:2719` (`connection.commit()`) | no |
 | 10 | byte meter (`_measure_written_bytes`) + the written-bytes charge | `record_writer.py:1732-1742`, `:2734` | no |
-| 11 | the **cache write**: `CREATE (:Point …)` under `_live_write_scope("create_point")`, then `:Tag`/`:Source` edges | `sdk.py:16287-16304` | no — gated ON the commit point |
+| 11 | the **cache write**: `CREATE (:Point …)` under `_live_write_scope("create_point")`, then `:Tag`/`:Source` edges | `sdk.py:16287-16324` (`:Tag` at `:16312-16317`, `extractedFrom`/`:Source` at `:16319-16324`) | no — gated ON the commit point |
 | 12 | counter allocation (`record_cursor.seq` increment) | `record_projection.py:6926-6945` — **not reachable on any production lane** (V2) | n/a |
 
 ### Which one is the commit point now
@@ -98,7 +98,7 @@ here because it is a durable write that precedes the commit point, not because i
 | **self-host** | its own data dir | only if the operator sets `TORTOISE_RECORD_DSN` | same code path (`selfhost_api.py:291`); unarmed ⇒ steps 5–10 do not run at all |
 | **embedded / local SDK** | local dir or in-memory | no DSN by default ⇒ **NOT_ARMED** | `write_live_record` returns `None` before opening a connection (`record_writer.py:2682-2684`); only steps 1–4, 11 |
 | **MCP stdio** | none (transport has no journal) | no | declared out of scope by the plan (`§A3.1`), unchanged |
-| **M2 session capture** | `_InMemoryEventLog` | declined on purpose (`durable=False`) | step 4 is a scratch append; steps 5–10 **do not run** (`record_writer.py:2454-2484` region) |
+| **M2 session capture** | `_InMemoryEventLog` | declined on purpose (`durable=False`) | step 4 is a scratch append; steps 5–10 **do not run** — the decline is `_live_write_verdict`'s `if not durable: return NON_DURABLE_JOURNAL_REFUSAL` (`record_writer.py:2169-2170`), reported and short-circuited at `:2685-2687`, and explained in the `write_live_record` docstring (`:2454-2484`) |
 | **CI** | — | unarmed unless a test arms it | `MEMORY.md:87` records the trap: setting `TEST_RECORD_DB_URI` without `TORTOISE_RECORD_DSN` measures an unarmed record |
 
 `record_dsn` is presence-based (`record_writer.py:654-678`): unset/blank ⇒ `None` ⇒ NOT_ARMED ⇒ *zero
@@ -117,7 +117,8 @@ The proof is a call-site census, not a reading of the PR body.
    through to `write_records(... allocate=allocate)` (`:2713-2716`).
 2. `RecordWriter.write` forwards it into `record_projection.replay(..., allocate=allocate)`
    (`record_writer.py:1646-1650`), and `replay` builds the allocation statement only on that arm
-   (`record_projection.py:7630-7640`, `:7760-7785`).
+   (`record_projection.py:7630-7634` for the lazy import and `replay_plan(..., allocate=allocate)`,
+   `:7768-7796` for the contradictions and the build — `if allocate:` at `:7785`).
 3. **Every production call site passes `seq=`, and none passes `allocate=`**:
    - `tortoise/sdk.py:14264-14265` — `return record_writer.write_live_record(record, durable=durable, seq=seq, tenant=self._record_tenant)`
    - `tortoise/api.py:2172-2173` — `record_writer.write_live_record(event, durable=…, seq=seq)`
@@ -132,7 +133,9 @@ The proof is a call-site census, not a reading of the PR body.
    no env read names the allocator.
 7. Nothing in production ever calls `record_allocator.seed/arm/halt/reopen`: outside `tests/`, the only
    **imports** of the module are `record_projection.py:7630` (the lazy import inside `replay`) and
-   `record_writer.py:2402` (`_allocator_refusal_cause` reading `record_allocator.metrics()`) — every
+   `record_writer.py:2402` (`_allocator_refusal_cause`, which imports it to map
+   `ra.CursorNotActive`/`ra.PositionCollision` onto counter tokens — `record_writer.py:2404-2405`; the
+   `metrics()` mention is prose in that function's docstring at `:2395`) — every
    other mention is prose in a docstring or a comment (`record_projection.py:6362,6401,6874,6876,6883,6889,6900`;
    `record_writer.py:1586,2395,2665,2787`), and no call to any of the four entry points exists.
    `provision_graph_record` — the creation hook of `§A7.8` item 8 — **does not exist in the tree**
@@ -318,11 +321,22 @@ the *code shape* on `main`: the unguarded call is there. The measurement that it
 ### 4.5 The guard also refuses the LIVE write, not only a replay (`#12986`)
 
 `_refuse_an_enumerated_replay` is called from `replay` whenever `position and not allocate`
-(`record_projection.py:7654-7655`) — and the **live** door takes exactly that arm today (V2). So on a
-graph whose cursor row is `seeded` or `halted`, every live write is refused as an *enumerated replay*
-while `write_live_record` passes the carried `seq` with `position=True`. Filed during `#12959`'s review
-as `#12986`; it is the live path's own consequence of the guard being keyed on the row rather than on
-the caller, and it disappears once the live door allocates (V5 item 4).
+(`record_projection.py:7654-7655`) — and the **live** door takes exactly that arm today (V2). The
+refusal is keyed on the **row**, not on the mode: `_refuse_an_enumerated_replay` returns early only
+when there is no row (`:7424-7425`), and every mode arm below it ends in an unconditional
+`raise RecordProjectionError` (`:7499`) — `seeded` (`:7446`), `halted` (`:7464`) and **`active`**
+(`:7470`, the `else` arm) differ only in the remedy each names
+(`arm` / `reopen`+re-seed+`arm` / `reopen`+`arm`). So **on any graph that has a `record_cursor` row,
+every live write is refused as an enumerated replay** while `write_live_record` passes the carried
+`seq` with `position=True`.
+
+That the `active` arm is included is the operationally decisive half, and it is pinned:
+`tests/test_12894_record_cursor.py:554-557` cuts a graph over to `MODE_ACTIVE` and asserts the replay
+raises, `:560` asserts `mode='active'` appears in the message. It means **arming a graph without
+V5 item 4 does not merely leave the allocator unused — it closes the live door**, because the door
+still arrives carrying a `seq`. Filed during `#12959`'s review as `#12986`; it is the live path's own
+consequence of the guard being keyed on the row rather than on the caller, and it disappears once the
+live door allocates (V5 item 4).
 
 ---
 
@@ -379,7 +393,9 @@ it. `§A7.7` step numbers are the plan's.
    drainer's premise *"is forbidden by the allocator's own lock"*.
 8. **M2 session capture off `durable=False`** (`§A7.7` 6.4 / `§A7.8` — *specified*). The decline exists
    because the lane has no position to hand the record; the flip removes the reason. Still declined at
-   `record_writer.py:2454-2484` (`tortoise/sdk.py:14262-14265` for the SDK half).
+   `record_writer.py:2169-2170` (`if not durable: return NON_DURABLE_JOURNAL_REFUSAL`), which
+   `:2685-2687` reports and short-circuits (`tortoise/sdk.py:14262-14265` for the SDK half that computes
+   `durable`).
 9. **`#9025`'s decision boundary** (*owner's, not ours*). `§A7.7` step 7 and `§B7` scope it: the
    decision covers the **file** and only the file. A bound on `journal_event` is a *different* decision
    (D-27: it is a primary status store — the only carrier of `Object.status`/`Subject.status`), and the
@@ -473,17 +489,31 @@ The honest comparison is `git log refs/pull/12959/head..<wip-ref>` plus a path-s
 
 ## 9. Commands used (verbatim, with counts)
 
-**Which invocations are registered, and which are not.** Four suite runs went through the lane's
-report tool (`WORKTREE-REPORT.md`, "Suites run" — rows 1, 3 and 4 are the wiring check at three
-different heads, row 2 is the docs-lint invocation below); every other measurement in this document is a
-read-only inspection (`rg`, `sed`, `grep`, `git log`/`git merge-base`/`git for-each-ref`,
-`gh issue|pr view`, and two `uv run python -c` evaluations), quoted inline at the claim it supports and
-**not** in the report tool's register. The two `python` evaluations are reproduced verbatim in §6 (V6-5)
-and §9 below so the negative findings are re-runnable rather than asserted.
+**Which invocations are registered, and which are not.** Five suite runs went through the lane's report
+tool (`WORKTREE-REPORT.md`, "Suites run"): **rows 1, 3, 4 and 5 are the wiring check**, re-run after each
+round of fixes, and **row 2 is the docs-lint invocation** that exited `2` without running. Two lane-tool
+invocations in the block below are *not* in the register — `worktree_report.py init`, and
+`gh_write_preflight.py`, whose probe creates, confirms and deletes a throwaway remote ref, so it is
+neither read-only nor registered. Every other measurement in this document is a read-only inspection
+(`rg`, `sed`, `grep`, `git log`/`git merge-base`/`git for-each-ref`, `gh issue|pr view`, and two
+`uv run python -c` evaluations), quoted inline at the claim it supports. Both `python` evaluations are
+reproduced verbatim at the end of this section, and V6-5 quotes their results rather than restating them from memory,
+so the negative findings are re-runnable rather than asserted.
 
-**One recorded suite did not run and is reported as red rather than omitted:** the docs-lint invocation exited
-`2` because the harness needs three outputs this lane did not produce, so the document was never
-linted by that tool — a gap in coverage, stated here and recorded there as red, not omitted:
+**Per-run head coverage is deliberately not claimed.** The report tool records one head for the whole
+file and warns when the branch has moved past it (`⚠ head moved since the report was written — re-run
+the affected suites so the report describes the tree you are actually shipping`), which every later
+docs-only commit would re-trigger. The runs above therefore say *when* they were taken — after the
+cycle-3, cycle-5 and cycle-6 fixes — and not that they cover the shipping commit. What makes that
+honest rather than convenient is a property of the suite: `record_wiring_check.py` reads the product
+tree (`tortoise/`, `tools/`, the migrations) and never this document, so the commits after the last
+registered run — all of them `docs/evidence/12894-landed-verify/README.md` — cannot change its verdict.
+The property does **not** extend to the docs lint, which is why its non-run stays a red.
+
+**One recorded suite did not run and is reported as red rather than omitted:** the docs-lint invocation
+exited `2` because the harness needs three outputs this lane did not produce, so the document was never
+linted by that tool. The register carries that gap **twice** — as suite 2 (exit 2) and again as a
+`Could not do` note — and this section states it a third time rather than letting a red row speak alone:
 
 ```bash
 uv run python tools/worktree_report.py init --issue 12894
@@ -492,11 +522,13 @@ uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wir
 uv run python tools/worktree_report.py run --cmd 'uv run python tools/docs_lint_baseline.py check --baseline config/docs-lint-baseline.json'   # suite 2, exit 2, NEVER RAN
 uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 3, exit 0 (re-run after the cycle-3 fixes)
 uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 4, exit 0 (re-run after the cycle-5 fixes)
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 5, exit 0 (re-run after the cycle-6 fixes)
 uv run python tools/worktree_report.py check        # exit 3 — VALID EVIDENCE, 1 FAILING SUITE
 ```
 
-The `Could not do` section of `WORKTREE-REPORT.md` carries the docs-lint non-run as a note rather
-than as a suite, and `check`'s `3` is what makes the gap a recorded red instead of a silence.
+`check`'s `3` — not its `0` — is what makes that gap a recorded red instead of a silence, and the
+head-moved warning it prints alongside is the reason the paragraph above claims no per-run head
+coverage.
 
 The two evaluations the negative findings rest on, verbatim and re-runnable:
 
