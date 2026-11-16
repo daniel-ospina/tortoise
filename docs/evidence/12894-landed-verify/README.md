@@ -246,7 +246,7 @@ ON CONFLICT (org_id, graph_id, seq) DO NOTHING
 
 | Arm | Loud? | Where |
 |---|---|---|
-| genuine replay (same type, same payload, same capture) | silent — that is idempotence | `:6717`, `:6847` |
+| genuine replay (same type, same payload, same capture) | silent — that is idempotence | `:6718-6723` (the arm), `:6812-6813` (the silent return), `:6847` |
 | same type **and** same capture, payload differs → read as *derivation drift* | **silent** — admitted as a *reading*, not evidence | `:6820-6846`, `:6847` |
 | anything else → `JournalPositionCollision` | loud: named refusal `journal_collision`, counter, WARNING | `:6858-6872`, `record_writer.py:2747-2771` |
 | `ts` is `NULL` and the payload differs | loud (`capture_state="unknown"`) | `:6849-6853` |
@@ -371,8 +371,9 @@ it. `§A7.7` step numbers are the plan's.
    a hole in the RECORD, healed by a later replay's enumeration (§A7.5.10 row 4), not a hole in the
    export"* (`docs/plans/2026-11-15-issue-12894-storage-shape.md:1336`). There is no drainer in the code
    to carry the defect (`last_exported` appears only in the plan, never in a Python module), so nothing
-   merged contradicts the resolution — the step simply remains planned. `#12959`'s own body makes the same point in one line:
-   the export drainer is *"not built: its premise is forbidden by the allocator's own lock"*.
+   merged contradicts the resolution — the step simply remains planned. `#12959`'s own body makes the same point under a heading it
+   writes as *"Not built, and why (a measurement, not a drainer)"*, whose entry says the export
+   drainer's premise *"is forbidden by the allocator's own lock"*.
 8. **M2 session capture off `durable=False`** (`§A7.7` 6.4 / `§A7.8` — *specified*). The decline exists
    because the lane has no position to hand the record; the flip removes the reason. Still declined at
    `record_writer.py:2454-2484` (`tortoise/sdk.py:14262-14265` for the SDK half).
@@ -418,7 +419,7 @@ had to be established by a call-site census rather than by the repo's own instru
 | the record allocates the ordinal (`record_cursor`, row-locked, transactional, allocation order = commit order) | **BUILT** — `record_allocator.py` (663 lines), `ALLOCATION_SQL` in `record_projection.py:6926`, two migrations |
 | the journal record CARRIES the ordinal | **BUILT on the class, not on the path** — the allocated number reaches `RecordWrite.last_seq` and the byte meter (`record_writer.py:1722-1742`); **no live caller enters the arm** |
 | replay READS the number instead of computing it | **BUILT for the refusal half** — an enumerated replay is REFUSED for a graph with a cursor row (`record_projection.py:7340-7510`); there is no carried-`seq` *read* yet, because nothing writes a `seq` onto the export line |
-| the duplicate position is a defect, not an absorption | **BUILT and loud** (`23505` → `PositionCollision`; replay's `DO NOTHING` is interrogated by the `#9318` guard) |
+| the duplicate position is a defect, not an absorption | **BUILT — loud for a DIFFERENT record, and still silent for one admitted pair**: `23505` → `PositionCollision` on the allocated insert; replay's `DO NOTHING` is interrogated by the `#9318` guard, which returns silently when `event_type` **and** `recorded_at` agree (`record_projection.py:6847-6848`) — so two different records sharing a capture instant are still absorbed (§4.1) |
 | the seed / cutover for existing graphs | **BUILT, UNREACHABLE** (no verb, no RPC, no runbook); zero-row case correct; **2b lifted contrary to plan** |
 | the live writer allocates (§A7.7 6.3) | **NOT DONE** |
 | the creation hook (§A7.7 6.6) | **ABSENT** |
@@ -469,20 +470,60 @@ The honest comparison is `git log refs/pull/12959/head..<wip-ref>` plus a path-s
 
 ## 9. Commands used (verbatim, with counts)
 
-Every command whose output this document relies on was run through the lane's report tool. **One
-recorded suite did not run and is reported as red rather than omitted:** the docs-lint invocation exited
+**Which invocations are registered, and which are not.** Three suite runs went through the lane's
+report tool (`WORKTREE-REPORT.md`, "Suites run"); every other measurement in this document is a
+read-only inspection (`rg`, `sed`, `grep`, `git log`/`git merge-base`/`git for-each-ref`,
+`gh issue|pr view`, and two `uv run python -c` evaluations), quoted inline at the claim it supports and
+**not** in the report tool's register. The two `python` evaluations are reproduced verbatim in §6 (V6-5)
+and §9 below so the negative findings are re-runnable rather than asserted.
+
+**One recorded suite did not run and is reported as red rather than omitted:** the docs-lint invocation exited
 `2` because the harness needs three outputs this lane did not produce, so the document was never
 linted by that tool — a gap in coverage, stated here rather than left to `WORKTREE-REPORT.md`:
 
 ```bash
 uv run python tools/worktree_report.py init --issue 12894
 uv run python tools/gh_write_preflight.py --repo .
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # exit 0
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/docs_lint_baseline.py check --baseline config/docs-lint-baseline.json'   # exit 2, NEVER RAN
+uv run python tools/worktree_report.py note --not-done '<the docs-lint non-run, verbatim>'
+uv run python tools/worktree_report.py check        # exit 3 — VALID EVIDENCE, 1 FAILING SUITE
 ```
 
-Plus read-only inspections (`rg`, `sed`, `grep`, `gh issue view`) whose exact invocations are quoted
-inline where they settle a claim. The report tool's log, with pass/fail per suite, is
-`WORKTREE-REPORT.md` at this worktree's root.
+The two evaluations the negative findings rest on, verbatim and re-runnable:
+
+```bash
+# §6 / V6-5 — the converter does not refuse a literal $n mixed with %s
+uv run python -c "
+import sys; sys.path.insert(0,'.')
+from tortoise.record_projection import Statement, to_dollar_placeholders, RecordProjectionError
+for s in [Statement('SELECT \$1, %s', ('a',)),
+          Statement('SELECT \$1, %s, %s', ('a','b')),
+          Statement('SELECT \$1, %s', ('a','b'))]:
+    try: print(s.sql, '->', to_dollar_placeholders(s))
+    except RecordProjectionError as e: print(s.sql, '-> REFUSED:', e)
+"
+# => 'SELECT $1, %s' with one param  -> ('SELECT $1, $1', ['a'])      NOT refused
+# => 'SELECT $1, %s, %s' with two    -> ('SELECT $1, $1, $2', [...])  NOT refused
+# => 'SELECT $1, %s' with TWO params -> REFUSED, on arity ('1 placeholders for 2 parameters')
+
+# V6-5 support — no landed statement mixes a literal $n with %s
+# ([$] rather than \$ so the shell does not eat the escape)
+uv run python -c "
+import re; src=open('tortoise/record_projection.py').read()
+for m in re.finditer('[\$][0-9]+', src):
+    print(src[:m.start()].count(chr(10))+1, m.group(0))
+"
+# => 266 $1 / 7570 $1 — both inside comments/docstrings, no live statement
+
+# §8 — which WIP ref carries the byte-meter fix
+git merge-base --is-ancestor e2a9eadb87 ec0bc91f6d || echo 'not in feat-ref'
+git merge-base --is-ancestor e2a9eadb87 703613fa0c && echo 'in issue-ref'
+git grep -c no_schema_ddl 703613fa0c -- tortoise/    # metering.py:3  sdk.py:3
+```
+
+The report tool's log, with pass/fail per suite and the note above, is `WORKTREE-REPORT.md` at this
+worktree's root.
 
 ### Measured contradictions of a *documentation* claim (not of the product)
 
