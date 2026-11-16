@@ -815,7 +815,12 @@ def _unquote_all(names: str) -> list[str]:
 #: operator form, `$NAME`, `$1`/`$@`/`$?`/…, and a backtick command substitution. Stripping these
 #: leaves only the LITERAL text a reader with no resolver can vouch for.
 _INTERPOLATION_SPAN = re.compile(
-    r"\$\{[^}]*\}|\$\([^)]*\)|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@*#?$!-]|`[^`]*`"
+    r"\$\(\([^)]*\)\)"  # arithmetic — BEFORE the command substitution arm
+    r"|\$\([^)]*\)"  # command substitution
+    r"|\$\{[^}]*\}"  # parameter expansion, any operator form
+    r"|\$[A-Za-z_][A-Za-z0-9_]*"  # $NAME
+    r"|\$[0-9@*#?$!-]"  # $1 $@ $* $# $? $$ $! $-
+    r"|`[^`]*`"  # backtick command substitution
 )
 _PURE_INTERPOLATION = re.compile(
     r"^\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<op>:?[-+])(?P<fallback>[^}]*))?\}$"
@@ -847,9 +852,27 @@ def _states_a_literal(value: str) -> bool:
         return False
     if remainder.strip():
         return True  # real literal text survives, e.g. `a-${X}` — literal enough
-    match = _PURE_INTERPOLATION.match(text)
+    # ⛔ EVERY expansion must carry a NON-EMPTY LITERAL fallback (review P3 at `d9b507ce90`, and
+    # the false-refusal mirror of it). Selecting the single match made `"${X:-1}${Y:-2}"` — two
+    # fallbacks that can never both expand empty — indistinguishable from `"${VA}${VB}"`, which is
+    # the fail-open this arm closes. One rule per expansion answers both: `"${X:-1}${Y:-2}"` states
+    # `12` at worst, `"${VA}${VB}"` states `""`.
+    tokens = list(_INTERPOLATION_SPAN.finditer(text))
+    if not tokens:
+        return False
+    return all(_fallback_states_a_value(token.group(0)) for token in tokens)
+
+
+def _fallback_states_a_value(expansion: str) -> bool:
+    """Whether ONE expansion states a value even when its variable is unset/empty.
+
+    ``${X:-1}``/``${X-1}`` do; ``${X}``, ``${X:+1}``, ``$X``, ``$(…)`` and a backtick substitution
+    do not — the reader resolves no interpolation, and the shipped case is an UNSET variable, so
+    anything that expands EMPTY there states nothing.
+    """
+    match = _PURE_INTERPOLATION.match(expansion)
     if not match:
-        return False  # nothing but expansions (two or more, or a form we cannot read)
+        return False  # `$X`, `$1`, `$( … )`, a backtick substitution, an unparsed `${ … }`
     operator = match.group("op") or ""
     # ⛔ ONLY `-`/`:-` (default-when-UNSET) survives an unset variable. `${X:+1}`/`${X+1}` expand
     # to EMPTY exactly when X is unset — the shipped case — so accepting them was a fail-open in a

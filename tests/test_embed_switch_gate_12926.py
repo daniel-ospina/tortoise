@@ -1788,13 +1788,27 @@ def test_a_value_made_of_SEVERAL_expansions_states_nothing():
         '"${VA}$HOME"',
         '"`id -u`"',
         '"${VA}$(id -u)"',
+        '"$((1+2))"',  # arithmetic is an expansion, not literal text
+        '"$(id -u)"',
         '"${VA"',  # an expansion this reader cannot parse is not literal text either
         '"${X:-/usr/local/bin"',  # … and an unclosed `${` is not a fallback
+        '"${X:+1}"',  # expands EMPTY exactly when X is unset — the shipped case
+        '"${X:-$Y}"',  # a fallback that is itself an expansion
     ):
         assert gate._states_a_literal(value) is False, value
     # The mirror: real literal text beside an expansion IS literal, and so is the empty value
-    # (which has its own, more specific refusal — `Channel.switch_problem`'s EMPTY arm).
-    for value in ('"a-${X}"', '"${X:-1}"', '"1"', '""', '"/usr/local/bin:${PATH}"'):
+    # (which has its own, more specific refusal — `Channel.switch_problem`'s EMPTY arm). ⛔ And so
+    # is a value whose EVERY expansion carries a non-empty literal fallback: `"${X:-1}${Y:-2}"`
+    # states `12` at worst, so refusing it would be a false refusal on the fail-closed side — the
+    # direction a review found next, one commit after this arm was written.
+    for value in (
+        '"a-${X}"',
+        '"${X:-1}"',
+        '"${X:-1}${Y:-2}"',
+        '"1"',
+        '""',
+        '"/usr/local/bin:${PATH}"',
+    ):
         assert gate._states_a_literal(value) is True, value
 
 
