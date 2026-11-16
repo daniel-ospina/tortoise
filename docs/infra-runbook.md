@@ -1013,8 +1013,12 @@ fly ssh console -a tortoise-y4mjjq -C \
 `{"detail": {"code": "capture_capacity_saturated", "message": …, "retry_after": 30,
 "in_flight": n, "limit": n}}` **and** the `Retry-After: 30` header. A client must branch on
 `detail.code` and wait at least `detail.retry_after`; prose-matching the message is not a contract
-(#11225). A `429` here is a DEFERRAL, never a lost capture: the record is on the client's durable
-substrate, and the drain retries it (the cursor does not advance on a refusal).
+(#11225). A `429` here is a DEFERRAL, not a lost capture **so long as the drain runs**: the record is
+on the client's durable substrate and the drain retries it (the cursor does not advance on a
+refusal) — but a refusal with no drain behind it is deferred forever, which is the P0
+condition #12992 measured (`~/.tortoise/store-sync/` absent on the reporting box while the
+substrate held 122,378 records). Check the drain before reading a backlog of refusals as a
+bounded delay: `docs/research/2026-11-16-12992-capture-429.md` §3.
 
 ### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
 

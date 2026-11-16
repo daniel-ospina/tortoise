@@ -9764,20 +9764,39 @@ def tortoise_session_capture(conversation: list[dict],
         # One mapping site covers every 402 this impl can raise, so REST and
         # MCP cannot drift on the class of a refusal.
         #
-        # ⛔ A TYPED `detail` IS RENDERED AS ITS MESSAGE, NEVER AS A PYTHON
-        # REPR (#12992 review P2). The capture door's 429s became dicts — the
-        # capacity refusal in this PR, and ``ingest_rate_limited`` before it —
-        # so `str(detail)` reached this tool surface as
+        # ⛔ A TYPED `detail` IS RENDERED AS ITS MESSAGE (#12992 review P2), WITH
+        # THE WHOLE-VALUE `str()` KEPT AS A FALLBACK — and that fallback IS a repr
+        # for a dict with no truthy `message`, so this is a CONVENTION the refusal
+        # shapes happen to satisfy, not an invariant this line enforces. Say it that
+        # way rather than claiming more: the capture door's 429s became dicts — the
+        # capacity refusal in this PR, and ``ingest_rate_limited`` before it — so
+        # `str(detail)` reached this tool surface as
         # `"{'code': 'capture_capacity_saturated', 'message': '…', …}"`: a repr,
         # not JSON, with `'` quoting that an agent's parser cannot read, and the
-        # plain sentence the refusal was worded as lost inside it. This is the
-        # SAME rule `hosted_api._record_capture_last_error` already records for
-        # the dashboard sub-line ("a Python repr would leak structure.
+        # plain sentence the refusal was worded as lost inside it. Every `detail=`
+        # the capture door can build at this head carries a `message` (the capacity
+        # 429, `_ingest_rate_limited`, `quota_refusal_payload`, the 503's
+        # `{error_code, message}` and the 403/404 shapes), so no in-repo refusal
+        # reaches the fallback — a NEW dict detail without one would.
+        # This is the SAME rule `hosted_api._record_capture_last_error` already
+        # records for the dashboard sub-line ("a Python repr would leak structure.
         # Stringify to the message") — one file, one convention, so the two
         # consumers of one detail cannot disagree about it.
         error_text = (str(detail.get("message") or detail)
                       if isinstance(detail, dict) else str(detail))
         out = _SafeError({"error": error_text, "status": status})
+        # ⛔ A 429 IS DELIBERATELY NOT TYPED HERE, and the reason is the vocabulary,
+        # not an oversight (#12992 review P2). `code` on this surface is the NUMERIC
+        # JSON-RPC vocabulary (`ERR_QUOTA = -32006` above), so there is no field on
+        # this envelope that can carry the door's STRING code
+        # (`capture_capacity_saturated`) without one of the two meanings silently
+        # changing — and a `retry_after` beside a numeric `code` would be a second
+        # spellings of one contract. The capacity refusal therefore reaches this
+        # surface as `status: 429` plus the sentence; REST (`detail.code` /
+        # `detail.retry_after` / the `Retry-After` header) is the typed surface, and
+        # `docs/infra-runbook.md` §4.1.1b publishes it there. Adding a typed arm here
+        # is a TOOL-SURFACE CHANGE and needs Daniel's approval (AGENTS.md →
+        # MCP/SDK surface), so it is recorded rather than taken.
         if status == 402:
             out["code"] = ERR_QUOTA
         return out
