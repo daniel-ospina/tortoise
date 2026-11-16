@@ -205,20 +205,27 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
     the hook — see that docstring).
 
     - A hook killed after it has dispatched one of its three `nohup … session
-      drain … >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:846`, `:854`)
-      leaves that drain in the group.  `nohup` ignores SIGHUP but changes
-      neither the drain's process group nor its reachability by SIGKILL, so a
+      drain … >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:840`–`:846`,
+      `:848`–`:854`) leaves that drain in the group.  `nohup` ignores SIGHUP
+      but changes neither the drain's process group nor its reachability by
+      SIGKILL, so a
       bound that reaps only bash leaks it.  That window is narrow: those arms
       are the script's LAST statements (`:855-856` are their closing `fi`s), so
       it is the instant between dispatch and exit — this bullet is a
       completeness argument, and the beacon below is the operative one.
-    - A hook that stalls before the `wait` (`:801`) leaves the BACKGROUNDED
-      install-probe beacon (`:786`) unreaped.  It is not `nohup`-detached —
-      `:767` says it does not join that fire-and-forget shape — but it is
-      backgrounded, and the foreground `_run_digest` (`:793`) that must finish
-      before that `wait` is precisely where a hung hook stalls.  It is a
-      `session probe` against the same API the digest is blocked on, i.e. the
-      child most likely to still be running when the bound fires.
+    - A hook that stalls before the `wait` (`:801`) leaves children in the
+      group.  The one CERTAINLY still running is the digest's own child
+      (`:689`, or `:691`'s `main(["context"])`): the foreground `_run_digest`
+      (`:793`) must return before `:801` can run, so whatever that child is
+      blocked on is what the hook is blocked on — the unbounded local-store
+      `session_context()` that `:756` names as able to outlive this bound,
+      with no network timeout to rescue it.  The BACKGROUNDED install-probe
+      beacon (`:786`) is the other: not `nohup`-detached (`:767` says it does
+      not join that fire-and-forget shape), but backgrounded, so nothing reaps
+      it if `:801` is never reached.  It self-bounds
+      (`urlopen(req, timeout=15)`), so expect it finished or an unreaped
+      zombie — that arm is a completeness argument, not the chief one.  Both
+      are in the group, which is what a bash-only kill misses.
 
     Both failures are absorbed on purpose —
     ``ProcessLookupError`` when the group is already gone, ``PermissionError``
