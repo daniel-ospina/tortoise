@@ -2054,3 +2054,137 @@ def test_a_forked_retraction_does_NOT_retract():
             f"a forked retraction cannot clear the parent's value, so the export must survive: "
             f"{forked_retraction!r} -> {stated}"
         )
+
+
+@pytest.mark.parametrize(
+    "delimiter", ["END-OF-DATA", "E.O.F", "'E.O.F'", '"E.O.F"', "\\EOF", "EOF"]
+)
+def test_the_dockerfile_heredoc_delimiter_is_a_WORD(delimiter):
+    """Review P1 (measured) — the Dockerfile reader's delimiter was IDENTIFIER-only.
+
+    `_HEREDOC_OPEN` matched `[A-Za-z_][A-Za-z0-9_]*`, so `<<END-OF-DATA` (and `<<E.O.F`,
+    `<<'E.O.F'`, `<<\\EOF`) left the opener unrecognised and its BODY was read as INSTRUCTIONS.
+    Measured on a Dockerfile whose only "ENV" lines were heredoc data — the gate printed
+    `ok … TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1`, exit 0, while `sh` (what `RUN` executes)
+    wrote those lines OUT verbatim: they are text a program prints, not statements the image gets.
+
+    Same fix as the shell reader's heredoc word (which `532ab60251e1` landed while this reader kept
+    the old grammar), and the same spelling table, so the two readers cannot drift again.
+    Mutation-proved: restoring the identifier-only word reds the non-`EOF` rows.
+    """
+    body = (
+        "FROM alpine:3.20\n"
+        f"RUN cat > /tmp/notes.txt <<{delimiter}\n"
+        "ENV TORTOISE_VALUE_GATE=1\n"
+        "ENV TORTOISE_EMBED_GATE=1\n"
+        f"{delimiter.lstrip(chr(92)).strip(chr(39) + chr(34))}\n"
+    )
+    stated, ambiguous, _ = gate._dockerfile_env(body)
+    assert stated == {}, (
+        f"a heredoc BODY was read as ENV instructions for delimiter {delimiter!r}: {stated}"
+    )
+    # A body is DATA, not a mention: the reader steps over it, so nothing from inside it is
+    # recorded either way. (Asserting `ambiguous` here would pin the wrong thing — the switches are
+    # absent from the FILE'S INSTRUCTIONS, which is what the channel verdict reports.)
+    assert ambiguous == set(), ambiguous
+
+
+@pytest.mark.parametrize(
+    "retraction",
+    [
+        "unset TORTOISE_EMBED_GATE 2>/dev/null",
+        "unset TORTOISE_EMBED_GATE >/dev/null",
+        'unset "TORTOISE_EMBED_GATE"',
+        "unset -v TORTOISE_EMBED_GATE",
+        "export -n TORTOISE_EMBED_GATE 2>/dev/null",
+    ],
+)
+def test_a_retraction_survives_a_trailing_word(retraction):
+    """Review P1 (measured) — a trailing redirect defeated every retraction arm.
+
+    `_SHELL_UNSET`/`_SHELL_EXPORT_UNEXPORT` anchored on `[\\w\\s-]+\\s*$`, so one trailing token made
+    the statement match NONE of the three retraction arms; it fell to the mention scan, and the
+    earlier literal survived in `stated` — which `switch_problem` PREFERS. Measured: each spelling
+    below printed `ok … TORTOISE_EMBED_GATE=1` while `env -i … bash script /usr/bin/env` showed the
+    switch absent. `2>/dev/null` is the IDIOMATIC spelling precisely because the name may be
+    absent, so this was a realistic disarm.
+
+    Mutation-proved: restoring the `\\s*$` anchor reds the redirect/quoted rows.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+        f"{retraction}\n"
+        'exec "$@"\n'
+    )
+    assert "TORTOISE_EMBED_GATE" not in stated, (
+        f"a retraction with a trailing word was dropped, so a stale literal survived: "
+        f"{retraction!r} -> {stated}"
+    )
+    assert "TORTOISE_EMBED_GATE" in ambiguous, (retraction, ambiguous)
+
+
+def test_a_brace_GROUP_is_credited_and_a_function_BODY_is_not():
+    """Review P1 (measured) — `{` is two different constructs, and the reader treated them alike.
+
+    A `{ … }` GROUP runs in the CURRENT shell, so its `export` reaches the process — the gate
+    refused an honest entrypoint (both switches MISSING while `env -i … bash script /usr/bin/env`
+    printed both). A FUNCTION BODY never runs unless called, so it must fail closed. The two are
+    told apart the only way a reader can: a body's `{` follows `)` (or `function NAME`).
+
+    Mutation-proved in both directions: dropping the `_function_body_braces` arm credits a body
+    (fail-open); counting every `{` as an opener refuses the group (false refusal).
+    """
+    group = (
+        "#!/bin/bash\n{\n  export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\n}\n"
+        'exec "$@"\n'
+    )
+    stated, _, = gate._shell_assignments(group)[:2]
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"a brace GROUP runs in the current shell, so its export DOES reach the process: {stated}"
+    )
+
+    for label, body in (
+        ("multi-line body", "arm() {\n  export TORTOISE_VALUE_GATE=1\n}\n"),
+        ("one-line body", "arm() { export TORTOISE_VALUE_GATE=1; }\n"),
+        ("`function` keyword", "function arm {\n  export TORTOISE_VALUE_GATE=1\n}\n"),
+    ):
+        stated, ambiguous = gate._shell_assignments(body)
+        assert stated == {}, f"{label}: a function body never runs unless called: {stated}"
+        assert "TORTOISE_VALUE_GATE" in ambiguous, (label, ambiguous)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        'exec env -i "$@"',
+        'exec env - "$@"',
+        'exec env --ignore-environment "$@"',
+        "exec env -u TORTOISE_EMBED_GATE \"$@\"",
+        "declare -x TORTOISE_EMBED_GATE=",
+        "readonly TORTOISE_EMBED_GATE=",
+    ],
+)
+def test_an_exec_or_builtin_that_discards_the_switch_is_refused(statement):
+    """Review P2 (measured) — the statement that REPLACES or re-binds the env was not modelled.
+
+    `exec env -i "$@"` replaces the process with one whose environment is EMPTY, so every export
+    above it is discarded — measured: the gate printed `ok … =1 =1` while `env -i … bash script
+    /usr/bin/env` printed no `TORTOISE_*` at all. `-u NAME`/`--unset=NAME` removes one name.
+
+    `declare -x K=` is the same class one shape over: after `export K=1` it leaves K EMPTY and
+    still exported (bash prints `K=`), while the gate kept the earlier `=1` and printed `ok`.
+
+    Both fail CLOSED (`ambiguous`), because a value run through them cannot be shown to survive.
+    Mutation-proved: dropping the `_EXEC_STATEMENT` arm reds the `env` rows; dropping
+    `_SHELL_BUILTIN_ASSIGN` reds the `declare`/`readonly` rows.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/bash\nexport TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+        f"{statement}\n"
+    )
+    assert "TORTOISE_EMBED_GATE" not in stated, (
+        f"the switch cannot be shown to survive {statement!r}, so crediting it is a false PASS: "
+        f"{stated}"
+    )
+    assert "TORTOISE_EMBED_GATE" in ambiguous, (statement, ambiguous)

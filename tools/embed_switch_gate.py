@@ -250,8 +250,34 @@ _SHELL_OPENERS = re.compile(
     # `findall` → `[]`, against `['(']` on the raw line). A trailing `(` that opens anything is a
     # subshell, and the span already models it; keeping a dead arm only made the comment claim a
     # capability the regex did not have.
-    r"|(?:^|[\s;&|()])\{"
+    r""
 )
+#: ⛔ A FUNCTION BODY is not a GROUP, and only the first opens a scope (review P1, BOTH
+#: directions measured 2026-11-16). `f() { :; export K=1; }` must fail closed: the body never runs.
+#: But `{ export K=1; }` is a compound group that runs in the CURRENT shell, so its `export` DOES
+#: reach the process — treating every `{` as an opener REFUSED an honest entrypoint (measured: the
+#: gate printed both switches MISSING while `env -i … bash script /usr/bin/env` printed both).
+#: The two are told apart the only way a reader can: a function body's `{` follows `)`, or the word
+#: `function NAME`. Everything else is a group and does NOT change the depth — which keeps the
+#: fail-closed direction (a body is refused) while un-refusing the mirror (a group is credited).
+#: ⛔ The brace arm cannot stay in `_SHELL_OPENERS`: that pattern only ever runs on the STRUCTURAL
+#: view, where `f()`'s `()` are blanked, so the `)` that identifies a body is invisible there.
+_SHELL_FN_BRACE = re.compile(r"\)\s*\{|\bfunction\s+[A-Za-z_][A-Za-z0-9_.-]*\s*\{")
+
+
+def _function_body_braces(raw: str, view: str) -> int:
+    """How many of ``view``'s CODE braces open a FUNCTION BODY (and so a new scope).
+
+    Matched on the RAW statement and confirmed against ``view``, because `_shell_structure` blanks
+    the `()` of `f()` — the `)` that identifies a body exists only in the raw text, while a `{`
+    inside a quote/comment/substitution is blanked in the view and must never count.
+    """
+    count = 0
+    for match in _SHELL_FN_BRACE.finditer(raw):
+        position = match.end() - 1
+        if position < len(view) and view[position] == "{":
+            count += 1
+    return count
 #: ⛔ A closer may follow a STATEMENT SEPARATOR on the same line (review P1, measured). The model
 #: was line-anchored, so a one-line `if [ -n "$X" ]; then echo hi; fi` opened a block and never
 #: closed it — the depth then leaked UP and any later top-level `export` was read as nested and
@@ -291,13 +317,44 @@ _SHELL_TERMINATES = re.compile(r"^\s*(?:exit|exec)\b")
 #: (review at `69ee7b1395`): a bare `K=` (never exported), and `unset K` (removed from the
 #: environment).
 _SHELL_UNEXPORTED = re.compile(r"^\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
-_SHELL_UNSET = re.compile(r"^\s*unset\s+(?P<names>[\w\s-]+)\s*$")
+#: ⛔ A TRAILING WORD must not defeat a retraction (review P1, measured). These two anchored on
+#: `[\w\s-]+\s*$`, so ANY trailing token — a redirect, a quoted name — matched none of the three
+#: retraction arms and the statement fell to the mention scan, leaving the earlier literal in
+#: `stated` (which `switch_problem` PREFERS): measured `unset TORTOISE_EMBED_GATE 2>/dev/null`,
+#: `unset K >/dev/null`, `unset "K"` and `export -n K 2>/dev/null` each printed `ok … =1` while
+#: `env -i … bash script /usr/bin/env` showed the switch absent. `2>/dev/null` is the IDIOMATIC
+#: spelling precisely because the name may be absent, so this was a realistic disarm, not a
+#: contrived one. The tail is tolerated the same way `_export_tokens` already tolerates it
+#: (`export A=1;B=2` states two assignments) — the two readers are symmetric again.
+#: Names are unquoted afterwards (`unset "K"`), because quoting a NAME is not a different statement.
+_SHELL_UNSET = re.compile(
+    r"^\s*unset(?:\s+-[A-Za-z]+)*\s+(?P<names>[^<>|;&]+?)\s*(?:[<>|;&].*)?$"
+)
 #: ⛔ A THIRD way a later line takes an earlier `export K=1` back (review P3, measured):
 #: `export -n K` removes K from the exported environment WITHOUT unsetting it, so `exec "$@"`
 #: passes nothing on. `entrypoint.sh` is `#!/bin/bash`, where `-n` means exactly that; the exported
 #: literal survived and the gate printed `ok … TORTOISE_EMBED_GATE=1` over a process that receives
 #: no value at all (`env -i … bash script` printed `NOT IN ENVIRONMENT`).
-_SHELL_EXPORT_UNEXPORT = re.compile(r"^\s*export\s+-n\s+(?P<names>[\w\s-]+)\s*$")
+_SHELL_EXPORT_UNEXPORT = re.compile(
+    r"^\s*export\s+-n\s+(?P<names>[^<>|;&]+?)\s*(?:[<>|;&].*)?$"
+)
+#: ⛔ A BUILTIN can take a switch back without the `export` spelling this reader credits (review
+#: P2, measured): `declare -x K=` after `export K=1` leaves K EMPTY and still exported (bash prints
+#: `K=`), while the gate kept the earlier `=1` and printed `ok`. It is a RETRACTION (fail closed),
+#: not a new spelling to credit: `declare`/`local` inside a function is local to it, `readonly`
+#: can never be reassigned, and none of them is the shipped configuration stating a usable value.
+_SHELL_BUILTIN_ASSIGN = re.compile(r"^\s*(?:declare|typeset|readonly|local|printf)\b(?P<rest>.*)$")
+#: ⛔ `exec env -i "$@"` REPLACES the process with one whose environment is EMPTY (review P2,
+#: measured): every `export` above it is discarded by `exec`, so the daemon sees nothing — while
+#: the gate credited both and printed `ok`. `-i`/`-`/`--ignore-environment` clears everything, and
+#: `-u NAME`/`--unset[=]NAME` removes one name; both now fail CLOSED, because a value run through
+#: them cannot be shown to survive. Kept to `exec` on purpose: an `env -i` that is NOT exec'd
+#: applies to a CHILD process, and the parent's exports still reach the daemon at its own `exec`.
+_EXEC_STATEMENT = re.compile(r"^\s*exec\b(?P<rest>.*)$")
+_ENV_IGNORES = re.compile(r"(?:^|\s)(?:-i|--ignore-environment|-)(?=\s|$)")
+_ENV_UNSETS = re.compile(
+    r"(?:^|\s)(?:-u|--unset)(?:\s+|=)(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+)
 
 #: A trailing `#` comment (idiomatic after a shell assignment) is NOT part of the value — leaving
 #: it in made `export K=""  # off for now` read as a non-empty statement and skip the EMPTY-value
@@ -324,6 +381,16 @@ def _unquote(value: str) -> str:
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         return text[1:-1]
     return text
+
+
+def _unquote_all(names: str) -> list[str]:
+    """Whitespace-separated NAMEs, each unquoted.
+
+    A retraction may spell its name quoted — `unset "TORTOISE_EMBED_GATE"` removes the same
+    variable `unset TORTOISE_EMBED_GATE` does (measured), so the quoting is not a different
+    statement and must not make the name unrecognisable.
+    """
+    return [_unquote(token) for token in names.split()]
 
 
 #: A value that is NOTHING BUT a variable interpolation, with its optional operator captured.
@@ -492,7 +559,20 @@ def _logical_lines(text: str) -> list[str]:
 
 
 #: A heredoc opener on an instruction line — `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`.
-_HEREDOC_OPEN = re.compile(r"<<(?P<dash>-?)\s*(?P<quote>[\"']?)(?P<word>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)")
+#: ⛔ **The delimiter is a bash WORD here too (review P1, measured).** This matched
+#: `[A-Za-z_][A-Za-z0-9_]*`, so every delimiter a shell accepts and this did not —
+#: `<<END-OF-DATA`, `<<E.O.F`, `<<'E.O.F'` — left the opener unrecognised and its BODY was read as
+#: INSTRUCTIONS. Measured on a Dockerfile whose only "ENV" lines were heredoc data:
+#: `RUN cat > /tmp/notes.txt <<END-OF-DATA` / `ENV TORTOISE_VALUE_GATE=1` / `ENV …` / `END-OF-DATA`
+#: → the gate printed `ok … =1 =1` (exit 0) while `sh` wrote those two lines OUT verbatim, so they
+#: are text a program prints, not statements the image receives. The spelling table is the one
+#: `_SHELL_HEREDOC` already pins (`END-OF-DATA`, `E.O.F`, `'E.O.F'`, `\EOF`); the two readers were
+#: the last place still disagreeing, and `_heredoc_delimiter` (already shared) removes the quoting
+#: so the terminator is compared against the unquoted word, exactly as a shell does.
+_HEREDOC_OPEN = re.compile(
+    r"(?<!<)<<(?P<dash>-?)\s*"
+    r"(?P<word>(?:[^\s;&|<>()'\"\\]|\\.|'[^']*'|\"[^\"]*\"|\$'[^']*')+)"
+)
 
 
 def _heredoc_end(lines: list[str], opener: int, after: int) -> int:
@@ -509,7 +589,7 @@ def _heredoc_end(lines: list[str], opener: int, after: int) -> int:
     later instruction into body text.
     """
     pending = [
-        (match.group("word"), bool(match.group("dash")))
+        (_heredoc_delimiter(match.group("word")), bool(match.group("dash")))
         for match in _HEREDOC_OPEN.finditer(lines[opener])
     ]
     if not pending:
@@ -1309,7 +1389,7 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             elif (unset := _SHELL_UNSET.match(raw)) or (
                 unexport := _SHELL_EXPORT_UNEXPORT.match(raw)
             ):
-                for name in (unset or unexport).group("names").split():
+                for name in _unquote_all((unset or unexport).group("names")):
                     if name in SWITCHES and retracts:
                         # ⛔ A NESTED `unset` neither credits nor retracts (review P2, measured).
                         # These branches ran before, and ignored, the `conditional` guard, so a
@@ -1333,7 +1413,28 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 # resolve an assignment is deliberately not scanned again — `ambiguous` is the
                 # "seen but not creditable" set, and the readers above already decided.
                 ambiguous.update(_mentioned_switches(raw))
-            depth += len(_SHELL_OPENERS.findall(view))
+                # ⛔ A BUILTIN that names a switch takes it back without the `export` spelling
+                # this reader credits (review P2, measured): `declare -x K=` after `export K=1`
+                # leaves K EMPTY and still exported while the gate kept the earlier `=1`.
+                if retracts and (builtin := _SHELL_BUILTIN_ASSIGN.match(raw)):
+                    for name in _mentioned_switches(builtin.group("rest")):
+                        ambiguous.add(name)
+                        stated.pop(name, None)
+            # ⛔ `exec env -i "$@"` discards every export above it (review P2, measured): the
+            # process is REPLACED with one whose environment is empty, while the gate credited
+            # both switches and printed `ok`. Handled here rather than in the arms above because
+            # the statement's own argv is what carries the effect, and it names no assignment.
+            if exec_statement := _EXEC_STATEMENT.match(raw):
+                argv = exec_statement.group("rest")
+                if depth == 0 and re.search(r"\benv\b", argv):
+                    cleared = set(SWITCHES) if _ENV_IGNORES.search(argv) else set()
+                    unset_names = {
+                        match.group("name") for match in _ENV_UNSETS.finditer(argv)
+                    }
+                    for name in cleared | (unset_names & set(SWITCHES)):
+                        ambiguous.add(name)
+                        stated.pop(name, None)
+            depth += len(_SHELL_OPENERS.findall(view)) + _function_body_braces(raw, view)
             if depth == 0 and _SHELL_TERMINATES.match(raw):
                 terminated = True
     return stated, ambiguous
