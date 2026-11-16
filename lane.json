@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kfixer-12951-1794858806-p3180322-13129cc2",
+  "_sha": "8428e1f4dde432effe5ad2c9bdadec71e48bead8",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/logs/fix-12951.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/11609-a-read-containers"
+    },
+    {
+      "kind": "sha",
+      "value": "9b07ede7e27b822a070032d753a7f26d8d400f28"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/.worktrees/surf-a"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "duration_s": 7227,
+  "ended_at": 1794866033,
+  "exit_code": 143,
+  "heartbeat_at": 1794866033,
+  "host": "cmux",
+  "issue": 12951,
+  "kind": "fixer",
+  "lane_id": "cmux.kfixer-12951-1794858806-p3180322-13129cc2",
+  "lease_until": 1794873833,
+  "pid": 3180322,
+  "reason": "bound:exceeded-wallclock",
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1794858806,
+  "state": "FAILED",
+  "tag": "12951",
+  "worktree": "/home/cmux/.worktrees/surf-a"
+}
