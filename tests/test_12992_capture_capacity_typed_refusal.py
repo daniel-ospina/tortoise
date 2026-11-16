@@ -251,3 +251,79 @@ def test_the_degraded_arm_publishes_the_same_keys_as_the_healthy_one(
     assert degraded["code"] == healthy["code"]
     assert degraded["retry_after"] == healthy["retry_after"]
     assert degraded["refusal_window_s"] == healthy["refusal_window_s"]
+
+
+def test_the_refusal_reaches_the_wire_as_a_typed_body_and_a_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE WIRE SHAPE, asserted through the APP — not on the `HTTPException`.
+
+    Everything above this test reads the exception object. That is one layer
+    short of what a client actually receives: the body a caller parses is
+    produced by FastAPI's `http_exception_handler`, and this module already
+    departs from that default for `Exception` (its own handler at
+    `hosted_api.py`'s `@app.exception_handler(Exception)`), so "the exception
+    carries a dict detail" and "the wire answers `{"detail": {...}}`" are two
+    claims, not one. The issue's whole premise is what a CLIENT does with the
+    refusal — `#12992` records two captures lost because the caller could only
+    prose-match — so the claim that a caller can branch on `detail.code` and
+    wait `detail.retry_after` has to be pinned where the caller reads it.
+
+    No DB is touched: the admission gate is the FIRST thing the handler does
+    after the scope check, so a saturated gate refuses before any state is
+    written (that ordering is what `_reserve_capture_slot`'s docstring is
+    about), and `legacy_full_access` satisfies `_require_scope` without a
+    credential lookup.
+
+    MUTATION THAT REDS THIS: re-type the raise's `detail` as the pre-#12992
+    positional string, or drop `headers={"Retry-After": ...}` -> the body is a
+    string (`.json()["detail"]["code"]` raises) and/or the header is `None` on
+    the response, while every exception-object test above stays green.
+    """
+    from fastapi.testclient import TestClient
+
+    from tortoise.hosted_api import app, get_current_org_gated
+
+    monkeypatch.setattr(ha, "_CAPTURE_MAX_IN_FLIGHT", 1)
+    monkeypatch.setattr(ha, "_CAPTURE_IN_FLIGHT", 0)
+    monkeypatch.setattr(ha, "_CAPTURE_SESSIONS", {})
+    monkeypatch.setattr(ha, "_CAPTURE_REFUSED_TOTAL", 0)
+    monkeypatch.setattr(ha, "_CAPTURE_LAST_REFUSED_AT", None)
+
+    # `legacy_full_access` is the documented scope short-circuit, so the handler
+    # reaches admission without a key/session lookup (no DB, no network).
+    app.dependency_overrides[get_current_org_gated] = lambda: {
+        "org_id": "org-12992-wire", "key_id": None, "legacy_full_access": True,
+        "tier": "free", "max_points": 100000, "max_sessions": None}
+    held = [ha._reserve_capture_slot("wire-holder")]
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/sessions",
+                json={"conversation": [{"role": "user", "content": "hi"}]})
+        # Read BEFORE the holder is released: a refusal must not add a slot of its
+        # own, so the count is the holder's 1 and no more.
+        in_flight_after_refusal = ha._CAPTURE_IN_FLIGHT
+        refused_after = ha._CAPTURE_REFUSED_TOTAL
+    finally:
+        for slot in held:
+            slot.release()
+        app.dependency_overrides.pop(get_current_org_gated, None)
+
+    assert response.status_code == 429, response.text
+    # The header a plain HTTP client honours, on the RESPONSE.
+    assert response.headers.get("retry-after") == "30", response.headers
+    body = response.json()
+    detail = body["detail"]
+    assert isinstance(detail, dict), (
+        "the wire body's `detail` is not a JSON object — a caller cannot read "
+        f"`detail.code` (got {type(detail).__name__}: {detail!r})")
+    assert detail["code"] == "capture_capacity_saturated"
+    # Body and header must not disagree: one contract, two carriers.
+    assert detail["retry_after"] == int(response.headers["retry-after"])
+    assert detail["in_flight"] == 1 and detail["limit"] == 1
+    # The refusal is counted on the SAME path a client just exercised.
+    assert refused_after == 1
+    assert in_flight_after_refusal == 1, (
+        "the refusal leaked a slot — a refusal is answered BEFORE the admission "
+        "increment, so in_flight must be whatever the holder took and no more")
