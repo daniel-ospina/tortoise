@@ -4130,16 +4130,19 @@ _SHELL_LEADING_KEYWORD = re.compile(
 
 #: ⛔ A `case` ARM opens with its PATTERN (`x) export FLAG=1 ;;`, `*.json) …`), which is
 #: not part of the command — the pattern made `_shell_export_args` return None, so the arm
-#: landed in no bucket and a `case`-guarded export read `OFF` (measured). The pattern is
-#: only stripped when it is a single word-ish token, so a FUNCTION definition (`f() {`)
-#: is untouched: the parenthesis that opens the empty parameter list blocks the match.
+#: landed in no bucket and a `case`-guarded export read `OFF` (measured). The pattern is one
+#: alternative or an ALTERNATION (`_SHELL_CASE_PATTERN_LIST`) with bash's OPTIONAL leading
+#: `(`, so a FUNCTION definition (`f() {`) is untouched: the parenthesis that opens the empty
+#: parameter list is not preceded by `case … in`, and its `)` is not preceded by a word the
+#: sharing grammar accepts (`_SHELL_CASE_ARM_PATTERN.match("f() { …")` is `None`).
 #: ⛔ ONE definition of a `case` PATTERN LIST: one alternative, or any number separated
-#: by `|` with optional spaces (`x)`, `x|y)`, `prod|staging|dev)`, `prod | staging )`).
+#: by `|` with optional spaces (`x)`, `x|y)`, `prod|staging|dev)`, `prod | staging )`), with
+#: bash's optional leading `(` (`case $E in (prod|staging) …`).
 #: A two-element-unspaced-only form dropped the rest — 36 of this repo's tracked arms — and
 #: the arm then landed in NO bucket (fresh review of `#12902`, P2).
 _SHELL_CASE_ALTERNATIVE = r"[^ \t(){};&|)]+"
 _SHELL_CASE_SEPARATOR = r"[ \t]*\|[ \t]*"
-_SHELL_CASE_PATTERN_LIST = (r"" + _SHELL_CASE_ALTERNATIVE +
+_SHELL_CASE_PATTERN_LIST = (r"\(?" + _SHELL_CASE_ALTERNATIVE +
                             r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*"
                             r"[ \t]*\)")
 
@@ -4159,11 +4162,19 @@ _SHELL_CASE_ARM_PATTERN = re.compile(r"^" + _SHELL_CASE_PATTERN_LIST + r"[ \t]+"
 _SHELL_CASE_SUBJECT_PATTERN = re.compile(
     r"^[^ \t(){};&|]+[ \t]+in[ \t]+" + _SHELL_CASE_PATTERN_LIST + r"[ \t]*")
 
-#: ⛔ A PATTERN POSITION is where a `case` arm's pattern list begins: a single word, bare or
-#: after `case <subject> in`. It is what tells the splitter that a `|` is an ALTERNATION
-#: inside the pattern (`prod|staging)`) rather than the pipe operator.
+#: ⛔ A PATTERN POSITION is where a `case` arm's pattern list begins: the first alternative,
+#: bare or after `case <subject> in` — OR after a bare `in`, because bash lets the head be
+#: SPLIT (`case $E` / `in prod|staging|dev) …`, measured). It is what tells the splitter that
+#: a `|` is an ALTERNATION inside the pattern (`prod|staging)`) rather than the pipe
+#: operator. ⛔ Without the bare-`in` arm a split head published a DEFINITE verdict over a
+#: shape `DECLARED_CHANNEL_BOUNDS` promises is held — measured both ways (`export FLAG=1`
+#: then `case $E` / `in prod|staging|dev) export FLAG=0 ;;` read `ON` where bash is `0`; the
+#: armed variant read `OFF` where bash is `1`), and the same line without a `|` read
+#: `UNMEASURED` — so the bar was what made a held shape definite (fresh review of `#12902`,
+#: P2).
 _SHELL_CASE_PATTERN_POSITION = re.compile(
-    r"^(?:case[ \t]+[^ \t(){};&|]+[ \t]+in[ \t]+)?" + _SHELL_CASE_ALTERNATIVE +
+    r"^(?:case[ \t]+[^ \t(){};&|]+[ \t]+in[ \t]+|in[ \t]+)?" + r"\(?" +
+    _SHELL_CASE_ALTERNATIVE +
     r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*$")
 
 #: ⛔ The rest of a pattern ALTERNATION — `|word)`, `|word|word)`, `| word | word )` — with
@@ -4175,7 +4186,7 @@ _SHELL_CASE_PATTERN_POSITION = re.compile(
 #: → reader `ON`, bash `0`; fresh review of `#12902`, P2). Matched against the line from the
 #: `|`, which is why it anchors at position 0.
 _SHELL_CASE_PATTERN_REST = re.compile(
-    r"[ \t]*\|[ \t]*" + _SHELL_CASE_ALTERNATIVE +
+    _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE +
     r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*" + r"[ \t]*\)")
 
 

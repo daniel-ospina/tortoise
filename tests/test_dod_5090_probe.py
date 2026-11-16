@@ -3190,6 +3190,13 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
             "case $ENV in prod | staging) export TORTOISE_EMBED_GATE=1 ;; esac\n",
             "case $ENV in prod | staging | dev ) export TORTOISE_EMBED_GATE=1 ;; esac\n",
             "case $ENV in\n  prod | staging | dev ) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+            # ⛔ bash's OPTIONAL leading `(` in a pattern list, and a case HEAD SPLIT across
+            # two lines (`case $E` / `in …)`). Neither was a pattern position, so the arm's
+            # `|` hit the subshell return and the line was dropped — a definite verdict over
+            # a shape the declared bounds promise is held (fresh review of `#12902`, P2/P3).
+            "case $ENV in (prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $ENV in\n  (prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+            "case $ENV\nin prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
     ):
         shipped = _shipped(script)
         assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
@@ -3226,6 +3233,16 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
     assert probe._shell_commands(
         "case $ENV in prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;; esac")[0][0] == \
         "export TORTOISE_EMBED_GATE=1"
+    # ⛔ THE FALSE-ARM DIRECTION of a SPLIT head: `export FLAG=1` stands, then a `case` arm
+    # whose `|` used to drop the whole line — bash runs `FLAG=0`, so reading the earlier `1`
+    # was a false ARM (measured `ON`, `indeterminate: []`; the same script WITHOUT a `|` read
+    # `UNMEASURED`, which is what showed the bar was the cause).
+    split_disarm = ("export TORTOISE_EMBED_GATE=1\ncase $ENV\n"
+                    "in prod|staging|dev) export TORTOISE_EMBED_GATE=0 ;;\nesac\n")
+    shipped = _shipped(split_disarm)
+    assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
+        shipped["per_surface"]["entrypoint"])
+    assert shipped["indeterminate"], shipped["indeterminate"]
     # ── CONTROL: a pipe between two REAL commands still drops the line (subshell) ──
     assert probe._shell_commands("export TORTOISE_EMBED_GATE=1 |cat") == []
     assert _shipped("for x in a b; do\nexport TORTOISE_EMBED_GATE=1\ndone\n")[
