@@ -220,10 +220,14 @@ def _no_ambient_store(monkeypatch, tmp_path):
     # blank `TORTOISE_API_KEY` only; `resolve_connection()` reads BOTH names, in
     # precedence order (`mcp_client._ENV_KEY_NAMES`), and `TORTOISE_MCP_API_KEY` is
     # the fleet alias (#5200) that a CI cell exports. Left set, it ANSWERS — so the
-    # store branch is never reached, the pin below cannot fail loud on a leaked
-    # store, and this module sends a REAL fleet key to the test daemon (measured on
-    # a cell: `sources == ('TORTOISE_API_KEY', 'TORTOISE_MCP_API_KEY')`, no store
-    # read). This is the `delenv` half of the recorded idiom —
+    # store branch is never reached and this module sends a REAL fleet key to the
+    # test daemon (measured on a cell: `sources == ('TORTOISE_API_KEY',
+    # 'TORTOISE_MCP_API_KEY')`, no store read). The store pin below still names a
+    # leaked store in that state — it reads `_credential_paths()` and stats each
+    # candidate directly, so it never consults env precedence — but the endpoint
+    # pin beside it measures the RESOLVED identity, so with the alias ambient it
+    # reds on the alias rather than on the store the module is meant to isolate.
+    # This is the `delenv` half of the recorded idiom —
     # `docs/plans/1708-key-mint-idempotency/plan.md` step 5 prescribes setenv(HOME)
     # + delenv(TORTOISE_API_KEY) + chdir; the sibling fixtures copied the other two.
     #
