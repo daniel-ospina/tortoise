@@ -696,7 +696,12 @@ _RE_OWNING_LANES = (
     # (label, method name, args, kwargs)
     ("recall_state", "recall_state", (_PLAIN_QUERY,), {}),
     ("issue_insight", "issue_insight", ("billing ledger", "the database"), {}),
-    ("suggest_entry_points", "suggest_entry_points", ("billing ledger",), {}),
+    # #4282 / #11609 Phase 2: the standalone ``suggest_entry_points`` SDK door
+    # retired into ``search_knowledge(mode="entry_points")``, which delegates to
+    # the same ``_suggest_entry_points`` lane — so the lane, and this pin, keep
+    # their subject through the one surviving door.
+    ("search_knowledge(entry_points)", "search_knowledge", ("billing ledger",),
+     {"mode": "entry_points"}),
     ("recall_gaps", "recall_gaps", (_PLAIN_QUERY,), {}),
     # #8487 review round 6, P2: the review pool is a MEMBERSHIP filter and the
     # subgraph seed is an expansion START SET — neither consumes the order.

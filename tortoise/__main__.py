@@ -1960,7 +1960,8 @@ def _cmd_init(args):
             content="Tortoise graph initialized — file decisions and observations here so your agents remember across sessions.",
             tags=["system", "welcome"],
         )
-        status = sdk.status()
+        # #11609: `status` retired into the orientation container.
+        status = sdk.graph_overview(section="status")
         point_count = status.get("counts", {}).get("Point", 0)
     except Exception:
         # #2210: the welcome-write or status read failed — never print a
@@ -15755,7 +15756,7 @@ def _cmd_doctor(args):
                 sdk = TortoiseSDK()
                 sdk._proj = _projection_for(target)
                 try:
-                    status = sdk.status()
+                    status = sdk.graph_overview(section="status")
                     points = status.get("counts", {}).get("Point", 0)
                     total = status.get("total_entities", 0)
                     if points > 0:
@@ -16303,7 +16304,8 @@ def _cmd_list_kinds(args) -> int:
     sdk._proj = _projection_for(target)
 
     try:
-        kinds = sdk.list_pointkinds()
+        # #11609: `list_pointkinds` retired into the orientation container.
+        kinds = sdk.graph_overview(section="pointkinds")
         if not kinds:
             print("No pointKinds found.")
             return 0
@@ -16335,7 +16337,8 @@ def _cmd_list_sources(args) -> int:
     sdk._proj = _projection_for(target)
 
     try:
-        sources = sdk.list_sources()
+        # #11609: `list_sources` retired into `list_knowledge(kind='source')`.
+        sources = sdk.list_knowledge(kind="source")
         if not sources:
             print("No sources found.")
             return 0

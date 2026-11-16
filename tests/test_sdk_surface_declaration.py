@@ -20,7 +20,7 @@ What each test is for, and why the naive version of it would prove nothing:
   4. **An approved method that does not exist fails, and is NAMED** — the mirror direction,
      with the same non-vacuity pattern. A gate tested in one direction permits the other.
 
-  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 118 live, 96
+  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 110 live, 82
      off the surface, 17 approved-but-absent — the split the composition of two disjoint
      retirement waves moved it to: #12901's five off-surface names, then #4282 Phase 2's
      lane B (four retired, three delivered) and lane C (seven retired, six delivered)). This is
@@ -196,12 +196,12 @@ def test_the_absence_failure_is_NOT_vacuous():
 
 
 def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
-    """#4282's true state: 40 approved, 118 live. Not green, and not vague.
+    """#4282's true state: 40 approved, 110 live. Not green, and not vague.
 
     The approved side has not moved: 23 of the 40 exist (22 live methods the
     declaration names, plus row 1's `Tortoise(...)`, which resolves to the class
-    itself), 17 do not — 23 + 17 = 40, and the 22 live ones are why
-    `118 live − 22 approved-and-live = 96` off-surface. The LIVE side moved
+    itself), 11 do not — 29 + 11 = 40, and the 28 live ones are why
+    `110 live − 28 approved-and-live = 82` off-surface. The LIVE side moved
     150 → 124 on 2026-10-27, when the owner's ruling that the surplus methods nothing calls
     may be deleted (PR #10187) removed the 26 with no caller under `tortoise/**` — so the
     off-surface gap falls 138 → 112 — 124 → 125 on 2026-11-14 (#10015), when approved
@@ -212,9 +212,11 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     moving `absent` (a surplus departure is not an approved name) — 120 → 119 by #4282
     Phase 2's WRITE/MUTATE lane (lane B: four public names retired into its containers,
     three approved ones delivered, so resolved 14 → 16 and `absent` 26 → 23, gap
-    107 → 103) — and 119 → 118 by the SAME epic's SOURCES/MINE/SESSION lane (this PR:
-    seven advertised names retired into its containers, six approved ones delivered, so
-    resolved 16 → 22, `absent` 23 → 17, gap 103 → 96). Every one of those five literals is
+    107 → 103) — 119 → 111 by the SAME epic's READ/QUERY lane (this PR: six containers land
+    and fourteen read doors are re-privatised, so resolved 16 → 22 and the gap 103 → 89) —
+    and 111 → 110 by the SAME epic's SOURCES/MINE/SESSION lane (six approved containers in,
+    seven advertised names retired out, so resolved 22 → 28, `absent` 17 → 11, gap
+    89 → 82). Every one of those six literals is
     MEASURED off the tree at this head (`tools/sdk_surface.py --check` and
     `tools/sdk_surface_declaration.py`), which is the only place the two halves can be read
     together. Nothing approved was removed: the 96 are all off-surface surplus, which is why
@@ -231,10 +233,10 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
     # verify nothing at all. Each literal carries its own premise note —
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    assert len(live) == 118, "the live surface moved — update this premise (it pins today's gap)"
+    assert len(live) == 110, "the live surface moved — update this premise (it pins today's gap)"
 
-    assert len(off_surface) == 96, "the gap moved — update this premise (it pins today's gap)"
-    assert len(absent) == 17, "the gap moved — update this premise (it pins today's gap)"
+    assert len(off_surface) == 82, "the gap moved — update this premise (it pins today's gap)"
+    assert len(absent) == 11, "the gap moved — update this premise (it pins today's gap)"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.
     assert sum(1 for p in problems if "NOT on the approved surface" in p) == len(off_surface)
@@ -309,13 +311,14 @@ def test_the_declaration_docstring_states_the_measured_split_not_the_delta():
         f"`Tortoise(...)` already resolves, and the {len(absent)} absent names exclude it."
     )
 
+    delta = len(live) - len(declared)
     unlabelled = [ln.strip() for ln in doc.splitlines()
-                  if "109" in ln and "delta" not in ln.lower()]
+                  if str(delta) in ln and "delta" not in ln.lower()]
     assert unlabelled == [], (
         "the docstring states the target-count DELTA (live − approved) as if it were the set "
         f"of methods the migration removes: {unlabelled}. The removals are the "
         f"{len(off_surface)}, and the {len(absent)} absent approved names are IMPLEMENTED, "
-        "not removed — say `delta` on any line that quotes 109."
+        f"not removed — say `delta` on any line that quotes {delta}."
     )
 
 

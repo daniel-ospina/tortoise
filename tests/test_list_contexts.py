@@ -51,7 +51,7 @@ class TestListPointkinds:
     def test_kinds_shape(self, sdk):
         """list_pointkinds returns a list of {kind, count, pack} dicts."""
         sdk.create_point("statement", "test")
-        result = sdk.list_pointkinds()
+        result = sdk.graph_overview("pointkinds")
         assert isinstance(result, list)
         for entry in result:
             assert set(entry.keys()) == {"kind", "count", "pack"}
@@ -59,7 +59,7 @@ class TestListPointkinds:
     def test_single_kind(self, sdk):
         """One kind, one point → returns [{kind, count, pack}]."""
         sdk.create_point("observation", "test")
-        result = sdk.list_pointkinds()
+        result = sdk.graph_overview("pointkinds")
         entry = next((r for r in result if r["kind"] == "observation"), None)
         assert entry is not None
         assert entry["count"] == 1
@@ -72,7 +72,7 @@ class TestListPointkinds:
         for _ in range(5):
             sdk.create_point("observation", "b point")
         # observation(5) > statement(3)
-        result = sdk.list_pointkinds()
+        result = sdk.graph_overview("pointkinds")
         counts = [r["count"] for r in result]
         assert counts == sorted(counts, reverse=True)
         # observation must come before statement
@@ -84,7 +84,7 @@ class TestListPointkinds:
         """Each result has exactly 'kind', 'count', 'pack' fields."""
         for i in range(3):
             sdk.create_point("statement", f"point {i}")
-        result = sdk.list_pointkinds()
+        result = sdk.graph_overview("pointkinds")
         entry = next(r for r in result if r["kind"] == "statement")
         assert set(entry.keys()) == {"kind", "count", "pack"}
         assert isinstance(entry["kind"], str)
@@ -97,7 +97,7 @@ class TestListSources:
 
     def test_sources_shape(self, sdk):
         """list_sources returns a list of {url, sourceKind, points} dicts."""
-        result = sdk.list_sources()
+        result = sdk.list_knowledge("source")
         assert isinstance(result, list)
         for entry in result:
             assert set(entry.keys()) == {"url", "sourceKind", "points"}

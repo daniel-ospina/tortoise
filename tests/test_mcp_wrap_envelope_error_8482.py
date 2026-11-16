@@ -645,7 +645,9 @@ async def test_the_named_read_path_siblings(quiet, stdio):
         def tortoise_fts_query(self, *a, **kw):
             raise RuntimeError("boom-search")
 
-        def expand_relationships(self, *a, **kw):
+        # #11609: `expand_relationships` retired into `explore_connections`;
+        # the door calls that, so the stub must raise from the name it reaches.
+        def explore_connections(self, *a, **kw):
             raise RuntimeError("boom-expand")
 
         def recall_state(self, *a, **kw):

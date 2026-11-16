@@ -881,10 +881,12 @@ class TestCliOnboardDbTarget:
         from tortoise import __main__ as m
         from tortoise.sdk import TortoiseSDK as _SDK
 
-        def _boom(self):
+        def _boom(self, *args, **kwargs):
             raise RuntimeError("status read failed")
 
-        monkeypatch.setattr(_SDK, "status", _boom)
+        # #11609: `TortoiseSDK.status` retired into `graph_overview(section='status')`,
+        # which is the call `_cmd_init` makes.
+        monkeypatch.setattr(_SDK, "graph_overview", _boom)
         rc = m._cmd_init(mock.Mock(
             path=None, cmd="init", yes=True, api_key=None, no_index=True))
 
@@ -1251,7 +1253,11 @@ class TestCliOnboardDbTarget:
              mock.patch("tortoise.sdk.TortoiseSDK") as fake_sdk:
             fake_run.return_value.returncode = 0  # git repo detected
             fake_run.return_value.stdout = str(repo_root)
-            fake_sdk.return_value.status.return_value = {"counts": {"Point": 1}}
+            # #11609: `TortoiseSDK.status` retired into
+            # `graph_overview(section="status")`, which is the call `_cmd_init`
+            # actually makes — the old `status` stub configured a name the code
+            # no longer reads.
+            fake_sdk.return_value.graph_overview.return_value = {"counts": {"Point": 1}}
             rc = m._cmd_init(mock.Mock(path=None, cmd="init", yes=True, api_key=None))
 
         assert rc == 0
@@ -1284,7 +1290,11 @@ class TestCliOnboardDbTarget:
              mock.patch("builtins.input", return_value="y"):
             fake_run.return_value.returncode = 0
             fake_run.return_value.stdout = str(repo_root)
-            fake_sdk.return_value.status.return_value = {"counts": {"Point": 1}}
+            # #11609: `TortoiseSDK.status` retired into
+            # `graph_overview(section="status")`, which is the call `_cmd_init`
+            # actually makes — the old `status` stub configured a name the code
+            # no longer reads.
+            fake_sdk.return_value.graph_overview.return_value = {"counts": {"Point": 1}}
             rc = m._cmd_init(mock.Mock(path=None, cmd="init", yes=False, api_key=None))
 
         assert rc == 0
@@ -1384,7 +1394,11 @@ class TestCliSecurityAndIndex:
              mock.patch("tortoise.sdk.TortoiseSDK") as fake_sdk:
             fake_run.return_value.returncode = 0  # git repo detected
             fake_run.return_value.stdout = str(repo_root)
-            fake_sdk.return_value.status.return_value = {"counts": {"Point": 1}}
+            # #11609: `TortoiseSDK.status` retired into
+            # `graph_overview(section="status")`, which is the call `_cmd_init`
+            # actually makes — the old `status` stub configured a name the code
+            # no longer reads.
+            fake_sdk.return_value.graph_overview.return_value = {"counts": {"Point": 1}}
             rc = m._cmd_init(mock.Mock(path=None, cmd="init", yes=True,
                                        api_key=None))
 
@@ -1517,8 +1531,9 @@ class TestCliSecurityAndIndex:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         _delenv_falkordb(monkeypatch)
 
+        # #11609: `list_kinds` answers through the orientation container.
         with mock.patch.object(TortoiseSDK, "__init__", return_value=None), \
-             mock.patch.object(TortoiseSDK, "list_pointkinds", return_value=[]), \
+             mock.patch.object(TortoiseSDK, "graph_overview", return_value=[]), \
              mock.patch("tortoise.projection.FalkorProjection") as FP:
             rc = m._cmd_list_kinds(mock.Mock(cmd="list-kinds"))
 
@@ -1535,8 +1550,9 @@ class TestCliSecurityAndIndex:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         _delenv_falkordb(monkeypatch)
 
+        # #11609: `list_sources` answers through `list_knowledge(kind='source')`.
         with mock.patch.object(TortoiseSDK, "__init__", return_value=None), \
-             mock.patch.object(TortoiseSDK, "list_sources", return_value=[]), \
+             mock.patch.object(TortoiseSDK, "list_knowledge", return_value=[]), \
              mock.patch("tortoise.projection.FalkorProjection") as FP:
             rc = m._cmd_list_sources(mock.Mock(cmd="list-sources"))
 
@@ -1790,7 +1806,11 @@ class TestOnboardCountExcludesNonContentDirs:
              mock.patch("tortoise.sdk.TortoiseSDK") as fake_sdk:
             fake_run.return_value.returncode = 0  # git repo detected
             fake_run.return_value.stdout = str(repo)
-            fake_sdk.return_value.status.return_value = {"counts": {"Point": 1}}
+            # #11609: `TortoiseSDK.status` retired into
+            # `graph_overview(section="status")`, which is the call `_cmd_init`
+            # actually makes — the old `status` stub configured a name the code
+            # no longer reads.
+            fake_sdk.return_value.graph_overview.return_value = {"counts": {"Point": 1}}
             # #715 P2 (prescription): dispatch through the REAL argparse
             # parser, not a hand-built Namespace/bare Mock — those drift.
             rc = m.main(["init", "--yes"])

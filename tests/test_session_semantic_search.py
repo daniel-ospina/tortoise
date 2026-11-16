@@ -248,7 +248,7 @@ class TestSearchSessionsHybrid:
         # Model must be available at QUERY time too (indexing and searching
         # share the same embedding model in production).
         with patch.object(EmbeddingModel, "get", return_value=_FakeEmbedder()):
-            return sdk.search_sessions(query, **kw)
+            return sdk.search_knowledge(query, mode="sessions", **kw)
 
     def test_semantic_match_ranks_relevant_first(self):
         sdk = _fresh_sdk()
@@ -336,11 +336,11 @@ class TestSearchSessionsLegacyFallback:
             _index_session_raw(sdk, "k2", "session beta", keywords=["cookie"], started_at=_JUL_15)
             # Partial-word CONTAINS on the keywords array still works
             # without any semantic strategy.
-            res = sdk.search_sessions("migra")
+            res = sdk.search_knowledge("migra", mode="sessions")
             assert _ids(res) == ["k1"], res
             # Exact keyword token match.
             _index_session_raw(sdk, "k3", "session gamma", keywords=["zebra-cluster"], started_at=_JUL_31)
-            res = sdk.search_sessions("zebra-cluster")
+            res = sdk.search_knowledge("zebra-cluster", mode="sessions")
             assert _ids(res) == ["k3"], res
         finally:
             sdk.close()
@@ -352,10 +352,10 @@ class TestSearchSessionsLegacyFallback:
             _index_session_raw(sdk, "k2", "session beta", keywords=["samekw"], started_at=_JUL_15)
             _index_session_raw(sdk, "k3", "session gamma", keywords=["samekw"], started_at=None)
             # after: k1 (Jul 1) before the bound; k3 has no startedAt → excluded
-            res = sdk.search_sessions("samekw", after="2026-07-10T00:00:00Z")
+            res = sdk.search_knowledge("samekw", mode="sessions", after="2026-07-10T00:00:00Z")
             assert _ids(res) == ["k2"], res
             # ...but the no-timestamp session appears in unbounded results
-            res = sdk.search_sessions("samekw")
+            res = sdk.search_knowledge("samekw", mode="sessions")
             assert "k3" in _ids(res), res
         finally:
             sdk.close()
@@ -367,9 +367,9 @@ class TestSearchSessionsLegacyFallback:
                                keywords=["kwalpha"], topics=["infrastructure"], started_at=_JUL_01)
             _index_session_raw(sdk, "k2", "session beta", agent="opine",
                                keywords=["kwalpha"], topics=["data"], started_at=_JUL_15)
-            res = sdk.search_sessions("kwalpha", agent="pi", limit=5)
+            res = sdk.search_knowledge("kwalpha", mode="sessions", agent="pi", limit=5)
             assert _ids(res) == ["k1"], res
-            res = sdk.search_sessions("kwalpha", topics=["data"], limit=5)
+            res = sdk.search_knowledge("kwalpha", mode="sessions", topics=["data"], limit=5)
             assert _ids(res) == ["k2"], res
         finally:
             sdk.close()
@@ -450,7 +450,7 @@ class TestReviewRegressions:
                 reset_circuit_breakers()
                 # Semantic route must still return the matching session (the
                 # legacy node must not take the whole dense leg down with it).
-                res = sdk.search_sessions("port migration", limit=5)
+                res = sdk.search_knowledge("port migration", mode="sessions", limit=5)
                 ids = _ids(res)
                 assert "s1" in ids, res
                 # Premise (the #8316 file asserts the same for Point): the legacy
@@ -523,7 +523,7 @@ class TestReviewRegressions:
                 # No embedding, no keyword overlap → structural-only row.
                 _index_session_raw(sdk, "s_unrelated", "quantum espresso tuning",
                                    keywords=["coffee"])
-                res = sdk.search_sessions("port migration", limit=10)
+                res = sdk.search_knowledge("port migration", mode="sessions", limit=10)
                 ids = _ids(res)
                 assert "s1" in ids, res
                 assert "s_unrelated" not in ids, f"structural-only session leaked: {ids}"

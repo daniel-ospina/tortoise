@@ -309,7 +309,7 @@ class TestE2E17Dispatch:
                 assert len(urls) == len(set(urls))  # zero url overlap
                 assert _count(g2, "MATCH (s:Source) RETURN count(s)") == 2  # 2N
                 # by_kind / list_sources correct
-                srcs = sdk2.list_sources()
+                srcs = sdk2.list_knowledge("source")
                 assert {s["url"] for s in srcs} == set(urls)
                 assert all(s["sourceKind"] == "agentSession" for s in srcs)
                 assert _required_sweep_clean(g2) == 0
