@@ -305,11 +305,17 @@ containers have landed**, so the surface is now **60 advertised tools** with **3
 `tortoise_annotate_operator`, `tortoise_mitigate_operator`, `tortoise_operator_action`,
 `tortoise_dream`, `tortoise_promote_point`, `tortoise_set_point_baseline`,
 `tortoise_file_decision`, `tortoise_file_human_approval`. Each container's handler DELEGATES to the
-handler it absorbs, so a retired name still answers through the #3883 shim with the same body (SERVED
-97, unchanged) and only the ADVERTISED set moved — the arithmetic is 68 − 14 + 6 = 60. The SDK half of
-the same batch retired six stated renames (`supersede`, `supersede_point` → `supersede_knowledge`;
-`update_point`, `update_entity` → `update_knowledge`; `file_decision` → `write_question`;
-`file_human_approval` → `record_decision`), 125 → 124 public methods, and each retired name's body is
+handler it absorbs, so a retired name still answers through the #3883 shim with the same body — which
+means the SERVED population GROWS rather than staying put: it was **91** (68 live + 23
+retired-forward) and it is **97** (60 live + 37 retired-forward) now, because the fourteen absorbed
+doors keep their rows and stay served while the six containers are added (91 − 14 + 14 + 6 = 97).
+Only the ADVERTISED set moved, and its arithmetic is 68 − 14 + 6 = 60. The SDK half of the same
+batch is FOUR stated renames, not six: `supersede` → `supersede_knowledge`, `update_entity` →
+`update_knowledge`, `file_decision` → `write_question`, `file_human_approval` → `record_decision`
+(`update_knowledge` already existed, so it is +0), **125 → 124** public methods. ⛔ `update_point` and
+`supersede_point` are NOT retired and must not be read as retired: both are still public, because each
+carries a §17.1 write-lane declaration keyed by the door's name, and `sdk_retired.py` says so in its
+own block. Each retired name's body is
 kept as the internal door its container calls, so no code was deleted. Two recorded consequences, not
 tidy-ups: `tortoise_refresh_confidence` is `http_policy=False` because it reaches whole-graph EP
 (#329) — so `promote`/`baseline` are no longer ADVERTISED over tenant HTTP MCP though the handler

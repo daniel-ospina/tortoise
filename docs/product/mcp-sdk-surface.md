@@ -375,7 +375,7 @@ retirement safe; a retired name that stopped resolving would be a silent removal
 | `tortoise_summarize_structure` | `tortoise_graph_overview(section="structure")` | `summarize_structure` | http |
 | `tortoise_supersede` | `tortoise_supersede_knowledge(old_id, new_id, transfer_edges=...)` | `supersede_knowledge` | http |
 | `tortoise_taxonomy` | `tortoise_graph_overview(section="taxonomy")` | `taxonomy` | http |
-| `tortoise_update` | `tortoise_update_knowledge(id, props=...)` | `update` | http |
+| `tortoise_update` | `tortoise_update_knowledge(id, props=...)` | `update_knowledge` | http |
 | `tortoise_update_entity` | `tortoise_update_knowledge(id, props=...)` | `update_knowledge` | http |
 | `tortoise_update_point` | `tortoise_update_knowledge(id, props=...)` | `update_knowledge` | http |
 | `tortoise_validate_domain` | `tortoise_graph_overview(section="validate_domain", domain=...)` | `validate_domain` | http |
@@ -412,10 +412,9 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.status` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_status (retired) | eval-harness, tooling, skill-docs, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.summarize_structure` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_summarize_structure (retired) | tooling, skill-docs, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.taxonomy` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_taxonomy (retired) | eval-harness, tooling, skill-docs, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
-| `TortoiseSDK.update` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_update (retired) | eval-harness, tooling, skill-docs, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.validate_domain` | reached by 0 registered tool(s) and 1 retired name(s): tortoise_validate_domain (retired) | tooling, skill-docs, docs | **keep** | reached by 0 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.get_point` | reached by 0 registered tool(s) and 2 retired name(s): tortoise_get_operator (retired), tortoise_get_point (retired) | eval-harness, tooling, docs | **keep** | reached by 0 registered tool(s) and 2 retired name(s) |
-| `TortoiseSDK.update_knowledge` | reached by 0 registered tool(s) and 2 retired name(s): tortoise_update_entity (retired), tortoise_update_point (retired) | tooling, docs | **keep** | reached by 0 registered tool(s) and 2 retired name(s) |
+| `TortoiseSDK.update_knowledge` | reached by 0 registered tool(s) and 3 retired name(s): tortoise_update (retired), tortoise_update_entity (retired), tortoise_update_point (retired) | tooling, docs | **keep** | reached by 0 registered tool(s) and 3 retired name(s) |
 | `TortoiseSDK.write_question` | reached by 1 registered tool(s) and 1 retired name(s): tortoise_file_decision (retired), tortoise_write_question | tooling, docs | **keep** | reached by 1 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.record_decision` | reached by 1 registered tool(s) and 1 retired name(s): tortoise_file_human_approval (retired), tortoise_record_decision | tooling, docs | **keep** | reached by 1 registered tool(s) and 1 retired name(s) |
 | `TortoiseSDK.paginated_query` | reached by 1 registered tool(s) and 1 retired name(s): tortoise_paginated_query (retired), tortoise_query | tooling, docs | **keep** | reached by 1 registered tool(s) and 1 retired name(s) |
@@ -470,6 +469,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.reconcile_sessions` | reached by no registered MCP tool; caller categories: cli | tooling, docs | **review** | no MCP tool binds it; callers: cli |
 | `TortoiseSDK.close` | reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling, tenant-rest | eval-harness, tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest |
 | `TortoiseSDK.query` | reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling, tenant-rest | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest |
+| `TortoiseSDK.update` | reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling, tenant-rest | eval-harness, tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest |
 | `TortoiseSDK.session_index_health` | reached by no registered MCP tool; caller categories: cli, engine | tooling, docs | **review** | no MCP tool binds it; callers: cli, engine |
 | `TortoiseSDK.volunteer_context` | reached by no registered MCP tool; caller categories: cli, engine, tenant-rest | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: cli, engine, tenant-rest |
 | `TortoiseSDK.apikey_create` | reached by no registered MCP tool; caller categories: cli, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: cli, tenant-rest |

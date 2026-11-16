@@ -87,32 +87,33 @@ def _stub_sdk(**methods):
 
 # ── 1. the containers delegate to the member's own handler ──────────
 
-def test_update_knowledge_props_arm_relays_to_the_update_WRITER(monkeypatch):
-    """⛔ NOT `tortoise_update` — that pin was the defect (#12915 review, P0).
+def test_update_knowledge_props_arm_delegates_to_tortoise_update(monkeypatch):
+    member = _Member()
+    monkeypatch.setattr(mcp_server, "tortoise_update", member)
+    got = mcp_server.tortoise_update_knowledge("n1", props={"status": "live"})
+    assert got is _Member.SENTINEL
+    assert member.calls == [(("n1",), {"props": {"status": "live"}})]
 
-    This test used to assert the property arm called `tortoise_update`, and that
-    IS the finding it was supposed to prevent: `tortoise_update` → `sdk.update`,
-    whose Point arm is `update_point`, which journals NO status record (so
-    `derived = replay(journal)` loses the transition) and refuses every
-    non-promote transition with one fixed sentence. Both doors this container
-    absorbs relay to `_update_entity_any` instead, so the container must too —
-    otherwise the approved door is WEAKER than the ones it retires. Asserted in
-    both directions: the writer is called, and `tortoise_update` is not.
+
+def test_the_props_arm_member_routes_at_update_knowledge_not_update(monkeypatch):
+    """#12915 review F1 — the ONE routing decision the container's `props` arm
+    inherits from `tortoise_update`.
+
+    `sdk.update` sends a Point to `update_point`: no `restatus` journal record
+    (the `derived = replay(journal)` class) and a fixed-sentence refusal that
+    names neither the target status nor the transition. `sdk.update_knowledge`
+    is the relay the absorbed `tortoise_update_point` / `tortoise_update_entity`
+    handlers already call, so the container must land there too.
+
+    The stub carries ONLY `update_knowledge`: the retired routing reddens here
+    with an `AttributeError` rather than silently reaching a second writer.
     """
     member = _Member()
     monkeypatch.setattr(mcp_server, "_get_org_sdk",
                         lambda: _stub_sdk(update_knowledge=member))
-    forbidden = _Member()
-    monkeypatch.setattr(mcp_server, "tortoise_update", forbidden)
-    got = mcp_server.tortoise_update_knowledge("n1", props={"status": "live"})
+    got = mcp_server.tortoise_update("n1", props={"status": "superseded"})
     assert got is _Member.SENTINEL
-    assert member.calls == [(('n1',), {"status": "live"})], (
-        "the property arm must reach `sdk.update_knowledge`, whose property arm "
-        f"IS `_update_entity_any` — it called {member.calls!r}")
-    assert forbidden.calls == [], (
-        "the property arm was routed back through `tortoise_update` → "
-        "`sdk.update` → `update_point`, which journals no status record and "
-        "refuses a non-promote transition with one fixed sentence")
+    assert member.calls == [(("n1",), {"status": "superseded"})], member.calls
 
 
 def test_update_knowledge_annotation_arm_delegates_to_annotate_operator(monkeypatch):
@@ -246,6 +247,59 @@ def test_action_mitigate_REFUSES_the_annotation_dimensions(monkeypatch):
     got = mcp_server.tortoise_adjust_relationship(
         "op1", reason="weak", bias=0.1, action="mitigate")
     assert "cannot record bias" in str(got.get("error", "")), got
+
+
+# ── 2b. `dry_run` is honoured or REFUSED on EVERY arm — never ignored ──
+#
+# ⛔ #12915 review F2. `dry_run` on this tool is an assertion about the write:
+# `_dry_run_tool_names()` derives its set from the handler's declared `dry_run`
+# parameter (this container declares one), and `_arguments_say_preview()` uses
+# that membership to record `dry_run=True` as "writes nothing" (#10084). The
+# annotation arm used to neither preview nor refuse — it WROTE — so an agent
+# asking for a preview got a real graph write plus a write-ack reporting a
+# preview. One case per arm, because the arms are separate code paths.
+
+def test_dry_run_is_REFUSED_on_the_annotation_arm(monkeypatch):
+    member = _Member()
+    monkeypatch.setattr(mcp_server, "tortoise_annotate_operator", member)
+    dims = {"bias": 0.1, "precision": 0.2, "consistency": 0.3, "directness": 0.4}
+
+    got = mcp_server.tortoise_update_knowledge("n1", annotation=dims, dry_run=True)
+
+    assert member.calls == [], (
+        "a dry_run=True call WROTE the annotation — the harness records that "
+        "call as a preview that wrote nothing, so this is a false PASS")
+    message = str(got.get("error", ""))
+    assert "dry_run" in message and "preview" in message, got
+
+
+def test_dry_run_is_REFUSED_on_the_property_arm(monkeypatch):
+    member = _Member()
+    monkeypatch.setattr(mcp_server, "tortoise_update", member)
+
+    got = mcp_server.tortoise_update_knowledge("n1", props={"tier": "gold"},
+                                              dry_run=True)
+
+    assert member.calls == [], member.calls
+    assert "dry_run" in str(got.get("error", "")), got
+
+
+def test_dry_run_PREVIEWS_the_temporal_arms_and_writes_nothing(monkeypatch):
+    """The other half: the two arms that DO have a preview must reach it."""
+    writes, previews = _Member(), _Member()
+    monkeypatch.setattr(mcp_server, "_preview_retract_point", previews)
+    monkeypatch.setattr(mcp_server, "_preview_invalidate", previews)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _stub_sdk(
+        retract_point=writes, invalidate_point=writes))
+
+    for kwargs in ({"invalid_at": "2030-01-01T00:00:00Z"},
+                   {"invalid_at": "2030-01-01T00:00:00Z",
+                    "corrected_by_id": "n2"}):
+        got = mcp_server.tortoise_update_knowledge("n1", dry_run=True, **kwargs)
+        assert got is _Member.SENTINEL, got
+    assert writes.calls == [], (
+        f"a dry_run=True temporal call reached the WRITER: {writes.calls}")
+    assert len(previews.calls) == 2, previews.calls
 
 
 # ── 3. the goalState cache writes through a LIVE name (F1) ──────────
@@ -462,16 +516,23 @@ def test_the_sdk_containers_point_arm_names_the_refused_transition(tmp_path):
         sdk.close()
 
 
-def test_the_MCP_container_point_arm_journals_the_status(tmp_path, monkeypatch):
-    """The MCP layer, not just the SDK layer (#12915 review, P0).
+# ── 7. the MCP container's props arm lands on the SAME writer as the SDK verb ──
+#
+# ⛔ #12915 review F1, fix direction: "add one MCP-level case that drives
+# `tortoise_update_knowledge(id, props={'status': ...})` end to end, not a stub".
+# §1 pins the DELEGATION (a recorder stands in for `tortoise_update`), which by
+# construction cannot see the routing behind it; the two cases below open a real
+# embedded engine and drive the advertised door through the whole chain
+# (`tortoise_update_knowledge` -> `tortoise_update` -> `sdk.update_knowledge` ->
+# `_update_entity_any` -> `_update_entity`), so the divergence the review measured
+# — refusal + 0 records on the container, success + 1 record on the door it
+# absorbs — cannot come back with the suite green.
 
-    The two pins above hold `sdk.update_knowledge` to the right writer — and the
-    container still shipped pointing its property arm at `tortoise_update`, which
-    is `sdk.update` → `update_point`. So the door the migration table sends
-    callers to could not perform a write the retired door performed: no
-    `EntityMutated` record, and a refusal naming neither the target word nor the
-    transition. This pin is the same measurement taken through the ADVERTISED
-    handler, so the routing cannot drift back one layer up.
+def test_the_mcp_containers_props_arm_journals_the_status(tmp_path, monkeypatch):
+    """Measured pre-fix at this head: `ValueError: update_point only promotes
+    draft→live` and **0** `EntityMutated` records, where the absorbed door wrote
+    **1** `restatus`. Post-fix the container and `TortoiseSDK.update_knowledge`
+    (§6 above) produce the same record.
     """
     sdk, events = _sdk_with_journal(tmp_path)
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
@@ -479,28 +540,48 @@ def test_the_MCP_container_point_arm_journals_the_status(tmp_path, monkeypatch):
         pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
         before = len(_entity_mutations(events, pid))
 
-        written = mcp_server.tortoise_update_knowledge(pid, props={"status": "superseded"})
-        assert "error" not in written, (
-            "the container refused a transition its retired door performs: "
-            f"{written!r}")
+        got = mcp_server.tortoise_update_knowledge(
+            pid, props={"status": "superseded"})
 
-        records = _entity_mutations(events, pid)[before:]
-        assert len(records) == 1, (
-            "a status write through the CONTAINER appended no (or more than one) "
-            f"journal record — a rebuild cannot replay it: {records!r}")
-        assert "restatus" in json.dumps(records[0]), (
-            f"the record does not describe a restatus: {records[0]!r}")
-        assert sdk.get_point(pid)["status"] == "superseded", (
-            "the container answered without moving the row")
+        assert not (isinstance(got, dict) and got.get("error")), (
+            "the advertised door refused a status write the door it absorbs "
+            f"performs: {got}")
+        written = _entity_mutations(events, pid)[before:]
+        assert len(written) == 1, (
+            "the container's props arm appended no (or more than one) journal "
+            f"record, so a rebuild cannot replay it: {written!r}")
+        blob = json.dumps(written[0])
+        assert "restatus" in blob, f"not a restatus record: {written[0]!r}"
+        assert "superseded" in blob, (
+            "the record must carry the word the graph holds: " + blob)
+    finally:
+        sdk.close()
 
-        # And the refusal half: an undeclared word must name itself.
-        # A FRESH point: the one above is terminal now, and a dead claim refuses
-        # the re-stamp first — a different (also correct) sentence.
-        fresh = sdk.create_point("statement", "another claim", dedup=False)["id"]
-        refused = mcp_server.tortoise_update_knowledge(fresh, props={"status": "archived"})
-        message = json.dumps(refused)
+
+def test_the_mcp_containers_props_arm_names_the_refused_transition(
+        tmp_path, monkeypatch):
+    """The other half of the same routing: the refusal must let a caller
+    CORRECT the call (AIP-193). Pre-fix the container answered with
+    `update_point`'s fixed sentence, which names neither the target word nor the
+    transition."""
+    sdk, events = _sdk_with_journal(tmp_path)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
+    try:
+        pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
+        before = len(_entity_mutations(events, pid))
+
+        got = mcp_server.tortoise_update_knowledge(
+            pid, props={"status": "archived"})
+
+        message = str(got.get("error", ""))
         assert "archived" in message, (
-            "the refusal names neither the target word nor a transition, so a "
-            f"caller cannot correct the call: {message!r}")
+            "the refusal does not name the refused target, so a caller cannot "
+            f"tell a typo from a closed door: {message!r}")
+        assert "live" in message, (
+            f"the refusal does not name the transition it refused: {message!r}")
+        assert len(_entity_mutations(events, pid)) == before, (
+            "a refused transition appended a journal record")
+        assert sdk.get_point(pid)["status"] == "live", (
+            "a refused transition moved the row")
     finally:
         sdk.close()
