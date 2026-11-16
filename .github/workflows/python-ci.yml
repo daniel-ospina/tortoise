@@ -536,11 +536,9 @@ jobs:
     #   * the tests still run, so a red run tells you about the code; and
     #   * a drift still fails loudly and still blocks the merge, because
     #     python-ci-gate (the required aggregate) lists this job in its needs.
-    # Cost: one extra job (~20s: checkout + setup-python + pyyaml), against a
-    # 25-minute suite that used to be silently withheld.
-    #
-    # Unconditional on every event (push/PR) — same as before. Needs
-    # pyyaml only: tools/ci_selection.py imports it locally.
+    # Cost: one extra job (~20s: checkout + setup-python + pyyaml + the `docker` CLI the new
+    # gate step resolves compose with — its absence REFUSES rather than skips), against a suite
+    # that used to be silently withheld. Unconditional on every event (push/PR) — same as before;
     #
     # timeout-minutes: this job now owns a network install (`pip install
     # pyyaml`) AND feeds the REQUIRED aggregate check — without a bound, a
@@ -561,6 +559,8 @@ jobs:
         # are drift-checked; tests/e2e/ is deliberately exempt
         # (welcome-e2e-monitor + legal-e2e + ENV_BROKEN_FILES cover those 17).
         run: python3 tools/ci_selection.py --integrity
+      - name: "Deployment config STATES both switches (#12926 — why: tools/embed_switch_gate.py)"
+        run: python3 tools/embed_switch_gate.py
       - name: "Mergify protection invariants (config guard, #5215)"
         # #5215 Task 4: the merge-throughput plan's safety contract is mechanical.
         # This runs the static clauses (i)-(viii) the plan's §3 asserts — exit 0

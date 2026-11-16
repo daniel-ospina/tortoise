@@ -114,10 +114,40 @@ from .env_truthy import is_truthy
 #: path is byte-identical to pre-`#5008` behaviour.
 ENV_FLAG = "TORTOISE_EMBED_GATE"
 
+#: ⛔ **THE TWO SWITCHES READ OPPOSITE WAYS WHEN UNSET, AND THAT IS DELIBERATE**
+#: (`#11445`, restated by `#12926`) — the sibling is
+#: :func:`tortoise.value_gate.value_gate_enabled`, which is **ON** unless disabled,
+#: while this one is **OFF** unless enabled. They gate the same rule set
+#: (`RULE_SET is value_gate.RULES`) at two points answering two questions, and
+#: the asymmetry follows the COST of being wrong, not taste:
+#:   * the DISCARD half's wrong answer is a row that was never written —
+#:     unrecoverable — so OFF is its safe residual;
+#:   * this half's wrong answer is a vector on a row that IS written — rent, and
+#:     always recoverable (the text is still on the node), so a default-ON
+#:     arming had to be MEASURED before it was trusted (`#5008`'s ordering).
+#: ⇒ **CHANGING EITHER DEFAULT IS A REOPEN OF `#11445`, NOT A FIX.** `#11445`
+#: decided the guarantee lives in the SHIPPED CONFIG, not in these defaults;
+#: `#12926` enforces that pre-merge (`tools/embed_switch_gate.py`), states both
+#: effective values at boot (`tortoise/gate_visibility.py`), and deliberately
+#: leaves these two lines as declared. A lane that "unifies" them reverses a
+#: recorded decision without saying so.
+
+
+def resolve_enabled(raw: object | None) -> bool:
+    """The EMBED switch's resolution over a RAW value — the ONE default site.
+
+    ``embed_gate_enabled()`` is this function applied to the environment, so the
+    resolution order (and the OFF-behind-unset default) has exactly one copy. A
+    diagnostic reports through it (`tortoise/gate_visibility.py`) rather than
+    re-deriving the default, because a log that says ON while the gate behaves
+    OFF is a worse silence than no log at all.
+    """
+    return is_truthy(raw)
+
 
 def embed_gate_enabled() -> bool:
     """Whether the EMBED gate runs. Off unless the flag says otherwise."""
-    return is_truthy(os.environ.get(ENV_FLAG))
+    return resolve_enabled(os.environ.get(ENV_FLAG))
 
 
 #: The question this gate asks of the shared rule set. Recorded on every

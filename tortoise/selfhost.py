@@ -915,6 +915,16 @@ def emit_off_box_backup_signal(env: dict | None = None) -> str:
 # CMD (`uvicorn tortoise.selfhost:app`), which never passes through the CLI.
 emit_off_box_backup_signal()
 
+# #12926: state the two embedding switches the process actually resolved.
+# Same seam and same reason as the line above: this module IS the boot of the
+# self-host daemon, and the two switches read OPPOSITE ways when unset
+# (`value_gate` ON, `embed_gate` OFF — see `tortoise/gate_visibility.py`), so an
+# unstated EMBED switch silently keeps a vector on every row. Stated, never
+# enforced here: the pre-merge refusal is `tools/embed_switch_gate.py`.
+from tortoise.gate_visibility import report_effective_switches  # noqa: E402
+
+report_effective_switches()
+
 # #8497: arm the self-host deployment's per-graph JSONL REBUILD journal.
 #
 # Both self-host write doors derive it from TORTOISE_EVENT_LOG_BASE_DIR
