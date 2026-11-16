@@ -3958,6 +3958,168 @@ def test_every_unset_SHAPE_is_classified_and_the_controls_do_not_disarm(
         + "\n  " + "\n  ".join(wrong))
 
 
+#: ⛔ The CONDITIONAL shapes the ENTRYPOINT channel's declared bound names in
+#: `cannot_see` (`DECLARED_CHANNEL_BOUNDS`). A conditional operand runs only if a test
+#: this reader cannot evaluate passes, so the file must be HELD — never answered either
+#: way. The CONTROLS are half the table: `;` IS a true separator, and a conditional that
+#: never touches the flag is silence, not an unmeasured reading.
+_CONDITIONAL_SHAPES = [
+    # (script body, expected entrypoint state, the `bash -c '…; env'` truth, why)
+    ('[ -n "" ] && export TORTOISE_EMBED_GATE=1\n', "UNMEASURED",
+     "bash: FLAG absent — the test fails, so the export never runs",
+     "&& whose test failed"),
+    ('export TORTOISE_EMBED_GATE=0\n[ -n "" ] && export TORTOISE_EMBED_GATE=1\n',
+     "UNMEASURED", "bash: FLAG=0 — the earlier disarm IS the last word",
+     "&& over an existing disarm"),
+    ('command -v definitely-not-a-command && export TORTOISE_EMBED_GATE=1\n',
+     "UNMEASURED", "bash: FLAG absent — command -v failed",
+     "&& on a command that does not exist"),
+    ('true || export TORTOISE_EMBED_GATE=1\n', "UNMEASURED",
+     "bash: FLAG absent — || never runs its right side on success",
+     "|| whose left side succeeded"),
+    ('export TORTOISE_EMBED_GATE=1\ncond || unset TORTOISE_EMBED_GATE\n', "UNMEASURED",
+     "bash: FLAG=1 — the unset is unreachable when `cond` succeeds",
+     "conditional DISARM"),
+    ('export TORTOISE_EMBED_GATE=1\nfalse && unset TORTOISE_EMBED_GATE\n', "UNMEASURED",
+     "bash: FLAG=1 — the unset never runs", "&& disarm that did not run"),
+    # …CONTROLS — `;` is a real separator and must keep being READ, in both directions.
+    ('export TORTOISE_EMBED_GATE=1; true\n', "ON", "bash: FLAG=1",
+     "; is a true separator (arm)"),
+    ('export TORTOISE_EMBED_GATE=1; unset TORTOISE_EMBED_GATE\n', "OFF",
+     "bash: FLAG absent", "; is a true separator (disarm)"),
+    ('export TORTOISE_EMBED_GATE=1\n[ -n "" ] && echo nope\n', "ON",
+     "bash: FLAG=1 — a conditional that never touches the flag is silence",
+     "unrelated conditional"),
+]
+
+
+#: ⛔ A HEREDOC BODY is an ARGUMENT, not a script — everything between the operator and
+#: its terminator is text handed to the command, so nothing in it runs. Both directions
+#: were scored before this, and the DISARM direction was a regression against `main`.
+_HEREDOC_SHAPES = [
+    # (script body, expected entrypoint state, the `bash -c '…; env'` truth, why)
+    ("export TORTOISE_EMBED_GATE=1\ncat <<'EOF' >/dev/null\n"
+     "TORTOISE_EMBED_GATE=0\nEOF\n", "ON",
+     "bash: FLAG=1 — the body is an argument to cat, not an assignment",
+     "a body DISARM after a real arm (regression against main)"),
+    ("cat <<'EOF' >/dev/null\nexport TORTOISE_EMBED_GATE=1\nEOF\n", "OFF",
+     "bash: FLAG absent — nothing in the body runs",
+     "a body ARM on an otherwise silent script"),
+    ("cat <<-EOF >/dev/null\n\texport TORTOISE_EMBED_GATE=1\n\tEOF\n", "OFF",
+     "bash: FLAG absent — <<- strips leading TABS from the terminator",
+     "the <<- tab-indented spelling"),
+    ("cat <<\\EOF >/dev/null\nexport TORTOISE_EMBED_GATE=1\nEOF\n", "OFF",
+     "bash: FLAG absent — a backslash-quoted delimiter is still a delimiter",
+     "the <<\\WORD spelling"),
+    ('cat <<"EOF" >/dev/null\nexport TORTOISE_EMBED_GATE=1\nEOF\n', "OFF",
+     "bash: FLAG absent — a double-quoted delimiter is still a delimiter",
+     'the <<"WORD" spelling'),
+    ("cat <<A <<'B' >/dev/null\nbody1\nA\nbody2\nexport TORTOISE_EMBED_GATE=1\nB\n", "OFF",
+     "bash: FLAG absent — TWO heredocs on one line, bodies read in order",
+     "two heredocs on one command"),
+    # …CONTROLS — neither of these opens a body, so the arm must STILL be read.
+    ('_u="x"\nwhile read -r l; do :; done <<< "$_u"\nexport TORTOISE_EMBED_GATE=1\n',
+     "ON", "bash: FLAG=1 — `<<<` is a HERESTRING, not a heredoc",
+     "a herestring opens no body"),
+    ('echo "a << b"\nexport TORTOISE_EMBED_GATE=1\n', "ON",
+     "bash: FLAG=1 — a `<<` inside a quoted word is not an operator",
+     "a quoted << is not an operator"),
+]
+
+
+def _entrypoint_state(tmp_path, monkeypatch, body: str) -> str:
+    """The `entrypoint.sh` verdict for one script body, through the real walk."""
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + body, encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    return shipped["per_surface"]["entrypoint"]["files"]["entrypoint.sh"]["state"]
+
+
+def test_a_CONDITIONAL_operand_is_never_scored_as_if_it_ran(tmp_path, monkeypatch):
+    """`cond && export FLAG=1` runs only if `cond` passes — so the file must be HELD.
+
+    ⛔ Measured RED before this test existed (fresh review of PR #12902, P1):
+    `_shell_commands` split a `&&` / `||` list and handed BOTH operands to the state
+    machine as commands that ran, so every flag command under a condition was scored as
+    if it had run — a FALSE ARM in the row's certification direction, and a regression
+    against `main`, which read these shapes `OFF`:
+
+        script: '[ -n "" ] && export TORTOISE_EMBED_GATE=1'
+        bash -c '…; env'      -> FLAG absent      (main: OFF, head: ON)
+        script: 'true || export TORTOISE_EMBED_GATE=1'
+        bash -c '…; env'      -> FLAG absent      (main: OFF, head: ON)
+        script: 'export …=0' then '[ -n "$X" ] && export …=1'
+        bash -c '…; env'      -> FLAG=0           (main: OFF, head: ON)
+
+    It was also unpinned in the other direction: reverting any `&&` handling left the
+    suite GREEN, because the two `&` / `|` rows in `_UNSET_SHAPES` are the only
+    separators any test names.
+    """
+    wrong: list[str] = []
+    for body, expected, truth, why in _CONDITIONAL_SHAPES:
+        actual = _entrypoint_state(tmp_path, monkeypatch, body)
+        if actual != expected:
+            wrong.append(f"{why}: expected {expected}, read {actual} ({body!r}; {truth})")
+    assert not wrong, (
+        "a CONDITIONAL shell operand was scored as if it ran — publishing an answer for "
+        "a test this reader cannot evaluate (fail-OPEN in the ARM direction):"
+        + "\n  " + "\n  ".join(wrong))
+
+
+def test_a_HEREDOC_body_is_DATA_and_never_a_command(tmp_path, monkeypatch):
+    """Everything between `<<WORD` and its terminator is an ARGUMENT, so nothing runs.
+
+    ⛔ Measured RED before this test existed (fresh review of PR #12902, P2), in BOTH
+    directions — and the DISARM one is a regression against `main`, because this PR's
+    per-line model is what lets a plain assignment inside a body reach `_assigned_value`
+    with `exported=True`:
+
+        'export …=1' + body 'FLAG=0'   bash: FLAG=1   main: ON   head: OFF  (regression)
+        body 'export …=1', nothing else bash: absent   main: ON   head: ON   (both wrong)
+
+    Reachability on THIS tree is nil (`entrypoint.sh`'s one multiline heredoc carries no
+    `export`/`unset`/flag token), which is why this is a pin on the reader rather than a
+    row change — but the reader is the artifact row 1 is scored from.
+    """
+    wrong: list[str] = []
+    for body, expected, truth, why in _HEREDOC_SHAPES:
+        actual = _entrypoint_state(tmp_path, monkeypatch, body)
+        if actual != expected:
+            wrong.append(f"{why}: expected {expected}, read {actual} ({body!r}; {truth})")
+    assert not wrong, (
+        "a HEREDOC BODY was read as shell commands — its content is an argument, so a "
+        "disarm inside one published a false DISARM and an arm inside one a false ARM:"
+        + "\n  " + "\n  ".join(wrong))
+
+
+def test_the_ENTRYPOINT_declared_bound_does_not_certify_a_shape_the_reader_SCORES():
+    """A bound's `cannot_see` example must produce no ANSWER — else it certifies a false arm.
+
+    ⛔ Measured (fresh review of PR #12902, P2): the entrypoint bound named
+    `[ -n "$X" ] && export FLAG=1` under `cannot_see` while the reader scored that exact
+    spelling `ON`. `_declared_bound_note` prints `cannot see` as *"an under-report a
+    reader can trust"*, and the Dockerfile bound was given a separate `reads_wrong` field
+    precisely so a false ARM could not be published under that trust-me verb (`#12978`).
+    So a conditonal/indirect shape named here must be HELD, and every example the bound
+    names must be one of these shapes.
+    """
+    entrypoint = next(row for row in probe.DECLARED_CHANNEL_BOUNDS
+                      if row["channel"] == "entrypoint")
+    cannot_see = entrypoint["cannot_see"]
+    # The bound must still NAME the shapes it is about — a silently trimmed sentence is
+    # the same defect one layer up.
+    for shape in ("HEREDOC BODY", "CONDITIONAL operand", "shell INDIRECTION"):
+        assert shape in cannot_see, (
+            f"the entrypoint bound no longer names {shape!r} — a bound that stops naming "
+            f"its shapes is an undeclared blind spot: {cannot_see!r}")
+    # …and it must state the TREATMENT, so a reader can tell `held` from `answered`.
+    assert "indeterminate" in cannot_see and "UNMEASURED" in cannot_see, (
+        "the entrypoint bound must say an unmeasurable shape is reported `indeterminate` "
+        f"and the file held UNMEASURED, not scored either way: {cannot_see!r}")
+
+
 def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, monkeypatch):
     """A compose value-less entry UNSETS the variable, so a later one must win.
 

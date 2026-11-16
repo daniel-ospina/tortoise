@@ -321,11 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 257 collected
-                                 # (docker lane: 256 passed, 1 skipped)
+                                 # this tree: 260 collected
+                                 # (docker lane: 259 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **257 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **260 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -419,8 +419,8 @@ arm RED against a mutant that tracks the value per LINE instead of per COMMAND),
 published a CLAIM the run did not make: a FALSE-ARM bound certified as `cannot_see` (`#12978`), a
 value-less compose entry described as "not an unset" when the deployment removes the image's `ENV`,
 and a REFUSED resolver named as having "answered"
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 33 + 9 = 257`).
-The `33` are `#12549`'s channel-resolver falsifiers: both orderings of a per-service
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 36 + 9 = 260`).
+The `36` are `#12549`'s channel-resolver falsifiers: both orderings of a per-service
 compose disagreement, a flow mapping, an anchor+merge key, a resolver that REFUSES
 (`UNRESOLVED`, never an answer), an unset interpolation that must not read as an
 explicit empty, the ambient environment that must not arm a compose default, the Fly
@@ -441,8 +441,8 @@ more a SECOND review measured after that first fix round, in the opposite direct
 a profile-gated ARM must not arm a file a default `up` does not start, and `compose.yaml`
 (a compose DEFAULT filename) must be measured rather than invisible. Each was
 shown RED against the pre-fix tool. Also from the reviews of PR #12902, each shown RED
-against the pre-fix tool and each **counted inside the `33`/`9` groups below, not on top of
-them** (the two groups are exactly the 42 new tests this branch adds — `33 + 9` — so nothing named
+against the pre-fix tool and each **counted inside the `36`/`9` groups below, not on top of
+them** (the two groups are exactly the 45 new tests this branch adds — `36 + 9` — so nothing named
 here is an addition to the total): defect 4's own shape (`export FLAG=1` then `FLAG=0`
 — a FALSE ARM, because the exported-name matcher accepted only the bare form), the
 PER-KEY narrowing of the unset-interpolation signal (a literal `FLAG: ""` beside an
@@ -455,7 +455,18 @@ ATTRIBUTE as a per-line state (an `unset`/`export -n` after an `export FLAG=1` r
 it, so a later plain assignment is not a decision: a false ARM a whole-file set
 produced), and a blank declaration judged from the UNINTERPOLATED model (both
 `${MISSING:+1}`, which compose does not warn about, and the per-key naming of the
-reason, which named a neighbour's variable). The final `1` is PR #12474's
+reason, which named a neighbour's variable), and three from the fourth fresh review, each
+shown RED against the pre-fix tool: a CONDITIONAL operand (`[ -n "$X" ] && export FLAG=1`,
+`true || unset FLAG`) reported `indeterminate` and the file HELD, because the reader cannot
+evaluate the test — scored as having run, it published a FALSE ARM on every flag command
+under a condition, and `main` read those `OFF`; a HEREDOC BODY read as data in both
+directions (a body `export FLAG=1` no longer arms, a body `FLAG=0` after a real
+`export FLAG=1` no longer disarms — the second is a REGRESSION against `main`, which read
+it `ON`), across `<<WORD`, `<<-WORD`, `<<\WORD`, `<<"WORD"` and two heredocs on one
+command, with `<<<` and a quoted `<<` as the controls; and the entrypoint declared
+bound's own `cannot_see` examples pinned against the reader, because the bound named
+`[ -n "$X" ] && export FLAG=1` under the trust-me verb while the reader SCORED it `ON`
+(the `reads_wrong` distinction the Dockerfile bound was given for `#12978`). The final `1` is PR #12474's
 row-1 falsifier for the `DISARMS it` leading clause — a compose `environment: [- FLAG, - FLAG=1]`
 REPORTS the value-less entry and ends `ON`, so a tree whose only disarmed file was a SILENT sibling
 published a false cause for its own OFF; the test reds against the pre-fix tool and greens after,
@@ -500,7 +511,7 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
-collected count — `256 passed, 1 skipped` and `255 passed, 2 skipped` here, both adding to the same `257` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+collected count — `259 passed, 1 skipped` and `258 passed, 2 skipped` here, both adding to the same `260` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
 `186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
