@@ -400,12 +400,16 @@ _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
 # that names no callable registry entry fails at import time (see the collection
 # gate at the foot of this module).
 _EXPECTED_PUBLIC_READS: dict[str, frozenset[str]] = {
-    # reads only ``_get_proj``; NO public SDK method is reached. The #3904
+    # ``tortoise_traverse`` used to sit here with an EMPTY expectation: the #3904
     # divergence was that it DECLARED ``traverse`` — a live but unrelated method,
     # signature ``(id, relationship_type, direction)`` — which its handler never
-    # read. Pinning the empty public set keeps that declaration from returning
-    # unnoticed.
-    "tortoise_traverse": frozenset(),
+    # read. #11609 Phase 2 RETIRED that door into
+    # ``tortoise_explore_connections``, so the key named no registry entry and the
+    # collection gate below flagged it (correctly). The pin is not dropped, it
+    # MOVED with the door: the successor declares ``explore_connections``, and the
+    # parametrized scoreboard still fails it if that declaration is not consumed
+    # (``DECLARED_BINDING_NOT_CONSUMED``) — the #3904 shape is caught there, on a
+    # registry entry that actually exists.
     # dispatches to ``mitigate_operator`` / ``annotate_operator``; the union is
     # exactly what the blanked consumed declaration was made honest about (the
     # consolidated ``operator_action`` SDK method is never reached).

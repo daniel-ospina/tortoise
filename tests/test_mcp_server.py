@@ -1192,7 +1192,12 @@ class TestStdioEntrypointToolRegistration:
             # the advertised count 72 -> 68; the floor moves with it (a floor left
             # at the old number would red on a CORRECT removal, and one dropped too
             # far would stop noticing a registry that failed to register).
-            assert len(names) >= 68, f"expected >=68 tools, got {len(names)}"
+            # #11609 Phase 2 then moved it 68 -> 64: nine READ/QUERY doors retired
+            # into five containers (traverse/persona/provenance/belief/policy reads
+            # -> tortoise_explore_connections, tortoise_check_confidence,
+            # tortoise_list_knowledge, tortoise_review_link_candidates), i.e.
+            # 68 - 9 + 5 = 64. Re-derived from the registry, not from the manifest.
+            assert len(names) >= 64, f"expected >=64 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
             # #3883: tortoise_health is RETIRED — the consolidator is advertised
             # and the retired name still answers, with a warning, off the list.
