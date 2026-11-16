@@ -14830,9 +14830,11 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         example in this very file: the `/v1/register` 429 used to enter on the `code`
         value `over_request_rate_limit_ip`, and under the message-preferred reading
         it is outside the universe and the row that cites it exempts nothing (the row
-        is kept, and says so). No site is LOST here today — the page's population is
-        41 rows at this head, every one compliant or category-exempt, with the
-        capacity 429 correctly out of it — so this is a stated RESIDUAL of the
+        is kept, and says so). No site is LOST here today — the class's own population
+        `_refusal_messages()` is 69 rows at this head (36 compliant, 33
+        category-exempt, 0 missed), with the capacity 429 correctly out of it (an
+        earlier cut of this sentence said 41 rows, a count from a much earlier
+        base; re-derive it rather than carrying it) — so this is a stated RESIDUAL of the
         reading, not a live gap: a refusal is invisible only if it never becomes
         in-universe, which is the direction this guard cannot see. That is the
         boundary the class's own note below records. `_ingest_rate_limited`
