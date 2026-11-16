@@ -16664,7 +16664,8 @@ class TortoiseSDK:
             capture_extractor=capture_extractor)
 
     # ⛔ #4282 (owner ruling 2026-10-27) deleted the PUBLIC name
-    # `TortoiseSDK.capture_session`; the surface is 124 methods and this body is not
+    # `TortoiseSDK.capture_session`; the surface was 124 methods then and is 120 today
+    # (#12901 wave 1), and this body is not
     # one of them. The body survives PRIVATELY because the 418-commit forward-merge
     # brought in tests that drive the whole capture (session + turns + Source +
     # extraction + provenance stamps) and the hosted `_capture_session_impl` needs a

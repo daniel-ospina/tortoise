@@ -20,9 +20,10 @@ related:
 
 # Canonical SDK method surface — an inventory, not the target
 
-**Read this for coverage, not for names.** This document is two things: an **inventory of all 125
+**Read this for coverage, not for names.** This document is two things: an **inventory of all 120
 methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and,
-alongside that, an **earlier target sketch** (32 groups over 124 live members). The 26 names that left
+alongside that, an **earlier target sketch** (32 groups over the 124 members live when it
+was written; the live surface is 120 today — see *The count*). The 26 names that left
 the surface on 2026-10-27 are recorded in *Removed from the surface* below rather than in a group.
 
 > ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` (40 methods), not this document.**
@@ -43,8 +44,8 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **125** |
-| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **125** |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **120** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **120** |
 
 The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, then 149 → 147 on
 2026-10-25 (the plan-quota counter `graph_count` went internal as `_graph_count`; the
@@ -59,14 +60,19 @@ because the two per-field setters fold into ONE partial update. `TortoiseSDK.ask
 the SDK layer by #3849 (PR #3929) — the ask pipeline moved to `tortoise/ask_lane.py`, so
 the SDK exposes **no** `ask` method. Nothing is unaccounted for in the manifest.
 
-The last move is 150 → **124** on 2026-10-27: the owner ruled that the surplus public methods
+The 150 → **124** move on 2026-10-27: the owner ruled that the surplus public methods
 **nothing calls** may be deleted (#4282, amendment in `canonical-mcp-tools.md`, PR #10187), and the
 **26** with no caller under `tortoise/**` — including `sdk.py` itself — were deleted, with their code
 archived at tag `archive/4282-surplus-sdk-methods`. The 111 that DO have callers are untouched here;
 privatising them is the remaining half of the migration. Then 124 → **125** on 2026-11-14, when
 approved row 28 `get_organisation_account` gained its `def` (#10015) — an IMPLEMENTATION of an
-already-approved name, not an addition to the approved 40. *Removed from the surface* below is the
-per-method record.
+already-approved name, not an addition to the approved 40. Then 125 → **120** on 2026-11-15, when
+#12901 wave 1 retired five off-surface methods (`backfill_v25`, `calibration_passed`,
+`list_relations`, `membership_get`, `quarantine_batch`) — none of them an approved row, so the
+declaration stays at 40. **120 is the count today**, and it is derived, not typed: `ast` over
+`tortoise/sdk.py` and `tools/sdk_surface.py --check` both read 120, and
+`counts.sdk_public_methods` in `config/surface-manifest.yml` reads 120. *Removed from the surface*
+below is the per-method record.
 
 > A previous draft reported 152 and explained the two-method gap as the manifest excluding
 the eval lane. That was wrong, and how it arose is worth naming: the method count was
@@ -255,7 +261,7 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 
 | Method | Why it is not on the target surface |
 |---|---|
-| `backfill_v25` | A one-shot migration setting `status='live'` where NULL and backfilling `pointKind` — targeting `ONTOLOGY_v2.5` while the schema is **v3.13**. Zero customers, pre-beta. The approved MCP list proposes the same archive for its tool (`tortoise_backfill_v25`); like that one, this is a **proposal** — the baseline still records the method `lifecycle: active`. A migration written against a schema several versions old is a liability, not a capability. |
+| `backfill_v25` | A one-shot migration setting `status='live'` where NULL and backfilling `pointKind` — targeting `ONTOLOGY_v2.5` while the schema is **v3.13**. Zero customers, pre-beta. The approved MCP list proposes the same archive for its tool (`tortoise_backfill_v25`), and this is no longer a proposal: **#12901 wave 1 (2026-11-15) retired the method**, so the baseline records no `backfill_v25` row at all — it is gone from `config/sdk-surface.json`, from `sdk-surface-baseline.md`, and from `TortoiseSDK`. The body is archived under `archive/sdk-methods/b2-sdk-retirement-wave-1/`. A migration written against a schema several versions old is a liability, not a capability. |
 
 ## What each group does
 
@@ -432,8 +438,9 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 **Where this lands for us.** 150 public methods on one flat class was ~5.6× the largest flat
 surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
-**collapse the aliases**. The sketch above does exactly that: **32 groups over 124 live
-members** (149 when it was written; the 26 deleted names took 26 members with them) — 26 memory-facing
+**collapse the aliases**. The sketch above does exactly that: **32 groups over the 124 members
+live when it was written** (149 when the sketch was first drawn; the 26 deleted names took 26
+members with them) — 26 memory-facing
 (R1–R9, W1–W17) and 6 control-plane namespaces (N1–N6) —
 reached by grouping and merging; the retired primitives stop resolving — a call raises with the
 hint naming its replacement (#3836 (c)) — and `backfill_v25` is archived. The

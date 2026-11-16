@@ -4846,7 +4846,8 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():
-    """That sentence's typed count has drifted once per rename: 150 → 149 → 147 → 150 → 124.
+    """That sentence's typed count has drifted once per rename: 150 → 149 → 147 → 150 → 124 →
+    125 → 120.
 
     #10053 review (P3): at that head it read 147 while the class and the manifest both
     said 150, so the doc that tells a reader where the canonical SDK list lives named a

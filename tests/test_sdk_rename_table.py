@@ -306,7 +306,7 @@ CITATION_REGION_LITERAL: dict[str, str] = {
 }
 
 
-# The COMPLETE row → (target, citation text) binding, for all 124 rows. Pinning the
+# The COMPLETE row → (target, citation text) binding, for all 120 rows. Pinning the
 # quotes by citation KEY was not enough: nothing pinned WHICH key a row selected, and
 # where two keys share a `named` member (`w3`/`w3_cut`, `w4`/`w4_index_sessions`) a
 # key swap kept the target, the basis AND the pinned quote set intact — so row 23
@@ -1249,7 +1249,7 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
 
 
 def test_the_whole_mapping_is_pinned() -> None:
-    """Every one of the 125 `method → destination` pairs equals the pinned literal.
+    """Every one of the 120 `method → destination` pairs equals the pinned literal.
 
     The representative-pin test guards group defaults; this guards the exceptions.
     Without it a row can be reassigned to a different target while its citation
@@ -1681,7 +1681,7 @@ def test_group_column_matches_the_canonical_inventory() -> None:
 
 
 def test_part_b_counts_match_the_rows_they_list() -> None:
-    """Part B's counts must equal the members it lists, and the total must be 125."""
+    """Part B's counts must equal the members it lists, and the total must be 120."""
     rows = []
     total = None
     for line in _section("Part B — destination counts").splitlines():
@@ -2226,14 +2226,17 @@ def test_part_c4_evidence_names_every_phantom() -> None:
         )
 
 
-def test_part_c6_records_the_fold_for_exactly_the_three_rows() -> None:
+def test_part_c6_records_the_fold_for_exactly_the_two_rows() -> None:
     """P1-4: the fold-not-delete rows carry a destination and an AUTHORITY.
 
     The remaining w11 members are the only rows whose "Removed" clause says the
     capability is reachable — there were four until #4282 deleted `list_drafts`, which
-    leaves it no row to fold. C6 must name each surviving one's destination AND the
-    authority for it, and the destinations must agree with Part A (the generator's
-    check 10 enforces the same). Nothing here is silently fixed: the AUTHORITY column is
+    leaves it no row to fold, and three until #12901 wave 1 archived `quarantine_batch`,
+    which left this table for the same reason: a retired method has no fold to record.
+    Two rows is what the assertion below measures, so the name says two. C6 must name each
+    surviving one's destination AND the authority for it, and the destinations must agree
+    with Part A (the generator's check 10 enforces the same). Nothing here is silently
+    fixed: the AUTHORITY column is
     what says how much the fold rests on — the owner-approved MCP list, or only beta's
     row clause.
     """

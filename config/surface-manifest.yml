@@ -936,8 +936,9 @@ approval_date: '2026-09-18'
 # The same holds for `render`: the numbers it prints are this manifest's derivation, not a
 # copy of the base tree's. Precedents where they diverged: #4282 deleted 26 dead public SDK
 # methods at `45eefb26c` (`sdk_public_methods` fell from 150 at its parent `13e6856e4` to
-# 124), and it is 125 since #10015 implemented approved row 28
-# (`get_organisation_account`).
+# 124), it moved 124 → 125 when #10015 implemented approved row 28
+# (`get_organisation_account`), and it is **120** since #12901 wave 1 retired five off-surface
+# methods (125 → 120). The live number is the derived `counts` block below, never this prose.
 # ⛔ A hand-edited `counts` reds `check` — re-cut instead
 # (`cut --commit $(git rev-parse origin/main)`), and never paste a number in. `cut` is
 # OWNER-GATED per this tool's own docstring ("ask Daniel FIRST, before the re-cut") because
@@ -1302,7 +1303,8 @@ rows:
 # on this branch; `used_by_with_unreadable_corpora` still re-derives every label it
 # CAN read) — so on a box whose `skills/` dangles, that churn is no longer a cost,
 # and neither is the `skill-docs` label. `cut` is also owner-gated.
-# ⛔ That 125 is re-derivable from this file: `rows` whose `name` starts `sdk:`.
+# ⛔ The live SDK count is re-derivable from this file: `rows` whose `name` starts
+# `sdk:` (120 today, matching `counts.sdk_public_methods`).
 # So exactly one derived cell moves, to the value `check` itself derives from the
 # declaration (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it
 # stands on this branch, after the owner's 2239f94ff6 and c82c0337a4 rewrote the

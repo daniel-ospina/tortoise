@@ -1,7 +1,7 @@
 # Archived sdk-method `list_relations` — REMOVED from the product surface (#11609).
 #
 # batch:   b2-sdk-retirement-wave-1
-# reason:  Listed pack-declared relation declarations; zero callers. Beta r6_canon records graph_overview as destination (no def today, so no hint). Registry call _get_kind_expander().list_relations() survives.
+# reason:  Listed pack-declared relation declarations; zero callers. CANONICAL r6_canon (row R6) records graph_overview as destination (no def today, so no hint); the beta tables never recorded a target for this name. Registry call _get_kind_expander().list_relations() survives.
 # source:  tortoise/sdk.py @ 32011c4dad4b42364868cb0810ad8e7317a7dfb6
 #
 # This file IS the source of record. To restore: copy each block below back into the

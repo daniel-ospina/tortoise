@@ -292,13 +292,28 @@ def test_gate_b_cli_reads_the_private_marker_seam():
     FAILS IF gates.py goes back to a public accessor that no longer exists, or invents a
     third read path instead of the one seam.
     """
+    import ast
     import inspect
 
     from tortoise import gates
 
     src = inspect.getsource(gates)
-    assert "_calibration_marker_recorded()" in src
-    assert ".calibration_passed()" not in src
+    # ⛔ The arm must be about a CALL, not a mention. `gates.py`'s own module docstring and its
+    # comments name this seam three times, so a substring test (`"_calibration_marker_recorded()"
+    # in src`) passes with NO call present — a fresh-context reviewer measured exactly that at
+    # `ac6a4066`. A `Call` node cannot be satisfied by prose, a docstring, or a comment, so the
+    # wiring assertion is taken from the AST and the retired-accessor arm is too.
+    tree = ast.parse(src)
+    called = [n.func.attr for n in ast.walk(tree)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
+    assert "_calibration_marker_recorded" in called, (
+        "gates.py MENTIONS the private seam but never CALLS it — the bare `except Exception` "
+        "would swallow the AttributeError and Gate B would resolve to False forever"
+    )
+    assert "calibration_passed" not in called, (
+        "gates.py calls the retired public accessor `calibration_passed()`, which no longer "
+        "exists on TortoiseSDK (#12901 wave 1)"
+    )
     # The seam must be reachable on the class the CLI constructs, or the except swallows it.
     # ⛔ Attribute access, not `getattr(..., "<name>")`: B009 (ruff, active on this repo's
     # select surface) is right that a constant-name `getattr` is no safer than the plain
