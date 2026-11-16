@@ -13293,7 +13293,6 @@ durations:
   test_9350_capture_provenance_journalled.py: 9.7  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 17.6
   test_9548_record_arming_health.py: 0.1
   test_12943_cache_leg.py: 5.1  # needs a graph (P4 refuses URI-less, so NOT DB-free); no Postgres except two skip-if-absent convergence legs
-  test_9555_narrative_carrier.py: 3.4  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (2.4s) is a LOWER bound; kept 3.4
   test_9555_narrative_carrier.py: 2.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 3.4
   test_backfill_references_5141.py: 0.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.2
   test_bm25_lexical_8488.py: 13.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 9.8
