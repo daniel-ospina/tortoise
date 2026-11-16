@@ -119,10 +119,15 @@ The proof is a call-site census, not a reading of the PR body.
    (`record_writer.py:1646-1650`), and `replay` builds the allocation statement only on that arm
    (`record_projection.py:7630-7634` for the lazy import and `replay_plan(..., allocate=allocate)`,
    `:7768-7796` for the contradictions and the build — `if allocate:` at `:7785`).
-3. **Every production call site passes `seq=`, and none passes `allocate=`**:
+3. **Every production call site passes a position it did not issue, and none passes `allocate=`**:
    - `tortoise/sdk.py:14264-14265` — `return record_writer.write_live_record(record, durable=durable, seq=seq, tenant=self._record_tenant)`
    - `tortoise/api.py:2172-2173` — `record_writer.write_live_record(event, durable=…, seq=seq)`
    - `tortoise/mining.py:1006-1007` — `record_writer.write_live_record(record, durable=…, seq=seq)`
+   - and the one caller of the **seam underneath** those doors, which does not go through
+     `write_live_record` at all: `tools/backfill_copy_turns.py:978-981` calls
+     `write_records(…, position=True, first_seq=first, conn=None, writer=writer)` — contiguous shipped
+     positions, bound as `first_seq=`, and again **no** `allocate=`. It is the fourth production writer
+     of position rows, and the one that makes the negative finding seam-wide rather than door-wide.
 4. Consequently `allocate` is `False` on every live lane, and the live path takes the **enumerated**
    arm: the position row is written from the number `EventLog.append` returned (`sdk.py:14151` →
    `:14203/:14205`), i.e. *the journal* still allocates the ordinal on the running path.
@@ -472,10 +477,12 @@ commit — `e2a9eadb87` (`acc9cbc035..refs/wip/issue-12894-allocator-spike` = `7
 `e2a9eadb87`, `5351f89298`); `acc9cbc035..refs/wip/feat-12894-allocator-spike` holds the `wip:` archive
 commit only. The substantive commit's two halves are **not** in the same state:
 
-- **half 1 (the `seeded` exemption in the enumerated-replay guard) was REVERSED on `main`** by
-  `f9f3e7e8b4` (*"the `seeded` exemption is WRONG — `reopen` keeps `seq`, so the row is the fact and the
-  mode is only the remedy"*), and the reasoning is quoted in the landed comment block at
-  `record_projection.py:7428-7441`. So that half is **superseded, not missing** — the WIP's arm would
+- **half 1 (the `seeded` exemption in the enumerated-replay guard) was REVERSED on `main`** — landed
+  as `792269c931` (the `#12959` squash; the branch commit carrying the reversal is `f9f3e7e8b4`, which
+  is **not** itself an ancestor of `main`, so `git merge-base --is-ancestor f9f3e7e8b4 origin/main` is
+  false and only the squash is the main-side evidence). The reversal's own words: *"the `seeded`
+  exemption is WRONG — `reopen` keeps `seq`, so the row is the fact and the mode is only the remedy"*,
+  and the reasoning is quoted in the landed comment block at `record_projection.py:7428-7441`. So that half is **superseded, not missing** — the WIP's arm would
   re-open the second-position defect its own review measured.
 - **half 2 (`_get_registry(no_schema_ddl=True)` on the byte-meter seam) is NOT on `main`** — measured:
   `no_schema_ddl` occurs 0 times in `tortoise/metering.py` and 0 times in `tortoise/record_writer.py`,
@@ -490,34 +497,46 @@ The honest comparison is `git log refs/pull/12959/head..<wip-ref>` plus a path-s
 
 ## 9. Commands used (verbatim, with counts)
 
-**Which invocations are registered, and which are not.** Five suite runs went through the lane's report
-tool (`WORKTREE-REPORT.md`, "Suites run"): **rows 1, 3, 4 and 5 are the wiring check**, re-run after the
-cycle-3, cycle-5 and cycle-6 fixes (**not** after cycle 4 — no row was taken for that round), and
-**row 2 is the docs-lint invocation** that exited `2` without running. ⚠️ **That register is not part of
-this PR and is not readable downstream:** `WORKTREE-REPORT.md` is gitignored (`.gitignore:158`) and lives
-only in the measurement worktree, so the counts above are this lane's record of what it ran rather than
-an artifact a reader of the merged document can open. What IS re-measurable is the wiring check itself,
-which is why V5 item 1 asks for its exit code to be re-established at the head that moves the gate.
+**Which invocations are registered, and which are not.** Six suite runs went through the lane's report
+tool (`WORKTREE-REPORT.md`, "Suites run"): **row 1 and rows 3–6 are the wiring check** — row 1 while
+drafting, then four runs across the eight review rounds, **not** one per round (the fix batches for
+cycles 2, 3 and 4 were never followed by a run) — and **row 2 is the docs-lint invocation** that exited
+`2` without running. ⚠️ **That register is not part of this PR and is not readable downstream:**
+`WORKTREE-REPORT.md` is gitignored (`.gitignore:158`) and lives only in the measurement worktree, so the
+counts above are this lane's record of what it ran rather than an artifact a reader of the merged
+document can open. What IS re-measurable is the wiring check itself, which is why V5 item 1 asks for its
+exit code to be re-established at the head that moves the gate.
 
 Two lane-tool invocations in the block below are *not* in the register — `worktree_report.py init`, and
 `gh_write_preflight.py`, whose probe creates, confirms and deletes a throwaway remote ref, so it is
 neither read-only nor registered. Every other measurement in this document is a read-only inspection
 (`rg`, `sed`, `grep`, `git log`/`git merge-base`/`git for-each-ref`, `gh issue|pr view`, and two
 `uv run python -c` evaluations), quoted inline at the claim it supports. Both `python` evaluations are
-reproduced verbatim at the end of this section, and V6-5 quotes their results rather than restating them from memory,
-so the negative findings are re-runnable rather than asserted.
+reproduced verbatim at the end of this section, and V6-5 quotes their results rather than restating
+them from memory, so the negative findings are re-runnable rather than asserted.
 
 **Per-run head coverage is deliberately not claimed.** The report tool records one head for the whole
 file and warns when the branch has moved past it (`⚠ head moved since the report was written — re-run
 the affected suites so the report describes the tree you are actually shipping`), which every later
-docs-only commit would re-trigger. The runs above therefore say *when* they were taken — after the
-cycle-3, cycle-5 and cycle-6 fixes — and not that they cover the shipping commit. What makes that
-honest rather than convenient is a property of the suite: `record_wiring_check.py` reads `tortoise/` and
-only `tortoise/` (`PACKAGE` at `tools/record_wiring_check.py:84`, the `rglob` at `:148`, the live door at
-`:378`/`:408`) and never this document, so the commits after the last
-registered run — all of them `docs/evidence/12894-landed-verify/README.md` — cannot change its verdict.
-That same restriction is V6-6's blind spot: a defect in `tools/` or in `supabase/migrations/` (the
-`ON DELETE CASCADE`) is outside what this instrument can see.
+docs-only commit would re-trigger. The runs above therefore say *when* they were taken and not that
+they cover the shipping commit. Each run is labelled with the round it follows, and the label is
+**checkable rather than asserted**: `.worktree-report/state.json` records every run's
+`started_at`/`finished_at`, so a row can be placed between two commits. Row 3 is where that check
+bites — it lands between `77951e15cf` (the cycle-1 fixes) and `3053bd2827` (the cycle-2 fixes), so it is
+a cycle-1 run and covers nothing the cycle-2 round added; row 4 lands after `3ada51d627` (cycle-4) and
+was taken with the cycle-5 edits already in the working tree; rows 5 and 6 follow the cycle-6 and
+cycle-7 edits. A run labelled one round fresher than its
+timestamps allow is the defect this paragraph exists to prevent: the first draft of this section
+attributed that row to cycle 3, and the register said otherwise.
+
+What makes the non-claim honest rather than convenient is a property of the suite:
+`record_wiring_check.py` reads `tortoise/` and only `tortoise/` (`PACKAGE` at
+`tools/record_wiring_check.py:84`, the `rglob` at `:148`, the live door at `:378`/`:408`) and never this
+document, so the commits after the last registered run — all of them
+`docs/evidence/12894-landed-verify/README.md` — cannot change its verdict. 🎯 That same restriction is
+**V6-6's blind spot**, and it is worth stating where the instrument is introduced rather than only where
+the finding is: a defect in `tools/` or in `supabase/migrations/` — the `ON DELETE CASCADE` is one — is
+outside what this check can see, so its exit 0 says nothing about it.
 The property does **not** extend to the docs lint, which is why its non-run stays a red.
 
 **One recorded suite did not run and is reported as red rather than omitted:** the docs-lint invocation
@@ -530,9 +549,10 @@ uv run python tools/worktree_report.py init --issue 12894
 uv run python tools/gh_write_preflight.py --repo .
 uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 1, exit 0
 uv run python tools/worktree_report.py run --cmd 'uv run python tools/docs_lint_baseline.py check --baseline config/docs-lint-baseline.json'   # suite 2, exit 2, NEVER RAN
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 3, exit 0 (re-run after the cycle-3 fixes)
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 4, exit 0 (re-run after the cycle-5 fixes)
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 5, exit 0 (re-run after the cycle-6 fixes)
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 3, exit 0 (re-run after the cycle-1 fixes)
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 4, exit 0 (re-run after the cycle-5 edits)
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 5, exit 0 (re-run after the cycle-6 edits)
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 6, exit 0 (re-run after the cycle-7 edits)
 uv run python tools/worktree_report.py check        # exit 3 — VALID EVIDENCE, 1 FAILING SUITE
 ```
 
