@@ -4133,7 +4133,7 @@ _SHELL_LEADING_KEYWORD = re.compile(
 #: landed in no bucket and a `case`-guarded export read `OFF` (measured). The pattern is
 #: only stripped when it is a single word-ish token, so a FUNCTION definition (`f() {`)
 #: is untouched: the parenthesis that opens the empty parameter list blocks the match.
-_SHELL_CASE_ARM_PATTERN = re.compile(r"^[^ \t(){};&|]+\)[ \t]+")
+_SHELL_CASE_ARM_PATTERN = re.compile(r"^[^ \t(){};&]+\)[ \t]+")
 
 #: ⛔ A `case` arm's SUBJECT and `in` sit between the keyword and the pattern, and the
 #: splitter hands the scanner all of it: `case x in x) export FLAG=1 ;; esac` becomes
@@ -4142,10 +4142,22 @@ _SHELL_CASE_ARM_PATTERN = re.compile(r"^[^ \t(){};&|]+\)[ \t]+")
 #: DEFINITE `OFF` over a deployment bash arms — exactly the reading `_shell_control_flow_lines`
 #: says it refuses, one spelling over (fresh review of `#12902`, P2: the multi-line spelling
 #: was pinned and read `UNMEASURED`, the one-line spelling was neither pinned nor fixed). The
-#: subject form is only stripped when a PATTERN WORD and its `)` follow it, so `for x in a b`
-#: (a loop's word list, no `)` after a word) is untouched.
-_SHELL_CASE_SUBJECT_ARM_PATTERN = re.compile(
-    r"^[^ \t(){};&|]+[ \t]+in[ \t]+[^ \t(){};&|]+\)[ \t]*")
+#: subject form is stripped ONLY after the `case` keyword itself (see
+#: `_shell_strip_leading_keywords`) and only when a PATTERN WORD and its `)` follow it, so
+#: `for x in a b` (a loop's word list) and a line bash refuses to parse (`echo in y) …`) are
+#: untouched.
+_SHELL_CASE_SUBJECT_PATTERN = re.compile(
+    r"^[^ \t(){};&|]+[ \t]+in[ \t]+[^ \t(){};&]+\)[ \t]*")
+
+#: ⛔ A PATTERN POSITION is where a `case` arm's pattern list begins: a single word, bare or
+#: after `case <subject> in`. It is what tells the splitter that a `|` is an ALTERNATION
+#: inside the pattern (`prod|staging)`) rather than the pipe operator.
+_SHELL_CASE_PATTERN_POSITION = re.compile(
+    r"^(?:case[ \t]+[^ \t(){};&|]+[ \t]+in[ \t]+)?[^ \t(){};&]+$")
+
+#: ⛔ The rest of a pattern ALTERNATION: `|word)`, `|word|word)`, with the `)` that closes
+#: the arm. Matched against the line from the `|`, which is why it anchors at position 0.
+_SHELL_CASE_PATTERN_REST = re.compile(r"[ \t]*\|[^ \t(){};&|)]+\)")
 
 
 def _shell_strip_leading_keywords(text: str) -> str:
@@ -4167,14 +4179,24 @@ def _shell_strip_leading_keywords(text: str) -> str:
             text = stripped[1:]
             continue
         match = _SHELL_LEADING_KEYWORD.match(stripped)
-        if not match:
-            arm = (_SHELL_CASE_ARM_PATTERN.match(stripped)
-                   or _SHELL_CASE_SUBJECT_ARM_PATTERN.match(stripped))
-            if not arm:
-                return stripped
-            text = stripped[arm.end():]
+        if match:
+            text = stripped[match.end():]
+            # ⛔ ONLY A `case` HAS A SUBJECT. Applied as a generic fallback, the form
+            # ``<word> in <word>)`` stripped an ARM out of a line bash refuses to parse:
+            # `echo in y) export FLAG=1` read `ON` while bash exits with
+            # `syntax error near unexpected token ')'` and exports nothing — a FALSE ARM in
+            # the certification direction, introduced by the one-line-`case` fix (fresh
+            # review of `#12902`, P3). Reaching it through the `case` keyword is the only
+            # way the subject exists.
+            if match.group(0).strip() == "case":
+                subject = _SHELL_CASE_SUBJECT_PATTERN.match(text)
+                if subject:
+                    text = text[subject.end():]
             continue
-        text = stripped[match.end():]
+        arm = _SHELL_CASE_ARM_PATTERN.match(stripped)
+        if not arm:
+            return stripped
+        text = stripped[arm.end():]
 
 
 def _shell_commands(line: str) -> list[tuple[str, bool]]:
@@ -4277,6 +4299,22 @@ def _shell_commands(line: str) -> list[tuple[str, bool]]:
                 current = []
                 after_conditional = True
                 index += 2
+                continue
+            # ⛔ A `|` INSIDE A `case` PATTERN IS NOT A PIPE (`prod|staging)`, `x|y)`).
+            # The subshell return below DROPPED the whole line — every command on it — so a
+            # `case`-guarded export landed in NO bucket and the file published a DEFINITE
+            # `OFF` over a deployment bash arms: the same P2 class as the one-line `case`
+            # spelling, one mechanism over, because the split runs BEFORE any stripping can
+            # see the arm (fresh review of `#12902`, P2). A pattern position is a SINGLE word
+            # (bare, or after `case <subject> in`) followed by `|word…)`, which no pipe
+            # between two real commands looks like — `export FLAG=1 |cat` starts its
+            # operand with a SPACE-bearing command, and `|cat)` is not followed by a `)`
+            # closing a pattern.
+            if (char == "|"
+                    and _SHELL_CASE_PATTERN_POSITION.match("".join(current).strip())
+                    and _SHELL_CASE_PATTERN_REST.match(line, index)):
+                current.append(char)
+                index += 1
                 continue
             # A SINGLE `&` / `|`: the command so far runs in a SUBSHELL, so neither it
             # nor anything after it is the parent's environment.

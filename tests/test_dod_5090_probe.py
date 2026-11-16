@@ -3171,6 +3171,15 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
             # ;; esac; env'` does export it — the row may not claim that, it did not
             # evaluate the subject). Fresh review of #12902, P2.
             "case x in x) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            # ⛔ …and a PATTERN ALTERNATION (`prod|staging)`), the mainstream spelling. Its
+            # `|` hit the splitter's SUBSHELL early-return FIRST, which dropped the whole
+            # line — every command on it — so the arm landed in NO bucket and the file
+            # published a definite `OFF` even after the subject strip (PRE == POST; the
+            # same P2 class, one mechanism over). All three spellings of the alternation,
+            # because the quoted one and the multi-line one are separate paths.
+            "case $ENV in prod|staging) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            'case $ENV in "prod|staging") export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            "case $ENV in\n  prod|staging) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
     ):
         shipped = _shipped(script)
         assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
@@ -3183,13 +3192,29 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
     # …and a plain group is unconditional, not a branch.
     assert _shipped("{ export TORTOISE_EMBED_GATE=1; }\n")[
         "per_surface"]["entrypoint"]["state"] == "ON"
-    # ⛔ CONTROL: the SUBJECT form is stripped only where a case PATTERN follows it. A
-    # loop's word list (`for x in a b`) carries no `<word>)`, so it must not be eaten by
-    # the case arm strip — the loop body is held by the BRANCH rule, not by a botched
-    # command parse that would silently drop the arm.
+    # ⛔ CONTROL: the SUBJECT form is stripped only under the `case` keyword, and only
+    # where a PATTERN follows it. A loop's word list (`for x in a b`) carries no `<word>)`,
+    # so it must not be eaten by the case strip, and a line with no `case` at all must not
+    # have an ARM invented out of it: `echo in y) export FLAG=1` is a bash SYNTAX ERROR
+    # (measured: `syntax error near unexpected token ')'`, exit 2, no flag), so reading it
+    # `ON` would be a false ARM in the certification direction — the defect the generic
+    # subject strip introduced (fresh review of #12902, P3).
     assert probe._shell_strip_leading_keywords("x in a b") == "x in a b"
     assert probe._shell_strip_leading_keywords(
-        "x in x) export TORTOISE_EMBED_GATE=1") == "export TORTOISE_EMBED_GATE=1"
+        "echo in y) export TORTOISE_EMBED_GATE=1") == \
+        "echo in y) export TORTOISE_EMBED_GATE=1"
+    assert _shipped("echo in y) export TORTOISE_EMBED_GATE=1\n")[
+        "per_surface"]["entrypoint"]["state"] == "OFF"
+    # …and on the ARM path the strip still happens, which is what the one-line `case` row
+    # above depends on (pinned here at the helper so the two cannot drift).
+    assert probe._shell_commands(
+        "case x in x) export TORTOISE_EMBED_GATE=1 ;; esac")[0][0] == \
+        "export TORTOISE_EMBED_GATE=1"
+    assert probe._shell_commands(
+        "case $ENV in prod|staging) export TORTOISE_EMBED_GATE=1 ;; esac")[0][0] == \
+        "export TORTOISE_EMBED_GATE=1"
+    # ── CONTROL: a pipe between two REAL commands still drops the line (subshell) ──
+    assert probe._shell_commands("export TORTOISE_EMBED_GATE=1 |cat") == []
     assert _shipped("for x in a b; do\nexport TORTOISE_EMBED_GATE=1\ndone\n")[
         "per_surface"]["entrypoint"]["state"] == "UNMEASURED"
 
