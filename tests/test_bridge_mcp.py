@@ -24,8 +24,10 @@ import pytest
 # (`CAL_STATE_FILE`, `CONFIG["review_queue_path"]`) — the capture-at-start class
 # `tortoise/mcp_client.py` deliberately avoids (#10605). `_no_ambient_store` below
 # redirects HOME per test, so a body-level import would freeze those constants into
-# a ONE-TEST pytest tmp dir that pytest then deletes, for every later test in the
-# same process. Collection-time import under the ambient HOME is the construction
+# another test's transient tmp path — pytest keeps its recent `tmp_path` basetemps for
+# the session, so those constants would outlive the test and point at a path that is
+# no longer this module's, for every later test in the same process. Collection-time
+# import under the ambient HOME is the construction
 # `tests/test_8491_cal_attendee_grounding.py` already uses; the bridge's own
 # capture-at-start bug is filed as #12968 rather than carried here.
 import integrations.crm.twenty.bridge as bridge
@@ -229,7 +231,13 @@ def _no_ambient_store(monkeypatch, tmp_path):
     # reds on the alias rather than on the store the module is meant to isolate.
     # This is the `delenv` half of the recorded idiom —
     # `docs/plans/1708-key-mint-idempotency/plan.md` step 5 prescribes setenv(HOME)
-    # + delenv(TORTOISE_API_KEY) + chdir; the sibling fixtures copied the other two.
+    # + delenv(TORTOISE_API_KEY) + chdir. The sibling AUTouse STORE-ISOLATORS copied
+    # the other halves only: `tests/test_mcp_client.py:226` does HOME+chdir and
+    # `tests/test_mcp_bridge.py:410` does chdir alone. Both siblings DO carry a
+    # `delenv` half, but in a separate fixture their tests opt into
+    # (`test_mcp_client.py:292 isolated_home`, `test_mcp_bridge.py:439 home`) — an
+    # autouse isolator, which every test in the module inherits whether it asks or
+    # not, needs the `delenv` in its own body, which is what this fixture is.
     #
     # ⛔ The NAMES are ASKED OF THE CODE, for the same reason the store pin below
     # asks `_credential_paths()` instead of restating today's two paths: a literal
