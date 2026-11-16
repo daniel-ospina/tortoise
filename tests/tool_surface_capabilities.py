@@ -266,11 +266,17 @@ INTERNAL_PATH_READERS: frozenset[str] = frozenset({
     "_probe_embedded_busy", "session_index_health",
 })
 
-# The 8 wrap sites that pass `abuse_weight` (R1 point-create metering).  Every
+# The wrap sites that pass `abuse_weight` (R1 point-create metering).  Every
 # other `_quota_gated` site must NOT.
+# #4282 Phase 2 folded the two decision doors into containers; the WEIGHT travels
+# with the CAPABILITY, so the two weighted sites are the new names — `write_question`
+# (`_quota_gated(..., abuse_weight=lambda r, a, k: 1 + len(options) + len(evidence))`)
+# and `record_decision` (`abuse_weight=1`). Keeping the retired keys here would
+# assert a weight on a method that no longer has a wrap site, which is exactly the
+# `test_point_creating_wrap_sites_have_weights` red this re-key closes.
 WEIGHT_BEARING_METHODS: frozenset[str] = frozenset({
-    "create_point", "create_operator", "mitigate_operator", "file_decision",
-    "file_human_approval", "diary_write", "ingest",
+    "create_point", "create_operator", "mitigate_operator", "write_question",
+    "record_decision", "diary_write", "ingest",
     # #11609 lane C retires the PUBLIC `checkpoint` method; its still-served door
     # wraps the SDK's private seam, and the weight is unchanged (the `filed`
     # count), so the weight class follows the name the wrap site actually calls.
@@ -278,6 +284,11 @@ WEIGHT_BEARING_METHODS: frozenset[str] = frozenset({
     # #11609 lane C: the mining container weights by the `filed` count its result
     # carries — the same bulk-write shape `checkpoint` had (#4113's reason).
     "mine_knowledge_from_session",
+    # ⛔ #11609 lane B retired `file_decision` / `file_human_approval` in the SAME
+    # release that landed `write_question` / `record_decision`: the two container names
+    # above are the ones the merged tree actually weights, and the retired pair is
+    # in no `_quota_gated(..., abuse_weight=)` site any more (measured, see the
+    # module's own wrap-site arm).
 })
 
 # #11609 lane C: four retired methods are still SERVED, through doors that call the
@@ -301,18 +312,32 @@ SDK_SEAM_ALIASES: dict[str, str] = {
 # liveness).
 DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "create_point": "tortoise_create_point",
-    "update_point": "tortoise_update_point",
     "create_operator": "tortoise_create_operator",
     "mitigate_operator": "tortoise_mitigate_operator",
-    "file_decision": "tortoise_file_decision",
-    "file_human_approval": "tortoise_file_human_approval",
+    # #4282 Phase 2: the four container names replace the five retired ones
+    # (`file_decision`->`write_question`, `file_human_approval`->`record_decision`,
+    # `supersede`->`supersede_knowledge`, `update_entity`/`update_point`->`update_knowledge`).
+    # This map is checked in BOTH directions against the AST wrap-site scan, so the
+    # retired keys red as "declared write methods with no wrap site" and the new ones
+    # red as "unmapped _quota_gated wrap sites" until they are re-keyed here.
+    "write_question": "tortoise_write_question",
+    "record_decision": "tortoise_record_decision",
+    "supersede_knowledge": "tortoise_supersede_knowledge",
+    "update_knowledge": "tortoise_update_knowledge",
     "invalidate_point": "tortoise_invalidate",
-    "supersede": "tortoise_supersede",
     "retract_point": "tortoise_retract_point",
     "_checkpoint": "tortoise_checkpoint",  # retired method, seam-wrapping door (#11609)
     "diary_write": "tortoise_diary_write",
     "create_entity": "tortoise_create_entity",
-    "update": "tortoise_update",
+    # ⛔ `update` LEFT this map in #11609 lane B (#12915 review F1): no MCP handler
+    # quota-gates `sdk.update` any more. `tortoise_update` — the door the
+    # `tortoise_update_knowledge` container's `props` arm delegates to — routes
+    # through `sdk.update_knowledge` (the same `_update_entity_any` relay
+    # `tortoise_update_point` and `tortoise_update_entity` call), because `update`
+    # sends a Point to `update_point`, which journals no `restatus` record and
+    # refuses every non-promote transition by a fixed sentence. Keeping the key
+    # would red the inverse arm ("declared write methods with no wrap site") on a
+    # method nothing writes through.
     "annotate_operator": "tortoise_operator_action",
     "create_subject": "tortoise_create_subject",
     "create_object": "tortoise_create_object",
@@ -325,6 +350,7 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "_create_source": "tortoise_create_source",
     "_assess_source": "tortoise_assess_source",
     "update_entity": "tortoise_update_entity",
+
     "create_edge": "tortoise_create_edge",
     "ingest": "tortoise_ingest",
     "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door
@@ -369,6 +395,19 @@ NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     # happens through hosted_api helpers (index job / onboarding state), so it
     # is an empty-binding writer here. It deliberately does NOT tear the GitHub
     # connection down: #1924 made the per-source switch intent, not a disconnect.
+    # #4282 Phase 2: the two containers that ship with `sdk_method=""` because they
+    # DELEGATE to the handler they absorbed (`adjust_relationship` ->
+    # `tortoise_operator_action` -> sdk.mitigate_operator/annotate_operator;
+    # `refresh_confidence` -> dream/promote_point/set_point_baseline). Both are
+    # writer-classified (`risk="destructive"`), so they belong in this declared set —
+    # without them `empty_writers == set(NON_SDK_WRITER_TOOLS)` reds and a
+    # graphs:read-only HTTP key could reach a write through a container nobody
+    # declared.
+    "tortoise_adjust_relationship", "tortoise_refresh_confidence",
+    # Same shape, same reason: `update_knowledge` dispatches per arm to the handler
+    # it absorbed, so it binds no single SDK method either (#4337 + #3904 both red
+    # on the old `sdk_method="update_knowledge"` declaration).
+    "tortoise_update_knowledge",
     "tortoise_manage_sources",
     # #4035: handler-served writer (reaches pack_manifest_store.upsert_tenant_manifest)
     # ⛔ `tortoise_pack_install` LEFT this set in #11609 batch 1: it is ARCHIVED

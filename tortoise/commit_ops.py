@@ -1962,7 +1962,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                 # already terminal — idempotent re-ingest no-op
                 continue
             try:
-                sdk.supersede(ref, supersedes_by)
+                sdk.supersede_knowledge(ref, supersedes_by)
                 applied += 1
             except Exception as exc:
                 warn(f"point supersede {ref!r} → {supersedes_by!r} failed: {exc}")

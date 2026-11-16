@@ -221,9 +221,9 @@ def test_supersede_both_legs_agree_on_operator_target(sdk):
     # not diverge on an operator successor.
     old1, old2, op = _point(sdk), _point(sdk), _op(sdk)
     with pytest.raises(ValueError, match="operator"):
-        sdk.supersede(old1, op)
+        sdk.supersede_knowledge(old1, op)
     with pytest.raises(ValueError, match="operator"):
-        sdk.supersede(old2, op, transfer_edges=False)
+        sdk.supersede_knowledge(old2, op, transfer_edges=False)
 
 
 # ── missing-input contracts are unchanged ───────────────────────────────

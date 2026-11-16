@@ -15,15 +15,17 @@
 |---|---|
 | approved methods (the target) | 40 |
 | live public methods on `TortoiseSDK` | 119 |
-| approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 20 |
-| approved but not implemented yet | 20 |
-| live and NOT approved (migration backlog) | 100 |
+
+| approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 17 |
+| approved but not implemented yet | 23 |
+| live and NOT approved (migration backlog) | 103 |
 
 Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs. It resolves
 to `TortoiseSDK` (the only constructible entry point); it is not a method on it.
 
 `docs/product/beta-sdk-surface.md` states "only four of the 40 exist in the current SDK".
-That sentence is STALE: 19 exist, plus the constructor. It is recorded here rather than
+
+That sentence is STALE: 16 exist, plus the constructor. It is recorded here rather than
 edited there, because the approved document is the owner's ruling and this baseline is not
 the place to amend it (#10044).
 
@@ -43,15 +45,16 @@ Phase 2 implements them.
 - `list_keys`
 - `list_knowledge`
 - `list_members`
-- `record_decision`
+
+- `manage_source_trust`
+- `mine_knowledge_from_directory`
+- `mine_knowledge_from_session`
 - `refresh_confidence`
 - `remove_member`
 - `review_link_candidates`
 - `revoke_key`
 - `search_knowledge`
-- `supersede_knowledge`
 - `write_knowledge_batch`
-- `write_question`
 
 ## Live and NOT approved — the migration backlog
 
@@ -88,8 +91,6 @@ the count above is the honest measure of the gap.
 - `dream_health_check`
 - `dream_health_state`
 - `expand_relationships`
-- `file_decision`
-- `file_human_approval`
 - `get_confidence`
 - `get_cross_lens_candidates`
 - `get_events`
@@ -144,7 +145,6 @@ the count above is the honest measure of the gap.
 - `status`
 - `suggest_entry_points`
 - `summarize_structure`
-- `supersede`
 - `supersede_point`
 - `sweep_invite_ghost_memberships`
 - `taxonomy`
@@ -154,7 +154,6 @@ the count above is the honest measure of the gap.
 - `trash_graphs`
 - `ulid`
 - `update`
-- `update_entity`
 - `update_point`
 - `validate_domain`
 - `volunteer_context`

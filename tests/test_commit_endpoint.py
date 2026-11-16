@@ -1368,7 +1368,7 @@ class TestRekeyedPointResolvedIds:
         """§6b — ``supersedes_by`` is a payload ``pt_<sha>`` id BY
         construction, so it shares the two-id-space hole: the successor point
         re-keyed onto a pre-existing node under another id and
-        ``sdk.supersede(prior, '<payload id>')`` targeted a node that does not
+        ``sdk.supersede_knowledge(prior, '<payload id>')`` targeted a node that does not
         exist — it RAISED and ``apply_supersessions`` swallowed it as
         ``point supersede '<prior>' → '<payload id>' failed`` (not the
         ``… ref '<payload id>' not found`` skip, which fires only when the
@@ -1842,7 +1842,7 @@ class TestFailedWriteRetry4704:
 
 class TestE5PointSupersessions:
     """E5 (#1537) Task 3 — a payload's pt_* supersession record materializes
-    the EXISTING canonical sdk.supersede() on commit (CORRECTS + outdated +
+    the EXISTING canonical sdk.supersede_knowledge() on commit (CORRECTS + outdated +
     edge transfer); already-terminal old → idempotent skip (no ValueError —
     supersede_point would raise); missing old → fail-open warning; the entity
     ObjectSuperseded fold is untouched by point refs."""
@@ -4931,7 +4931,7 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_a_source(client):
         sdk.register_source(url, "agentSession", contentHash="h1")
 
         with pytest.raises(ValueError, match="server-managed on a :Source"):
-            sdk.update_entity(url, story_arc="NARRATIVE-ZEBRA prose must not land")
+            sdk.update_knowledge(url, story_arc="NARRATIVE-ZEBRA prose must not land")
 
         rows = sdk._get_proj().g.query(
             "MATCH (s:Source {url:$u}) RETURN s.story_arc", params={"u": url}

@@ -346,7 +346,7 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
             elif door == "update_point":
                 sdk.update_point("p-census", embedding_width="f16")
             elif door == "update_entity":
-                sdk.update_entity("e-census", embedding_width="f16")
+                sdk.update_knowledge("e-census", embedding_width="f16")
             elif door == "update":
                 sdk.update(target, embedding_width="f16")
             elif door == "update_knowledge":

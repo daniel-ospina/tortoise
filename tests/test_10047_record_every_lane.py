@@ -266,7 +266,7 @@ def test_the_index_relink_pass_binds_the_default_graph_tenant(
 #     reaches `write_live_record` / `_apply_and_journal` / `_emit_event` /
 #     `_journal_entity_event`, transitively through the module's own call
 #     graph (#10380 review P1: the previous hand-picked list missed the SDK's
-#     own aliases — `create_entity` and `supersede` are the live evidence; the
+#     own aliases — `create_entity` and `supersede_knowledge` are the live evidence; the
 #     other two the review measured, `batch_create_points` and `index_file`, were
 #     among the 26 dead public methods #4282 DELETED on 2026-10-27, so they can no
 #     longer witness anything);
@@ -468,8 +468,9 @@ _PINNED_CORE_VERBS = frozenset({
     # ⚠️ #4282 DELETED three names this floor used to carry — `record_calibration`,
     # `batch_create_points` and `index_file`. They are removed from the floor because
     # a non-vacuity check may only demand names that EXIST; the alias coverage the
-    # floor exists for still has `create_entity` and `supersede` as live witnesses.
-    "create_entity", "supersede",
+    # floor exists for still has `create_entity` and `supersede_knowledge` as live
+    # witnesses (#11609 Phase 2 retired `supersede` into the container).
+    "create_entity", "supersede_knowledge",
 })
 
 
@@ -1666,13 +1667,13 @@ def _flagged(source: str) -> list[str]:
     return _unbound_record_writes(ast.parse(source))
 
 
-@pytest.mark.parametrize("verb", ["create_entity", "supersede",
+@pytest.mark.parametrize("verb", ["create_entity", "supersede_knowledge",
                                   "link_entities", "ingest", "create_point"])
 def test_a_lane_using_an_sdk_alias_is_caught(verb):
     """P1 (#10380): the verbs are DERIVED, so an alias is not a blind spot.
 
     Mutation this reddens on: replacing `_RECORD_EMITTING_VERBS` with the old
-    hand-picked frozenset. Four of these five cases (`create_entity`, `supersede`,
+    hand-picked frozenset. Four of these five cases (`create_entity`, `supersede_knowledge`,
     `link_entities`, `ingest`) are absent from it, so they redden at the non-vacuity
     assertion above and the scan assertion below is never reached — which is the point:
     under that mutation the guard's own scan would be silent for any lane using them.

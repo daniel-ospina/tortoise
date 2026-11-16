@@ -737,14 +737,14 @@ class TestPropsDoorsScreenTheFoldAliases:
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
 
         with pytest.raises(UnapprovedKindNamespace) as excinfo:
-            sdk.update_entity(obj["id"], objectKind=f"{MARKETING}:campaign")
+            sdk.update_knowledge(obj["id"], objectKind=f"{MARKETING}:campaign")
         assert MARKETING in str(excinfo.value)
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
         assert [r[0] for r in sdk._get_proj().g.query(
             "MATCH (o:Object {id: $id}) RETURN o.objectKind",
             params={"id": obj["id"]}).result_set] == ["other"]
 
-        sdk.update_entity(obj["id"], objectKind="portfolio")
+        sdk.update_knowledge(obj["id"], objectKind="portfolio")
         assert [r[0] for r in sdk._get_proj().g.query(
             "MATCH (o:Object {id: $id}) RETURN o.objectKind",
             params={"id": obj["id"]}).result_set] == ["portfolio"]

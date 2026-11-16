@@ -66,14 +66,28 @@ The 150 → **124** move on 2026-10-27: the owner ruled that the surplus public 
 archived at tag `archive/4282-surplus-sdk-methods`. The 111 that DO have callers are untouched here;
 privatising them is the remaining half of the migration. Then 124 → **125** on 2026-11-14, when
 approved row 28 `get_organisation_account` gained its `def` (#10015) — an IMPLEMENTATION of an
-already-approved name, not an addition to the approved 40. Then 125 → **124** on 2026-11-14 by the
-SOURCES/MINE/SESSION containers (`#11609` batch 2: six approved names implemented, seven live names
-retired, net −1). Then 124 → **119** on 2026-11-15, when the `#12901` wave 1 retired five off-surface
-methods (`backfill_v25`, `calibration_passed`, `list_relations`, `membership_get`,
-`quarantine_batch`) — none of them an approved row, so the declaration stays at 40. **119 is the
-count today**, and it is derived, not typed: `ast` over `tortoise/sdk.py` and
-`tools/sdk_surface.py --check` both read 119, and `counts.sdk_public_methods` in
-`config/surface-manifest.yml` reads 119. *Removed from the surface*
+
+already-approved name, not an addition to the approved 40. **TWO waves landed in one week and they
+are disjoint**, so the merged count is one subtraction from each side rather than either side's
+number:
+
+- **125 → 120 on 2026-11-15** — `#12901` wave 1 retired five off-surface methods
+  (`backfill_v25`, `calibration_passed`, `list_relations`, `membership_get`, `quarantine_batch`),
+  none of them an approved row, so the declaration stays at 40.
+- **120 → 119 on 2026-11-16** — #11609 Phase 2's WRITE/MUTATE batch: three approved rows gained
+  their `def` (`supersede_knowledge`, `write_question`, `record_decision` — `update_knowledge`
+  already had one) while four absorbed doors were retired (`supersede`, `file_decision`,
+  `file_human_approval`, `update_entity`), a net −1. Four names stay live for stated reasons
+  (`update_point`/`supersede_point` for their §17.1 write-lane declarations, `retract_point` for
+  its instant-free retraction, `invalidate_point` for `valid_to_precision='unknown'`), and
+  `update_entity`'s Point-lifecycle behaviour — the `restatus` journal record and the
+  transition-naming refusal — is CARRIED by `update_knowledge`, not dropped with the name.
+
+The overlap is chosen rather than assumed: wave 1 admitted a name only when NO `tool_registry` entry
+(live or retired) bound it, and the four doors this batch re-keys were live MCP tools at that time,
+so the two waves could not have consumed each other's candidates. **119 is the count today**, and it
+is derived, not typed: `ast` over `tortoise/sdk.py`, `tools/sdk_surface.py --check` and
+`counts.sdk_public_methods` in `config/surface-manifest.yml` all read 119. *Removed from the surface*
 below is the per-method record.
 
 > A previous draft reported 152 and explained the two-method gap as the manifest excluding
@@ -237,8 +251,8 @@ Three rules, each of which caught a real error in this document.
 | W7 | `capture_session_hosted` | — | — | **no live member** — `commit_session` was deleted on 2026-10-27 (#4282, code archived at the same tag); the capability returns under `mine_knowledge_from_session` |
 | W8 | `manage_source_trust` | #14 | `manage_source_trust`, `get_source_reliability` | keep — **`get_source_reliability` writes**. `assess_source` and `set_source_tier` were retired into `manage_source_trust` in #4282 Phase 2 (`#11609`), which dispatches on the argument (`score=` vs `tier=`) |
 | W9 | `link_entities` | #15 | `link_entities`, `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split |
-| W10 | `record_decision` | #16 | `file_decision`, `file_human_approval` | keep, collapse |
-| W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline` | keep, collapse — **the widest group; see Open items** |
+| W10 | `record_decision` | #16 | `write_question`, `record_decision` | keep, collapse — `file_decision` and `file_human_approval` were retired on 2026-11-16 (#11609 Phase 2) into the two rows they now name |
+| W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `supersede_knowledge`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline` | keep, collapse — **the widest group; see Open items**. `update_entity` and `supersede` were retired on 2026-11-16 (#11609 Phase 2) into `update_knowledge` and `supersede_knowledge`; `quarantine_batch` left in `#12901` wave 1 |
 | W12 | `delete_knowledge` | #18 | `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |
 | W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation` | keep — **`compute_confidence` mislabelled read** |
 | W14 | `approve_merge` | #20 | `approve_merge` | keep |

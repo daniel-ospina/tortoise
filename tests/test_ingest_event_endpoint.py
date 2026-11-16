@@ -569,7 +569,7 @@ def test_direct_route_terminal_only_carrier_is_a_different_incarnation(sdk):
     """
     sub = sdk.create_subject("Alpha")["id"]
     sdk.create_object("Beta")
-    sdk.update_entity(sub, status="superseded")
+    sdk.update_knowledge(sub, status="superseded")
     bundle = {
         "points": [{"ref": "pX", "kind": "statement",
                     "content": "must-not-commit"}],
@@ -1345,7 +1345,7 @@ def test_direct_route_self_edge_rejected_when_the_name_is_only_terminal(sdk):
     Mutation that must red this: restoring `if _h[0]:` in the guard.
     """
     sub = sdk.create_subject("Gamma")["id"]
-    sdk.update_entity(sub, status="superseded")
+    sdk.update_knowledge(sub, status="superseded")
     bundle = {
         "points": [{"ref": "pX", "kind": "statement",
                     "content": "must-not-commit"}],

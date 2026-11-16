@@ -126,7 +126,18 @@ class TestTheRiskAxis:
         #   (47 read + 3 maintenance -> 46 read + 2 maintenance). The other two left the
         #   writing side: `tortoise_backfill_v25` (destructive) and `tortoise_pack_install`
         #   (admin).
-        assert len(reading) == 49, sorted(reading)   # 47 read + 2 maintenance
+
+        #   #4282 Phase 2, lane B (this change) — retires FOURTEEN doors into SIX
+        #   containers. That does NOT shrink the SERVED census: a retired door stays SERVED as a shim
+        #   (`RETIRED_TOOL_REGISTRY`), and `served()` is live + retired by definition. What
+        #   moves the figure is the net of the two populations: live 68 -> 60
+        #   (68 - 14 retired + 6 containers) and retired 23 -> 37 (23 + 14), so
+        #   91 -> 97 = 91 + 6 — exactly the six containers, which is the arithmetic a
+        #   reader can check against the two registry lengths.
+        #   The READING population is unchanged at 48 (46 read + 2 maintenance): none of
+        #   the six containers reads — four are `destructive` and two are `write` — so
+        #   this batch redistributes the WRITING census only and leaves this one alone.
+        assert len(reading) == 48, sorted(reading)   # 46 read + 2 maintenance
         assert len(served()) == 97, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
@@ -173,6 +184,15 @@ class TestTheRiskAxis:
             "tortoise_supersede", "tortoise_invalidate", "tortoise_promote_point",
             # whole-graph rewrites
             "tortoise_dream",
+            # #11609 Phase 2 containers — each carries the tier of the writer it IS, and
+            # each inherits the confirmation its retired doors carried: `update_knowledge`
+            # overwrites user-authored props (`update_point`/`update_entity`),
+            # `supersede_knowledge` moves every edge off the old point (`supersede`),
+            # `adjust_relationship` re-runs `update_point` + `set_point_baseline` on its
+            # mitigate path (`mitigate_operator`/`operator_action`), and
+            # `refresh_confidence` rewrites stored confidence graph-wide (`dream`).
+            "tortoise_update_knowledge", "tortoise_supersede_knowledge",
+            "tortoise_adjust_relationship", "tortoise_refresh_confidence",
             # bulk re-ingest that rewrites an existing corpus' stored rows
             "tortoise_index_files", "tortoise_ingest_corpus",
             "tortoise_index_sessions", "tortoise_mine_conversations",
@@ -230,11 +250,12 @@ class TestTheRiskAxis:
             "tortoise_ingest",
             "tortoise_onboarding_github_index",
             "tortoise_session_capture",
-            # #11609 lane C: the container that absorbs the retired `create_source`
-            # door. Additive — it stores the caller's own row and no row the call
-            # did not name; the trust/assessment half that DOES overwrite lives in
-            # `tortoise_manage_source_trust` (destructive, pinned above).
-            "tortoise_register_source",
+
+            # #11609 Phase 2 containers — additive in the same sense as the rows above:
+            # `write_question` appends a question row (`create_point` family) and
+            # `record_decision` appends a decision row (`file_decision`), and neither
+            # rewrites a row the call did not name.
+            "tortoise_write_question", "tortoise_record_decision",
         }, sorted(writes)
 
     def test_the_maintenance_tier_is_exactly_the_ruling(self):
@@ -437,12 +458,14 @@ class TestHintsCannotDrift:
         # 45 -> 43: #11609 batch 1 removed two more writing tools, both ARCHIVED rather
         # than retired-forward (`tortoise_backfill_v25` (destructive) and
         # `tortoise_pack_install` (admin)).
-        # 43 -> 48: #11609 lane C added six registry entries, five of them writing
-        # tiers — four destructive containers (`index_sources_from_directory`,
-        # `mine_knowledge_from_directory`, `mine_knowledge_from_session`,
-        # `manage_source_trust`) and one additive (`register_source`). The sixth,
-        # `tortoise_check_connection`, is a read and is counted by the reading pin.
-        assert len(expected) == 48, sorted(expected)  # census, hard-coded
+
+        # 43 -> 49: #11609 Phase 2 +6 — the six containers are all writing-tier, and the
+        # fourteen doors they absorb are NOT subtracted because a retired door stays
+        # SERVED and keeps its tier: destructive 24 -> 28 (+4: `update_knowledge`,
+        # `supersede_knowledge`, `adjust_relationship`, `refresh_confidence`), write
+        # 15 -> 17 (+2: `write_question`, `record_decision`), admin unchanged at 4.
+        # 28 + 17 + 4 = 49, which is the measured `len(expected)`.
+        assert len(expected) == 49, sorted(expected)  # census, hard-coded
 
 
 class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
@@ -495,12 +518,20 @@ class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
                 found.append(entry)
         return found
 
-    def test_the_enumeration_finds_both_doors_to_the_same_writer(self):
+    def test_the_enumeration_finds_every_door_to_the_same_writer(self):
         """Pinned by name so the enumeration cannot silently collapse to empty
-        and make the property below vacuously true."""
+        and make the property below vacuously true.
+
+        Renamed from `…both_doors…` by #11609 Phase 2: the ENUMERATION found a
+        THIRD door when the container shipped, which is the enumeration working as
+        designed — `tortoise_adjust_relationship`'s handler reaches
+        `mitigate_operator` on its reason=/strength=/credibility= arm. Pinning the
+        new door here is what keeps the property below covering it.
+        """
         assert {e.name for e in self.mitigation_writers()} == {
             "tortoise_mitigate_operator",   # the direct binding
             "tortoise_operator_action",     # handler-served, same writer
+            "tortoise_adjust_relationship",  # handler-served, same writer (#11609 P2)
         }
 
     def test_no_door_to_the_mitigation_write_claims_unqualified_idempotence(self):

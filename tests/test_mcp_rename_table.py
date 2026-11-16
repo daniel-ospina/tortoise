@@ -126,6 +126,32 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_stale": 'tortoise_graph_overview(section="stale", days=..., limit=...)',
     "tortoise_status": 'tortoise_graph_overview(section="status")',
     "tortoise_taxonomy": 'tortoise_graph_overview(section="taxonomy")',
+    # #4282 Phase 2 (#11609 / #12915): fourteen WRITE/MUTATE doors retired into SIX
+    # approved containers. The oracle below is TYPED on purpose — it is what makes a
+    # registry-side edit red — so each container batch has to move it deliberately.
+    # 23 + 14 = 37; the container each name points at is one hop, never a chain.
+    "tortoise_annotate_operator":
+        'tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., '
+        'directness=...)',
+    "tortoise_dream": 'tortoise_refresh_confidence(scope="dirty"|"full", ...)',
+    "tortoise_file_decision": "tortoise_write_question(options, evidence, choice)",
+    "tortoise_file_human_approval":
+        "tortoise_record_decision(approver_id, artifact_id, point_ids, decision_content=...)",
+    "tortoise_invalidate":
+        "tortoise_supersede_knowledge(id, corrected_by_id, transfer_edges=False)",
+    "tortoise_mitigate_operator":
+        "tortoise_adjust_relationship(id, reason=..., strength=..., credibility=...)",
+    "tortoise_operator_action":
+        'tortoise_adjust_relationship(id, action="mitigate"|"annotate", ...)',
+    "tortoise_promote_point": 'tortoise_refresh_confidence(scope="promote", point_id=...)',
+    "tortoise_retract_point": "tortoise_update_knowledge(id, invalid_at=...)",
+    "tortoise_set_point_baseline":
+        'tortoise_refresh_confidence(scope="baseline", point_id=..., alpha=..., beta=...)',
+    "tortoise_supersede":
+        "tortoise_supersede_knowledge(old_id, new_id, transfer_edges=...)",
+    "tortoise_update": "tortoise_update_knowledge(id, props=...)",
+    "tortoise_update_entity": "tortoise_update_knowledge(id, props=...)",
+    "tortoise_update_point": "tortoise_update_knowledge(id, props=...)",
 }
 
 # The names whose 0.1 destination differs from the destination of their redirect.
@@ -230,7 +256,11 @@ def _parse_part_a() -> dict[str, dict]:
             rows[name] = {
                 "idx": int(idx),
                 "lineno": int(lineno),
-                "instead": instead.strip(),
+                # The rendered cell escapes a literal `|` (GFM ends a cell there),
+                # so the DOC carries `\|` where the registry carries `|`. Undo the
+                # escape here: this parser's output is compared to the registry
+                # map, which is never escaped.
+                "instead": instead.strip().replace("\\|", "|"),
                 "destination": dest,
                 "retirement": retirement,
             }
@@ -251,7 +281,8 @@ def _parse_part_b() -> dict[str, dict]:
             _, d_old, redirect, d_new, verdict = m.groups()
             rows[m.group(1)] = {
                 "destination": d_old,
-                "redirect": redirect,
+                # Same undo as Part A: the doc escapes a literal `|` for GFM.
+                "redirect": redirect.replace("\\|", "|"),
                 "redirect_destination": d_new,
                 "verdict": verdict,
             }
@@ -521,12 +552,14 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
         "the Part B intro no longer states the redirect-map size the table covers"
     )
     # 18 after #3540; 23 after #4282's `graph_overview` batch retired five more names
-    # into the container (and `tortoise_overview` itself into its target); 30 after
-    # #11609 lane C retired the per-kind indexing doors, the source-write family and
-    # the session/corpus miners into their containers. The pin moves with each landed
-    # container batch.
-    assert len(RETIRED_LITERAL) == 30, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 30"
+
+    # into the container (and `tortoise_overview` itself into its target); 37 after
+    # #4282 Phase 2 retired fourteen WRITE/MUTATE doors into six approved containers
+    # (23 + 14 = 37 — the same arithmetic `config/surface-manifest.yml` derives as
+    # 68 live − 14 + 6 = 60, since every retired name stays SERVED through the shim).
+    # The pin moves with each landed container batch.
+    assert len(RETIRED_LITERAL) == 37, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 37"
     )
 
 

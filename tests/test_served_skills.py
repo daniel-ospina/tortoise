@@ -77,6 +77,21 @@ KNOWN_STALE_TOOL_NAMES = {
         "tortoise_list_pointkinds",  # retired #3883 → tortoise_graph_overview
         "tortoise_list_sources",     # retired #3883 → tortoise_graph_overview
         "tortoise_status",           # retired #3883 → tortoise_graph_overview
+        # #4282 Phase 2 (#11609): the write/mutate doors below were ABSORBED into
+        # containers, so this mirror's references became stale in one step. The
+        # entry grows for exactly the reason the note above allows — the text is
+        # NOT owned here: `how-to-use-tortoise` is one of the three sha-pinned
+        # mirrors in `config/served-skills-upstream.yml`, so re-pointing it here
+        # would break `tools/served_skills_parity.py --check-upstream` and the
+        # next `--sync` would overwrite the fix. Every name still resolves
+        # through the #3883 warning shim and each warning names the container;
+        # re-cutting the mirror upstream SHRINKS this entry back out.
+        "tortoise_annotate_operator",   # → tortoise_adjust_relationship(id, bias=…, precision=…, consistency=…, directness=…)
+        "tortoise_invalidate",          # → tortoise_supersede_knowledge(id, corrected_by_id, transfer_edges=False)
+        "tortoise_mitigate_operator",   # → tortoise_adjust_relationship(id, reason=…, strength=…, credibility=…)
+        "tortoise_set_point_baseline",  # → tortoise_refresh_confidence(scope="baseline", point_id=…)
+        "tortoise_supersede",           # → tortoise_supersede_knowledge(old_id, new_id, …)
+        "tortoise_update_point",        # → tortoise_update_knowledge(id, props=…)
     },
     "research-domain": {
         # #4282 → tortoise_graph_overview(section=...) — see the note above.

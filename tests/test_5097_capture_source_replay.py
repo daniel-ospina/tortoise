@@ -468,7 +468,7 @@ def test_the_capture_props_stay_unsettable_through_create_source(tmp_path):
         # which uses the whole read declaration as its write allowlist.
         for key in ("sessionId", "capturedAt", "eventId"):
             with pytest.raises(ValueError, match="server-managed"):
-                sdk.update_entity(url, **{key: "forged"})
+                sdk.update_knowledge(url, **{key: "forged"})
     finally:
         sdk.close()
 

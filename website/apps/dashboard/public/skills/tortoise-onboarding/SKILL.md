@@ -654,7 +654,7 @@ Never hand-edit inside markers you did not write; the next refresh discards it.
    - Claude Desktop / Claude Web: you have no REST/curl surface, and **no
      dashboard click connects anything** — the server writes this same
      checkpoint itself on your first successful graph write
-     (`tortoise_create_point` / `tortoise_file_decision` →
+     (`tortoise_create_point` / `tortoise_write_question` →
      `_maybe_onboarding_auto_complete()`). File a first memory and the
      dashboard reflects it on its own: the done step (step 3) shows Connected
      the moment your agent files. The connect step does NOT advance by itself
@@ -974,11 +974,12 @@ connection):
    A ranking needs ≥1 IMPL edge before `tortoise_compute_confidence` can
    produce signal.
 5. **Mitigate, don't NAND, for fit.** When a finding is true but matters
-   less, express it on the OPERATOR with `tortoise_mitigate_operator`
+   less, express it on the OPERATOR with
+   `tortoise_adjust_relationship(action='mitigate')`
    (strength 0.10–0.50), never NAND the option for a bad fit. When you can
    grade how much the connection contributes, rate it with
-   `tortoise_annotate_operator` (bias, precision, consistency, directness —
-   all four are required arguments).
+   `tortoise_update_knowledge(annotation={...})` (bias, precision, consistency,
+   directness — all four are required arguments).
 
    **Mitigation semantics (single source: tortoise/weights.py module
    docstring, #2315):** `strength` is the graded DAMPENER of the

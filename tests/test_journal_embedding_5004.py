@@ -1306,7 +1306,7 @@ def test_update_entity_point_branch_is_a_declared_exemption(tmp_path):
             assert v_created is not None
 
             before_n = len(_events(events))
-            sdk.update_entity(pid, embedding=caller_vec)
+            sdk.update_knowledge(pid, embedding=caller_vec)
             assert _vector(sdk, pid) == caller_vec, (
                 "exemption premise changed: the live _update_entity no longer "
                 "takes the caller embedding — #4094 may be fixed; INVERT this "
@@ -1340,7 +1340,7 @@ def test_update_entity_point_branch_is_a_declared_exemption(tmp_path):
             # (round-11 P2: the shared `props` dict leaked it to every label
             # the loop visits).
             sid = sdk.create_entity("subject", "marker leak probe")["node"]["id"]
-            sdk.update_entity(sid, embedding=caller_vec)
+            sdk.update_knowledge(sid, embedding=caller_vec)
             subj = sdk._get_proj().g.query(
                 "MATCH (n:Subject {id:$id}) RETURN properties(n)",
                 params={"id": sid}).result_set[0][0]
@@ -1377,7 +1377,7 @@ def test_update_entity_caller_vector_rides_a_re_emit_verbatim(tmp_path):
             # this pin exercises the draft→live promote re-emit.
             pid = sdk.create_point("statement", "entity re-emit probe",
                                    status="draft").get("id")
-            sdk.update_entity(pid, embedding=caller_vec)
+            sdk.update_knowledge(pid, embedding=caller_vec)
             sdk.promote_point(pid)
 
             live = _vector(sdk, pid)

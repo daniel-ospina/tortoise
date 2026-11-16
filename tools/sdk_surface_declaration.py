@@ -16,6 +16,10 @@ WHAT IT CHECKS
          * a name in `__all__` with NO `def` on the class   ->  an approved method that does
            not exist yet (20 today; `Tortoise` is the constructor and always resolves).
 
+           approved surface does not cover (119 live − 16 approved-and-live = 103 today;
+         * a name in `__all__` with NO `def` on the class   ->  an approved method that does
+           not exist yet (23 today; `Tortoise` is the constructor and always resolves).
+
 WHY BOTH DIRECTION-2 CHECKS FAIL, HONESTLY (#10034 rework)
     An earlier draft of this gate carried two extra ledger blocks — an `OFF_SURFACE`
     removal backlog and an `APPROVED_PENDING` gap list — inside `tortoise/__all__.py`, so
@@ -29,6 +33,8 @@ WHY BOTH DIRECTION-2 CHECKS FAIL, HONESTLY (#10034 rework)
     So today this gate is RED — by design, with every offender named. That is the true
     state of #4282: 40 approved, 119 live. It goes green when Phase 2 removes the surplus
     and implements the 20 approved-but-absent methods, not before.
+
+    and implements the 23 approved-but-absent methods, not before.
 
 WHAT RUNS IN REQUIRED CI (`check --contract-only`)
     `tools/surface_manifest.py check` runs in the required `surface-guard` job and calls
