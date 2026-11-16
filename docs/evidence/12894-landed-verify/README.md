@@ -40,10 +40,13 @@ Method, in the order the brief prescribes: `record_allocator.py` end to end, the
 (call sites, not PR bodies), because the decisive question turned out to be a call site, not a module.
 
 What this lane did **not** do: it did not run a Postgres-backed suite (the one DB-free gate below was
-run, `tools/record_wiring_check.py`, which is DB-free by design), it did not run the docs lint (the
-invocation exited **2** on its own missing required inputs — `--markdownlint-output`,
-`--markdownlint-expected-files`, `--lychee-output` — so it *never ran*; recorded in
-`WORKTREE-REPORT.md` as suite 2, exit 2, and **not** a clean result), and it did not modify product code. It also
+run, `tools/record_wiring_check.py`, which is DB-free by design), and it did not modify product code.
+The docs lint is the one instrument whose history had to be corrected rather than simply reported: the
+first invocation exited **2** on its own missing required inputs (`--markdownlint-output`,
+`--markdownlint-expected-files`, `--lychee-output`), so it *never ran* — recorded in
+`WORKTREE-REPORT.md` as suite 2, exit 2, a red that is kept rather than deleted — and the lint was then
+run through the `docs` job's own scripts at its pinned versions, where it reports **0 markdownlint
+issues, 0 link errors and 0 new baseline findings** (§9, rows 7–9). Both states are in the record. It also
 did not re-derive the discussion on `#12894`/`#12959` line by line — where a PR-body claim is quoted
 below it is marked as a claim and the code is what settles it.
 
