@@ -206,7 +206,35 @@ _ENV_PAIRS = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S
 _SHELL_EXPORT = re.compile(r"^\s*export\s+(?P<body>\S.*)$")
 #: A shell VARIABLE name: what may sit left of the `=` in an `export` word.
 _SHELL_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*$")
+
+#: ⛔ A STATEMENT PREFIX does not change what the statement does (review P1, measured), and an
+#: anchored `^\s*<verb>` reader silently missed it: `{ unset K; }` runs the unset in the CURRENT
+#: shell (a group is the module's own credit rule) yet the `{` defeated the retraction regex, so
+#: the earlier literal survived and the gate printed `ok` over a process without K. `command` and
+#: `builtin` are transparent for the same reason (`command unset K`, `builtin unset K`).
+#: The SAME prefix in the other direction made an honest one-line group REFUSED:
+#: `{ export K=1; export B=1; }` — the first export could not match `^\s*export`.
+#: ⛔ The `{` of a FUNCTION BODY is untouched: it follows `)`, so it is never at statement start,
+#: and this is applied only at statement start.
+_SHELL_STATEMENT_PREFIX = re.compile(
+    r"^[ \t]*(?:\{|\bcommand\b|\bbuiltin\b|\bthen\b|\belse\b|\belif\b|\bdo\b)"
+)
+
+
+def _strip_statement_prefix(raw: str, view: str) -> tuple[str, str]:
+    """``(raw, view)`` with leading `{`/`command`/`builtin` words removed from BOTH, in step.
+
+    Length-preserving blanking is what keeps the two aligned, so the prefix has to be cut from
+    each by the same amount; cutting only the raw text would break every head guard that compares
+    the two byte-for-byte.
+    """
+    while True:
+        match = _SHELL_STATEMENT_PREFIX.match(raw)
+        if not match:
+            return raw, view
+        cut = match.end()
+        raw, view = raw[cut:], view[cut:]
+
 
 #: Shell keywords that open a block whose body may never run at top level (`if`/`then`,
 #: `while`/`until`/`for`/`case`/`select`/`do`, and a `{` body — `name() {` is the brace), and
@@ -363,7 +391,17 @@ _SHELL_BUILTIN_ASSIGN = re.compile(r"^\s*(?:declare|typeset|readonly|local|print
 #: `export -n`, a bare `K=`). `env VAR=1 cmd` (no `-u`/`-i`) states nothing and is left alone.
 _SHELL_ENV_CALL = re.compile(r"^\s*(?:exec\s+)?(?:command\s+)?env\b(?P<args>.*)$")
 _SHELL_ENV_UNSET = re.compile(
-    r"(?:^|\s)(?:-u|--unset)(?:\s+|=)(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    # ⛔ the name may be ATTACHED (`-uK`), which getopt accepts and the first version missed —
+    # measured: `exec env -uTORTOISE_VALUE_GATE "$@"` printed `ok … =1` while `/usr/bin/env`
+    # showed nothing. `--unset=K` and `-u K` are the same removal.
+    r"(?:^|\s)(?:-u|--unset)(?:\s+|=)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+)
+#: ⛔ `env K=` sets the child's K to EMPTY, which the resolver reads OFF — so it CLEARS the switch
+#: (review P1, measured): `exec env TORTOISE_VALUE_GATE= "$@"` printed `ok … TORTOISE_VALUE_GATE=1`
+#: while `bash … /usr/bin/env` showed `TORTOISE_VALUE_GATE=` (empty, gate OFF). `env K=1` is a
+#: stated value and is deliberately NOT matched here.
+_SHELL_ENV_EMPTIED = re.compile(
+    r"(?:^|\s)(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?:\"\"|'')?(?=\s|$)"
 )
 _SHELL_ENV_IGNORE = re.compile(
     # ⛔ the BARE `-` is bash's short spelling of `-i` — `exec env - "$@"` clears the environment
@@ -602,7 +640,7 @@ _HEREDOC_OPEN = re.compile(
 )
 
 
-def _heredoc_end(lines: list[str], opener: int, after: int) -> int:
+def _heredoc_end(lines: list[str], instruction: str, after: int) -> int:
     """``after``, or the index just past the heredoc body the line at ``opener`` opens.
 
     A heredoc body is DATA: `RUN cat <<EOF` followed by a line starting with `FROM` does not begin
@@ -617,7 +655,7 @@ def _heredoc_end(lines: list[str], opener: int, after: int) -> int:
     """
     pending = [
         (_heredoc_delimiter(match.group("word")), bool(match.group("dash")))
-        for match in _HEREDOC_OPEN.finditer(lines[opener])
+        for match in _HEREDOC_OPEN.finditer(instruction)
     ]
     if not pending:
         return after
@@ -628,6 +666,14 @@ def _heredoc_end(lines: list[str], opener: int, after: int) -> int:
         if candidate.rstrip("\r") == word:
             pending.pop(0)
         cursor += 1
+    # ⛔ An unfindable terminator does NOT swallow the rest of the file — a `<<` inside a quoted
+    # string or a shell shift is not a body (`RUN echo "1 << 2"` must not hide the `ENV` lines
+    # below it; pinned by `test_a_heredoc_body_is_data_not_instructions`). ⛔ This policy is only
+    # safe BECAUSE THE BODY IS LOCATED ON PHYSICAL LINES: it used to be applied to the ALREADY
+    # JOINED lines, so a body line ending in `\` swallowed its own terminator, and the body was
+    # then read as instructions — measured on a Dockerfile whose FINAL stage carries no `ENV` and
+    # whose heredoc body contained a `FROM` and two `ENV` lines: `ok … =1 =1`, exit 0, while
+    # `docker inspect` showed no `TORTOISE_*` and `docker run cat` printed the body verbatim.
     return after if pending else cursor
 
 
@@ -700,11 +746,19 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str], dict[str, str]
     #: kept apart so it can never occupy the first stage's INDEX.
     before_from: dict[str, str] = {}
     ambiguous: set[str] = set()
-    lines = _logical_lines(text)
+    # ⛔ PHYSICAL lines, joined lazily (review P1, measured). `_logical_lines` joined every
+    # continuation BEFORE heredoc bodies were located, so a body line ending in `\` merged with
+    # its own terminator and the body was then read as instructions. The join now applies to the
+    # INSTRUCTION only; a body line is never joined, because a body is data and its `\` means
+    # nothing to Docker.
+    lines = text.splitlines()
     cursor = 0
     while cursor < len(lines):
         line = lines[cursor]
         cursor += 1
+        while line.rstrip().endswith("\\") and cursor < len(lines):
+            line = line.rstrip()[:-1] + " " + lines[cursor]
+            cursor += 1
         boundary = _FROM_INSTRUCTION.match(line)
         if boundary:
             names.append(boundary.group("name") or "")
@@ -714,7 +768,7 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str], dict[str, str]
         match = _ENV_INSTRUCTION.match(line)
         if not match:
             # Any other instruction may OPEN a heredoc whose body is data, not instructions.
-            cursor = _heredoc_end(lines, cursor - 1, cursor)
+            cursor = _heredoc_end(lines, line, cursor)
             continue
         stage = envs[-1] if envs else before_from
         # ⛔ NO inline-comment stripping here, unlike the shell reader: in the `K=V` form a
@@ -1344,6 +1398,8 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     stated: dict[str, str] = {}
     ambiguous: set[str] = set()
     depth = 0
+    #: How many of `depth` are FUNCTION BODIES rather than control flow (see `nested_retracts`).
+    fn_body = 0
     terminated = False
     #: The separator a PREVIOUS line ended with. ⛔ It has to cross the line boundary (review P1,
     #: measured): `_shell_statements` carries a separator only WITHIN one logical line, so the
@@ -1388,8 +1444,11 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # the shipped configuration stating a value, whether it is spelled `if …; then`, `&&`,
             # `&` or `|`. The `export` in the shipped `entrypoint.sh` is a plain top-level one, so
             # this cannot refuse an honest channel (`test_the_real_entrypoint_statements_are_unconditional`).
+            # ⛔ Statements are read WITHOUT their prefix (`{`, `command`, `builtin`), which do
+            # not change what the statement does — see `_strip_statement_prefix`.
+            content_raw, content_view = _strip_statement_prefix(raw, view)
             short_circuit = separator in ("&&", "||")
-            forked = _SHELL_FORK.search(view) is not None
+            forked = _SHELL_FORK.search(content_view) is not None
             conditional = depth > 0 or terminated or short_circuit or forked
             # ⛔ CREDITING and RETRACTING are not the same question, and folding `short_circuit`
             # into the one flag answered both — measured fail-OPEN in the mirror direction
@@ -1417,7 +1476,14 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # `STATED`. (`export K=1 && unset K` — the ordinary spelling — always removes it; the
             # contrived `false && unset K` is exactly the shape this reader says it does not model.)
             retracts = not (depth > 0 or terminated or forked)
-            exports = _shell_exports(raw, view)
+            # ⛔ A retraction inside CONTROL FLOW is not the same as one inside a FUNCTION BODY
+            # (review P2, measured). The function-body case must stay inert — a helper's local
+            # `unset K` must not redden an honest config. But `if true; then unset K; fi` at top
+            # level DOES run, and the arm skipped it entirely (no retract, no `ambiguous`), so the
+            # gate reported `ok … =1` over a process without K. `fn_body` is what tells them
+            # apart; with it 0, a `depth > 0` retraction fails CLOSED like the nested-export arm.
+            nested_retracts = depth > 0 and fn_body == 0 and not terminated and not forked
+            exports = _shell_exports(content_raw, content_view)
             if exports:
                 for key, raw_value in exports:
                     value = _strip_inline_comment(raw_value)
@@ -1433,18 +1499,18 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                         continue
                     if not conditional:
                         stated[key] = _unquote(value)
-            elif (unset := _SHELL_UNSET.match(raw)) or (
-                unexport := _SHELL_EXPORT_UNEXPORT.match(raw)
+            elif (unset := _SHELL_UNSET.match(content_raw)) or (
+                unexport := _SHELL_EXPORT_UNEXPORT.match(content_raw)
             ):
                 for name in _unquote_all((unset or unexport).group("names")):
-                    if name in SWITCHES and retracts:
+                    if name in SWITCHES and (retracts or nested_retracts):
                         # ⛔ A NESTED `unset` neither credits nor retracts (review P2, measured).
                         # These branches ran before, and ignored, the `conditional` guard, so a
                         # helper's local `unset K` retracted a TOP-LEVEL `export K=1` the process
                         # does receive — a false refusal of an honest config.
                         ambiguous.add(name)
                         stated.pop(name, None)
-            elif (unexported := _SHELL_UNEXPORTED.match(raw)) and (
+            elif (unexported := _SHELL_UNEXPORTED.match(content_raw)) and (
                 unexported.group("key") in SWITCHES
             ):
                 # Same rule, same reason: only a TOP-LEVEL bare assignment is a statement about
@@ -1454,10 +1520,11 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 if retracts:
                     ambiguous.add(unexported.group("key"))
                     stated.pop(unexported.group("key"), None)
-            elif (env_call := _SHELL_ENV_CALL.match(view)) and retracts:
+            elif (env_call := _SHELL_ENV_CALL.match(content_view)) and (retracts or nested_retracts):
                 # Same gate as the builtins above: a forked or short-circuited `env` cannot change
                 # the parent's environment, so only a statement that provably runs is a retraction.
                 stripped = set(_SHELL_ENV_UNSET.findall(env_call.group("args")))
+                stripped |= set(_SHELL_ENV_EMPTIED.findall(env_call.group("args")))
                 if _SHELL_ENV_IGNORE.search(env_call.group("args")):
                     stripped |= set(SWITCHES)
                 for name in stripped & set(SWITCHES):
@@ -1472,11 +1539,13 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 # ⛔ A BUILTIN that names a switch takes it back without the `export` spelling
                 # this reader credits (review P2, measured): `declare -x K=` after `export K=1`
                 # leaves K EMPTY and still exported while the gate kept the earlier `=1`.
-                if retracts and (builtin := _SHELL_BUILTIN_ASSIGN.match(raw)):
+                if retracts and (builtin := _SHELL_BUILTIN_ASSIGN.match(content_raw)):
                     for name in _mentioned_switches(builtin.group("rest")):
                         ambiguous.add(name)
                         stated.pop(name, None)
-            depth += len(_SHELL_OPENERS.findall(view)) + _function_body_braces(raw, view)
+            opened_fn = _function_body_braces(raw, view)
+            depth += len(_SHELL_OPENERS.findall(view)) + opened_fn
+            fn_body = max(0, fn_body - len(_SHELL_CLOSERS.findall(view))) + opened_fn
             if depth == 0 and _SHELL_TERMINATES.match(raw):
                 terminated = True
     return stated, ambiguous

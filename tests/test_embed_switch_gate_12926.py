@@ -2312,3 +2312,122 @@ def test_an_exec_or_builtin_that_discards_the_switch_is_refused(statement):
         f"{stated}"
     )
     assert "TORTOISE_EMBED_GATE" in ambiguous, (statement, ambiguous)
+
+
+def test_a_dockerfile_heredoc_body_survives_a_CONTINUATION_line():
+    """Review P1 (measured) — bodies were located AFTER continuations were joined, so one
+    backslash inside a body swallowed its own terminator and the body was read as INSTRUCTIONS.
+
+    The A/B is ONE trailing backslash. Measured, final stage carrying NO `ENV`, body carrying a
+    `FROM` and both `ENV` lines:
+
+        cmd --flag \\      ->  ok TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1   (exit 0)
+        cmd --flag        ->  REFUSED … MISSING MISSING
+
+    while `docker inspect` showed no `TORTOISE_*` and `docker run cat /notes.txt` printed the body
+    verbatim — so the gate credited statements the image never receives. The reader now walks
+    PHYSICAL lines and joins continuations only for the INSTRUCTION.
+
+    Mutation-proved: joining before locating (the previous shape) reds this test.
+    """
+    text = (
+        "FROM alpine:3.20\n"
+        "RUN cat > /notes.txt <<EOF\n"
+        "example deployment:\n"
+        "FROM tortoise-selfhost:latest\n"
+        "ENV TORTOISE_VALUE_GATE=1\n"
+        "ENV TORTOISE_EMBED_GATE=1\n"
+        "cmd --flag \\\n"
+        "EOF\n"
+    )
+    stated, _ambiguous, _ = gate._dockerfile_env(text)
+    assert stated == {}, (
+        f"a heredoc body was read as instructions because one body line ended in a backslash: {stated}"
+    )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "exec env TORTOISE_VALUE_GATE= \"$@\"",
+        "exec env TORTOISE_VALUE_GATE='' \"$@\"",
+        'exec env TORTOISE_VALUE_GATE="" "$@"',
+        "exec env -uTORTOISE_VALUE_GATE \"$@\"",
+    ],
+)
+def test_an_env_that_empties_or_strips_the_switch_is_a_retraction(statement):
+    """Review P1/P2 (measured) — `env` can EMPTY or strip a name, and neither was modelled.
+
+    `env K=` sets the child's K to EMPTY, which the resolver reads OFF; `-uK` (getopt's attached
+    value) removes it. Measured: each shape printed `ok … TORTOISE_VALUE_GATE=1` while
+    `bash … /usr/bin/env` showed `TORTOISE_VALUE_GATE=` (empty) or nothing at all.
+
+    Mutation-proved: dropping `_SHELL_ENV_EMPTIED` reds the `=` rows; restoring the `(?:\\s+|=)`
+    separator requirement on `_SHELL_ENV_UNSET` reds the `-uK` row.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n" + statement + "\n"
+    )
+    assert "TORTOISE_VALUE_GATE" not in stated, (
+        f"`env` empties or strips the switch, so crediting `=1` is a false PASS: {statement!r}"
+    )
+    assert "TORTOISE_VALUE_GATE" in ambiguous, (statement, ambiguous)
+
+
+def test_a_statement_prefix_neither_disarms_a_retraction_nor_a_group_export():
+    """Review P1 (measured) — an anchored `^\\s*<verb>` reader missed every prefixed statement.
+
+    `{ unset K; }` runs the unset in the CURRENT shell (a group is the module's own credit rule)
+    yet the `{` defeated the retraction regex, so the earlier literal survived and the gate printed
+    `ok` over a process without K. `command`/`builtin` are transparent for the same reason. The
+    SAME prefix in the other direction REFUSED an honest one-line group, because the first
+    `export` could not match `^\\s*export`.
+
+    Mutation-proved: dropping `_strip_statement_prefix` reds both halves.
+    """
+    for prefix, retraction in (
+        ("{ unset TORTOISE_VALUE_GATE; }", "a brace GROUP runs in the current shell"),
+        ("command unset TORTOISE_VALUE_GATE", "`command` is transparent"),
+        ("builtin unset TORTOISE_VALUE_GATE", "`builtin` is transparent"),
+    ):
+        stated, ambiguous = gate._shell_assignments(
+            "export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+            f"{prefix}\n" + 'exec "$@"\n'
+        )
+        assert "TORTOISE_VALUE_GATE" not in stated, (retraction, prefix, stated)
+        assert "TORTOISE_VALUE_GATE" in ambiguous, (prefix, ambiguous)
+
+    stated, _ = gate._shell_assignments(
+        "{ export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; }\n" + 'exec "$@"\n'
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"a one-line brace GROUP arms both switches in the current shell: {stated}"
+    )
+
+
+def test_a_control_flow_retraction_retracts_but_a_function_body_one_does_not():
+    """Review P2 (measured) — `depth > 0` lumped two different scopes together.
+
+    `if true; then unset K; fi` at top level DOES run, so the retraction must land — it was skipped
+    entirely (no retract, no `ambiguous`), and the gate printed `ok … =1` over a process without K.
+    A `unset` in a FUNCTION BODY must stay INERT: a helper that is never called must not redden an
+    honest config (the reason the nested arm exists at all).
+
+    Mutation-proved: dropping `nested_retracts` reds the control-flow row; counting function bodies
+    as control flow reds the function-body row.
+    """
+    control_flow, _ = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+        "if true; then unset TORTOISE_VALUE_GATE; fi\n" + 'exec "$@"\n'
+    )
+    assert "TORTOISE_VALUE_GATE" not in control_flow, (
+        f"a control-flow retraction runs at top level, so it must land: {control_flow}"
+    )
+
+    in_body, _ = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+        "arm() { unset TORTOISE_VALUE_GATE; }\n" + 'exec "$@"\n'
+    )
+    assert in_body == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"a helper that is never called must not retract the shipped value: {in_body}"
+    )
