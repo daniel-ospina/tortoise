@@ -189,7 +189,7 @@ def test_a_blank_statement_is_reported_as_blank_not_as_unset(monkeypatch):
     monkeypatch.setenv("TORTOISE_VALUE_GATE", "")
     monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
     line = gate_visibility.startup_line()
-    assert "TORTOISE_VALUE_GATE=OFF (stated '' — blank reads as unset, so this value is the residual)" in line
+    assert "TORTOISE_VALUE_GATE=OFF (stated '' — blank reads as OFF, not as the unset default)" in line
     assert "TORTOISE_EMBED_GATE=OFF (unset → code default OFF)" in line
     assert "code default ON" not in line
 
@@ -416,7 +416,9 @@ def test_the_dockerfile_reader_reads_both_forms_and_fails_closed():
     assert stated == {} and ambiguous == {"TORTOISE_VALUE_GATE"}
     channel = gate.Channel("Dockerfile", "dockerfile", "Dockerfile ENV", stated=stated,
                            ambiguous=tuple(sorted(ambiguous)))
-    assert "mentions TORTOISE_VALUE_GATE but not as an assignment" in channel.problems()[0]
+    assert "mentions TORTOISE_VALUE_GATE but does not state a value this gate can read" in (
+        channel.problems()[0]
+    )
 
 
 def test_a_prose_mention_does_not_override_a_readable_assignment():
@@ -439,6 +441,48 @@ def test_a_prose_mention_does_not_override_a_readable_assignment():
     channel = gate.Channel("entrypoint.sh", "entrypoint", "entrypoint assignments",
                            stated=stated, ambiguous=tuple(sorted(ambiguous)))
     assert channel.problems() == [], channel.problems()
+
+
+def test_an_interpolation_with_no_literal_fallback_is_refused():
+    """Review P3: `ENV K=$UNSET` / `export K="${K:-}"` can resolve EMPTY, so it states nothing.
+
+    Neither reader resolves interpolation — there is no environment it could resolve against that
+    would be the SHIPPED value — so a pure interpolation survives only if it carries a non-empty
+    literal fallback. `entrypoint.sh`'s own `${K:-1}` is exactly that shape.
+    """
+    for text, reader in (
+        ("ENV TORTOISE_EMBED_GATE=$UNSET_VAR\n", gate._dockerfile_env),
+        ('export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-}"\n', gate._shell_assignments),
+        ("ENV TORTOISE_EMBED_GATE ${TORTOISE_EMBED_GATE:-}\n", gate._dockerfile_env),
+    ):
+        stated, ambiguous = reader(text)
+        assert stated == {}, (text, stated)
+        assert ambiguous == {"TORTOISE_EMBED_GATE"}, (text, ambiguous)
+        channel = gate.Channel("entrypoint.sh", "entrypoint", "r", stated=stated,
+                               ambiguous=tuple(sorted(ambiguous)))
+        problems = channel.problems()
+        assert any("does not state a value this gate can read" in p for p in problems), problems
+
+    # a non-empty literal fallback IS a statement
+    stated, ambiguous = gate._shell_assignments('export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-1}"\n')
+    assert stated == {"TORTOISE_EMBED_GATE": "${TORTOISE_EMBED_GATE:-1}"} and ambiguous == set()
+
+
+def test_a_non_scalar_fly_value_is_refused_rather_than_stringified():
+    """Review P3: the Fly arm's `ambiguous` set was dead by construction; a non-scalar value is
+    the shape it was reaching for — a TOML table states no string the gate can read."""
+    env = {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": {"nested": "1"}}
+    stated, ambiguous = gate._env_table_values(env)
+    assert stated == {"TORTOISE_VALUE_GATE": "1"}
+    assert ambiguous == {"TORTOISE_EMBED_GATE"}
+    # booleans are normalised, not repr()d as `True`
+    stated, ambiguous = gate._env_table_values({"TORTOISE_EMBED_GATE": True})
+    assert stated == {"TORTOISE_EMBED_GATE": "true"} and ambiguous == set()
+    # `null` states no value at all → the EMPTY arm refuses it
+    stated, _ = gate._env_table_values({"TORTOISE_EMBED_GATE": None})
+    assert stated == {} and gate.Channel("fly.toml", "fly", "r", stated={}).problems()[0].endswith(
+        "(r)"
+    )
 
 
 def test_the_entrypoint_reader_reads_defaults_and_ignores_a_valueless_export():
