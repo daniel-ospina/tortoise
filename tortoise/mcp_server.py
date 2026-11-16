@@ -5706,19 +5706,15 @@ def tortoise_get_operator(id: str) -> dict:
     Raises error if the Point is not an operator.
     Alias → get(id, type='operator') (epic #888 W3).
 
-    ⚠️ Its registry `description` (see `tool_registry.py`) is safe to extend for
-    this door ONLY because `tortoise_get_operator` is a RETIRED name, and the two
-    artifacts that would otherwise move are both keyed to LIVE entries: a live
-    description is snapshotted verbatim into `config/surface-manifest.yml`'s
-    `job:` field and compared by `tools/surface_manifest.py check`, while
-    `tools/surface-guard.py` digests the HANDLER's docstring through `co_consts`
-    (this one, in fact). Neither reads a retired entry — its manifest row carries
-    `use_instead` and no `job:` — which is why editing the LIVE entry
-    (`tortoise_get_entity`) is the change that needs the approval and the re-cut.
-    Note `bridge-table`/`mcp-rename-table` are unaffected by a description either
-    way: they never render one. What they DO publish is a
-    `tool_registry.py:<line>` column, so a registry edit of any size restages both
-    and both are regenerated, never hand-reconciled.
+    ⚠️ Extending its registry `description` (see `tool_registry.py`) is safe here
+    ONLY because `tortoise_get_operator` is a RETIRED name, and both gates that
+    would otherwise move are keyed to LIVE entries: a live description is
+    snapshotted into `config/surface-manifest.yml`'s `job:` field and compared by
+    `tools/surface_manifest.py check`, and the served row's handler docstring is
+    digested by `tools/surface-guard.py`. The retired row carries `use_instead`
+    and NEITHER a `job:` nor a `served_from`, so nothing reads this entry —
+    editing the live `tortoise_get_entity` text is the change that needs the
+    owner's approval and a manifest re-cut.
 
     ⚠️ ARMED MODES (`TORTOISE_RECORD_SERVE`) change TWO of those sentences (#12941):
     a found operator also names the store that answered (`servedFrom` /
