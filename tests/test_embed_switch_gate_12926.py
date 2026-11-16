@@ -3284,3 +3284,65 @@ def test_a_function_body_closer_may_carry_ANY_redirect():
         "{ export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; } | tee /tmp/x\n"
     )
     assert piped == {}, f"`}} | tee` must stay a fork, not a body close: {piped}"
+
+
+@pytest.mark.parametrize(
+    ("label", "prefix", "credited"),
+    [
+        # ⛔ review round 6 at `2fb9c6fb`, all measured with a target script that writes `env`
+        # (a script that redirects fd 1 cannot be read from stdout — that artifact produced 240
+        # false "fail-opens" in the reviewer's first pass).
+        #
+        # 1 — a process substitution may nest `$( … )`; the old `\([^()]*\)` blanking matched
+        # nothing and left the leftover paren to be read as a COMMAND WORD.
+        (
+            "exec with a nested process substitution",
+            'exec > >(tee -a "/tmp/boot.$(date +%F).log") 2>&1',
+            True,
+        ),
+        ("exec with a plain process substitution", "exec > >(tee -a /var/log/boot.log) 2>&1", True),
+        # 2 — bash's brace-allocated fd is part of the redirect.
+        ("exec with a brace-allocated fd", "exec {fd}>&1", True),
+        # 3 — a SHORT-CIRCUITED terminator may not run, so it cannot end the file. The braced
+        # spelling was already saved by the group model; the bare one was not.
+        ("a bare `|| exit`", "[ -x /usr/bin/env ] || exit 1", True),
+        ("`true || exit`", "true || exit 1", True),
+        # ⛔ `&&` guards the SUCCESS path, so the terminator really runs there and the rest of
+        # the file is unreachable (peer round 5, measured: `true && exit 1` then exports →
+        # bash never reaches them). `||` guards the FAILURE path, which is the row above.
+        ("`false && exit`", "false && exit 1", False),
+        ("`true && exit`", "true && exit 1", False),
+        ("a fail-fast mkdir prologue", "mkdir -p /data || exit 1", True),
+        # 4 — a FORK anywhere on the line means the `exec` ran in a subshell.
+        ("an exec inside a piped group", "{ exec /bin/true; } | cat", True),
+        # ⛔ …and the true positives must stay true, or the fix is a widening.
+        ("a real `exec`", 'exec "$@"', False),
+        ("an exec inside an UNPIPED group", "{ exec /bin/true; }", False),
+        ("a bare `exit`", "exit 1", False),
+        # 5 — a leading ASSIGNMENT word does not hide the verb. This was a measured FAIL-OPEN:
+        # `FOO=1 exec /tmp/cap.sh` replaced the shell and the dead exports were credited.
+        ("an assignment before `exec`", "FOO=1 exec /tmp/cap.sh", False),
+    ],
+)
+def test_termination_is_decided_by_what_REALLY_runs(label, prefix, credited):
+    """Review round 6 at `2fb9c6fb` (measured five ways, each with a control).
+
+    `_terminates_the_shell` decides whether the rest of the file can credibly state anything. Both
+    of its error directions are measured: the false refusals blamed the VALUE (an honest
+    `entrypoint.sh` red, message pointing at the exports it already states), and the assignment
+    prefix was a fail-OPEN (gate `ok … =1 =1`, exit 0, over a process with no `TORTOISE_*`).
+
+    Mutation-proved: restoring the `\\([^()]*\\)` blanking reds the nested row; dropping the brace-fd
+    arm reds the fd row; dropping `not short_circuit` reds the three short-circuit rows; dropping
+    `line_forked` reds the piped-group row; dropping the assignment strip reds the last row.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        f"{prefix}\nexport TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+    )
+    if credited:
+        assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+            f"{label}: bash runs the exports after {prefix!r}, so they are stated: {stated}"
+        )
+    else:
+        assert stated == {}, f"{label}: nothing after {prefix!r} runs: {stated}"
+        assert set(SWITCHES) <= ambiguous, (label, ambiguous)

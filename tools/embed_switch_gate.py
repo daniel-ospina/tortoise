@@ -286,6 +286,39 @@ _SHELL_STATEMENT_PREFIX = re.compile(
 )
 
 
+def _blank_process_substitutions(text: str) -> str:
+    """Blank every ``>( … )`` / ``<( … )`` up to its MATCHING ``)``.
+
+    A regex cannot do this (review P1 at `2fb9c6fb`, measured): the ordinary boot-log idiom
+    ``exec > >(tee -a "$(date +%F).log") 2>&1`` nests a ``$( … )`` inside the substitution, so
+    ``\\([^()]*\\)`` matched nothing useful and the leftover paren was read as a command WORD —
+    "replaces the process" — refusing an honest entrypoint whose process does receive both
+    switches. Counting nesting is the only correct way. Over-blanking is safe here: it can only
+    make a statement look MORE like a redirect, and the caller then has to find a real command
+    word to call it a replacement.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] in "<>" and text[index + 1 : index + 2] == "(":
+            depth = 0
+            scan = index + 1
+            while scan < len(text):
+                if text[scan] == "(":
+                    depth += 1
+                elif text[scan] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                scan += 1
+            out.append(" " * (scan - index + 1))
+            index = scan + 1
+        else:
+            out.append(text[index])
+            index += 1
+    return "".join(out)
+
+
 def _terminates_the_shell(statement: str) -> bool:
     """Whether this statement really REPLACES or EXITS the shell that runs the rest of the file.
 
@@ -295,8 +328,26 @@ def _terminates_the_shell(statement: str) -> bool:
     refused an honest ``entrypoint.sh``). ``exit`` always ends the shell, but only where it RUNS:
     the caller gates this on the same provably-runs predicate the retraction arms use, so an
     ``exit`` inside a function body, a branch or a group cannot terminate the file.
+
+    ⛔ Three refinements, each measured (review round 6 at `2fb9c6fb`):
+
+    * a process substitution may contain a NESTED ``$( … )`` — ``exec > >(tee -a "$(date +%F).log")``
+      — so the blanking counts parentheses instead of matching ``\\([^()]*\\)``, which matched
+      nothing there and left the leftover paren to be read as a COMMAND WORD (a false refusal of
+      an honest file whose process receives both switches);
+    * a brace-allocated fd (``exec {fd}>&1``) is a redirect, not a command (see
+      `_REDIRECT_OPERATOR`);
+    * a leading ASSIGNMENT word does not hide the verb (``FOO=1 exec /tmp/x``), which was a
+      measured fail-OPEN — the reader kept crediting exports the process never reaches.
+
+    A verb spelled through quoting or ``eval`` (``"exit" 0``, ``eval exec …``) is a DECLARED BOUND:
+    this reader models the shipped entrypoint shapes, and a quoted or evaluated terminator is
+    neither, so it is not credited as one.
     """
-    match = _SHELL_TERMINATES.match(statement)
+    text = statement
+    while (assignment := _LEADING_ASSIGNMENT.match(text)) is not None:
+        text = text[assignment.end() :]
+    match = _SHELL_TERMINATES.match(text)
     if not match:
         return False
     if match.group(0).strip() == "exit":
@@ -305,7 +356,7 @@ def _terminates_the_shell(statement: str) -> bool:
     # feeds (`exec > >(tee -a log)`) or a subshell. Dropping them first is what lets the state
     # machine below see `exec > >(tee …) 2>&1` as redirections only, while `exec "$@"` (a quoted
     # span, blanked in the structural view) still counts as the command word it is.
-    rest = re.sub(r"[<>]?\([^()]*\)", " ", statement[match.end() :])
+    rest = _blank_process_substitutions(text[match.end() :])
     while True:
         rest = rest.lstrip()
         operator = _REDIRECT_OPERATOR.match(rest)
@@ -464,7 +515,18 @@ _SHELL_GROUP_OPEN = re.compile(r"(?<![\w${])\{(?=[\s$({!\\]|$)")
 #: `>&`/`<&` are listed BEFORE the plain `>` arm (review round 4, measured): with the other
 #: order `2>&1` matched `2>` and left `&1` looking like a command WORD, so a
 #: redirect-only `exec` still terminated the file.
-_REDIRECT_OPERATOR = re.compile(r"(?:[0-9]*(?:&>>?|>&|<&|>>?\|?|<<<?-?|<>?))")
+_REDIRECT_OPERATOR = re.compile(
+    # ⛔ bash's brace-allocated fd is part of the redirection (review P2 at `2fb9c6fb`, measured):
+    # `exec {fd}>&1` left `{fd}>&1` looking like a command WORD, so a redirect-only `exec` was
+    # read as "replaces the process" and an honest file was refused with a message blaming the
+    # VALUE.
+    r"(?:\{[A-Za-z_][A-Za-z0-9_]*\})?[0-9]*(?:&>>?|>&|<&|>>?\|?|<<<?-?|<>?)"
+)
+
+#: A leading shell ASSIGNMENT word (`FOO=1 `), which may precede `exec`/`exit` (review P3 at
+#: `2fb9c6fb`, measured: `FOO=1 exec /tmp/cap.sh` replaced the shell and the reader credited the
+#: dead exports after it — gate `ok`, exit 0, over a process with no `TORTOISE_*`).
+_LEADING_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*\s+")
 #: ⛔ A redirection token, stripped from between a group closer and the operator that follows it
 #: (review P2, measured BOTH ways). The first pattern spelled the redirect as
 #: `[0-9]*>>?[0-9]*\s*`, which consumed the fd digit of `N>&M` and left the `&` to be read as the
@@ -1706,6 +1768,13 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
 
     code_lines = _shell_code_lines(text)
     for line, structure in zip(code_lines, _shell_structures(code_lines), strict=True):
+        # ⛔ A FORK ANYWHERE ON THE LINE means no statement on it can replace the parent shell
+        # (review P2 at `2fb9c6fb`, measured): `{ exec /bin/true; } | cat` runs the `exec` in the
+        # pipeline's SUBSHELL and the parent continues, so every later export runs — but `forked`
+        # is per SEGMENT and the `|` sits in a later segment, so the `exec` was read as replacing
+        # the shell and an honest file was refused. Read from the STRUCTURAL view, so a `|` inside
+        # a string or a comment cannot mark the line forked.
+        line_forked = _SHELL_FORK.search(structure) is not None
         # ⛔ STRUCTURE, not the raw line: a closer inside a quote or a comment is DATA (review P1),
         # and quote state carried across lines covers a quoted string that spans a newline.
         segments = _shell_statements(line, structure)
@@ -1963,7 +2032,17 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # `||` guards the FAILURE path, so the file's normal flow continues; `&&` guards the
             # SUCCESS path, where an `exec`/`exit` really does end the file (`true && exit 1` ⏎
             # exports → bash never reaches them), so `&&` still terminates.
-            if retracts and separator != "||" and _terminates_the_shell(content_raw):
+            # ⛔ A line that FORKS cannot terminate the file either (review P2 at `2fb9c6fb`,
+            # measured): `{ exec /bin/true; } | cat` runs the exec in the pipeline's subshell and
+            # the parent continues. The `||` arm above is the peer round's reading of the two
+            # operators; `line_forked` answers a DIFFERENT question (was the parent even running
+            # this statement), so both are needed.
+            if (
+                retracts
+                and separator != "||"
+                and not line_forked
+                and _terminates_the_shell(content_raw)
+            ):
                 terminated = True
     return stated, ambiguous
 
