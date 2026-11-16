@@ -49,6 +49,9 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import queue
+import threading
+import time
 import uuid
 
 import pytest
@@ -529,7 +532,13 @@ def test_a_cut_over_DOOR_still_writes_when_the_journal_has_a_position(
     from tests.test_9078_record_written_by_production_path import _app_role_dsn
 
     org, graph = tenant
-    _seed_and_arm(app, org, graph, 0)
+    # ⛔ THE COUNTER IS SEEDED TO 6 AND THE JOURNAL'S ORDINAL IS 7 (#12894): while
+    # both allocators exist they must AGREE, so the door's `seq` is the position
+    # the journal really holds — not an arbitrary number. The discriminating power
+    # of this test does not depend on the two disagreeing: `first_seq=7` forwarded
+    # into `replay_plan` would still be refused (`start_seq must be left at 1`),
+    # which is the regression this pin exists for.
+    _seed_and_arm(app, org, graph, 6)
     # The door opens its OWN connection from the arming env; that is the
     # shape production has, and the shape whose forwarding was wrong.
     monkeypatch.setenv(rw.RECORD_DSN_ENV,
@@ -540,13 +549,14 @@ def test_a_cut_over_DOOR_still_writes_when_the_journal_has_a_position(
     assert write is not None and write.outcome is rw.RecordWriteOutcome.APPLIED, (
         f"a cut-over door refused a write that carried a journal position: "
         f"{write!r}")
-    # The ALLOCATED number is reported, not the journal's 7: allocation is what
-    # `allocate=True` is FOR, and the ordinal the append reported has no meaning
-    # on this arm.
-    assert (write.first_seq, write.last_seq) == (1, 1), (
+    # The ALLOCATED number is reported, not the caller's `first_seq=1`: allocation
+    # is what `allocate=True` is FOR. (It equals `seq` here because the two
+    # allocators must agree — `test_a_divergent_journal_position_is_refused_not_`
+    # `renumbered` is the leg that holds them together.)
+    assert (write.first_seq, write.last_seq) == (7, 7), (
         f"the door reported {write.first_seq}..{write.last_seq}, not the "
         f"allocated block")
-    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1]
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [7]
 
 
 def test_a_duplicate_position_fails_the_transaction(schema, tenant, app):
@@ -759,10 +769,15 @@ def test_a_post_cutover_replay_cannot_add_a_second_position_for_one_record(
 
     EXECUTED, on the shape the finding names: the door writes the record at the
     ALLOCATED number (4, from a counter at 3), then the same record is replayed
-    enumerated at the JOURNAL's ordinal for it (9). The replay must be REFUSED by
-    name, and the position rows must still be exactly the ones the door wrote —
-    which is the half that fails if the guard is removed (a row at 9 would
-    appear here with no exception at all).
+    enumerated at 9. The replay must be REFUSED by name, and the position rows must
+    still be exactly the ones the door wrote — which is the half that fails if the
+    guard is removed (a row at 9 would appear here with no exception at all).
+
+    ⚠️ The door is given `seq=4`, not 9: since #12894's cutover invariant the
+    door's journal ordinal and the allocated number must AGREE, and a divergent one
+    is refused at the door (`test_a_divergent_journal_position_is_refused_not_`
+    `renumbered`). The replay below still uses 9 — a position the record does not
+    hold — which is exactly the second-position shape this pin is about.
     """
     org, graph = tenant
     _append_positions(schema, org, graph, [1, 2, 3])
@@ -775,7 +790,7 @@ def test_a_post_cutover_replay_cannot_add_a_second_position_for_one_record(
     monkeypatch.setenv(rw.RECORD_DSN_ENV,
                        _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
     write = rw.write_live_record(
-        RECORD, durable=True, seq=9, tenant=(org, graph), allocate=True)
+        RECORD, durable=True, seq=4, tenant=(org, graph), allocate=True)
     assert write is not None and write.outcome is rw.RecordWriteOutcome.APPLIED, (
         f"the allocated door write did not apply: {write}")
     assert (write.first_seq, write.last_seq) == (4, 4), (
@@ -783,8 +798,8 @@ def test_a_post_cutover_replay_cannot_add_a_second_position_for_one_record(
     written = [row[0] for row in _journal_rows(schema, org, graph)]
     assert written == [1, 2, 3, 4], f"the door wrote {written}"
 
-    # THE DERIVED REPLAY OF THE SAME JOURNAL EVENT, at the ordinal the JOURNAL
-    # holds for it (9): refused, by name, before a single position statement.
+    # THE DERIVED REPLAY OF THE SAME RECORD AT A POSITION IT DOES NOT HOLD (9):
+    # refused, by name, before a single position statement.
     with pytest.raises(rp.RecordProjectionError) as refused:
         rp.replay([RECORD], app, org_id=org, graph_id=graph, start_seq=9)
     app.rollback()
@@ -863,9 +878,14 @@ def test_a_reopened_graph_keeps_its_consumed_numbers_and_still_refuses(
     payload land at a SECOND position, silently.
 
     The shape, end to end: the door allocates and writes the record at 4; the
-    counter is halted and reopened to `(4, 'seeded')`; an enumerated replay at the
-    journal's ordinal for it (9) must be REFUSED, and position 9 must NOT exist.
-    Pre-fix this replay SUCCEEDED and `journal_event` held the record at 4 AND 9.
+    counter is halted and reopened to `(4, 'seeded')`; an enumerated replay at a
+    position the record does NOT hold (9) must be REFUSED, and position 9 must NOT
+    exist. Pre-fix this replay SUCCEEDED and `journal_event` held the record at 4
+    AND 9.
+
+    ⚠️ The door is given `seq=4` (not 9): since #12894's cutover invariant the
+    journal ordinal and the allocated number must agree at the door, and a
+    divergent one is refused there rather than numbered here.
     """
     org, graph = tenant
     _append_positions(schema, org, graph, [1, 2, 3])
@@ -876,7 +896,7 @@ def test_a_reopened_graph_keeps_its_consumed_numbers_and_still_refuses(
     monkeypatch.setenv(rw.RECORD_DSN_ENV,
                        _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
     write = rw.write_live_record(
-        RECORD, durable=True, seq=9, tenant=(org, graph), allocate=True)
+        RECORD, durable=True, seq=4, tenant=(org, graph), allocate=True)
     assert write is not None and write.outcome is rw.RecordWriteOutcome.APPLIED, (
         f"the allocated door write did not apply: {write}")
     assert (write.first_seq, write.last_seq) == (4, 4), (
@@ -1107,10 +1127,19 @@ def test_the_live_door_takes_the_allocated_number_over_the_journals(
     ``allocate=True`` the record's counter issues the number and the journal's own
     ordinal stays in the journal FILE, whose coordinate it is.
 
-    The falsifier drives the REAL live door with a journal ordinal of 9 on a
-    graph whose counter is at 3: the write must APPLY at 4, and the position row
-    must BE 4 — a forwarded `first_seq` reds this test twice over (a refusal, and
-    a position of 9 if the refusal were ever relaxed).
+    The falsifier drives the REAL live door with the journal ordinal the record
+    really holds — 4, on a graph whose counter is at 3. The write must APPLY at 4
+    and the position row must BE 4; a forwarded `first_seq` reds this test twice
+    over (a refusal, and a position of 9 if the refusal were ever relaxed).
+
+    ⛔ AND THE DIVERGENT SHAPE IS NOW A REFUSAL, deliberately (#12894's cutover
+    invariant): a journal ordinal of 9 against a counter at 3 means the journal and
+    the counter disagree about how long the journal is, and writing at 4 would put
+    the line at 9 and the row at 4. That half lives in
+    `tests/test_12894_live_allocator_armed.py::
+    test_a_divergent_journal_position_is_refused_not_renumbered`; it was previously
+    asserted HERE as an APPLIED write at 4, which pinned the divergence this change
+    removes.
     """
     org, graph = tenant
     _append_positions(schema, org, graph, [1, 2, 3])
@@ -1130,10 +1159,10 @@ def test_the_live_door_takes_the_allocated_number_over_the_journals(
                        _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
 
     write = rw.write_live_record(
-        RECORD, durable=True, seq=9, tenant=(org, graph), allocate=True)
+        RECORD, durable=True, seq=4, tenant=(org, graph), allocate=True)
     assert write is not None, "the live door returned nothing (an unarmed read?)"
     assert write.outcome is rw.RecordWriteOutcome.APPLIED, (
-        f"a journal ordinal of 9 refused an ALLOCATED write: outcome="
+        f"a cutover write with the journal's real ordinal refused: outcome="
         f"{write.outcome} refusal={write.refusal!r} — `first_seq` is still "
         f"carrying the journal's number into the plan")
     assert (write.first_seq, write.last_seq) == (4, 4), (
@@ -1181,3 +1210,520 @@ def test_a_mis_armed_counter_is_refused_with_a_remedy_that_applies(
     assert "a replay heals the record" not in text, (
         "the generic lost-write remedy was emitted for a mis-armed counter — a "
         "replay cannot arm a cursor")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# #12894 — THE WIRE: the live door ALLOCATES (flag `TORTOISE_RECORD_ALLOCATE`)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS SECTION EXISTS. `docs/evidence/12894-landed-verify/README.md` V2 proved,
+# by a call-site census, that the allocator chain that landed is SCAFFOLDING: every
+# production door passes a `seq` it did not issue and none passes `allocate=`, so
+# `allocate=True` was exercised by tests only and `write_live_record`'s allocated
+# arm was inert. A green suite that never enters that arm is not evidence about the
+# live path — which is the whole finding. Every test below therefore drives **the
+# live door** (`write_live_record`) or **the seed verb**, not `RecordWriter` and not
+# the plan builder alone, except where the fact being asserted is the allocator's
+# own (`record_allocator` is the subject and the door is the caller).
+#
+# THE SIX FALSIFIERS (the brief's list, in its order):
+#
+#   (3a) concurrent writers, order = commit order   `test_two_writers_allocate_in_commit_order`
+#   (3b) a rollback burns nothing, reuses nothing   `test_a_rolled_back_allocation_is_reissued_exactly_once`
+#   (3c) replay READS the carried ordinal, refuses  `test_replay_reads_a_carried_ordinal` +
+#        on `carried != start_seq + i`              `test_replay_refuses_a_carried_ordinal_that_disagrees`
+#   (3d) a journal line and its row carry the same  `test_the_armed_row_carries_the_journals_position` +
+#        number                                     `test_a_divergent_journal_position_is_refused_not_renumbered`
+#   (3e) a truncated journal does not re-mint       `test_a_shrunken_journal_cannot_mint_a_position`
+#   (3f) `TORTOISE_JOURNAL_SEGMENTS=1` after a seal `test_a_sealed_journal_is_gated_on_the_armed_arm`
+#
+# ⛔ THEY LIVE IN THIS FILE, NOT A NEW ONE, on purpose: the schema/tenant/app harness
+# (and the pooled-handle teardown that keeps this suite from deadlocking the NEXT
+# suite's migration re-apply) is defined here, and re-exporting it into a second
+# module is both an F811 lint failure and a second copy of a harness that must not
+# drift. A new test FILE would also owe a `config/ci-surfaces.yml` durations row.
+
+
+# ── harness for the wire section ────────────────────────────────────────────
+
+def _door_dsn() -> str:
+    from tests.test_9078_record_written_by_production_path import _app_role_dsn
+
+    return _app_role_dsn(os.environ["TEST_RECORD_DB_URI"])
+
+
+def _app_conn():
+    psycopg2 = pytest.importorskip("psycopg2")
+    conn = psycopg2.connect(_door_dsn())
+    conn.autocommit = False
+    return conn
+
+def _door_dsn() -> str:
+    from tests.test_9078_record_written_by_production_path import _app_role_dsn as dsn
+
+    return dsn(os.environ["TEST_RECORD_DB_URI"])
+
+
+def _app_conn():
+    psycopg2 = pytest.importorskip("psycopg2")
+    conn = psycopg2.connect(_door_dsn())
+    conn.autocommit = False
+    return conn
+
+
+def _arm_door(monkeypatch, *, flag: bool) -> None:
+    """Put the live door in the shape production has: its own DSN, from the env.
+
+    The DSN is ALWAYS set — the flag is the only variable between the two arms,
+    so a test cannot pass because the door was unarmed (`write_live_record`
+    returns `None` there, which would make every `is not None` assertion fail
+    loudly rather than quietly).
+    """
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, _door_dsn())
+    if flag:
+        monkeypatch.setenv(rw.RECORD_ALLOCATE_ENV, "1")
+    else:
+        monkeypatch.delenv(rw.RECORD_ALLOCATE_ENV, raising=False)
+
+
+def _journal_file(tmp_path, n: int):
+    """A REAL journal file, written by `EventLog` itself (the reader the seed uses)."""
+    from tortoise.log import EventLog
+
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    for i in range(n):
+        log.append({**RECORD, "id": f"p-journal-{i}",
+                    "point": {"id": f"p-journal-{i}", "content": f"c{i}",
+                              "pointKind": "claim"}})
+    return path
+
+
+# ── (1) the seed is REACHABLE, and correct on both populations ──────────────
+
+def test_the_seed_verb_seeds_a_graph_from_its_own_journal(schema, tenant, tmp_path):
+    """V5 item 2: `seed()` had no operator door — a code path with no door.
+
+    The floor is the JOURNAL's own enumeration (`EventLog.read_all`, the read the
+    replay engines use), not a number this tool counted off newlines: the number
+    becomes a `seq` live writes key on, so a second reader is a second answer to
+    "how long is the journal".
+    """
+    from tools import record_allocator_cli as cli
+
+    org, graph = tenant
+    path = _journal_file(tmp_path, 3)
+
+    code = cli.main(["seed", "--org-id", org, "--graph-id", graph,
+                     "--dsn", _door_dsn(), "--journal", str(path),
+                     "--json"])
+    assert code == 0, "the seed verb refused a graph it should have seeded"
+    assert _counter(schema, org, graph) == (3, "seeded"), (
+        "a journal with 3 records and no position rows must seed the counter to "
+        "3 — the next write is 4")
+
+
+def test_a_seed_from_a_journal_with_no_rows_gives_the_first_write_n_plus_1(
+        schema, tenant, app, monkeypatch):
+    """THE ROUND-2 P0, driven through the DOOR (plan case 2a / `§A7.5.5`).
+
+    A journal with N records and ZERO `journal_event` rows is the population the
+    seed exists for: `row_max = 0`, `floor = N`, so `seq = GREATEST(0, N) = N` and
+    the FIRST live write is `N + 1`. Under a `COALESCE(row_max, 0)` seed this
+    graph would start at 1 and every write would collide with an existing row.
+
+    Driven through the FLAG rather than `allocate=True`, because the flag is what a
+    deployment sets: seed → arm → the next journal append's position is N+1 and the
+    door's allocated number is the same N+1.
+    """
+    org, graph = tenant
+    seeded = _seed_and_arm(app, org, graph, 3)
+    assert (seeded.seq, seeded.row_max, seeded.healed_tail) == (3, 0, True), (
+        f"the seed did not lift a zero-row graph to its journal's floor: {seeded}")
+
+    _arm_door(monkeypatch, flag=True)
+    write = rw.write_live_record(RECORD, durable=True, seq=4,
+                                 tenant=(org, graph))
+    assert write is not None and write.applied, f"the door refused: {write!r}"
+    assert (write.first_seq, write.last_seq) == (4, 4)
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [4], (
+        "the first new position is not N+1")
+
+
+def test_the_seed_verb_refuses_a_divergence_and_names_it(schema, tenant, tmp_path):
+    """`SeedRefused(reason='divergence')`, reached through the VERB.
+
+    The record holds position 3; the journal enumerates 2. Lifting to the
+    enumerated floor would claim positions the journal cannot reproduce, so the
+    seed writes NO row — and the reason has to survive to the operator, because
+    `divergence` and `armed` have opposite remedies.
+    """
+    from tools import record_allocator_cli as cli
+
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2, 3])
+    path = _journal_file(tmp_path, 2)
+
+    code = cli.main(["seed", "--org-id", org, "--graph-id", graph,
+                     "--dsn", _door_dsn(), "--journal", str(path)])
+    assert code == 1, "the seed verb accepted a graph whose record is ahead of its journal"
+    assert _counter(schema, org, graph) is None, (
+        "a refused seed must leave NO counter row: absence IS 'not cut over'")
+
+
+def test_the_seed_verb_refuses_to_guess_the_floor(schema, tenant):
+    """`0` is a real answer for an empty graph, so it cannot be a DEFAULT.
+
+    A defaulted floor would seed a populated graph to 0 and the next allocation
+    would collide with row 1 — the failure mode this refusal exists to prevent.
+    """
+    from tools import record_allocator_cli as cli
+
+    org, graph = tenant
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["seed", "--org-id", org, "--graph-id", graph,
+                  "--dsn", _door_dsn()])
+    assert raised.value.code == 2, "a seed with no floor must be a USAGE refusal"
+
+
+# ── (2) the flag: BOTH arms, and the meter ──────────────────────────────────
+
+def test_the_flag_arms_the_door_and_the_row_carries_the_allocated_number(
+        schema, tenant, app, monkeypatch):
+    """The switch, turned on. Before this, `allocate` was False on every lane and
+    the row's position came from `EventLog.append` (V2 item 3-4)."""
+    org, graph = tenant
+    _seed_and_arm(app, org, graph, 0)
+    _arm_door(monkeypatch, flag=True)
+
+    write = rw.write_live_record(RECORD, durable=True, seq=1,
+                                 tenant=(org, graph))
+    assert write is not None and write.applied, (
+        f"the flag-armed door refused a write on an ARMED counter: {write!r}")
+    assert (write.first_seq, write.last_seq) == (1, 1), (
+        "the reported watermark is not the allocated position")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1]
+
+
+def test_the_flag_off_keeps_the_enumerated_arm(schema, tenant, monkeypatch):
+    """The DEFAULT is unchanged: no flag ⇒ the door writes the journal's ordinal.
+
+    On a graph with no counter row the enumerated arm is the only one that can
+    apply — and that is exactly what must keep happening for every deployment
+    that has not been cut over.
+    """
+    org, graph = tenant
+    _arm_door(monkeypatch, flag=False)
+
+    write = rw.write_live_record(RECORD, durable=True, seq=4,
+                                 tenant=(org, graph))
+    assert write is not None and write.applied, f"the default arm refused: {write!r}"
+    assert (write.first_seq, write.last_seq) == (4, 4)
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [4]
+    assert _counter(schema, org, graph) is None, (
+        "the unarmed-flag arm allocated a position — the switch is not off")
+
+
+def test_the_armed_door_charges_real_bytes(schema, tenant, app, monkeypatch):
+    """The review's P0, driven through the DOOR: the byte meter charged 0 because
+    the watermark came from the caller's `first_seq` and matched no row.
+
+    ⛔ A ZERO HERE IS THE DEFECT, not a quiet pass: `written_bytes == 0` is what
+    the pre-fix code reported for every allocated write.
+    """
+    org, graph = tenant
+    _seed_and_arm(app, org, graph, 0)
+    _arm_door(monkeypatch, flag=True)
+
+    write = rw.write_live_record(RECORD, durable=True, seq=1,
+                                 tenant=(org, graph))
+    assert write is not None and write.applied
+    assert write.written_rows >= 1, (
+        f"the meter matched no rows for an allocated write: rows="
+        f"{write.written_rows} bytes={write.written_bytes}")
+    assert write.written_bytes > 0, (
+        "the byte meter charged 0 for an allocated write — the watermark is not "
+        "the allocated position")
+
+
+def test_the_armed_door_refuses_a_record_whose_position_is_unproven(
+        schema, tenant, app, monkeypatch):
+    """`seq is None` is the `#9307` "append succeeded, position not proven" state.
+
+    On the enumerated arm it writes the layer rows and NO position row. On the
+    ALLOCATED arm there is nothing to verify the issued number against, so the
+    write is REFUSED rather than allocating a position the journal cannot
+    corroborate — a fail-closed refusal of one record, not a lost write (the
+    journal holds it and a replay heals it).
+    """
+    org, graph = tenant
+    _seed_and_arm(app, org, graph, 0)
+    _arm_door(monkeypatch, flag=True)
+
+    write = rw.write_live_record(RECORD, durable=True, seq=None,
+                                 tenant=(org, graph))
+    assert write is not None and not write.applied, (
+        "the armed door allocated a position for a record whose journal "
+        "position was never proven")
+    assert _journal_rows(schema, org, graph) == []
+
+
+# ── (3a) concurrency: allocation order IS commit order ─────────────────────
+
+def test_two_writers_allocate_in_commit_order(schema, tenant, app):
+    """The property a bare `nextval()` cannot give (module docstring: a sequence is
+    not transactional and its order is not the commit order).
+
+    Writer A allocates and HOLDS. Writer B allocates and must BLOCK on the
+    counter's row lock until A commits — then receive the NEXT number. The
+    assertion is both halves: distinct positions, and B's number is A's + 1 with
+    B finishing after A's commit.
+    """
+    org, graph = tenant
+    _seed_and_arm(app, org, graph, 0)
+    statement = ra.allocation_statement(org_id=org, graph_id=graph,
+                                        records=[RECORD])
+
+    first = ra.execute_allocation(app, statement, org_id=org, graph_id=graph)
+
+    result: queue.Queue = queue.Queue()
+
+    def writer_b() -> None:
+        conn = _app_conn()
+        try:
+            block = ra.execute_allocation(conn, statement, org_id=org,
+                                          graph_id=graph)
+            result.put(("ok", block.first_seq, time.monotonic()))
+            conn.commit()
+        except Exception as exc:
+            result.put(("error", exc, time.monotonic()))
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=writer_b, daemon=True)
+    thread.start()
+    # B must be BLOCKED here: it cannot take the counter's row lock until A
+    # commits. A fixed sleep is a measurement of "B has had time to block".
+    time.sleep(1.0)
+    assert result.empty(), (
+        "the second writer allocated while the first still held the counter — "
+        "allocation order is not commit order")
+    committed_at = time.monotonic()
+    app.commit()
+    thread.join(timeout=30)
+    assert not thread.is_alive(), "the second writer never completed"
+
+    status, value, finished_at = result.get_nowait()
+    assert status == "ok", f"the second writer failed: {value}"
+    assert value == first.last_seq + 1, (
+        f"the second writer received {value}, not {first.last_seq + 1} — the "
+        f"numbers are not contiguous in commit order")
+    assert finished_at >= committed_at
+
+
+# ── (3b) a rollback burns nothing ──────────────────────────────────────────
+
+def test_a_rolled_back_allocation_is_reissued_exactly_once(schema, tenant, app):
+    """A position is issued inside the caller's transaction, so a rollback returns
+    it. Not burned (no gap), and not reused-after-being-seen (the first caller
+    never committed it)."""
+    org, graph = tenant
+    _seed_and_arm(app, org, graph, 0)
+
+    statement = ra.allocation_statement(org_id=org, graph_id=graph,
+                                        records=[RECORD])
+    first = ra.execute_allocation(app, statement, org_id=org, graph_id=graph)
+    app.rollback()
+
+    second_conn = _app_conn()
+    try:
+        again = ra.execute_allocation(second_conn, statement, org_id=org,
+                                      graph_id=graph)
+        second_conn.commit()
+    finally:
+        second_conn.close()
+
+    assert first.first_seq == again.first_seq, (
+        f"a rolled-back allocation BURNED a position: {first.first_seq} then "
+        f"{again.first_seq}")
+    assert _counter(schema, org, graph) == (again.first_seq, "active"), (
+        "the counter did not end at the number that committed")
+
+
+# ── (3c) replay READS the carried ordinal ──────────────────────────────────
+
+def _position_plan(records, *, start_seq: int):
+    """The journal-position statements of a plan, with the `seq` each binds."""
+    plan = rp.replay_plan(records, org_id="o", graph_id="g",
+                          start_seq=start_seq)
+    out = []
+    for statement in plan:
+        if statement.sql.startswith(rp._JOURNAL_INSERT_PREFIX):
+            _org_id, _graph_id, seq = statement.params[:3]
+            out.append(seq)
+    return out
+
+
+def test_replay_reads_a_carried_ordinal():
+    """THE RULING'S SECOND HALF (V5 item 5a): replay READS the number instead of
+    computing it.
+
+    A record that carries `seq` is asserting its own position — that is the shape a
+    record-sourced read produces (`journal_event.seq` is a column). A batch
+    replaying a LATER segment (`start_seq=5`) keeps the positions the records
+    really hold; the caller's watermark and the record's own number are two
+    readings of one fact, and the plan binds the record's.
+
+    ⚠️ THE DISCRIMINATING LEG IS THE REFUSAL BELOW, not this one: a plan that
+    ignored `seq` entirely would also produce 5, 6 here, because it enumerates from
+    the same `start_seq`. What only the READ gives is the ability to NOTICE a
+    disagreement — which is `test_replay_refuses_a_carried_ordinal_that_disagrees`.
+    """
+    carried = [{**RECORD, "seq": 5}, {**RECORD, "seq": 6}]
+    assert _position_plan(carried, start_seq=5) == [5, 6]
+    # A record with no `seq` still enumerates (the JSONL journal's shape — no
+    # writer emits one yet, `§A7.7` 6.3).
+    assert _position_plan([RECORD, RECORD], start_seq=5) == [5, 6]
+
+
+def test_replay_refuses_a_carried_ordinal_that_disagrees():
+    """⛔ A DISAGREEMENT IS A REFUSAL, never a renumbering — the brief's
+    `carried != start_seq + i`.
+
+    Silently preferring either side would be the `#9190` defect with a new
+    spelling: the record says one number and the enumeration says another, and one
+    of them gets overwritten without anyone learning which was right. Both shapes
+    are refused: a wholly different number (a reordered or foreign batch) and an
+    off-by-one (a batch whose start_seq the caller got wrong).
+    """
+    for carried_value, start in ((9, 1), (6, 1)):
+        with pytest.raises(rp.RecordProjectionError) as raised:
+            rp.replay_plan([{**RECORD, "seq": carried_value}], org_id="o",
+                           graph_id="g", start_seq=start)
+        message = str(raised.value)
+        assert str(carried_value) in message and str(start) in message, (
+            f"the refusal does not name both numbers: {message}")
+
+    with pytest.raises(rp.RecordProjectionError):
+        rp.replay_plan([{**RECORD, "seq": "not-a-number"}], org_id="o",
+                       graph_id="g", start_seq=1)
+
+
+# ── (3d) the journal line and its row carry the SAME number ────────────────
+
+def test_the_armed_row_carries_the_journals_position(schema, tenant, app,
+                                                     monkeypatch):
+    """The cutover invariant: while both allocators exist they must AGREE.
+
+    The journal's append reported N and the counter issued N. The row is at N. That
+    is what makes a replay of the JSONL (which enumerates 1..N) reproduce the same
+    numbers the record holds — and it is the test that would have caught a door
+    that allocated `counter + 1` while the journal was at `N`.
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2])
+    _seed_and_arm(app, org, graph, 2)
+    _arm_door(monkeypatch, flag=True)
+
+    write = rw.write_live_record(RECORD, durable=True, seq=3,
+                                 tenant=(org, graph))
+    assert write is not None and write.applied, f"refused: {write!r}"
+    assert (write.first_seq, write.last_seq) == (3, 3)
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3]
+
+
+def test_a_divergent_journal_position_is_refused_not_renumbered(
+        schema, tenant, app, monkeypatch):
+    """⛔ THE FALSIFIER, and it is RED without the guard.
+
+    The counter is at 3 and the door is handed journal position 9 (what a door
+    that trusted the append would report). Writing the row at 4 leaves the line at
+    9 and the row at 4 — two coordinates, one record, and a replay of the JSONL can
+    never reproduce the row. The write must REFUSE and the allocation must ROLL
+    BACK, so the counter is still 3 afterwards: nothing burned, nothing renumbered.
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2, 3])
+    _seed_and_arm(app, org, graph, 3)
+    _arm_door(monkeypatch, flag=True)
+
+    write = rw.write_live_record(RECORD, durable=True, seq=9,
+                                 tenant=(org, graph))
+    assert write is not None and not write.applied, (
+        f"the door wrote a position {write.first_seq} for journal position 9 — "
+        f"the line and its row now carry different numbers")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3], (
+        "the refused write left a position row behind")
+    assert _counter(schema, org, graph) == (3, "active"), (
+        "the refused write did not roll the allocation back")
+
+
+# ── (3e) a truncated journal does not re-mint a position ───────────────────
+
+def test_a_shrunken_journal_cannot_mint_a_position(schema, tenant, app,
+                                                   monkeypatch):
+    """The journal-can-shrink hazard (evidence V4.3, restore-replace / in-place
+    truncate+regrow).
+
+    A restored or truncated journal reports position 1 for its next append while
+    the record's counter is at 4. Under enumeration that re-mints positions the
+    record already holds (`log.py`'s in-place regrow is undetectable by any cheap
+    identity check). Under the armed arm it cannot: `1 != 4` is a refusal, and no
+    row is written at 5.
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2, 3, 4])
+    _seed_and_arm(app, org, graph, 4)
+    _arm_door(monkeypatch, flag=True)
+
+    write = rw.write_live_record(RECORD, durable=True, seq=1,
+                                 tenant=(org, graph))
+    assert write is not None and not write.applied, (
+        "the door minted a position from a journal that went backwards")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3, 4]
+    assert _counter(schema, org, graph) == (4, "active")
+
+
+# ── (3f) the live seal trigger is GATED, not harmless ──────────────────────
+
+def test_a_sealed_journal_is_gated_on_the_armed_arm(schema, tenant, app,
+                                                    monkeypatch, tmp_path):
+    """`TORTOISE_JOURNAL_SEGMENTS=1` is the round-1 LIVE trigger (evidence V4.2).
+
+    `seal_active` renames the active segment aside and starts a fresh
+    `events.jsonl`, so the FILE-LOCAL index restarts at 1 while the
+    segment-spanning reader keeps counting. This test builds that state for real —
+    a seal, then an append — rather than asserting the claim from the code, and
+    then drives the door with the number the append really returned.
+
+    GATED is the answer the brief allows: on the armed arm the mismatch is a
+    refusal, so the seal cannot mint a position the record already holds.
+    """
+    from tortoise import journal_segments
+
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2])
+    _seed_and_arm(app, org, graph, 2)
+    _arm_door(monkeypatch, flag=True)
+
+    graph_dir = tmp_path / "journal"
+    graph_dir.mkdir()
+    active = graph_dir / journal_segments.ACTIVE_NAME
+    active.write_text("", encoding="utf-8")
+
+    from tortoise.log import EventLog
+
+    log = EventLog(active)
+    assert log.append({**RECORD, "id": "pre-seal"}) == 1
+    monkeypatch.setenv(journal_segments.ENV_FLAG, "1")
+    journal_segments.seal_active(graph_dir)
+    after_seal = log.append({**RECORD, "id": "post-seal"})
+    assert after_seal == 1, (
+        f"the seal did not restart the file-local index (got {after_seal}) — "
+        f"this test's premise, not the door's, is wrong")
+
+    write = rw.write_live_record(RECORD, durable=True, seq=after_seal,
+                                 tenant=(org, graph))
+    assert write is not None and not write.applied, (
+        f"a sealed journal re-used position {after_seal} on an armed counter at 2")
+    assert _counter(schema, org, graph) == (2, "active")

@@ -7795,12 +7795,61 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
             plan.append(allocation_statement(
                 org_id=org_id, graph_id=graph_id, records=records))
         return plan
-    for seq, record in enumerate(records, start=start_seq):
+    for index, record in enumerate(records):
+        seq = _carried_position(record, start_seq + index, index)
         plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
                                   columns=columns, refused=refused))
         if position:
             plan.append(_journal_row(record, seq, org_id, graph_id))
     return plan
+
+
+def _carried_position(record: Mapping[str, Any], enumerated: int,
+                      index: int) -> int:
+    """The record's OWN position when it carries one, else the enumeration (#9190).
+
+    THE RULING'S SECOND HALF. `#9190` reopened this issue because replay DERIVED
+    the number (`enumerate(records, start=1)`) instead of reading it: the record
+    allocates the ordinal and the journal record CARRIES it, so a replay of that
+    record must not renumber it. A record built from the record's own rows carries
+    `seq` as a fact (`public.journal_event.seq` is a column); a record read off the
+    JSONL journal carries no `seq` (no writer emits one — that is `§A7.7` 6.3,
+    still planned) and keeps the enumeration, which is why this is a READ when
+    present rather than a required field.
+
+    ⛔ A DISAGREEMENT IS A REFUSAL, NEVER A RENUMBERING. Silently preferring either
+    side is the `#9190` defect with a new spelling: one number would be overwritten
+    and nobody would learn which was right. The refusal names both numbers and the
+    record's index, so an operator can tell a reordered batch from a corrupted
+    one.
+
+    ⚠️ SCOPE, stated because a reader will ask: `seq` is a journal POSITION here.
+    `:GraphEvent.seq` (`event_store_meta.last_seq`) is a DIFFERENT coordinate with
+    its own allocator (`record_allocator`'s docstring says so, and `§A7.7` step 4
+    deletes D-07 from this sequence), and no producer hands a `:GraphEvent` to the
+    record — every caller of this plan passes journal records. A future caller that
+    did would be refused loudly by the check below rather than silently numbered,
+    which is the direction this module wants to fail in.
+    """
+    carried = record.get("seq")
+    if carried is None:
+        return enumerated
+    try:
+        carried_seq = int(carried)
+    except (TypeError, ValueError):
+        raise RecordProjectionError(
+            f"record {index} carries seq={carried!r}, which is not an integer: a "
+            f"record that CARRIES its position must carry a number (or no `seq` "
+            f"at all, which means 'enumerate me')"
+        ) from None
+    if carried_seq != enumerated:
+        raise RecordProjectionError(
+            f"record {index} carries journal position {carried_seq} but the "
+            f"enumeration puts it at {enumerated}. The record and the read "
+            f"disagree about the ordinal, so NEITHER is renumbered here -- "
+            f"repair the batch (or the caller's start_seq) and re-run"
+        )
+    return carried_seq
 
 
 def to_dollar_placeholders(statement: Statement) -> tuple[str, list[Any]]:
