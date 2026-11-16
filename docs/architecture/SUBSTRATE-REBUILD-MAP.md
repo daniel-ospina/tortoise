@@ -301,8 +301,8 @@ docstring, and `_entity_label`'s record of why the local copy of the canonical
 map had to go). That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
-retirement prose in `tortoise/mcp_server.py:4281`, IS a retirement. The eighth is
-#12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
+retirement prose in `tortoise/mcp_server.py:4281`, IS a retirement. The eighth
+is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
 `tortoise/sdk.py:33175`, one line in a file this population already reached, whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a

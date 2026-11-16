@@ -228,7 +228,7 @@ def test_a_point_id_scope_REFUSES_the_dream_knobs(scope, knob, monkeypatch):
         got = mcp_server.tortoise_refresh_confidence(
             scope=scope, point_id="p1", **extra, **knob)
     message = str(got.get("error", ""))
-    assert list(knob)[0] in message, (knob, got)
+    assert next(iter(knob)) in message, (knob, got)
     assert "dream arms" in message, (knob, got)
     assert promote.calls == [] and baseline.calls == [], (knob, promote.calls, baseline.calls)
 
