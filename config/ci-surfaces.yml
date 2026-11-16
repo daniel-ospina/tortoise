@@ -13199,6 +13199,8 @@ durations:
   # members and an absent key moves the durations coverage RATIO (#3400). The tail
   # LEADS with `# unmeasured` so `render_refreshed_manifest` clears it on that first
   # sweep instead of leaving a stale note attached to a CI value (#9110 review P2).
+  # → the tail LED with it, which is why the collecting sweep cleared it: both rows
+  # now carry the CI reading and neither tail opens with that marker.
   test_measure_ask_distilled.py: 18.8  # new in #9097: it opened as the flat default; the 2026-11-16 sweep replaced it — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 23.1
   eval/ask/test_ask_corpus.py: 0.1  # new in #9097: it opened as the flat default; the 2026-10-26 sweep replaced it — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
   # #9494: a file ADDED BY THIS PR cannot appear in a junit artifact (the
