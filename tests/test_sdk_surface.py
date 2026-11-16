@@ -83,7 +83,7 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # paragraph above requires. The waves are disjoint by construction: wave 1's membership
 # rule excluded any name a `tool_registry` entry bound, and the four doors Phase 2
 # re-keys were live MCP tools at that time.
-DECLARED_COUNT = 119
+DECLARED_COUNT = 118
 
 
 def _declaration() -> dict:

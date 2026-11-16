@@ -558,8 +558,11 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     # (23 + 14 = 37 — the same arithmetic `config/surface-manifest.yml` derives as
     # 68 live − 14 + 6 = 60, since every retired name stays SERVED through the shim).
     # The pin moves with each landed container batch.
-    assert len(RETIRED_LITERAL) == 37, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 37"
+    # 44 after #11609 lane C retired SEVEN SOURCES/MINE/SESSION doors into six
+    # containers on top of lane B's fourteen (23 + 7 + 14 = 44 — the same arithmetic
+    # `config/surface-manifest.yml` derives as 68 + 6 + 6 − 7 − 14 = 59 live).
+    assert len(RETIRED_LITERAL) == 44, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 44"
     )
 
 

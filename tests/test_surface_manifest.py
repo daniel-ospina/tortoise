@@ -4861,7 +4861,10 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #11609 lane B (#4282 Phase 2): 68 -> 60 — fourteen WRITE/MUTATE doors retired into
     # six approved containers (68 − 14 + 6). The retired names still ANSWER (#3883), so
     # the SERVED surface is unchanged; this pin is the ADVERTISED one.
-    assert live["mcp"] == manifest["counts"]["tools"] == 60
+    # #11609 lane C composes with lane B on this tree: 60 -> 59 (six SOURCES/MINE/SESSION
+    # containers in, seven advertised members retired into them; the 68 the branch started
+    # from is lane B's pre-wave number, so the merged arithmetic is 68 + 6 + 6 - 7 - 14).
+    assert live["mcp"] == manifest["counts"]["tools"] == 59
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
@@ -4886,7 +4889,7 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # ⛔ `adjust_relationship` and `refresh_confidence` are NOT implemented rows: they are
     # approved targets still ABSENT from the live class (see the 23 the declaration gate
     # prints), so naming them as delivered here was false.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 119
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 118
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

@@ -306,7 +306,7 @@ CITATION_REGION_LITERAL: dict[str, str] = {
 }
 
 
-# The COMPLETE row → (target, citation text) binding, for all 119 rows. Pinning the
+# The COMPLETE row → (target, citation text) binding, for all 118 rows. Pinning the
 # quotes by citation KEY was not enough: nothing pinned WHICH key a row selected, and
 # where two keys share a `named` member (`w3`/`w3_cut`, `w4`/`w4_index_sessions`) a
 # key swap kept the target, the basis AND the pinned quote set intact — so row 23
@@ -316,6 +316,7 @@ CITATION_REGION_LITERAL: dict[str, str] = {
 ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'annotate_ask_hits': ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
     'annotate_operator': ('update_knowledge', '`beta-sdk-surface.md` — “\\| `mitigate_operator`, `operator_action`, `annotate_operator` \\| 3 \\| → `adjust_relationship` for strength, `update_knowledge` for annotation. `operator_action(**kwargs)` **accepted and silently ignored** `credibility` — a bug that #4282 rendered moot by DELETING the method (with `mitigate_operator`/`annotate_operator` surviving as the writes, neither of which takes `credibility` through a `**kwargs` funnel). \\|”'),
+    'register_source': ('register_source', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'apikey_create': ('create_key', '`beta-sdk-surface.md` — “\\| 34 \\| `create_key` \\| Mint a credential scoped to one memory graph. **The credential carries the tenant** — the client does not pass a graph id \\| — \\| builder \\|”'),
     'apikey_revoke': ('revoke_key', '`beta-sdk-surface.md` — “\\| 34 \\| `create_key` \\| Mint a credential scoped to one memory graph. **The credential carries the tenant** — the client does not pass a graph id \\| — \\| builder \\|”'),
     'apikey_verify': ('', "`beta-sdk-surface.md` — “\\| `org_update`, `org_delete`, `membership_get`, `membership_update_role`, `apikey_verify` \\| 5 \\| Console plumbing. `org_delete` is **settled**: an end-customer must never be able to delete the builder's account. **The builder's own account closure is a console operation** — not in the SDK. \\|”"),
@@ -706,9 +707,9 @@ def test_check_mode_detects_a_drifted_copy(tmp_path: Path) -> None:
 
     drifted = tmp_path / "sdk-rename-table.md"
     text = DOC.read_text(encoding="utf-8")
-    assert "119 public methods" in text
+    assert "118 public methods" in text
 
-    drifted.write_text(text.replace("119 public methods", "129 public methods"),
+    drifted.write_text(text.replace("118 public methods", "128 public methods"),
                        encoding="utf-8")
 
     rc = sdk_rename_table.main(["--check", "--out", str(drifted)])
@@ -723,6 +724,7 @@ def test_check_mode_detects_a_drifted_copy(tmp_path: Path) -> None:
 TARGETS_LITERAL: dict[str, str] = {
     'annotate_ask_hits': 'search_knowledge',
     'annotate_operator': 'update_knowledge',
+    'register_source': 'register_source',
     'apikey_create': 'create_key',
     'apikey_revoke': 'revoke_key',
     'apikey_verify': '',
@@ -845,6 +847,7 @@ TARGETS_LITERAL: dict[str, str] = {
 AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'annotate_ask_hits': ('deprecated', 'public', 'stated', 'retain'),
     'annotate_operator': ('deprecated', 'public', 'stated', 'retain'),
+    'register_source': ('stable', 'public', 'derived', 'retain'),
     'apikey_create': ('deprecated', 'public', 'derived', 'retain'),
     'apikey_revoke': ('deprecated', 'public', 'derived', 'retain'),
     'apikey_verify': ('removed', 'internal', 'stated', 'delete'),
@@ -1146,8 +1149,12 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
     # — targets with NO `def` — loses exactly those three. The summary sentence's own
     # arithmetic still composes: 19 distinct no-`def` destinations + 5 non-destination
     # rows = 24 Phase-2 methods.
-    assert c1_total == 24, f"Part C1 lists {c1_total} Phase-2 methods, expected 24"
-    assert c1_total == no_def + 5, (
+    # 24 -> 18: the SOURCES/MINE/SESSION wave gave six more approved targets their `def`
+    # (`check_connection`, `index_sources_from_directory`, `manage_source_trust`,
+    # `mine_knowledge_from_directory`, `mine_knowledge_from_session`, `register_source`),
+    # so the C1 finding — targets with NO `def` — loses exactly those six.
+    assert c1_total == 18, f"Part C1 lists {c1_total} Phase-2 methods, expected 18"
+    assert c1_total == no_def + 4, (
         f"C1's {c1_total} and the summary's {no_def} destinations should differ by exactly "
         f"the 4 never-a-destination targets"
     )
@@ -1171,15 +1178,18 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
     # so the no-`def` half drops 22 -> 19 and the "already exists" half rises 13 -> 16,
     # while the destination count (38) and the non-destination dispositions (3) are
     # untouched — 38 = 19 + 16 + 3 either way.
-    assert (distinct, no_def, exists, non_target) == (38, 19, 16, 3), (
+    # lane C then gave six more approved targets a `def` and added `register_source` as a
+    # destination (it was `create_source`'s target and is now a row of its own), so
+    # 38 -> 39 distinct, 19 -> 14 no-`def`, 16 -> 22 already-existing; 39 = 14 + 22 + 3.
+    assert (distinct, no_def, exists, non_target) == (39, 14, 22, 3), (
         "the destination summary moved: "
         f"{distinct} destinations = {no_def} no-def + {exists} existing + {non_target} other"
     )
-    assert "**32 groups** over **119** named members" in doc, (
+    assert "**32 groups** over **118** named members" in doc, (
         "the structural note's canonical-group counts are gone"
     )
-    assert "119 = the 119-method surface" in doc, (
-        "the structural note no longer reconciles its members to the 119-method surface"
+    assert "118 = the 118-method surface" in doc, (
+        "the structural note no longer reconciles its members to the 118-method surface"
     )
     # C6 sits between C5 and the structural notes; terminate the C5 slice at C6 so a
     # `W11` mention in the contested section cannot leak into the group set.
@@ -1257,7 +1267,7 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
     # three (`update_knowledge` already existed; the new ones are `supersede_knowledge`,
     # `write_question`, `record_decision`), a net -1: 120 -> 119 — which is the same 119
     # `tools/surface-guard.py` reports for the frozen baseline.
-    assert len(rows) == 119, f"Part A has {len(rows)} rows, expected the 119-method surface"
+    assert len(rows) == 118, f"Part A has {len(rows)} rows, expected the 118-method surface"
     assert len(set(names)) == len(names), (
         "Part A lists a method twice — `--check` cannot see a duplicated row because the "
         "duplicate is in the constant too"
@@ -1266,7 +1276,7 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
 
 
 def test_the_whole_mapping_is_pinned() -> None:
-    """Every one of the 119 `method → destination` pairs equals the pinned literal.
+    """Every one of the 118 `method → destination` pairs equals the pinned literal.
 
     The representative-pin test guards group defaults; this guards the exceptions.
     Without it a row can be reassigned to a different target while its citation
@@ -1611,11 +1621,11 @@ def test_prose_counts_are_the_literals_the_doc_claims() -> None:
     # Digit-BOUNDED, not substring: `"124 public methods" in text` also passes when the
     # render produces `1124 public methods`, so the pin did not hold the number.
     for pattern in (
-        r"(?<![\d])119 public methods",
+        r"(?<![\d])118 public methods",
         r"(?<![\d])40 target methods",
 
-        r"(?<![\d])88 of the 119 are renames",
-        r"\*\*16\*\* are already targets \(unchanged\)",
+        r"(?<![\d])81 of the 118 are renames",
+        r"\*\*22\*\* are already targets \(unchanged\)",
         r"\*\*12\*\* are discarded with a rationale \(lifecycle `removed` · "
         r"visibility `internal` · delete `delete`\)",
         r"\*\*0\*\* are live but \*\*unlisted\*\* \(visibility `unlisted` — NOT deleted\)",
@@ -1623,8 +1633,8 @@ def test_prose_counts_are_the_literals_the_doc_claims() -> None:
         r"\*\*0\*\* are \*\*contested\*\* \(the docs name conflicting destinations\)",
         r"\*\*2\*\* have no destination",
 
-        r"only \*\*16\*\* of them exist on `TortoiseSDK` today",
-        r"\*\*24\*\* are Phase 2 work",
+        r"only \*\*22\*\* of them exist on `TortoiseSDK` today",
+        r"\*\*18\*\* are Phase 2 work",
     ):
         assert re.search(pattern, text), f"the headline no longer says {pattern!r}"
 
@@ -1641,13 +1651,13 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
     text = DOC.read_text(encoding="utf-8")
     part_a = text.split("## Part A")[1].split("## Part B")[0]
     ordinals = [int(m) for m in re.findall(r"^\| (\d+) \|", part_a, re.M)]
-    assert ordinals == list(range(1, 120)), (
-        f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..119"
+    assert ordinals == list(range(1, 119)), (
+        f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..118"
     )
     c1 = text.split("### C1")[1].split("### C2")[0]
 
-    assert c1.count("| no `def` on `TortoiseSDK` today |") == 24, (
-        "C1's status column no longer repeats its one true statement on all 28 rows"
+    assert c1.count("| no `def` on `TortoiseSDK` today |") == 18, (
+        "C1's status column no longer repeats its one true statement on all 18 rows"
     )
     c4 = text.split("### C4")[1].split("### C5")[0]
     for name, referent in (
@@ -1669,7 +1679,7 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
 
     # 13 -> 16 by #11609 Phase 2: the three targets that gained a `def` are their own
     # destination, so each contributes one UNCHANGED row.
-    assert sum(1 for r in rows if r["target"] == r["name"]) == 16
+    assert sum(1 for r in rows if r["target"] == r["name"]) == 22
     assert sum(1 for r in rows if r["lifecycle"] == "removed"
                and r["delete"] == "delete") == 12
     assert sum(1 for r in rows if r["visibility"] == "unlisted") == 0
@@ -1748,10 +1758,10 @@ def test_part_b_counts_match_the_rows_they_list() -> None:
         rows.append((dest.strip("`"), re.findall(r"`([a-z_][a-z0-9_]*)`", names),
                      int(count)))
     assert rows, "parsed no Part B rows"
-    assert total == 119, f"Part B's total row says {total}, expected 119"
+    assert total == 118, f"Part B's total row says {total}, expected 118"
     bad = [(d, len(ms), c) for d, ms, c in rows if len(ms) != c]
     assert not bad, f"Part B counts disagree with the members listed: {bad}"
-    assert sum(c for _, _, c in rows) == 119
+    assert sum(c for _, _, c in rows) == 118
 
     by_target: dict[str, set[str]] = {}
     for r in part_a_rows():
@@ -1787,6 +1797,10 @@ def test_basis_split_is_the_literal() -> None:
         # name that IS its own destination has no collapse sentence to quote, so its row
         # is `derived` (the beta preamble is the only statement naming it).
         "record_decision", "supersede_knowledge", "write_question",
+        # and by the six SOURCES/MINE/SESSION targets that wave 2 delivered the same way:
+        # each is its own destination, so its row quotes the beta preamble, not a collapse.
+        "check_connection", "index_sources_from_directory", "manage_source_trust",
+        "mine_knowledge_from_directory", "mine_knowledge_from_session", "register_source",
     }
 
 
@@ -1797,7 +1811,7 @@ def test_part_c1_lists_exactly_the_targets_with_no_def() -> None:
     """
     expected = set(targets_independently()) - set(public_methods_independently())
 
-    assert len(expected) == 24
+    assert len(expected) == 18
     listed = set(_first_column(_section("C1 — target methods with no `def` on `TortoiseSDK`")))
     assert listed == expected, (
         "Part C1 does not list exactly the target methods with no `def`.\n"
@@ -2559,8 +2573,8 @@ def test_legend_structural_prose_and_reproduce_block_are_read() -> None:
     # The structural reconciliation must name its 32 groups and 119 members, and reconcile
     # them to the 119-method surface — every canonical member is a live method since
     # #12901 wave 1 retired `backfill_v25`, the Archived-table member this used to mention.
-    assert "partitions the surface into **32 groups** over **119** named members" in doc
-    assert "119 = the 119-method surface" in doc
+    assert "partitions the surface into **32 groups** over **118** named members" in doc
+    assert "118 = the 118-method surface" in doc
 
 
 def test_table_header_rows_are_read() -> None:

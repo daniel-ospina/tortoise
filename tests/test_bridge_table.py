@@ -797,7 +797,9 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     # 37 after #11609 Phase 2's WRITE/MUTATE batch retired fourteen doors into six
     # containers (the served registry is live + retired, so this counts the
     # shim-served population: 60 live + 37 retired = 97).
-    assert len(retired) == 37, f"expected 37 retired rows, got {len(retired)}"
+    # 37 -> 44: lane C retires seven SOURCES/MINE/SESSION doors into six containers on a tree
+    # that already carries lane B's fourteen (23 + 7 + 14).
+    assert len(retired) == 44, f"expected 44 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "

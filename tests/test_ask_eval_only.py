@@ -214,10 +214,19 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   if both sides were wholly `http_policy=True` would have hidden a real
     #   exemption behind a coincidence (the sibling derivation in
     #   `test_10084_graph_argument_omit_first` records the same split).
-    # Anything BELOW 55 is unexplained shrinkage and this arm reds on it; lowering the
+    #   #11609 lane C (SOURCES/MINE/SESSION, this PR) — the listing is EXACTLY the
+    #   ADVERTISED population minus its `http_policy=False` rows, so it moves with the
+    #   live surface and nothing else: this lane's six containers retire SEVEN advertised
+    #   doors and add six live names (67 - 7 + 6 = 66 at its own head; composed with
+    #   lane B, which retired fourteen and added six, 60 - 1 = 59). The exclusion set is
+    #   unchanged at FIVE (`tortoise_expand_relationships`, `tortoise_index_sources_from_directory`,
+    #   `tortoise_mine_knowledge_from_directory`, `tortoise_org_create`,
+    #   `tortoise_refresh_confidence` — measured, `set(TOOL_REGISTRY) - set(get_http_allowed())`),
+    #   so the floor moves 55 = 60 - 5 -> 54 = 59 - 5, the same -1 the live surface moves.
+    # Anything BELOW 54 is unexplained shrinkage and this arm reds on it; lowering the
     # floor again needs the same kind of recorded reason, never a green run.
 
-    assert len(names) >= 55, f"default surface shrank to {len(names)}"
+    assert len(names) >= 54, f"default surface shrank to {len(names)}"
     # The floor is a proxy for the real invariant, and a proxy cannot tell a
     # recorded consolidation from a silent drop. Pin the invariant itself: the
     # default HTTP listing serves EXACTLY the registry's `http_policy` population

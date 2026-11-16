@@ -4147,7 +4147,6 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 def _http_excluded_error() -> dict:
     """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
 
-
     #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding ten
     tool bodies (four live, six retired-but-served), each of which returns it
     verbatim, so the dispatch used to be recorded ``status="ok"``. The wire

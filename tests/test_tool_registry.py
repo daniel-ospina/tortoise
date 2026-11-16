@@ -128,14 +128,15 @@ class TestRegistryEquivalence:
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
-        assert len(TOOL_REGISTRY) == 60, f"Expected 60, got {len(TOOL_REGISTRY)}"
+        # lane C composes on top of lane B: 68 - 14 + 6 = 60 there, then its own 60 - 7 + 6 = 59.
+        assert len(TOOL_REGISTRY) == 59, f"Expected 59, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
         # consolidated, the 5 #4282 container members and the 14 #11609 lane B
         # WRITE/MUTATE members are NOT live, and each one is declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
 
-        assert len(retired) == 37, f"Expected 37 retired, got {len(retired)}"
+        assert len(retired) == 44, f"Expected 44 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -205,10 +206,17 @@ class TestRegistryEquivalence:
         # Phase-4 mining/promotion/dedup/timeline surface (#787). `tortoise_promote_point`
         # retired into the `tortoise_refresh_confidence` container (#11609 lane B,
         # `scope="promote"`) — the capability assertion follows the container.
-        phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
+        phase4 = {"tortoise_list_dedup_candidates",
                   "tortoise_approve_merge", "tortoise_refresh_confidence",
                   "tortoise_belief_timeline"}
         assert phase4 <= names, f"Missing #787 tools: {phase4 - names}"
+        # `tortoise_mine_conversations` is no longer ADVERTISED: #11609 lane C retired
+        # it into the SESSION container, and the capability assertion follows the
+        # container (the retired name still ANSWERS — #3883 — so it stays served).
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY as _RETIRED
+        served_names = {t.name for t in (*TOOL_REGISTRY, *_RETIRED)}
+        assert "tortoise_mine_conversations" in served_names, "still-served retired shim left the registry"
+        assert "tortoise_mine_knowledge_from_session" in names, "Missing #787 container destination"
 
     def test_no_duplicate_names(self):
         """No two registry entries share the same name."""
@@ -2299,9 +2307,14 @@ class TestToolIdentity:
         # moves 43 → 49 (43 + 6) while the ADVERTISED (live) number moves 39 → 31
         # (39 − 14 + 6). A change to either is a permission change and needs the
         # owner's eye, not a test edit.
-        assert len(WRITE_TOOL_NAMES) == 49, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+        # #11609 lane C (SOURCES/MINE/SESSION), composed onto the tree lane B is
+        # already on: SEVEN advertised writers retire into the containers (they stay
+        # SERVED as shims, #3883) and FIVE new writers arrive (the four re-ingesting
+        # containers + `register_source`). So SERVED 49 -> 54 and LIVE 31 -> 29
+        # (−7 + 5), i.e. 29 live + 25 retired writer shims = 54 served.
+        assert len(WRITE_TOOL_NAMES) == 54, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 31, f"live write census moved: {len(live)}"
+        assert len(live) == 29, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.
@@ -2330,10 +2343,12 @@ class TestToolIdentity:
         served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
         writers = sorted(e.name for e in served if e.writes)
 
-        # 49 = the served writer census (31 live + 18 retired shims; #11609 lane B
-        # moved the advertised number and left the served one larger than 43).
+        # 54 = the served writer census (29 live + 25 retired shims) at this head:
+        # #11609 lane B moved the advertised number and left the served one larger
+        # than 43; lane C then retired SEVEN advertised writers into its containers
+        # (still served, #3883) and added FIVE writing containers (+5 served, -2 live).
         # Pinned here so the derived loop below can never pass by covering nothing.
-        assert len(writers) == 49, writers
+        assert len(writers) == 54, writers
         for name in ("tortoise_index_files", "tortoise_dream",
                      "tortoise_index_sessions", "tortoise_ingest_corpus",
                      "tortoise_org_create"):

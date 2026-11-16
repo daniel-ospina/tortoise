@@ -134,11 +134,14 @@ class TestTheRiskAxis:
         #   (68 - 14 retired + 6 containers) and retired 23 -> 37 (23 + 14), so
         #   91 -> 97 = 91 + 6 — exactly the six containers, which is the arithmetic a
         #   reader can check against the two registry lengths.
-        #   The READING population is unchanged at 48 (46 read + 2 maintenance): none of
-        #   the six containers reads — four are `destructive` and two are `write` — so
-        #   this batch redistributes the WRITING census only and leaves this one alone.
-        assert len(reading) == 48, sorted(reading)   # 46 read + 2 maintenance
-        assert len(served()) == 97, sorted(e.name for e in served())
+        #   The READING population is 48 after lane B (46 read + 2 maintenance): none of
+        #   lane B's six containers reads — four are `destructive` and two are `write` — so
+        #   that batch redistributed the WRITING census only.
+        #   #11609 lane C then added ONE reading-eligible container, `tortoise_check_connection`
+        #   (tier `read`), and five writing ones, so 48 -> 49 here and the served census
+        #   97 -> 103 (59 live + 44 retired; the seven doors it retires stay SERVED as shims).
+        assert len(reading) == 49, sorted(reading)   # 47 read + 2 maintenance
+        assert len(served()) == 103, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
@@ -256,6 +259,12 @@ class TestTheRiskAxis:
             # `record_decision` appends a decision row (`file_decision`), and neither
             # rewrites a row the call did not name.
             "tortoise_write_question", "tortoise_record_decision",
+            # #11609 lane C (SOURCES/MINE/SESSION): `register_source` creates the source
+            # row the caller names and stores only the caller's own `credibilityTier` —
+            # it rewrites no row the call did not name, which is why it is the fifth
+            # container and the only one of those five that is ADDITIVE (the other four
+            # re-ingest a corpus and sit in the destructive pin above).
+            "tortoise_register_source",
         }, sorted(writes)
 
     def test_the_maintenance_tier_is_exactly_the_ruling(self):
@@ -464,8 +473,14 @@ class TestHintsCannotDrift:
         # SERVED and keeps its tier: destructive 24 -> 28 (+4: `update_knowledge`,
         # `supersede_knowledge`, `adjust_relationship`, `refresh_confidence`), write
         # 15 -> 17 (+2: `write_question`, `record_decision`), admin unchanged at 4.
-        # 28 + 17 + 4 = 49, which is the measured `len(expected)`.
-        assert len(expected) == 49, sorted(expected)  # census, hard-coded
+        # 28 + 17 + 4 = 49, which is the measured `len(expected)` at that head.
+        # 49 -> 54 for lane C: its six containers are ONE read (`check_connection`) and
+        # FIVE writing — `register_source` (write), `manage_source_trust`,
+        # `index_sources_from_directory`, `mine_knowledge_from_session`,
+        # `mine_knowledge_from_directory` (destructive) — and the seven doors it retires are
+        # NOT subtracted, because a retired door stays SERVED and keeps its tier. Measured:
+        # destructive 28 -> 32, write 17 -> 18, admin 4. 32 + 18 + 4 = 54.
+        assert len(expected) == 54, sorted(expected)  # census, hard-coded
 
 
 class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
