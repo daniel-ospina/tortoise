@@ -5975,15 +5975,23 @@ def tortoise_invalidate(id: str, corrected_by_id: str,
     return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"), id, corrected_by_id)
 
 
-def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True,
+def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool | None = None,
                        dry_run: bool = False) -> dict:
     """Atomically replace old Point with new — CORRECTS edge + outdated flag.
 
-    transfer_edges=True (default): full supersede — all edges move from old to
-    new. transfer_edges=False: invalidate behavior — mark old outdated with a
-    CORRECTS edge only (no edge transfer). Absorbs tortoise_invalidate.
-    Returns {invalidated, id, corrected_by} (+ edges_transferred when
-    transfer_edges=True).
+    transfer_edges=None (default, NOT SUPPLIED): the SDK picks the arm by the
+    OLD node's label — a full supersede for a Point, the family supersede for an
+    Object/Subject. transfer_edges=True: full supersede — all edges move from
+    old to new. transfer_edges=False: invalidate behavior — mark old outdated
+    with a CORRECTS edge only (no edge transfer). Absorbs tortoise_invalidate.
+    Returns {invalidated, id, corrected_by} (+ edges_transferred when the
+    supersede arm ran).
+
+    ⛔ The default is `None`, not `True` (#12914 review P3 + re-review finding 2):
+    passing `True` is a CALLER CHOICE the Object/Subject arm cannot honour, so it
+    is REFUSED there rather than silently dropped — and this container must not
+    manufacture that choice on the caller's behalf by defaulting to it. It passes
+    the value through UNCHANGED; the SDK owns the one dispatch rule.
 
     dry_run=True previews exactly which edges would transfer and changes
     nothing; dry_run=False (default) applies the supersede.
@@ -8147,17 +8155,28 @@ def tortoise_update_knowledge(id: str, props: Any = None,
 
 
 def tortoise_supersede_knowledge(old_id: str, new_id: str,
-                                 transfer_edges: bool = True,
+                                 transfer_edges: bool | None = None,
                                  dry_run: bool = False) -> dict:
     """Replace a node with a successor — dispatching on the LINK POLICY (#4282 row 23).
 
-      transfer_edges=True  (default) → FULL SUPERSEED. CORRECTS edge, outdated flag,
-                                       and every edge moves from old to new.
-                                       Was `tortoise_supersede`.
-      transfer_edges=False           → INVALIDATE ONLY. Outdated flag + a CORRECTS
-                                       edge; nothing is transferred. This is the
-                                       whole of `tortoise_invalidate`, so that door
-                                       retires here rather than into a fourth verb.
+      transfer_edges=None (default, NOT SUPPLIED) → the SDK picks the arm by the
+                                       OLD node's label: a full supersede for a
+                                       :Point, the family supersede for an
+                                       :Object/:Subject.
+      transfer_edges=True            → FULL SUPERSEED (Point only). CORRECTS edge,
+                                       outdated flag, and every edge moves from
+                                       old to new. Was `tortoise_supersede`.
+      transfer_edges=False           → INVALIDATE ONLY (Point only). Outdated flag
+                                       + a CORRECTS edge; nothing is transferred.
+                                       This is the whole of `tortoise_invalidate`,
+                                       so that door retires here rather than into a
+                                       fourth verb.
+
+    ⛔ The default is `None`, not `True` (#12914 re-review finding 2): either
+    boolean is a Point-arm choice the family arm refuses, so defaulting to `True`
+    made every Object/Subject call here hit that refusal — a regression on the
+    only public route for a family supersede. The value is passed through
+    UNCHANGED; the SDK owns the one dispatch rule.
 
     dry_run=True previews the transition — which edges would move — and changes
     nothing; it runs the same guards, so a rejected input is rejected in the
@@ -11017,7 +11036,7 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     `edges_already_present_at_new` names those no-ops; both are multiplied by
     `successor_nodes` when a duplicate successor id fans the writer out.
     """
-    if not transfer_edges:
+    if transfer_edges is not None and not transfer_edges:
         out = _preview_invalidate(sdk, old_id, new_id)
         out["tool"] = "tortoise_supersede"
         out["would"] = "invalidate (transfer_edges=false)"

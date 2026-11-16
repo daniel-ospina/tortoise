@@ -126,7 +126,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: d741bd4a5a8d45198ec9c8fd2324c93ca746af5e
+cut_at_commit: bc00777726eedad9620bebfbe30e2c2453611060
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1559,8 +1559,8 @@ rows:
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_supersede_knowledge
-  served_from: tortoise/mcp_server.py:e7034d3eb0fb550f
-  served_attributes: a546b21f5ed08523
+  served_from: tortoise/mcp_server.py:8e1eac1c6e5edae1
+  served_attributes: 3b483f3ddfc755b7
   family: memory
   family_rank: 1
   served: http

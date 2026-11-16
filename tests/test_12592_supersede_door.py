@@ -1778,3 +1778,104 @@ def test_transfer_edges_is_refused_on_the_family_arm_in_BOTH_directions(sdk):
     out = sdk.supersede_knowledge(node, successor)
     assert out["superseded"] is True, out
     assert _row(sdk, "Object", node)[0] == "superseded"
+
+
+def test_the_ENTRY_ARMS_resolve_every_id_on_the_bytes_the_write_sends(sdk):
+    """The rebind must sit ABOVE the label read and the lifecycle guards.
+
+    Measured at the parent commit (#12914 re-review finding 3), where the rebind
+    lived inside ``_supersede_entity`` — below ``_supersession_label`` and below
+    ``supersede_point``'s source guard:
+
+    * TERMINAL-GUARD BYPASS: an ``old_id`` whose BASE CONTENT is an
+      already-``superseded`` Point but whose ``replace()`` renders a LIVE Point
+      read as live, so ``supersede_point`` ACCEPTED and appended a SECOND
+      ``PointSuperseded`` for a dead claim — the #2498 "re-terminalize a dead
+      claim" harm ``_assert_lifecycle_guard`` exists to prevent.
+    * PHANTOM SUCCESS: an ``old_id`` whose base content is an ``:Object`` and
+      that renders a ``:Point`` resolved AS A POINT, returned
+      ``{'invalidated': True}`` and wrote NOTHING — a record/graph divergence
+      reported as success.
+
+    Mutation: move either rebind below the label read / the source guard -> both
+    cases below stop refusing (and the second returns success having written
+    nothing).
+    """
+    # ── case A: terminal BASE, live RENDER, source operand ────────────────────
+    dead = _make(sdk, "Point", "render-src-dead")
+    sdk.supersede_knowledge(dead, _make(sdk, "Point", "render-src-dead-v2"))
+    assert _row(sdk, "Point", dead)[0] == "superseded"
+
+    live = _make(sdk, "Point", "render-src-live")
+    live_before = _row(sdk, "Point", live)
+
+    render_live = _StrSubLyingRender(dead)
+    render_live.render_as = live
+
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede_point(render_live, _make(sdk, "Point", "render-src-succ"))
+    assert "already terminal" in str(exc.value), (
+        f"the source guard read the RENDERED id instead of the base content: "
+        f"{exc.value!r}")
+    assert _row(sdk, "Point", live) == live_before, (
+        f"a refused call moved the render target: {_row(sdk, 'Point', live)}")
+
+    # ── case B: an :Object that RENDERS as a :Point ───────────────────────────
+    obj = _make(sdk, "Object", "render-cross")
+    point = _make(sdk, "Point", "render-cross-point")
+    point_before = _row(sdk, "Point", point)
+
+    render_point = _StrSubLyingRender(obj)
+    render_point.render_as = point
+
+    out = sdk.supersede_knowledge(render_point, _make(sdk, "Object", "render-cross-v2"))
+    assert _row(sdk, "Point", point) == point_before, (
+        f"the call resolved the RENDERED :Point and touched it: "
+        f"{_row(sdk, 'Point', point)}")
+    assert not out.get("invalidated"), (
+        f"the call took the Point INVALIDATE arm for an :Object id it rendered "
+        f"as a Point, having written nothing: {out}")
+    assert _row(sdk, "Object", obj)[0] == "superseded", (
+        f"a success that did not land on the row it names: {_row(sdk, 'Object', obj)}")
+
+
+def test_transfer_edges_None_is_the_ONLY_default_and_other_falsy_values_keep_their_arm(sdk):
+    """Pin the ARM SELECTION for every supplied value, not just the two singletons.
+
+    #12914 re-review finding 4, measured at the parent commit: pinning
+    ``is True`` / ``is False`` left the original defect reachable for every other
+    value — on the family arm ``1``, ``0``, ``'yes'`` and ``1.0`` were still
+    silently dropped — and keying the Point arm on ``is False`` re-pointed the
+    falsy non-bools: ``transfer_edges=0`` / ``''`` took the SUPERSEED arm
+    (``edges_transferred`` counted real edges) where ``not transfer_edges`` had
+    always taken INVALIDATE, i.e. the *more* destructive arm.
+
+    Mutations, each reddening one block below:
+      * family arm keyed on ``is True`` -> the ``1`` / ``'yes'`` / ``1.0`` cases stop refusing;
+      * Point arm keyed on ``is False``   -> the ``0`` / ``''`` cases supersede instead of invalidating.
+    """
+    node = _make(sdk, "Object", "arm-values")
+    successor = _make(sdk, "Object", "arm-values-v2")
+    for value in (True, False, 1, 0, "yes", 1.0):
+        with pytest.raises(ValueError) as exc:
+            sdk.supersede_knowledge(node, successor, value)
+        assert "transfer_edges=" in str(exc.value), (value, str(exc.value))
+    assert _row(sdk, "Object", node)[0] != "superseded", "a refused keyword wrote"
+
+    # The omitted keyword is the ONLY value that takes the family arm.
+    assert sdk.supersede_knowledge(node, successor)["superseded"] is True
+
+    # A Point: a falsy non-bool keeps INVALIDATE (the arm it always took); the
+    # omitted keyword keeps FULL SUPERSEED.
+    for value in (0, "", []):
+        p = _make(sdk, "Point", f"arm-point-falsy-{type(value).__name__}")
+        out = sdk.supersede_knowledge(p, _make(sdk, "Point", f"arm-point-v2-{id(value)}"),
+                                      value)
+        assert out.get("invalidated") is True, (value, out)
+        assert "edges_transferred" not in out, (value, out)
+
+    p = _make(sdk, "Point", "arm-point-default")
+    out = sdk.supersede_knowledge(p, _make(sdk, "Point", "arm-point-default-v2"))
+    assert out.get("invalidated") is True, out
+    assert out.get("edges_transferred") == 0 or isinstance(
+        out.get("edges_transferred"), int), out

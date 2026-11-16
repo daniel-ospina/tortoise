@@ -18622,7 +18622,7 @@ class TortoiseSDK:
         Supersessions ride the payload's ``supersessions`` channel (#2164):
         ``commit_ops.apply_supersessions`` applies each record AFTER the
         entities/points it references exist (ordering contract) — ``pt_`` refs
-        → the canonical ``supersede()`` (CORRECTS + outdated + edge transfer);
+        → the canonical ``supersede_point`` (CORRECTS + outdated + edge transfer);
         entity refs → an ``ObjectSuperseded`` event (id-style, journaled with
         full provenance) + the ``_fold_object_superseded`` status fold. Fold
         misses/skips/failures are surfaced through the shared meta
@@ -19545,7 +19545,7 @@ class TortoiseSDK:
                         payload, _capture_reverse_id_map.get(pid, pid))
                     or _folded_content_by_id.get(pid, "")))
         # #2164: supersessions — client-derived records (the deterministic
-        # channel for the Object status fold; §6b parity). pt_ → supersede()
+        # channel for the Object status fold; §6b parity). pt_ → supersede_point
         # CORRECTS; entity-level → ObjectSuperseded + fold. Runs after points/
         # entities exist (ordering contract). Warnings ride meta under the
         # helper's BOUNDED #5654 contract: the first
@@ -22936,9 +22936,11 @@ class TortoiseSDK:
         return {"invalidated": True, "id": id, "corrected_by": corrected_by_id}
 
     # ── Supersede / Invalidate consolidation (epic #888 W2) ───────────
-    # supersede() is the unified node-lifecycle entry; transfer_edges picks the
-    # full transfer (supersede_point) or the invalidate behavior
-    # (invalidate_point). Legacy methods remain the implementations.
+    # `supersede_knowledge` is the unified node-lifecycle entry (#12592 retired
+    # the bare `supersede` name); `transfer_edges` picks the full transfer
+    # (supersede_point) or the invalidate behavior (invalidate_point) on the
+    # Point arm, and the OLD node's label picks the family arm otherwise.
+    # Legacy methods remain the implementations.
 
     def supersede_knowledge(self, old_id: str, new_id: str,
                             transfer_edges: bool | None = None, *,
@@ -22951,7 +22953,10 @@ class TortoiseSDK:
         *"Carries an explicit link policy — whether the old node's links follow the
         successor"*. That is ``transfer_edges``:
 
-          transfer_edges=True  (default) → FULL SUPERSEED. CORRECTS edge + outdated
+          transfer_edges=None (default, NOT SUPPLIED) → the arm is chosen by the OLD
+                              node's label: a full supersede for a :Point, the
+                              family supersede for an :Object/:Subject.
+          transfer_edges=True → FULL SUPERSEED (:Point only). CORRECTS edge + outdated
                               flag + ALL edges transferred from old to new.
                               Absorbs ``supersede_point`` — and with it the
                               bi-temporal window kwargs below, which the old
@@ -22962,7 +22967,7 @@ class TortoiseSDK:
                               ``valid_from`` is the same "returned success having
                               recorded part of it" class this surface refuses
                               everywhere else, so the kwargs are carried here.
-          transfer_edges=False → INVALIDATE ONLY. Outdated flag + a CORRECTS edge,
+          transfer_edges=False → INVALIDATE ONLY (:Point only). Outdated flag + a CORRECTS edge,
                               NO edge transfer. Absorbs the ``supersede(...,
                               transfer_edges=False)`` arm; ``invalidate_point``
                               itself STAYS public, because its
@@ -23007,6 +23012,24 @@ class TortoiseSDK:
         or a Subject. Raises ``ValueError`` on missing/self/terminal/cross-family
         input (both Point legs route through the ONE shared lifecycle guard, #2498).
         """
+        # ⛔ NORMALISE THE OPERANDS BEFORE ANYTHING READS THEM (#12914 review P1,
+        # re-review finding 3). Every read below — `_supersession_label`, the
+        # lifecycle/terminal guards, the per-family probes, the write — must see
+        # the SAME bytes, and the bytes the driver sends are `quote_string`'s
+        # rendering of the caller's object (`v.replace(...)` + a format), NOT its
+        # base content. Measured while the rebind sat INSIDE `_supersede_entity`
+        # (below this point): an `old_id` whose base content is an `:Object` and
+        # whose `replace()` renders a `:Point` RESOLVED AS A POINT, passed the
+        # Point guards, appended a `PointSuperseded` record and wrote NOTHING —
+        # a record/graph divergence reported as `{'invalidated': True}`. Rebinding
+        # here, at the entry the label and both arms derive from, makes the guard,
+        # the probes and the wire one value. Behaviour for a plain `str` and for a
+        # genuinely non-`str` id is unchanged (`str.__str__` is identity on the
+        # former and the rebind is skipped for the latter).
+        if issubclass(type(old_id), str):
+            old_id = str.__str__(old_id)
+        if issubclass(type(new_id), str):
+            new_id = str.__str__(new_id)
         label = self._supersession_label(old_id)
         # ⛔ AN IMPOSTOR ID IS REFUSED AT THE DOOR (#12914 review P2). A value
         # that declares ``__class__ = str`` without being one passes
@@ -23026,26 +23049,21 @@ class TortoiseSDK:
                 f"graph cannot encode it (#12907). Pass the id string itself."
             )
         if label in ("Object", "Subject"):
-            # ⛔ THE FAMILY ARM CANNOT TRANSFER EDGES, SO IT REFUSES THE KEYWORD IN
-            # BOTH DIRECTIONS (#12914 review P3). `transfer_edges` defaulted to
-            # `True`, so an EXPLICIT `True` here was silently DROPPED — no edges
-            # transferred and no `edges_transferred` in the return — while
-            # `False` on the same labels was refused. That is exactly the
-            # "a keyword the chosen arm cannot RECORD is refused, never dropped"
-            # rule this file states for the Point arm (#10053), so the default is
-            # now `None` (= not supplied) and an explicit `True` is refused like
-            # `False`. `None` keeps every omitted-keyword call working, and the
-            # Point arm reads the keyword as `is False` / `is not False`.
-            if transfer_edges is True:
-                raise ValueError(
-                    f"supersede_knowledge: transfer_edges=True cannot be honoured on "
-                    f"a :{label} — the family arm records status='superseded' + "
-                    f"supersededBy + supersededAt and performs NO edge transfer "
-                    f"(`outdated` + a `CORRECTS` edge + edge transfer are a "
-                    f"Point's machinery, ONTOLOGY §4.7). Drop the keyword to take "
-                    f"this arm, or call it for a Point."
-                )
+            # ⛔ THE FAMILY ARM CANNOT TRANSFER EDGES, SO IT REFUSES THE KEYWORD —
+            # ANY SUPPLIED VALUE (#12914 review P3, re-review findings 4 + 2).
+            # `transfer_edges` defaulted to `True`, so an EXPLICIT `True` here was
+            # silently DROPPED — no edges transferred and no `edges_transferred`
+            # in the return — while `False` on the same labels was refused. That
+            # is exactly the "a keyword the chosen arm cannot RECORD is refused,
+            # never dropped" rule this file states for the Point arm (#10053).
+            # The test is `is not None`, not `is True`: pinning the two singletons
+            # left `1`, `0`, `'yes'`, `1.0` still silently dropped (measured), so
+            # the singleton shape only narrowed the defect. `None` is the
+            # not-supplied default and is the ONLY value that takes this arm.
             if transfer_edges is False:
+                # The INVALIDATE half keeps its own prescription: a :{label} that
+                # was retired with no successor is `archived`, and that is the
+                # repair a caller who wanted this arm actually needs.
                 raise ValueError(
                     f"supersede_knowledge: transfer_edges=False is the INVALIDATE half, "
                     f"and it is Point-only — `outdated` + a `CORRECTS` edge are "
@@ -23055,6 +23073,17 @@ class TortoiseSDK:
                     f"`update_knowledge({_refusal_repr(old_id)}, status='archived')` "
                     f"— or, if it WAS replaced, name the successor with "
                     f"`supersede_knowledge({_refusal_repr(old_id)}, <successor id>)`."
+                )
+            if transfer_edges is not None:
+                raise ValueError(
+                    f"supersede_knowledge: transfer_edges={transfer_edges!r} cannot be "
+                    f"honoured on a :{label} — that keyword is Point-only: "
+                    f"`outdated` + a `CORRECTS` edge + edge transfer are a Point's "
+                    f"machinery (ONTOLOGY §4.7), while this arm records "
+                    f"status='superseded' + supersededBy + supersededAt with NO edge "
+                    f"transfer. Drop the keyword to take this arm, or call it for a "
+                    f"Point; a :{label} retired with no successor is "
+                    f"`update_knowledge(id, status='archived')`."
                 )
             # The family write records status + carrier + stamp; it has no slot
             # for a bi-temporal window, so a window kwarg is refused here rather
@@ -23088,8 +23117,14 @@ class TortoiseSDK:
         # same value, which is why the Object/Subject arm is untouched.
         if isinstance(new_id, str) and not issubclass(type(new_id), str):
             raise ValueError(f"No point {_refusal_repr(new_id)}")
-        if transfer_edges is False:            # `is False`, not `not`: `None` is the
-            # not-supplied default and must take the SUPERSEED arm (see above).
+        if transfer_edges is not None and not transfer_edges:
+            # `is not None and not …`, not `is False` (#12914 re-review finding 4):
+            # the `None` default means NOT SUPPLIED and must keep taking the
+            # SUPERSEED arm, while every other falsy value a caller can pass —
+            # `0`, `''`, `[]` — must keep selecting INVALIDATE exactly as
+            # `not transfer_edges` did before the default changed. Keying on
+            # `is False` alone silently redirected those to the MORE destructive
+            # arm (measured: `transfer_edges=0` transferred real edges).
             # The window kwargs are SUPERSEED facts (the predecessor's end is the
             # successor's start; the precision marker closes its window). The
             # invalidate arm writes its own window end and can carry neither, so
@@ -23211,19 +23246,11 @@ class TortoiseSDK:
                      if issubclass(type(old_id), str) else old_id)
         _new_word = (str.__str__(new_id)
                      if issubclass(type(new_id), str) else new_id)
-        # ⛔ THE BASE CONTENT IS WHAT THE DOOR *ACTS ON*, so it is what the door
-        # must SEND (#12914 review P1). Comparing base content while probing and
-        # writing the CALLER'S OBJECT is a guard/wire split: the driver renders
-        # an id through `falkordb.helpers.quote_string`, which calls
-        # `v.replace(...)` and formats the caller's object — so a `str` subclass
-        # overriding `replace` renders DIFFERENT bytes from its base content.
-        # Measured on the reviewed head: base `"fff"` rendering `MinOld` walked
-        # past the self-successor gate (base content differs) and the write
-        # stored `['MinOld', 'superseded', 'MinOld']` — the row naming ITSELF as
-        # its successor, the exact state `old_id != new_id` exists to refuse.
-        # Rebinding the operands to their base content makes guard, probe and
-        # wire the SAME bytes by construction, and it is also the value the
-        # door reports back (`id`) — the stored one.
+        # ⛔ The operands were already rebound to base content at the ENTRY of
+        # `supersede_knowledge` (#12914 review P1, re-review finding 3), so these
+        # are the same bytes the probes and the write send. Kept as the local
+        # spelling the comparison and the sibling probe read, so a future edit
+        # cannot reintroduce a caller-object read here without failing those.
         old_id = _old_word
         new_id = _new_word
         if (issubclass(type(old_id), str) and issubclass(type(new_id), str)
@@ -23485,6 +23512,23 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
+        # ⛔ BOUND BEFORE THE GUARDS, NOT AFTER (#12914 re-review finding 3).
+        # The driver renders a parameter through `quote_string` -> `v.replace(...)`
+        # + a format, so the bytes it sends are NOT the operand's base content
+        # when the operand is a `str` subclass. Rebinding here — above the source
+        # guard, the successor comparison and the target guard — is what makes
+        # "guard, probes and wire are the same bytes" true; sitting below the
+        # source guard it left the split open, and measured: an `old_id` whose
+        # base content is an already-`superseded` Point but whose `replace()`
+        # renders a LIVE Point passed the terminal guard and appended a SECOND
+        # `PointSuperseded` for a dead claim — the #2498 harm that guard exists
+        # to prevent. (`str.__str__` on a plain `str` is identity, so nothing
+        # about an ordinary call changes.)
+        if issubclass(type(old_id), str):
+            old_id = str.__str__(old_id)
+        if issubclass(type(new_id), str):
+            new_id = str.__str__(new_id)
+
         # #432/#2498: the SHARED transition guard — old point must exist, be
         # a statement (not an operator), and not already be terminal. The
         # pre-#2498 body hardcoded a 3-status subset, so an `outdated` /
@@ -23513,24 +23557,21 @@ class TortoiseSDK:
         # that pair is compared in BASE CONTENT (the bound ``_supersede_entity``
         # carries on the entity arm, cycle 7). Every other pair keeps exactly the
         # comparison it had, so no non-``str`` id changes behaviour here.
-        _old_is_str = issubclass(type(old_id), str)
-        _new_is_str = issubclass(type(new_id), str)
-        # ⛔ THE SAME GUARD/WIRE SPLIT AS THE ENTITY ARM (#12914 review P1): the
-        # comparison is base content, but `_assert_lifecycle_guard` and the write
-        # send the CALLER'S OBJECT, which the driver renders through
-        # `quote_string` -> `v.replace(...)`. A `str` subclass overriding
-        # `replace` therefore renders an id this gate never compared, and the
-        # write stored `CORRECTS <id> -> <id>`. Rebinding to base content makes
-        # the guard, the probes and the wire the same bytes.
-        if _old_is_str:
-            old_id = str.__str__(old_id)
-        if _new_is_str:
-            new_id = str.__str__(new_id)
-        if _old_is_str and _new_is_str:
-            _same_successor = str.__str__(old_id) == str.__str__(new_id)
-        else:
-            _same_successor = old_id == new_id
-        if _same_successor:
+        # ⛔ THE COMPARISON IS A CALLER READ TOO (#12914 review P2, cycle 9): `==`
+        # on an operand that is not genuinely `str` dispatches to the caller —
+        # ``str.__eq__`` answers ``NotImplemented`` for a GENUINE ``str``
+        # SUBCLASS that overrides ``__eq__``, so the subclass's answer is the one
+        # that lands. Measured: a str subclass whose ``__eq__`` returns False
+        # walked ``supersede_knowledge(<live Point>, SubLyingEq(<the same id>))``
+        # past this gate, and the write stored the row as its OWN successor —
+        # row ``['superseded', True, None]`` with a ``CORRECTS`` edge
+        # ``<id> -> <id>`` — the exact state this gate exists to refuse. The
+        # rebind at the TOP of this method (re-review finding 3) already reduced
+        # every genuinely-`str` operand to its base content, so this comparison
+        # runs on base content for that pair without ever calling the caller's
+        # `__eq__`; a non-``str`` pair keeps exactly the comparison it had, so no
+        # non-``str`` id changes behaviour here.
+        if old_id == new_id:
             raise ValueError("supersede_point: old_id and new_id must differ")
         # #2498: the SAME shared guard for the successor — a terminal (or
         # operator) target would terminalize the old point with no valid
@@ -49576,7 +49617,7 @@ class TortoiseSDK:
         accepts a DECLARED terminalizing POINT target and writes no
         `CORRECTS` successor record. This guard closes only the half §4.3 names —
         the word without a pointer — and says so in the repair, which names
-        :meth:`supersede` (the door that also mints the edge) rather than
+        :meth:`supersede_knowledge` (the door that also mints the edge) rather than
         prescribing the bare pair for a Point.
 
         ⛔ SCOPE: THE **UPDATE** DOOR, AND THE CREATE DOOR IS A DISCLOSED RESIDUAL.
