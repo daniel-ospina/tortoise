@@ -109,13 +109,28 @@ def _falkor_client():
     from urllib.parse import unquote, urlparse  # noqa: PLC0415
 
     from falkordb import FalkorDB  # noqa: PLC0415
-    uri = (os.environ.get("TORTOISE_DB_URI") or "").strip()
+    # ⛔ THE COUNTING CLIENT TAKES ITS URI FROM ITS OWN VARIABLE. To reproduce the
+    # DEFECT shape the write path must run with `TORTOISE_DB_URI` EMPTY
+    # (`_make_sdk` branches on its truthiness) — but the cache then has to be
+    # counted on a server that URI would have named, or the "0" is an artefact of
+    # looking nowhere. `CACHE_COUNT_URI` (default `TORTOISE_DB_URI`) separates
+    # the two questions: where the SDK writes, and where we look. Without it this
+    # harness could not produce the second row of its own table (review cycle 2).
+    uri = (os.environ.get("CACHE_COUNT_URI")
+           or os.environ.get("TORTOISE_DB_URI") or "").strip()
     parsed = urlparse(uri)
     if not parsed.hostname:
         raise SystemExit(
-            f"TORTOISE_DB_URI ({uri.split('://')[0] or 'empty'}://…) names no "
-            "host — export the lane's docker:// URI, e.g. "
-            "`uv run python tools/test_lane.py uri`")
+            "neither CACHE_COUNT_URI nor TORTOISE_DB_URI names a host — export "
+            "one, e.g. `uv run python tools/test_lane.py uri`")
+    if parsed.scheme.endswith("s") or "ssl" in parsed.scheme:
+        # `rediss://` / `redis+ssl://` are TLS endpoints; `FalkorDB` here has no
+        # ssl flag, so dialling them would silently fall back to cleartext and
+        # surface as an auth/timeout error that blames the wrong thing.
+        raise SystemExit(
+            f"{parsed.scheme}:// is a TLS scheme this harness cannot dial "
+            "(it passes no ssl=True); point it at the lane's plaintext "
+            "docker:// URI instead")
     return FalkorDB(host=parsed.hostname, port=parsed.port or 6379,
                     password=unquote(parsed.password) if parsed.password else None)
 
@@ -154,7 +169,10 @@ def main() -> int:
     sdk._bind_record_tenant(org, graph_id)
     print(f"tenant           org={org} graph={graph_id}")
     print(f"cache graph      {ns}")
-    print(f"TORTOISE_DB_URI  {os.environ['TORTOISE_DB_URI']}")
+    print(f"TORTOISE_DB_URI  {os.environ.get('TORTOISE_DB_URI', '<unset>')!r}"
+          f"  (write path)")
+    print(f"CACHE_COUNT_URI  "
+          f"{os.environ.get('CACHE_COUNT_URI', '<defaults to TORTOISE_DB_URI>')}")
     print(f"record DSN set   {'yes' if os.environ.get('TORTOISE_RECORD_DSN') else 'no'}")
 
     writes: list[dict] = []
@@ -196,6 +214,8 @@ def main() -> int:
     print("\n── cache (FalkorDB) ──")
     for k, v in cache.items():
         print(f"  {k:14s} {v}")
+    print("\n── the cache leg's own counter ──")
+    print("  " + json.dumps(monitoring.cache_leg_failure_counts(), sort_keys=True))
     print("\n── monitoring.metrics() deltas ──")
     print("  " + (json.dumps(deltas, sort_keys=True) if deltas else "(none)"))
     print("\n── writes returned ──")
@@ -209,7 +229,14 @@ def main() -> int:
 
     result = {
         "org": org, "graph_id": graph_id, "cache_graph": ns,
-        "record": record, "cache": cache, "metric_deltas": deltas,
+        # Which shape this run measured — the README's table keys on it.
+        "write_path_uri": os.environ.get("TORTOISE_DB_URI") or None,
+        "cache_count_uri_source": ("CACHE_COUNT_URI"
+                                   if os.environ.get("CACHE_COUNT_URI")
+                                   else "TORTOISE_DB_URI"),
+        "record": record, "cache": cache,
+        "cache_leg_failures": monitoring.cache_leg_failure_counts(),
+        "metric_deltas": deltas,
     }
     out = Path(os.environ.get("SUMMARY_OUT",
                               str(Path(__file__).with_name("last-run.json"))))

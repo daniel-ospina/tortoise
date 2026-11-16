@@ -1,0 +1,45 @@
+{
+  "_what": "#12943 - the two arms of the measure.py table, captured verbatim. arm-a = TORTOISE_DB_URI set (shared cache); arm-b = TORTOISE_DB_URI empty (the defect shape), cache counted via CACHE_COUNT_URI.",
+  "arm_a_shared_cache": {
+    "cache": {
+      "Event": 0,
+      "Object": 2,
+      "Point": 3,
+      "Source": 0,
+      "Subject": 0
+    },
+    "cache_count_uri_source": "CACHE_COUNT_URI",
+    "cache_leg_failures": {},
+    "record": {
+      "event": 0,
+      "journal_event": 6,
+      "object": 2,
+      "point": 3,
+      "relation": 4,
+      "subject": 0
+    },
+    "write_path_uri": "docker://:@127.0.0.1:16419/tortoise_test_matrix"
+  },
+  "arm_b_local_cache": {
+    "cache": {
+      "Event": 0,
+      "Object": 0,
+      "Point": 0,
+      "Source": 0,
+      "Subject": 0
+    },
+    "cache_count_uri_source": "CACHE_COUNT_URI",
+    "cache_leg_failures": {
+      "cache_not_shared": 2
+    },
+    "record": {
+      "event": 0,
+      "journal_event": 6,
+      "object": 2,
+      "point": 3,
+      "relation": 4,
+      "subject": 0
+    },
+    "write_path_uri": null
+  }
+}

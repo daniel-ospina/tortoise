@@ -58,6 +58,7 @@ APP_PASSWORD = "app12943"
 
 def main() -> int:
     import psycopg2                                   # noqa: PLC0415
+    from urllib.parse import urlparse                  # noqa: PLC0415
 
     from tortoise import record_projection            # noqa: PLC0415
 
@@ -72,9 +73,19 @@ def main() -> int:
         # The role is created NOLOGIN/NOBYPASSRLS by the tenancy migration.
         cur.execute(f"ALTER ROLE {APP_ROLE} LOGIN PASSWORD %s", (APP_PASSWORD,))
     conn.close()
-    host = dsn.rsplit("@", 1)[1]
+    # `rsplit("@", 1)[1]` raises IndexError on a credential-less DSN — the same
+    # shape review cycle 2 removed from the other two parsers in this directory
+    # (#12943). And it fires AFTER the migrations and the ALTER ROLE have
+    # committed, so a crash here reads as "provisioning failed" to a caller whose
+    # database is in fact provisioned.
+    parsed = urlparse(dsn)
+    if not parsed.hostname:
+        print("app DSN: (unparseable RECORD_DSN — provisioning SUCCEEDED, but "
+              "the DSN could not be rendered; check RECORD_DSN)")
+        return 0
+    host = f"{parsed.hostname}:{parsed.port}" if parsed.port else parsed.hostname
     print(f"provisioned {len(record_projection.RECORD_MIGRATIONS)} migrations")
-    print(f"app DSN: postgresql://{APP_ROLE}:{APP_PASSWORD}@{host}")
+    print(f"app DSN: postgresql://{APP_ROLE}:{APP_PASSWORD}@{host}{parsed.path}")
     return 0
 
 

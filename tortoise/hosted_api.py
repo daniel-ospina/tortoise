@@ -7565,6 +7565,13 @@ def _record_health() -> dict:
         "record_write_failures": None,
         "record_non_journal_skips": None,
         "record_position_unproven": None,
+        # #12943: seeded ``None`` for the same reason as the three above — this
+        # is the dict the `counters_error` arm PUBLISHES, so a key that is only
+        # assigned in the `else` arm is ABSENT exactly when the snapshot failed,
+        # and an absent key reads as "the cache is fine" (#9548 review P2's
+        # missing-key class). Caught by review cycle 2; the seeded arm had no
+        # test at all.
+        "cache_leg_failures": None,
         # The POSITIVE pair (#9548): committed writes, and when. Seeded ``None``
         # for the same reason as the three above — an unread counter is not a
         # zero, and a ``0`` here is exactly what a never-writing deployment

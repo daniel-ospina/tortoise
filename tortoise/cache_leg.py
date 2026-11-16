@@ -17,13 +17,16 @@ counted in both stores:
 ===================================  ==================  ================
 record (``public.object``/``point``)  2 / 3               2 / 3
 cache graph ``org_<org>_<gid>``       2 / 3               0 / 0
-``monitoring.metrics()``              ``record_writes_applied`` 0 → 6
+``record_writes_applied``             0 → 6               0 → 6
+``cache_leg_failures`` (this module)  ``{}``              ``{"cache_not_shared": 2}``
 ===================================  ==================  ================
 
 The second column is #12943's own shape for its IN-PROCESS writes (8 objects /
 39 events / 5 operators in Postgres and none of them in FalkorDB), and it is not
 a lost write: it is a write that landed, in full, in a store the record is not
-in. Nothing counted it, nothing warned, and no caller could tell.
+in. Nothing counted it, nothing warned, and no caller could tell — note that
+``record_writes_applied`` is IDENTICAL in both columns, which is why nothing
+downstream could tell them apart until the last row existed.
 
 ⚠️ The issue's cache column is **1**, not 0, and the difference is the
 diagnosis: that one object was written through REST (`POST /v1/objects`) by the
@@ -32,7 +35,9 @@ not reach it. The split is per PROCESS — a write from a process with no
 `TORTOISE_DB_URI` files truth in a shared Postgres and cache in a local file.
 (That is an inference from the issue's numbers plus this code path; it is not a
 measurement of the deployment, which this tree cannot reach. The counter below
-is what confirms it on the app.)
+is what confirms it — but read it on the process that PERFORMED the write: a
+process with a shared cache reports ``{}`` BY CONSTRUCTION, so the app's own
+reading falsifies nothing about a same-deployment worker.)
 
 WHY A COUNTER AND A WARNING, AND NOT A REFUSAL. ⛔ Two recorded decisions
 bound this module, and neither is reversed here:

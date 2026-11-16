@@ -5,6 +5,22 @@ Every number here was produced by `measure.py` against a **throwaway** tenant
 append-only by trigger, so a fixed pair cannot be reused), a real FalkorDB and a
 real Postgres carrying the record's own migrations.
 
+⛔ **Both rows below are runnable as committed** — this was not true of the first
+draft of this file, and the gap mattered: the URI-less row is the one that *is*
+the defect, and a harness that stack-traces when asked to reproduce it is a table
+of inferences under a provenance claim (review cycle 2). Two hooks make it
+runnable: `CACHE_COUNT_URI` names the server the cache is **counted** on,
+separately from `TORTOISE_DB_URI` which decides where the SDK **writes** (default:
+`TORTOISE_DB_URI`), and `TORTOISE_DB_URI` is read with `.get(…, "<unset>")` so an
+absent value prints as absent instead of raising `KeyError`. Run shape:
+
+```bash
+# ARM A — shared cache
+CACHE_COUNT_URI="$LANE_URI" TORTOISE_DB_URI="$LANE_URI" python measure.py
+# ARM B — the defect: record armed, write path URI-less, cache still COUNTED
+CACHE_COUNT_URI="$LANE_URI" TORTOISE_DB_URI='' python measure.py
+```
+
 ```
 provision_record.py   a throwaway record Postgres: the record's migration list
                       (read from record_projection.RECORD_MIGRATIONS) plus
@@ -24,10 +40,24 @@ path uses `tortoise_record_app`, because the rows it files are the subject.
 
 Same tenant, same writes, same record. The only difference is `TORTOISE_DB_URI`.
 
-| | record `object` / `point` / `journal_event` | cache `Object` / `Point` | `monitoring.metrics()` |
-|---|---|---|---|
-| `TORTOISE_DB_URI` **set** | 2 / 3 / 6 | **2 / 3** | `record_writes_applied: 0 → 6`, no failure |
-| `TORTOISE_DB_URI` **empty** | 2 / 3 / 6 | **0 / 0** | `record_writes_applied: 0 → 6`, no failure |
+| | record `object` / `point` / `journal_event` | cache `Object` / `Point` | `record_writes_applied` | `cache_leg_failures` |
+|---|---|---|---|---|
+| `TORTOISE_DB_URI` **set** | 2 / 3 / 6 | **2 / 3** | `0 → 6`, no failure | **`{}`** |
+| `TORTOISE_DB_URI` **empty** | 2 / 3 / 6 | **0 / 0** | `0 → 6`, no failure | **`{"cache_not_shared": 2}`** |
+
+The last column is the fix's own instrument, and reading it beside the others is
+the whole point: **`record_writes_applied` is identical in both rows (0 → 6, no
+failure)** — the record accepted every write either way, which is why nothing
+downstream could tell the two rows apart. Only the cache count differs, and only
+`cache_leg_failures` says so in a number.
+
+⚠️ **`2`, not `1`, and that number is evidence for the counter's unit.**
+`hosted_api._make_sdk` builds an **anchor** SDK and a **per-request** SDK on its
+embedded path (`hosted_api.py`, both `TortoiseSDK(db_path=…)` calls), so one
+harness write path is two constructions. That is exactly why the unit is *SDK
+constructions* and is **not** comparable with the write count beside it — a unit
+mislabelled "writes" would have made this row read as 2 stranded writes when five
+objects were written.
 
 ## Residue this harness leaves
 
@@ -62,9 +92,16 @@ measurement of the deployment: this lane has no access to the hosted app (no
 `_make_sdk` + `_bind_record_tenant` pair, run twice, with and without the URI.
 What the inference buys is the diagnosis: a cache with 1 of 9 writes is not a
 deployment that lacks a cache, it is a process that was not writing to the
-deployment's cache. Whoever runs the repair should confirm it on the app with
-`monitoring.metrics()["cache_leg_failures"]`, which is now the instrument that
-answers it without guessing.
+deployment's cache.
+
+**How to confirm it — on the right process, or the `0` lies.** Read
+`/health`'s `cache_leg_failures` (or `monitoring.metrics()`) on the process that
+**performed** the write. ⛔ A process whose cache IS shared reports `{}` by
+construction (`cache_leg.py`'s predicate returns `None` on any cache URI), so the
+deployed app's own `/health` reading `{}` falsifies **nothing** about a
+same-deployment worker that has no `TORTOISE_DB_URI` — and reading the app's
+number instead of the writer's is the same false-negative this change exists to
+end, one level up.
 
 **So the cache leg does not fail. It succeeds, into a store the record is not
 in.** `TORTOISE_DB_URI` picks the cache and `TORTOISE_RECORD_DSN` picks the

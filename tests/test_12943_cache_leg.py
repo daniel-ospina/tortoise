@@ -182,10 +182,46 @@ def test_the_health_block_carries_it_too(monkeypatch, tmp_path):
     _arm_record(monkeypatch)
     _drop_uri(monkeypatch)
     monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "health.db"))
+    # A DELTA, not an absolute. The counter is process-cumulative, so `>= 1`
+    # would pass off an earlier test's increment and stay green with this test's
+    # construction unhooked (review cycle 2).
+    before = _counts()
     _embedded_sdk(tmp_path).close()
+    assert _delta(before) == {cache_leg.CACHE_NOT_SHARED: 1}
     block = hosted_api._record_health()
     assert "cache_leg_failures" in block, sorted(block)
-    assert block["cache_leg_failures"][cache_leg.CACHE_NOT_SHARED] >= 1
+    assert block["cache_leg_failures"][cache_leg.CACHE_NOT_SHARED] == \
+        before.get(cache_leg.CACHE_NOT_SHARED, 0) + 1
+
+
+def test_the_health_block_carries_the_key_when_the_SNAPSHOT_fails(monkeypatch):
+    """The arm where the key used to vanish (#12943 review cycle 2).
+
+    ``_record_health`` seeds a block and publishes it on the ``counters_error``
+    arm. A key assigned only in the ``else`` arm is ABSENT precisely when the
+    snapshot raised — and an absent key reads as "the cache is fine", which is
+    the illusion this whole change exists to end. Every published counter key
+    must survive the failure arm.
+    """
+    from tortoise import hosted_api
+
+    def _boom(*a, **k):
+        raise RuntimeError("counter snapshot failed")
+
+    # Patched on `tortoise.monitoring`, not on `hosted_api`: `_record_health`
+    # imports its counters INSIDE the function body, so a local import re-reads
+    # this attribute at call time while `hosted_api` has no such attribute to set.
+    monkeypatch.setattr("tortoise.monitoring.cache_leg_failure_counts", _boom)
+    block = hosted_api._record_health()
+    # The degraded shape, not a healthy one.
+    assert block["ok"] is False
+    assert "counter snapshot failed" in block["counters_error"], block
+    # …and the key is still THERE, null, alongside every sibling.
+    for key in ("record_write_failures", "record_non_journal_skips",
+                "record_position_unproven", "record_writes_applied",
+                "record_last_write_at", "cache_leg_failures"):
+        assert key in block, f"{key} vanished on the failure arm: {sorted(block)}"
+        assert block[key] is None, f"{key} = {block[key]!r} on the failure arm"
 
 
 def test_the_warning_names_both_stores_and_the_remedy(monkeypatch, tmp_path,
@@ -284,10 +320,19 @@ def test_a_declared_single_tenant_deployment_may_run_a_local_cache(
 def test_the_test_lane_redirect_is_not_a_split(monkeypatch, tmp_path):
     """Epic #1647's docker-lane redirect rewrites an embedded construction onto
     the ambient server, so the effective store IS shared and counting it would
-    report a split that does not exist. Asserted through the constructor, and
-    through the REAL redirect: an explicit `db_path` plus `TORTOISE_TEST_MODE=1`
-    plus a loopback URI is the shape `projection.FalkorProjection.__init__`
-    rewrites."""
+    report a split that does not exist.
+
+    ⚠️ WHAT THIS PINS, precisely: `cache_leg._redirected_to_a_server` — the
+    MIRROR of the real gate, not the gate. Nothing here opens the projection
+    (`__init__` leaves `self._proj` None, so the rewrite runs lazily), so if
+    `projection.FalkorProjection`'s condition changed — redirect dropped, or
+    narrowed — this test stays green while the mirror silently exempts a
+    genuinely embedded construction (the under-count residual the mirror's own
+    docstring names). Asserting the real redirect means opening the projection
+    and reading where it resolved, which needs a live ambient server; that is
+    `test_each_door_reaches_the_same_shared_stores` below, which skips without
+    one. Said plainly here because the previous docstring claimed "through the
+    REAL redirect", which this assertion does not do (review cycle 2)."""
     _arm_record(monkeypatch)
     monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379/g")
@@ -603,6 +648,13 @@ def test_no_cache_leg_failure_is_counted_when_the_cache_is_shared(monkeypatch):
     from tortoise import hosted_api
 
     sdk = hosted_api._make_sdk(graph_name="org_org1_g1")
+    # ⛔ "THE HOOK RAN AND DECLINED", not just "nothing was counted" (review
+    # cycle 2). A zero delta cannot tell the predicate's `if cache_uri: return
+    # None` arm from a hook that was never reached, so it would stay green if the
+    # call were deleted or pushed back inside an `is None` branch. The SDK's own
+    # attribute is the evidence that the shared-cache arm is the live gate.
+    assert sdk._db_uri, "the shared-cache construction must carry a URI"
+    assert cache_leg.cache_leg_reason(cache_uri=sdk._db_uri) is None
     sdk.close()
     assert _delta(before) == {}
 
