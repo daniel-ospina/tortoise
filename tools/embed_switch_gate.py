@@ -305,6 +305,28 @@ _SHELL_OPENERS = re.compile(
 _SHELL_FN_BRACE = re.compile(r"\)\s*\{|\bfunction\s+[A-Za-z_][A-Za-z0-9_.-]*\s*\{")
 
 
+#: ⛔ A function body's `{` may be on the NEXT LINE (review P1, measured — the ALLMAN spelling):
+#: `arm_gates()` / `{` / `export …` / `}` was credited `ok … =1 =1` (exit 0) while `env -i … bash
+#: script /usr/bin/env` printed nothing. `_SHELL_FN_BRACE` needs the `)` and the `{` on one line, so
+#: every pinned spelling (`arm() {`, `arm() { …; }`, `function arm {`) passed while ONE NEWLINE
+#: defeated all of them. The header is remembered and the following lone `{` is the body's brace.
+_SHELL_FN_HEADER = re.compile(
+    r"^(?:function\s+[A-Za-z_][A-Za-z0-9_.-]*|[A-Za-z_][A-Za-z0-9_.-]*\s*\(\s*\))$"
+)
+
+
+def _statement_is_code(raw: str, view: str) -> bool:
+    """Whether the statement's first non-blank character is CODE, not a blanked span.
+
+    Blanking preserves length, so the check is one byte: inside a multi-line string, a comment or a
+    command substitution the structural view holds a space where the raw text holds a verb. Without
+    it, `echo "to turn it off:` / `unset TORTOISE_EMBED_GATE` / `"` RETRACTED a real export
+    (review P1, measured: the gate refused a process that does receive both switches).
+    """
+    index = len(raw) - len(raw.lstrip())
+    return index < len(view) and raw[index] == view[index]
+
+
 def _function_body_braces(raw: str, view: str) -> int:
     """How many of ``view``'s CODE braces open a FUNCTION BODY (and so a new scope).
 
@@ -394,7 +416,10 @@ _SHELL_ENV_UNSET = re.compile(
     # ⛔ the name may be ATTACHED (`-uK`), which getopt accepts and the first version missed —
     # measured: `exec env -uTORTOISE_VALUE_GATE "$@"` printed `ok … =1` while `/usr/bin/env`
     # showed nothing. `--unset=K` and `-u K` are the same removal.
-    r"(?:^|\s)(?:-u|--unset)(?:\s+|=)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    # ⛔ the NAME may be QUOTED (`env -u "K"`, `env --unset='K'`) — quoting a name is not a
+    # different statement (review P1, measured: the quoted form printed `ok … =1` over a process
+    # without K, while the bare form was correctly refused).
+    r"(?:^|\s)(?:-u|--unset)(?:\s+|=)?[\"']?(?P<name>[A-Za-z_][A-Za-z0-9_]*)[\"']?"
 )
 #: ⛔ `env K=` sets the child's K to EMPTY, which the resolver reads OFF — so it CLEARS the switch
 #: (review P1, measured): `exec env TORTOISE_VALUE_GATE= "$@"` printed `ok … TORTOISE_VALUE_GATE=1`
@@ -756,6 +781,14 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str], dict[str, str]
     while cursor < len(lines):
         line = lines[cursor]
         cursor += 1
+        # ⛔ A COMMENT ends at the newline even when it ends in `\` (review P1, measured). Docker
+        # drops comment lines before continuation joining (`_join_logical` used to do exactly this,
+        # and this reader no longer calls it), so joining across a comment swallowed the NEXT
+        # instruction — both directions measured: a swallowed `FROM … AS final` made the gate
+        # report the BUILDER stage's `ENV` as the image's (`ok`, while `docker inspect` showed no
+        # `TORTOISE_*`), and a swallowed honest `ENV` was reported MISSING.
+        if line.lstrip().startswith("#"):
+            continue
         while line.rstrip().endswith("\\") and cursor < len(lines):
             line = line.rstrip()[:-1] + " " + lines[cursor]
             cursor += 1
@@ -1398,6 +1431,8 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     stated: dict[str, str] = {}
     ambiguous: set[str] = set()
     depth = 0
+    #: Set when the previous statement was a function HEADER, so the next `{` is a body.
+    pending_fn_header = False
     #: How many of `depth` are FUNCTION BODIES rather than control flow (see `nested_retracts`).
     fn_body = 0
     terminated = False
@@ -1447,6 +1482,12 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # ⛔ Statements are read WITHOUT their prefix (`{`, `command`, `builtin`), which do
             # not change what the statement does — see `_strip_statement_prefix`.
             content_raw, content_view = _strip_statement_prefix(raw, view)
+            # ⛔ An Allman function body: a lone `{` on the line AFTER its header (see
+            # `_SHELL_FN_HEADER`). The header is remembered, and the next statement's `{` is a body.
+            # ⛔ read from RAW, not the stripped text: `_strip_statement_prefix` removes a leading
+            # `{`, so a lone body brace's stripped text is EMPTY and cannot identify it.
+            allman_body = pending_fn_header and raw.strip().startswith("{")
+            pending_fn_header = _SHELL_FN_HEADER.match(content_raw.strip()) is not None
             short_circuit = separator in ("&&", "||")
             forked = _SHELL_FORK.search(content_view) is not None
             conditional = depth > 0 or terminated or short_circuit or forked
@@ -1499,9 +1540,10 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                         continue
                     if not conditional:
                         stated[key] = _unquote(value)
-            elif (unset := _SHELL_UNSET.match(content_raw)) or (
-                unexport := _SHELL_EXPORT_UNEXPORT.match(content_raw)
-            ):
+            elif (
+                (unset := _SHELL_UNSET.match(content_raw))
+                or (unexport := _SHELL_EXPORT_UNEXPORT.match(content_raw))
+            ) and _statement_is_code(content_raw, content_view):
                 for name in _unquote_all((unset or unexport).group("names")):
                     if name in SWITCHES and (retracts or nested_retracts):
                         # ⛔ A NESTED `unset` neither credits nor retracts (review P2, measured).
@@ -1512,7 +1554,7 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                         stated.pop(name, None)
             elif (unexported := _SHELL_UNEXPORTED.match(content_raw)) and (
                 unexported.group("key") in SWITCHES
-            ):
+            ) and _statement_is_code(content_raw, content_view):
                 # Same rule, same reason: only a TOP-LEVEL bare assignment is a statement about
                 # what the process gets. `retracts` (not `conditional`), because a top-level
                 # `K=` really does clear it and a short-circuited one is unknowable — see the
@@ -1520,7 +1562,9 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 if retracts:
                     ambiguous.add(unexported.group("key"))
                     stated.pop(unexported.group("key"), None)
-            elif (env_call := _SHELL_ENV_CALL.match(content_view)) and (retracts or nested_retracts):
+            elif (env_call := _SHELL_ENV_CALL.match(content_raw)) and (
+                retracts or nested_retracts
+            ) and _statement_is_code(content_raw, content_view):
                 # Same gate as the builtins above: a forked or short-circuited `env` cannot change
                 # the parent's environment, so only a statement that provably runs is a retraction.
                 stripped = set(_SHELL_ENV_UNSET.findall(env_call.group("args")))
@@ -1539,13 +1583,29 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 # ⛔ A BUILTIN that names a switch takes it back without the `export` spelling
                 # this reader credits (review P2, measured): `declare -x K=` after `export K=1`
                 # leaves K EMPTY and still exported while the gate kept the earlier `=1`.
-                if retracts and (builtin := _SHELL_BUILTIN_ASSIGN.match(content_raw)):
+                if (
+                    retracts
+                    and (builtin := _SHELL_BUILTIN_ASSIGN.match(content_raw))
+                    and _statement_is_code(content_raw, content_view)
+                ):
                     for name in _mentioned_switches(builtin.group("rest")):
                         ambiguous.add(name)
                         stated.pop(name, None)
-            opened_fn = _function_body_braces(raw, view)
-            depth += len(_SHELL_OPENERS.findall(view)) + opened_fn
-            fn_body = max(0, fn_body - len(_SHELL_CLOSERS.findall(view))) + opened_fn
+            opened_fn = _function_body_braces(raw, view) + (1 if allman_body else 0)
+            # ⛔ OPENERS are scanned on the PREFIX-STRIPPED view (review P1, measured):
+            # `{ if false; then export …; fi; }` credited BOTH switches although bash ran
+            # neither, because `_SHELL_OPENERS` anchors on `(?:^|[;&|])` and a group's `{`
+            # is not one of those — after the strip the `if` IS at statement start. Adding
+            # `{` to the anchor class instead would make `echo {if,while}` open a phantom
+            # block and refuse an honest file.
+            depth += len(_SHELL_OPENERS.findall(content_view)) + opened_fn
+            # ⛔ `fn_body` is decremented only by a BRACE closer (review P2, measured).
+            # Counting `fi`/`done`/`esac` against it let a balanced `if … fi` inside a helper
+            # drop `fn_body` to 0 while the helper was still open, so the helper's `unset`
+            # retracted a top-level export: measured — `cleanup() { if …; then …; fi; unset
+            # K; }` REFUSED a process that receives both switches.
+            closers = _SHELL_CLOSERS.findall(view)
+            fn_body = max(0, fn_body - len([c for c in closers if "}" in c])) + opened_fn
             if depth == 0 and _SHELL_TERMINATES.match(raw):
                 terminated = True
     return stated, ambiguous

@@ -2431,3 +2431,156 @@ def test_a_control_flow_retraction_retracts_but_a_function_body_one_does_not():
     assert in_body == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
         f"a helper that is never called must not retract the shipped value: {in_body}"
     )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # the ALLMAN spelling: the body brace is on the line AFTER its header
+        "arm_gates()\n{\n  export TORTOISE_VALUE_GATE=1\n}\n",
+        "function arm_gates\n{\n  export TORTOISE_VALUE_GATE=1\n}\n",
+    ],
+)
+def test_an_ALLMAN_brace_function_body_is_refused(body):
+    """Review P1 (measured) — one newline defeated every pinned function-body spelling.
+
+    `_SHELL_FN_BRACE` needs the `)` and the `{` on ONE line, so `arm() {`, `arm() { …; }` and
+    `function arm {` were all refused while `arm_gates()` / `{` / `export …` / `}` was credited
+    `ok … =1` (exit 0) over a process that `env -i … bash script /usr/bin/env` shows receives
+    nothing. The header is now remembered and the following lone `{` is the body's brace.
+
+    Mutation-proved: dropping `pending_fn_header` reds both rows while the group row below stays
+    green — the two are told apart by the HEADER, not by the brace.
+    """
+    stated, ambiguous = gate._shell_assignments(body + 'exec "$@"\n')
+    assert stated == {}, f"an Allman-spelled function body never runs unless called: {stated}"
+    assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
+
+    # …and the mirror stays credited: a GROUP after nothing at all is not a body
+    group, _ = gate._shell_assignments(
+        "{\n  export TORTOISE_VALUE_GATE=1\n}\n" + 'exec "$@"\n'
+    )
+    assert group == {"TORTOISE_VALUE_GATE": "1"}, group
+
+
+def test_a_block_keyword_right_after_a_group_brace_is_not_invisible():
+    """Review P1 (measured) — `_SHELL_OPENERS` anchors on `(?:^|[;&|])`, and a group's `{` is none.
+
+    `{ if false; then export TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1; fi; }` credited BOTH
+    switches (exit 0) although bash ran neither — measured with `env -i … bash script /usr/bin/env`
+    printing nothing. The same for `{ while false; do …; done; }`. The openers are now scanned on
+    the PREFIX-STRIPPED view, where the keyword IS at statement start.
+
+    ⛔ The fix is NOT "add `{` to the anchor class": that would make `echo {if,while}` open a
+    phantom block and refuse an honest file (pinned by the brace-expansion row below).
+    """
+    for statement in (
+        "{ if false; then export TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1; fi; }",
+        "{ while false; do export TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1; done; }",
+    ):
+        stated, _ = gate._shell_assignments(statement + "\n" + 'exec "$@"\n')
+        assert stated == {}, f"the body never runs, so neither export reaches the process: {statement}"
+
+    expansion, _ = gate._shell_assignments(
+        "mkdir -p {if,while}\nexport TORTOISE_VALUE_GATE=1\n" + 'exec "$@"\n'
+    )
+    assert expansion == {"TORTOISE_VALUE_GATE": "1"}, expansion
+
+
+def test_a_dockerfile_comment_ending_in_backslash_does_not_swallow_the_next_line():
+    """Review P1 (measured) — a Docker COMMENT ends at the newline even when it ends in `\\`.
+
+    The physical-line join did not drop comment lines, so a comment ending in `\\` swallowed the
+    NEXT instruction. Both directions measured against `docker build` + `docker inspect`:
+
+      * a swallowed `FROM … AS final` made the gate report the BUILDER stage's `ENV` as the
+        image's — `ok … =1 =1` while `docker inspect` showed no `TORTOISE_*` (fail-OPEN);
+      * a swallowed honest `ENV` was reported MISSING (false refusal).
+
+    Mutation-proved: removing the comment `continue` reds both rows.
+    """
+    fail_open = (
+        "FROM alpine:3 AS base\n"
+        "ENV TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1\n"
+        "# the final stage is assembled separately \\\n"
+        "FROM scratch AS final\n"
+        'LABEL note="nothing here"\n'
+    )
+    stated, _ambiguous, _shadowed = gate._dockerfile_env(fail_open)
+    assert stated == {}, (
+        f"the final stage carries no ENV, so nothing may be credited from the builder: {stated}"
+    )
+
+    false_refusal = (
+        "FROM alpine:3\n"
+        "# the gates are armed here (a note) \\\n"
+        "ENV TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1\n"
+        'CMD ["true"]\n'
+    )
+    stated, _, _ = gate._dockerfile_env(false_refusal)
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"the comment ends at the newline, so the ENV below it is a real instruction: {stated}"
+    )
+
+
+def test_quoting_is_read_from_the_RAW_text_in_both_directions():
+    """Review P1 (measured) — the retraction arms had quoting on ONE side only.
+
+    The `env` arm matched the STRUCTURAL view (quoting blanked), so:
+      * a QUOTED name was unrecognisable — `exec env -u "TORTOISE_VALUE_GATE"` printed `ok … =1`
+        over a process without K (fail-OPEN), while the bare form was correctly refused;
+      * a QUOTED non-empty value read as an EMPTY assignment — `exec env K="1"` was REFUSED
+        although the process receives `K=1` (false refusal).
+    And the `unset`/`declare` arms matched the raw text, so a `unset K` line INSIDE a multi-line
+    string retracted a real export (false refusal: the process receives both).
+
+    Every arm now reads the RAW text and requires its VERB to be CODE in the structural view.
+    Mutation-proved: dropping `_statement_is_code` reds the string row; matching the view reds the
+    quoted rows.
+    """
+    quoted_unset, ambiguous = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+        'exec env -u "TORTOISE_VALUE_GATE" "$@"\n'
+    )
+    assert "TORTOISE_VALUE_GATE" not in quoted_unset, quoted_unset
+    assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
+
+    quoted_value, _ = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+        'exec env TORTOISE_VALUE_GATE="1" "$@"\n'
+    )
+    assert quoted_value == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f'a QUOTED non-empty value states the switch; it is not an emptied one: {quoted_value}'
+    )
+
+    in_a_string, _ = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+        'echo "to turn it off:\nunset TORTOISE_EMBED_GATE\n"\n' + 'exec "$@"\n'
+    )
+    assert in_a_string == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"a `unset` that is the TEXT of a string is data, not a statement: {in_a_string}"
+    )
+
+
+def test_a_closer_inside_a_function_body_does_not_end_the_body():
+    """Review P2 (measured) — `fn_body` counted EVERY closer, including `fi`/`done`/`esac`.
+
+    A balanced `if … fi` inside a helper dropped `fn_body` to 0 while the helper was still open, so
+    the helper's `unset K` retracted a TOP-LEVEL export the process does receive — the exact
+    property the nested-retraction rule exists to protect. Measured: the gate REFUSED an entrypoint
+    both of whose switches reach the daemon, and deleting the `if`/`fi` made it pass.
+
+    Mutation-proved: decrementing `fn_body` by every closer reds this row.
+    """
+    stated, _ = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+        "cleanup() {\n"
+        '  if [ -n "${DEBUG:-}" ]; then\n'
+        '    echo "debug"\n'
+        "  fi\n"
+        "  unset TORTOISE_EMBED_GATE\n"
+        "}\n" + 'exec "$@"\n'
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"the helper is never called, so its `unset` cannot touch the shipped value: {stated}"
+    )
