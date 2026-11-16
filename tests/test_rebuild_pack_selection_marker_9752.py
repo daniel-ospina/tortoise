@@ -1499,6 +1499,16 @@ def test_cmd_rebuild_reports_the_pack_selection_marker(tmp_path, capsys,
 # ── #9752: the THIRD `rebuild_all` caller — `tortoise migrate-db` ───────────
 
 
+# #12962: the reach recorder for the `_count_nodes` stub inside
+# `_migrate_with_rebuild_counts`. The pin
+# `test_the_migrate_route_counts_nodes_without_booting_a_server` goes THROUGH
+# that helper and asserts on THIS list, so it measures the helper's stub rather
+# than a stub of its own. A pin that installs its own stub proves only that
+# `migrate()` reaches `_count_nodes`; it stays GREEN when the helper's stub is
+# deleted, i.e. when the ten-minute server boot comes back (#12962 review P1).
+_COUNT_NODES_CALLS: list[str] = []
+
+
 def _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts):
     """Run the real `migrate_db.migrate()` with `rebuild_all`'s counts injected.
 
@@ -1531,14 +1541,24 @@ def _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts):
     # `b"not-a-real-rdb"` above, and `rebuild_all` is stubbed, so there is no
     # graph to count and nothing the number could assert). Measured at #12962:
     # the file cost **620.80 s wall against 9.8 s user + 5.7 s system**, with
-    # FIFTEEN `migrate`-route cases each at exactly 60.7-60.9 s — i.e. ~10 min of
+    # TEN `migrate`-route cases each at exactly 60.7-60.9 s — i.e. ~10 min of
     # pure socket wait. That is what killed the required `test (j)` leg: the
     # shard's whole 20 min watchdog, spent waiting on a server boot, twice in a
-    # row at the same nodeid, with ZERO attributable test failures.
-    # Pinned so a future edit that drops this line reds on TIME, not on a
-    # mysterious CI-only watchdog kill: `test_the_migrate_route_never_boots_an_
-    # embedded_server` below.
-    monkeypatch.setattr("tortoise.migrate_db._count_nodes", lambda _db: 0)
+    # row at the same nodeid, with ZERO attributable test failures. (TEN, not
+    # fifteen: `grep -c '_migrate_with_rebuild_counts(tmp_path'` counts ELEVEN
+    # lines = one definition at :1502 plus the ten CALL sites, and ten x 60.5 s
+    # is the measured 620.80 - 15.45 = 605.35 s delta — fifteen would be 912 s
+    # and contradict the ~10 min the same sentence states.)
+    #
+    # Pinned by `test_the_migrate_route_counts_nodes_without_booting_a_server`
+    # below, which goes THROUGH this helper and reads `_COUNT_NODES_CALLS`: drop
+    # this line and that pin reds — after re-paying the ~60 s boot it forbids.
+    def _count_nodes_without_booting(db_path):
+        _COUNT_NODES_CALLS.append(str(db_path))
+        return 0
+
+    monkeypatch.setattr("tortoise.migrate_db._count_nodes",
+                        _count_nodes_without_booting)
 
     from tortoise.migrate_db import migrate
 
@@ -1555,45 +1575,49 @@ def test_the_migrate_route_counts_nodes_without_booting_a_server(
     and blocks in `embedded_lifecycle._wait_for_server_start` for its boot bound.
 
     Measured while it did (#12962): this file cost **620.80 s wall against 9.8 s
-    user + 5.7 s system**, with fifteen `migrate`-route cases at exactly
-    60.7-60.9 s each — ~10 min of pure socket wait — and the required `test (j)`
-    leg was killed at its 20 min watchdog TWICE, at the same nodeid, with ZERO
+    user + 5.7 s system**, with ten `migrate`-route cases at exactly 60.7-60.9 s
+    each — ~10 min of pure socket wait — and the required `test (j)` leg was
+    killed at its 20 min watchdog TWICE, at the same nodeid, with ZERO
     attributable test failures. Its committed `durations` weight is `3.2`, which
     is why no budget derivation could see it: the row is honest about the TEST
     and the boot was never part of it.
 
     This pin is deliberately about REACH, not timing (a wall-clock assertion is
-    flaky and would red under load): a refactor that stops calling `_count_nodes`
-    makes the stub dead weight, and one that bypasses the stub brings the ten
-    minutes back. Either reds here, locally, instead of as a mysterious CI-only
-    watchdog kill.
+    flaky and would red under load), and it goes THROUGH the helper: it does NOT
+    install a `_count_nodes` stub of its own. That distinction is the whole pin
+    (#12962 review P1) — a pin that stubs `_count_nodes` itself asserts only that
+    `migrate()` reaches the seam, and stays GREEN when the HELPER's stub is
+    deleted, which is the edit that brings the ten minutes back. Deleting the
+    helper's stub empties `_COUNT_NODES_CALLS` and reds this after re-paying the
+    boot; dropping the `_count_nodes` call from `migrate()` reds it immediately.
     """
-    from tortoise.projection import FalkorProjection
-
-    calls = []
     counts = {"nodes": 0, "edges": 0, "events": 0,
               "pack_selection_expected": 0, "pack_selection_verified": True,
               "pack_selection_restored": 0,
               "pack_selection_gap": 0, "pack_selection_state_unknown": False,
               "pack_selection_conflict": False}
-    monkeypatch.setenv("HOME", str(tmp_path))
-    tortoise_dir = tmp_path / ".tortoise"
-    (tortoise_dir / "events").mkdir(parents=True)
-    (tortoise_dir / "embedded.db").write_bytes(b"not-a-real-rdb")
-    monkeypatch.setattr(FalkorProjection, "rebuild_all",
-                        lambda self, _dir, **kw: dict(counts))
-    monkeypatch.setattr("tortoise.migrate_db._count_nodes",
-                        lambda db: (calls.append(db), 0)[1])
+    _COUNT_NODES_CALLS.clear()
 
-    from tortoise.migrate_db import migrate
+    result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
 
-    migrate(force=True)
-    assert calls, (
+    assert result["status"] == "migrated", (
+        "the migrate route did not report a migration, so the reach below is "
+        f"not the post-rebuild integrity verify (#12962): {result!r}"
+    )
+    assert _COUNT_NODES_CALLS, (
         "`migrate(force=True)` no longer reaches `migrate_db._count_nodes`, so the "
         "stub this file's `_migrate_with_rebuild_counts` installs is DEAD WEIGHT "
         "— delete the stub, or re-point this pin at the new integrity-verify seam "
         "(#12962: while the real call reached a server boot, this file cost 620 s "
         "and killed the required `test (j)` leg twice)"
+    )
+    # REACH IS NOT ENOUGH: the calls must be the helper's STUB, i.e. they must
+    # have left no server behind and returned a count, not `None`. `_count_nodes`
+    # returns None on failure, and `migrate()` raises on a None target — so a pin
+    # that reaches the REAL function reds here rather than passing quietly.
+    assert result.get("nodes") == 0, (
+        "the reached `_count_nodes` did not answer the helper's stub value, so "
+        f"this test is measuring the REAL server-booting call (#12962): {result!r}"
     )
 
 
