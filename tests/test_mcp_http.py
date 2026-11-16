@@ -57,7 +57,7 @@ def seeded_registry_sdk(tmp_path):
     db_path = str(tmp_path / "reg.db")
     sdk = TortoiseSDK(db_path=db_path, namespace="registry")
     team = sdk.org_create("test-team")
-    key_info = sdk.apikey_create(team["id"], "test-fixture")
+    key_info = sdk._apikey_create(team["id"], "test-fixture")
     return sdk, key_info["api_key"]  # (registry SDK, plaintext tt_ key)
 
 
@@ -220,7 +220,7 @@ class TestAuthPreLeak:
         db_path = str(tmp_path / "rev.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
         team = reg_sdk.org_create("rev-team")
-        key_info = reg_sdk.apikey_create(team["id"], "t")
+        key_info = reg_sdk._apikey_create(team["id"], "t")
         key = key_info["api_key"]
         headers = {"Authorization": f"Bearer {key}",
                    "Accept": "application/json, text/event-stream",
@@ -235,7 +235,7 @@ class TestAuthPreLeak:
             assert r.status_code == 200
             # Revoke the key in the registry
             key_id = key_info["id"]
-            reg_sdk.apikey_revoke(key_id)
+            reg_sdk._apikey_revoke(key_id)
             # Same app: cache hit → still passes ≤60s
             r = tc.post("/mcp", headers=headers,
                         json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
@@ -282,7 +282,7 @@ class TestAuthRetryAfterContract:
         db_path = str(tmp_path / "retry.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
         team = reg_sdk.org_create("retry-team")
-        key = reg_sdk.apikey_create(team["id"], "retry")["api_key"]
+        key = reg_sdk._apikey_create(team["id"], "retry")["api_key"]
 
         made: list = []
         orig_init = ma.OrgResolutionMiddleware.__init__
@@ -370,7 +370,7 @@ class TestAuthRetryAfterContract:
         # 3) The control plane / registry is cold or unreachable on the
         #    re-resolve (twice: it recovers for the retry leg).
         calls = {"n": 0}
-        real_verify = reg_sdk.apikey_verify
+        real_verify = reg_sdk._apikey_verify
 
         def _cold_then_healthy(token):
             calls["n"] += 1
@@ -378,7 +378,8 @@ class TestAuthRetryAfterContract:
                 raise ConnectionError("control plane cold / connection refused")
             return real_verify(token)
 
-        monkeypatch.setattr(reg_sdk, "apikey_verify", _cold_then_healthy)
+        # #12901 wave 2: public `apikey_verify` closed; its body is the private seam.
+        monkeypatch.setattr(reg_sdk, "_apikey_verify", _cold_then_healthy)
 
         # 4) The contract: a parseable Retry-After in a sane range, pinned to
         #    the CONFIGURED value. Removing the header makes this RED (#3812's
@@ -449,7 +450,7 @@ class TestAuthRetryAfterContract:
             calls["n"] += 1
             raise ConnectionError("control plane cold / connection refused")
 
-        monkeypatch.setattr(reg_sdk, "apikey_verify", _always_cold)
+        monkeypatch.setattr(reg_sdk, "_apikey_verify", _always_cold)
 
         # (a) UNSET → the production default, on the wire.
         raw, seconds = self._first_503_after_idle(tc, monkeypatch, 2, None)
@@ -540,7 +541,7 @@ class TestTortoiseHealthTruth:
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
         team = reg.org_create("health-truth-team")
-        key = reg.apikey_create(team["id"], "h")["api_key"]
+        key = reg._apikey_create(team["id"], "h")["api_key"]
 
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
                               _registry_sdk=reg)
@@ -585,7 +586,7 @@ class TestTortoiseHealthTruth:
         # this test consumes `max_points`, and the free tier's `max_graph_nodes` is
         # 10,000, so `= 1000` could only TIGHTEN. A setup write no assertion
         # consumes is dropped, not re-aimed (#4282 review 18, F4).
-        key = reg.apikey_create(team["id"], "h")["api_key"]
+        key = reg._apikey_create(team["id"], "h")["api_key"]
 
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
                               _registry_sdk=reg)
@@ -655,9 +656,9 @@ class TestTeamIsolation:
         db_path = str(tmp_path / "iso.db")
         sdk = TortoiseSDK(db_path=db_path, namespace="registry")
         team_a = sdk.org_create("tenant-a")
-        ka = sdk.apikey_create(team_a["id"], "t")["api_key"]
+        ka = sdk._apikey_create(team_a["id"], "t")["api_key"]
         team_b = sdk.org_create("tenant-b")
-        kb = sdk.apikey_create(team_b["id"], "t")["api_key"]
+        kb = sdk._apikey_create(team_b["id"], "t")["api_key"]
 
         app = create_http_app(allowed_origins=[], _registry_sdk=sdk)
         tc = _mounted_test_client(app)
@@ -807,7 +808,7 @@ class TestRateLimit:
         db_path = str(tmp_path / "rl.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
         team = reg_sdk.org_create("rl-team")
-        key = reg_sdk.apikey_create(team["id"], "t")["api_key"]
+        key = reg_sdk._apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg_sdk)
         tc = _mounted_test_client(app)
         tc.headers.update({"Authorization": f"Bearer {key}",
@@ -1062,7 +1063,7 @@ class TestOnboardingToolGating:
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
         team = reg.org_create(org_name)
-        key = reg.apikey_create(team["id"], "t")["api_key"]
+        key = reg._apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         return _mounted_test_client(app), key, team["id"]
 
@@ -1449,7 +1450,7 @@ class TestGraphBoundKeyTeamSurfaceReject:
     """#2300: MCP HTTP authz for the team-surface tools.
 
     Deleg=0 per-graph keys resolve graph scope on the registry lane
-    (sdk.apikey_verify graph_id/namespace — #2300 C5 registry-lane parity)
+    (sdk._apikey_verify graph_id/namespace — #2300 C5 registry-lane parity)
     and hit the tool-body graph-bound rejects; team-wide (deleg NULL) and
     legacy keys pass. The authz signal mirrors REST's GRAPH_SCOPED_TEAM_SURFACE
     family: an AuthorizationError isError result whose text names the surface.
@@ -1587,7 +1588,7 @@ class TestGraphBoundKeyTeamSurfaceReject:
         """Positive control: a legacy full-access key (deleg NULL, no
         scopes) keeps the source-surface read."""
         _reg, tid, _gid, tc = self._env(tmp_path, monkeypatch, "state-legacy")
-        legacy = _reg.apikey_create(tid, "#2300-legacy")["api_key"]
+        legacy = _reg._apikey_create(tid, "#2300-legacy")["api_key"]
         with tc:
             result, text = self._call(tc, legacy, "tortoise_manage_sources",
                                       {"action": "list"})
@@ -1953,7 +1954,7 @@ class TestQuotaEnforcement:
         db = str(tmp_path / "quota.db")
         reg = TortoiseSDK(db_path=db, namespace="registry")
         team = reg.org_create("quota-team")
-        key_info = reg.apikey_create(team["id"], "quota-fixture")
+        key_info = reg._apikey_create(team["id"], "quota-fixture")
         yield reg, key_info["api_key"], team["id"], db
         reg.close()
 
@@ -2102,7 +2103,7 @@ class TestQuotaEnforcement:
         """Team A at cap → blocked; team B below cap → succeeds (same DB)."""
         tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
         team_b = reg_sdk.org_create("quota-team-b")
-        key_b = reg_sdk.apikey_create(team_b["id"], "quota-fixture-b")["api_key"]
+        key_b = reg_sdk._apikey_create(team_b["id"], "quota-fixture-b")["api_key"]
         self._set_max_points(reg_sdk, tid, 0)  # team A at cap
 
         payload_a = {
@@ -2426,7 +2427,7 @@ class TestGraphSetRecordingHTTP:
         reg = TortoiseSDK(db_path=db, namespace="registry")
         team = reg.org_create("rec-http-team")
         reg._graph_create(team["id"], "default", kind="default")
-        key = reg.apikey_create(team["id"], "r")["api_key"]
+        key = reg._apikey_create(team["id"], "r")["api_key"]
 
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
                               _registry_sdk=reg)
@@ -2528,7 +2529,7 @@ class TestToolCallAdmissionBoundary:
         monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
         team = reg.org_create(name)
-        key = reg.apikey_create(team["id"], "t")["api_key"]
+        key = reg._apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         tc = _mounted_test_client(app)
         tc.headers.update({
@@ -2811,7 +2812,7 @@ class TestToolCallAdmissionBoundary:
         monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
         team = reg.org_create("hidden-team")
-        key = reg.apikey_create(team["id"], "t")["api_key"]
+        key = reg._apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         tc = _mounted_test_client(app)
         tc.headers.update({
@@ -3150,7 +3151,7 @@ class TestToolCallAdmissionBoundary:
         monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
         team = reg.org_create("originteam")
-        key = reg.apikey_create(team["id"], "t")["api_key"]
+        key = reg._apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
                               allowed_hosts=["mcp.premiselabs.co"],
                               _registry_sdk=reg)
@@ -3280,11 +3281,11 @@ class TestAgentEnableToolHolderRefusals:
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
         team = reg.org_create("holder-team")
-        good = reg.apikey_create(team["id"], "holder")
-        revoked = reg.apikey_create(team["id"], "holder")
-        expired = reg.apikey_create(team["id"], "holder",
+        good = reg._apikey_create(team["id"], "holder")
+        revoked = reg._apikey_create(team["id"], "holder")
+        expired = reg._apikey_create(team["id"], "holder",
                                     expires_at="2020-01-01T00:00:00+00:00")
-        reg.apikey_revoke(revoked["id"])
+        reg._apikey_revoke(revoked["id"])
 
         def _client(key):
             app = create_http_app(allowed_origins=[], _registry_sdk=reg)

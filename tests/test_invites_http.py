@@ -1217,7 +1217,7 @@ class TestExpiredInviteGhostCleanup:
                          status="invited")
         assert len(self._ghost_rows(client)) == 5  # 4 ghosts + 1 placeholder
         sdk = TortoiseSDK(namespace="registry")
-        result = sdk.sweep_invite_ghost_memberships()
+        result = sdk._sweep_invite_ghost_memberships()
         assert result["found"] == 5
         assert result["ghosts"] == 4
         assert result["deleted"] == 4
@@ -1226,7 +1226,7 @@ class TestExpiredInviteGhostCleanup:
         assert len(rows) == 1, "pending placeholder must survive the sweep"
         assert rows[0]["user_id"] == f"invite-{minted['invite_id']}"
         # idempotent
-        result2 = sdk.sweep_invite_ghost_memberships()
+        result2 = sdk._sweep_invite_ghost_memberships()
         assert result2["found"] == 1
         assert result2["ghosts"] == 0
         assert result2["deleted"] == 0
@@ -1238,13 +1238,13 @@ class TestExpiredInviteGhostCleanup:
         self._seed_pre_1880_ghost(
             reg, "inv-consumed", "a@example.com", accepted_at="2020-01-01T00:00:00+00:00")
         sdk = TortoiseSDK(namespace="registry")
-        result = sdk.sweep_invite_ghost_memberships(dry_run=True)
+        result = sdk._sweep_invite_ghost_memberships(dry_run=True)
         assert result["ghosts"] == 1
         assert result["deleted"] == 0
         _as_user(_U1, "owner@example.com")
         assert len(self._ghost_rows(client)) == 1, "dry-run must not write"
         # a real sweep then clears it
-        sdk.sweep_invite_ghost_memberships()
+        sdk._sweep_invite_ghost_memberships()
         assert self._ghost_rows(client) == []
 
 
