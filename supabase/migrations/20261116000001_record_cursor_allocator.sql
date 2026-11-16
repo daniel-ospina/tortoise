@@ -116,43 +116,14 @@ CREATE POLICY record_cursor_app_tenant ON public.record_cursor
     USING (org_id = current_setting('app.current_org_id', true))
     WITH CHECK (org_id = current_setting('app.current_org_id', true));
 
--- ── The byte meter's EXECUTE grant, for the role that can actually write ────
--- ⛔ NOT DECORATION, and not this change's own table. `20261114000001` grants
--- EXECUTE on the meter to `service_role` ONLY, while
--- `record_projection.scope_connection` REFUSES `service_role` (it is BYPASSRLS)
--- — so on the only role allowed to write the record, the meter raised
--- `InsufficientPrivilege`, returned `None` (TOTAL by contract), and the org was
--- charged **0 bytes** for a write that stored real rows.
---
--- MEASURED on a container migrated by this tree:
---   has_function_privilege('tortoise_record_app',
---     'public.journal_event_bytes_for_rows(text,text,bigint[])', 'EXECUTE')  -> false
---   has_function_privilege('service_role', (same))                          -> true
---
--- It is needed HERE because #12894's falsifier — "the byte meter charges the
--- written bytes and not zero" — cannot pass on a production-shaped connection
--- without it (#12762's artifact). The guard keeps this file applyable on a
--- database where the metering migration has not run (the record schema and the
--- metering schema are applied by different steps).
-DO $$
-BEGIN
-    IF to_regprocedure(
-            'public.journal_event_bytes_for_rows(text,text,bigint[])') IS NOT NULL THEN
-        GRANT EXECUTE ON FUNCTION public.journal_event_bytes_for_rows(
-                text, text, bigint[]) TO tortoise_record_app;
-    ELSE
-        -- ⛔ A SKIP HERE IS NOT SILENT, because a silent one is the FAIL-OPEN this
-        -- guard would otherwise become: the grant is absent, the meter returns
-        -- `None` (TOTAL by contract), and the org is charged 0 bytes with no
-        -- error anywhere. The NOTICE names WHICH grant is missing and WHY, so a
-        -- reader of a migration log is not left to discover it as a zero-byte
-        -- meter three assertions away. It cannot be an error: the record schema
-        -- and the metering schema are applied by different steps, and this file
-        -- must stay applyable where the metering migration has not run (the
-        -- statement order is the deploy's, not this file's, to decide).
-        RAISE NOTICE 'record_cursor_allocator: byte meter absent, so the EXECUTE '
-            'grant to tortoise_record_app was SKIPPED. Apply the metering '
-            'migration (20261114000001) and RE-APPLY this file, or every armed '
-            'record write will be charged 0 bytes by a meter that cannot run.';
-    END IF;
-END $$;
+-- ── The byte meter's EXECUTE grant is NOT HERE (#12894) ────────────────────
+-- ⛔ DO NOT RE-ADD IT. It lives in `20261116000002_record_cursor_meter_grant.sql`,
+-- as its own migration, and the reason is this file's own re-apply shape: the
+-- record-suite fixture re-applies `20261116000001` only where
+-- `public.record_cursor` is ABSENT (that is what keeps its `CREATE POLICY`s and
+-- `GRANT`s — an ACCESS EXCLUSIVE lock on the counter table — out of a live
+-- allocator transaction, the #12399 deadlock). After the FIRST apply the file is
+-- therefore skipped forever, so a grant at this tail can never fire on the
+-- containers that need it, and the meter silently charges 0 bytes. Granting a
+-- FUNCTION needs no lock on `record_cursor`, which is exactly why that half
+-- belongs in an always-applied step of its own.

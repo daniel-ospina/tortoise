@@ -30,6 +30,8 @@ no isolation precondition (M5)    `test_a_serializable_transaction_is_refused_at
                                     (real statement timeout; counter unchanged)
 restore restarts the allocator    `test_a_restored_counter_continues_past_the_rows`
   (B3)                              (the seed reads the rows, not a sequence)
+enumerated replay after cutover   `test_a_post_cutover_replay_cannot_add_a_second_position_`
+  ⇒ same record at a 2nd position  `for_one_record` (refusal named; rows unchanged)
 
 THE DSN GATE. `TEST_RECORD_DB_URI` is the record's own Postgres (the CI job
 `test-record-postgres` provisions it, and `provision.sh` makes it a SUPERUSER).
@@ -112,16 +114,30 @@ def schema():
     """The record schema (this tree's migrations) + the byte meter, once.
 
     ⛔ THE THREE CALLS ARE THE **FILENAME ORDER** OF THE FILES THEY APPLY, and the
-    order is LOAD-BEARING — not tidiness. `20261116000001_record_cursor_allocator.sql`
-    grants the byte meter's EXECUTE to `tortoise_record_app` **guarded on the
-    meter's presence** (`to_regprocedure(...) IS NOT NULL`), because the record
-    schema and the metering schema are applied by different production steps. Its
-    function is created by the METERING migration `20261114000001`, which is
-    EARLIER by filename but is NOT in `RECORD_MIGRATIONS`. So on a fresh database
-    a single record-then-metering pass applies the cursor migration while the
-    meter does not exist yet, the guard fires its SKIP, `tortoise_record_app` has
-    no EXECUTE, and the meter raises `InsufficientPrivilege` -> returns `None`
-    (TOTAL by contract) -> the org is charged 0 bytes.
+    order is LOAD-BEARING — not tidiness. The byte meter's EXECUTE grant for
+    `tortoise_record_app` lives in `20261116000002_record_cursor_meter_grant.sql`,
+    GUARDED on the meter's presence (`to_regprocedure(...) IS NOT NULL`), because
+    the record schema and the metering schema are applied by different production
+    steps. The meter's function is created by the METERING migration
+    `20261114000001`, which is EARLIER by filename but is NOT in
+    `RECORD_MIGRATIONS`. So on a fresh database a single record-then-metering pass
+    applies `…02…` while the meter does not exist yet, the guard fires its SKIP,
+    `tortoise_record_app` has no EXECUTE, and the meter raises
+    `InsufficientPrivilege` -> returns `None` (TOTAL by contract) -> the org is
+    charged 0 bytes.
+
+    ⛔ THAT GRANT IS A STEP OF ITS OWN (`20261116000002`), AND THE THIRD CALL IS
+    WHAT REACHES IT. It used to be the TAIL of
+    `20261116000001_record_cursor_allocator.sql`, where it was unreachable: that
+    file is `creates`-conditional in `RECORD_REAPPLY_STEPS` (its `CREATE POLICY`s
+    take an ACCESS EXCLUSIVE lock on `public.record_cursor`, the #12399
+    deadlock), so it is applied only where the table is ABSENT — skipped forever
+    once the FIRST pass created it, which is before the metering migration exists.
+    The third call below therefore reached nothing and the assertion at the end of
+    this fixture reddened on the required `test-record-postgres` leg (run
+    43810200175). `…02…` is listed with `creates=None`: it creates no relation, it
+    locks only the FUNCTION, and it is re-applied on EVERY pass — which is exactly
+    what makes the third call grant a meter the second call created.
 
     MEASURED on a fresh `pgvector/pgvector:pg16` (the exact CI shape), with the
     single-pass pair: `test_the_allocated_number_reaches_the_watermark_and_the_`
@@ -151,7 +167,7 @@ def schema():
     conn = _record_db()
     _ensure_record_schema(conn)      # the base shape the metering files depend on
     _ensure_metering_schema(conn)    # …14… — the meter's function comes into being
-    _ensure_record_schema(conn)      # …16… — re-applied, so its guard can fire
+    _ensure_record_schema(conn)      # …16…+`…02…` — the GRANT step, always re-applied
     from tortoise import postgres_bytes
 
     with conn.cursor() as cur:
@@ -177,8 +193,9 @@ def schema():
     assert granted is True, (
         "the write role has NO EXECUTE on the byte meter, so the meter returns "
         "None and every armed write is charged 0 bytes — this is the state "
-        "`20261116000001`'s guarded GRANT exists to remove, and it is skipped "
-        "whenever the record migrations are applied before the metering one")
+        "`20261116000002_record_cursor_meter_grant.sql`'s guarded GRANT exists "
+        "to remove, and it is skipped whenever that always-applied step runs "
+        "before the metering migration has created the function")
     try:
         yield conn
     finally:
@@ -719,6 +736,64 @@ def test_the_replay_path_keeps_its_idempotent_position_write(schema, tenant, app
     rp.replay([RECORD], app, org_id=org, graph_id=graph, start_seq=1)
     app.commit()
     assert [row[0] for row in _journal_rows(schema, org, graph)] == [1]
+
+
+def test_a_post_cutover_replay_cannot_add_a_second_position_for_one_record(
+        schema, tenant, app, monkeypatch):
+    """FINDING (review P1): the record's ordinal is ALLOCATED once a graph is cut
+    over, so an ENUMERATED replay is an answer to a question already answered.
+
+    `#9190` was reopened by owner ruling (2026-11-15, comment 6902871297): *"the
+    record allocates the ordinal and the journal record CARRIES it; replay READS
+    the number instead of computing it."* Before this pin, `replay()` still
+    enumerated from `start_seq`, so replaying one journal event on a cut-over
+    graph stored the SAME record at a SECOND position — silently:
+    `ON CONFLICT (org_id, graph_id, seq) DO NOTHING` keys on `seq` and the
+    enumerated `seq` was free, and the `#9318` collision guard only runs on an
+    insert that was ABSORBED (this one affects a row). No error, no counter, one
+    record at two positions — and the door's own refusal text recommended that
+    replay as the remedy.
+
+    EXECUTED, on the shape the finding names: the door writes the record at the
+    ALLOCATED number (4, from a counter at 3), then the same record is replayed
+    enumerated at the JOURNAL's ordinal for it (9). The replay must be REFUSED by
+    name, and the position rows must still be exactly the ones the door wrote —
+    which is the half that fails if the guard is removed (a row at 9 would
+    appear here with no exception at all).
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2, 3])
+    _seed_and_arm(app, org, graph, 3)
+    app.commit()
+    # The live door opens its OWN connection, so it goes through the role gate
+    # (`scope_connection` refuses a BYPASSRLS DSN); see the sibling test above.
+    from tests.test_9078_record_written_by_production_path import _app_role_dsn
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV,
+                       _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
+    write = rw.write_live_record(
+        RECORD, durable=True, seq=9, tenant=(org, graph), allocate=True)
+    assert write is not None and write.outcome is rw.RecordWriteOutcome.APPLIED, (
+        f"the allocated door write did not apply: {write}")
+    assert (write.first_seq, write.last_seq) == (4, 4), (
+        f"the door did not take the allocated number: {write.first_seq}")
+    written = [row[0] for row in _journal_rows(schema, org, graph)]
+    assert written == [1, 2, 3, 4], f"the door wrote {written}"
+
+    # THE DERIVED REPLAY OF THE SAME JOURNAL EVENT, at the ordinal the JOURNAL
+    # holds for it (9): refused, by name, before a single position statement.
+    with pytest.raises(rp.RecordProjectionError) as refused:
+        rp.replay([RECORD], app, org_id=org, graph_id=graph, start_seq=9)
+    app.rollback()
+    message = str(refused.value)
+    for needle in ("ENUMERATED replay is REFUSED", "ISSUED", "record_cursor",
+                   "#9190", "allocate=True"):
+        assert needle in message, (
+            f"the refusal does not name {needle!r}: {message}")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == written, (
+        "a post-cutover replay added a position row for a record the allocator "
+        f"had already numbered: {[row[0] for row in _journal_rows(schema, org, graph)]} "
+        f"vs the door's {written}")
 
 
 def test_the_allocated_position_cannot_be_absorbed_at_all(schema, tenant, app):

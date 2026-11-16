@@ -372,6 +372,23 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # reviewer's double-apply, which do not depend on this list.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261116000001_record_cursor_allocator.sql", "public.record_cursor"),
+    # #12894 stage C — the byte meter's EXECUTE grant, split OUT of the allocator
+    # file above so that a RE-APPLY can reach it. `creates=None` is correct and
+    # is the whole reason for the split: this file creates no relation, so the
+    # existence probe has nothing to ask (a `creates` here would be a lie about a
+    # table), and the `None` arm RE-APPLIES IT ON EVERY `_ensure_record_schema`
+    # call — which is required, because the grant is exactly what the entry above
+    # can no longer deliver: the allocator file is `creates`-guarded (skipped
+    # forever once `record_cursor` exists) and normally applies BEFORE the
+    # metering migration exists. ⛔ `GRANT EXECUTE ON FUNCTION` takes NO lock on
+    # `public.record_cursor` — the lock that made the entry above conditional
+    # (#12399) — so the re-apply is safe in a live allocator transaction; and it
+    # is idempotent (granting an already-granted privilege is a no-op). Measured
+    # before the split: `has_function_privilege('tortoise_record_app', …, '
+    # 'EXECUTE')` stayed false, the meter returned `None` (TOTAL by contract) and
+    # the org was charged 0 bytes on the required `test-record-postgres` leg.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261116000002_record_cursor_meter_grant.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in

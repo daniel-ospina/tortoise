@@ -36,6 +36,9 @@ isolation preconditions (M5)      `test_the_allocator_refuses_a_non_read_committ
 40001/40P01/57014 handled (M5)    `test_each_retryable_sqlstate_is_named_and_counted`
                                   + live `test_a_cancelled_allocation_rolls_the_counter_back`
 no global `statement_timeout`     `test_the_allocator_imposes_no_global_statement_timeout`
+enumerated replay after cutover    `test_a_post_cutover_enumerated_replay_is_refused_not_duplicated`
+  ⇒ same record at a 2nd position  (+ live `test_a_post_cutover_replay_cannot_`
+                                     `add_a_second_position_for_one_record`)
 ==================================================================================
 """
 
@@ -466,6 +469,124 @@ def test_an_allocating_plan_never_asks_the_collision_question() -> None:
         "nothing for that guard to decide")
 
 
+def test_a_post_cutover_enumerated_replay_is_refused_not_duplicated() -> None:
+    """#9190's reopened ruling, on the path that could silently break it.
+
+    THE DEFECT. `replay()` numbers records by ENUMERATION (`start_seq` is the
+    journal's own ordinal for `records[0]`), and it passes `position=True` —
+    which is what the derived live door does on every write today
+    (`allocate` defaults to False). Once a graph is CUT OVER the ordinal is not
+    the journal's to give (owner ruling 2026-11-15: *"the record allocates the
+    ordinal and the journal record CARRIES it; replay READS the number instead
+    of computing it"*), so a replay of the SAME journal event lands the same
+    payload at a SECOND position — and neither existing guard can see it:
+    `ON CONFLICT (org_id, graph_id, seq) DO NOTHING` keys on `seq` and the
+    enumerated `seq` is free, and `_refuse_a_journal_collision` only runs on an
+    insert that was ABSORBED (this one affects a row). No error, no counter, one
+    record at two positions — and the door's refusal text recommended exactly
+    that replay as the remedy.
+
+    ⛔ THE REFUSAL IS NARROW, and that is asserted in the same breath: the SAME
+    replay on the SAME recorder, with no cursor row, still writes its position
+    row. That is every graph before cutover, and it is what keeps the existing
+    suite honest rather than merely green.
+    """
+    records = [{"type": "PointAdded", "ts": "2026-11-16T00:00:00Z", "id": "p1",
+                "point": {"id": "p1", "content": "c", "pointKind": "claim"}}]
+
+    class _Cursor:
+        def __init__(self, conn: _CounterConn) -> None:
+            self._conn = conn
+            self._sql = ""
+            self.rowcount = 1
+
+        def execute(self, sql, params=None) -> None:
+            self._conn.executed.append((sql, params))
+            self._sql = sql
+            if sql == rp.TENANT_GUC_SQL and params:
+                self._conn.guc_set = params[0]
+
+        def fetchall(self):
+            return []
+
+        def fetchone(self):
+            # Per STATEMENT, never per call: `replay` scopes the tenant, verifies
+            # the read-back, then asks whether this graph's positions are ISSUED.
+            if self._sql == rp.TENANT_SCOPE_SQL:
+                return (self._conn.guc_set, False)
+            if self._sql == rp.CURSOR_PRESENCE_SQL:
+                if self._conn.unreadable:
+                    # The shape of a database the counter migration never
+                    # reached: the relation is absent, so the read raises.
+                    raise _NoSuchRelation(
+                        'relation "public.record_cursor" does not exist')
+                return self._conn.cursor_row
+            return (self._conn.guc_set,)
+
+        def close(self) -> None:
+            pass
+
+    class _NoSuchRelation(Exception):
+        """`psycopg2.errors.UndefinedTable`, as far as this guard reads it."""
+
+        pgcode = "42P01"
+
+    class _CounterConn:
+        def __init__(self, cursor_row=None, *, unreadable: bool = False) -> None:
+            self.cursor_row = cursor_row
+            self.unreadable = unreadable
+            self.executed: list[tuple[str, object]] = []
+            self.guc_set = None
+
+        def cursor(self) -> _Cursor:
+            return _Cursor(self)
+
+        def journal_statements(self):
+            return [sql for sql, _ in self.executed
+                    if sql.startswith(rp._JOURNAL_INSERT_PREFIX)]
+
+    # 1. CUT OVER — the counter holds a row, so the positions are ISSUED.
+    cut_over = _CounterConn((3, ra.MODE_ACTIVE))
+    with pytest.raises(rp.RecordProjectionError) as refused:
+        rp.replay(records, cut_over, org_id="o", graph_id="g", start_seq=9)
+    message = str(refused.value)
+    for needle in ("ENUMERATED replay is REFUSED", "ISSUED", "record_cursor",
+                   "mode='active'", "#9190", "allocate=True", "seed"):
+        assert needle in message, (
+            f"the refusal does not name {needle!r}, so an operator cannot tell it "
+            f"from a lost write or a driver fault: {message}")
+    assert cut_over.journal_statements() == [], (
+        "the refusal came AFTER a position write — the duplicate the guard exists "
+        f"to prevent was already stored: {cut_over.executed!r}")
+
+    # 2. NOT CUT OVER — no cursor row, so the enumeration IS the coordinate and
+    # the replay is byte-identical to what it was before the guard existed.
+    fresh = _CounterConn(None)
+    report = rp.replay(records, fresh, org_id="o", graph_id="g", start_seq=9)
+    assert report.events == 1
+    writes = fresh.journal_statements()
+    assert len(writes) == 1, (
+        f"a pre-cutover replay stopped writing its position row: {fresh.executed!r}")
+    # 2b. AND A READ THAT FAILS IS A REFUSAL THAT NAMES ITS REMEDY — never a
+    #     silent "no cursor" and never a bare driver error. The realistic shape
+    #     is a database the counter migration has not reached (`42P01`), and the
+    #     remedy is the MIGRATION, not a retry; catching-and-continuing is not an
+    #     option on a real driver either (a failed statement aborts the caller's
+    #     transaction, `25P02`).
+    unreadable = _CounterConn(unreadable=True)
+    with pytest.raises(rp.RecordProjectionError) as could_not_classify:
+        rp.replay(records, unreadable, org_id="o", graph_id="g")
+    detail = str(could_not_classify.value)
+    for needle in ("could not be classified", "42P01",
+                   "20261116000001_record_cursor_allocator.sql"):
+        assert needle in detail, (
+            f"a failed counter read does not name {needle!r}, so the operator is "
+            f"sent to the wrong remedy: {detail}")
+    assert unreadable.journal_statements() == [], (
+        "a failed counter read still wrote a position row: "
+        f"{unreadable.executed!r}")
+
+
 def test_allocate_and_position_false_is_refused() -> None:
     """An allocated number exists to be CARRIED by a position row. Both flags set
     their opposite is a contradiction, refused before a connection is opened."""
@@ -682,6 +803,14 @@ def test_the_allocation_sql_has_one_definition() -> None:
     assert ra.RECORD_CURSOR_TABLE == rp.RECORD_CURSOR_TABLE
     assert (ra.MODE_SEEDED, ra.MODE_ACTIVE, ra.MODE_HALTED) == (
         rp.MODE_SEEDED, rp.MODE_ACTIVE, rp.MODE_HALTED)
+    # ⛔ AND THE COUNTER READ IS ONE SPELLING TOO (#9190). `replay()`'s
+    # enumerated-replay guard asks exactly what `read_cursor` reads, so a
+    # second hand-written copy could drift into asking a DIFFERENT question —
+    # and the two would then disagree about whether a graph is cut over, which
+    # is the one fact both exist to establish.
+    assert rp.CURSOR_PRESENCE_SQL == ra.READ_SQL, (
+        "`replay`'s guard and `read_cursor` read the counter with two "
+        f"different statements:\n{rp.CURSOR_PRESENCE_SQL!r}\n{ra.READ_SQL!r}")
 
 
 def test_an_empty_batch_allocates_nothing() -> None:

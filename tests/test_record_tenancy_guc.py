@@ -125,6 +125,13 @@ class RecordingCursor:
                 return {"tenant": self._conn.guc_reports,
                         "bypassing": self._conn.role_posture}
             return (self._conn.guc_reports, self._conn.role_posture)
+        # #9190: `replay()` asks whether this graph's positions have already been
+        # ISSUED by the allocator before it enumerates them. This recorder models
+        # the PRE-CUTOVER shape — the counter table is there (this tree's
+        # migrations create it) and holds NO row for the graph — which is what
+        # every graph is until `record_allocator.arm` runs.
+        if self._conn.last_sql == rp.CURSOR_PRESENCE_SQL:
+            return None
         return (self._conn.guc_reports,)
 
     def fetchall(self) -> list[Any]:
@@ -189,13 +196,19 @@ class RecordingConnection:
 
         The prologue is `set_config(...)` and the verify statement READS the GUC
         back (`current_setting(...)`) on the same round trip as the connecting
-        role's posture, so each is named rather than filtered by position.
+        role's posture, so each is named rather than filtered by position. The
+        #9190 counter read (`CURSOR_PRESENCE_SQL`) is named for the same reason:
+        it is about the CALLER's graph, not about the statements the plan
+        applies, and folding it into this list would make "the plan's
+        parameters" answer for a question it does not ask.
         """
         # Identity, not substring (#9600 review cycle 5, P3): a statement that
         # merely mentioned `current_setting` used to disappear from this list,
         # which is exactly the "statement the seam invented" this pins.
+        scope_and_probes = (rp.TENANT_GUC_SQL, rp.TENANT_SCOPE_SQL,
+                            rp.CURSOR_PRESENCE_SQL)
         return [(sql, params) for sql, params in self.executed
-                if sql != rp.TENANT_GUC_SQL and sql != rp.TENANT_SCOPE_SQL]
+                if sql not in scope_and_probes]
 
 
 def _migration_text(name: str) -> str:

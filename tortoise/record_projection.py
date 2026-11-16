@@ -297,6 +297,18 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # populated `journal_event` and a counter at 0 would restart the allocator
     # at 1 and collide with every existing position (round-1 finding B3).
     "20261116000001_record_cursor_allocator.sql",
+    # #12894 stage C — the byte meter's EXECUTE grant for `tortoise_record_app`,
+    # split OUT of the allocator file above. ⛔ THE SPLIT IS LOAD-BEARING: the
+    # allocator file is `creates`-conditional in `RECORD_REAPPLY_STEPS` (its
+    # policies take an ACCESS EXCLUSIVE lock on the counter table, the #12399
+    # deadlock), so after the first apply it is never re-applied and a grant at
+    # its tail could never fire on a container whose metering migration arrived
+    # later — measured as `has_function_privilege(… 'EXECUTE') = false`, a meter
+    # that raised `InsufficientPrivilege`, and an org charged 0 bytes. This file
+    # creates no table, so it is always re-applied (that is the whole point) and
+    # it is listed here for the registry reason this tuple's header states: the
+    # filename is the only total partition of "is this the record's schema".
+    "20261116000002_record_cursor_meter_grant.sql",
     # #11642 / #4051 V1 — the vector move: `CREATE EXTENSION vector`, the
     # `record_embedding_vector(jsonb)` converter, three GENERATED
     # `embedding_vec public.vector(384)` columns and their HNSW indexes. It
@@ -6611,6 +6623,24 @@ MODE_SEEDED = "seeded"
 MODE_ACTIVE = "active"
 MODE_HALTED = "halted"
 
+#: The graph's ISSUED position, or no row — and ⛔ THE SAME STATEMENT AS
+#: `record_allocator.READ_SQL`, not a second spelling of it (an equality pin in
+#: `tests/test_12894_record_cursor.py` holds the two together, for the reason
+#: `test_the_allocation_sql_has_one_definition` holds the allocation's copies).
+#:
+#: ONE statement, read after :func:`scope_connection` set the tenant GUC, so
+#: `record_cursor`'s RLS policy scopes it to the tenant this replay is about (a
+#: counter row another tenant holds is not visible, and could not be this
+#: graph's anyway — the pair is the key). It is ONE round trip on the live
+#: write path, which is why there is no `to_regclass` pre-probe in front of it:
+#: the derived door pays this on every record write (`#9558` is the cost
+#: register), and the counter table is a precondition this tree already assumes
+#: — `record_allocator.read_cursor` reads it with the same unguarded SELECT.
+CURSOR_PRESENCE_SQL = (
+    f"SELECT seq, mode FROM public.{RECORD_CURSOR_TABLE} "
+    "WHERE org_id = %s AND graph_id = %s"
+)
+
 #: The allocation, and the batch's payloads, in ONE statement.
 #:
 #: ⛔ `unnest(...) WITH ORDINALITY`, NOT `generate_series`: a series joined to a
@@ -7045,6 +7075,85 @@ def _statement_attribution(statement: Statement, index: int, total: int) -> str:
     return " ".join(parts)
 
 
+def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
+                                 graph_id: str) -> None:
+    """Refuse an ENUMERATED replay on a graph whose positions are ISSUED (#9190).
+
+    THE DEFECT THIS CLOSES. `replay()` numbers records by ENUMERATION —
+    `enumerate(records, start=start_seq)`, where `start_seq` is the journal's own
+    ordinal for `records[0]`. On a graph that has been cut over, the number is no
+    longer the journal's to give: `#9190` was reopened by owner ruling (2026-11-15,
+    comment 6902871297) — *"the record allocates the ordinal and the journal
+    record CARRIES it; replay READS the number instead of computing it."* So an
+    enumerated replay there is an answer to a question the record has already
+    answered, and it is WRONG in the one direction nothing could see: the same
+    journal event, replayed, lands its payload at a SECOND position. Neither
+    guard fires — `ON CONFLICT (org_id, graph_id, seq) DO NOTHING` keys on `seq`
+    and the enumerated `seq` is free, and :func:`_refuse_a_journal_collision`
+    only runs on an INSERT that was ABSORBED (this one affects a row). No error,
+    no counter, one record at two positions, and the door's own refusal text —
+    *"a replay heals the record"* — pointed an operator straight at it.
+
+    ⛔ IT IS A REFUSAL, NOT A HEAL. A cut-over graph's repair path is the
+    ALLOCATOR (`allocate=True`, which issues the number and carries it) or a
+    SEED, never a replay that renumbers from a coordinate the record no longer
+    uses. `RecordProjectionError` is the channel :func:`replay` already refuses
+    on (`start_seq`/`allocate` contradictions) — this is a fifth contradiction
+    of the same kind, not a new exception class and not a crash.
+
+    ⛔ NARROW BY CONSTRUCTION, and this is what keeps the whole existing suite
+    green: the refusal fires ONLY when the graph has a `record_cursor` row. A
+    graph with no row — every graph before cutover — replays exactly as it does
+    today. `position=False` never reaches here (it writes no position row, so
+    there is no second position to create), and neither does `allocate=True`
+    (the counter issues the number; that arm is the remedy this refusal names).
+
+    ⛔ AND AN ARM THAT CANNOT ASK MUST NOT GO QUIET. One statement — no `seq`
+    row and no refusal; a read that FAILS is a refusal that names the migration
+    it needs (see the `except` below), never a silent "no cursor". The one
+    direction this guard may be quiet in is ABSENCE, because absence of a cursor
+    row is exactly the pre-cutover state it exists to leave alone.
+    """
+    try:
+        cursor.execute(CURSOR_PRESENCE_SQL, (org_id, graph_id))
+        row = cursor.fetchone()
+    except Exception as exc:
+        # ⛔ A FAILURE TO ASK IS NOT AN ANSWER — and it is not a crash either.
+        # The one shape that reaches here on a real deployment is a database the
+        # counter migration has not reached (`42P01`), and the remedy is a
+        # MIGRATION, not a retry of the replay; so the refusal names it rather
+        # than escaping as a bare driver error the caller would read as a lost
+        # write. Catching-and-continuing is not an option: a failed statement
+        # aborts the caller's transaction (`25P02`), so a "tolerated" miss would
+        # poison every statement after it.
+        raise RecordProjectionError(
+            f"an ENUMERATED replay could not be classified: reading "
+            f"public.{RECORD_CURSOR_TABLE} for org_id={org_id!r} "
+            f"graph_id={graph_id!r} failed ({_driver_fault(exc)}). Apply the "
+            f"ordinal-allocator migration (20261116000001_record_cursor_"
+            f"allocator.sql) to this database — this replay cannot tell a "
+            f"pre-cutover graph from an allocated one, and enumerating an "
+            f"allocated one would store the same record at a second position "
+            f"(#9190)"
+        ) from exc
+    if row is None:
+        return
+    seq, mode = ((row["seq"], row["mode"]) if isinstance(row, Mapping)
+                 else (row[0], row[1]))
+    raise RecordProjectionError(
+        f"an ENUMERATED replay is REFUSED for a graph whose positions are "
+        f"ISSUED: public.{RECORD_CURSOR_TABLE} holds (seq={seq!r}, "
+        f"mode={mode!r}) for org_id={org_id!r} graph_id={graph_id!r}, so this "
+        f"graph's ordinals are ALLOCATED and CARRIED by the journal rather than "
+        f"computed by this replay (#9190, owner ruling 2026-11-15: \"the record "
+        f"allocates the ordinal and the journal record CARRIES it; replay READS "
+        f"the number instead of computing it\"). Enumerating here would store "
+        f"the same record at a SECOND position with no error, so a repair on "
+        f"this graph must go through the allocator (allocate=True) or a seed, "
+        f"not through a replay"
+    )
+
+
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str, start_seq: int = 1,
            position: bool = True,
@@ -7091,6 +7200,17 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     ``position=seq is not None`` and layer 1 is populated by production traffic,
     not only by a replay. ``True`` (the default) keeps every caller that
     predates the parameter byte-identical.
+
+    ⛔ AND AN ENUMERATED REPLAY IS REFUSED ONCE THE GRAPH IS CUT OVER (#9190).
+    Before a single plan statement, and only when ``position`` is on and
+    ``allocate`` off, this asks whether the graph has a `public.record_cursor`
+    row — i.e. whether its positions are ISSUED. If they are, the replay is
+    refused by name: the ordinal is the allocator's to give and the journal's to
+    CARRY, so enumerating would store the same record at a second position with
+    no error (`ON CONFLICT … DO NOTHING` cannot see it, and the `#9318`
+    collision guard only fires on an ABSORBED insert). A graph with no row —
+    every graph before cutover — is unaffected; see
+    :func:`_refuse_an_enumerated_replay`.
 
     THE TENANT GUC (R6). The FIRST statement executed is
     :data:`TENANT_GUC_SQL` — ``set_config('app.current_org_id', $1, true)`` —
@@ -7171,6 +7291,13 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     # context the plan is applied in — plus the role gate that decides whether
     # the context can mean anything at all.
     cursor = scope_connection(conn, org_id)
+    # ⛔ AN ENUMERATED REPLAY ASKS FIRST WHETHER THE COUNTER HAS ALREADY ISSUED
+    # THIS GRAPH'S POSITIONS (#9190). `position=False` writes no position row and
+    # `allocate=True` IS the allocator's arm, so neither is asked; everything pre-
+    # cutover replays unchanged (no cursor row ⇒ no refusal). See
+    # :func:`_refuse_an_enumerated_replay` for the duplication it closes.
+    if position and not allocate and records:
+        _refuse_an_enumerated_replay(cursor, org_id, graph_id)
     total = len(plan)
     allocated: list[int] = []
     for index, statement in enumerate(plan, start=1):
