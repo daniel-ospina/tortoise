@@ -1543,12 +1543,18 @@ def _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts):
     # the file cost **620.80 s wall against 9.8 s user + 5.7 s system**, with
     # TEN `migrate`-route cases each at exactly 60.7-60.9 s — i.e. ~10 min of
     # pure socket wait. That is what killed the required `test (j)` leg: the
-    # shard's whole 20 min watchdog, spent waiting on a server boot, twice in a
-    # row at the same nodeid, with ZERO attributable test failures. (TEN, not
-    # fifteen: `grep -c '_migrate_with_rebuild_counts(tmp_path'` counts ELEVEN
-    # lines = one definition at :1502 plus the ten CALL sites, and ten x 60.5 s
-    # is the measured 620.80 - 15.45 = 605.35 s delta — fifteen would be 912 s
-    # and contradict the ~10 min the same sentence states.)
+    # shard's whole 20 min watchdog, spent waiting on a server boot, in BOTH
+    # attempts, with ZERO test-level attribution (the legs died inside this file
+    # on ADJACENT migrate-route cases, not on one nodeid — att 1 on
+    # `…keeps_the_error_pointer_for_a_rescue_file`, att 2 on
+    # `…names_the_capture_source_when_it_observed_nothing`). (TEN, not fifteen:
+    # at `6234f4f2` `grep -c '_migrate_with_rebuild_counts(tmp_path'` counted
+    # ELEVEN lines = one definition at :1502 plus the ten CALL sites, and ten x
+    # 60.5 s is the measured 620.80 - 15.45 = 605.35 s delta — fifteen would be
+    # 912 s and contradict the ~10 min the same sentence states. The same grep
+    # counts THIRTEEN here: the pin below is an eleventh call site and this very
+    # sentence matches the pattern — re-derive the ten from `origin/main`, where
+    # the population is the ten real callers.)
     #
     # Pinned by `test_the_migrate_route_counts_nodes_without_booting_a_server`
     # below, which goes THROUGH this helper and reads `_COUNT_NODES_CALLS`: drop
@@ -1577,10 +1583,13 @@ def test_the_migrate_route_counts_nodes_without_booting_a_server(
     Measured while it did (#12962): this file cost **620.80 s wall against 9.8 s
     user + 5.7 s system**, with ten `migrate`-route cases at exactly 60.7-60.9 s
     each — ~10 min of pure socket wait — and the required `test (j)` leg was
-    killed at its 20 min watchdog TWICE, at the same nodeid, with ZERO
-    attributable test failures. Its committed `durations` weight is `3.2`, which
-    is why no budget derivation could see it: the row is honest about the TEST
-    and the boot was never part of it.
+    killed at its 20 min watchdog in BOTH attempts, inside this file, with ZERO
+    test-level attribution (att 1 died on
+    `…keeps_the_error_pointer_for_a_rescue_file`, att 2 on
+    `…names_the_capture_source_when_it_observed_nothing` — adjacent
+    migrate-route cases, not one nodeid). Its committed `durations` weight is
+    `3.2`, which is why no budget derivation could see it: the row is honest
+    about the TEST and the boot was never part of it.
 
     This pin is deliberately about REACH, not timing (a wall-clock assertion is
     flaky and would red under load), and it goes THROUGH the helper: it does NOT
@@ -1611,10 +1620,14 @@ def test_the_migrate_route_counts_nodes_without_booting_a_server(
         "(#12962: while the real call reached a server boot, this file cost 620 s "
         "and killed the required `test (j)` leg twice)"
     )
-    # REACH IS NOT ENOUGH: the calls must be the helper's STUB, i.e. they must
-    # have left no server behind and returned a count, not `None`. `_count_nodes`
-    # returns None on failure, and `migrate()` raises on a None target — so a pin
-    # that reaches the REAL function reds here rather than passing quietly.
+    # REACH IS NOT ENOUGH: the calls must be the helper's STUB. Measured both
+    # ways at #12962 — with the ARM above the only one that fires — deleting the
+    # helper's stub lets the REAL call boot a server and answer a count (probed:
+    # `{'status': 'migrated', 'nodes': 1}` after ~65 s), so arm (a) is what reds
+    # and no exception is expected; replacing the `_count_nodes` call sites in
+    # `tortoise/migrate_db.py` reds in ~5 s. This arm therefore does NOT rest on
+    # a `None`-handed-to-`migrate()` crash: `_count_nodes` answers `None` only
+    # when the boot gives up, and a boot that succeeds answers a count.
     assert result.get("nodes") == 0, (
         "the reached `_count_nodes` did not answer the helper's stub value, so "
         f"this test is measuring the REAL server-booting call (#12962): {result!r}"
