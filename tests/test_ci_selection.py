@@ -12122,6 +12122,79 @@ def test_no_durations_row_calls_an_unchanged_weight_one_it_does_not_hold():
     )
 
 
+#: A row asserting that its OWN committed weight IS a number the row no longer
+#: holds — "The weight is 0.9", "Declared 14.0s". The same falsification as
+#: `_WEIGHT_UNCHANGED_CLAIM_RE` above, in the DECLARATIVE spelling that guard cannot
+#: see: at the 2026-11-16 refresh four rows shipped this way after the sweep moved
+#: their values (`test_substrate_map.py` 0.9 -> 1.4, `test_10017_turn_parity_census`
+#: 25.0 -> 15.2, `test_embed_decision_step_11086` 7.0 -> 0.9,
+#: `test_demo_session_read_exclusion_8290` 14.0 -> 12.3) — the third re-ship of
+#: this defect in `test_substrate_map.py`'s row alone (3.7 -> 0.9 -> 1.4).
+#: ⛔ Anchored to the PRESENT-TENSE forms only. A note recording history must stay
+#: silent: "the weight WAS 0.9", the sweep's own `was 3.7`, and the `-> declared
+#: 23.8` derivation of a superseded figure all name a past value deliberately.
+_WEIGHT_IS_CLAIM_RE = re.compile(
+    r"\bthe\s+weight\s+is\s+(?P<w1>\d+(?:\.\d+)?)"
+    r"|\bDeclared\s+(?P<w2>\d+(?:\.\d+)?)\s*s\b",
+    re.IGNORECASE)
+
+
+def _durations_rows_declaring_a_weight_they_do_not_hold(text: str):
+    """`(key, claimed, value)` rows whose note declares a weight at another number."""
+    out = []
+    for key, note in _durations_row_comments(text):
+        claim = _WEIGHT_IS_CLAIM_RE.search(note)
+        if claim is None:
+            continue
+        row = next((ln for ln in text.splitlines()
+                    if (m := _DURATIONS_ROW_RE.match(ln)) and m.group("key") == key),
+                   None)
+        if row is None:  # pragma: no cover — every judged note came from a row
+            continue
+        value = float(_DURATIONS_ROW_RE.match(row).group("value"))
+        claimed = float(claim.group("w1") or claim.group("w2"))
+        if abs(claimed - value) > 1e-9:
+            out.append((key, claimed, value))
+    return out
+
+
+def test_no_durations_row_declares_a_weight_it_does_not_hold():
+    """#12962 cycle 5: the DECLARATIVE form of the #10726 claim.
+
+    `test_no_durations_row_calls_an_unchanged_weight_one_it_does_not_hold` anchors
+    on `the N weight … deliberately unchanged`, so a row that says `The weight is
+    0.9` or `Declared 7.0s` while its value moved is invisible to it — which is how
+    four rows shipped past the 2026-11-16 refresh. Same thesis as the flat-default
+    guard above: a guard that reads one spelling cannot say a claim is absent.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_declaring_a_weight_they_do_not_hold(text)
+    assert offenders == [], (
+        "a durations row's note DECLARES a weight the row does not hold — the note "
+        "is a stale copy of the row it sits in, and a reader trusts the prose: "
+        f"(key, claimed, row's value): {offenders}")
+
+
+def test_the_declared_weight_claim_check_is_not_vacuous():
+    """Bite on the declarations that shipped; stay silent on the history forms."""
+    stale = (
+        "durations:\n"
+        "  test_a.py: 1.4  # The weight is 0.9, the refresh-durations replacement.\n"
+        "  test_b.py: 0.9  # Declared 7.0s — ~1.4x the measured body.\n"
+        "surfaces: []\n")
+    assert _durations_rows_declaring_a_weight_they_do_not_hold(stale) == [
+        ("test_a.py", 0.9, 1.4), ("test_b.py", 7.0, 0.9)]
+    legitimate = (
+        "durations:\n"
+        "  test_a.py: 1.4  # The weight WAS 0.9 from the 2026-11-02 sweep.\n"
+        "  test_b.py: 0.9  # 23.77 s of testcase time -> declared 23.8 on that"
+        " day's map.\n"
+        "  test_c.py: 0.9  # Declared 0.9s, and the row still holds it.\n"
+        "  test_d.py: 1.4  # the census reading, not a declaration at all.\n"
+        "surfaces: []\n")
+    assert _durations_rows_declaring_a_weight_they_do_not_hold(legitimate) == []
+
+
 def test_the_unchanged_weight_claim_check_is_not_vacuous():
     """The guard above must bite on the shipped shape and stay quiet on its siblings.
 
