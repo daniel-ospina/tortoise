@@ -2529,6 +2529,71 @@ class TestNonScalarStatus12869:
         finally:
             sdk.close()
 
+    @pytest.mark.parametrize("lane", ["merge", "adopt", "no_projection"])
+    def test_the_JOURNAL_door_refuses_on_EVERY_landing_lane(self, tmp_path, lane):
+        """The encoder refusal is a RECORD question and must not be landing-gated.
+
+        The pin above exercises ONLY the MINT path — a fresh name, where
+        `lands()` answers True and the refusal fires. On every OTHER path the
+        landing test answers False and the pre-fix helper returned before the
+        encoder check, so the raw traceback escaped the very method #12869 is
+        about:
+
+          * MERGE — the name already carries an id;
+          * ADOPT — a raw id-less holder that `resolve_or_mint` stamps an id
+            onto, so `lands()` then answers False for a row it has just
+            MUTATED (the refusal cost the write it was meant to prevent — the
+            `#3590` live-without-durable class: id-bearing, zero journal lines);
+          * NO PROJECTION — the documented journal-only `EventAPI` lane, where
+            there is no graph to land on at all and `lands` is `lambda: False`.
+
+        MEASURED at the pre-fix head, all three: `TypeError: Object of type
+        bytes is not JSON serializable` out of `EventLog.append`. The fix asks
+        the encoder BEFORE `_registration_id`, which is this method's own
+        `#11948` rule, so ADOPT is no longer stamped either.
+
+        FALSIFIABLE BY: moving the encoder check back below `lands` reds MERGE
+        and ADOPT (raw `TypeError`, not `ValueError`); moving it back below
+        `_registration_id` reds the ADOPT arm's id-absence assert.
+        """
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        sdk = TortoiseSDK(str(tmp_path / f"t12869lane-{lane}.db"))
+        try:
+            target = {"merge": "enc-merge",
+                      "adopt": "enc-adopt",
+                      "no_projection": "enc-noproj"}[lane]
+            log_path = tmp_path / f"enc-{lane}.jsonl"
+            projection = None if lane == "no_projection" else sdk._get_proj()
+            api = EventAPI(EventLog(str(log_path)), initiated_by="user",
+                           projection=projection)
+            if lane == "merge":
+                api.add_object(target, "core:strategy")   # mints + journals
+            elif lane == "adopt":
+                sdk._get_proj().g.query(
+                    "CREATE (n:Object {name:$n, objectKind:'core:strategy'})",
+                    params={"n": target})
+                assert _carrier_row(sdk, "Object", target)[0] is None, (
+                    "the ADOPT fixture must start id-less")
+            before = (log_path.read_text().splitlines()
+                      if log_path.exists() else [])
+            with pytest.raises(ValueError, match=r"no JSON form"):
+                api.add_object(target, "core:strategy", status=b"live")
+            after = (log_path.read_text().splitlines()
+                     if log_path.exists() else [])
+            assert after == before, (
+                "a REFUSED write appended a journal record — the refusal must "
+                "land before anything reaches the stream")
+            if lane == "adopt":
+                assert _carrier_row(sdk, "Object", target)[0] is None, (
+                    "the refusal ran AFTER `_adopt_idless_holder` stamped an "
+                    "id: a refusal that costs a write (#12869 review P1)")
+            if lane != "no_projection":
+                assert _carrier_row(sdk, "Object", target)[1] is None, (
+                    "the unencodable status reached the node")
+        finally:
+            sdk.close()
+
     @pytest.mark.parametrize("payload_kind", ["subclass", "pair", "stronly"])
     def test_a_renderer_only_status_does_NOT_land_on_the_MERGE_path(
             self, tmp_path, payload_kind):

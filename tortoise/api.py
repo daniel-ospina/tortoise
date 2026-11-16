@@ -2861,6 +2861,22 @@ class EventAPI:
         that cannot happen.
         """
         _refuse_caller_named_funnel_keys(props, "`add_object`")
+        # ⛔ #12869: the RECORD-side refusal, BEFORE the lock and the id
+        # resolution — by this method's own `#11948` rule, "a refusal that ran
+        # after `_registration_id` would have taken the lock for a write that
+        # cannot happen". That is not hypothetical on this path: on the ADOPT
+        # branch `_registration_id` -> `resolve_or_mint` -> `_adopt_idless_holder`
+        # STAMPS `n.id` onto an id-less holder, after which no landing test can
+        # tell the row was not already addressable — and the encoder then raises
+        # out of `EventLog.append`, leaving an id-bearing row with ZERO journal
+        # lines (the `#3590` class). Measured at the pre-fix head: MERGE, ADOPT
+        # and the projection-less lane all escaped with
+        # `TypeError: Object of type bytes is not JSON serializable`.
+        # It is a SEPARATE helper, not a flag on `_refuse_non_string_object_status`
+        # below, because the node-side refusals in that helper genuinely need the
+        # landing test — which can only be asked AFTER the id exists.
+        from .sdk import _refuse_unencodable_object_status
+        _refuse_unencodable_object_status(props, door="add_object", target=name)
         from .entity_identity import entity_create_lock
         with entity_create_lock("Object", name):
             oid = self._registration_id("Object", name, explicit_id=id)
@@ -2889,14 +2905,14 @@ class EventAPI:
             # `AttributeError`. Measured: the first cut of this call raised
             # `'NoneType' object has no attribute 'g'` where `main` accepted and
             # journaled the call.
-            # `journals=True` because THIS door always appends a record:
-            # a value the node would drop (`bytes`, `frozenset`) has no JSON
-            # form, and the encoder would raise AFTER `_registration_id` stamped
-            # an id onto an adopted holder (measured: `TypeError: Object of type
-            # bytes is not JSON serializable`, zero journal lines).
+            # `journals` was REMOVED from this call (#12869 review round 5, P1):
+            # the encoder question is asked above, before the lock, because a
+            # value with no JSON form is a RECORD question and the record is
+            # written on every path — asking it here, below `_registration_id`,
+            # made it unreachable on MERGE/ADOPT and cost a write on ADOPT.
             _lands = getattr(self.projection, "g", None)
             _refuse_non_string_object_status(
-                props, door="add_object", target=name, journals=True,
+                props, door="add_object", target=name,
                 lands=(lambda: not _lands.query(
                     "MATCH (n:Object {id:$id}) RETURN count(n)",
                     params={"id": oid},

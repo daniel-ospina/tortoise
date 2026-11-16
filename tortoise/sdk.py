@@ -8775,8 +8775,63 @@ def _status_is_stored_unhashable(value: object) -> bool:
             and _is_persistable_prop_value(value))
 
 
+def _refuse_unencodable_object_status(props, *, door: str, target: object) -> None:
+    """#12869 — refuse a declared ``status`` the RECORD cannot carry, before any write.
+
+    ⛔ THIS IS A QUESTION ABOUT THE RECORD, AND IT IS ANSWERED BEFORE THE WRITE.
+    ``dropped`` is a claim about the NODE: ``#7369`` degrades a value FalkorDB
+    cannot store to null, so no node ever carries it. At a door that ALWAYS
+    appends a JSON record the same value is placed on the event envelope and
+    handed to ``json.dumps``, which has no ``default=`` (``tortoise/log.py:1563``)
+    and therefore RAISES. Measured at the pre-fix head, ``EventAPI.add_object(…,
+    status=b'live')`` raised ``TypeError: Object of type bytes is not JSON
+    serializable`` out of ``EventLog.append`` — the bare traceback #12869 exists
+    to replace.
+
+    ⛔ IT MUST RUN BEFORE ``_registration_id``, which is why it is a separate
+    helper rather than a flag on ``_refuse_non_string_object_status``. That
+    method's own ``#11948`` rule — stated in its docstring — is that a refusal
+    after ``_registration_id`` "would have taken the lock for a write that cannot
+    happen". A landing-gated check inside the shared helper cannot satisfy that:
+    on the ADOPT path ``resolve_or_mint`` has ALREADY stamped ``n.id`` onto an
+    id-less holder by the time the helper is reachable, and ``lands()`` then
+    answers False (the id now exists), so the helper returns and the encoder
+    raises afterwards — a refusal that COSTS A WRITE, leaving an id-bearing row
+    with ZERO journal lines (the ``#3590`` live-without-durable class). Measured
+    before this split: MERGE, ADOPT and the projection-less lane all escaped with
+    the raw ``TypeError``, and on ADOPT it followed the stamp.
+
+    ⛔ AND IT IS SCOPED TO THE DOOR THAT RAISES. ``create_entity(type='object')``
+    deliberately does NOT call it: its journal leg is ``_journal_entity_event``,
+    which SWALLOWS the encoder failure and logs "LIVE-ONLY and will not survive a
+    rebuild" (``#4240``) — uniformly for every unencodable prop, ``tags=
+    frozenset(...)`` included. Refusing there would narrow ``status`` alone on a
+    mechanism that is not ``status``-specific.
+
+    ``dict`` DOES have a JSON form and stays accepted (the node drops it, the
+    record carries it — no crash, no write to protect).
+    """
+    declared = lifecycle_props_by_rendering(props, {"status"})
+    if not declared:
+        return
+    word = declared["status"]
+    import json as _json
+    try:
+        _json.dumps(word)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{door} refused a non-string status for {target!r}: {word!r} "
+            f"is {word.__class__.__name__}, which has no JSON form, and this "
+            f"door records every write. The NODE would drop the value "
+            f"(#7369) but the record cannot carry it, so the write would "
+            f"fail inside the event log after this door had already "
+            f"stamped an id (#12869). Pass `status` as a plain str. "
+            f"Nothing was written."
+        ) from None
+
+
 def _refuse_non_string_object_status(props, *, door: str, target: object,
-                                    lands=None, journals: bool = False) -> None:
+                                    lands=None) -> None:
     """#12869 — refuse a PERSISTABLE NON-STRING Object ``status`` at a write door.
 
     ⛔ THIS IS NOT A VOCABULARY. ONTOLOGY §4.3 declares the property's TYPE as
@@ -8854,6 +8909,17 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     stamped an id onto an adopted holder. ``bytes``/``bytearray``/``frozenset``
     have no JSON form; ``dict`` does and stays accepted.
 
+    ⛔ AND THAT CHECK RUNS **ABOVE** ``lands``, not below it (review round 5, P1).
+    ``lands`` is a question about the NODE; the encoder is a question about the
+    RECORD, and the record is written on EVERY path. An earlier cut put the
+    encoder check below the ``lands`` early return and argued the landing test
+    protected it — true of the node, FALSE of the record: on MERGE, ADOPT and the
+    projection-less lane ``lands`` answers False, the helper returned, and the
+    encoder still raised. On ADOPT that ``TypeError`` FOLLOWED the id stamp, so a
+    refusal left a mutated row with zero journal lines (``#3590``). The check is
+    now unconditional for the doors that pass ``journals``, and pinned on all
+    three lanes.
+
     ⚠️ AND IT IS SCOPED TO THAT DOOR, because the mechanism is not general and
     the first cut of this paragraph claimed it was (review round 3, P2).
     ``create_entity`` does NOT raise: its journal leg is ``_journal_entity_event``,
@@ -8877,30 +8943,30 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     declared = lifecycle_props_by_rendering(props, {"status"})
     if not declared:
         return
-    # ⛔ THE LANDING TEST RUNS FIRST — ABOVE EVERY REFUSAL (#12869 review, P2).
+    word = declared["status"]
+    # ⛔ THE RECORD-SIDE QUESTION IS ASKED ELSEWHERE, ON PURPOSE. A value with no
+    # JSON form is refused by `_refuse_unencodable_object_status`, BEFORE
+    # `_registration_id` — because on the ADOPT path the id is stamped by
+    # `resolve_or_mint` before this helper is even reachable, so any refusal here
+    # is a refusal that COSTS A WRITE (`#1198`'s rule, this method's own
+    # docstring). It is not a flag on this function because that helper's
+    # landing test is a NODE question and the encoder is a RECORD question, and
+    # the record is written on every path (review round 5, P1: putting it below
+    # the `lands` return made it unreachable on MERGE/ADOPT/projection-less).
+    # ⛔ THE LANDING TEST, for the NODE-side refusals below.
     # A write that MERGES onto (or ADOPTS) an existing node drops a declared
-    # `status` entirely (`#7925` round 4), so there is nothing at this call to
+    # `status` entirely (`#7925` round 4), so there is nothing for THOSE to
     # refuse. The ORDER is not cosmetic: at the create door `lands` is asked
     # AFTER `resolve_or_mint`, which has already stamped an id onto an id-less
-    # live holder on the ADOPT path — so a refusal raised above this line is a
-    # refusal that COSTS A WRITE (`#9287`/`#10192`), and on a journaling lane it
-    # loses the record too. MEASURED before the fix, on a journaled SDK with a
-    # fixture holder minted raw as `CREATE (n:Object {name:'noid', …})`:
-    #
-    #   create_object('noid','core:strategy', status=b'live')
-    #     -> ValueError: … has no JSON form;  row now holds an id it did not
-    #        have, journal has 0 lines.
-    #   create_object('noid2','core:strategy',
-    #                 **{"status": None, KHash("status"): ["live"]})
-    #     -> ValueError: … CONFLICTING status write;  row id-bearing, journal 0.
-    #
-    # Both are the "a refusal that COSTS A WRITE" the atomicity rule forbids and
-    # that `test_a_REFUSED_create_writes_NOTHING` claims is impossible — it could
-    # not see them, because every value in `_REFUSED` passes `lands()`->False on
-    # adopt and so never reached these two checks. Asking `lands` first makes the
-    # claim true by construction instead of by test coverage.
-    # ⚠️ `declared` is still asked FIRST, so a call that names no status issues no
+    # live holder on the ADOPT path — so a node-side refusal raised above this
+    # line is a refusal that COSTS A WRITE (`#9287`/`#10192`).
+    # ⚠️ `declared` is asked FIRST, so a call that names no status issues no
     # graph read: the thunk is paid for only where a refusal was on the table.
+    # ⛔ IT NO LONGER PROTECTS THE RECORD-SIDE CHECK, which is above it by design:
+    # an earlier cut put that check BELOW this return and claimed "asking `lands`
+    # first makes the claim true by construction", which was true of the node and
+    # FALSE of the record — it made the check unreachable on precisely the paths
+    # (MERGE/ADOPT/projection-less) where the encoder goes on to raise.
     if lands is not None and not lands():
         return                                      # ON CREATE only: not stored
     # ⛔ BEFORE reading the value: two keys rendering as `status` make the read
@@ -8917,12 +8983,6 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
             f"`None` key to hide a non-scalar behind it (#12869). Pass `status` "
             f"ONCE, as a plain str."
         )
-    word = declared["status"]
-    # ⛔ `word is None` IS load-bearing, not a restatement: `_value_ok(None)` is
-    # True (a live write of null CLEARS the property), so dropping this disjunct
-    # REFUSES `status=None` — the documented clear (#9974 R1). Measured: removing
-    # it reds `test_a_NULL_status_still_CLEARS_an_Object`, the
-    # `[null-clear-target]` arm and the repair pin.
     if word is None:
         return                                      # the documented CLEAR
     if isinstance(word, str):
@@ -8936,30 +8996,13 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
         # helper — refusing here rejected a write the writer performs, the
         # `#7925` round-4 class this docstring opens by refusing.
         return                                      # a word
-    # ⛔ ASKED BEFORE the landing scope below, and the ORDER is the whole point:
-    # a value the NODE drops is exactly the value this check exists for, so
-    # gating it on `_value_ok` would let `bytes` return early and the encoder be
-    # the thing that reports it (measured — the first cut did precisely that).
-    if journals:
-        # See `journals` above: the NODE drops this value, the RECORD cannot
-        # encode it, and the encoder's own `TypeError` is reported from inside
-        # `EventLog.append` after the id has been stamped.
-        import json as _json
-        try:
-            _json.dumps(word)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"{door} refused a non-string status for {target!r}: {word!r} "
-                f"is {word.__class__.__name__}, which has no JSON form, and this "
-                f"door records every write. The NODE would drop the value "
-                f"(#7369) but the record cannot carry it, so the write would "
-                f"fail inside the event log after this door had already "
-                f"stamped an id (#12869). Pass `status` as a plain str."
-            ) from None
     if not _value_ok(word):
         return                                      # the #7369 gate drops it
-    # ⛔ `lands` IS ALREADY SPENT ABOVE, deliberately: the one landing test runs
-    # before every refusal, so a refusal here can never follow a write.
+    # ⛔ FOR THIS REFUSAL, `lands` IS ALREADY SPENT ABOVE: the node-side landing
+    # test runs before every NODE-side refusal, so a refusal here can never
+    # follow a write. (The RECORD-side `journals` check is the exception by
+    # design — it runs ABOVE the landing test, because the record is written on
+    # every path. See the block above.)
     # ⛔ `type(word)` would be fine here, but `type` is a PARAMETER name at one
     # of the three callers (`create_entity(type, …)`), so the shadow-free
     # spelling is used uniformly rather than per-caller.
