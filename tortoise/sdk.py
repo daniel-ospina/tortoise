@@ -5816,11 +5816,16 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
                    if issubclass(type(status), str) else None)
     if status_word == _SUPERSEDED_STATUS:
         return
-    named = ", ".join(f"{key!r} (record column {column!r})"
+    # Both caller-supplied operands in this message go through `_refusal_repr`:
+    # a `str` subclass is admitted as a keyword KEY by CPython's own check and as
+    # a `status` value by the record, and its `__repr__` may answer with another
+    # `str` subclass whose `__format__` raises (measured: `RuntimeError:
+    # fmt-boom`), which would replace this door's `ValueError` (#12914 review P3).
+    named = ", ".join(f"{_refusal_repr(key)} (record column {column!r})"
                      for key, column in carriers)
     raise ValueError(
         f"{named} on a :{label} is a lifecycle CARRIER and cannot be "
-        f"written with status={status!r} (through {surface}). The record "
+        f"written with status={_refusal_repr(status)} (through {surface}). The record "
         f"derives an Object's/Subject's status from the carriers ALONE "
         f"(public.object_current_status: superseded_by IS NOT NULL OR "
         f"superseded_at IS NOT NULL -> 'superseded'), so a carrier written "
@@ -11981,9 +11986,16 @@ def _refusal_repr(value) -> str:
     `!r` — the exact gap the #12907 Point arm carried.
     """
     try:
-        return repr(value)
+        text = repr(value)
     except Exception:  # noqa: BLE001, RUF100 — a hostile `__repr__` is the point
         return f"<{_refusal_type_name(value)}>"
+    # The CALL surviving is not enough, exactly as `_refusal_type_name` states for
+    # the class name: CPython accepts a `__repr__` that ANSWERS with a `str`
+    # SUBCLASS, and the f-string then renders it with that subclass's own
+    # `__format__` — measured, `RuntimeError: fmt-boom` out of this PR's own
+    # refusals at `supersede`'s two operand arms (#12914 review P3). Bound the
+    # ANSWER into base content before it enters a message.
+    return text if type(text) is str else str.__str__(text)
 
 
 class TortoiseSDK:
@@ -22786,6 +22798,18 @@ class TortoiseSDK:
                     f"`supersede({_refusal_repr(old_id)}, <successor id>)`."
                 )
             return self._supersede_entity(label, old_id, new_id)
+        # ⛔ THE SUCCESSOR OPERAND IS BOUNDED ON THE POINT ARM TOO (#12914 review
+        # P2): the refusal above bounds ``old_id``, but this arm hands ``new_id``
+        # straight to ``_assert_lifecycle_guard`` and its query, which cannot
+        # encode a forged-``__class__`` value either — measured,
+        # ``supersede(<live Point>, <impostor>)`` escaped as ``TypeError:
+        # argument of type '…' is not iterable`` where every GENUINE non-``str``
+        # successor (``123``, ``None``, ``[]``) answers the Point doors' own
+        # documented ``No point <id>`` (measured). ``_supersede_entity`` needs no
+        # equivalent here: its ``_rows`` already answers "names no node" for the
+        # same value, which is why the Object/Subject arm is untouched.
+        if isinstance(new_id, str) and not issubclass(type(new_id), str):
+            raise ValueError(f"No point {_refusal_repr(new_id)}")
         if transfer_edges:
             return self.supersede_point(old_id, new_id)
         return self.invalidate_point(old_id, new_id)

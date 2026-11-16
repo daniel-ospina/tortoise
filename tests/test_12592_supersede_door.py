@@ -70,16 +70,21 @@ What this suite pins (each row names the mutation that reds it):
 * #12825's allowance is untouched: ``status='live'`` WITH both carriers cleared
   lifts a superseded row; a status-ONLY lift is still refused. Mutation: make
   the new guard fire on any status -> the un-supersede case reds.
-* The #12907 IMPOSTOR class, at all three sites this door reads a caller value
+* The #12907 IMPOSTOR class, at all FOUR sites this door reads a caller value
   through a ``str`` test: ``update_entity(status=<impostor>)`` still answers the
   CARRIER ``ValueError``; ``supersede(<live>, <impostor>)`` still answers
-  ``no :<label> <id>``; ``supersede(<impostor>, <id>)`` answers a ``ValueError``
+  ``no :<label> <id>`` on Object/Subject and the Point doors' own ``No point
+  <id>`` on ``Point`` (the family dispatch bounds the SUCCESSOR operand on both
+  arms — the first cut bounded only the entity arm and the Point arm still
+  raised ``TypeError``, #12914 review P2); ``supersede(<impostor>, <id>)``
+  answers a ``ValueError``
   rather than a ``TypeError``. Mutation: spell the base-content gate
   ``isinstance(x, str)`` instead of ``issubclass(type(x), str)`` -> the first two
   red with ``TypeError: descriptor '__str__' requires a 'str' object``; delete
   the door's impostor refusal (or ``_supersession_label``'s non-``str``
   short-circuit) -> the third reds with ``TypeError: argument of type 'Imp' is
-  not iterable``. A GENUINE non-``str`` id (`123`, `None`, `[]`, `object()`)
+  not iterable``; delete the Point arm's successor bound -> the ``Point`` case
+  reds the same way. A GENUINE non-``str`` id (`123`, `None`, `[]`, `object()`)
   keeps the documented ``No point <id>`` fall-through, pinned in the same cases,
   so the bound cannot be widened into a blanket ``str``-only door. The refusal
   interpolates the refused operand, so BOTH caller reads are defensive: a
@@ -87,8 +92,11 @@ What this suite pins (each row names the mutation that reds it):
   class (``_refusal_type_name``) each still answer ``ValueError``.
   Mutation: spell either ``{old_id!r}`` / ``{type(old_id).__name__}`` -> the
   impostor refusal escapes as the caller's own ``RuntimeError``. The same holds
-  where a metaclass ANSWERS with a non-``str`` name (``RuntimeError: fmt-boom``)
-  and at the exotic-key refusal that groups class names
+  where a metaclass ANSWERS with a non-``str`` name (``RuntimeError: fmt-boom``),
+  where a ``__repr__`` ANSWERS with a ``str`` whose ``__format__`` raises
+  (``_refusal_repr`` bounds the ANSWER, and so do the carrier message's
+  ``status=`` and carrier-KEY operands), and at the exotic-key refusal that
+  groups class names
   (``{type(k).__name__ for k in _exotic_keys}`` -> ``RuntimeError: name-boom``).
 
 Runnable (docker lane):
@@ -949,9 +957,9 @@ def test_an_impostor_status_still_answers_the_carrier_refusal(sdk, label):
         f"{before} -> {_row(sdk, label, node)}")
 
 
-@pytest.mark.parametrize("label", ["Object", "Subject"])
+@pytest.mark.parametrize("label", ["Point", "Object", "Subject"])
 def test_an_impostor_successor_answers_the_same_missing_node_refusal(sdk, label):
-    """``supersede(<live>, <impostor>)`` answers ``no :<label>``, not a TypeError.
+    """``supersede(<live>, <impostor>)`` answers ``no <label> <id>``, not a TypeError.
 
     Measured at ``6823ed2b84``: ``TypeError: descriptor '__str__' requires a
     'str' object`` at the self-successor gate (sdk.py:22819), where
@@ -959,19 +967,39 @@ def test_an_impostor_successor_answers_the_same_missing_node_refusal(sdk, label)
     A value the graph cannot encode names no node, so it must reach that same
     refusal.
 
+    ⛔ THE POINT ARM IS ITS OWN CASE (#12914 review P2, cycle 5): the first cut of
+    this fix only bounded the Object/Subject dispatch, so
+    ``supersede(<live Point>, <impostor>)`` still escaped as ``TypeError:
+    argument of type '…' is not iterable`` (measured) out of
+    ``_assert_lifecycle_guard`` — the default and most-used family, untested
+    because the parametrization stopped at the two entity labels. Its documented
+    answer is the Point doors' own ``No point <id>``, which every GENUINE
+    non-``str`` successor (``123``, ``None``) already gets; the ``No point``
+    cases below keep that fall-through from being narrowed.
+
     Mutation: spell either base-content gate ``isinstance(x, str)`` -> TypeError;
     drop the non-``str`` short-circuit in ``_rows`` -> TypeError inside the
-    query.
+    query; delete the Point arm's successor bound -> ``TypeError`` on the Point
+    case alone.
     """
     node = _make(sdk, label, f"impostor-new-{label.lower()}")
     before = _row(sdk, label, node)
     with pytest.raises(ValueError) as exc:
         sdk.supersede(node, _Impostor())
     msg = str(exc.value)
-    assert f"no :{label}" in msg, f"the missing-successor refusal must land: {msg!r}"
+    expected = "No point" if label == "Point" else f"no :{label}"
+    assert expected in msg, f"the missing-successor refusal must land: {msg!r}"
     assert _row(sdk, label, node) == before, (
         "a refused impostor successor moved the row: "
         f"{before} -> {_row(sdk, label, node)}")
+    # The bound is the FORGED-CLASS shape, not a blanket `str`-only door.
+    for genuine in (123, None):
+        with pytest.raises(ValueError) as exc:
+            sdk.supersede(node, genuine)
+        assert expected in str(exc.value), exc.value
+        assert _row(sdk, label, node) == before, (
+            f"a refused {genuine!r} successor moved the row: "
+            f"{before} -> {_row(sdk, label, node)}")
 
 
 def test_an_impostor_old_id_is_refused_at_this_door(sdk):
@@ -1187,6 +1215,82 @@ def test_a_class_name_that_is_not_a_str_cannot_escape_the_refusal(sdk):
     assert _row(sdk, "Object", node) == before, (
         "a refused fmt-boom impostor moved the row: "
         f"{before} -> {_row(sdk, 'Object', node)}")
+
+
+class _FmtBoomKey(str):
+    """A GENUINE ``str`` subclass whose ``__repr__`` ANSWERS with a bad subclass."""
+
+    def __repr__(self):
+        return _FmtBoomAnswer("'supersededBy'")
+
+
+class _FmtBoomAnswer(str):
+    """A ``str`` subclass whose ``__format__`` raises.
+
+    CPython ACCEPTS a ``__repr__`` that answers with a ``str`` subclass, so
+    guarding the ``repr`` CALL is not enough: the f-string then renders the
+    ANSWER through that subclass's own ``__format__``.
+    """
+
+    def __format__(self, spec):
+        raise RuntimeError("fmt-boom")
+
+
+class _ImpostorFmtAnswer(_Impostor):
+    """An impostor whose ``__repr__`` answers with an unrenderable subclass."""
+
+    def __repr__(self):
+        return _FmtBoomAnswer("<imp-fmt>")
+
+
+def test_a_repr_that_ANSWERS_with_a_bad_subclass_cannot_escape_the_refusal(sdk):
+    """`_refusal_repr` must bound the ANSWER, not just guard the call.
+
+    Measured on this fix's fourth cut (#12914 review P3): a caller ``__repr__``
+    returning a ``str`` subclass whose ``__format__`` raises made
+    ``supersede(<impostor>, <id>)`` -> ``RuntimeError: fmt-boom``, and the same
+    value reached the PRE-EXISTING ``{status!r}`` carrier message this PR's F1
+    fix sits beside. Fail-closed (no write) but the contract is the exception
+    CLASS, and it is the same rule ``_refusal_type_name`` already states for the
+    class NAME.
+
+    Mutation: ``return repr(value)`` unchecked -> ``RuntimeError: fmt-boom`` on
+    every arm; spell the carrier message ``status={status!r}`` /
+    ``{key!r}`` -> ``RuntimeError`` on arms 3 and 4.
+    """
+    point = _make(sdk, "Point", "fmt-answer-point")
+    obj = _make(sdk, "Object", "fmt-answer-object")
+    before_p, before_o = _row(sdk, "Point", point), _row(sdk, "Object", obj)
+
+    # 1. the Point successor arm (the value this cycle added a bound for).
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(point, _ImpostorFmtAnswer())
+    assert "No point <imp-fmt>" in str(exc.value), exc.value
+
+    # 2. the old-id arm (this PR's door refusal).
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(_ImpostorFmtAnswer(), obj)
+    assert "is not a node id" in str(exc.value), exc.value
+    assert "but its class is" in str(exc.value), (
+        f"the class name is the fallback's second read: {str(exc.value)!r}")
+
+    # 3. the carrier message's `status=` operand.
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(obj, status=_ImpostorFmtAnswer(), supersededBy="v2")
+    assert "lifecycle CARRIER" in str(exc.value), exc.value
+
+    # 4. the carrier message's KEY operand — a genuine `str` subclass is admitted
+    #    as a keyword key by CPython's own check.
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(obj, status="live", **{_FmtBoomKey("supersededBy"): "v2"})
+    assert "lifecycle CARRIER" in str(exc.value), exc.value
+
+    assert _row(sdk, "Point", point) == before_p, (
+        f"a refused fmt-answer successor moved the row: {before_p} -> "
+        f"{_row(sdk, 'Point', point)}")
+    assert _row(sdk, "Object", obj) == before_o, (
+        f"a refused fmt-answer write moved the row: {before_o} -> "
+        f"{_row(sdk, 'Object', obj)}")
 
 
 class _BoomNameKey(str, metaclass=_BoomNameMeta):
