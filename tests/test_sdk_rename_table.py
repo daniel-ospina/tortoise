@@ -224,7 +224,7 @@ CITES_ANCHOR_LITERAL: dict[str, tuple[str, str]] = {
     ),
     'r1_canon': (
         'canonical-sdk-methods.md',
-        '| R1 | `search_knowledge` | #1 | `tortoise_fts_query`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` |',
+        '| R1 | `search_knowledge` | #1 |',
     ),
     'r2': (
         'beta-sdk-surface.md',
@@ -272,7 +272,7 @@ CITES_ANCHOR_LITERAL: dict[str, tuple[str, str]] = {
     ),
     'r6_canon': (
         'canonical-sdk-methods.md',
-        '| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` |',
+        '| R6 | `graph_overview` | #6 |',
     ),
     'r6_list_sources': (
         'beta-sdk-surface.md',
@@ -308,7 +308,7 @@ CITES_ANCHOR_LITERAL: dict[str, tuple[str, str]] = {
     ),
     't_r6': (
         'canonical-sdk-methods.md',
-        '| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` |',
+        '| R6 | `graph_overview` | #6 |',
     ),
     't_w15': (
         'canonical-sdk-methods.md',
@@ -470,10 +470,10 @@ CITATION_REGION_LITERAL: dict[str, str] = {
     'p_set_name': '| `set_memory_graph_name`, `set_memory_graph_backend`, `count_memory_graphs` | 3 | See "Provisioning" above. |',
     'p_withdraw': '| `withdraw_knowledge` | 1 | **Never existed** — removed from the plan. Retraction is a field on `update_knowledge`. |',
     'r1': '| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` | 5 | → `search_knowledge`. |',
-    'r1_canon': '| R1 | `search_knowledge` | #1 | `tortoise_fts_query`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse |',
+    'r1_canon': "| R1 | `search_knowledge` | #1 | `search_knowledge`, `tortoise_fts_query`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse — `suggest_entry_points` and `search_sessions` were re-privatised into this container by #11609's READ/QUERY family A (#12951) |",
     'r2': '| `query`, `paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`. |',
     'r3': '| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". |',
-    'r3_canon': '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `provenance`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads and `provenance`; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |',
+    'r3_canon': '| R3 | `recall_beliefs` | #3 | `check_confidence`, `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads (`check_confidence` is the approved name they resolve to, and it landed in #11609 family A); `provenance` was re-privatised into this container by #12951; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |',
     'r3_context': '| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` | 4 | → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. |',
     'r3_drop_subgraph': '| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". |',
     'r3_restore': '| `restore_point_at` | → row 7 **`get_historical_knowledge`**. A **read**, not a write — it returns the version of a claim valid on a date and mutates nothing. |',
@@ -482,16 +482,16 @@ CITATION_REGION_LITERAL: dict[str, str] = {
     'r5': '| `traverse`, `expand_relationships`, `get_org_structure` | 3 | → `explore_connections`. |',
     'r6': '| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` | ~5 | → `graph_overview` where they are orientation. The diagnostics are the held question above. |',
     'r6_aliases': '| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` | **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. |',
-    'r6_canon': '| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability |',
+    'r6_canon': "| R6 | `graph_overview` | #6 | `graph_overview`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability. `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics` and `validate_domain` were re-privatised into this container's `section=` arm by #11609 family A (#12951) |",
     'r6_list_sources': "| `list_sources` | **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool and a CLI command (`tortoise/__main__.py`), and it is covered by `tests/test_enumeration_surfaces.py` and `tests/test_connector_sources.py`. It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays first-class and gains the credibility tier; it no longer needs its own method. |",
     'r6_test_guard': '| `test_guard` | **Kept and relocated.** It guards the production-wipe incident, so the code must survive — but it is *test infrastructure* and moves out of the product SDK. |',
     'r7': '| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | 3 | → `review_link_candidates`. |',
     'r8': '| `events_poll` | → row 11 `poll_events`. |',
     'r9': "| `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. |",
     't_n2': '| N2 | `graph` | `list_memory_graphs`, `restore_memory_graph`, `update_memory_graph` |',
-    't_r3': '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `provenance`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads and `provenance`; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |',
-    't_r5': '| R5 | `explore_connections` | #5 | `expand_relationships`, `get_owned_entities` | keep, collapse — `traverse` and `get_org_structure` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |',
-    't_r6': '| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability |',
+    't_r3': '| R3 | `recall_beliefs` | #3 | `check_confidence`, `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads (`check_confidence` is the approved name they resolve to, and it landed in #11609 family A); `provenance` was re-privatised into this container by #12951; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |',
+    't_r5': '| R5 | `explore_connections` | #5 | `explore_connections`, `get_owned_entities` | keep, collapse — `expand_relationships` was re-privatised into this container by #11609 family A (#12951); `traverse` and `get_org_structure` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |',
+    't_r6': "| R6 | `graph_overview` | #6 | `graph_overview`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability. `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics` and `validate_domain` were re-privatised into this container's `section=` arm by #11609 family A (#12951) |",
     't_w15': '| W15 | `adjust_relationship` | #21 | `mitigate_operator`, `annotate_operator` | keep, collapse |',
     't_w8': '| W8 | `manage_source_trust` | #14 | `manage_source_trust`, `get_source_reliability` | keep — **`get_source_reliability` writes**. `assess_source` and `set_source_tier` were retired into `manage_source_trust` in #4282 Phase 2 (`#11609`), which dispatches on the argument (`score=` vs `tier=`) |',
     'unchanged4': "> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the\n> current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim.\n> The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it.\nUntil it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every\n*current* tool to its destination but does not name the target's replacing name.",
@@ -538,107 +538,99 @@ CITATION_REGION_LITERAL: dict[str, str] = {
 # Binding the rendered citation text per row closes the evidence-swap in both
 # directions.
 ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
-    'annotate_ask_hits': ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
-    'annotate_operator': ('update_knowledge', '`beta-sdk-surface.md` — “\\| `mitigate_operator`, `operator_action`, `annotate_operator` \\| 3 \\| → `adjust_relationship` for strength, `update_knowledge` for annotation. `operator_action(**kwargs)` **accepted and silently ignored** `credibility` — a bug that #4282 rendered moot by DELETING the method (with `mitigate_operator`/`annotate_operator` surviving as the writes, neither of which takes `credibility` through a `**kwargs` funnel). \\|”'),
+    'annotate_ask_hits': ('search_knowledge', '`beta-sdk-surface.md` — “\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \| 5 \| → `search_knowledge`. \|”'),
+    'annotate_operator': ('update_knowledge', '`beta-sdk-surface.md` — “\| `mitigate_operator`, `operator_action`, `annotate_operator` \| 3 \| → `adjust_relationship` for strength, `update_knowledge` for annotation. `operator_action(**kwargs)` **accepted and silently ignored** `credibility` — a bug that #4282 rendered moot by DELETING the method (with `mitigate_operator`/`annotate_operator` surviving as the writes, neither of which takes `credibility` through a `**kwargs` funnel). \|”'),
     'approve_merge': ('approve_merge', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'audit': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
-    'belief_timeline': ('check_confidence', '`beta-sdk-surface.md` — “\\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \\| 4 \\| → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. \\|”'),
-    'calibrate_summary': ('check_confidence', '`beta-sdk-surface.md` — “\\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \\| ~6 \\| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \\|”'),
+    'audit': ('graph_overview', '`beta-sdk-surface.md` — “\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \| ~5 \| → `graph_overview` where they are orientation. The diagnostics are the held question above. \|”'),
+    'belief_timeline': ('check_confidence', '`beta-sdk-surface.md` — “\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \| 4 \| → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. \|”'),
+    'calibrate_summary': ('check_confidence', '`beta-sdk-surface.md` — “\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \| ~6 \| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \|”'),
+    'check_confidence': ('check_confidence', '`beta-sdk-surface.md` — “\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \| ~6 \| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \|”'),
     'check_connection': ('check_connection', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'check_structure': ('graph_overview', '`beta-sdk-surface.md` — “\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|”'),
+    'check_structure': ('graph_overview', '`beta-sdk-surface.md` — “\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \|”'),
     'close': ('close', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'compute_confidence': ('refresh_confidence', '`canonical-sdk-methods.md` — “\\| W13 \\| `stabilize_beliefs` \\| #19 \\| `dream`, `compute_confidence`, `compute_reputation` \\| keep — **`compute_confidence` mislabelled read** \\|”'),
+    'compute_confidence': ('refresh_confidence', '`canonical-sdk-methods.md` — “\| W13 \| `stabilize_beliefs` \| #19 \| `dream`, `compute_confidence`, `compute_reputation` \| keep — **`compute_confidence` mislabelled read** \|”'),
     'compute_reputation': ('', '—'),
-    'create_derivation': ('link_entities', '`beta-sdk-surface.md` — “\\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \\| 4 \\| → `link_entities`, which dispatches on the relation. \\|”'),
-    'create_direct_edge': ('link_entities', '`beta-sdk-surface.md` — “\\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \\| 4 \\| → `link_entities`, which dispatches on the relation. \\|”'),
-    'create_document': ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \\|”'),
-    'create_edge': ('link_entities', '`canonical-sdk-methods.md` — “\\| W9 \\| `link_entities` \\| #15 \\| `link_entities`, `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` \\| keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split \\|”'),
+    'create_derivation': ('link_entities', '`beta-sdk-surface.md` — “\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \| 4 \| → `link_entities`, which dispatches on the relation. \|”'),
+    'create_direct_edge': ('link_entities', '`beta-sdk-surface.md` — “\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \| 4 \| → `link_entities`, which dispatches on the relation. \|”'),
+    'create_document': ('create_entity', '`beta-sdk-surface.md` — “\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \| 5 \| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \|”'),
+    'create_edge': ('link_entities', '`canonical-sdk-methods.md` — “\| W9 \| `link_entities` \| #15 \| `link_entities`, `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` \| keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split \|”'),
     'create_entity': ('create_entity', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'create_event': ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \\|”'),
-    'create_object': ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \\|”'),
-    'create_operator': ('link_entities', '`beta-sdk-surface.md` — “\\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \\| 4 \\| → `link_entities`, which dispatches on the relation. \\|”'),
-    'create_point': ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \\|”'),
-    'create_subject': ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \\|”'),
-    'delete': ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \\| keep, collapse \\|”'),
-    'delete_entity': ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \\| keep, collapse \\|”'),
+    'create_event': ('create_entity', '`beta-sdk-surface.md` — “\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \| 5 \| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \|”'),
+    'create_object': ('create_entity', '`beta-sdk-surface.md` — “\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \| 5 \| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \|”'),
+    'create_operator': ('link_entities', '`beta-sdk-surface.md` — “\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \| 4 \| → `link_entities`, which dispatches on the relation. \|”'),
+    'create_point': ('create_entity', '`beta-sdk-surface.md` — “\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \| 5 \| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \|”'),
+    'create_subject': ('create_entity', '`beta-sdk-surface.md` — “\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \| 5 \| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \|”'),
+    'delete': ('delete_knowledge', '`canonical-sdk-methods.md` — “\| W12 \| `delete_knowledge` \| #18 \| `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \| keep, collapse \|”'),
+    'delete_entity': ('delete_knowledge', '`canonical-sdk-methods.md` — “\| W12 \| `delete_knowledge` \| #18 \| `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \| keep, collapse \|”'),
     'delete_knowledge': ('delete_knowledge', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'delete_point': ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
-    'delete_point_wrapped': ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
-    'diary_read': ('list_knowledge', '`canonical-mcp-tools.md` — “\\| `diary_read` \\| dissolves into `list_knowledge(kind="diary")` \\|”'),
-    'diary_write': ('create_entity', '`canonical-mcp-tools.md` — “\\| 10 \\| `create_entity` \\| create_point, create_entity, create_event, create_object, create_subject, create_document, diary_write \\|”'),
-    'dream': ('refresh_confidence', '`canonical-sdk-methods.md` — “\\| W13 \\| `stabilize_beliefs` \\| #19 \\| `dream`, `compute_confidence`, `compute_reputation` \\| keep — **`compute_confidence` mislabelled read** \\|”'),
-    'dream_health_check': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
-    'dream_health_state': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
-    'expand_relationships': ('explore_connections', '`beta-sdk-surface.md` — “\\| `traverse`, `expand_relationships`, `get_org_structure` \\| 3 \\| → `explore_connections`. \\|”'),
-    'get_confidence': ('check_confidence', '`canonical-sdk-methods.md` — “\\| R3 \\| `recall_beliefs` \\| #3 \\| `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `provenance`, `belief_timeline`, `get_historical_knowledge` \\| keep, collapse — absorbs the confidence reads and `provenance`; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) \\|”'),
-    'get_cross_lens_candidates': ('review_link_candidates', '`beta-sdk-surface.md` — “\\| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` \\| 3 \\| → `review_link_candidates`. \\|”'),
+    'delete_point': ('delete_knowledge', '`beta-sdk-surface.md` — “\| `delete_point`, `delete_point_wrapped` \| 2 \| → `delete_knowledge`. \|”'),
+    'delete_point_wrapped': ('delete_knowledge', '`beta-sdk-surface.md` — “\| `delete_point`, `delete_point_wrapped` \| 2 \| → `delete_knowledge`. \|”'),
+    'diary_write': ('create_entity', '`canonical-mcp-tools.md` — “\| 10 \| `create_entity` \| create_point, create_entity, create_event, create_object, create_subject, create_document, diary_write \|”'),
+    'dream': ('refresh_confidence', '`canonical-sdk-methods.md` — “\| W13 \| `stabilize_beliefs` \| #19 \| `dream`, `compute_confidence`, `compute_reputation` \| keep — **`compute_confidence` mislabelled read** \|”'),
+    'dream_health_check': ('graph_overview', '`beta-sdk-surface.md` — “\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \| ~5 \| → `graph_overview` where they are orientation. The diagnostics are the held question above. \|”'),
+    'dream_health_state': ('graph_overview', '`beta-sdk-surface.md` — “\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \| ~5 \| → `graph_overview` where they are orientation. The diagnostics are the held question above. \|”'),
+    'explore_connections': ('explore_connections', '`beta-sdk-surface.md` — “\| `traverse`, `expand_relationships`, `get_org_structure` \| 3 \| → `explore_connections`. \|”'),
+    'get_confidence': ('check_confidence', '`canonical-sdk-methods.md` — “\| R3 \| `recall_beliefs` \| #3 \| `check_confidence`, `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `belief_timeline`, `get_historical_knowledge` \| keep, collapse — absorbs the confidence reads (`check_confidence` is the approved name they resolve to, and it landed in #11609 family A); `provenance` was re-privatised into this container by #12951; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) \|”'),
+    'get_cross_lens_candidates': ('review_link_candidates', '`beta-sdk-surface.md` — “\| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` \| 3 \| → `review_link_candidates`. \|”'),
     'get_entity': ('get_entity', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'get_events': ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`, except where a genuinely different shape is returned. \\|”'),
-    'get_historical_knowledge': ('get_historical_knowledge', '`beta-sdk-surface.md` — “\\| `restore_point_at` \\| → row 7 **`get_historical_knowledge`**. A **read**, not a write — it returns the version of a claim valid on a date and mutates nothing. \\|”'),
-    'get_organisation_account': ('get_organisation_account', '`beta-sdk-surface.md` — “\\| 28 \\| `get_organisation_account` \\| Read the account and the plan it is on \\| — \\| admin \\|”'),
-    'get_owned_entities': ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`, except where a genuinely different shape is returned. \\|”'),
-    'get_point': ('get_entity', '`canonical-sdk-methods.md` — “\\| R4 \\| `get_entity` \\| #4 \\| `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` \\| keep, collapse \\|”'),
-    'get_session': ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`, except where a genuinely different shape is returned. \\|”'),
-    'get_source_reliability': ('list_knowledge', '`beta-sdk-surface.md` — “\\| `assess_source`, `set_source_tier`, `get_source_reliability` \\| 3 \\| → `manage_source_trust` for the setter; reads via `list_sources`. \\|”'),
+    'get_events': ('get_entity', '`beta-sdk-surface.md` — “\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \| ~8 \| → `get_entity`, except where a genuinely different shape is returned. \|”'),
+    'get_historical_knowledge': ('get_historical_knowledge', '`beta-sdk-surface.md` — “\| `restore_point_at` \| → row 7 **`get_historical_knowledge`**. A **read**, not a write — it returns the version of a claim valid on a date and mutates nothing. \|”'),
+    'get_organisation_account': ('get_organisation_account', '`beta-sdk-surface.md` — “\| 28 \| `get_organisation_account` \| Read the account and the plan it is on \| — \| admin \|”'),
+    'get_owned_entities': ('get_entity', '`beta-sdk-surface.md` — “\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \| ~8 \| → `get_entity`, except where a genuinely different shape is returned. \|”'),
+    'get_point': ('get_entity', '`canonical-sdk-methods.md` — “\| R4 \| `get_entity` \| #4 \| `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` \| keep, collapse \|”'),
+    'get_session': ('get_entity', '`beta-sdk-surface.md` — “\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \| ~8 \| → `get_entity`, except where a genuinely different shape is returned. \|”'),
+    'get_source_reliability': ('list_knowledge', '`beta-sdk-surface.md` — “\| `assess_source`, `set_source_tier`, `get_source_reliability` \| 3 \| → `manage_source_trust` for the setter; reads via `list_sources`. \|”'),
+    'graph_overview': ('graph_overview', '`beta-sdk-surface.md` — “\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \| ~5 \| → `graph_overview` where they are orientation. The diagnostics are the held question above. \|”'),
     'index_sources_from_directory': ('index_sources_from_directory', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'ingest': ('write_knowledge_batch', '`canonical-sdk-methods.md` — “\\| W2 \\| `write_knowledge` \\| — \\| `ingest` \\| keep — **SDK-only name.** The batch call: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so connections can address nodes created in the same call. Not to be called `ingest_bundle` (jargon) or `write_graph` (collides with `graph_overview` and the graph admin namespace) \\|”'),
-    'ingest_corpus': ('index_sources_from_directory', '`beta-sdk-surface.md` — “\\| `ingest_corpus`, `index_file`, `session_index_health` \\| 3 \\| → `index_sources_from_directory`. \\|”'),
-    'invalidate_point': ('update_knowledge', "`beta-sdk-surface.md` — “\\| `retract_point`, `invalidate_point` \\| 2 \\| → fields on `update_knowledge`. **Zep's shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a separate verb. \\|”"),
-    'issue_insight': ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
+    'ingest': ('write_knowledge_batch', '`canonical-sdk-methods.md` — “\| W2 \| `write_knowledge` \| — \| `ingest` \| keep — **SDK-only name.** The batch call: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so connections can address nodes created in the same call. Not to be called `ingest_bundle` (jargon) or `write_graph` (collides with `graph_overview` and the graph admin namespace) \|”'),
+    'ingest_corpus': ('index_sources_from_directory', '`beta-sdk-surface.md` — “\| `ingest_corpus`, `index_file`, `session_index_health` \| 3 \| → `index_sources_from_directory`. \|”'),
+    'invalidate_point': ('update_knowledge', "`beta-sdk-surface.md` — “\| `retract_point`, `invalidate_point` \| 2 \| → fields on `update_knowledge`. **Zep's shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a separate verb. \|”"),
+    'issue_insight': ('search_knowledge', '`beta-sdk-surface.md` — “\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \| 5 \| → `search_knowledge`. \|”'),
     'link_entities': ('link_entities', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'link_source_to_entity': ('link_entities', '`beta-sdk-surface.md` — “\\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \\| 4 \\| → `link_entities`, which dispatches on the relation. \\|”'),
-    'list_batch': ('list_knowledge', "`beta-sdk-surface.md` — “\\| `list_batch`, `list_batches` \\| 2 \\| → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. \\|”"),
-    'list_batches': ('list_knowledge', "`beta-sdk-surface.md` — “\\| `list_batch`, `list_batches` \\| 2 \\| → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. \\|”"),
-    'list_dedup_candidates': ('review_link_candidates', '`beta-sdk-surface.md` — “\\| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` \\| 3 \\| → `review_link_candidates`. \\|”'),
-    'list_graphs': ('graph_overview', '`beta-sdk-surface.md` — “\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|”'),
-    'list_memory_graphs': ('list_memory_graphs', "`beta-sdk-surface.md` — “\\| 31 \\| `list_memory_graphs` \\| List the account's memory graphs \\| — \\| admin, builder \\|”"),
-    'list_namespaces': ('graph_overview', '`beta-sdk-surface.md` — “\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|”'),
-    'list_pointkinds': ('graph_overview', '`beta-sdk-surface.md` — “\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|”'),
-    'list_sources': ('list_knowledge', "`beta-sdk-surface.md` — “\\| `list_sources` \\| **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool and a CLI command (`tortoise/__main__.py`), and it is covered by `tests/test_enumeration_surfaces.py` and `tests/test_connector_sources.py`. It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays first-class and gains the credibility tier; it no longer needs its own method. \\|”"),
-    'list_tags': ('graph_overview', '`beta-sdk-surface.md` — “\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|”'),
-    'list_topics': ('graph_overview', '`beta-sdk-surface.md` — “\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|”'),
+    'link_source_to_entity': ('link_entities', '`beta-sdk-surface.md` — “\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \| 4 \| → `link_entities`, which dispatches on the relation. \|”'),
+    'list_batch': ('list_knowledge', "`beta-sdk-surface.md` — “\| `list_batch`, `list_batches` \| 2 \| → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. \|”"),
+    'list_batches': ('list_knowledge', "`beta-sdk-surface.md` — “\| `list_batch`, `list_batches` \| 2 \| → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. \|”"),
+    'list_graphs': ('graph_overview', '`beta-sdk-surface.md` — “\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \|”'),
+    'list_knowledge': ('list_knowledge', '`beta-sdk-surface.md` — “\| `query`, `paginated_query`, `query_points_by_tag` \| 3 \| → `list_knowledge`. \|”'),
+    'list_memory_graphs': ('list_memory_graphs', "`beta-sdk-surface.md` — “\| 31 \| `list_memory_graphs` \| List the account's memory graphs \| — \| admin, builder \|”"),
     'manage_source_trust': ('manage_source_trust', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'mine_knowledge_from_directory': ('mine_knowledge_from_directory', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'mine_knowledge_from_session': ('mine_knowledge_from_session', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'mitigate_operator': ('adjust_relationship', '`beta-sdk-surface.md` — “\\| `mitigate_operator`, `operator_action`, `annotate_operator` \\| 3 \\| → `adjust_relationship` for strength, `update_knowledge` for annotation. `operator_action(**kwargs)` **accepted and silently ignored** `credibility` — a bug that #4282 rendered moot by DELETING the method (with `mitigate_operator`/`annotate_operator` surviving as the writes, neither of which takes `credibility` through a `**kwargs` funnel). \\|”'),
+    'mitigate_operator': ('adjust_relationship', '`beta-sdk-surface.md` — “\| `mitigate_operator`, `operator_action`, `annotate_operator` \| 3 \| → `adjust_relationship` for strength, `update_knowledge` for annotation. `operator_action(**kwargs)` **accepted and silently ignored** `credibility` — a bug that #4282 rendered moot by DELETING the method (with `mitigate_operator`/`annotate_operator` surviving as the writes, neither of which takes `credibility` through a `**kwargs` funnel). \|”'),
     'org_create': ('', '—'),
-    'paginated_query': ('list_knowledge', '`beta-sdk-surface.md` — “\\| `query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`. \\|”'),
-    'poll_events': ('poll_events', '`beta-sdk-surface.md` — “\\| `events_poll` \\| → row 11 `poll_events`. \\|”'),
-    'promote_point': ('update_knowledge', "`beta-sdk-surface.md` — “\\| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \\| 4 \\| Lifecycle and confidence **state** — a **field on `update_knowledge`** (promote, baseline, quarantine), selected by a **filter on `list_knowledge(kind=…, status=…)`** (drafts). No separate verb. `promote_point` also promotes its incident operators and carries the approval gate, so it is not `update_point(status='live')`. \\|”"),
-    'provenance': ('check_confidence', '`beta-sdk-surface.md` — “\\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \\| 4 \\| → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. \\|”'),
-    'query': ('list_knowledge', '`beta-sdk-surface.md` — “\\| `query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`. \\|”'),
-    'query_points_by_tag': ('list_knowledge', '`beta-sdk-surface.md` — “\\| `query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`. \\|”'),
-    'recall_gaps': ('check_confidence', '`beta-sdk-surface.md` — “\\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \\| ~6 \\| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \\|”'),
-    'recall_state': ('check_confidence', '`beta-sdk-surface.md` — “\\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \\| ~6 \\| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \\|”'),
-    'recall_subgraph': ('', '`beta-sdk-surface.md` — “\\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \\| ~6 \\| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \\|”'),
-    'reconcile_sessions': ('', '`beta-sdk-surface.md` — “\\| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` \\| 4 \\| One-shot migrations. Run once, then dead code carrying a public promise. \\|”'),
+    'paginated_query': ('list_knowledge', '`beta-sdk-surface.md` — “\| `query`, `paginated_query`, `query_points_by_tag` \| 3 \| → `list_knowledge`. \|”'),
+    'poll_events': ('poll_events', '`beta-sdk-surface.md` — “\| `events_poll` \| → row 11 `poll_events`. \|”'),
+    'promote_point': ('update_knowledge', "`beta-sdk-surface.md` — “\| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \| 4 \| Lifecycle and confidence **state** — a **field on `update_knowledge`** (promote, baseline, quarantine), selected by a **filter on `list_knowledge(kind=…, status=…)`** (drafts). No separate verb. `promote_point` also promotes its incident operators and carries the approval gate, so it is not `update_point(status='live')`. \|”"),
+    'query': ('list_knowledge', '`beta-sdk-surface.md` — “\| `query`, `paginated_query`, `query_points_by_tag` \| 3 \| → `list_knowledge`. \|”'),
+    'query_points_by_tag': ('list_knowledge', '`beta-sdk-surface.md` — “\| `query`, `paginated_query`, `query_points_by_tag` \| 3 \| → `list_knowledge`. \|”'),
+    'recall_gaps': ('check_confidence', '`beta-sdk-surface.md` — “\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \| ~6 \| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \|”'),
+    'recall_state': ('check_confidence', '`beta-sdk-surface.md` — “\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \| ~6 \| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \|”'),
+    'recall_subgraph': ('', '`beta-sdk-surface.md` — “\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \| ~6 \| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \|”'),
+    'reconcile_sessions': ('', '`beta-sdk-surface.md` — “\| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` \| 4 \| One-shot migrations. Run once, then dead code carrying a public promise. \|”'),
     'record_decision': ('record_decision', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'register_source': ('register_source', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'resolve_id': ('get_entity', '`canonical-sdk-methods.md` — “\\| R4 \\| `get_entity` \\| #4 \\| `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` \\| keep, collapse \\|”'),
-    'restore_memory_graph': ('restore_memory_graph', '`beta-sdk-surface.md` — “\\| 33 \\| `restore_memory_graph` \\| Undo a recoverable delete. **Refuses on a purged graph** \\| — \\| builder \\|”'),
-    'retract_point': ('update_knowledge', "`beta-sdk-surface.md` — “\\| `retract_point`, `invalidate_point` \\| 2 \\| → fields on `update_knowledge`. **Zep's shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a separate verb. \\|”"),
-    'review_connections': ('review_link_candidates', '`beta-sdk-surface.md` — “\\| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` \\| 3 \\| → `review_link_candidates`. \\|”'),
-    'search_sessions': ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
-    'session_context': ('check_confidence', '`beta-sdk-surface.md` — “\\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \\| 4 \\| → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. \\|”'),
-    'session_index_health': ('index_sources_from_directory', '`beta-sdk-surface.md` — “\\| `ingest_corpus`, `index_file`, `session_index_health` \\| 3 \\| → `index_sources_from_directory`. \\|”'),
-    'set_point_baseline': ('update_knowledge', "`beta-sdk-surface.md` — “\\| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \\| 4 \\| Lifecycle and confidence **state** — a **field on `update_knowledge`** (promote, baseline, quarantine), selected by a **filter on `list_knowledge(kind=…, status=…)`** (drafts). No separate verb. `promote_point` also promotes its incident operators and carries the approval gate, so it is not `update_point(status='live')`. \\|”"),
-    'stale_points': ('graph_overview', '`beta-sdk-surface.md` — “\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|”'),
-    'status': ('graph_overview', '`beta-sdk-surface.md` — “\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|”'),
-    'suggest_entry_points': ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
-    'summarize_structure': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
+    'resolve_id': ('get_entity', '`canonical-sdk-methods.md` — “\| R4 \| `get_entity` \| #4 \| `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` \| keep, collapse \|”'),
+    'restore_memory_graph': ('restore_memory_graph', '`beta-sdk-surface.md` — “\| 33 \| `restore_memory_graph` \| Undo a recoverable delete. **Refuses on a purged graph** \| — \| builder \|”'),
+    'retract_point': ('update_knowledge', "`beta-sdk-surface.md` — “\| `retract_point`, `invalidate_point` \| 2 \| → fields on `update_knowledge`. **Zep's shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a separate verb. \|”"),
+    'review_connections': ('review_link_candidates', '`beta-sdk-surface.md` — “\| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` \| 3 \| → `review_link_candidates`. \|”'),
+    'review_link_candidates': ('review_link_candidates', '`beta-sdk-surface.md` — “\| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` \| 3 \| → `review_link_candidates`. \|”'),
+    'search_knowledge': ('search_knowledge', '`beta-sdk-surface.md` — “\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \| 5 \| → `search_knowledge`. \|”'),
+    'session_context': ('check_confidence', '`beta-sdk-surface.md` — “\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \| 4 \| → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. \|”'),
+    'session_index_health': ('index_sources_from_directory', '`beta-sdk-surface.md` — “\| `ingest_corpus`, `index_file`, `session_index_health` \| 3 \| → `index_sources_from_directory`. \|”'),
+    'set_point_baseline': ('update_knowledge', "`beta-sdk-surface.md` — “\| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \| 4 \| Lifecycle and confidence **state** — a **field on `update_knowledge`** (promote, baseline, quarantine), selected by a **filter on `list_knowledge(kind=…, status=…)`** (drafts). No separate verb. `promote_point` also promotes its incident operators and carries the approval gate, so it is not `update_point(status='live')`. \|”"),
+    'stale_points': ('graph_overview', '`beta-sdk-surface.md` — “\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \|”'),
+    'summarize_structure': ('graph_overview', '`beta-sdk-surface.md` — “\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \| ~5 \| → `graph_overview` where they are orientation. The diagnostics are the held question above. \|”'),
     'supersede_knowledge': ('supersede_knowledge', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'supersede_point': ('supersede_knowledge', '`beta-sdk-surface.md` — “\\| `supersede`, `supersede_point` \\| 2 \\| → `supersede_knowledge`. They also **disagree** — `supersede_point` carries a `valid_from` the other silently drops. \\|”'),
-    'taxonomy': ('graph_overview', '`beta-sdk-surface.md` — “\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|”'),
-    'test_guard': ('', '`beta-sdk-surface.md` — “\\| `test_guard` \\| **Kept and relocated.** It guards the production-wipe incident, so the code must survive — but it is *test infrastructure* and moves out of the product SDK. \\|”'),
-    'topic_summarize': ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
-    'tortoise_fts_query': ('search_knowledge', '`canonical-sdk-methods.md` — “\\| R1 \\| `search_knowledge` \\| #1 \\| `tortoise_fts_query`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` \\| keep, collapse \\|”'),
-    'ulid': ('', '`beta-sdk-surface.md` — “\\| `ulid` \\| 1 \\| A ULID generator. Not a memory operation. \\|”'),
-    'update': ('update_knowledge', '`canonical-sdk-methods.md` — “\\| W11 \\| `revise_knowledge` \\| #17 \\| `update_knowledge`, `update`, `update_point`, `supersede_knowledge`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline` \\| keep, collapse — **the widest group; see Open items**. `update_entity` and `supersede` were retired on 2026-11-16 (#11609 Phase 2) into `update_knowledge` and `supersede_knowledge`; `quarantine_batch` left in `#12901` wave 1 \\|”'),
+    'supersede_point': ('supersede_knowledge', '`beta-sdk-surface.md` — “\| `supersede`, `supersede_point` \| 2 \| → `supersede_knowledge`. They also **disagree** — `supersede_point` carries a `valid_from` the other silently drops. \|”'),
+    'test_guard': ('', '`beta-sdk-surface.md` — “\| `test_guard` \| **Kept and relocated.** It guards the production-wipe incident, so the code must survive — but it is *test infrastructure* and moves out of the product SDK. \|”'),
+    'topic_summarize': ('search_knowledge', '`beta-sdk-surface.md` — “\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \| 5 \| → `search_knowledge`. \|”'),
+    'tortoise_fts_query': ('search_knowledge', "`canonical-sdk-methods.md` — “\| R1 \| `search_knowledge` \| #1 \| `search_knowledge`, `tortoise_fts_query`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` \| keep, collapse — `suggest_entry_points` and `search_sessions` were re-privatised into this container by #11609's READ/QUERY family A (#12951) \|”"),
+    'ulid': ('', '`beta-sdk-surface.md` — “\| `ulid` \| 1 \| A ULID generator. Not a memory operation. \|”'),
+    'update': ('update_knowledge', '`canonical-sdk-methods.md` — “\| W11 \| `revise_knowledge` \| #17 \| `update_knowledge`, `update`, `update_point`, `supersede_knowledge`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline` \| keep, collapse — **the widest group; see Open items**. `update_entity` and `supersede` were retired on 2026-11-16 (#11609 Phase 2) into `update_knowledge` and `supersede_knowledge`; `quarantine_batch` left in `#12901` wave 1 \|”'),
     'update_knowledge': ('update_knowledge', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
-    'update_memory_graph': ('update_memory_graph', '`beta-sdk-surface.md` — “\\| 30 \\| `update_memory_graph` \\| **The one partial update a memory graph has** — rename it, or set/clear its session-recording override. A graph is created with its fields; this is the single place they change \\| `graph_set_recording` (recording only) \\| builder \\|”'),
-    'update_point': ('update_knowledge', '`beta-sdk-surface.md` — “\\| `update_point`, `update_entity` \\| 2 \\| → `update_knowledge`. \\|”'),
-    'validate_domain': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
-    'volunteer_context': ('check_confidence', '`beta-sdk-surface.md` — “\\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \\| 4 \\| → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. \\|”'),
+    'update_memory_graph': ('update_memory_graph', '`beta-sdk-surface.md` — “\| 30 \| `update_memory_graph` \| **The one partial update a memory graph has** — rename it, or set/clear its session-recording override. A graph is created with its fields; this is the single place they change \| `graph_set_recording` (recording only) \| builder \|”'),
+    'update_point': ('update_knowledge', '`beta-sdk-surface.md` — “\| `update_point`, `update_entity` \| 2 \| → `update_knowledge`. \|”'),
+    'volunteer_context': ('check_confidence', '`beta-sdk-surface.md` — “\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \| 4 \| → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. \|”'),
     'write_question': ('write_question', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
 }
 
@@ -913,9 +905,9 @@ def test_check_mode_detects_a_drifted_copy(tmp_path: Path) -> None:
 
     drifted = tmp_path / "sdk-rename-table.md"
     text = DOC.read_text(encoding="utf-8")
-    assert "102 public methods" in text
+    assert "94 public methods" in text
 
-    drifted.write_text(text.replace("102 public methods", "112 public methods"),
+    drifted.write_text(text.replace("94 public methods", "104 public methods"),
                        encoding="utf-8")
 
     rc = sdk_rename_table.main(["--check", "--out", str(drifted)])
@@ -934,6 +926,7 @@ TARGETS_LITERAL: dict[str, str] = {
     'audit': 'graph_overview',
     'belief_timeline': 'check_confidence',
     'calibrate_summary': 'check_confidence',
+    'check_confidence': 'check_confidence',
     'check_connection': 'check_connection',
     'check_structure': 'graph_overview',
     'close': 'close',
@@ -954,12 +947,11 @@ TARGETS_LITERAL: dict[str, str] = {
     'delete_knowledge': 'delete_knowledge',
     'delete_point': 'delete_knowledge',
     'delete_point_wrapped': 'delete_knowledge',
-    'diary_read': 'list_knowledge',
     'diary_write': 'create_entity',
     'dream': 'refresh_confidence',
     'dream_health_check': 'graph_overview',
     'dream_health_state': 'graph_overview',
-    'expand_relationships': 'explore_connections',
+    'explore_connections': 'explore_connections',
     'get_confidence': 'check_confidence',
     'get_cross_lens_candidates': 'review_link_candidates',
     'get_entity': 'get_entity',
@@ -970,6 +962,7 @@ TARGETS_LITERAL: dict[str, str] = {
     'get_point': 'get_entity',
     'get_session': 'get_entity',
     'get_source_reliability': 'list_knowledge',
+    'graph_overview': 'graph_overview',
     'index_sources_from_directory': 'index_sources_from_directory',
     'ingest': 'write_knowledge_batch',
     'ingest_corpus': 'index_sources_from_directory',
@@ -979,14 +972,9 @@ TARGETS_LITERAL: dict[str, str] = {
     'link_source_to_entity': 'link_entities',
     'list_batch': 'list_knowledge',
     'list_batches': 'list_knowledge',
-    'list_dedup_candidates': 'review_link_candidates',
     'list_graphs': 'graph_overview',
+    'list_knowledge': 'list_knowledge',
     'list_memory_graphs': 'list_memory_graphs',
-    'list_namespaces': 'graph_overview',
-    'list_pointkinds': 'graph_overview',
-    'list_sources': 'list_knowledge',
-    'list_tags': 'graph_overview',
-    'list_topics': 'graph_overview',
     'manage_source_trust': 'manage_source_trust',
     'mine_knowledge_from_directory': 'mine_knowledge_from_directory',
     'mine_knowledge_from_session': 'mine_knowledge_from_session',
@@ -995,7 +983,6 @@ TARGETS_LITERAL: dict[str, str] = {
     'paginated_query': 'list_knowledge',
     'poll_events': 'poll_events',
     'promote_point': 'update_knowledge',
-    'provenance': 'check_confidence',
     'query': 'list_knowledge',
     'query_points_by_tag': 'list_knowledge',
     'recall_gaps': 'check_confidence',
@@ -1008,17 +995,15 @@ TARGETS_LITERAL: dict[str, str] = {
     'restore_memory_graph': 'restore_memory_graph',
     'retract_point': 'update_knowledge',
     'review_connections': 'review_link_candidates',
-    'search_sessions': 'search_knowledge',
+    'review_link_candidates': 'review_link_candidates',
+    'search_knowledge': 'search_knowledge',
     'session_context': 'check_confidence',
     'session_index_health': 'index_sources_from_directory',
     'set_point_baseline': 'update_knowledge',
     'stale_points': 'graph_overview',
-    'status': 'graph_overview',
-    'suggest_entry_points': 'search_knowledge',
     'summarize_structure': 'graph_overview',
     'supersede_knowledge': 'supersede_knowledge',
     'supersede_point': 'supersede_knowledge',
-    'taxonomy': 'graph_overview',
     'test_guard': '',
     'topic_summarize': 'search_knowledge',
     'tortoise_fts_query': 'search_knowledge',
@@ -1027,7 +1012,6 @@ TARGETS_LITERAL: dict[str, str] = {
     'update_knowledge': 'update_knowledge',
     'update_memory_graph': 'update_memory_graph',
     'update_point': 'update_knowledge',
-    'validate_domain': 'graph_overview',
     'volunteer_context': 'check_confidence',
     'write_question': 'write_question',
 }
@@ -1039,6 +1023,7 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'audit': ('deprecated', 'public', 'stated', 'retain'),
     'belief_timeline': ('deprecated', 'public', 'stated', 'retain'),
     'calibrate_summary': ('deprecated', 'public', 'stated', 'retain'),
+    'check_confidence': ('stable', 'public', 'stated', 'retain'),
     'check_connection': ('stable', 'public', 'derived', 'retain'),
     'check_structure': ('deprecated', 'public', 'stated', 'retain'),
     'close': ('stable', 'public', 'stated', 'retain'),
@@ -1059,12 +1044,11 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'delete_knowledge': ('stable', 'public', 'derived', 'retain'),
     'delete_point': ('deprecated', 'public', 'stated', 'retain'),
     'delete_point_wrapped': ('deprecated', 'public', 'stated', 'retain'),
-    'diary_read': ('deprecated', 'public', 'stated', 'retain'),
     'diary_write': ('deprecated', 'public', 'stated', 'retain'),
     'dream': ('deprecated', 'public', 'stated', 'retain'),
     'dream_health_check': ('deprecated', 'public', 'stated', 'retain'),
     'dream_health_state': ('deprecated', 'public', 'stated', 'retain'),
-    'expand_relationships': ('deprecated', 'public', 'stated', 'retain'),
+    'explore_connections': ('stable', 'public', 'stated', 'retain'),
     'get_confidence': ('deprecated', 'public', 'stated', 'retain'),
     'get_cross_lens_candidates': ('deprecated', 'public', 'stated', 'retain'),
     'get_entity': ('stable', 'public', 'stated', 'retain'),
@@ -1075,6 +1059,7 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'get_point': ('deprecated', 'public', 'stated', 'retain'),
     'get_session': ('deprecated', 'public', 'stated', 'retain'),
     'get_source_reliability': ('deprecated', 'public', 'stated', 'retain'),
+    'graph_overview': ('stable', 'public', 'stated', 'retain'),
     'index_sources_from_directory': ('stable', 'public', 'derived', 'retain'),
     'ingest': ('deprecated', 'public', 'stated', 'retain'),
     'ingest_corpus': ('deprecated', 'public', 'stated', 'retain'),
@@ -1084,14 +1069,9 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'link_source_to_entity': ('deprecated', 'public', 'stated', 'retain'),
     'list_batch': ('deprecated', 'public', 'stated', 'retain'),
     'list_batches': ('deprecated', 'public', 'stated', 'retain'),
-    'list_dedup_candidates': ('deprecated', 'public', 'stated', 'retain'),
     'list_graphs': ('deprecated', 'public', 'stated', 'retain'),
+    'list_knowledge': ('stable', 'public', 'stated', 'retain'),
     'list_memory_graphs': ('stable', 'public', 'stated', 'retain'),
-    'list_namespaces': ('deprecated', 'public', 'stated', 'retain'),
-    'list_pointkinds': ('deprecated', 'public', 'stated', 'retain'),
-    'list_sources': ('deprecated', 'public', 'stated', 'retain'),
-    'list_tags': ('deprecated', 'public', 'stated', 'retain'),
-    'list_topics': ('deprecated', 'public', 'stated', 'retain'),
     'manage_source_trust': ('stable', 'public', 'derived', 'retain'),
     'mine_knowledge_from_directory': ('stable', 'public', 'derived', 'retain'),
     'mine_knowledge_from_session': ('stable', 'public', 'derived', 'retain'),
@@ -1100,7 +1080,6 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'paginated_query': ('deprecated', 'public', 'stated', 'retain'),
     'poll_events': ('stable', 'public', 'stated', 'retain'),
     'promote_point': ('deprecated', 'public', 'stated', 'retain'),
-    'provenance': ('deprecated', 'public', 'stated', 'retain'),
     'query': ('deprecated', 'public', 'stated', 'retain'),
     'query_points_by_tag': ('deprecated', 'public', 'stated', 'retain'),
     'recall_gaps': ('deprecated', 'public', 'stated', 'retain'),
@@ -1113,17 +1092,15 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'restore_memory_graph': ('stable', 'public', 'stated', 'retain'),
     'retract_point': ('deprecated', 'public', 'stated', 'retain'),
     'review_connections': ('deprecated', 'public', 'stated', 'retain'),
-    'search_sessions': ('deprecated', 'public', 'stated', 'retain'),
+    'review_link_candidates': ('stable', 'public', 'stated', 'retain'),
+    'search_knowledge': ('stable', 'public', 'stated', 'retain'),
     'session_context': ('deprecated', 'public', 'stated', 'retain'),
     'session_index_health': ('deprecated', 'public', 'stated', 'retain'),
     'set_point_baseline': ('deprecated', 'public', 'stated', 'retain'),
     'stale_points': ('deprecated', 'public', 'derived', 'retain'),
-    'status': ('deprecated', 'public', 'stated', 'retain'),
-    'suggest_entry_points': ('deprecated', 'public', 'stated', 'retain'),
     'summarize_structure': ('deprecated', 'public', 'stated', 'retain'),
     'supersede_knowledge': ('stable', 'public', 'derived', 'retain'),
     'supersede_point': ('deprecated', 'public', 'stated', 'retain'),
-    'taxonomy': ('deprecated', 'public', 'stated', 'retain'),
     'test_guard': ('stable', 'internal', 'stated', 'retain'),
     'topic_summarize': ('deprecated', 'public', 'stated', 'retain'),
     'tortoise_fts_query': ('deprecated', 'public', 'stated', 'retain'),
@@ -1132,7 +1109,6 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'update_knowledge': ('stable', 'public', 'derived', 'retain'),
     'update_memory_graph': ('stable', 'public', 'stated', 'retain'),
     'update_point': ('deprecated', 'public', 'stated', 'retain'),
-    'validate_domain': ('deprecated', 'public', 'stated', 'retain'),
     'volunteer_context': ('deprecated', 'public', 'stated', 'retain'),
     'write_question': ('stable', 'public', 'derived', 'retain'),
 }
@@ -1144,7 +1120,6 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
 C3_TENSIONS_LITERAL = {
     "get_owned_entities": ("get_entity", "explore_connections"),
     "get_historical_knowledge": ("get_historical_knowledge", "check_confidence"),
-    "list_sources": ("list_knowledge", "graph_overview"),
     "test_guard": ("RELOCATED", "graph_overview"),
     "get_source_reliability": ("list_knowledge", "manage_source_trust"),
     "annotate_operator": ("update_knowledge", "adjust_relationship"),
@@ -1170,7 +1145,6 @@ def test_part_c3_tensions_are_read() -> None:
     for name, marker in (
         ("get_owned_entities", r"\| R5 \| `explore_connections`"),
         ("get_historical_knowledge", r"\| R3 \| `recall_beliefs`"),
-        ("list_sources", r"\| R6 \| `graph_overview`"),
         ("test_guard", r"\| R6 \| `graph_overview`"),
         ("get_source_reliability", r"\| W8 \| `manage_source_trust`"),
         ("annotate_operator", r"\| W15 \| `adjust_relationship`"),
@@ -1201,9 +1175,6 @@ C3B_DIVERGENCES_LITERAL: list[tuple[str, str, str, str]] = [
     ('compute_confidence', 'refresh_confidence', 'check_confidence', 'tortoise_compute_confidence'),
     ('invalidate_point', 'update_knowledge', 'supersede_knowledge', 'tortoise_invalidate'),
     ('list_graphs', 'graph_overview', 'tenancy:list_memory_graphs', 'tortoise_list_graphs'),
-    ('list_namespaces', 'graph_overview', 'list_knowledge', 'tortoise_list_namespaces'),
-    ('list_sources', 'list_knowledge', 'graph_overview', 'tortoise_list_sources'),
-    ('list_topics', 'graph_overview', 'list_knowledge', 'tortoise_list_topics'),
     ('org_create', 'UNBACKED', 'tenancy:create_memory_graph', 'tortoise_org_create'),
     ('paginated_query', 'list_knowledge', 'search_knowledge', 'tortoise_paginated_query'),
     ('paginated_query', 'list_knowledge', 'search_knowledge', 'tortoise_query'),
@@ -1218,9 +1189,6 @@ C3B_DETERMINATIONS_LITERAL: dict[str, str] = {
     'compute_confidence': "**Part A is right.** The canonical W13 group is renamed by beta to `refresh_confidence` (“Recompute confidence after changes”); `check_confidence` is the READ (“Returns the confidence view only”). `compute_confidence` recomputes, so the bridge follows the canonical group rather than beta's rename.",
     'invalidate_point': "**Part A is right.** beta: “`retract_point`, `invalidate_point` \\| 2 \\| → fields on `update_knowledge`”, and its retraction rationale is “not a separate verb”. The bridge follows the canonical collapse table's `invalidate_point` → `supersede`.",
     'list_graphs': "**Part A is right; the bridge conflates two methods.** beta's narrow-aliases row names `list_graphs` among the aliases absorbed by `graph_overview` and deleted, while `graph_list` is the one sent to `list_memory_graphs`. The canonical doc's “does not merge” list keeps `list_graphs` ≠ `graph_list` (raw DB names vs control-plane rows).",
-    'list_namespaces': "**Part A is right; the bridge is wrong.** beta's narrow-aliases row names `list_namespaces` among the aliases absorbed by `graph_overview`, and canonical R6 lists it there too.",
-    'list_sources': "**Part A is right (beta governs).** beta's `list_sources` row is explicit that it is **not discarded** and folds into **row 4 `list_knowledge(kind='source')`**, and beta's `get_source_reliability` row routes its reads via `list_sources`. The bridge sends it to `graph_overview` — canonical R6's home for it — but beta governs the surface, so Part A carries beta's destination.",
-    'list_topics': "**Part A is right; the bridge is wrong.** beta's narrow-aliases row names `list_topics` among the aliases absorbed by `graph_overview`, and canonical R6 lists it there too.",
     'org_create': "**Genuinely contested — no owner ruling.** No approved doc places organisation-account creation. `create_memory_graph` (beta row 29) provisions a memory GRAPH, not an account, and beta's tenancy block has no creation row. Part A's `UNBACKED` is the honest record; the bridge asserts a destination no doc states.",
     'promote_point': "**Part A is right; the bridge is wrong — and the map is owner-approved, so it is reported here, not edited.** The owner-approved MCP list absorbs `promote_point` into `revise_knowledge`, whose beta successor is `update_knowledge`; beta names it a FIELD on that update, and promote's incident-operator cascade and approval gate ride with it. The bridge's `refresh_confidence` recomputes confidence and does not cover the cascade.",
     # #10602: no `query` entry, and `paginated_query`'s bound tool moved to
@@ -1328,7 +1296,7 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
     # stayed 18: the 9 that are never a destination are `Tortoise`, `create_memory_graph`,
     # `list_members`, `remove_member`, and the five the retired control-plane rows used to
     # reach. The relation below is the invariant, not the old constant.
-    assert c1_total == 18, f"Part C1 lists {c1_total} Phase-2 methods, expected 18"
+    assert c1_total == 12, f"Part C1 lists {c1_total} Phase-2 methods, expected 12"
     assert c1_total == no_def + 9, (
         f"C1's {c1_total} and the summary's {no_def} destinations should differ by exactly "
         f"the 9 targets that are never a destination"
@@ -1356,15 +1324,15 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
     # lane C then gave six more approved targets a `def` and added `register_source` as a
     # destination (it was `create_source`'s target and is now a row of its own), so
     # 38 -> 39 distinct, 19 -> 14 no-`def`, 16 -> 22 already-existing; 39 = 14 + 22 + 3.
-    assert (distinct, no_def, exists, non_target) == (34, 9, 22, 3), (
+    assert (distinct, no_def, exists, non_target) == (34, 3, 28, 3), (
         "the destination summary moved: "
         f"{distinct} destinations = {no_def} no-def + {exists} existing + {non_target} other"
     )
-    assert "**32 groups** over **102** named members" in doc, (
+    assert "**32 groups** over **94** named members" in doc, (
         "the structural note's canonical-group counts are gone"
     )
-    assert "102 = the 102-method surface" in doc, (
-        "the structural note no longer reconciles its members to the 102-method surface"
+    assert "94 = the 94-method surface" in doc, (
+        "the structural note no longer reconciles its members to the 94-method surface"
     )
     # C6 sits between C5 and the structural notes; terminate the C5 slice at C6 so a
     # `W11` mention in the contested section cannot leak into the group set.
@@ -1445,7 +1413,7 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
     # three (`update_knowledge` already existed; the new ones are `supersede_knowledge`,
     # `write_question`, `record_decision`), a net -1: 120 -> 119 — which is the same 119
     # `tools/surface-guard.py` reports for the frozen baseline.
-    assert len(rows) == 102, f"Part A has {len(rows)} rows, expected the 102-method surface"
+    assert len(rows) == 94, f"Part A has {len(rows)} rows, expected the 94-method surface"
     assert len(set(names)) == len(names), (
         "Part A lists a method twice — `--check` cannot see a duplicated row because the "
         "duplicate is in the constant too"
@@ -1799,11 +1767,11 @@ def test_prose_counts_are_the_literals_the_doc_claims() -> None:
     # Digit-BOUNDED, not substring: `"124 public methods" in text` also passes when the
     # render produces `1124 public methods`, so the pin did not hold the number.
     for pattern in (
-        r"(?<![\d])102 public methods",
+        r"(?<![\d])94 public methods",
         r"(?<![\d])40 target methods",
 
-        r"(?<![\d])74 of the 102 are renames",
-        r"\*\*22\*\* are already targets \(unchanged\)",
+        r"(?<![\d])60 of the 94 are renames",
+        r"\*\*28\*\* are already targets \(unchanged\)",
         r"\*\*3\*\* are discarded with a rationale \(lifecycle `removed` · "
         r"visibility `internal` · delete `delete`\)",
         r"\*\*0\*\* are live but \*\*unlisted\*\* \(visibility `unlisted` — NOT deleted\)",
@@ -1811,8 +1779,8 @@ def test_prose_counts_are_the_literals_the_doc_claims() -> None:
         r"\*\*0\*\* are \*\*contested\*\* \(the docs name conflicting destinations\)",
         r"\*\*2\*\* have no destination",
 
-        r"only \*\*22\*\* of them exist on `TortoiseSDK` today",
-        r"\*\*18\*\* are Phase 2 work",
+        r"only \*\*28\*\* of them exist on `TortoiseSDK` today",
+        r"\*\*12\*\* are Phase 2 work",
     ):
         assert re.search(pattern, text), f"the headline no longer says {pattern!r}"
 
@@ -1829,13 +1797,13 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
     text = DOC.read_text(encoding="utf-8")
     part_a = text.split("## Part A")[1].split("## Part B")[0]
     ordinals = [int(m) for m in re.findall(r"^\| (\d+) \|", part_a, re.M)]
-    assert ordinals == list(range(1, 103)), (
-        f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..102"
+    assert ordinals == list(range(1, 95)), (
+        f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..94"
     )
     c1 = text.split("### C1")[1].split("### C2")[0]
 
-    assert c1.count("| no `def` on `TortoiseSDK` today |") == 18, (
-        "C1's status column no longer repeats its one true statement on all 18 rows"
+    assert c1.count("| no `def` on `TortoiseSDK` today |") == 12, (
+        "C1's status column no longer repeats its one true statement on all 12 rows"
     )
     c4 = text.split("### C4")[1].split("### C5")[0]
     for name, referent in (
@@ -1857,7 +1825,7 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
 
     # 13 -> 16 by #11609 Phase 2: the three targets that gained a `def` are their own
     # destination, so each contributes one UNCHANGED row.
-    assert sum(1 for r in rows if r["target"] == r["name"]) == 22
+    assert sum(1 for r in rows if r["target"] == r["name"]) == 28
     # 12 -> 3 by #12901 wave 2: the nine DISCARDED control-plane rows (graph_delete,
     # trash_graphs, graph_key_ids, graph_active_key_count, membership_create,
     # apikey_create, apikey_revoke, apikey_verify, the invitation trio,
@@ -1942,10 +1910,10 @@ def test_part_b_counts_match_the_rows_they_list() -> None:
         rows.append((dest.strip("`"), re.findall(r"`([a-z_][a-z0-9_]*)`", names),
                      int(count)))
     assert rows, "parsed no Part B rows"
-    assert total == 102, f"Part B's total row says {total}, expected 102"
+    assert total == 94, f"Part B's total row says {total}, expected 94"
     bad = [(d, len(ms), c) for d, ms, c in rows if len(ms) != c]
     assert not bad, f"Part B counts disagree with the members listed: {bad}"
-    assert sum(c for _, _, c in rows) == 102
+    assert sum(c for _, _, c in rows) == 94
 
     by_target: dict[str, set[str]] = {}
     for r in part_a_rows():
@@ -1996,7 +1964,7 @@ def test_part_c1_lists_exactly_the_targets_with_no_def() -> None:
     """
     expected = set(targets_independently()) - set(public_methods_independently())
 
-    assert len(expected) == 18
+    assert len(expected) == 12
     listed = set(_first_column(_section("C1 — target methods with no `def` on `TortoiseSDK`")))
     assert listed == expected, (
         "Part C1 does not list exactly the target methods with no `def`.\n"
@@ -2090,7 +2058,6 @@ def test_load_bearing_mappings_are_literal() -> None:
         "close": "close",
         # Rows where the two docs disagree, or a capricious rewrite is easy.
         "get_historical_knowledge": "get_historical_knowledge",
-        "list_sources": "list_knowledge",
         "test_guard": "",
         "recall_subgraph": "",
         "write_question": "write_question",
@@ -2120,7 +2087,7 @@ def test_every_group_has_a_pinned_representative() -> None:
         "R2": ("query", "list_knowledge"),
         "R3": ("recall_state", "check_confidence"),
         "R4": ("get_events", "get_entity"),
-        "R5": ("expand_relationships", "explore_connections"),
+        "R5": ("explore_connections", "explore_connections"),
         "R6": ("audit", "graph_overview"),
         "R7": ("review_connections", "review_link_candidates"),
         "R8": ("poll_events", "poll_events"),
@@ -2758,8 +2725,8 @@ def test_legend_structural_prose_and_reproduce_block_are_read() -> None:
     # The structural reconciliation must name its 32 groups and 119 members, and reconcile
     # them to the 119-method surface — every canonical member is a live method since
     # #12901 wave 1 retired `backfill_v25`, the Archived-table member this used to mention.
-    assert "partitions the surface into **32 groups** over **102** named members" in doc
-    assert "102 = the 102-method surface" in doc
+    assert "partitions the surface into **32 groups** over **94** named members" in doc
+    assert "94 = the 94-method surface" in doc
 
 
 def test_table_header_rows_are_read() -> None:

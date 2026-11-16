@@ -231,13 +231,16 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
     # verify nothing at all. Each literal carries its own premise note —
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    # 118 -> 102 by #12901 wave 2 (the control-plane partition `N1`–`N6` left the public
-    # surface); the off-surface set falls 96 -> 80 with it. `absent` is unchanged at 17 —
+    # 110 -> 94 by #12901 wave 2 (the control-plane partition `N1`–`N6` left the public
+    # surface); the off-surface set falls 82 -> 66 with it. `absent` is unchanged at 11 —
     # none of the sixteen was an approved row, so no approved name left the class.
-    assert len(live) == 102, "the live surface moved — update this premise (it pins today's gap)"
+    # MEASURED on this tree, not carried over: the wave branched before #12951's
+    # READ/QUERY containers landed, so its own "118 -> 102 / 96 -> 80 / absent 17" is
+    # that branch's arithmetic. See `tools/sdk_surface_declaration.py show`.
+    assert len(live) == 94, "the live surface moved — update this premise (it pins today's gap)"
 
-    assert len(off_surface) == 80, "the gap moved — update this premise (it pins today's gap)"
-    assert len(absent) == 17, "the gap moved — update this premise (it pins today's gap)"
+    assert len(off_surface) == 66, "the gap moved — update this premise (it pins today's gap)"
+    assert len(absent) == 11, "the gap moved — update this premise (it pins today's gap)"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.
     assert sum(1 for p in problems if "NOT on the approved surface" in p) == len(off_surface)

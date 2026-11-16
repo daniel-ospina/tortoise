@@ -229,8 +229,9 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > **This branch's `graph_overview` container then moved the live surface from 76 to 72 at that
 > head**, so 72 was the figure there until #11609 batch 1 moved the live surface from 72 to 68;
 **at this head BOTH Phase 2 lanes have landed, and their waves compose: batch 2's
-SOURCES/MINE/SESSION containers moved the live surface 68 → 67 at their own wave, and lane B's
-WRITE/MUTATE containers then took the live surface 67 → 59**
+SOURCES/MINE/SESSION containers moved the live surface 68 → 67 at their own wave, lane B's
+WRITE/MUTATE containers took it 67 → 59, and #11609 family A's READ/QUERY containers then
+took the live surface 59 → 55**
 > (`uv run python tools/surface_manifest.py check` is the live count).
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
@@ -347,12 +348,18 @@ not, and **none of them is archived** — a name with a destination keeps its sh
 
 **Composed at this head** (this PR's re-cut onto the branch that already carries lane B): the two
 records above describe two waves that are now on the SAME tree, so they compose rather than replace
-one another: these two waves took the live surface 68 → 59, so the surface is now **59 advertised tools**
-with **44** retired-forward entries (68 + 6 + 6 − 7 − 14 = 59, and 23 + 7 + 14 = 44 —
-every retired name still answers on its retired name), and the SERVED population is **103**
-(59 live + 44 shims). Both waves' SDK halves compose the same way:
-125 → 120 (#12901 wave 1) → 119 (lane B: four retired, three delivered) → **118** (batch 2:
-six approved in, seven retired out). Every number here is MEASURED off the merged registry, not added
+one another: the three batches composing on this tree took the live surface 68 → 55 — batch 2's
+SOURCES/MINE/SESSION containers 68 → 67, lane B's WRITE/MUTATE containers 67 → 59, and #11609's
+READ/QUERY family A (#12951) retiring nine advertised doors into the six containers it landed,
+59 → 55 — so the surface is now **55 advertised tools**
+with **53** retired-forward entries (68 + 6 + 6 − 7 − 14 = 59, then 59 − 9 + 5 = 55;
+and 23 + 7 + 14 + 9 = 53 — every retired name still answers on its retired name), and the SERVED
+population is **108**
+(55 live + 53 shims). Both waves' SDK halves compose the same way:
+125 → 120 (#12901 wave 1) → 112 (#11609's READ/QUERY family A, #12951: six containers in, fourteen
+read methods re-privatised) → 111 (lane B: four retired, three delivered) → 110 (batch 2: six approved
+in, seven retired out) → **94** (#12901 wave 2: sixteen control-plane doors closed, their bodies kept
+private). Every number here is MEASURED off the merged registry, not added
 by hand — `tools/bridge_table.py` and `tests/test_tool_risk_tiers.py` read the same three.
 
 Three consequences for readers of the paragraph below, which is left as written because it records
@@ -538,7 +545,7 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 2. **Publish the bridge table** (MCP `type=`/`mode=` → SDK method).
 3. Implement the MCP list with the **SDK frozen** (method names + capabilities unchanged)
    so the handlers are written once.
-4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **102** public
+4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **94** public
    methods — a number DERIVED from the class, never typed; it moved 147 → 150 at #4282
    phase 2.2 because `link_entities`, `update_knowledge` and `delete_knowledge` were
    approved rows with no `def` yet, 150 → 124 on 2026-10-27 when the surplus methods
@@ -546,11 +553,14 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
    archived at tag `archive/4282-surplus-sdk-methods`), and 124 → 125 on 2026-11-14 when
    approved row 28 `get_organisation_account` was implemented on #10015, then 125 → 120 on
    2026-11-15 when #12901 wave 1 retired five off-surface methods no production code called,
-   then 120 → 119 on 2026-11-16 when #11609 Phase 2's WRITE/MUTATE lane retired four public names
-   into containers and delivered three, then 119 → 118 when the SAME epic's
-   SOURCES/MINE/SESSION lane composed on top of it (six approved methods in — `register_source`,
-   `manage_source_trust`, `index_sources_from_directory`, `mine_knowledge_from_session`,
-   `mine_knowledge_from_directory`, `check_connection` — and seven retired out, for a net −1) —
+   then 120 → 112 on 2026-11-16 when #11609's READ/QUERY family A (#12951) landed six containers
+   while re-privatising the fourteen read methods they cover, then 112 → 111 when the SAME epic's
+   WRITE/MUTATE lane retired four public names into containers and delivered three, then 111 → 110
+   when its SOURCES/MINE/SESSION lane composed on top of it (six approved methods in —
+   `register_source`, `manage_source_trust`, `index_sources_from_directory`,
+   `mine_knowledge_from_session`, `mine_knowledge_from_directory`, `check_connection` — and seven
+   retired out, for a net −1), then 110 → 94 when #12901 wave 2 closed the sixteen control-plane
+   doors of the canonical `N1`–`N6` partition (every body kept PRIVATE, so no capability left) —
    in none of these moves did the declared surface change, so
    the declaration stays at 40 — and
    `docs/product/canonical-sdk-methods.md` agrees; reconcile the per-name mapping when

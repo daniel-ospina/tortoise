@@ -20,10 +20,10 @@ related:
 
 # Canonical SDK method surface — an inventory, not the target
 
-**Read this for coverage, not for names.** This document is two things: an **inventory of all 102
+**Read this for coverage, not for names.** This document is two things: an **inventory of all 94
 methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and,
 alongside that, an **earlier target sketch** (32 groups over the 124 members live when it
-was written; the live surface is 102 today — see *The count*). The 26 names that left
+was written; the live surface is 94 today — see *The count*). The 26 names that left
 the surface on 2026-10-27 are recorded in *Removed from the surface* below rather than in a group.
 
 > ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` (40 methods), not this document.**
@@ -44,8 +44,8 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **102** |
-| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **102** |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **94** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **94** |
 
 The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, then 149 → 147 on
 2026-10-25 (the plan-quota counter `graph_count` went internal as `_graph_count`; the
@@ -83,7 +83,7 @@ number:
   `update_entity`'s Point-lifecycle behaviour — the `restatus` journal record and the
   transition-naming refusal — is CARRIED by `update_knowledge`, not dropped with the name.
 
-- **119 → 102 on 2026-11-16** — `#12901` wave 2 retired the SIXTEEN members of this document's own
+- **110 → 94 on 2026-11-16** — `#12901` wave 2 retired the SIXTEEN members of this document's own
   control-plane partition (`N1`–`N6`) that are off the approved 40 and bound by no MCP tool. Every
   one was PRIVATISED rather than deleted (each body has a caller in the hosted API, the CLI or
   `mcp_auth`), so the declaration stays at 40 and no capability moved.
@@ -94,9 +94,11 @@ so the waves could not have consumed each other's candidates. Wave 2 rests on th
 partition: it is `N1`–`N6` minus the approved rows minus the one MCP-bound member, and the three
 waves are disjoint by construction (the wave-1 and wave-2 candidate lists share no name — wave 1's
 members were checked against every `tool_registry` entry, wave 2's are checked against the partition
-AND against wave 1's recorded set). **102 is the count today**, and it is derived, not typed: `ast`
+AND against wave 1's recorded set). **94 is the count today**, and it is derived, not typed: `ast`
 over `tortoise/sdk.py`, `tools/sdk_surface.py --check` and `counts.sdk_public_methods` in
-`config/surface-manifest.yml` all read 102. *Removed from the surface* below is the per-method
+`config/surface-manifest.yml` all read 94. (Wave 2 was written against a main that predated
+`#12951`'s READ/QUERY containers, so the derivation it recorded — 118 → 102 — is that branch's
+BEFORE/AFTER; on the tree this landed in, the same sixteen departures read 110 → 94.) *Removed from the surface* below is the per-method
 record.
 
 > A previous draft reported 152 and explained the two-method gap as the manifest excluding
@@ -149,7 +151,7 @@ of these to the public surface is a **new** surface change and needs the owner a
 
 `test_guard` is **not** in this list and was **not** deleted: `beta-sdk-surface.md` rules it *"Kept
 and relocated … it guards the production-wipe incident, so the code must survive"*. ⚠️ **But it is
-still ON the public surface today** — it is one of the 102 (`config/sdk-surface.json`,
+still ON the public surface today** — it is one of the 94 (`config/sdk-surface.json`,
 `sdk.py::TortoiseSDK.test_guard`), and `tools/sdk_surface.py --check` counts it. The
 `beta-sdk-surface.md` ruling is about the approved 40-method TARGET, where it is relocated rather
 than deleted; on the live surface it remains a *removal candidate* (see the "Candidates for
@@ -293,13 +295,13 @@ Three rules, each of which caught a real error in this document.
 
 | # | Canonical | MCP tool | Members (current names) | Action |
 |---|---|---|---|---|
-| R1 | `search_knowledge` | #1 | `tortoise_fts_query`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse |
-| R2 | `list_knowledge` | #2 | `query`, `paginated_query`, `query_points_by_tag` | keep, collapse |
-| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `provenance`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads and `provenance`; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |
+| R1 | `search_knowledge` | #1 | `search_knowledge`, `tortoise_fts_query`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse — `suggest_entry_points` and `search_sessions` were re-privatised into this container by #11609's READ/QUERY family A (#12951) |
+| R2 | `list_knowledge` | #2 | `list_knowledge`, `query`, `paginated_query`, `query_points_by_tag` | keep, collapse |
+| R3 | `recall_beliefs` | #3 | `check_confidence`, `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads (`check_confidence` is the approved name they resolve to, and it landed in #11609 family A); `provenance` was re-privatised into this container by #12951; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |
 | R4 | `get_entity` | #4 | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` | keep, collapse |
-| R5 | `explore_connections` | #5 | `expand_relationships`, `get_owned_entities` | keep, collapse — `traverse` and `get_org_structure` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |
-| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability |
-| R7 | `review_link_candidates` | #7 | `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | keep, collapse |
+| R5 | `explore_connections` | #5 | `explore_connections`, `get_owned_entities` | keep, collapse — `expand_relationships` was re-privatised into this container by #11609 family A (#12951); `traverse` and `get_org_structure` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |
+| R6 | `graph_overview` | #6 | `graph_overview`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability. `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics` and `validate_domain` were re-privatised into this container's `section=` arm by #11609 family A (#12951) |
+| R7 | `review_link_candidates` | #7 | `review_link_candidates`, `review_connections`, `get_cross_lens_candidates` | keep, collapse — `list_dedup_candidates` was re-privatised into this container's `kind='dedup'` arm by #11609 family A (#12951) |
 | R8 | `poll_events` | #8 | `poll_events` | keep |
 | R9 | `inspect_batch` | #9 | `list_batch`, `list_batches` | keep, collapse |
 
@@ -311,7 +313,7 @@ Three rules, each of which caught a real error in this document.
 | W2 | `write_knowledge` | — | `ingest` | keep — **SDK-only name.** The batch call: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so connections can address nodes created in the same call. Not to be called `ingest_bundle` (jargon) or `write_graph` (collides with `graph_overview` and the graph admin namespace) |
 | W3 | `register_source` | #11 | `register_source` | keep — **not foldable**: the URL is the node identity. `create_source` was retired into this name in #4282 Phase 2 (`#11609`): same signature, same body, one surface name |
 | W4 | `index_files` | #12 | `index_sources_from_directory`, `mine_knowledge_from_directory`, `ingest_corpus`, `reconcile_sessions`, `session_index_health` | keep — **1 self-declared DEPRECATED** (`ingest_corpus`; measured over the five members this row lists). `index_directory`, `index_sessions` and `mine_corpus` were retired in #4282 Phase 2 (`#11609`): the first into `index_sources_from_directory` (itself renamed), the second into that same name with `file_type='agent_session'`, the third into `mine_knowledge_from_directory` — the beta row's own split, since mining is not a kind of indexing. The two legacy names remain reachable through their RETIRED MCP tools |
-| W5 | `capture_knowledge` | #13 | `mine_knowledge_from_session`, `diary_write`, `diary_read` | **superseded — see the amendment below the split table (owner ruling 2026-10-09)**; each member retires to its OWN destination, so they no longer share one. `checkpoint` was retired into `mine_knowledge_from_session` in #4282 Phase 2 (`#11609`) as that method's `items=` arm |
+| W5 | `capture_knowledge` | #13 | `mine_knowledge_from_session`, `diary_write` | **superseded — see the amendment below the split table (owner ruling 2026-10-09)**; each member retires to its OWN destination, so they no longer share one. `checkpoint` was retired into `mine_knowledge_from_session` in #4282 Phase 2 (`#11609`) as that method's `items=` arm |
 | W6 | `capture_session_local` | — | — | **no live PUBLIC member** — `capture_session` was retired on 2026-10-27 (#4282, code archived at tag `archive/4282-surplus-sdk-methods`); the body survives as the private `TortoiseSDK._capture_session`, and the capability returns publicly under `mine_knowledge_from_session` |
 | W7 | `capture_session_hosted` | — | — | **no live member** — `commit_session` was deleted on 2026-10-27 (#4282, code archived at the same tag); the capability returns under `mine_knowledge_from_session` |
 | W8 | `manage_source_trust` | #14 | `manage_source_trust`, `get_source_reliability` | keep — **`get_source_reliability` writes**. `assess_source` and `set_source_tier` were retired into `manage_source_trust` in #4282 Phase 2 (`#11609`), which dispatches on the argument (`score=` vs `tier=`) |
