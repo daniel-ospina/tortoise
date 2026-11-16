@@ -185,6 +185,78 @@ class TestPointIdExtraction:
         assert _point_id(result) == (None, "unparseable_result")
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_store(monkeypatch, tmp_path):
+    """No test in this module may read a REAL credential store.
+
+    `tortoise.mcp_client.resolve_connection` falls back to the stores
+    `tortoise init` writes — `./.tortoise` (project-local) then
+    `~/.tortoise/credentials.json` (#1708 D5) — when no env KEY names one. These
+    tests declare the endpoint with `TORTOISE_MCP_URL` and set
+    `TORTOISE_API_KEY=""` (a blank value is deliberately ABSENT), so on a box
+    that has run `tortoise init` the STORE supplies the key — and by the #2369
+    D1.1 CO-SOURCE rule the store then supplies the HOST too, overriding the URL
+    the fixture just declared here. The push then probes the stored host instead
+    of this fixture's ephemeral daemon, the hermetic egress guard (#4387) blocks
+    the request, and `push_to_tortoise` returns `{"status": "skipped"}` — the
+    exact `assert 'skipped' == 'ok'` that reded `test (a)` on main at
+    bdda17dd22d0, from the HOST's state rather than from any diff.
+
+    Isolating HOME and CWD makes this module's result independent of who ran it
+    — the same fixture, for the same reason, as
+    `tests/test_mcp_client.py::_no_ambient_store`.
+    """
+    home = tmp_path / "ambient-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    # …and the PROJECT-LOCAL store `tortoise init --api-key` writes (`./.tortoise`),
+    # which is the other candidate in the same chain (#1708 D5).
+    (tmp_path / "cwd").mkdir()
+    monkeypatch.chdir(tmp_path / "cwd")
+
+
+class TestNoStoredCredentialDecidesTheEndpoint:
+    """Precondition pins for `_no_ambient_store` (#2369 D1.1).
+
+    These are PRECONDITIONS, not behaviour: they fail LOUD and name the cause
+    instead of letting the module pass on a clean box and quietly probe a live
+    host on a dirty one.
+    """
+
+    def test_no_credential_store_is_reachable_from_this_test(self):
+        from pathlib import Path
+
+        candidates = (
+            Path.home() / ".tortoise" / "credentials.json",
+            Path.cwd() / ".tortoise",
+        )
+        found = [str(c) for c in candidates if c.is_file()]
+        assert not found, (
+            "an ambient credential store reached this test: "
+            f"{found}. It carries a KEY, and #2369 D1.1 makes the store that "
+            "supplies the key supply the HOST as well — so TORTOISE_MCP_URL below "
+            "is overridden and this module measures whatever host the store names. "
+            "THIS IS NOT YOUR DIFF: `_no_ambient_store` is supposed to isolate both "
+            "stores; if one is visible here, that fixture is gone or bypassed."
+        )
+
+    def test_the_declared_daemon_url_is_the_one_the_client_resolves(
+        self, monkeypatch, daemon_url,
+    ):
+        """`TORTOISE_MCP_URL` must be what the client actually talks to."""
+        from tortoise.mcp_client import resolve_connection
+
+        monkeypatch.setenv("TORTOISE_MCP_URL", daemon_url)
+        monkeypatch.setenv("TORTOISE_API_KEY", "")
+
+        connection = resolve_connection()
+        assert connection.url == daemon_url, (
+            f"the client resolved {connection.url!r} instead of the declared "
+            f"{daemon_url!r} (sources read: {connection.sources})"
+        )
+        assert connection.declared is True
+
+
 class TestNoEngineImports:
     def test_integrations_have_zero_sdk_imports(self):
         """AST gate (AC4): integrations connect via MCP — no engine imports.
@@ -202,9 +274,15 @@ class TestNoEngineImports:
         import ast
         from pathlib import Path
 
-        root = Path("integrations")
+        root = Path(__file__).resolve().parents[1] / "integrations"
+        # ⛔ An ABSOLUTE root, and the gate must MEASURE something. `_no_ambient_store`
+        # changes CWD, and `rglob` on a path that is not there yields an empty list —
+        # so `Path("integrations")` would report zero offenders and pass VACUOUSLY
+        # (a false PASS in the exact shape this gate exists to catch).
+        scanned = list(root.rglob("*.py"))
+        assert scanned, f"the AST gate read NO files under {root} — this is not a PASS"
         offenders = []
-        for py in root.rglob("*.py"):
+        for py in scanned:
             tree = ast.parse(py.read_text())
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.module == "tortoise.sdk":
@@ -219,7 +297,8 @@ class TestNoEngineImports:
         import ast
         from pathlib import Path
 
-        src = Path("integrations/crm/twenty/bridge.py").read_text()
+        src = (Path(__file__).resolve().parents[1]
+               / "integrations/crm/twenty/bridge.py").read_text()
         tree = ast.parse(src)
         assert any(
             isinstance(n, ast.ImportFrom) and n.module == "tortoise.mcp_client"
