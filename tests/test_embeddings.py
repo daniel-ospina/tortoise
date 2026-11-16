@@ -826,10 +826,17 @@ def test_the_operator_lever_is_declared_in_the_env_contract():
     cannot widen a knob the contract does not mention.
 
     Declared means the ASSIGNMENT form the contract uses (``NAME=`` or a
-    commented ``# NAME=`` placeholder). A bare prose mention gives an operator
-    nothing to copy, so it does not count. Asserted STATICALLY on the contract
-    text: the file is documentation, and an operator reading it is the whole
-    point of the assertion.
+    commented ``# NAME=`` placeholder), AND a value the code will ACCEPT. A
+    bare prose mention gives an operator nothing to copy, so it does not count;
+    neither does a declared value the resolver refuses, because an operator who
+    copies it gets the warning-and-fallback path instead of the lever. Asserted
+    STATICALLY on the contract text: the file is documentation, and an operator
+    reading it is the whole point of the assertion.
+
+    The value arm is not decoration (review finding, PR #13040): presence alone
+    accepted ``# TORTOISE_EMBED_THREADS=0``, ``=-4`` or ``=banana`` — every one
+    of them refused at runtime by ``resolve_embed_threads`` — so the pin would
+    have stayed green over a contract declaring a value the code rejects.
     """
     import re
     from pathlib import Path
@@ -838,12 +845,20 @@ def test_the_operator_lever_is_declared_in_the_env_contract():
     contract = Path(__file__).resolve().parents[1] / ".env.example"
     text = contract.read_text(encoding="utf-8")
     decl = re.compile(
-        r"^\s*#?\s*" + re.escape(mod.EMBED_THREADS_ENV) + r"\s*=", re.MULTILINE)
-    assert decl.search(text), (
+        r"^\s*#?\s*" + re.escape(mod.EMBED_THREADS_ENV) + r"\s*=\s*(\S*)",
+        re.MULTILINE)
+    found = decl.search(text)
+    assert found, (
         f"{mod.EMBED_THREADS_ENV} is the operator lever for the #10296 thread "
         "pin, but .env.example — the repo's declared env contract — never "
         "declares it, so an operator cannot discover it without reading "
         "tortoise/embeddings.py; add a `# NAME=` line in the embedder block")
+    declared = found.group(1).strip()
+    assert declared.isdigit() and int(declared) >= 1, (
+        f".env.example declares {mod.EMBED_THREADS_ENV}={declared!r}, but "
+        "resolve_embed_threads refuses any value that is not a positive "
+        "integer (it warns and falls back to the measured default), so an "
+        "operator copying this line does not get the lever it documents")
 
 
 # ── runner (LAST — see the note on `_run_all`) ────────────────────────────
