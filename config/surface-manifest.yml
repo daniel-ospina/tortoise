@@ -1733,8 +1733,9 @@ rows:
   job: 'How confident the graph is — the confidence view ONLY (#4282 row 5). Dispatch is by argument: claim_id =
     one claim''s EP posterior {mean,variance,alpha,beta}, and include_provenance adds the chain behind it; topic
     = the dated belief chain for a topic; session = what happened last session, including its confidence changes;
-    calibrate (or no selector) = the graph-wide calibration audit. It never recomputes or writes a belief — that
-    is tortoise_compute_confidence''s job.'
+    calibrate (or no selector) = the graph-wide calibration audit. It never RECOMPUTES the posterior — that is tortoise_compute_confidence''s
+    job — and it is NOT write-free: the claim_id arm reaches get_confidence, whose lazy consistency pass dreams
+    a dirty root, which is why this door is tiered maintenance rather than read.'
   dependency: declares TortoiseSDK.check_confidence (resolves)
   lifecycle: active
   used_by: never called

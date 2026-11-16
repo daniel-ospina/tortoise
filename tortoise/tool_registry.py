@@ -1556,11 +1556,15 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "behind it; topic = the dated belief chain for a topic; session = "
                     "what happened last session, including its confidence changes; "
                     "calibrate (or no selector) = the graph-wide calibration audit. It "
-                    "never recomputes or writes a belief — that is "
-                    "tortoise_compute_confidence's job.",
-        # ⛔ maintenance, NOT read: one arm refreshes a stored projection —
-        # its default and `claim_id` arms reach `get_confidence`,
-        # whose lazy `dream(dirty_only=True)` writes `n.confidence` — and #4122
+                    "never RECOMPUTES the posterior — that is "
+                    "tortoise_compute_confidence's job — and it is NOT write-free: the "
+                    "claim_id arm reaches get_confidence, whose lazy consistency pass "
+                    "dreams a dirty root, which is why this door is tiered maintenance "
+                    "rather than read.",
+        # ⛔ maintenance, NOT read: one arm refreshes a stored projection through a write
+        # — the `claim_id` arm reaches `get_confidence`, whose lazy `dream(dirty_only=True)`
+        # writes `n.confidence` (the no-selector default answers from `calibrate_summary`,
+        # a pure projection query that calls neither `dream` nor `get_confidence`) — and #4122
         # refuses a read-only hint over a declared read-through write (the declaration is
         # `READ_THROUGH_WRITE_METHODS` in `tests/tool_surface_capabilities.py`). A
         # `graphs:read` key can still call it: maintenance is the tier for exactly that

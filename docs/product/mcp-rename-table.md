@@ -18,7 +18,7 @@ not something to reconcile silently.
 
 | # | Current tool | Source | Call instead today | Destination (target surface) | Retirement |
 |---|---|---|---|---|---|
-| 1 | `tortoise_adjust_relationship` | `tool_registry.py:1688` | **no replacement** | `adjust_relationship` | absent |
+| 1 | `tortoise_adjust_relationship` | `tool_registry.py:1692` | **no replacement** | `adjust_relationship` | absent |
 | 2 | `tortoise_annotate_operator` | `tool_registry.py:746` | `tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., directness=...)` | `adjust_relationship` | warning shim |
 | 3 | `tortoise_approve_merge` | `tool_registry.py:583` | **no replacement** | `approve_merge` | absent |
 | 4 | `tortoise_assess_source` | `tool_registry.py:1340` | **no replacement** | `manage_source_trust` | absent |
@@ -48,11 +48,11 @@ not something to reconcile silently.
 | 28 | `tortoise_entity_profile` | `tool_registry.py:902` | `tortoise_explore_connections(node_id, hops=...)` | `explore_connections` | warning shim |
 | 29 | `tortoise_events_poll` | `tool_registry.py:837` | **no replacement** | `poll_events` | absent |
 | 30 | `tortoise_expand_relationships` | `tool_registry.py:520` | **no replacement** | `explore_connections` | absent |
-| 31 | `tortoise_explore_connections` | `tool_registry.py:1573` | **no replacement** | `explore_connections` | absent |
+| 31 | `tortoise_explore_connections` | `tool_registry.py:1577` | **no replacement** | `explore_connections` | absent |
 | 32 | `tortoise_file_decision` | `tool_registry.py:784` | `tortoise_write_question(options, evidence, choice)` | `write_question` | warning shim |
 | 33 | `tortoise_file_human_approval` | `tool_registry.py:793` | `tortoise_record_decision(approver_id, artifact_id, point_ids, decision_content=...)` | `record_decision` | warning shim |
 | 34 | `tortoise_find_cross_lens_candidates` | `tool_registry.py:1162` | **no replacement** | `review_link_candidates` | absent |
-| 35 | `tortoise_get` | `tool_registry.py:1613` | `tortoise_get_entity(id, type=...)` | `get_entity` | warning shim |
+| 35 | `tortoise_get` | `tool_registry.py:1617` | `tortoise_get_entity(id, type=...)` | `get_entity` | warning shim |
 | 36 | `tortoise_get_confidence` | `tool_registry.py:658` | `tortoise_check_confidence(claim_id=...)` | `check_confidence` | warning shim |
 | 37 | `tortoise_get_entity` | `tool_registry.py:1359` | **no replacement** | `get_entity` | absent |
 | 38 | `tortoise_get_events` | `tool_registry.py:1234` | `tortoise_get_entity(None, type="events")` | `get_entity` | warning shim |
@@ -80,25 +80,25 @@ not something to reconcile silently.
 | 60 | `tortoise_list_sources` | `tool_registry.py:397` | `tortoise_graph_overview(section="sources")` | `graph_overview` | warning shim |
 | 61 | `tortoise_list_tags` | `tool_registry.py:446` | `tortoise_graph_overview(section="tags")` | `graph_overview` | warning shim |
 | 62 | `tortoise_list_topics` | `tool_registry.py:1107` | `tortoise_list_knowledge(kind="topic", entity_id=...)` | `list_knowledge` | warning shim |
-| 63 | `tortoise_manage_sources` | `tool_registry.py:1798` | **no replacement** | `manage_sources` | absent |
+| 63 | `tortoise_manage_sources` | `tool_registry.py:1802` | **no replacement** | `manage_sources` | absent |
 | 64 | `tortoise_mine_conversations` | `tool_registry.py:559` | **no replacement** | `mine_knowledge_from_directory` | absent |
 | 65 | `tortoise_mitigate_operator` | `tool_registry.py:764` | `tortoise_adjust_relationship(id, reason=..., strength=..., credibility=...)` | `adjust_relationship` | warning shim |
-| 66 | `tortoise_onboarding_github_index` | `tool_registry.py:1839` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `manage_sources` | warning shim |
-| 67 | `tortoise_onboarding_session_recording` | `tool_registry.py:1830` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `manage_sources` | warning shim |
+| 66 | `tortoise_onboarding_github_index` | `tool_registry.py:1843` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `manage_sources` | warning shim |
+| 67 | `tortoise_onboarding_session_recording` | `tool_registry.py:1834` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `manage_sources` | warning shim |
 | 68 | `tortoise_operator_action` | `tool_registry.py:1441` | `tortoise_adjust_relationship(id, action="mitigate"\|"annotate", ...)` | `adjust_relationship` | warning shim |
 | 69 | `tortoise_org_create` | `tool_registry.py:1190` | **no replacement** | `tenancy:create_memory_graph` | absent |
-| 70 | `tortoise_overview` | `tool_registry.py:1602` | `tortoise_graph_overview(section=...)` | `graph_overview` | warning shim |
+| 70 | `tortoise_overview` | `tool_registry.py:1606` | `tortoise_graph_overview(section=...)` | `graph_overview` | warning shim |
 | 71 | `tortoise_paginated_query` | `tool_registry.py:328` | `tortoise_query(offset=..., limit=...)` | `search_knowledge` | warning shim |
 | 72 | `tortoise_promote_point` | `tool_registry.py:604` | `tortoise_refresh_confidence(scope="promote", point_id=...)` | `refresh_confidence` | warning shim |
 | 73 | `tortoise_provenance` | `tool_registry.py:1180` | `tortoise_check_confidence(claim_id, include_provenance=True)` | `check_confidence` | warning shim |
 | 74 | `tortoise_query` | `tool_registry.py:297` | **no replacement** | `search_knowledge` | absent |
 | 75 | `tortoise_query_points_by_tag` | `tool_registry.py:454` | `tortoise_query(tag=..., offset=..., limit=...)` | `search_knowledge` | warning shim |
 | 76 | `tortoise_recall` | `tool_registry.py:531` | **no replacement** | `check_confidence` | absent |
-| 77 | `tortoise_record_decision` | `tool_registry.py:1756` | **no replacement** | `record_decision` | absent |
-| 78 | `tortoise_refresh_confidence` | `tool_registry.py:1714` | **no replacement** | `refresh_confidence` | absent |
+| 77 | `tortoise_record_decision` | `tool_registry.py:1760` | **no replacement** | `record_decision` | absent |
+| 78 | `tortoise_refresh_confidence` | `tool_registry.py:1718` | **no replacement** | `refresh_confidence` | absent |
 | 79 | `tortoise_retract_point` | `tool_registry.py:890` | `tortoise_update_knowledge(id, invalid_at=...)` | `update_knowledge` | warning shim |
 | 80 | `tortoise_review_connections` | `tool_registry.py:1139` | `tortoise_review_link_candidates(kind="connections", mode=...)` | `review_link_candidates` | warning shim |
-| 81 | `tortoise_review_link_candidates` | `tool_registry.py:1587` | **no replacement** | `review_link_candidates` | absent |
+| 81 | `tortoise_review_link_candidates` | `tool_registry.py:1591` | **no replacement** | `review_link_candidates` | absent |
 | 82 | `tortoise_search` | `tool_registry.py:508` | **no replacement** | `search_knowledge` | absent |
 | 83 | `tortoise_search_knowledge` | `tool_registry.py:1495` | **no replacement** | `search_knowledge` | absent |
 | 84 | `tortoise_search_sessions` | `tool_registry.py:1276` | **no replacement** | `search_knowledge` | absent |
@@ -111,15 +111,15 @@ not something to reconcile silently.
 | 91 | `tortoise_suggest_entry_points` | `tool_registry.py:497` | **no replacement** | `search_knowledge` | absent |
 | 92 | `tortoise_summarize_structure` | `tool_registry.py:357` | `tortoise_graph_overview(section="structure")` | `graph_overview` | warning shim |
 | 93 | `tortoise_supersede` | `tool_registry.py:824` | `tortoise_supersede_knowledge(old_id, new_id, transfer_edges=...)` | `supersede_knowledge` | warning shim |
-| 94 | `tortoise_supersede_knowledge` | `tool_registry.py:1675` | **no replacement** | `supersede_knowledge` | absent |
+| 94 | `tortoise_supersede_knowledge` | `tool_registry.py:1679` | **no replacement** | `supersede_knowledge` | absent |
 | 95 | `tortoise_taxonomy` | `tool_registry.py:1097` | `tortoise_graph_overview(section="taxonomy")` | `graph_overview` | warning shim |
 | 96 | `tortoise_traverse` | `tool_registry.py:912` | `tortoise_explore_connections(node_id, hops=...)` | `explore_connections` | warning shim |
 | 97 | `tortoise_update` | `tool_registry.py:1404` | `tortoise_update_knowledge(id, props=...)` | `update_knowledge` | warning shim |
 | 98 | `tortoise_update_entity` | `tool_registry.py:1370` | `tortoise_update_knowledge(id, props=...)` | `update_knowledge` | warning shim |
-| 99 | `tortoise_update_knowledge` | `tool_registry.py:1644` | **no replacement** | `update_knowledge` | absent |
+| 99 | `tortoise_update_knowledge` | `tool_registry.py:1648` | **no replacement** | `update_knowledge` | absent |
 | 100 | `tortoise_update_point` | `tool_registry.py:706` | `tortoise_update_knowledge(id, props=...)` | `update_knowledge` | warning shim |
 | 101 | `tortoise_validate_domain` | `tool_registry.py:345` | `tortoise_graph_overview(section="validate_domain", domain=...)` | `graph_overview` | warning shim |
-| 102 | `tortoise_write_question` | `tool_registry.py:1744` | **no replacement** | `write_question` | absent |
+| 102 | `tortoise_write_question` | `tool_registry.py:1748` | **no replacement** | `write_question` | absent |
 
 **102 served MCP tools, 28 destinations.** 46 retire **with a warning shim**; the other **56** are simply absent — no shim.
 

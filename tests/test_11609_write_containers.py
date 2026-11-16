@@ -543,6 +543,31 @@ def test_the_census_still_catches_an_sdk_call_site():
         "a plain attribute READ of a name that happens to be retired must NOT "
         "be flagged — it reaches no SDK")
 
+    # ── RECORDED RESIDUAL (#12951 review Q4) ───────────────────────────────
+    # The census is CALL-SHAPE scoped, so an ALIASED call — ``fn = sdk.<retired>;
+    # fn(1)`` — carries no ``ast.Attribute`` at the call site and is NOT flagged.
+    # That is SAFE rather than merely measured, and the reason is a different pin:
+    # ``TortoiseSDK.__getattr__`` (sdk.py) raises ``AttributeError(retirement_hint
+    # (name))`` on the ATTRIBUTE ACCESS itself, so the alias is never formed — the
+    # first statement below dies before a callee exists. Both shapes are asserted
+    # here so the residual is recorded where the narrowing is, instead of being
+    # claimed away above. (The raise itself is pinned for EVERY retired name by
+    # `test_a_retired_sdk_name_RAISES_naming_its_replacement`; the single-name
+    # check here ties that pin to the alias claim.)
+    from tortoise.sdk import TortoiseSDK
+    aliased = ast.parse(f"def f(sdk):\n    fn = sdk.{name}\n    return fn(1)\n")
+    assert _attribute_names(aliased) == [], (
+        "the census is call-shape scoped: an aliased call is not visible to it — "
+        "if this ever starts matching, update the recorded residual above")
+    alias_builtin = ast.parse(
+        f"def f(sdk):\n    return getattr(sdk, {name!r})(1)\n")
+    assert _attribute_names(alias_builtin) == [], (
+        "a getattr() dynamic call is not visible to the census either")
+
+    bare = object.__new__(TortoiseSDK)
+    with pytest.raises(AttributeError):
+        getattr(bare, name)
+
 
 def test_no_production_module_reaches_a_retired_sdk_name():
     """#12915 review F1/F3. A retired name is only retired if nothing can still
