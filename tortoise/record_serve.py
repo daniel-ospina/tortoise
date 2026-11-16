@@ -389,12 +389,18 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
         cypher="TortoiseSDK.get_point(id) — the SDK's internal accessor",
         reason="write paths call it MID-WRITE to build journal events, so a "
                "record-served answer would read a store the same write has not "
-               "finished projecting. The caller-facing reads of the same shape "
+               "finished projecting — so the ACCESSOR itself stays cache-only, "
+               "which is why `served_out` is OPT-IN (#12941) and no write path "
+               "passes it. The caller-facing reads of the same shape "
                "are the hosted endpoint served here AND the MCP route that reaches "
                "it (`tortoise_get_entity(id, type=\"point\")` — `tortoise_get_point` "
-               "is its RETIRED alias, `tool_registry.RETIRED_USE_INSTEAD`), which is "
-               "not wired because an MCP call carries no hosted org credential from "
-               "which to resolve a record tenant.",
+               "is its RETIRED alias, `tool_registry.RETIRED_USE_INSTEAD`). That "
+               "MCP route was excluded because an MCP call carried no hosted org "
+               "credential from which to resolve a record tenant; it does now "
+               "(#9192/#10025/#10046 install the tenant ambiently through "
+               "`mcp_auth._record_tenant_scope`), so since #12941 the route does "
+               "honour this seam — through the accessor's opt-in caller-facing "
+               "form, never through a mid-write caller.",
     ),
     "entity-accessor": AnchoredRead(
         name="entity-accessor",
@@ -407,8 +413,15 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "so a record-served answer "
                "would read a store the same write has not finished projecting. "
                "Its caller-facing surface is `tortoise_get_entity`, EXCLUDED for "
-               "the same reason as the point accessor: no hosted org credential "
-               "from which to resolve a record tenant. ⚠️ `tortoise_get` is NOT a "
+               "the same MID-WRITE reason as the point accessor, and because a "
+               "name/alias resolution is not a node-id coordinate. ⚠️ RESIDUAL "
+               "(#12941): the MCP tenant objection that used to sit beside this "
+               "reason no longer holds (the lane installs one ambiently), so this "
+               "door is now a real read-your-writes gap for an Object/Event written "
+               "and verified by id — `node-by-key` can answer it once parity is "
+               "measured for that label (see that entry's caveat), and that work is "
+               "tracked on #12941 rather than wired behind a parity claim this unit "
+               "cannot show. ⚠️ `tortoise_get` is NOT a "
                "separate escape from the exclusion — it is a by-id dispatcher, and "
                "`tortoise_get(id, type=\"point\")` lands on the SAME accessor this "
                "module excludes (`tortoise_get_point` → `TortoiseSDK.get_point`), so "
