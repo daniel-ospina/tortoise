@@ -58,6 +58,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from tests import _cite_resolution as _cr  # noqa: E402
+from tests._cite_resolution import ANCHOR_KINDS  # noqa: E402
 from tests._cite_resolution import anchor_lines as _anchor_lines  # noqa: E402
 from tests._cite_resolution import cite_failure as _cite_failure  # noqa: E402
 from tests._cite_resolution import locate_hint as _locate_hint  # noqa: E402
@@ -4646,9 +4647,14 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     to `7913`, `the vet flag` reds, naming the line the anchor really lives on
     (the line the mutated cite reads, by its own text) and where `vet_enabled = (` is
     instead — measured at a head on which 7913 was that comment. ⛔ THE READ LINE'S
-    NUMBER IS NOT QUOTED HERE EITHER: `7953` was quoted for it and `grep -n 'vet_enabled = ('`
-    puts the real anchor at 14783 at this head, so the quoted number was unsupported under
-    either reading — the same rot, one clause over (#13033 round-8 review, P3). ⛔ THE FAILURE TAIL IS
+    NUMBER IS NOT QUOTED HERE EITHER — AND NO NUMBER REPLACES IT: `7953` was quoted
+    for it and was the wrong line, so the number was unsupported under either reading
+    (the same rot, one clause over) and quoting a corrected one would only restart the
+    clock. The anchor is the `vet_enabled = (` line, which this file's own
+    `_BUNDLE_CITE` row for the README's `i.e. BEFORE the` sentence resolves BY CONTENT
+    — that row is the pin, this paragraph is the prose (#13033 round-8 review, P3: a
+    number typed into prose is unpinnable, and a mutation of it stayed green).
+    ⛔ THE FAILURE TAIL IS
     NOT QUOTED HERE any more: an earlier cut quoted its literal text (`…, which carries
     none of […]`), and the message was re-worded under it (#12989), so the quote rotted
     into a claim the tree refutes — this paragraph's own subject, applied to itself.
@@ -4753,6 +4759,23 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
                 (anchor[0], anchor[1]) if isinstance(anchor, tuple)
                 else ("line", anchor)
             )
+            # ⛔ AN UNSUPPORTED KIND IS A ROW DEFECT, NOT A ValueError OUT OF THE PIN
+            # (#13033 round-8 review, P3 — measured). Honouring the row's kind is what
+            # the comment above asks for, and it opened a crash the pre-fix code could
+            # not have: this table's own vocabulary has FOUR kinds (`line`, `def`,
+            # `exact`, and `_BUNDLE_RULES`' `span`/`method-span`), while
+            # `_cite_resolution.ANCHOR_KINDS` grades three — so a row spelled
+            # `("span", …)` RAISED `ValueError: unknown anchor kind 'span'` where it used
+            # to be graded `exact` and produce a finding. A row this pin cannot grade is
+            # reported as the row's own defect, which is the same contract the
+            # unregistered-source-key guard below keeps.
+            if kind not in ANCHOR_KINDS:
+                failures.append(
+                    f"{doc_label}: the row for {phrase!r} names anchor kind {kind!r}, "
+                    f"which this pin cannot grade (it grades {ANCHOR_KINDS}) — the row "
+                    f"would otherwise raise out of the pin instead of reporting, so its "
+                    f"cite at :{number} checks nothing until the row is re-worded")
+                continue
             # ⛔ RESOLVED ONCE, ABOVE BOTH BRANCHES (#13033 review round 6, P2): the
             # `_cite_failure` call below indexes `sources[source_key]`, so a row keyed
             # outside the map is a KeyError out of the pin unless the lookup is guarded
@@ -8001,6 +8024,62 @@ def test_the_resolver_refuses_the_anchors_that_would_pass_everything():
     # …and a pair that resolves everywhere still gets it (the cited line carries neither)
     both = _cite_failure("D.md", "s.py", 2, src, ("x = 1", "z = 3"))
     assert both is not None and "re-point the cite" in both, both
+
+
+def test_a_stale_cite_names_the_line_the_anchor_really_lives_on(tmp_path):
+    """THE DELIVERABLE, pinned: a miss must say WHERE the anchor is, not only that it moved.
+
+    ⛔ MEASURED (#13033 round-8 review, P2). No test asserted the message CONTENT: with
+    every `_locate_hint` call site replaced by a constant the suite still passed, so the
+    claim this whole change exists to make — *the repair message is the deliverable*, the
+    pin should hand a fixer the line to copy instead of a grep to run — and the
+    docstring's own vet-flag illustration could be reverted with CI green. Each arm below
+    drives a REAL producer and requires the resolved line in its output. Deleting the
+    resolution reds every one of them.
+    """
+    lines = ["# a comment", "target = 1", "other = 2"]
+    # 1. the block arm (`_bundle_missing`), which `_bundle_sweep` composes
+    fragment = _bundle_missing("line", ("target = 1",), lines, 3, None)
+    assert fragment and "is at line 2" in fragment[0], (
+        "the block arm's message must name the line the anchor really lives on — a "
+        f"message that only says the cite is wrong is what this change replaces: {fragment}")
+    # 2. the row arm on a stale number (`_cite_failure` through `_pin_row_failures`)
+    doc = tmp_path / "doc.md"
+    doc.write_text("`src.py:3` is where the seam sits.\n", encoding="utf-8")
+    stale = _pin_row_failures([("doc.md", "is where the seam sits", ((3, "target = 1"),))],
+                             {"doc.md": doc}, {"src": lines}, default_source="src")
+    assert stale and "is at line 2" in stale[0], (
+        f"the row arm must name the resolved line too: {stale}")
+    # 3. the bare-continuation arm carries the same resolution
+    doc.write_text("`src.py:3` is where the seam sits.\n", encoding="utf-8")
+    bare = _pin_row_failures([("doc.md", "is where the seam sits", ((1, "target = 1"),))],
+                             {"doc.md": doc}, {"src": lines}, default_source="src")
+    assert bare and "is at line 2" in bare[0], (
+        f"the bare-continuation arm must name the resolved line: {bare}")
+    # 4. ⛔ THE ROW'S OWN `kind` IS HONOURED (#13033 round-8 review, P3). Every shipped
+    #    row spells `("exact", …)`, so a mutation back to `("exact", anchor[1])` stayed
+    #    green — the fix's own comment claimed a behaviour nothing exercised. Both arms
+    #    below HOLD under their declared kind and would FAIL under `exact`:
+    #    `"target" in "target = 1"` (line) and `str.startswith` (def), neither of which
+    #    is the stripped-line equality `exact` demands.
+    doc.write_text("`src.py:2` is where the seam sits.\n", encoding="utf-8")
+    for kind in ("line", "def"):
+        held = _pin_row_failures(
+            [("doc.md", "is where the seam sits", (("2", (kind, "target")),))],
+            {"doc.md": doc}, {"src": lines}, default_source="src")
+        assert held == [], (
+            f"a row spelling kind {kind!r} must be graded BY that kind, not by `exact`: "
+            f"{held}")
+    # 5. ⛔ A KIND THIS PIN CANNOT GRADE IS A ROW DEFECT, NOT A ValueError out of the pin
+    #    (#13033 round-8 review, P3 — measured). Honouring the row's kind routed this
+    #    table's own `span`/`method-span` vocabulary into `ANCHOR_KINDS`, which grades
+    #    three, so such a row RAISED where it previously produced a finding.
+    for unsupported in ("span", "method-span"):
+        reported = _pin_row_failures(
+            [("doc.md", "is where the seam sits", (("2", (unsupported, "x = 1")),))],
+            {"doc.md": doc}, {"src": lines}, default_source="src")
+        assert reported and "cannot grade" in reported[0] and unsupported in reported[0], (
+            f"an ungradeable row kind must be REPORTED, not raised: {reported}")
 
 
 def test_the_arm_table_is_not_satisfied_by_an_unrelated_red():
