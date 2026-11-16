@@ -554,7 +554,7 @@ def test_health_reports_the_refusal_window_without_touching_status(monkeypatch):
         "(#10185/#10620); the verdict lives on the 9090 listener")
     assert "degraded_reasons" not in body
     # Its OWN key: `degraded_reasons` belongs to `record` (a documented
-    # six-value vocabulary), and two schemas under one name is how a consumer
+    # seven-value vocabulary), and two schemas under one name is how a consumer
     # reads the wrong one.
     assert "degraded_reasons" not in body
     assert "loop_blocks" in body, (
