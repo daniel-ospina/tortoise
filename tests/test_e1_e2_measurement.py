@@ -3012,17 +3012,16 @@ def _argmax_row(doc: str, arm: str) -> str:
     raise AssertionError(f"no `{arm}` row in the arm table; rows={[r[0][:28] for r in rows]}")
 
 
-def test_the_two_flags_are_unset_on_every_deploy_surface(monkeypatch):
-    """The FACT the wording rests on, measured from the tree instead of asserted.
+def test_every_deploy_surface_states_the_arm_the_measurement_scored(monkeypatch):
+    """The ARM each deploy surface resolves to, measured from the tree instead of asserted.
 
-    If a deploy surface ever starts setting these, the deployed configuration
-    stops being the default one: this test fails and points at the documents
-    that must then change (and at the log, which becomes a measurement of an
-    explicitly-pinned arm rather than of the default).
-
-    `#10996`: the DEFAULT is now the gate-armed half (``TORTOISE_VALUE_GATE``
-    defaults ON), so "unset everywhere" means production runs the mechanical
-    predicate with the seam and classify-later off — not that nothing runs.
+    ⛔ The property is an ARM comparison, not a text-presence one (renamed at `bb4aee2d`, review
+    P3: the old name and this docstring still said "unset on every surface" and "if a deploy
+    surface ever starts setting these … this test fails", which `#12926` made false — every
+    deployment channel now STATES both switches, `fly.toml` included). What must hold is that a
+    surface states the SAME arm this measurement was scored on (`#10996`: unset means ON for
+    `TORTOISE_VALUE_GATE`), and that a statement which could move it — `=0`, or anything arming
+    VET or the seam — reds and points at the documents that must then change.
     """
     # ⛔ #12926: this pins the ARM, not the TEXT. `#12926` made every deployment channel
     # STATE both embedding switches, so `fly.toml` now carries `TORTOISE_VALUE_GATE = "1"` —

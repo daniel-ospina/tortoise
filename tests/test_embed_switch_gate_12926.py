@@ -3346,3 +3346,48 @@ def test_termination_is_decided_by_what_REALLY_runs(label, prefix, credited):
     else:
         assert stated == {}, f"{label}: nothing after {prefix!r} runs: {stated}"
         assert set(SWITCHES) <= ambiguous, (label, ambiguous)
+
+
+@pytest.mark.parametrize(
+    ("label", "line", "credited"),
+    [
+        # ⛔ A MENTION is not an assignment (review P1 at `bb4aee2d`, measured). The builtin arm
+        # retracted on any switch named in the arguments, so a boot-log line — the way this repo's
+        # own `entrypoint.sh` logs its gates — un-stated a value the process demonstrably receives
+        # and the required CI step redded an honest file with a message blaming the value.
+        ("printf that prints it", 'printf \'gates: TORTOISE_EMBED_GATE=%s\\n\' "$TORTOISE_EMBED_GATE"', True),
+        ("printf with a bare word", "printf '%s\\n' TORTOISE_EMBED_GATE", True),
+        ("a bare readonly", "readonly TORTOISE_EMBED_GATE", True),
+        ("a bare declare -x", "declare -x TORTOISE_EMBED_GATE", True),
+        ("a bare declare -p", "declare -p TORTOISE_EMBED_GATE", True),
+        # …and the TRUE retractions must still retract: an ASSIGNMENT of the name.
+        ("declare -x with =", "declare -x TORTOISE_EMBED_GATE=", False),
+        ("readonly with =", "readonly TORTOISE_EMBED_GATE=", False),
+        ("printf -v", "printf -v TORTOISE_EMBED_GATE ''", False),
+    ],
+)
+def test_only_an_ASSIGNMENT_takes_a_switch_back_not_a_mention(label, line, credited):
+    """Review P1 at `bb4aee2d` (measured) — print/`declare -p`/bare `readonly` are not retractions.
+
+    The reader's own contract, six lines above the arm, says a MENTION is "recorded, never
+    credited"; the arm did worse than credit it, it RETRACTED. Measured end to end: an
+    `entrypoint.sh` that arms both switches and then logs them (`printf 'gates:
+    TORTOISE_EMBED_GATE=%s\\n' "$TORTOISE_EMBED_GATE"`) was REFUSED while `env -i bash` on it set
+    both; changing that one word to `echo` turned the gate green, so the `printf` was the whole
+    cause.
+
+    Mutation-proved: restoring `printf` to `_SHELL_BUILTIN_ASSIGN` (retracting on any mention)
+    reds the three mention rows and leaves the assignment rows green.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n" + line + '\nexec "$@"\n'
+    )
+    if credited:
+        assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+            f"{label}: a mention does not change the environment: {stated} {ambiguous}"
+        )
+    else:
+        assert stated == {"TORTOISE_VALUE_GATE": "1"}, (
+            f"{label}: an ASSIGNMENT of the name does take it back: {stated}"
+        )
+        assert "TORTOISE_EMBED_GATE" in ambiguous, ambiguous

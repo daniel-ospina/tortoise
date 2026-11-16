@@ -427,17 +427,18 @@ _SHELL_OPENERS = re.compile(
     # 0, and both exports were credited (gate `ok`, exit 0, real process: no switch at all).
     r"(?:^|[;&|])\s*(?:(?:!|time)\s+)*(?:(?:then|else|elif|do)\s+)?"
     r"(?:if|while|until|for|case|select)\b"
-    # ⛔ `{` is an opener WHEREVER it appears at a word start, not only at end of statement
-    # (review P1, measured): a one-line function body (`f() { :; export K=1; }`) put the brace
-    # mid-statement, so it never opened, the body ran at depth 0, and an export the process never
-    # receives was credited `STATED` (exit 0). The preceding-character class is what keeps the
-    # OTHER `{`s out: `${VAR}` has a `$` before it (parameter expansion, not a block) and brace
-    # expansion (`a{b,c}`) has a word character before it, as does a `{` inside an arithmetic or
-    # quoted span — which is blanked before this runs anyway.
+    # ⛔ There is NO `{` arm here, and there must not be (review P3 at `bb4aee2d`, measured): a
+    # one-line function body (`f() { :; export K=1; }`) and a compound group (`{ export K=1; }`)
+    # are DIFFERENT scopes — the body never runs, the group runs in the current shell — and this
+    # pattern only ever runs on the STRUCTURAL view, where `f()`'s parens are blanked, so a `{`
+    # here could not tell them apart. A body's brace is `_SHELL_FN_BRACE`/`_SHELL_FN_HEADER`, a
+    # group's is `_SHELL_GROUP_OPEN`/`_SHELL_GROUP_BRACE`; this pattern owns the block KEYWORDS.
+    # (An earlier comment claimed a `{` arm with a preceding-character class that lived in another
+    # pattern entirely — a capability claim this regex did not have.)
     #
-    # ⛔ There is no `(` arm here (review P3, measured): a trailing `(` used to have one, but this
-    # pattern only ever runs on the STRUCTURAL view, where `_SPAN_SUBSHELL` has already blanked
-    # every `(` — so the arm could never fire (`_shell_structure('f() (')` → `'f    '`,
+    # ⛔ There is no `(` arm here either (review P3, measured): a trailing `(` used to have one, but
+    # this pattern only ever runs on the STRUCTURAL view, where `_SPAN_SUBSHELL` has already
+    # blanked every `(` — so the arm could never fire (`_shell_structure('f() (')` → `'f    '`,
     # `findall` → `[]`, against `['(']` on the raw line). A trailing `(` that opens anything is a
     # subshell, and the span already models it; keeping a dead arm only made the comment claim a
     # capability the regex did not have.
@@ -676,7 +677,17 @@ _SHELL_EXPORT_UNEXPORT = re.compile(
 #: `K=`), while the gate kept the earlier `=1` and printed `ok`. It is a RETRACTION (fail closed),
 #: not a new spelling to credit: `declare`/`local` inside a function is local to it, `readonly`
 #: can never be reassigned, and none of them is the shipped configuration stating a usable value.
-_SHELL_BUILTIN_ASSIGN = re.compile(r"^\s*(?:declare|typeset|readonly|local|printf)\b(?P<rest>.*)$")
+#: ⛔ Only an ASSIGNMENT of the name takes it back — a MENTION does not (review P1 at
+#: `bb4aee2d`, measured): the alternation used to include `printf` and to retract on any name in
+#: the arguments, so a boot-log line — `printf 'gates: TORTOISE_EMBED_GATE=%s\n' "$TORTOISE_EMBED_GATE"`
+#: — un-stated a value the process demonstrably receives and the required CI step redded an honest
+#: `entrypoint.sh` with a message blaming the value. The reader's own contract says a mention is
+#: RECORDED, never credited; here it was worse than credited — it retracted. `printf` changes an
+#: environment only through `-v NAME` (`_SHELL_PRINTF_ASSIGN`), and a bare `readonly K` /
+#: `declare -x K` / `declare -p K` never changes K's value.
+_SHELL_BUILTIN_ASSIGN = re.compile(r"^\s*(?:declare|typeset|readonly|local)\b(?P<rest>.*)$")
+#: `printf -v NAME …` is the one form of `printf` that writes a shell variable.
+_SHELL_PRINTF_ASSIGN = re.compile(r"^\s*printf\s+-v\s*(?P<rest>.*)$")
 #: ⛔ A FOURTH way a later statement takes an earlier `export K=1` back (review P3, measured):
 #: the statement is an `env` INVOCATION that strips the variable from the child's environment.
 #: `export K=1; exec env -u K "$@"` leaves the process without K, and `env -i` strips everything —
@@ -1961,16 +1972,31 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 # resolve an assignment is deliberately not scanned again — `ambiguous` is the
                 # "seen but not creditable" set, and the readers above already decided.
                 ambiguous.update(_mentioned_switches(raw))
-                # ⛔ A BUILTIN that names a switch takes it back without the `export` spelling
+                # ⛔ A BUILTIN that ASSIGNS a switch takes it back without the `export` spelling
                 # this reader credits (review P2, measured): `declare -x K=` after `export K=1`
                 # leaves K EMPTY and still exported while the gate kept the earlier `=1`.
+                # ⛔ Only a token carrying `=` for that name is an assignment (review P1 at
+                # `bb4aee2d`, measured): `readonly K`, `declare -x K`, `declare -p K` and a
+                # `printf` that merely PRINTS the value all leave it intact, and retracting on
+                # those refused an honest entrypoint that logs its gates at boot.
                 if (
                     retracts
                     and (builtin := _SHELL_BUILTIN_ASSIGN.match(content_raw))
                     and _statement_is_code(content_raw, content_view)
                 ):
-                    for name in _mentioned_switches(builtin.group("rest")):
-                        _retract(name)
+                    for token in builtin.group("rest").split():
+                        if "=" not in token:
+                            continue
+                        for name in _mentioned_switches(token):
+                            _retract(name)
+                if (
+                    retracts
+                    and (printed := _SHELL_PRINTF_ASSIGN.match(content_raw))
+                    and _statement_is_code(content_raw, content_view)
+                ):
+                    target = printed.group("rest").split(maxsplit=1)
+                    if target and target[0] in SWITCHES:
+                        _retract(target[0])
             # ⛔ A GROUP CLOSER: apply its frame (review P1, measured). Only when no FUNCTION
             # BODY is open — a body's `}` is the same character, and `fn_body` is what tells them
             # apart (`opened_fn` is checked as well, for a body opened and closed on one line).
