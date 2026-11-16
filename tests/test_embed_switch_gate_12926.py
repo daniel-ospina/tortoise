@@ -607,6 +607,35 @@ def test_a_trailing_comment_is_not_part_of_the_value():
     assert stated == {"HF_HUB_OFFLINE": "1"} and ambiguous == set()
 
 
+def test_the_shell_reader_requires_export():
+    """Review P2 at `648842c31a` — a bare assignment never reaches the process.
+
+    `entrypoint.sh` ends in `exec "$@"` (:1151), so a shell variable that is not EXPORTED is not
+    inherited by uvicorn. Crediting the bare form would report `ok entrypoint.sh
+    TORTOISE_EMBED_GATE=1` for a value the image never receives — the false PASS this gate exists
+    to prevent — so only an `export`ed assignment is a statement. Measured both ways: with the
+    optional `export` group, the bare line read `stated={'TORTOISE_EMBED_GATE': '1'}`.
+    """
+    stated, ambiguous = gate._shell_assignments("TORTOISE_EMBED_GATE=1\n")
+    assert stated == {}, (
+        "a bare `K=V` is not a statement an entrypoint can make to its process — crediting it "
+        f"reports an arm the process never receives: {stated}"
+    )
+    assert ambiguous == {"TORTOISE_EMBED_GATE"}, (
+        "a bare assignment is SEEN but not creditable, so it must be reported as ambiguous rather "
+        f"than silently ignored: {ambiguous}"
+    )
+
+    # The channel-level consequence follows: a file whose only mention is bare does not STATE the
+    # switch, so the gate refuses it rather than OK-ing it.
+    channel = gate.Channel("entrypoint.sh", "entrypoint", "shell assignments", stated=stated,
+                           ambiguous=ambiguous)
+    assert any("does not state" in problem for problem in channel.problems()), channel.problems()
+
+    stated, _ = gate._shell_assignments("export TORTOISE_EMBED_GATE=1\n")
+    assert stated == {"TORTOISE_EMBED_GATE": "1"}, stated
+
+
 def test_the_entrypoint_reader_reads_defaults_and_ignores_a_valueless_export():
     stated, ambiguous = gate._shell_assignments(
         "#!/bin/sh\n"

@@ -151,7 +151,13 @@ _ENV_INSTRUCTION = re.compile(r"(?i)^\s*ENV\s+(?P<body>.+)$")
 #: The body of an `ENV` line that is NOTHING BUT `K=V` pairs (quotes honoured). Anything else is
 #: not tiled, so it is never parsed as a set of assignments.
 _ENV_PAIRS = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)\s*)+$")
-_SHELL_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
+#: ⛔ `export` IS NOT OPTIONAL (review P2 at `648842c31a`, measured). A bare `K=V` in an
+#: entrypoint script never reaches the process: `entrypoint.sh` ends in `exec "$@"` (:1151), and a
+#: non-exported shell variable is not inherited. Crediting the bare form would print `ok
+#: entrypoint.sh TORTOISE_EMBED_GATE=1` for a value uvicorn never sees — the false PASS this gate
+#: exists to prevent — so only an `export`ed assignment counts as a statement. Measured: with the
+#: optional group, `TORTOISE_EMBED_GATE=1` alone read `stated={'TORTOISE_EMBED_GATE': '1'}`.
+_SHELL_ASSIGNMENT = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
 _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*$")
 
 #: A trailing `#` comment (idiomatic after a shell assignment) is NOT part of the value — leaving
