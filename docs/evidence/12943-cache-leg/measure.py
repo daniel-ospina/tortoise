@@ -36,6 +36,13 @@ sys.path.insert(0, str(REPO_ROOT))
 def _record_dsn() -> str:
     """The APPLICATION role's DSN — what the live writer connects as.
 
+    ``SUMMARY_OUT`` selects where the JSON capture is written (default
+    ``last-run.json`` beside this script; the committed captures are
+    ``last-run-arm-a-shared-cache.json`` and ``last-run-arm-b-local-cache.json``).
+    ``EVENTS_BASE`` selects the journal base dir (default ``.evidence-events/``);
+    each run APPENDS a run-unique ``org_<hex>/events.jsonl`` there, which is
+    scratch — it is gitignored, and it is not part of the evidence.
+
     ``record_projection`` REFUSES a role that BYPASSES RLS, so this must be
     ``tortoise_record_app`` (see ``provision_record.py``).
     """
@@ -231,9 +238,21 @@ def main() -> int:
         "org": org, "graph_id": graph_id, "cache_graph": ns,
         # Which shape this run measured — the README's table keys on it.
         "write_path_uri": os.environ.get("TORTOISE_DB_URI") or None,
+        # The VALUE, not only the variable name (review cycle 3): arm A's whole
+        # claim is that the cache count came from THE SERVER THE SDK WROTE TO,
+        # and a source-name alone cannot show that. A `CACHE_COUNT_URI` naming a
+        # different server makes arm A read 0/0 while looking identical to arm B.
+        "cache_count_uri": (os.environ.get("CACHE_COUNT_URI")
+                            or os.environ.get("TORTOISE_DB_URI") or None),
         "cache_count_uri_source": ("CACHE_COUNT_URI"
                                    if os.environ.get("CACHE_COUNT_URI")
                                    else "TORTOISE_DB_URI"),
+        # Same server or arm A proves nothing — computed, so it cannot be
+        # transcribed wrongly.
+        "cache_count_uri_matches_write_target":
+            (os.environ.get("CACHE_COUNT_URI")
+             or os.environ.get("TORTOISE_DB_URI") or None)
+            == (os.environ.get("TORTOISE_DB_URI") or None),
         "record": record, "cache": cache,
         "cache_leg_failures": monitoring.cache_leg_failure_counts(),
         "metric_deltas": deltas,

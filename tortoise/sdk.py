@@ -163,6 +163,21 @@ from .session_projection import session_extraction_status
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         is_turn_echo_row, resolve_pool_size)
 from . import monitoring
+# #12943: module-scope, not a local import inside ``__init__``. THE IMPORT IS THE
+# ONLY LINE OF THAT HOOK THAT CAN RAISE: ``note_local_cache`` itself is wrapped
+# (its module's contract is "a fault in observability must never deny a caller a
+# graph it can use", the #5148 rule), but a local `from .cache_leg import …`
+# re-executes `cache_leg`'s module body on first use — and by then
+# ``__init__`` has already run ``_mark_embedded_opened``, so a failure here would
+# leave the opened-set claiming a store this dead construction never opened and
+# silence the cross-process busy probe for the next one (epic #900 §5.3).
+# Imported under a guard for the same reason: observability must not be able to
+# break the constructor, so a broken seam degrades to no hook.
+try:
+    from .cache_leg import note_local_cache as _note_local_cache
+except Exception:  # noqa: BLE001 — observability never denies a usable graph
+    _note_local_cache = None
+
 # #4489: the read funnel's retrieval meter. ``metered_query`` wraps
 # ``tortoise_fts_query`` so ONE product read notes ONE query and its wall time
 # without any caller cooperation; it is a no-op (one ``ContextVar.get()``) when
@@ -11980,8 +11995,9 @@ class TortoiseSDK:
         # costs one attribute read and one comparison (its first arm).
         # Deliberately NOT a raise: #7722's embedded fallback and a declared
         # single-tenant self-host are both coherent and must keep building.
-        from .cache_leg import note_local_cache
-        note_local_cache(cache_uri=self._db_uri, cache_path=self._db_path)
+        if _note_local_cache is not None:
+            _note_local_cache(cache_uri=self._db_uri,
+                              cache_path=self._db_path)
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}

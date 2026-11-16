@@ -7467,6 +7467,19 @@ def _record_health() -> dict:
         NON-ZERO value is the claim "a transaction committed here", not a row
         count — the runbook's SQL read is still the witness for how many rows
         landed.
+      * ``cache_leg_failures`` — **the CACHE half of the write (#12943)**, and a
+        FOURTH counter outside "the record counters" above: it does not describe
+        a record write at all, it describes a construction whose cache is not the
+        record's store (the record armed, no shared cache ⇒ the cache is a
+        process-local file and the record is in Postgres). ⚠️ Its unit is
+        **SDK constructions, not writes** — the store choice is made once per
+        construction and this read path serves reads too, so it is NOT comparable
+        with ``record_writes_applied`` beside it. ⛔ It does **NOT** move ``ok``
+        or ``status``: ``#10185`` ruled the verdict window-based over rows
+        actually dropped, and a split cache drops no rows — it strands them in a
+        store the record is not in. Read it as HISTORY, like
+        ``record_write_failures``, and read it on the process that PERFORMED the
+        write (a process with a shared cache reports ``{}`` by construction).
       * ``counters_error`` — why the counter snapshot could not be read, or ``None``.
         Kept distinct from ``error`` so the documented pairing
         (*``error`` non-null ⇔ set-but-unusable value*) stays true.

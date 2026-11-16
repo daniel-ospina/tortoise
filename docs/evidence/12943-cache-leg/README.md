@@ -5,36 +5,60 @@ Every number here was produced by `measure.py` against a **throwaway** tenant
 append-only by trigger, so a fixed pair cannot be reused), a real FalkorDB and a
 real Postgres carrying the record's own migrations.
 
-⛔ **Both rows below are runnable as committed** — this was not true of the first
-draft of this file, and the gap mattered: the URI-less row is the one that *is*
-the defect, and a harness that stack-traces when asked to reproduce it is a table
-of inferences under a provenance claim (review cycle 2). Two hooks make it
-runnable: `CACHE_COUNT_URI` names the server the cache is **counted** on,
-separately from `TORTOISE_DB_URI` which decides where the SDK **writes** (default:
-`TORTOISE_DB_URI`), and `TORTOISE_DB_URI` is read with `.get(…, "<unset>")` so an
-absent value prints as absent instead of raising `KeyError`. Run shape:
+⛔ **Both rows below are runnable as committed** — this was not true of the
+first two drafts of this file, and the gap mattered both times: the URI-less row
+is the one that *is* the defect, and a harness that stack-traces (or exits 1 on a
+missing variable) when asked to reproduce it is a table of inferences under a
+provenance claim.
+
+Three knobs make the second arm expressible:
+
+* **`CACHE_COUNT_URI`** names the server the cache is **counted** on, separately
+  from `TORTOISE_DB_URI`, which decides where the SDK **writes** (default:
+  `TORTOISE_DB_URI`). Without it the defect arm is unmeasurable — the write path
+  must run URI-less, so there is no URI left to count with. ⛔ **Arm A is only
+  meaningful when `cache_count_uri_matches_write_target` is `true`**: a
+  `CACHE_COUNT_URI` naming a different server reads `0 / 0` and looks exactly
+  like arm B. The harness records that boolean so the claim cannot be
+  transcribed wrongly.
+* **`OWNER_RECORD_DSN`** — the RLS-bypassing owner, for seeding and counting
+  only. It is required and is not optional politeness: the app role below cannot
+  see across tenants, so counting through it would answer 0 for the wrong reason.
+* **`EVENTS_BASE`** — where the per-run JSONL journal is written (default
+  `.evidence-events/`, gitignored). **Scratch, not evidence**: each run appends a
+  run-unique `org_<hex>/events.jsonl`, and the record rows were projected from
+  it. `SUMMARY_OUT` — where the JSON capture goes (default `last-run.json`), and
+  how the two committed captures below were produced.
+
+Both rows, copy-pasteable (fill the four DSNs/URIs from your own instances):
 
 ```bash
-# ARM A — shared cache
-CACHE_COUNT_URI="$LANE_URI" TORTOISE_DB_URI="$LANE_URI" python measure.py
+export TEST_RECORD_DB_URI='postgresql://tortoise_record_app:…@127.0.0.1:33943/record'
+export OWNER_RECORD_DSN='postgresql://record:…@127.0.0.1:33943/record'
+export CACHE_COUNT_URI="$LANE_URI"          # e.g. docker://:pw@127.0.0.1:16419/db
+
+# ARM A — shared cache: count and write on the SAME server
+SUMMARY_OUT=last-run-arm-a-shared-cache.json \
+  TORTOISE_DB_URI="$LANE_URI" python measure.py
+
 # ARM B — the defect: record armed, write path URI-less, cache still COUNTED
-CACHE_COUNT_URI="$LANE_URI" TORTOISE_DB_URI='' python measure.py
+SUMMARY_OUT=last-run-arm-b-local-cache.json \
+  TORTOISE_DB_URI='' python measure.py
 ```
 
 ```
-provision_record.py   a throwaway record Postgres: the record's migration list
-                      (read from record_projection.RECORD_MIGRATIONS) plus
-                      LOGIN on the record's APPLICATION role
-measure.py            one tenant, written through the hosted data plane's own
-                      seam, counted in BOTH stores
-last-run.json         one captured run
+provision_record.py                 a throwaway record Postgres: the record's
+                                    migration list (read from
+                                    record_projection.RECORD_MIGRATIONS) plus
+                                    LOGIN on the record's APPLICATION role
+measure.py                          one tenant, written through the hosted data
+                                    plane's own seam, counted in BOTH stores
+last-run-arm-a-shared-cache.json    the ARM A capture, verbatim
+last-run-arm-b-local-cache.json     the ARM B capture, verbatim
+both-arms.json                      the columns the table below reads, from
+                                    those two captures, plus the
+                                    same-server check arm A depends on
 ```
-
-⛔ The app role is not a convenience. `record_projection` REFUSES a connection
-that BYPASSES RLS (#9600), and the first cut of this harness connected as the
-owner — so it measured that refusal instead of the cache leg. Seeding
-`public.organizations`/`graphs` and counting rows use the owner DSN; the WRITE
-path uses `tortoise_record_app`, because the rows it files are the subject.
 
 ## The measurement
 
@@ -54,7 +78,9 @@ downstream could tell the two rows apart. Only the cache count differs, and only
 ⚠️ **`2`, not `1`, and that number is evidence for the counter's unit.**
 `hosted_api._make_sdk` builds an **anchor** SDK and a **per-request** SDK on its
 embedded path (`hosted_api.py`, both `TortoiseSDK(db_path=…)` calls), so one
-harness write path is two constructions. That is exactly why the unit is *SDK
+harness write path is two constructions. ⚠️ That is the **cold-process** number —
+the anchor is built only on a `_FALLBACK_KEEPALIVE` miss or a stale path, so a
+warm process yields one construction per request. Every `measure.py` run is cold. That is exactly why the unit is *SDK
 constructions* and is **not** comparable with the write count beside it — a unit
 mislabelled "writes" would have made this row read as 2 stranded writes when five
 objects were written.

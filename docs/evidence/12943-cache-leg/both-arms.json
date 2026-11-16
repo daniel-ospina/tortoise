@@ -1,5 +1,7 @@
 {
-  "_what": "#12943 - the two arms of the measure.py table, captured verbatim. arm-a = TORTOISE_DB_URI set (shared cache); arm-b = TORTOISE_DB_URI empty (the defect shape), cache counted via CACHE_COUNT_URI.",
+  "_arm_a_requires": "cache_count_uri_matches_write_target must be TRUE, or the cache was counted on a DIFFERENT server than the SDK wrote to and the 2/3 says nothing.",
+  "_provenance": "each arm is one `measure.py` run as committed; the per-arm files are the full captures, this file is the columns the README table reads.",
+  "_what": "#12943 - the two arms of the measure.py table, captured verbatim.",
   "arm_a_shared_cache": {
     "cache": {
       "Event": 0,
@@ -8,6 +10,8 @@
       "Source": 0,
       "Subject": 0
     },
+    "cache_count_uri": "docker://:@127.0.0.1:16419/tortoise_test_matrix",
+    "cache_count_uri_matches_write_target": true,
     "cache_count_uri_source": "CACHE_COUNT_URI",
     "cache_leg_failures": {},
     "record": {
@@ -28,6 +32,8 @@
       "Source": 0,
       "Subject": 0
     },
+    "cache_count_uri": "docker://:@127.0.0.1:16419/tortoise_test_matrix",
+    "cache_count_uri_matches_write_target": false,
     "cache_count_uri_source": "CACHE_COUNT_URI",
     "cache_leg_failures": {
       "cache_not_shared": 2
