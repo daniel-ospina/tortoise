@@ -14064,8 +14064,11 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         if served is None:
             # #12941: OFF consults no record, so it cannot establish absence at
             # all — but the marker's OWN flag is what lets this door say so, and
-            # it is read before any handle is touched (`residency_armed`), so an
-            # unarmed deployment still pays nothing and answers the same string.
+            # it is read BEFORE the marker does any work of its own
+            # (`residency_armed`), so an unarmed deployment pays no extra round
+            # trip and answers the same string. (The cache read above already
+            # happened — that one is the pre-existing fallback, not this flag's
+            # cost.)
             marker = None
             if record_serve.residency_armed():
                 # `found` is the CACHE's own visibility, not the endpoint's
