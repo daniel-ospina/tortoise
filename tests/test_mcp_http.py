@@ -2355,14 +2355,28 @@ class TestSC5IndexFilesSurface:
                 f"{legacy} points at {target}, which is not a LIVE tool")
 
     def test_index_files_absent_from_http_tools_list(self, mcp_client):
-        """E2E-17(e) structural half: the filesystem-walk tool is not
-        discoverable over tenant HTTP (http_policy=False, #329 posture)."""
+        """E2E-17(e) structural half: the filesystem walk is not discoverable
+        over tenant HTTP (http_policy=False, #329 posture).
+
+        ⛔ Retargeted onto the LIVE container by the #12948 review (P3-5). The
+        previous arm asserted only that the RETIRED name `tortoise_index_files`
+        was absent — a name-shaped no-op: `_RetiredToolTransform.list_tools`
+        strips retired names UNCONDITIONALLY, so no `http_policy` value, however
+        wrong, could make that assertion fail. What CAN fail is the live
+        container's own policy, so that is what this measures — plus the
+        non-vacuity guard that the listing under test is not empty (an empty
+        payload would satisfy a bare `not in` on its own).
+        """
         tc, _ = mcp_client
         r, body = _mcp_post(tc, {  # noqa: RUF059
             "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
         })
         names = {t.get("name") for t in body.get("result", {}).get("tools", [])}
-        assert "tortoise_index_files" not in names
+        assert names, f"the connector listing is empty — nothing was measured: {body}"
+        assert "tortoise_index_sources_from_directory" not in names, (
+            "the filesystem walk must not be advertised over tenant HTTP: "
+            f"{sorted(n for n in names if 'index' in n)}")
+        assert "tortoise_index_files" not in names  # retired; stripped by the transform
 
     def test_index_files_http_call_refused(self, mcp_client):
         """E2E-17(e): tools/call over HTTP → _http_excluded_error (-32004)."""

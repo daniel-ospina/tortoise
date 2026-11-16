@@ -583,3 +583,138 @@ class TestMCPLayerRefusals:
             conversation=[{"role": "user", "content": "hi"}],
             items=[{"content": "x"}])
         assert "different pipelines" in out["error"]
+
+
+class TestTheAbsorbedArmsAreReachable:
+    """Every arm a retired door had must be reachable through its absorber.
+
+    The #12948 review (P2-1/P2-2/P2-3) measured three arms that were NOT: the
+    single-transcript mode of `tortoise_mine_conversations`, the
+    `machine_id`/`model` attribution the capture door stamped, and the
+    `extract_metadata`/`llm_model` pair the session-index door defaulted ON.
+    Each test here fails if the arm is dropped again — they assert the
+    FORWARDED CALL, not the absorbed door's docstring.
+    """
+
+    def test_the_single_transcript_arm_reaches_the_retired_body(self, monkeypatch):
+        """`conversation=` as a raw string + `source_id=` is the OTHER mode of the
+        retired conversations door; the directory container cannot perform it."""
+        seen = {}
+
+        def _recorder(**kwargs):
+            seen.update(kwargs)
+            return {"mined": True}
+
+        monkeypatch.setattr(ms, "tortoise_mine_conversations", _recorder)
+        out = ms.tortoise_mine_knowledge_from_session(
+            conversation="USER: hello\nAGENT: hi", source_id="src-1",
+            content_dedup=False, session_date="2026-11-16", participants=["a"],
+            extract_entities=False)
+        assert out == {"mined": True}, out
+        assert seen["transcript"] == "USER: hello\nAGENT: hi", seen
+        assert seen["source_id"] == "src-1", seen
+        assert seen["content_dedup"] is False, seen
+        assert seen["session_date"] == "2026-11-16", seen
+        assert seen["participants"] == ["a"], seen
+        assert seen["extract_entities"] is False, seen
+
+    def test_a_raw_transcript_without_a_source_is_refused_by_name(self):
+        out = ms.tortoise_mine_knowledge_from_session(conversation="USER: hello")
+        assert "error" in out, out
+        assert "source_id" in out["error"], out
+
+    def test_the_capture_arm_forwards_the_attribution_claims(self, monkeypatch):
+        """`machine_id`/`model` are CLIENT-CLAIMED and stamped set-if-absent
+        downstream; dropping them at the container loses attribution silently."""
+        seen = {}
+
+        def _recorder(conversation, **kwargs):
+            seen["conversation"] = conversation
+            seen.update(kwargs)
+            return {"ok": True}
+
+        monkeypatch.setattr(ms, "tortoise_session_capture", _recorder)
+        turns = [{"role": "user", "content": "hi"}]
+        out = ms.tortoise_mine_knowledge_from_session(
+            conversation=turns, session_id="s-1", harness="pi",
+            machine_id="machine-x", model="deepseek-flash")
+        assert out == {"ok": True}, out
+        assert seen["conversation"] == turns, seen
+        assert seen["machine_id"] == "machine-x", seen
+        assert seen["model"] == "deepseek-flash", seen
+        assert seen["harness"] == "pi" and seen["session_id"] == "s-1", seen
+
+    def test_the_metadata_default_follows_the_arm(self, monkeypatch):
+        """`index_sessions` extracted metadata by default and took `llm_model`;
+        the corpus doors did not. One union default would silently flip a
+        migrating session-index caller to extraction OFF."""
+        seen = []
+
+        class _FakeSDK:
+            def index_sources_from_directory(self, directory, **kwargs):
+                seen.append(dict(kwargs))
+                return {"indexed": 1}
+
+        monkeypatch.setattr(ms, "_get_org_sdk", lambda: _FakeSDK())
+        monkeypatch.setattr(ms.os.path, "isdir", lambda p: True)
+
+        outs = []
+        token = ms._transport_mode.set("stdio")
+        try:
+            outs = [
+                ms.tortoise_index_sources_from_directory(
+                    "/tmp/c", file_type="agent_session"),
+                ms.tortoise_index_sources_from_directory("/tmp/c", file_type="doc"),
+                ms.tortoise_index_sources_from_directory(
+                    "/tmp/c", file_type="agent_session", extract_metadata=False,
+                    llm_model="gpt-5-mini"),
+            ]
+        finally:
+            ms._transport_mode.reset(token)
+        assert len(seen) == 3, outs
+        session_arm, corpus_arm, explicit = seen
+        assert session_arm["extract_metadata"] is True, session_arm
+        assert "llm_model" in session_arm, session_arm
+        assert corpus_arm["extract_metadata"] is False, corpus_arm
+        assert "llm_model" not in corpus_arm, corpus_arm
+        assert explicit["extract_metadata"] is False, explicit
+        assert explicit["llm_model"] == "gpt-5-mini", explicit
+
+    def test_a_meeting_walk_does_not_invent_the_session_door_s_default(self, monkeypatch):
+        """`meeting` has NO retired door, so it keeps the container's own OFF
+        default: claiming door parity for it would flip extraction ON for a file
+        class no door ever defaulted that way."""
+        seen = []
+
+        class _FakeSDK:
+            def index_sources_from_directory(self, directory, **kwargs):
+                seen.append(dict(kwargs))
+                return {"indexed": 1}
+
+        monkeypatch.setattr(ms, "_get_org_sdk", lambda: _FakeSDK())
+        monkeypatch.setattr(ms.os.path, "isdir", lambda p: True)
+        token = ms._transport_mode.set("stdio")
+        try:
+            ms.tortoise_index_sources_from_directory("/tmp/c", file_type="meeting")
+        finally:
+            ms._transport_mode.reset(token)
+        assert seen[0]["extract_metadata"] is False, seen
+        assert "llm_model" not in seen[0], seen
+
+    def test_the_raw_transcript_arm_refuses_http_by_arm_not_for_the_whole_tool(self):
+        """The retired door was HTTP-excluded as a whole (its CORPUS mode walks the
+        host filesystem), so the transcript arm keeps that posture — but it must
+        say so about the ARM: the inherited blanket message told an HTTP caller the
+        whole container was unavailable, including the capture/`items=` arms that
+        do work there (#12948 review round 2)."""
+        token = ms._transport_mode.set("http")
+        try:
+            out = ms.tortoise_mine_knowledge_from_session(
+                conversation="USER: hi", source_id="src-1")
+        finally:
+            ms._transport_mode.reset(token)
+        assert "error" in out, out
+        assert "raw-transcript arm" in out["error"], out
+        assert "capture arm" in out["error"], out
+        assert "not available over HTTP" not in out["error"], (
+            "the blanket refusal tells the caller the whole tool is unavailable")

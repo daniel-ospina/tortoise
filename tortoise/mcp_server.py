@@ -6842,7 +6842,8 @@ def tortoise_manage_source_trust(url: str,
 def tortoise_index_sources_from_directory(directory: str,
                                           file_type: str = "auto",
                                           corpus_name: str | None = None,
-                                          extract_metadata: bool = False,
+                                          extract_metadata: bool | None = None,
+                                          llm_model: str | None = None,
                                           progress_file: str | None = None) -> dict:
     """Register a directory's files as sources — row 15. **Nothing is extracted.**
 
@@ -6852,6 +6853,16 @@ def tortoise_index_sources_from_directory(directory: str,
     retired into it — `tortoise_index_sessions` (`file_type="agent_session"`) and
     `tortoise_ingest_corpus` (`file_type="doc"`).
 
+    ⛔ The absorbed doors did NOT share one default for `extract_metadata`, and
+    collapsing them onto one would silently change what a migrating caller gets
+    (#12948 review P2-3): `tortoise_index_sessions` extracted metadata by DEFAULT
+    (and took `llm_model`), while `tortoise_index_files` / `tortoise_ingest_corpus`
+    did not. So the default is resolved PER ARM — `None` means "the absorbed door's
+    own default": `True` for `agent_session` (the one arm a door defaulted ON),
+    `False` for every other arm including `meeting`, where no retired door ever
+    extracted by default. `llm_model` is forwarded on the arms that had it. Pass an
+    explicit value to override either.
+
     #329: EXCLUDED from tenant HTTP — walks the server filesystem with a
     caller-supplied path. Stdio/CLI only; node-creating, so quota-gated.
     """
@@ -6860,14 +6871,35 @@ def tortoise_index_sources_from_directory(directory: str,
     if not os.path.isdir(directory):
         return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
                                     f"path to a directory containing .md files."})
+    # `tortoise_index_sessions`' own default (metadata extraction ON) applies to
+    # the session-shaped arm it absorbed. `meeting` does NOT get it: no retired
+    # door ever defaulted extraction ON for meetings, so flipping it there would
+    # be this container inventing a default and calling it parity.
+    metadata_arm = file_type == "agent_session"
+    if extract_metadata is None:
+        extract_metadata = metadata_arm
+    # `tortoise_index_sessions` always FORWARDED `llm_model` (None when the caller
+    # did not set it); the corpus doors passed no model at all and so took the
+    # SDK's default. Mirroring that keeps each arm's behaviour, not just its flag.
+    extra: dict[str, Any] = {}
+    if llm_model is not None or metadata_arm:
+        extra["llm_model"] = llm_model
     return _safe(_quota_gated(_get_org_sdk().index_sources_from_directory, "points"),
                  directory, file_type=file_type, corpus_name=corpus_name,
-                 extract_metadata=extract_metadata, progress_file=progress_file)
+                 extract_metadata=extract_metadata, progress_file=progress_file,
+                 **extra)
 
 
 def tortoise_mine_knowledge_from_session(conversation: Any = None,
                                          session_id: str | None = None,
                                          harness: str | None = None,
+                                         machine_id: str | None = None,
+                                         model: str | None = None,
+                                         source_id: str | None = None,
+                                         extract_entities: bool = True,
+                                         content_dedup: bool = True,
+                                         session_date: str | None = None,
+                                         participants: Any = None,
                                          items: Any = None,
                                          agent_name: str = "checkpoint",
                                          threshold: float = 0.95) -> dict:
@@ -6879,20 +6911,40 @@ def tortoise_mine_knowledge_from_session(conversation: Any = None,
     `tortoise_session_capture`, with its gates: 429 capacity, 409 duplicate /
     recording-off, 400 turn cap, 422 empty transcript, 402 quota. The server's
     turn cap is the gate's, not a caller knob — that is why `max_turns` is on
-    the SDK method and not here.
+    the SDK method and not here. `machine_id`/`model` are the capture's
+    attribution claims and are FORWARDED: dropping them let a migrating
+    `tortoise_session_capture` caller lose its attribution silently (#12948
+    review P2-2; the base door sanitized and stamped both).
+
+    ⛔ `conversation=` ALSO takes a RAW TRANSCRIPT STRING (with `source_id=`),
+    which is the other mode the retired `tortoise_mine_conversations` had: a
+    single transcript mined by `mine_conversation`, not the turn-list capture
+    pipeline. `content_dedup`/`session_date`/`participants`/`extract_entities`
+    are that arm's own knobs. A door that absorbed `tortoise_mine_conversations`
+    but could only mine a FOLDER would send every single-transcript caller to a
+    name that cannot perform their call (#12948 review P2-1).
 
     `items=` files an already-distilled batch ({wing, room, content}) with
     two-tier dedup; `agent_name` and `threshold` are the batch's own knobs.
-    Supplying both is refused — extraction and batch-filing are different
-    pipelines.
+    Supplying two arms at once is refused — extraction and batch-filing are
+    different pipelines.
 
-    Absorbs `tortoise_checkpoint` and `tortoise_session_capture` (both retired,
-    still answering).
+    Absorbs `tortoise_checkpoint`, `tortoise_session_capture` and the
+    single-transcript arm of `tortoise_mine_conversations` (all retired, still
+    answering).
     """
     if items is not None and conversation is not None:
         return _SafeError({"error": "pass conversation= (a transcript to extract from) "
                                     "OR items= (a distilled batch to file) — they are "
                                     "different pipelines", "code": ERR_INVALID})
+    if source_id is not None and not isinstance(conversation, str):
+        # `source_id` addresses the RAW-TRANSCRIPT arm only; on the capture arm it
+        # would be accepted and ignored, which is the silent-drop shape this
+        # container exists to avoid.
+        return _SafeError({"error": "source_id= belongs to the raw-transcript arm: pass "
+                                    "conversation= as a transcript STRING, or drop "
+                                    "source_id= (the capture arm keys on session_id=)",
+                           "code": ERR_INVALID})
     if items is not None:
         items = _parse(items)
         # #329 batch cap: one call must not create unbounded nodes
@@ -6906,10 +6958,44 @@ def tortoise_mine_knowledge_from_session(conversation: Any = None,
                                   abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)),
             items=items, agent_name=agent_name, threshold=threshold)
     if conversation is not None:
+        if isinstance(conversation, str):
+            # The RAW-TRANSCRIPT arm of the retired `tortoise_mine_conversations`
+            # (`transcript=` + `source_id=`). Delegated to that retired body rather
+            # than re-implemented: it IS the pipeline, and a copy would be a second
+            # implementation of the same write to keep in sync.
+            #
+            # ⛔ Transport: the retired door was excluded from tenant HTTP as a
+            # WHOLE (its corpus mode walks the server filesystem with a
+            # caller-supplied path), so its transcript arm never answered over HTTP.
+            # This arm keeps that posture instead of silently widening the HTTP
+            # surface — and refuses with a message about THIS ARM, because the
+            # retired body's blanket refusal would tell an HTTP caller the whole
+            # container is unavailable, including the capture/`items=` arms that do
+            # work here (#12948 review round 2).
+            if _transport_mode.get() == "http":
+                return _SafeError({"error": "the raw-transcript arm (conversation= as a "
+                                            "transcript STRING with source_id=) is stdio/CLI "
+                                            "only — it keeps the retired conversations-"
+                                            "mining door's tenant-HTTP exclusion. The "
+                                            "capture arm (conversation= as a turn list) and "
+                                            "items= ARE available over HTTP.",
+                                   "code": ERR_INVALID})
+            if not source_id:
+                return _SafeError({"error": "conversation= given as a transcript string "
+                                            "needs source_id= — the source the transcript "
+                                            "came from. (Pass conversation= as a turn list "
+                                            "for the capture arm.)",
+                                   "code": ERR_INVALID})
+            return tortoise_mine_conversations(
+                transcript=conversation, source_id=source_id,
+                extract_entities=extract_entities, content_dedup=content_dedup,
+                session_date=session_date, participants=participants)
         return tortoise_session_capture(conversation, harness=harness,
-                                        session_id=session_id)
+                                        session_id=session_id,
+                                        machine_id=machine_id, model=model)
     return _SafeError({"error": "nothing to mine — pass conversation= for one session "
-                                "transcript, or items= for a distilled batch",
+                                "transcript (a turn list, or a raw transcript string "
+                                "with source_id=), or items= for a distilled batch",
                        "code": ERR_INVALID})
 
 

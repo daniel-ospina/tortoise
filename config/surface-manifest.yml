@@ -90,7 +90,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: bdda17dd22d060a667be44954a7ff6446474230f
+cut_at_commit: 1c02571c1354ce12b4ce0fb4e24d102ea50aa208
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1015,7 +1015,8 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_mine_conversations
-  use_instead: tortoise_mine_knowledge_from_directory(directory=..., extract_entities=...)
+  use_instead: tortoise_mine_knowledge_from_directory(directory=..., extract_entities=...) for a corpus — the single-transcript
+    arm is tortoise_mine_knowledge_from_session(conversation=<transcript>, source_id=...)
   sdk_method: mine_corpus
   http_policy: false
   approval: null
@@ -1046,7 +1047,8 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_session_capture
-  use_instead: tortoise_mine_knowledge_from_session(conversation=..., harness=..., session_id=...)
+  use_instead: tortoise_mine_knowledge_from_session(conversation=..., harness=..., session_id=..., machine_id=...,
+    model=...)
   sdk_method: null
   http_policy: true
   approval: null
@@ -2450,8 +2452,8 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_mine_knowledge_from_session
-  served_from: tortoise/mcp_server.py:9de5fcd213a44bfb
-  served_attributes: 7e72f195732d155a
+  served_from: tortoise/mcp_server.py:5dd5beab2d78e0a7
+  served_attributes: 591a47d3388cd6a9
   family: sessions
   family_rank: 4
   served: http
@@ -2463,12 +2465,14 @@ rows:
   canonical: null
   job: 'Mine ONE session (#4282 row 16). Dispatch is BY ARGUMENT: `conversation=` files an agent session (turns
     become episodic Points, LLM extraction produces epistemic Points; the backend is the target graph''s configuration)
-    — same door and gates as the retired session-capture shim; `items=` files an already-distilled batch ({wing,
-    room, content}) with two-tier dedup. Passing both is refused. Absorbs both retired capture doors — the session
-    arm AND the checkpoint batch arm. CONSENT (#3662, Option 1): this tool runs server-side and cannot read the
-    caller''s TORTOISE_CAPTURE, so calling it with `conversation=` IS the agreement to record the session — tell
-    the user you are filing it BEFORE you call, so they can decline. session_id is the idempotency key; a team that
-    disabled capture gets 409, so do not retry.'
+    — same door and gates as the retired session-capture shim, whose `machine_id=`/`model=` attribution claims are
+    forwarded too; `conversation=` as a raw transcript STRING (with `source_id=`, stdio/CLI only) mines one transcript
+    through the retired conversations-mining door''s single-transcript arm; `items=` files an already-distilled
+    batch ({wing, room, content}) with two-tier dedup. Passing two arms is refused. Absorbs both retired capture
+    doors — the session arm AND the checkpoint batch arm — plus that single-transcript arm. CONSENT (#3662, Option
+    1): this tool runs server-side and cannot read the caller''s TORTOISE_CAPTURE, so calling it with `conversation=`
+    IS the agreement to record the session — tell the user you are filing it BEFORE you call, so they can decline.
+    session_id is the idempotency key; a team that disabled capture gets 409, so do not retry.'
   dependency: declares TortoiseSDK.mine_knowledge_from_session (resolves)
   lifecycle: active
   used_by: never called
@@ -2756,8 +2760,8 @@ rows:
   cluster_canonical: tortoise_create_entity
   cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
 - name: tortoise_index_sources_from_directory
-  served_from: tortoise/mcp_server.py:cc0f50897415f8e5
-  served_attributes: 69a955f223d31f18
+  served_from: tortoise/mcp_server.py:4501d8ae1df4913c
+  served_attributes: 5efd82012e8dcbd5
   family: sources
   family_rank: 8
   served: stdio-only
@@ -2769,11 +2773,12 @@ rows:
   canonical: null
   job: 'Register a directory''s files as sources — NOTHING is extracted (#4282 row 15). The three older per-kind
     indexing doors redirect here: `file_type=''agent_session''` files a session transcript and `file_type=''doc''`
-    a document corpus. `file_type`: auto | agent_session | meeting | doc. Batched and resumable (progress_file).
-    Returns the honest summary (file_count, indexed, updated, skipped, failed, aborted, ignored, errors[], by_kind);
-    idempotent — re-runs converge to skipped. On a shared graph, give each corpus a unique corpus_name (default
-    = directory basename) to avoid cross-corpus url collisions. EXCLUDED from tenant HTTP — walks the server filesystem
-    with a caller-supplied path.'
+    a document corpus. `extract_metadata` defaults PER ARM to the absorbed door''s own value (`true` for `agent_session`
+    only) and `llm_model` is forwarded on the arms that had it. `file_type`: auto | agent_session | meeting | doc.
+    Batched and resumable (progress_file). Returns the honest summary (file_count, indexed, updated, skipped, failed,
+    aborted, ignored, errors[], by_kind); idempotent — re-runs converge to skipped. On a shared graph, give each
+    corpus a unique corpus_name (default = directory basename) to avoid cross-corpus url collisions. EXCLUDED from
+    tenant HTTP — walks the server filesystem with a caller-supplied path.'
   dependency: declares TortoiseSDK.index_sources_from_directory (resolves)
   lifecycle: active
   used_by: never called

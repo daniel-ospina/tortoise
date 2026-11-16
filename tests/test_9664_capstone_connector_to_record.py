@@ -822,7 +822,7 @@ def test_the_retired_name_matcher_reads_whole_tool_names_not_substrings():
     tool", and a substring test answers a different question. `tortoise_get` is
     retired, `tortoise_get_point` is retired, and `tortoise_get_entity` is the
     LIVE canonical read tool (`RETIRED_USE_INSTEAD`'s own value, and the owner
-    ruling at `tool_registry.py:1950-1861` says it must NOT be retired). A
+    ruling at `tool_registry.py:2183-2191` says it must NOT be retired). A
     substring matcher reports all three as hits on any one of them.
 
     Mutation check: restore `name in (tool.description or "")` in

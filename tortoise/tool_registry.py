@@ -1598,6 +1598,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "(#4282 row 15). The three older per-kind indexing doors "
                     "redirect here: `file_type='agent_session'` files a session "
                     "transcript and `file_type='doc'` a document corpus. "
+                    "`extract_metadata` defaults PER ARM to the absorbed door's own "
+                    "value (`true` for `agent_session` only) "
+                    "and `llm_model` is forwarded on the arms that had it. "
                     "`file_type`: auto | "
                     "agent_session | meeting | doc. Batched and resumable "
                     "(progress_file). Returns the honest summary (file_count, indexed, "
@@ -1617,10 +1620,15 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "`conversation=` files an agent session (turns become episodic "
                     "Points, LLM extraction produces epistemic Points; the backend is "
                     "the target graph's configuration) — same door and gates as the "
-                    "retired session-capture shim; `items=` files an already-distilled batch "
-                    "({wing, room, content}) with two-tier dedup. Passing both is "
+                    "retired session-capture shim, whose `machine_id=`/`model=` "
+                    "attribution claims are forwarded too; `conversation=` as a raw "
+                    "transcript STRING (with `source_id=`, stdio/CLI only) mines one "
+                    "transcript through the retired conversations-mining door's "
+                    "single-transcript arm; "
+                    "`items=` files an already-distilled batch "
+                    "({wing, room, content}) with two-tier dedup. Passing two arms is "
                     "refused. Absorbs both retired capture doors — the session arm "
-                    "AND the checkpoint batch arm. "
+                    "AND the checkpoint batch arm — plus that single-transcript arm. "
                     "CONSENT (#3662, Option 1): this tool runs server-side and cannot "
                     "read the caller's TORTOISE_CAPTURE, so calling it with "
                     "`conversation=` IS the agreement to record the session — tell the "
@@ -2297,13 +2305,19 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
         'threshold=...)',
     # The session arm keeps the server's own gates (429 capacity, 409 duplicate /
     # recording-off, 400 turn cap, 422 empty transcript, 402 quota) — which is
-    # why the pointer names `conversation`/`session_id` and not a knob.
+    # why the pointer names `conversation`/`session_id` and not a knob. The two
+    # ATTRIBUTION claims are named for the same reason (#12948 review round 2):
+    # they are client-declared and stamped set-if-absent downstream, so a caller
+    # that drops them loses attribution with no error — `machine_id` at least has
+    # a derive fallback, `model` has none.
     "tortoise_session_capture":
         'tortoise_mine_knowledge_from_session(conversation=..., '
-        'harness=..., session_id=...)',
+        'harness=..., session_id=..., machine_id=..., model=...)',
     "tortoise_mine_conversations":
         "tortoise_mine_knowledge_from_directory(directory=..., "
-        "extract_entities=...)",
+        "extract_entities=...) for a corpus — the single-transcript arm is "
+        "tortoise_mine_knowledge_from_session(conversation=<transcript>, "
+        "source_id=...)",
 }
 
 

@@ -86,10 +86,13 @@ RETIRED_LITERAL: dict[str, str] = {
         'tortoise_mine_knowledge_from_session(items=..., agent_name=..., threshold=...)'
     ),
     "tortoise_session_capture": (
-        'tortoise_mine_knowledge_from_session(conversation=..., harness=..., session_id=...)'
+        'tortoise_mine_knowledge_from_session(conversation=..., harness=..., session_id=..., '
+        'machine_id=..., model=...)'
     ),
     "tortoise_mine_conversations": (
         'tortoise_mine_knowledge_from_directory(directory=..., extract_entities=...)'
+        ' for a corpus — the single-transcript arm is'
+        ' tortoise_mine_knowledge_from_session(conversation=<transcript>, source_id=...)'
     ),
     # #3540 ruling B: the two per-source switches retired into the ONE
     # consolidated source-management operation (net one tool fewer).
