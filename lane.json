@@ -1,0 +1,21 @@
+{
+  "artifacts": [],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "exit_code": null,
+  "heartbeat_at": 1794789885,
+  "host": "cmux",
+  "issue": 12911,
+  "kind": "fixer",
+  "lane_id": "cmux.kfixer-12911-1794789885-p2676872-b4e2206a",
+  "lease_until": 1794797685,
+  "pid": 2676872,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1794789885,
+  "state": "RUNNING",
+  "tag": "12911",
+  "worktree": "/home/cmux/.worktrees/surf-d"
+}
