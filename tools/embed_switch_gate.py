@@ -158,7 +158,9 @@ applied to the wrong frame. A redirection TARGET stops at the shell's metacharac
 operator (`2>&1|tee`, `>/f|tee`) is still seen as a fork. And `exec`/`exit` terminate the file only
 when they PROVABLY run: a redirect-only `exec > >(tee -a log) 2>&1` (the boot-log idiom) keeps the
 shell alive, and an `exit` behind `||` or inside a helper body cannot end the file — the old rule
-keyed on the VERB and refused an honest ``entrypoint.sh`` with a message blaming the value.
+keyed on the VERB and refused an honest ``entrypoint.sh`` with a message blaming the value. The two
+operators are then read by what they GUARD: ``||`` guards the failure path, so the file's normal flow
+continues, while ``&&`` guards the success path, where an ``exec``/``exit`` really does end it.
 
 ``.env.example`` is a template nothing deploys, so it is not a channel of this gate; the
 read-only instrument (``tools/dod_5090_probe.py``) is what scores it.
@@ -1952,7 +1954,16 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # rest of the script unreachable, so a shipped `entrypoint.sh` stating both switches
             # was REFUSED with a message about the VALUE. `retracts` is the provably-runs
             # predicate: it excludes a body, a branch, a group behind a guard and a subshell.
-            if retracts and _terminates_the_shell(content_raw):
+            # ⛔ …and a `||`-guarded statement cannot terminate it (round 5, measured). `retracts`
+            # deliberately INCLUDES the RHS of `&&`/`||` (a short-circuited retraction must still
+            # retract), and terminating there refused the most ordinary fail-fast prologue:
+            # `mkdir -p /data || exit 1` ⏎ two exports → REFUSED with a message blaming the VALUE,
+            # while `env -i bash` sets both switches (the exit runs only when mkdir FAILS, and then
+            # the container dies anyway). The two operators mean OPPOSITE things for reachability:
+            # `||` guards the FAILURE path, so the file's normal flow continues; `&&` guards the
+            # SUCCESS path, where an `exec`/`exit` really does end the file (`true && exit 1` ⏎
+            # exports → bash never reaches them), so `&&` still terminates.
+            if retracts and separator != "||" and _terminates_the_shell(content_raw):
                 terminated = True
     return stated, ambiguous
 

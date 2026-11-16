@@ -3150,6 +3150,11 @@ def test_a_brace_that_is_DATA_does_not_push_a_group_frame(body):
         "exec 2>&1",
         # ⛔ an `exit` that runs only on a failure branch cannot terminate the file.
         '[ -x /usr/bin/env ] || { echo "no env"; exit 1; }',
+        # …including the PLAIN `||` spelling, which is the ordinary fail-fast prologue
+        # (review round 5, measured: the group spelling was fixed first and this one was not,
+        # so `mkdir -p … || exit 1` refused a file `env -i bash` runs happily).
+        'mkdir -p "${TORTOISE_DATA_DIR:-/tmp/tdata}" || exit 1',
+        '[ -n "${STARTUP_LOG:-}" ] || exit',
         # an `exit` inside a helper body the script may never call
         "cleanup() {\n  exit 1\n}",
     ],
@@ -3191,6 +3196,9 @@ def test_a_REDIRECT_ONLY_exec_or_a_GUARDED_exit_does_not_terminate_the_file(pref
         'exec "$@"',
         "exit 0",
         "exit",
+        # ⛔ `&&` guards the SUCCESS path, where the file really does end (review round 5):
+        # `true && exit 1` ⏎ exports → bash never reaches them.
+        "true && exit 1",
     ],
 )
 def test_a_real_exec_or_exit_still_terminates_the_file(prefix):
