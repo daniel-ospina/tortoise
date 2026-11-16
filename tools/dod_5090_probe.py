@@ -3417,7 +3417,12 @@ def _shell_unset_values(line: str) -> set[str]:
     options = match.group("opts") or ""
     if "f" in options or "n" in options:
         return set()
-    return {word for word in _shell_words(match.group("names") or "")
+    # ⛔ Split on shell OPERATORS as well as whitespace, exactly as `_shell_unset_target`
+    # does: `unset FLAG;` / `unset FLAG|cmd` glue the operator to the last name, and a
+    # whitespace-only split then fails to revoke the export attribute — which leaves a
+    # LATER plain assignment reading as a decision, i.e. the false ARM again (measured on
+    # the `;` spelling, which shell scripts really use).
+    return {word for word in re.split(r"[ \t;&|()<>]+", match.group("names") or "")
             if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", word)}
 
 

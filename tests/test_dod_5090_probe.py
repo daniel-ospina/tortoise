@@ -11673,6 +11673,11 @@ def test_12549_the_export_attribute_is_a_MOMENT_not_a_file_property(
 
     revocations = {
         "unset": "unset TORTOISE_EMBED_GATE",
+        # ⛔ The spelling shell scripts really use: the operator glues to the last name,
+        # so a whitespace-only split failed to revoke and the false ARM came back.
+        "unset with `;`": "unset TORTOISE_EMBED_GATE;",
+        "unset with `&&`": "unset TORTOISE_EMBED_GATE && true",
+        "unset -v": "unset -v TORTOISE_EMBED_GATE",
         # `help export`: "-n remove the export property from each NAME".
         "export -n": "export -n TORTOISE_EMBED_GATE",
     }
