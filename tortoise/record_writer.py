@@ -2684,14 +2684,14 @@ def write_live_record(record: Mapping[str, Any], *,
     cutover invariant. The record's counter issues the number and the journal's
     append reported one, and while BOTH allocators exist they must AGREE; a
     disagreement is refused and the allocation rolled back (the
-    ``position_divergence`` arm below). Two further arms exist only on the
-    allocated arm, and neither is the enumerated arm's behaviour: ``seq=None``
-    is a REFUSAL (``position_unverifiable`` — the counter would issue a number
-    nothing corroborates), not the enumerated arm's row-less named skip. An
-    earlier cut of this docstring said ``seq`` was ignored and that both arms
-    did not apply; a fresh-context review measured the door and found the claim
-    false (#12894 review cycle 4, P1), the same defect class this file's history
-    already records once.
+    ``position_divergence`` arm below). ``seq=None`` is also a REFUSAL on this
+    arm (``position_unverifiable`` — the counter would issue a number nothing
+    corroborates), not the enumerated arm's row-less named skip; and a
+    `seeded`/`halted`/absent counter is the third arm, refused before any of
+    this. An earlier cut of this docstring said ``seq`` was ignored and that
+    both arms did not apply; a fresh-context review measured the door and found
+    the claim false (#12894 review cycle 4, P1), the same defect class this
+    file's history already records once.
 
     The graph's cursor must be in mode ``active``. ⛔ A `seeded` /
     `halted` / absent cursor, or a duplicate position, comes back as
@@ -2751,16 +2751,21 @@ def write_live_record(record: Mapping[str, Any], *,
         # UNARMED arm a replay of the journal heals a row-less record, but on
         # THIS arm the counter is the authority and an enumerated replay is
         # REFUSED once the graph is cut over (`_refuse_an_enumerated_replay`) —
-        # so "a replay heals it" is false here and the remedy is the allocator's
-        # operator path.
+        # so "a replay heals it" is false here. ⛔ And the cost is not one record
+        # either: the journal consumed a position the counter did not, so the
+        # same one-behind gap the divergence arm produces is armed here too, and
+        # every later armed write refuses for the same reason. The remedy is the
+        # allocator's operator path, named in the warning below.
         _count_write_failure("write_failed")
         _logger.warning(
             "the record write was REFUSED (position_unverifiable) — the journal "
             "holds the record but the append could not PROVE its position, so "
             "the ordinal allocator (`%s`) has nothing to check the number it "
             "would issue against. On the ALLOCATED arm a replay does NOT heal "
-            "this (an enumerated replay is refused on a cut-over graph); the "
-            "remedy is the allocator's operator path — `halt` -> "
+            "this (an enumerated replay is refused on a cut-over graph), and "
+            "the journal consumed a position the counter did not — so EVERY "
+            "later armed write refuses for the same reason until the counter is "
+            "re-seeded. The remedy is the allocator's operator path: `halt` -> "
             "`seed --journal` -> `reopen` -> `arm`; record=%s %s",
             RECORD_ALLOCATE_ENV, record.get("type"), _record_identity(record),
         )
@@ -2771,11 +2776,10 @@ def write_live_record(record: Mapping[str, Any], *,
         # row needs a number, and inventing one collides with a later replay's
         # numbering. Counted and warned above, so the skip is observable.
         # ⛔ With `allocate=True` the number comes from the RECORD's counter
-
-        # instead (#12894), so `seq` is neither needed nor consulted — and it
-        # must NOT be forwarded as `first_seq`, because `replay_plan` REFUSES a
-        # caller watermark on that arm (`allocate=True derives the position from
-        # the record's counter, so start_seq must be left at 1`). MEASURED
+        # instead (#12894), so `seq` must NOT be forwarded as `first_seq`,
+        # because `replay_plan` REFUSES a caller watermark on that arm
+        # (`allocate=True derives the position from the record's counter, so
+        # start_seq must be left at 1`). MEASURED
         # (review cycle 1, P1): forwarding it made a cut-over door refuse EVERY
         # write — all three production sites pass a real `seq` from `log.append`
         # — while the wiring gate blessed the body. So the arm passes the one
@@ -2806,18 +2810,28 @@ def write_live_record(record: Mapping[str, Any], *,
         # refuses (`allocated != its line`), the other applies, and the counter
         # is left exactly one behind the journal.
         #
-        # ⛔ THE THIRD AND FOURTH STATES ARE NOT RARE, AND THE COST IS NOT "one
-        # refused record" — say it here rather than let an operator discover it.
-        # Every refusal arm above appends its journal line and writes NO row, so
-        # the JOURNAL's position advances while the COUNTER's does not (the
-        # concurrency inversion above leaves the same one-behind gap). The gap does
-        # not close on its own (a replay writes rows, never the counter), so
-        # every LATER armed write refuses for the same reason: once one record is
-        # declined, this arm refuses every subsequent record until an operator
-        # re-seeds. That is the price of keeping one invariant — the line and its
-        # row carry the same number — instead of guessing which side is right,
-        # and the remedy is named in the warning below: `halt` →
-        # `seed --journal <path>` → `reopen` → `arm`.
+        # ⛔ THE COST IS NOT "one refused record", AND THE TWO DIRECTIONS ARE
+        # NOT SYMMETRIC — say it here rather than let an operator discover it, and
+        # never describe them with one sentence:
+        #
+        #   * the journal AHEAD of the counter — the refused-write and
+        #     CONCURRENT-WRITER states above. Every refusal arm appends its line
+        #     and issues no counter number, so the gap never closes (a replay
+        #     writes rows, never the counter) and every LATER armed write refuses
+        #     for the same reason. Remedy in order: `halt` →
+        #     `seed --journal <path>` → `reopen` → `arm` (the seed is allowed
+        #     here, because the record's rows are BELOW the journal).
+        #   * the journal BEHIND the counter — the RESTORED / TRUNCATED / SEALED
+        #     states above. WORSE, not better: each refused append still advances
+        #     the journal by one, so the guard stops refusing after
+        #     `counter - floor` records — and each of those records LOST its row
+        #     with no operator action at all. It does not wedge, it eats.
+        #     `seed --journal` REFUSES here (`SEED_SQL` requires
+        #     `row_max <= enumerated_floor`), so the remedy is to restore the
+        #     journal, or to state `--enumerated-floor` deliberately.
+        #
+        # That is the price of keeping one invariant — the line and its row carry
+        # the same number — instead of guessing which side is right.
         #
         # ⛔ THE ROLLBACK IS THE OTHER HALF. Detecting the mismatch AFTER the
         # insert but BEFORE the commit is what makes this free: the allocation
@@ -2843,14 +2857,17 @@ def write_live_record(record: Mapping[str, Any], *,
                     "BACK so nothing was burned or renumbered. Compare the two "
                     "readings with `tools/record_allocator_cli.py status "
                     "--journal <path>`, whose position_divergence field is THIS "
-                    "door's condition. THE GAP DOES NOT CLOSE ON ITS OWN: a "
-                    "refused write keeps its journal line and issues no counter "
-                    "number, so EVERY later armed write refuses for the same "
-                    "reason until the counter is re-seeded. Remedy, in order: "
-                    "`halt`, `seed --journal <path>`, `reopen`, `arm` (seed and "
-                    "reopen both refuse from `active`, so halt is first). Then "
-                    "check for a restored, truncated or re-sealed journal. "
-                    "record=%s %s",
+                    "door's condition (LIKELY CAUSES DIFFER IN REMEDY, so read "
+                    "which side is ahead): if the JOURNAL is ahead — a refused "
+                    "write consumed a position the counter did not — the gap "
+                    "never closes and EVERY later armed write refuses until you "
+                    "re-seed: `halt`, `seed --journal <path>`, `reopen`, `arm`. "
+                    "If the JOURNAL is behind — a restored, truncated or "
+                    "re-sealed journal — it does NOT wedge: the guard stops "
+                    "refusing after `counter - floor` records, and each of them "
+                    "SILENTLY LOSES ITS ROW; `seed --journal` refuses in that "
+                    "state, so restore the journal or pass "
+                    "`--enumerated-floor` deliberately. record=%s %s",
                     seq, allocated_first, record.get("type"),
                     _record_identity(record),
                 )

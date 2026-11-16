@@ -87,21 +87,33 @@ deliberate — a flag that silently fell back to enumeration would hide exactly 
 mis-armed deployment an operator needs to see.
 
 ⚠️ And a second, which the same reasoning covers but which costs more than one
-record, so it is spelled out: **any refused record wedges the armed arm until the
-counter is re-seeded.** The journal's position advances on every append, including
-an append whose record the door then declines, while the counter advances only
-inside a committed write. The gap therefore survives the refusal, a replay does not
-fill it (a replay writes rows, never the counter), and the guard refuses every
-*later* record for the same reason — `halt` → `seed --journal <path>` → `reopen` →
-`arm` is the way back. This is the price of keeping one invariant rather than
-guessing which side of a disagreement is right, and it is a real operational
-consequence of the design, not a defect to be discovered in production: the door's
-WARNING now names the remedy and the permanent-until-reseed cost, and
-`status --journal` reports the door's own condition as `position_divergence`
-(distinct from the seed's `divergence`, which is a different pair and can read
-`false` while the door refuses). The residual — no automatic recovery, and no
-distinction between a benign gap and a journal that went backwards — is recorded
-here rather than designed away in this lane (#12894 review cycle 4, P1).
+record, so it is spelled out. **The journal's position advances on every append,
+including an append whose record the door then declines, while the counter
+advances only inside a committed write** — so the two directions a disagreement
+can take are NOT symmetric, and they must not be described with one sentence:
+
+* **journal AHEAD of the counter** (a refused write consumed a position the counter
+did not). The gap never closes — a replay writes rows, never the counter — so the
+guard refuses every *later* record for the same reason, indefinitely. Remedy in
+order: `halt` → `seed --journal <path>` → `reopen` → `arm` (the seed is allowed
+here, because the record's rows are below the journal).
+* **journal BEHIND the counter** (a restored or truncated journal, or a sealed one
+whose file-local index restarts at 1). This is *worse*, not better: each refused
+append still advances the journal by one, so the guard stops refusing after
+`counter - floor` records — and **each of those records silently loses its row**
+with no operator action at all. It does not wedge, it eats. `seed --journal`
+refuses in this state (`SEED_SQL` requires `row_max <= enumerated_floor`), so the
+remedy is to restore the journal or to state `--enumerated-floor` deliberately.
+
+This is the price of keeping one invariant rather than guessing which side of a
+disagreement is right, and it is a real operational consequence of the design, not
+a defect to be discovered in production. Both the door's WARNING and
+`tools/record_allocator_cli.py status --journal` now say which side is ahead, and
+`status` reports the door's own condition as `position_divergence` — distinct from
+the seed's `divergence`, which is a different pair (`row_max > floor`) and can
+read `false` while the door refuses. The residual — no automatic recovery, and no
+repair path that does not require an operator — is recorded here rather than
+designed away in this lane (#12894 review cycles 4–5, P1).
 
 ---
 
@@ -114,13 +126,15 @@ the plan builder alone — because "a green suite that never exercises
 `allocate=True` on the live door is not" evidence.
 
 **The exception, stated so the green count is read as what it is** (an earlier cut
-of this paragraph claimed the rule without it, #12894 review cycle 4, P2): three
-legs assert a fact that belongs to the allocator or the plan, not to the door, and
-drive that layer directly — (3a) `test_two_writers_allocate_in_commit_order` and
-(3b) `test_a_rolled_back_allocation_is_reissued_exactly_once` call
-`record_allocator.execute_allocation`; (3c) `test_replay_reads_a_carried_ordinal`
-drives `record_projection.replay_plan`. Every other leg — including all six
-divergence, seal and unproven-position refusals — goes through the door.
+of this paragraph claimed the rule without it, #12894 review cycles 4–5, P2): three
+falsifiers assert a fact that belongs to the allocator or the plan, not to the
+door, and drive that layer directly — (3a) `test_two_writers_allocate_in_commit_
+order` and (3b) `test_a_rolled_back_allocation_is_reissued_exactly_once` call
+`record_allocator.execute_allocation`; (3c) is TWO legs, `test_replay_reads_a_
+carried_ordinal` and `test_replay_refuses_a_carried_ordinal_that_disagrees`, and
+both drive `record_projection.replay_plan` without touching the door. Every other
+leg — including all six divergence, seal and unproven-position refusals — goes
+through the door.
 
 | # | Falsifier | Leg | Red before the code because |
 |---|---|---|---|

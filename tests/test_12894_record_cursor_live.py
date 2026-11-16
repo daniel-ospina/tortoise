@@ -1339,6 +1339,60 @@ def test_a_seed_from_a_journal_with_no_rows_gives_the_first_write_n_plus_1(
     assert (write.first_seq, write.last_seq) == (4, 4)
     assert [row[0] for row in _journal_rows(schema, org, graph)] == [4], (
         "the first new position is not N+1")
+    # ⛔ THE DISCRIMINATOR, as on its two sibling legs. Counter 3 + `seq=4` and the
+    # enumeration's own 4 produce the SAME row and watermark, so without this line
+    # the leg stays green with the flag wiring removed entirely (#12894 review
+    # cycles 4 and 5, P2). Seed 3 → allocation issues 4, and only the allocated
+    # arm moves the counter.
+    assert _counter(schema, org, graph) == (4, "active"), (
+        "this leg did not allocate — it would pass on the enumerated arm too")
+
+
+def test_status_position_divergence_is_the_doors_condition(
+        schema, tenant, app, tmp_path, capsys):
+    """⛔ THE DOOR'S PAIR, NOT THE SEED'S — and both directions (review cycle 5, P1).
+
+    `divergence` answers the SEED's question (`row_max > floor`) and can read
+    False while the door refuses every write. `position_divergence` must be the
+    DOOR's own test. The door issues `cursor + 1` and compares it with the
+    position the append reported (`floor + 1`), so it ACCEPTS iff `cursor ==
+    floor` — the `+ 1` cancels.
+
+    ⛔ AN OFF-BY-ONE HERE IS WORSE THAN NO FIELD AT ALL: `cursor + 1 != floor`
+    reads True on a healthy armed graph and False on the wedged one, while the
+    door's WARNING names this field as authoritative. Both directions are pinned
+    below, healthy first — a one-sided leg would have passed the inverted version.
+    """
+    from tools import record_allocator_cli as cli
+
+    org, graph = tenant
+    _seed_and_arm(app, org, graph, 3)          # counter 3; journal count 3: AGREE
+
+    healthy_dir = tmp_path / "healthy"
+    healthy_dir.mkdir()
+    assert cli.main(["status", "--org-id", org, "--graph-id", graph,
+                     "--dsn", _door_dsn(),
+                     "--journal", str(_journal_file(healthy_dir, 3)),
+                     "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["seq"] == 3 and payload["mode"] == "active", (
+        f"the fixture did not arm a counter at 3: {payload}")
+    assert payload["position_divergence"] is False, (
+        f"a healthy armed graph was reported as divergent — the door's condition "
+        f"is inverted here, and the door's WARNING names this field: {payload}")
+
+    # ONE refused write: the journal has a 4th line, the counter is still 3. This
+    # is the permanent-wedge state the field exists to expose.
+    wedged_dir = tmp_path / "wedged"
+    wedged_dir.mkdir()
+    assert cli.main(["status", "--org-id", org, "--graph-id", graph,
+                     "--dsn", _door_dsn(),
+                     "--journal", str(_journal_file(wedged_dir, 4)),
+                     "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["position_divergence"] is True, (
+        f"the wedged state read as healthy — an operator following the door's "
+        f"WARNING would be told there is nothing to diagnose: {payload}")
 
 
 def test_the_seed_verb_refuses_a_divergence_and_names_it(schema, tenant, tmp_path):
@@ -1367,10 +1421,19 @@ def test_status_answers_the_divergence_remedy_beside_the_record(
     """THE REMEDY MUST BE ABLE TO ANSWER ITS OWN QUESTION (fresh-context review, P2).
 
     The door's divergence WARNING tells an operator to check the journal's
-    enumeration. `status` used to accept `--journal` and ignore it, reporting only
-    `journal_row_max` — so the one number the remedy needs was absent from the
-    command the remedy names. It now prints both readings, and the two derived
+    enumeration, so `status` must report the journal's count and the two derived
     booleans that name which seed outcome they imply.
+
+    ⚠️ PROVENANCE CORRECTED (#12894 review cycle 5, P2). This docstring
+    originally claimed `status` "used to accept `--journal` and ignore it". That
+    was FALSE: `main()` has resolved `--journal` through `_journal_floor()` into
+    `args.floor` since the verb was created, and `_cmd_status` already emitted
+    `journal_enumerated_floor`/`divergence`/`healed_tail`. So this leg is a
+    REGRESSION PIN of behaviour that already worked — worth keeping, but it
+    proves nothing about the cycle-4 finding, which was that `divergence` answers
+    the SEED's pair and can read `false` while the door refuses. That condition is
+    `position_divergence`, pinned separately by
+    `test_status_position_divergence_is_the_doors_condition`.
     """
     from tools import record_allocator_cli as cli
 
@@ -1652,6 +1715,21 @@ def test_replay_refuses_a_carried_ordinal_that_disagrees():
     with pytest.raises(rp.RecordProjectionError):
         rp.replay_plan([{**RECORD, "seq": "not-a-number"}], org_id="o",
                        graph_id="g", start_seq=1)
+
+    # ⛔ AND A VALUE THAT ONLY *COERCES* TO THE RIGHT-NUMBERED POSITION IS A
+    # DISAGREEMENT, NOT A MATCH (#12894 review cycle 4, P2). `int(carried)` used
+    # to accept both of the first two below — 5.9 truncated to 5, "5" parsed to 5
+    # — against `start_seq=5`, i.e. it silently renumbered a value that disagreed
+    # into agreement, which is the `#9190` defect with a new spelling. `True` is
+    # included because `bool` is an `int` SUBCLASS, so a naive `isinstance(…, int)`
+    # would let it through as 1.
+    for wrong_type in (5.9, "5", True):
+        with pytest.raises(rp.RecordProjectionError) as coercion:
+            rp.replay_plan([{**RECORD, "seq": wrong_type}], org_id="o",
+                           graph_id="g", start_seq=5)
+        assert "not an integer" in str(coercion.value), (
+            f"seq={wrong_type!r} was accepted or refused for the wrong reason: "
+            f"{coercion.value}")
 
 
 # ── (3d) the journal line and its row carry the SAME number ────────────────

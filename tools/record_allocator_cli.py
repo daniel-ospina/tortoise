@@ -196,18 +196,27 @@ def _cmd_status(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         #
         # ⛔ THIS IS THE **SEED'S** REFUSAL CONDITION, and it is deliberately not
         # the only divergence reported. `write_live_record` refuses on a DIFFERENT
-        # pair — the counter's next number against this journal position — so a
-        # wedged armed graph can show `divergence: false` here while the door
-        # refuses every write. `position_divergence` below reports the DOOR's
+        # pair, so a wedged armed graph can show `divergence: false` here while the
+        # door refuses every write. `position_divergence` below reports the DOOR's
         # condition; the door's own warning names that field, so the two cannot be
         # mistaken for each other (#12894 review cycle 4, P2).
         payload["journal_enumerated_floor"] = args.floor
         payload["divergence"] = row_max > args.floor
         payload["healed_tail"] = args.floor > row_max
+        # ⛔ THE DOOR'S OWN CONDITION, and read the arithmetic before changing it.
+        # The door issues `cursor + 1` and compares it with the position the append
+        # reported, which on a journal holding `floor` records is `floor + 1`. So
+        # the door ACCEPTS iff `cursor + 1 == floor + 1`, i.e. iff
+        # `cursor == floor`. The `+ 1` appears on BOTH sides and cancels — which is
+        # why the test is `cursor != floor` and not `cursor + 1 != floor`: the
+        # latter is off by one and reports the condition INVERTED (true on a
+        # healthy armed graph, false on the wedged one it exists to expose), which
+        # is worse than no field at all because the door's WARNING names this field
+        # as authoritative (#12894 review cycle 5, P1 — measured).
         payload["position_divergence"] = (
             cursor is not None
             and cursor[1] == ra.MODE_ACTIVE
-            and cursor[0] + 1 != args.floor
+            and cursor[0] != args.floor
         )
     return payload
 
