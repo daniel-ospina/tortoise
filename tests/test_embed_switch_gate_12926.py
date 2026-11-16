@@ -1620,7 +1620,7 @@ def test_a_fallback_that_is_itself_a_variable_is_refused():
         ),
         ("ENV TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-$FALLBACK}\n", gate._dockerfile_env),
     ):
-        stated, ambiguous, *rest = reader(body)
+        stated, ambiguous, *_rest = reader(body)
         assert stated == {}, (body, stated)
         assert "TORTOISE_EMBED_GATE" in ambiguous, (body, ambiguous)
 
