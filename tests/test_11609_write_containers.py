@@ -23,6 +23,7 @@ walk pins the ones we did not.
 from __future__ import annotations
 
 import ast
+import json
 import pathlib
 import sys
 
@@ -333,3 +334,109 @@ def test_no_production_module_reaches_a_retired_sdk_name():
         "production code reaches RETIRED SDK names — a retired name RAISES at "
         "call time (#4282/#3836(c)), so each of these is a live failure:\n  "
         + "\n  ".join(offenders))
+
+
+# ── 6. the SDK container's POINT arm keeps the absorbed door's BEHAVIOUR ──
+#
+# ⛔ THE GAP THIS CLOSES (#12915 review, the blocking finding that outlived three
+# rounds). A container is only an absorption if the member's BEHAVIOUR survives;
+# the body's claim that `update_knowledge` "delegates to `update()` which already
+# dispatches on the resolved label" hid a difference on exactly one label. For a
+# Point, `update()` takes the `update_point` arm, which
+#
+#   1. appends NO journal record for a status write — the `derived = replay(
+#      journal)` class, so a rebuild loses the transition; and
+#   2. refuses every non-promote transition with ONE fixed sentence that names
+#      neither the target status nor the transition, where the absorbed door
+#      named both.
+#
+# Both are pinned below, in the container, so the routing cannot drift back
+# without a red row. Measured at the merged head before the fix: 0 records and
+# `update_point only promotes draft→live` (the review's own `tests/
+# test_9649_update_entity_point_lifecycle.py` went from 40 failed to 63 passed
+# once the routing was corrected).
+
+
+def _sdk_with_journal(tmp_path):
+    """An EMBEDDED engine whose JSONL journal is readable (the #3311 shape)."""
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "t11609_containers.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    return sdk, events
+
+
+def _entity_mutations(events, node_id):
+    """The `EntityMutated` records addressing `node_id` (id is TOP-LEVEL)."""
+    path = events / "events.jsonl"
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        if rec.get("type") == "EntityMutated" and rec.get("id") == node_id:
+            out.append(rec)
+    return out
+
+
+def test_the_sdk_containers_point_arm_journals_the_status(tmp_path):
+    """A status write through the container must leave a REPLAYABLE record.
+
+    `update_entity` journalled a `restatus` against the Point; `update_point`
+    (which `update()` routes a Point to) does not. Retiring the door without
+    carrying that half would make every Point status write invisible to
+    `rebuild_all` — a silent loss, not a rename.
+    """
+    sdk, events = _sdk_with_journal(tmp_path)
+    try:
+        pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
+        before = len(_entity_mutations(events, pid))
+
+        sdk.update_knowledge(pid, status="superseded")
+
+        written = _entity_mutations(events, pid)[before:]
+        assert len(written) == 1, (
+            "a status write through the container appended no (or more than "
+            f"one) journal record — a rebuild cannot replay it: {written!r}")
+        blob = json.dumps(written[0])
+        assert "restatus" in blob, (
+            f"the record does not describe a restatus: {written[0]!r}")
+        assert "superseded" in blob, (
+            "the record must carry the word the graph holds: " + blob)
+    finally:
+        sdk.close()
+
+
+def test_the_sdk_containers_point_arm_names_the_refused_transition(tmp_path):
+    """The refusal must let a caller CORRECT the call (AIP-193).
+
+    Pre-fix the container answered with `update_point`'s fixed sentence
+    ("only promotes draft→live"), which names neither the target word nor the
+    transition — so a caller could not tell an undeclared transition from a
+    closed door. Non-vacuity: the target word below is asserted, and the
+    pre-fix message does not contain it.
+    """
+    sdk, events = _sdk_with_journal(tmp_path)
+    try:
+        pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
+        before = len(_entity_mutations(events, pid))
+
+        with pytest.raises(ValueError) as excinfo:
+            sdk.update_knowledge(pid, status="archived")
+
+        message = str(excinfo.value)
+        assert "archived" in message, (
+            "the refusal does not name the refused target, so a caller cannot "
+            f"tell a typo from a closed door: {message!r}")
+        assert "live" in message, (
+            f"the refusal does not name the transition it refused: {message!r}")
+        assert len(_entity_mutations(events, pid)) == before, (
+            "a refused transition appended a journal record")
+        assert sdk.get_point(pid)["status"] == "live", (
+            "a refused transition moved the row")
+    finally:
+        sdk.close()

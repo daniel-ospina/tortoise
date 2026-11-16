@@ -171,7 +171,7 @@ def test_the_named_repair_is_performable(sdk):
     # And the prescription that IS named really exists:
     from tortoise.commit_ops import apply_supersessions  # noqa: F401
     with pytest.raises(ValueError, match="No point"):
-        sdk.supersede_knowledge(node, "some-successor")   # Point-only, as the message says
+        sdk.supersede_knowledge(node, "some-successor")  # Point-only, as the message says
 
 
 # ── NOT a vocabulary: a pack/connector word is accepted ──
@@ -364,7 +364,10 @@ def _carriers(s, node) -> tuple:
 def test_the_record_carried_un_supersede_is_admitted(sdk, maker, label):
     """Clearing a supersession IS writable — that is what the record can express.
 
-    `tests/test_status_projection.py::test_clearing_a_supersession_is_still_writable`
+    `tests/test_status_projection.py::TestLifecycleCarrierCoherence::`
+    `test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot`
+    (cited as `test_clearing_a_supersession_is_still_writable` before #12790/#12882
+    renamed it; the CLASS is part of the node path or pytest collects nothing)
     caught this guard refusing the shape `cache_projection`'s NOT MONOTONE bullet
     documents and measures. A state machine that cannot un-supersede has a
     user-visible shape: a fact superseded BY MISTAKE cannot be restored at all —

@@ -1029,6 +1029,61 @@ def _make_carrier_entity(sdk, label: str, name: str) -> str:
     return row[0]
 
 
+class _LyingEq:
+    """A non-`str` status whose `__eq__` answers `True` for ANYTHING (#12896).
+
+    The guard must answer "may this value leave the dead state?" from the TYPE,
+    never from a comparison the caller controls. `str.__eq__(stored, non_str)`
+    returns `NotImplemented`, so a natural `stored == target` falls back to THIS
+    reflected `__eq__` — measured: `status=_LyingEq()` on an `archived` row
+    returned normally, the `status` property was REMOVED, and the row read
+    `live`. It is unhashable on purpose (defining `__eq__` nulls `__hash__`),
+    which is a shape a store can hold — but it is NOT the `in _np_terminal`
+    membership door: on the PRE-fix tree the ENTAILMENT shortcut `continue`d
+    first for a non-`str` target, so this fixture never reached the membership
+    test (at HEAD the shortcut is gated on an exact `str`, so it is not live for
+    a non-`str` at all). That door is pinned by the str-SUBCLASS arm of
+    `test_a_str_subclass_cannot_forge_a_dead_word_or_crash_the_guard`
+    (`_UnhashHonest`), not here.
+    """
+
+    def __eq__(self, other):
+        return True
+
+    __hash__ = None
+
+    def __repr__(self):
+        return "_LyingEq()"
+
+
+class _RenderingLie(str):
+    """A `str` whose CONTENT is honest and whose RENDERING lies (#12906).
+
+    The guard normalises the target with `str.__str__`, but the DRIVER renders
+    what it is given: `falkordb.helpers.quote_string` calls `len(v)` and
+    `v.replace(...)` on the CALLER'S object. So a subclass could agree with the
+    stored word by content (the entailed shortcut rightly reads "no transition
+    asked for") and still store a different word. Measured at `70b37dcfc5` on an
+    `archived` Object: `update_entity(oid, status=_RenderingLie('archived'))`
+    returned normally and the row read `live` — a resurrection the guard never saw.
+    """
+
+    def replace(self, *args, **kwargs):
+        return "live"
+
+
+class _ZeroLen(str):
+    """Content honest, `__len__` lying — `quote_string` renders it as `""`.
+
+    Measured at `70b37dcfc5`: `status=_ZeroLen('archived')` on an `archived`
+    Object returned normally and stored `''` (the same rendering hole as
+    `_RenderingLie`, through `quote_string`'s `len(v) == 0` branch).
+    """
+
+    def __len__(self):
+        return 0
+
+
 #: Every carrier shape measured as ACCEPTED (and record-divergent) before the
 #: #10192 guard: a pointer/stamp alone, a BLANK pointer (the record view's
 #: `IS NOT NULL` reads `''` as a carrier), a carrier with an explicit LIVE status,
@@ -1198,46 +1253,27 @@ class TestLifecycleCarrierCoherence:
         finally:
             sdk.close()
 
-    def test_clearing_a_supersession_cannot_lift_a_dead_row(self, tmp_path):
-        """A CLEAR is not a carrier — and it does not undo a supersession.
+    def test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot(
+            self, tmp_path):
+        """#12825's decided contract: the CLEAR lifts the row; the STATUS-ONLY cannot.
 
-        The carrier CLEAR (`supersededBy=None`) is still not a CARRIER, so the
-        #10192 guard does not over-block it (review P1 extended that guard to the
-        snake spelling, not to the CLEAR). What a clear cannot do is make the row
-        current again: `superseded` is in the family's own recorded dead set
-        (`commit_ops.OBJECT_TERMINAL_STATUSES`), and since #12745
-        `update_entity` refuses a dead row's transition to a current-reading
-        STATUS WORD — it asks about the RESULT status, not about which keys the
-        call supplied. ⛔ The word is the whole of it: a NULL status is not a
-        word, the guard skips it, and `update_entity(status=None)` is still
-        ACCEPTED — that shape removes the property and leaves the graph reading
-        current while the record keeps folding `superseded`, a residual this
-        test does not touch (#9974).
+        ⛔ This test has now been restated TWICE, and the reason is worth keeping:
+        the row is `superseded`, the one dead word with a DESIGNED WITHDRAWAL, so
+        the guard must ask which WRITE the call performs rather than which WORD it
+        names.
 
-        This test used to assert the OPPOSITE — that
-        `update_entity(oid, status="live", supersededBy=None, supersededAt=None)`
-        un-superseded an Object, because the mutation writes both carrier columns
-        and a rebuild therefore derives nothing (`cache_projection`'s NOT
-        MONOTONE bullet). That shape was coherent at the record layer, and it is
-        inside #12745's blast radius all the same, so the assertion has been RED
-        on every head since #12745 landed (measured on `main` at `9e934efad5`):
+        * `status='live'` **plus both carriers cleared** — the record-carried
+          un-supersede (`cache_projection`'s NOT MONOTONE bullet): the graph goes
+          live and a rebuild derives nothing, so graph and record AGREE. Allowed.
+        * `status='live'` **alone** — refused: the carriers stay set, so the record
+          still reads 'superseded' against a live graph. That divergence is the
+          whole reason the guard exists.
 
-            ValueError: update_entity refused the status transition
-            'superseded' -> 'live' on Object '…': 'superseded' is TERMINAL for a
-            :Object (ONTOLOGY §4.3), so this row cannot be made current again.
-
-        The assertion is therefore RESTATED to the decided contract, not
-        dropped: the door refuses the transition, the refusal leaves the row
-        exactly as it was (nothing half-written, nothing journaled), and the
-        bare CLEAR with no `status` still writes. What is NOT pinned here: the
-        snake spelling is accepted (`None` is not a carrier under either
-        spelling) and its EFFECT is not asserted — a snake carrier SET writes a
-        shadow `superseded_by` node property that the CAMEL-keyed read surfaces
-        (`audit` 4b/4c, `assembly._probe_visible_successors`, the renderer) do
-        not consult, while `derived_invalidation._retirement` reads both
-        spellings, so a snake-only carrier can flip an input to retired with no
-        camel carrier present (#12782). A snake CLEAR removes the property again,
-        so a clear proves nothing about it either way.
+        #12745 refused both. #12790 restated this test to match. #12825 then
+        corrected the refusal for the designed withdrawal (#12745 had taken its
+        dead set from the RECALL set, which answers "which stored states are dead"
+        and not "which states a writer may mint") and did not restate this test
+        back — which is what made `test (a)` red on `main` at `14be041b8f`.
         """
         events = tmp_path / "events"
         events.mkdir()
@@ -1252,29 +1288,405 @@ class TestLifecycleCarrierCoherence:
             assert superseded_row[1:] == ("superseded", "beta-v2",
                                           "2026-01-01T00:00:00Z"), (
                 superseded_row)
+
+            # ── the STATUS-ONLY shape is the incoherent one, and it is refused ──
             journal_before = len(_records(journal))
             with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
-                sdk.update_knowledge(oid, status="live", supersededBy=None,
-                                  supersededAt=None)
+                sdk.update_knowledge(oid, status="live")
             assert _carrier_row(sdk, "Object", "beta") == superseded_row, (
-                "a REFUSED un-supersede still moved the row — the refusal must "
-                "leave it exactly as it stood")
+                "a REFUSED status-only lift still moved the row — the refusal "
+                "must leave it exactly as it stood")
             assert len(_records(journal)) == journal_before, (
-                "a refused un-supersede appended a journal record — the "
+                "a refused status-only lift appended a journal record — the "
                 "refusal must land before any write reaches the stream")
 
-            # The CLEAR itself is still not a carrier: with no `status` in the
-            # call there is no transition to ask about, so it is accepted — and
-            # the row stays terminal, which is the point.
-            sdk.update_knowledge(oid, supersededBy=None, supersededAt=None)
-            cleared = _carrier_row(sdk, "Object", "beta")
-            assert cleared[1:] == ("superseded", None, None), (
-                f"the bare carrier CLEAR did not clear both columns while "
-                f"leaving the row dead: {cleared}")
-            # …and the SNAKE spelling of a clear is accepted too (`None` is not a
-            # carrier under either spelling). Its effect is NOT pinned here: a
+            # ── the COHERENT shape lifts it: both carriers go NULL ──
+            sdk.update_knowledge(oid, status="live", supersededBy=None,
+                              supersededAt=None)
+            lifted = _carrier_row(sdk, "Object", "beta")
+            assert lifted[1:] == ("live", None, None), (
+                "the record-carried un-supersede must make the row CURRENT with "
+                f"both carriers cleared, so a rebuild derives nothing: {lifted}")
+
+            # ── and the SNAKE spelling of a clear is accepted too (`None` is not
+            # a carrier under either spelling). Its EFFECT is NOT pinned here: a
             # snake carrier SET is what writes the shadow property (#12782).
             sdk.update_knowledge(oid, superseded_by=None, superseded_at=None)
+
+            # ── a BARE carrier CLEAR (no `status` key at all) is still ACCEPTED
+            # on a superseded row and leaves the row TERMINAL: with no status
+            # named there is no transition to ask about, so the guard above never
+            # runs — the carriers clear while the row stays dead. Restated from
+            # the assertion #12790 dropped when it rewrote this test: the
+            # BEHAVIOUR never changed, only its pin did (#12882 review F2).
+            bare = _make_carrier_entity(sdk, "Object", "gamma")
+            sdk.update_knowledge(bare, status="superseded",
+                              supersededBy="gamma-v2",
+                              supersededAt="2026-01-01T00:00:00Z")
+            sdk.update_knowledge(bare, supersededBy=None, supersededAt=None)
+            cleared = _carrier_row(sdk, "Object", "gamma")
+            assert cleared[1:] == ("superseded", None, None), (
+                "the bare carrier CLEAR did not clear both columns while "
+                f"leaving the row dead: {cleared}")
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("target", [["live"], {"a": 1}, 123, True, None,
+                                        _LyingEq()],
+                             ids=["list", "dict", "int", "bool", "none",
+                                  "lying-eq"])
+    def test_a_non_string_or_absent_status_cannot_lift_a_dead_row(
+            self, tmp_path, target):
+        """⛔ The question is "is this in the DEAD set", never "is this a string".
+
+        An earlier cut skipped the whole check when the target was not a `str`,
+        so a dead Object went CURRENT without naming a dead word. Measured, per
+        target, on the pre-fix tree:
+
+            status=['live']   STORED as-is   -> in no dead set -> reads current
+            status=123        STORED as-is   -> same
+            status=True       STORED as-is   -> same
+            status={'a': 1}   DEGRADED to null (#7369) -> property ABSENT
+            status=None       property REMOVED
+
+        ⛔ NOT "all five store a wrong word": two of the five end with NO status at
+        all — the dict silently, through #7369's null degradation, and `None` by
+        construction. §4.3 settles those two ("an Object created without a status
+        stores none and reads as `live`"), so all five make a DEAD row current
+        again, by two different mechanisms. That difference is why the assertion
+        below is about the ROW, not about the stored value.
+
+        ⛔ NOT "a row whose carriers still describe a supersession": this fixture
+        is a plain create force-set to `archived`, so it carries no supersession at
+        all. The harm is the resurrection; a superseded row adds the graph/record
+        divergence, which is a different test.
+
+        The bare carrier clear (no `status` key at all) remains accepted above;
+        only naming a status that leaves the dead state is refused.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t10192n.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "delta")
+            sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) SET o.status='archived'",
+                params={"id": oid})
+            before = _carrier_row(sdk, "Object", "delta")
+            assert before[1] == "archived", before
+            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+                sdk.update_knowledge(oid, status=target)
+            assert _carrier_row(sdk, "Object", "delta") == before, (
+                "a refused resurrection moved the row: " +
+                repr(_carrier_row(sdk, "Object", "delta")))
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("target", [_RenderingLie("archived"),
+                                        _ZeroLen("archived")],
+                             ids=["replace-lie", "len-lie"])
+    def test_a_rendering_lie_cannot_move_a_dead_row(self, tmp_path, target):
+        """The guard's word and the WRITTEN word must be the same object (#12906).
+
+        Normalising only the guard's copy left `props` carrying the caller's
+        subclass, and the driver renders that object with its own `replace`/
+        `len` — so a target that AGREES with the stored word by content, and is
+        therefore the no-op re-assert the entailed shortcut knowingly lets
+        through, could still store whatever its rendering produced. Measured on
+        the pre-fix tree (`70b37dcfc5`), both params below were ACCEPTED and
+        MOVED the row: `replace-lie` -> `'live'`, `len-lie` -> `''`.
+
+        The invariant pinned is the ROW, not the outcome: a same-content
+        re-assert is legitimately accepted (it asks for no transition), so this
+        asserts that whatever the door answers, the dead row does not move and
+        never comes back CURRENT.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t12906.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "epsilon")
+            sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) SET o.status='archived'",
+                params={"id": oid})
+            before = _carrier_row(sdk, "Object", "epsilon")
+            assert before[1] == "archived", before
+            try:
+                sdk.update_knowledge(oid, status=target)
+            except ValueError as exc:
+                assert "is TERMINAL for a :Object" in str(exc), exc
+            assert _carrier_row(sdk, "Object", "epsilon") == before, (
+                "a rendering lie moved a DEAD row: "
+                f"{before} -> {_carrier_row(sdk, 'Object', 'epsilon')} — the "
+                "guard approved the CONTENT and the store wrote the RENDERING")
+        finally:
+            sdk.close()
+
+    def test_a_hostile_repr_cannot_replace_the_refusal(self, tmp_path):
+        """A caller-controlled `__repr__` must not escape as its own exception.
+
+        The refusal interpolates the refused target with `!r`. For a non-`str`
+        target that is the CALLER'S `__repr__`, so a target that raises there
+        turned the promised `ValueError` into its own class (measured at
+        `70b37dcfc5`: `RuntimeError` — review cycle 8 P3). Not a fail-open (the
+        refusal still precedes the write and the row was unchanged), but the
+        contract this door advertises is "refuse with ValueError".
+        """
+
+        class _BoomRepr:
+            def __eq__(self, other):
+                return True
+
+            __hash__ = None
+
+            def __repr__(self):
+                raise RuntimeError("repr-boom")
+
+        sdk = TortoiseSDK(str(tmp_path / "t12906r.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "zeta")
+            sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) SET o.status='archived'",
+                params={"id": oid})
+            before = _carrier_row(sdk, "Object", "zeta")
+            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+                sdk.update_knowledge(oid, status=_BoomRepr())
+            assert _carrier_row(sdk, "Object", "zeta") == before, before
+
+            # ⛔ AND THE ID OPERAND (review cycle 9 P3): the same message
+            # interpolates `id_val`, so an id whose `__repr__` raises escaped as
+            # its own class too (measured: `RuntimeError: id-repr-boom`).
+            class _IdLie(str):
+                def __repr__(self):
+                    raise RuntimeError("id-repr-boom")
+
+            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+                sdk.update_knowledge(_IdLie(oid), status="live")
+            assert _carrier_row(sdk, "Object", "zeta") == before, before
+
+            # ⛔ AND THE CONFLICTING-WRITE door, ONE BRANCH ABOVE it (review cycle
+            # 10 P3): that refusal renders `id_val` too, so the same id object
+            # escaped as `RuntimeError: id-repr-boom` there. One helper for both
+            # doors, so this pins the sibling the earlier fix walked past.
+            class _StatusKey(str):
+                def __str__(self):
+                    return "status"
+
+            with pytest.raises(ValueError, match="CONFLICTING status write"):
+                sdk.update_knowledge(
+                    _IdLie(oid),
+                    **{_StatusKey("superseded"): "superseded", "status": "live"})
+            assert _carrier_row(sdk, "Object", "zeta") == before, before
+        finally:
+            sdk.close()
+
+    def test_a_str_subclass_cannot_forge_a_dead_word_or_crash_the_guard(
+            self, tmp_path):
+        """`isinstance(x, str)` is not the boundary — a SUBCLASS keeps the
+        caller's `__eq__`/`__hash__`, and the guard consulted both (#12896,
+        review cycles 6 and 7). Measured on a dead `archived` Object:
+
+            class HashCollide(str):          # content 'banana', lying __eq__
+                __hash__ = lambda self: hash("archived")
+                __eq__ = lambda self, other: True
+
+            status=HashCollide('banana')  ACCEPTED -> 'archived' -> 'banana'
+
+        ⛔ THROUGH THE **ENTAILMENT** SHORTCUT, not the dead→dead membership.
+        The comparison `'archived' == HashCollide('banana')` consults the
+        SUBCLASS's own `__eq__` FIRST — CPython gives a proper subclass priority
+        for the reflected comparison, BEFORE any content comparison (measured: a
+        logging `__eq__` is called with `'archived'` and `str`'s comparison never
+        runs; `str.__eq__('archived', HashCollide('banana'))` on its own is
+        `False`). Note this is a DIFFERENT mechanism from the non-`str` case: there
+        `str.__eq__(s, non_str)` returns `NotImplemented` and Python falls back to
+        the reflected call. Either way the write looked like "no transition asked
+        for". That shortcut runs FIRST, so it shadows the membership line for any
+        shape that lies about equality —
+        which is why a colliding `__hash__` ALONE does not lift a row (`in` also
+        compares, so a hash-only subclass whose content is `'banana'` is
+        REFUSED, measured).
+
+        The `TypeError` is a THIRD shape, and it needs an unhashable subclass
+        whose `__eq__` does NOT answer `True` — that one passes the entailment
+        check, reaches the membership test, and hashes:
+
+            class UnhashHonest(str):          # __eq__ never returns True
+                def __eq__(self, other): return other == "zzz"
+            status=UnhashHonest('banana')  TypeError: unhashable type
+
+        All three are closed by normalising the target with `str.__str__` (which
+        cannot consult an override) before ANY decision, so the guard reads the
+        value the store holds. The gate is `issubclass(type(x), str)`, not
+        `isinstance`: an object can claim `__class__ = str`, `isinstance`
+        believes it, and `str.__str__` on such an impostor RAISES (the impostor
+        arm below) — it is not a `str` word, so it takes the non-`str` path.
+
+        ⛔ The last arm pins the OTHER side: normalising must not over-refuse. A
+        plain subclass whose content IS the dead word is the same no-op it was —
+        `S('archived')` on an `archived` row is ACCEPTED and the row is unchanged.
+        """
+
+        class _HashCollide(str):
+            def __hash__(self):
+                return hash("archived")
+
+            def __eq__(self, other):
+                return True
+
+        class _UnhashHonest(str):
+            def __eq__(self, other):
+                return other == "zzz"
+
+        class _Impostor:
+            __class__ = str
+
+            def __eq__(self, other):
+                return True
+
+        class _PlainSub(str):
+            pass
+
+        sdk = TortoiseSDK(str(tmp_path / "t12882s.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "eta")
+            sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) SET o.status='archived'",
+                params={"id": oid})
+            before = _carrier_row(sdk, "Object", "eta")
+            assert before[1] == "archived", before
+
+            for target, label in ((_HashCollide("banana"), "entailed-door"),
+                                  (_UnhashHonest("banana"),
+                                   "unhashable membership"),
+                                  (_Impostor(), "__class__ impostor")):
+                with pytest.raises(ValueError,
+                                   match="is TERMINAL for a :Object"):
+                    sdk.update_knowledge(oid, status=target)
+                assert _carrier_row(sdk, "Object", "eta") == before, (
+                    f"a {label} target moved the dead row: "
+                    + repr(_carrier_row(sdk, "Object", "eta")))
+
+            # normalising must not over-refuse: same CONTENT as the dead word
+            sdk.update_knowledge(oid, status=_PlainSub("archived"))
+            assert _carrier_row(sdk, "Object", "eta") == before, (
+                "a plain `str` subclass re-asserting the dead word was not the "
+                "no-op it was: " + repr(_carrier_row(sdk, "Object", "eta")))
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("target", [["live"], {"a": 1}, 123, True, None,
+                                        _LyingEq()],
+                             ids=["list", "dict", "int", "bool", "none",
+                                  "lying-eq"])
+    def test_a_composed_non_string_status_is_refused_too(self, tmp_path, target):
+        """The allowance is a COHERENCE test, not a licence for any value.
+
+        The three conjuncts that admit the un-supersede read the KEY supplied
+        (`_status_key_leaves_the_dead_state`) and the carriers the call CLEARS —
+        never the value written. So a non-string target that also clears both
+        carriers rode the coherent shape into the row, measured at the head
+        before this pin existed:
+
+            status=123     + both clears -> (123, None, None)
+            status=['live'] + both clears -> (['live'], None, None)
+            status=None    + both clears -> (None, None, None)
+            status={'a':1} + both clears -> (None, None, None)   (#7369)
+
+        — i.e. the row went CURRENT on a word nobody can read, and for the two
+        null shapes the record kept folding `superseded` against a current graph
+        (#9974's damage direction, one call away). The settled decision on
+        #12827 licenses exactly ONE shape (`status='live'` with both carriers
+        cleared), so the allowance now requires a `str` target.
+
+        ⛔ This is NOT a vocabulary check: an undeclared STRING word is still
+        accepted (#10371 / #8166 — an `:Object`'s status is unvalidated). Only the
+        non-string half is pinned here.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t12882c.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "zeta")
+            sdk.update_knowledge(oid, status="superseded",
+                              supersededBy="zeta-v2")
+            assert _carrier_row(sdk, "Object", "zeta")[1:] == (
+                "superseded", "zeta-v2", None)
+            before = _carrier_row(sdk, "Object", "zeta")
+            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+                sdk.update_knowledge(oid, status=target,
+                                  supersededBy=None, supersededAt=None)
+            assert _carrier_row(sdk, "Object", "zeta") == before, (
+                "a refused composed write moved the row: "
+                + repr(_carrier_row(sdk, "Object", "zeta")))
+        finally:
+            sdk.close()
+
+    def test_a_non_string_status_on_a_LIVE_row_is_still_the_undeclared_word_hole(
+            self, tmp_path):
+        """The sibling pin, so the guard above is not read as a vocabulary.
+
+        A live row accepts these exactly as it did before — the vocabulary hole
+        for Objects is #10371 and needs per-kind resolution (§4.3: a pack kind
+        validates against its own declared words). What this change adds is the
+        LIFECYCLE half, not the vocabulary half.
+
+        ⚠️ This pin also records the RESIDUAL around it, and one measurement that
+        changed. It stores a LIST as the status, so a LATER lifecycle write on this
+        row used to raise `TypeError: unhashable type: 'list'` out of the guard's
+        dead-set membership test — the same defect class one layer down (the STORED
+        side, #12869), reachable only because this vocabulary hole exists. The dead
+        set is now built from `str` STORED values only, so that traceback is gone
+        at this site: a non-`str` stored value is not a dead WORD, the dead set is
+        empty, and the write is `continue`d. ⛔ #12869 is NOT closed by this —
+        re-measure it there before assuming its symptom is gone; what is pinned
+        here is only that the LIVE-row vocabulary half is unchanged.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t10192v.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "epsilon")
+            # ⛔ THE ROW MUST CARRY A STORED WORD, or this pin proves NOTHING
+            # (#12882 review R1). `_make_carrier_entity` mints an Object with no
+            # `status` key at all, and the guard exits at `if not _np_stored:
+            # continue` BEFORE the dead-set comparison — so the write below was
+            # accepted because there was no word to compare, not because a live
+            # word is excluded from the dead set. Measured: the mutant that
+            # refuses a non-string when the stored word is not dead (the #10371
+            # live-row hole this pin claims to keep open) left the unseeded pin
+            # GREEN, and a `status='live'`-seeded control row was refused by that
+            # same mutant. The seed makes the assertion discriminating: the
+            # stored word is `live`, it is NOT in the family's dead set, so the
+            # write must still be accepted.
+            sdk.update_knowledge(oid, status="live")
+            assert _carrier_row(sdk, "Object", "epsilon")[1] == "live"
+            sdk.update_knowledge(oid, status=["live"])
+            assert _carrier_row(sdk, "Object", "epsilon")[1] == ["live"]
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("target", [["live"], {"a": 1}, 123], ids=str)
+    def test_a_non_string_stored_status_does_not_crash_the_dead_set(
+            self, tmp_path, target):
+        """A non-`str` STORED value is not a dead WORD, so it must not raise.
+
+        `_np_dead` used to run `s in _np_terminal` over EVERY stored value, so an
+        unhashable one (`['live']`) raised `TypeError: unhashable type: 'list'`
+        out of `update_entity` (#12869). The entailed shortcut had been hiding it
+        for the IDEMPOTENT case only — `['live'] == ['live']` was True, so the
+        write `continue`d — which means tightening that shortcut's type check
+        REVEALED the traceback as a REGRESSION on an idempotent rewrite (measured
+        on `d2872f0967`). The dead set now takes `str` stored values only, so both
+        cases are handled the way they were before the guard looked at types at
+        all: the row holds no dead WORD, so no transition is refused, and no
+        traceback escapes the door.
+
+        ⛔ The assertion is "did not raise, row is intact" — NOT a claim about
+        which word lands. A live row's vocabulary is #10371's business, and a
+        `str` target is not involved here.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t12869dead.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "kappa")
+            sdk.update_knowledge(oid, status=["live"])
+            assert _carrier_row(sdk, "Object", "kappa")[1] == ["live"]
+            # The write under test must complete: `TypeError` out of a door that
+            # promises a refusal is the defect this pins shut.
+            sdk.update_knowledge(oid, status=target)
+            assert _carrier_row(sdk, "Object", "kappa")[0] == oid
         finally:
             sdk.close()
 

@@ -154,6 +154,78 @@ def test_probe_1_every_terminal_status_resists_every_live_status(env, dead):
     assert _row(sdk, pid) == before
 
 
+# ══════════════════════════════════════════════════════════════════════
+# #12907 — the word the guard APPROVED is the word the driver STORED
+# ══════════════════════════════════════════════════════════════════════
+
+class _LyingLen(str):
+    """A `str` status whose RENDERING disagrees with its CONTENT (#12907).
+
+    A `str` subclass is a shape JSON/MCP cannot forge but a Python caller can.
+    Before the normalisation these pins require, the guard's word and the
+    driver's word were two different objects: measured on a live Point,
+    ``status=_LyingLen('superseded')`` stored ``''`` (the driver read
+    ``len()``/truthiness) while the journal recorded the approved
+    ``'superseded'`` — so the Point stayed CURRENT and ``rebuild_all`` would
+    have reverted the write.
+    """
+
+    def __len__(self) -> int:
+        return 0
+
+
+class _CollidingHash(str):
+    """A `str` status whose `__hash__`/`__eq__` collide with a LEGAL word.
+
+    ``'garbage'`` is not in §5's Point vocabulary, but under the collision
+    ``'garbage' in POINT_STATUS_VALUES`` answered True, so the vocabulary test
+    admitted an UNDECLARED word and stored it verbatim (measured).
+    """
+
+    def __hash__(self) -> int:
+        return hash("live")
+
+    def __eq__(self, other) -> bool:  # the lie IS the fixture
+        return True
+
+
+def test_the_written_word_is_the_word_the_guard_approved(env):
+    """#12907: normalise to the exact `str` content BEFORE the vocabulary test.
+
+    Mutant that reddens: drop the `str.__str__` normalisation in the Point arm
+    and the stored status becomes `''` while the journal still says
+    `superseded` — a graph/record divergence, not a refusal.
+    """
+    sdk, events = env
+    pid = _live(sdk)
+    assert _row(sdk, pid)["status"] == "live"
+
+    sdk.update_knowledge(pid, status=_LyingLen("superseded"))
+
+    after = _row(sdk, pid)
+    assert after["status"] == "superseded", (
+        "the driver stored a word the guard never approved (#12907): "
+        + repr(after))
+    blob = json.dumps(_mutations(events, pid))
+    assert "restatus" in blob, (
+        f"the terminalize must journal a restatus: {_mutations(events, pid)!r}")
+    assert '"superseded"' in blob, (
+        "the journal must carry the word the graph holds: " + blob)
+
+
+def test_an_undeclared_word_cannot_ride_a_colliding_hash(env):
+    """The vocabulary test must answer from CONTENT, not the caller's `__eq__`."""
+    sdk, _ = env
+    pid = _live(sdk)
+    before = _row(sdk, pid)
+
+    with pytest.raises(ValueError, match="Invalid status"):
+        sdk.update_knowledge(pid, status=_CollidingHash("garbage"))
+
+    assert _row(sdk, pid) == before, (
+        "a refused vocabulary write must leave the Point untouched")
+
+
 def test_the_legacy_outdated_flag_alone_makes_the_point_dead(env):
     """``outdated=true`` with a NULL status is terminal on every read surface
     (#2498), so it must be terminal on this door too."""
@@ -203,6 +275,277 @@ def test_a_null_status_legacy_point_can_still_be_given_one(env):
 
     sdk.update_knowledge(pid, status="live")
     assert _row(sdk, pid)["status"] == "live"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #12907 cycle 1 — the Point ARM's own two doors (exactness + rendering)
+# ══════════════════════════════════════════════════════════════════════
+
+class _Impostor:
+    """Claims `__class__ = str` — `isinstance` believes it, `type()` does not.
+
+    The normalisation the Point arm applies is gated on
+    `issubclass(type(x), str)`, so it correctly SKIPS this object (a real
+    `str.__str__` on it raises). That left `isinstance(_status, str)` as the
+    only type test, and the impostor passes it while its `__hash__`/`__eq__`
+    collide with the LEGAL word `'live'` — so the vocabulary test admitted an
+    object whose `replace()` the driver then rendered as `'archived'`: a §5
+    TERMINAL word written onto a live Point, with no journal record at all.
+    """
+
+    __class__ = str
+
+    def __eq__(self, other) -> bool:  # the lie IS the fixture
+        return True
+
+    def __hash__(self) -> int:
+        return hash("live")
+
+    def __contains__(self, item) -> bool:
+        return False
+
+    def __iter__(self):
+        return iter(())
+
+    def encode(self, *args):
+        return b"archived"
+
+    def __len__(self) -> int:
+        return 8
+
+    def replace(self, *args):
+        return "archived"
+
+    def __str__(self) -> str:
+        return "archived"
+
+
+class _HostileRepr:
+    """A caller operand whose `__repr__` raises (#12907 cycle 1, P3)."""
+
+    def __repr__(self) -> str:
+        raise RuntimeError("repr-boom")
+
+
+def test_an_impostor_cannot_write_a_terminal_word_on_a_live_point(env):
+    """#12907: the vocabulary test must be EXACT-type, not `isinstance`.
+
+    Mutant that reddens: restore `not isinstance(_status, str)`. Measured, the
+    pin REDS on the refusal it actually receives: the impostor reaches the
+    DECLARED-TRANSITION refusal (`'live' -> <_Impostor …>`), because the loop's
+    content comparison still holds. `ACCEPTED` + a stored `'archived'` is what
+    the PARENT does with BOTH pre-fix clauses restored — the graph/record
+    divergence (`journal delta 0`) `rebuild_all` reverts.
+    """
+    sdk, events = env
+    pid = _live(sdk)
+    before = _row(sdk, pid)
+    assert before["status"] == "live"
+
+    with pytest.raises(ValueError, match="Invalid status"):
+        sdk.update_knowledge(pid, status=_Impostor())
+
+    assert _row(sdk, pid) == before, (
+        "an impostor must not move a live Point, let alone to a terminal word: "
+        + repr(_row(sdk, pid)))
+    assert "restatus" not in json.dumps(_mutations(events, pid)), (
+        "a refused write must journal nothing: " + repr(_mutations(events, pid)))
+
+
+def test_a_hostile_repr_cannot_replace_a_point_refusal(env):
+    """#12907: the refusal's contract is the CLASS — `ValueError`, always.
+
+    Mutant that reddens: render the operand with the raw `!r` and this raises
+    `RuntimeError: repr-boom` instead (row unchanged either way, so this is a
+    contract break rather than a fail-open).
+    """
+    sdk, _ = env
+    pid = _live(sdk)
+    before = _row(sdk, pid)
+
+    with pytest.raises(ValueError, match="Invalid status"):
+        sdk.update_knowledge(pid, status=_HostileRepr())
+
+    assert _row(sdk, pid) == before
+
+
+class _StoredSub(str):
+    """A `str` SUBCLASS as the STORED row status — the read seam (#12907 c2).
+
+    No engine path returns one (measured: the driver normalises the parameter to
+    an exact `str`, so ``_force_status`` cannot mint it), which is why the seam
+    is injected at the row-set read. It exists because the cycle-1 repair
+    ``type(_stored) is not str: continue`` SKIPPED the declared-transition check
+    for every stored subclass where the parent checked them — a guard-STRENGTH
+    regression, and a weaker guard is not a fix even at nil reachability.
+    """
+
+
+def test_a_stored_subclass_still_gets_the_transition_check(env, monkeypatch):
+    """#12907 cycle 2, P3: normalising the STORED side must not skip it.
+
+    Mutant that reddens: restore ``type(_stored) is not str: continue`` and this
+    call is ACCEPTED, moving a `live` Point to the UNDECLARED `draft` — the
+    check the loop exists to perform, skipped on the strength of the value's
+    type alone.
+    """
+    sdk, events = env
+    pid = _live(sdk, "a claim whose stored word arrives as a subclass")
+    before = _row(sdk, pid)
+
+    graph = type(sdk._get_proj().g)
+    real = graph.query.__get__(sdk._get_proj().g, graph)
+
+    class _RowSet:
+        result_set = (((_StoredSub("live"),), 0),)
+
+    def query(_graph, cypher, *args, **kwargs):
+        if "collect(DISTINCT n.status)" in cypher:
+            return _RowSet()
+        return real(cypher, *args, **kwargs)
+
+    monkeypatch.setattr(graph, "query", query)
+
+    with pytest.raises(ValueError, match="refused the status transition"):
+        sdk.update_knowledge(pid, status="draft")
+
+    assert _row(sdk, pid) == before, (
+        "a stored subclass must still be CHECKED, not skipped: "
+        + repr(_row(sdk, pid)))
+    assert "restatus" not in json.dumps(_mutations(events, pid)), (
+        "the refused transition must journal nothing: "
+        + repr(_mutations(events, pid)))
+
+
+class _EqBoom(str):
+    """A `str` SUBCLASS address whose `__eq__` raises (#12907 cycle 2, P3)."""
+
+    __hash__ = str.__hash__
+
+    def __eq__(self, other):  # the raise IS the fixture
+        raise RuntimeError("eq-boom")
+
+
+class _LieEq(str):
+    """A `str` subclass that answers `True` to every content question."""
+
+    __hash__ = str.__hash__
+
+    def __eq__(self, other):  # the lie IS the fixture
+        return True
+
+
+def test_a_lying_eq_cannot_disarm_the_entailed_exemption(env, monkeypatch):
+    """#12907 cycle 3, P2: the ENTAILED test must compare CONTENT, not objects.
+
+    `_status_entailed` is what DISARMS the terminal guard, and that guard is the
+    only instrument for a stored word `_ALLOWED_TRANSITIONS` has no key for —
+    the declared-transition loop DEFERS on such a word, so a wrongly-entailed
+    call reaches the write with nothing left to refuse it. A `str` subclass
+    answers `__eq__` for whichever side of the tuple element it occupies, so
+    BOTH directions are measured here.
+
+    `deprecated` (not `retracted`) is the vehicle: it is terminal to the guard
+    and absent from the map, which is exactly the pair that leaves the guard as
+    the only refuser (that absence is asserted by
+    `test_deprecated_is_terminal_even_though_the_map_has_no_key` above, and
+    `test_a_map_less_stored_status_still_defers` pins the loop's deferral).
+
+    Mutant that reddens: (M2) compare the stored tuple / the rendered status
+    object directly (`_pt_statuses == (_lifecycle_rendered["status"],)`) and
+    BOTH phases (a) and (b) are ACCEPTED, storing `live` on a dead row (a
+    resurrection) with the guard never asked. (M3) destroy the exemption
+    outright (`_status_entailed = False`) and phase (c) is REFUSED — that is
+    what makes phase (c) discriminating, and it is only true because phase (c)
+    sits on a TERMINAL row (#12907 cycle 4, P3: on a live row the same phase
+    stayed GREEN under M3, because a live row's guard passes whether it was
+    asked or skipped).
+    """
+    sdk, events = env
+
+    # ── (a) the CALLER's object — reachable through `props`, no engine seam ──
+    pid = _live(sdk, "a claim held dead by a map-less word")
+    _force_status(sdk, pid, "deprecated")
+    before = _row(sdk, pid)
+    assert before["status"] == "deprecated"
+
+    with pytest.raises(ValueError, match="on a dead claim"):
+        sdk.update_knowledge(pid, status=_LieEq("live"))
+    assert _row(sdk, pid) == before, (
+        "a lying `__eq__` in the caller's own value must not disarm the "
+        "terminal guard: " + repr(_row(sdk, pid)))
+
+    # ── (b) the STORED object — the read seam, same guard ──
+    pid2 = _live(sdk, "a claim whose stored word arrives as a lying subclass")
+    _force_status(sdk, pid2, "deprecated")
+    before2 = _row(sdk, pid2)
+
+    graph = type(sdk._get_proj().g)
+    real = graph.query.__get__(sdk._get_proj().g, graph)
+
+    class _RowSet:
+        result_set = (((_LieEq("deprecated"),), 0),)
+
+    def query(_graph, cypher, *args, **kwargs):
+        if "collect(DISTINCT n.status)" in cypher:
+            return _RowSet()
+        return real(cypher, *args, **kwargs)
+
+    monkeypatch.setattr(graph, "query", query)
+    with pytest.raises(ValueError, match="on a dead claim"):
+        sdk.update_knowledge(pid2, status="live")
+    assert _row(sdk, pid2) == before2, (
+        "a stored lying `__eq__` must not disarm the terminal guard: "
+        + repr(_row(sdk, pid2)))
+
+    # ── (c) the LICENSED shape the exemption exists for, still entailed ──
+    # A read-modify-write echo is what the exemption was introduced for (#3305):
+    # a subclass ECHO of the row's own word reduces to that content, so it stays
+    # entailed and still lands. Without this the fix could "pass" by refusing
+    # everything — fail-closed is cheaper than fail-open, but it is not free.
+    # ⛔ The row MUST be TERMINAL. On a LIVE row this phase passes under an
+    # over-fix that destroys the exemption outright (`_status_entailed = False`),
+    # because a live row's guard passes whether it was asked or skipped — so a
+    # live-row phase asserted nothing (#12907 cycle 4, P3, measured).
+    monkeypatch.undo()
+    pid3 = _live(sdk, "a claim that echoes its own word through a subclass")
+    sdk.retract_point(pid3)
+    sdk.update_knowledge(pid3, status=_LieEq("retracted"), content="echoed, rewritten")
+    assert _row(sdk, pid3)["status"] == "retracted", (
+        "the entailed echo must land and must not disturb the terminal word: "
+        + repr(_row(sdk, pid3)))
+    assert sdk.get_point(pid3)["content"] == "echoed, rewritten", (
+        "the entailed path must still write the content it carried")
+
+    for _pid in (pid, pid2):
+        assert "restatus" not in json.dumps(_mutations(events, _pid)), (
+            "a refused write must journal nothing: "
+            + repr(_mutations(events, _pid)))
+
+
+def test_a_hostile_eq_address_cannot_replace_a_transition_refusal(env):
+    """#12907 cycle 2, P3: the address compare must not reach the caller.
+
+    Python tries the RIGHT operand's `__eq__` first when it is a proper
+    subclass of the left's type, so the pre-fix `_named_id == id_val` let a
+    caller's raising `__eq__` replace this refusal with `RuntimeError:
+    eq-boom` (row unchanged either way). The comparison is now content on the
+    LEFT behind an `issubclass` gate, so the caller's `__eq__` is unreachable.
+
+    Mutant that reddens: restore `_named_id == id_val` and this raises
+    `RuntimeError` instead of the promised `ValueError`.
+    """
+    sdk, events = env
+    pid = _live(sdk, "a claim addressed through a hostile __eq__")
+    before = _row(sdk, pid)
+
+    with pytest.raises(ValueError, match="refused the status transition"):
+        sdk.update_knowledge(_EqBoom(pid), status="draft")
+
+    assert _row(sdk, pid) == before, repr(_row(sdk, pid))
+    assert "restatus" not in json.dumps(_mutations(events, pid)), (
+        "a refused write must journal nothing: "
+        + repr(_mutations(events, pid)))
 
 
 # ══════════════════════════════════════════════════════════════════════
