@@ -1879,8 +1879,11 @@ def test_the_short_circuit_guard_does_not_refuse_an_honest_entrypoint():
 
     Fail-closed is only correct if it is not also false-closed: a `;`-separated second statement
     (the reason the split exists), an export on the LEFT of `&&` (it runs unconditionally), and a
-    redirection containing `&` (`>&2`, `&>file`, `|&`) are all ordinary statements and stay
-    credited. Mutation-proved in the opposite direction from the test above.
+    REDIRECT (`>&2`, `&>file`, `>|log` — they move a stream, they do not fork a subshell) are all
+    ordinary statements and stay credited. ⛔ `|&` used to be listed here as ordinary too; it is
+    NOT — it is a pipeline, every element of which runs in its own subshell (see the note at the
+    end of the table, and `test_a_statement_that_short_circuits_or_backgrounds_is_not_credited`).
+    Mutation-proved in the opposite direction from the test above.
     """
     for label, script, expected in (
         (
@@ -1938,3 +1941,64 @@ def test_the_real_entrypoint_statements_are_unconditional():
         "TORTOISE_VALUE_GATE": "${TORTOISE_VALUE_GATE:-1}",
         "TORTOISE_EMBED_GATE": "${TORTOISE_EMBED_GATE:-1}",
     }, stated
+
+
+#: The three ways a LATER statement takes an earlier `export K=1` back. Each must still retract
+#: when it is the right-hand side of `&&`/`||`.
+_RETRACTIONS = (
+    "unset TORTOISE_VALUE_GATE",
+    "export -n TORTOISE_VALUE_GATE",
+    "TORTOISE_VALUE_GATE=",
+)
+
+
+@pytest.mark.parametrize("retraction", _RETRACTIONS)
+def test_a_short_circuited_retraction_still_retracts(retraction):
+    """Review P0 at `a0d5b9ae4908` (measured) — crediting and retracting are DIFFERENT questions.
+
+    The cycle-1 fix folded the `&&`/`||` separator into one `conditional` flag, and the retraction
+    branches are gated on it — so once a retraction was declared conditional they did NOTHING at
+    all, not even `ambiguous.add`, and the earlier literal survived in `stated`, which
+    `switch_problem` PREFERS over `ambiguous`. Measured against `env -i … bash` ground truth:
+
+        export K=1 && unset K        gate: STATED K=1   bash: K UNSET   <-- false PASS
+        export K=1 && export -n K    gate: STATED K=1   bash: K UNSET   <-- false PASS
+        export K=1 && K=             gate: STATED K=1   bash: K=""      <-- false PASS
+
+    A short-circuited statement runs in the PARENT and may or may not execute, so whether the value
+    survives is unknowable to this reader — and "cannot be shown to hold" fails CLOSED. It is
+    retracted (and so lands on `ambiguous`, i.e. refused), never reported `STATED`.
+    Mutation-proved: restoring `not conditional` on the retraction branches reds all three.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        f"export TORTOISE_VALUE_GATE=1 && {retraction}\n"
+    )
+    assert stated == {}, f"a short-circuited retraction was skipped as if it never ran: {retraction!r} -> {stated}"
+    assert "TORTOISE_VALUE_GATE" in ambiguous, (retraction, ambiguous)
+
+
+def test_a_forked_retraction_does_NOT_retract():
+    """The other half of the split: a subshell cannot change the PARENT's environment.
+
+    `K= | cat` and `K= &` run in a subshell, so the parent still has the exported K — retracting on
+    them would be a FALSE REFUSAL of an honest config, the mirror of the fail-open above. Measured
+    on this box (`env -i … bash`): `export K=1` then either statement, then `echo "[${K-UNSET}]"`,
+    prints `[1]` — the value survives.
+
+    ⛔ The BARE-ASSIGNMENT spelling is the only one that reaches this clause, and that is the reason
+    the test uses it: `_SHELL_UNSET`/`_SHELL_EXPORT_UNEXPORT` anchor on `\s*$` inside a name
+    character class, so `unset K | cat` never matches them at all (it falls through to the mention
+    scan) — a pin written on that spelling passes for the WRONG reason and pins nothing. An earlier
+    draft of this test did exactly that and survived its own mutation; this one does not.
+
+    Mutation-proved: dropping `forked` from `retracts` (`not (depth > 0 or terminated)`) reds
+    exactly this test and nothing else.
+    """
+    for forked_retraction in ("TORTOISE_VALUE_GATE= | cat", "TORTOISE_VALUE_GATE= &"):
+        stated, _ = gate._shell_assignments(
+            f"export TORTOISE_VALUE_GATE=1\n{forked_retraction}\n"
+        )
+        assert stated == {"TORTOISE_VALUE_GATE": "1"}, (
+            f"a forked retraction cannot clear the parent's value, so the export must survive: "
+            f"{forked_retraction!r} -> {stated}"
+        )
