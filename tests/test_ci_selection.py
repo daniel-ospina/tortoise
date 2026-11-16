@@ -10574,18 +10574,24 @@ _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     # form ONLY. The map's more common forward-looking PROVENANCE boilerplate drops
     # `until` entirely (`… \`tools/ci_timing.py --refresh-durations\` replaces this
     # value from the first push-to-main junit sweep that includes the file`), which
-    # these arms cannot see; measured 2026-11-16 at 121 rows carrying it, 112 with a
-    # landed `was N` tail. That is the ungated-provenance-prose class, recorded on
-    # #9442 with the measurement rather than claimed closed here.
-    # ⛔ The WINDOW is `[^;\n]`, not `[^.;]` (#12962 cycle 7): the instrument arm's
-    # own subject is `tools/ci_timing.py`, so a window that excludes `.` cannot span
-    # the tool name it is anchored on — the arm returned quiet on the very row it was
-    # written for. A `;` (or the end of the line) still binds it.
-    r"|\buntil\s+(?:a\s+)?(?:CI\s+)?junit[^;\n]{0,80}?"
+    # these arms cannot see. That is the ungated-provenance-prose class, recorded on
+    # #9442 rather than claimed closed here. Its size is COUNTED, not asserted — at
+    # 3d74516 the rows whose tail names `--refresh-durations` and carries no `until`
+    # numbered 112, of which 106 carry a landed `; was N` tail (re-count rather than
+    # trusting the figures; an earlier revision of this comment asserted 121/112,
+    # which no counting of the class reproduces).
+    # ⛔ The WINDOW is the SENTENCE — `[^.;\n]*?` — and the anchor eats its OWN period
+    # (#12962 cycles 7-8). Two revisions each inverted a different polarity: `[^.;]`
+    # cannot span `tools/ci_timing.py`, so the arm was silent on the very row it was
+    # written for; `[^;\n]{0,80}` let the window cross a `.` into the NEXT sentence,
+    # where `What the weight covers:` — the map's dominant opener, 121 occurrences —
+    # supplied a present-tense verb and falsely red a correctly past-tensed row. That
+    # is the over-block this arm's own contract forbids, so it is not a nit:
+    # `tools/ci_timing(?:\.py)?` consumes the anchor's period, which restores the
+    # sentence bound with no character budget to be surprised by.
+    r"|\buntil\s+(?:a\s+)?(?:CI\s+)?junit[^.;\n]*?"
     r"\b(?:carries|lands|collects|measures|covers|exists|arrives)\b"
-    r"|\buntil\s+`?tools/ci_timing[^;\n]{0,80}?"
-    r"\b(?:replaces|re-derives|measures|collects|covers)\b"
-    r"|\buntil\s+`?-*refresh-durations[^;\n]{0,80}?"
+    r"|\buntil\s+`?tools/ci_timing(?:\.py)?[^.;\n]*?"
     r"\b(?:replaces|re-derives|measures|collects|covers)\b",
     re.IGNORECASE)
 
