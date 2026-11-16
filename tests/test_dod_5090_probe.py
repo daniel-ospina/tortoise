@@ -11639,8 +11639,10 @@ def test_12549_an_EXPORTED_assignment_exports_its_name_too(tmp_path, monkeypatch
     assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
     # ⛔ `export -n FLAG` REMOVES the export attribute and `export -f FLAG` exports a
     # FUNCTION (a different namespace), so neither may ADD the name — reading either as a
-    # plain arm would be a NEW false arm, one option character over from defect 4.
-    for revoke in ("export -n TORTOISE_EMBED_GATE", "export -f TORTOISE_EMBED_GATE"):
+    # plain arm would be a NEW false arm, one option character over from defect 4. The
+    # QUOTED argument is the same command and must behave identically.
+    for revoke in ("export -n TORTOISE_EMBED_GATE", "export -f TORTOISE_EMBED_GATE",
+                   'export -n "TORTOISE_EMBED_GATE"'):
         (tmp_path / "entrypoint.sh").write_text(
             "#!/bin/bash\n" + revoke + "\nTORTOISE_EMBED_GATE=1\n",
             encoding="utf-8")
@@ -11678,8 +11680,14 @@ def test_12549_the_export_attribute_is_a_MOMENT_not_a_file_property(
         "unset with `;`": "unset TORTOISE_EMBED_GATE;",
         "unset with `&&`": "unset TORTOISE_EMBED_GATE && true",
         "unset -v": "unset -v TORTOISE_EMBED_GATE",
+        # ⛔ QUOTED targets are the same `unset`, and dropping them put the arm and the
+        # disarm in one record: `on: True` beside a `unset_declarations` entry for the
+        # very line that revoked it (fresh review, P1).
+        'unset "F"': 'unset "TORTOISE_EMBED_GATE"',
+        "unset 'F'": "unset 'TORTOISE_EMBED_GATE'",
         # `help export`: "-n remove the export property from each NAME".
         "export -n": "export -n TORTOISE_EMBED_GATE",
+        'export -n "F"': 'export -n "TORTOISE_EMBED_GATE"',
     }
     for spelling, revocation in revocations.items():
         (tmp_path / "entrypoint.sh").write_text(
@@ -11693,6 +11701,29 @@ def test_12549_the_export_attribute_is_a_MOMENT_not_a_file_property(
                    for entry in shipped["unset_declarations"]), (spelling, shipped)
         # …and the arming IMAGE BUILD file does not paper over it.
         assert shipped["deployment"]["on"] is False, (spelling, shipped["deployment"])
+    # ⛔ `set -a` (allexport) is NOT a file-level shortcut: it confers the export
+    # attribute on each assignment while it is in force, so a later `export -n` still
+    # takes the flag OUT of the environment. A file-wide "everything exported" published
+    # this as `ON` (fresh review, P2-2).
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nset -a\nexport TORTOISE_EMBED_GATE=1\n"
+        "export -n TORTOISE_EMBED_GATE\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
+    # …and `set -a` plus a plain assignment IS an arm (each assignment re-confers it).
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nset -a\nTORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped
+    # ⛔ `export -n` RETAINS the variable's value (`help export`: it removes only the
+    # attribute), so a later bare `export FLAG` RE-PUBLISHES it. Clearing the value here
+    # published a false OFF (fresh review, P2-3).
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n"
+        "export -n TORTOISE_EMBED_GATE\nexport TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped
     # …the POSITIVE control: the bare-export HOUSE IDIOM still arms the file, because the
     # export publishes the value already assigned. Without this arm the per-line state
     # would read every `FLAG=...` + `export FLAG` entrypoint as silence.
@@ -11719,8 +11750,8 @@ def test_12549_a_blank_gate_key_is_not_blamed_on_an_UNRELATED_unset_variable(
     unset interpolation variable (MISSING_VAR) to a blank string — the file fixes no
     value"*, and a MEASURED `OFF` became `UNMEASURED` — `#12549` defect 1's own class
     (a cause the run did not measure), one layer in. The per-key question is answered by
-    re-resolving with the variable BOUND and comparing, so the literal blank stays a
-    measured `OFF`.
+    the resolver's own UNINTERPOLATED model (`config --no-interpolate`), so the literal
+    blank stays a measured `OFF`.
     """
     (tmp_path / "docker-compose.yml").write_text(
         "services:\n  app:\n    image: alpine\n    environment:\n"

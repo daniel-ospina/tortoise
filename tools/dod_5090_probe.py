@@ -2397,10 +2397,20 @@ CHANNEL_READERS: tuple[tuple[str, str], ...] = (
 #: channel is answered by the `docker` binary, so a box WITHOUT `docker compose` makes
 #: every compose file `UNRESOLVED` and holds row 1 on every tree. That is a fail-closed
 #: reading (never a false PASS), and it is declared here rather than discovered by a
-#: reader wondering why the row is held on a bare box. It also costs TWO spawns per
-#: compose file — the default set and the all-profiles set (see
-#: `COMPOSE_RESOLVER_ALL_PROFILES`) — which is why the per-file result is not
-#: re-resolved by any caller.
+#: reader wondering why the row is held on a bare box.
+#:
+#: ⚠️ **What it COSTS, measured rather than estimated** (fresh review, P2 — the sentence
+#: this replaces said "TWO spawns per compose file … which is why the per-file result is
+#: not re-resolved by any caller", and both halves were false). Each `_compose_channel`
+#: call spawns the resolver **twice** (the default set and the all-profiles set, see
+#: `COMPOSE_RESOLVER_ALL_PROFILES`), and **twice more** when the file carries a blank
+#: value, because the per-key blank question needs the `--no-interpolate` model of each
+#: (`_compose_blank_declarations`). And the callers DO re-resolve: `_channel_for` in the
+#: deployment walk, `_entrypoint_scripts` and `_compose_build_refs` each ask
+#: independently — plus the per-surface walk — so one compose file costs **8 spawns**
+#: armed and **10** on the blank path (counted, not estimated). The number is stated
+#: because a reader deciding whether to thread a resolved reading through needs it, not
+#: because it is small; on this box it is most of the suite's 220 s.
 COMPOSE_CHANNEL_HOST_DEPENDENCE = (
     "requires `docker compose` on the host; absent ⇒ every compose file is UNRESOLVED "
     "and row 1 HOLDS (fail-closed, never a false PASS)")
@@ -3410,11 +3420,16 @@ def _shell_export_args(line: str) -> tuple[list[str], set[str], str] | None:
         if word.startswith("-") and not names:
             options += word.lstrip("-")
             continue
-        match = _SHELL_EXPORT_ARG.match(word)
+        # ⛔ QUOTES ARE PART OF THE SPELLING: `export -n "FLAG"`, `export "FLAG=1"` and
+        # `unset "FLAG"` are legal shell, and a matcher that required a bare name put the
+        # first and the last in NO bucket at all — so the export attribute was never
+        # revoked and a later plain assignment published a FALSE ARM (fresh review, P1).
+        bare = word.strip("'\"")
+        match = _SHELL_EXPORT_ARG.match(bare)
         if match:
             name = match.group("name")
             names.append(name)
-            if word[len(name):len(name) + 1] == "=":
+            if bare[len(name):len(name) + 1] == "=":
                 assigned.add(name)
     return names, assigned, options
 
@@ -3432,47 +3447,59 @@ def _shell_unset_values(line: str) -> set[str]:
     # whitespace-only split then fails to revoke the export attribute — which leaves a
     # LATER plain assignment reading as a decision, i.e. the false ARM again (measured on
     # the `;` spelling, which shell scripts really use).
-    return {word for word in re.split(r"[ \t;&|()<>]+", match.group("names") or "")
-            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", word)}
+    # ⛔ The QUOTED target (`unset "FLAG"`, `unset 'FLAG'`) is the same `unset`, and a
+    # bare-identifier filter dropped it while `_shell_unset_target` — the OTHER reader of
+    # the same grammar — stripped the quotes and scored the disarm. Two readers that
+    # disagree published `on: True` beside a `unset_declarations` entry for the same line:
+    # a false ARM stated and contradicted in one string (fresh review, P1). Quotes are
+    # stripped here, and a COMPUTED name (`unset "$FLAG"`) is left alone on purpose — it
+    # is not a literal, and the loop's own `unknown` arm holds the file for it.
+    return {word.strip("'\"")
+            for word in re.split(r"[ \t;&|()<>]+", match.group("names") or "")
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", word.strip("'\""))}
 
 
-def _shell_export_states(text: str, flag: str) -> list[dict] | None:
-    """The export state IN EFFECT at each line for ``flag``; `None` = every line exported.
+def _shell_export_states(text: str, flag: str) -> list[dict]:
+    """The export state IN EFFECT at each line for ``flag``, one entry per line.
 
-    `None` means the script turns on `set -a` (allexport), where every assignment is
-    exported, so the caller treats every assignment as eligible.
-
-    Otherwise this is a small STATE MACHINE, one entry per line, because the export
-    attribute is a property of a MOMENT and not of the file:
+    The export attribute is a property of a MOMENT, not of the file, so a single
+    whole-file set is not the right model. Each entry is:
 
     * ``exported`` — is ``flag`` in the environment while this line runs?
-    * ``publish`` — for a BARE `export flag`, the value that line publishes: the last
-      value assigned *while the name was not exported*. This is this repo's own
-      entrypoint idiom (`FLAG=...` then `export FLAG`), and it is how bash behaves —
-      the export publishes the value already assigned.
-    * ``unexport`` — this line REMOVES the attribute (`export -n flag`), so the
-      environment loses the flag here and the line is a DISARMING declaration.
+    * ``publish`` — for a BARE `export flag`, the value that line publishes: whatever
+      the shell VARIABLE currently holds. That is this repo's own entrypoint idiom
+      (`FLAG=...` then `export FLAG`), and it is how bash behaves — `export NAME`
+      exports an existing variable **without changing its value**.
+    * ``unexport`` — this line REMOVES the attribute (`export -n flag`) or the
+      variable (`unset flag`), so the environment loses the flag here and the line is a
+      DISARMING declaration.
 
-    ⛔ Three separate measurements are folded in here, each one a false ARM or a false
-    HOLD that a single whole-file set produced:
+    ⛔ **What a whole-file set got wrong, each measured as a false ARM or a false HOLD:**
 
     1. **`export FLAG=1` exports `FLAG` exactly as `export FLAG` does** — the matcher
        that accepted only the BARE form ignored it, so a later plain `FLAG=0` was not a
        decision and the file published `ON` while bash runs `0` (`#12549` defect 4).
-    2. **`unset FLAG` REVOKES it** — the variable *and* its export attribute are gone,
-       so a later plain `FLAG=1` is a shell variable the process never sees. A
-       whole-file set kept the name and read that assignment as a decision: measured
-       `main` `OFF` → this branch `ON` on
-       `export FLAG=0; unset FLAG; FLAG=1` (fresh review, P1). `unset -f/-n` name a
-       FUNCTION / a NAMEREF and must NOT revoke the variable.
-    3. **`export -n FLAG` revokes it too** (`help export`: *"-n remove the export
-       property from each NAME"*), and it is reported as a disarm rather than skipped.
+    2. **`unset FLAG` REVOKES it** — the variable *and* its export attribute are gone, so
+       a later plain `FLAG=1` is a shell variable the process never sees. A whole-file set
+       kept the name and read that assignment as a decision: `main` `OFF` → `ON` on
+       `export FLAG=0; unset FLAG; FLAG=1` (fresh review, P1). `unset -f`/`-n` name a
+       FUNCTION / a NAMEREF and must NOT revoke the variable; the QUOTED target
+       (`unset "FLAG"`) does revoke it.
+    3. **`export -n FLAG` revokes it** (`help export`: *"-n remove the export property
+       from each NAME"*) **while RETAINING the value** — so a later bare `export FLAG`
+       re-publishes it, and clearing the value here published a false OFF (fresh review,
+       P2-3).
+    4. **`set -a` (allexport) is not a file-level shortcut** — it means every variable
+       ASSIGNED while it is in force gets the export attribute. `set -a` followed by
+       `export FLAG=1; export -n FLAG` leaves the flag OUT of the environment, which a
+       file-wide `None` ("everything exported") published as `ON` (fresh review, P2-2).
+       Allexport is therefore the machine's INITIAL state, and each assignment re-confers
+       the attribute exactly as bash does.
     """
     lines = text.splitlines()
-    if any(_SHELL_ALLEXPORT.match(line) for line in lines):
-        return None
-    exported = False
-    pending: str | None = None
+    allexport = any(_SHELL_ALLEXPORT.match(line) for line in lines)
+    exported = allexport
+    current: str | None = None
     states: list[dict] = []
     for line in lines:
         states.append({"exported": exported, "publish": None, "unexport": False})
@@ -3482,20 +3509,27 @@ def _shell_export_states(text: str, flag: str) -> list[dict] | None:
             if flag not in names:
                 continue
             if "n" in options:
-                exported, pending = False, None
-                states[-1]["unexport"] = True
+                exported = False
+                states[-1]["unexport"] = True      # the value is RETAINED
             elif "f" not in options:
-                if flag not in assigned:
-                    states[-1]["publish"] = pending
-                exported, pending = True, None
+                if flag in assigned:
+                    # `export FLAG=v` also SETS the variable: the value a later bare
+                    # `export FLAG` publishes is this one.
+                    current = _assigned_value(line, flag) or current
+                else:
+                    states[-1]["publish"] = current
+                exported = True
             continue
         if flag in _shell_unset_values(line):
-            exported, pending = False, None
+            exported, current = False, None
+            states[-1]["unexport"] = True
             continue
-        if not exported:
-            value = _assigned_value(line, flag)
-            if value is not None:
-                pending = value
+        value = _assigned_value(line, flag)
+        if value is not None:
+            current = value
+            # `set -a`: an assignment RE-CONFERS the attribute, so it re-arms here.
+            if exported or allexport:
+                exported = True
     return states
 
 
@@ -4099,13 +4133,12 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 # #12474, P2, measured). Reported in `unset_declarations` exactly as the
                 # compose value-less spelling is, so the direction is visible, not just
                 # scored.
-                # ⛔ The channel test is the FILE, not `shell_exports`: that value is
-                # `None` for a `set -a` (allexport) script as well as for a non-shell
-                # file, so keying the arm on it made every allexport entrypoint skip the
-                # arm and keep the earlier `export` standing — the same fail-open, still
-                # open, on the shape the reader explicitly models (fresh review of PR
-                # #12474, P2). ⛔ And BEFORE the exported-assignment gate, which
-                # `continue`s on any line that is not an export and would swallow this.
+                # ⛔ The channel test is the FILE, not `shell_exports`: keying the arm
+                # on it made every allexport entrypoint skip the arm and keep the earlier
+                # `export` standing — the same fail-open, still open, on the shape the
+                # reader explicitly models (fresh review of PR #12474, P2).
+                # ⛔ And BEFORE the exported-assignment gate, which `continue`s on any
+                # line that is not an export and would swallow this.
                 if posix.endswith(".sh"):
                     target = _shell_unset_target(line, flag)
                     if target == "value":
