@@ -228,7 +228,7 @@ def test_suggest_entry_points_with_graph_ranker():
     _set_confidence(sdk, p_low["id"], 0.05)
 
     # Without ranker — substring confidence order (identical lengths → tie).
-    plain = sdk.suggest_entry_points("pricing subscription", limit=10)  # noqa: F841
+    plain = sdk.search_knowledge("pricing subscription", mode="entry_points", limit=10)  # noqa: F841
     # With ranker — persisted EP confidence breaks the tie. The embedded FTS
     # gives zero RRF for this query (→ zero-signal fallback returns []), so
     # mock the hybrid query deterministically with rrf > 0 to exercise the
@@ -239,7 +239,10 @@ def test_suggest_entry_points_with_graph_ranker():
         {"id": p_low["id"], "content": "subscription pricing tiers model premium",
          "point_kind": "decision", "scores": {"rrf": 0.0082}},
     ]
-    ranked = sdk.suggest_entry_points("pricing subscription", limit=10, graph_ranker=ranker)
+    # The graph_ranker arm is SDK-internal (`search_knowledge(mode='entry_points')`
+    # dispatches without one), so the private lane is called directly: the public
+    # surface keeps no ranker option (#11609).
+    ranked = sdk._suggest_entry_points("pricing subscription", limit=10, graph_ranker=ranker)
     ids = [r["id"] for r in ranked if r["id"] in (p_high["id"], p_low["id"])]
     assert ids.index(p_high["id"]) < ids.index(p_low["id"])
     assert any("graph_ranking" in r for r in ranked)

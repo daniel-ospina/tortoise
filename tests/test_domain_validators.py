@@ -478,7 +478,7 @@ def graph_sdk():
 class TestGraphValidators:
     def test_orphan_use_case_fires(self, graph_sdk):
         ids = _seed_chain_violations(graph_sdk)
-        res = graph_sdk.validate_domain("product-strategy")
+        res = graph_sdk.graph_overview("validate_domain", domain="product-strategy")
         orphans = [v for v in res["violations"]
                    if v["rule"] == "orphan_use_case"]
         assert any(v["ref"] == ids["orphan_uc"]["id"] for v in orphans)
@@ -486,7 +486,7 @@ class TestGraphValidators:
     def test_draft_points_excluded_from_chain_rules(self, graph_sdk):
         """Draft orphan useCase → NOT orphan_use_case (draft exclusion)."""
         ids = _seed_chain_violations(graph_sdk)
-        res = graph_sdk.validate_domain("product-strategy")
+        res = graph_sdk.graph_overview("validate_domain", domain="product-strategy")
         draft_id = ids["draft_uc"]["id"]
         chain_rules = [v for v in res["violations"]
                        if v["rule"] in ("orphan_use_case",
@@ -500,7 +500,7 @@ class TestGraphValidators:
 
     def test_dangling_refs_fire(self, graph_sdk):
         ids = _seed_chain_violations(graph_sdk)  # noqa: F841
-        res = graph_sdk.validate_domain("product-strategy")
+        res = graph_sdk.graph_overview("validate_domain", domain="product-strategy")
         rules = {v["rule"] for v in res["violations"]}
         assert {"dangling_use_case_ref", "dangling_jtbd_ref",
                 "dangling_workflow_ref"} <= rules
@@ -514,7 +514,7 @@ class TestGraphValidators:
             objectKind="product-strategy:requirement",
             enabled_workflow="WF-MISSING-405",
         )
-        res = graph_sdk.validate_domain("product-strategy")
+        res = graph_sdk.graph_overview("validate_domain", domain="product-strategy")
         assert any(v["rule"] == "dangling_workflow_ref"
                    for v in res["violations"]), res["violations"]
 
@@ -526,7 +526,7 @@ class TestGraphValidators:
         graph_sdk.create_point(
             "dev:requirement", "legacy-shaped requirement",
             enabled_workflow="WF-MISSING-405", status="live")
-        res = graph_sdk.validate_domain("product-strategy")
+        res = graph_sdk.graph_overview("validate_domain", domain="product-strategy")
         assert any(v["rule"] == "dangling_workflow_ref"
                    for v in res["violations"]), res["violations"]
 
@@ -565,31 +565,31 @@ class TestGraphValidators:
             objectKind="product-strategy:requirement",
             enabled_workflow="WF-OK-405",
         )
-        res = graph_sdk.validate_domain("product-strategy")
+        res = graph_sdk.graph_overview("validate_domain", domain="product-strategy")
         assert not any(v["rule"] == "dangling_workflow_ref"
                        for v in res["violations"]), res["violations"]
 
     def test_wired_use_case_not_orphan(self, graph_sdk):
         ids = _seed_chain_violations(graph_sdk)
-        res = graph_sdk.validate_domain("product-strategy")
+        res = graph_sdk.graph_overview("validate_domain", domain="product-strategy")
         wired_v = [v for v in res["violations"]
                    if v["ref"] == ids["wired_uc"]["id"]]
         assert not any(v["rule"] == "orphan_use_case" for v in wired_v)
 
     def test_actionable_fields(self, graph_sdk):
         ids = _seed_chain_violations(graph_sdk)  # noqa: F841
-        res = graph_sdk.validate_domain("product-strategy")
+        res = graph_sdk.graph_overview("validate_domain", domain="product-strategy")
         assert res["violations"], "expected seeded violations"
         for v in res["violations"]:
             assert {"rule", "kind", "ref", "message", "fix"} <= set(v)
 
     def test_drift_empty_for_product_strategy(self, graph_sdk):
-        res = graph_sdk.validate_domain("product-strategy")
+        res = graph_sdk.graph_overview("validate_domain", domain="product-strategy")
         assert res["drift"] == []
 
     def test_unknown_domain_raises(self, graph_sdk):
         with pytest.raises(ValueError):
-            graph_sdk.validate_domain("no-such-domain-405")
+            graph_sdk.graph_overview("validate_domain", domain="no-such-domain-405")
 
     def test_wrapper_equivalence_with_legacy(self, graph_sdk):
         """sdk.check_structure (registry delegation) == legacy implementation
@@ -608,7 +608,7 @@ class TestGraphValidators:
         assert new == legacy_without_draft_orphan
 
     def test_empty_db_clean(self, graph_sdk):
-        res = graph_sdk.validate_domain("product-strategy")
+        res = graph_sdk.graph_overview("validate_domain", domain="product-strategy")
         assert res["ok"] is True
         assert res["violations"] == []
 

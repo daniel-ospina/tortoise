@@ -421,7 +421,7 @@ _UNRESOLVED = {
     # is a resolved read.
     "_raise_update_point_status_error",
     "_window_closure",
-    "expand_relationships",
+    "_expand_relationships",
     # f-string interpolates a computed fragment (`{_label}`, `{relationship_type}`,
     # `{_capture_passthrough_read_fields()}`, …) — the #9124 review's P1 shape,
     # which a placeholder substitution used to flatten into a false READ.
@@ -623,8 +623,8 @@ _UNRESOLVED = {
     "list_batch",
     "paginated_query",
     "query",
-    "search_sessions",
-    "suggest_entry_points",
+    "_search_sessions",
+    "_suggest_entry_points",
     "tortoise_fts_query",
     # ⛔ NO SECOND ROW FOR `calibrate_summary` / `_uncalibrated_ep_participants`.
     # They are declared ONCE, above (the #9063 entry). Both PRs that landed on

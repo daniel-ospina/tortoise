@@ -152,9 +152,15 @@ DESTINATION = {
     "tortoise_list_graphs": "tenancy:list_memory_graphs",
     "tortoise_taxonomy": "graph_overview",
     "tortoise_overview": "graph_overview",
-    # #4282 — the container itself. It is a REGISTRY tool, so the map owes it a
-    # row; its destination is its own target name.
+    # #4282 — the containers themselves. Each is a REGISTRY tool, so the map owes
+    # it a row; its destination is its own target name. #11609 Phase 2 added the
+    # READ/QUERY family beside `graph_overview`.
     "tortoise_graph_overview": "graph_overview",
+    "tortoise_search_knowledge": "search_knowledge",
+    "tortoise_list_knowledge": "list_knowledge",
+    "tortoise_check_confidence": "check_confidence",
+    "tortoise_explore_connections": "explore_connections",
+    "tortoise_review_link_candidates": "review_link_candidates",
     "tortoise_status": "graph_overview",
     "tortoise_health": "graph_overview",
     "tortoise_stale": "graph_overview",

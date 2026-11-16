@@ -45,7 +45,7 @@ try:
             _os.environ["TORTOISE_DB_URI"] = _uri
             _sdk = TortoiseSDK()
             try:
-                _sdk.status()
+                _sdk.graph_overview("status")
                 FALKORDB_AVAILABLE = True
             finally:
                 _sdk.close()

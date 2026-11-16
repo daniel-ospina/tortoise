@@ -204,15 +204,22 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   of them were in this listing (the fourth, `tortoise_backfill_v25`, was
     #   `http_policy=False`), so 66 - 3 = 63 measured here. Lowered to 63 with that
     #   measurement, not to whatever a green run last produced.
-    #   #11609 batch 2 (this change) — fourteen WRITE/MUTATE doors retired into six
+    #   #11609 Phase 2 (this branch) — nine READ/QUERY doors retired into five
+    #   containers. ALL NINE were `http_policy=True` and ALL FIVE containers are too,
+    #   so the listing moves by -9 + 5 = -4: 63 - 4 = 59, re-measured from the
+    #   registry's own `http_policy` population (64 live entries, 59 advertised; the
+    #   five stdio-only rows include `tortoise_mine_conversations`).
+    #   #11609 batch 2 (the WRITE/MUTATE containers) — fourteen doors retired into six
     #   containers. The move is NOT `http_policy`-neutral at either end, and the
     #   arithmetic must say so: `tortoise_dream` is the one absorbed door with
     #   `http_policy=False` (so 13 of the 14 were in this listing) and
     #   `tortoise_refresh_confidence` is the one container that is stdio-only (so 5
-    #   of the 6 join it): 63 - 13 + 5 = 55 measured here. The net is the same -8
-    #   the live surface moves by, but only because 13 - 5 = 8 — stating the net as
-    #   if both sides were wholly `http_policy=True` would have hidden a real
-    #   exemption behind a coincidence (the sibling derivation in
+    #   of the 6 join it): 59 - 13 + 5 = 51 measured here (56 live entries, 51
+    #   advertised, the five stdio-only rows being `expand_relationships`,
+    #   `index_files`, `mine_conversations`, `org_create`, `refresh_confidence`).
+    #   The two waves are disjoint at both ends, so their adjustments compose; stating
+    #   either one's net as if both sides were wholly `http_policy=True` would have
+    #   hidden a real exemption behind a coincidence (the sibling derivation in
     #   `test_10084_graph_argument_omit_first` records the same split).
     #   #11609 lane C (SOURCES/MINE/SESSION, this PR) — the listing is EXACTLY the
     #   ADVERTISED population minus its `http_policy=False` rows, so it moves with the
@@ -223,10 +230,17 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   `tortoise_mine_knowledge_from_directory`, `tortoise_org_create`,
     #   `tortoise_refresh_confidence` — measured, `set(TOOL_REGISTRY) - set(get_http_allowed())`),
     #   so the floor moves 55 = 60 - 5 -> 54 = 59 - 5, the same -1 the live surface moves.
-    # Anything BELOW 54 is unexplained shrinkage and this arm reds on it; lowering the
+    #   #11609 Phase 2 READ/QUERY (this PR, MERGED) — nine READ doors retire into five
+    #   containers (the sixth, `tortoise_graph_overview`, was already live via #10914).
+    #   ALL NINE doors were `http_policy=True` and ALL FIVE arriving containers are too,
+    #   so the listing moves by -9 + 5 = -4: 54 - 4 = **50**, re-measured from the
+    #   registry's own `http_policy` population (55 live entries, 50 advertised). The
+    #   exclusion set is still FIVE and unchanged by this wave, so the floor moves
+    #   exactly with the live surface: 50 = 50 live `http_policy` entries - 5.
+    # Anything BELOW 50 is unexplained shrinkage and this arm reds on it; lowering the
     # floor again needs the same kind of recorded reason, never a green run.
 
-    assert len(names) >= 54, f"default surface shrank to {len(names)}"
+    assert len(names) >= 50, f"default surface shrank to {len(names)}"
     # The floor is a proxy for the real invariant, and a proxy cannot tell a
     # recorded consolidation from a silent drop. Pin the invariant itself: the
     # default HTTP listing serves EXACTLY the registry's `http_policy` population

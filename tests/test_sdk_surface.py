@@ -76,14 +76,17 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # `supersede` -> `supersede_knowledge`, `update_entity` -> `update_knowledge`,
 # `file_decision` -> `write_question`, `file_human_approval` -> `record_decision` — and
 # added THREE (`supersede_knowledge`, `write_question`, `record_decision`;
-# `update_knowledge` already existed), a net -1: 120 -> 119. Both are the CHEAP
-# direction for this pin, and `high_water_counts` stays 150. 119 is what
+# `update_knowledge` already existed), a net -1: 120 -> 119. Then the two sibling lanes of
+# the same epic composed: this PR's READ/QUERY wave re-privatised fourteen read doors and
+# landed six containers (119 + 6 - 14 = 111), and the SOURCES/MINE/SESSION lane retired
+# seven and landed six (+6 - 7 = -1, so 111 -> 110). Both are the CHEAP
+# direction for this pin, and `high_water_counts` stays 150. 110 is what
 # `config/surface-manifest.yml` derives and `tools/surface-guard.py` pins as the frozen
 # baseline — so this literal and the re-cut baseline move in the same PR, as the
 # paragraph above requires. The waves are disjoint by construction: wave 1's membership
 # rule excluded any name a `tool_registry` entry bound, and the four doors Phase 2
 # re-keys were live MCP tools at that time.
-DECLARED_COUNT = 118
+DECLARED_COUNT = 110
 
 
 def _declaration() -> dict:

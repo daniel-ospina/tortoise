@@ -612,6 +612,14 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
         (3, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value fires the "
             "test-session redirect and the session-journal append, so a leaked `=true` in "
             "a production process would mint and journal `test_*` graphs"),
+    ("tortoise/cache_leg.py", "TORTOISE_TEST_MODE"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — this is the MIRROR of "
+            "`projection/__init__.py`'s redirect gate (#12943), and it must match that "
+            "gate's predicate EXACTLY or the probe diverges from the thing it mirrors. "
+            "Widening it to the truthy set would make `_redirected_to_a_server()` exempt "
+            "a construction the real gate does NOT redirect, and the counter would then "
+            "under-report the split #12943 exists to expose — the mirror's own docstring "
+            "names that as the one direction it can miss in"),
     ("tortoise/pack_state.py", "TORTOISE_TEST_MODE"):
         (2, "OVERRIDES (#4128): #4097's truthy-set parsing — HERE the truthy value switches "
             "graph-name DERIVATION on, which in a leaked production env targets phantom "

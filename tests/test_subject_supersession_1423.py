@@ -569,7 +569,10 @@ def test_provenance_chain_surfaces_the_subject_status(env):
     sid = node_id(sdk, "Subject", "Team Alpha")
     pt = sdk.create_point("statement", "Rollout is approved by the team",
                           authoredBy=sid)
-    chain = sdk.provenance(pt["id"])
+    # The chain is not an EP surface: the posterior gate is opted out, exactly as
+    # `_check_confidence_provenance` (mcp_server) does the same for the live door.
+    chain = sdk.check_confidence(pt["id"], include_provenance=True,
+        require_calibration=False)['provenance']
     assert chain["subject"]["name"] == "Team Alpha", chain
     # #9974 R1: a status-less birth leaves the property ABSENT — and this read
     # RENDERS an absent status as `'live'` (`live.status_as_reported`), the value
@@ -579,7 +582,8 @@ def test_provenance_chain_surfaces_the_subject_status(env):
     # `status` family at all (#9974 R1 review P2).
     assert chain["subject"]["status"] == "live", chain
     _apply(proj, sdk, [RECORD])
-    assert sdk.provenance(pt["id"])["subject"]["status"] == "superseded"
+    assert sdk.check_confidence(pt["id"], include_provenance=True,
+        require_calibration=False)['provenance']["subject"]["status"] == "superseded"
 
 
 # ── 4. the read side ─────────────────────────────────────────────────────

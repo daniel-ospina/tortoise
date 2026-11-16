@@ -193,10 +193,28 @@ def _memory(sdk, content: str = "a claim whose raw may be gone"):
     return p["id"]
 
 
+def _chain(sdk, point_id: str) -> dict:
+    """The provenance chain for ONE point — read through the CONTAINER that absorbed
+    the retired ``provenance`` door (#11609 Phase 2):
+    ``check_confidence(claim_id, include_provenance=True)``.
+
+    ⛔ The old public name no longer resolves (``sdk.provenance`` raises with its
+    recorded destination named — #3836 (c) forbids an alias layer), so a test that
+    called it would be asserting on a surface the product does not serve. The
+    container returns the same chain (``{"confidence": …, "provenance": <chain>}``)
+    whose ``raw`` block is still built by ``_raw_entry_for_point`` →
+    ``raw_state.raw_entry``, which is what the #3998 assertions read.
+    """
+    # The chain is not an EP surface: the posterior gate is opted out, exactly as
+    # `_check_confidence_provenance` (mcp_server) does the same for the live door.
+    return sdk.check_confidence(point_id, include_provenance=True,
+        require_calibration=False)['provenance']
+
+
 def _raw(sdk, url: str = RAW_URL) -> dict:
-    """The ``raw`` block as a READER sees it — through ``provenance``, never by
-    touching the node, so these assertions cannot pass by reading state the read
-    path would not surface.
+    """The ``raw`` block as a READER sees it — through the confidence container's
+    provenance chain, never by touching the node, so these assertions cannot pass by
+    reading state the read path would not surface.
 
     ⚠️ #4282 deleted `get_provenance_chain` (one row per `(source, reference)`
     hop); the surviving reader returns ONE chain whose `raw` block is built by the
@@ -204,7 +222,7 @@ def _raw(sdk, url: str = RAW_URL) -> dict:
     single-source assertion reads the same keys through `["raw"]`. The hop-shaped
     assertions that needed more than one row were removed with the reader.
     """
-    chain = sdk.provenance(_memory(sdk))
+    chain = _chain(sdk, _memory(sdk))
     assert chain, "no provenance row — the read went silent"
     raw = chain.get("raw")
     assert raw, "no raw block on the chain — the read went silent"
@@ -579,7 +597,7 @@ def test_memory_and_provenance_are_readable_and_labelled(sdk, cause):
     pid = _memory(s)
     if cause == RAW_DELETED:
         s.register_source(RAW_URL, "conversation", raw_state=cause)
-        raw = s.provenance(pid)["raw"]
+        raw = _chain(s, pid)["raw"]
     else:
         with pytest.raises(ValueError, match="observed live"):
             s.register_source(RAW_URL, "conversation", raw_state=cause)
@@ -632,7 +650,7 @@ def test_the_three_causes_are_distinguishable_through_the_read_path(sdk):
     plain = _source_props(s)
     seen = {cause: raw_entry(plain, observed=cause) for cause in RAW_OBSERVED_STATES}
     s.register_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
-    seen[RAW_DELETED] = s.provenance(pid)["raw"]
+    seen[RAW_DELETED] = _chain(s, pid)["raw"]
     assert len({r["raw_state"] for r in seen.values()}) == 3
     assert len({r["label"] for r in seen.values()}) == 3
     assert len({r["message"] for r in seen.values()}) == 3
@@ -1775,7 +1793,7 @@ def test_provenance_reads_do_not_raise_and_invent_no_raw_for_a_sourceless_point(
     plain = _source_props(s)
 
     s.register_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
-    prov = s.provenance(pid)                     # must not raise
+    prov = _chain(s, pid)                        # must not raise
     assert prov["raw"]["raw_state"] == RAW_DELETED
     assert "error" not in prov
 
@@ -1789,4 +1807,5 @@ def test_provenance_reads_do_not_raise_and_invent_no_raw_for_a_sourceless_point(
 
     # A point with NO source at all: still no raise, and NO raw key invented.
     orphan = s.create_point("statement", "orphan claim")["id"]
-    assert "raw" not in s.provenance(orphan)
+    assert "raw" not in s.check_confidence(orphan, include_provenance=True,
+        require_calibration=False)['provenance']

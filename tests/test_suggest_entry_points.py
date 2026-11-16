@@ -5,6 +5,8 @@ import os
 import sys
 import tempfile
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
@@ -37,7 +39,7 @@ def test_exact_match_returns_entity():
     db_path = _tmp_db()
     sdk = TortoiseSDK(db_path)
     _seed(sdk)
-    results = sdk.suggest_entry_points("competitor X", limit=5)
+    results = sdk.search_knowledge("competitor X", mode="entry_points", limit=5)
     assert len(results) >= 1
     result = results[0]
     assert "competitor X" in result["name"]
@@ -51,7 +53,7 @@ def test_partial_match_returns_multiple():
     db_path = _tmp_db()
     sdk = TortoiseSDK(db_path)
     _seed(sdk)
-    results = sdk.suggest_entry_points("competitor", limit=5)
+    results = sdk.search_knowledge("competitor", mode="entry_points", limit=5)
     assert len(results) >= 2  # X and Y
     names = {r["name"] for r in results}
     assert "competitor X analysis" in names
@@ -66,8 +68,7 @@ def test_kind_filter_narrows_results():
     db_path = _tmp_db()
     sdk = TortoiseSDK(db_path)
     _seed(sdk)
-    results = sdk.suggest_entry_points("competitor", limit=5,
-                                       kind_filter="competitor-research")
+    results = sdk.search_knowledge("competitor", mode="entry_points", kind="competitor-research", limit=5)
     assert len(results) >= 1
     for r in results:
         assert "competitor" in r["name"].lower()
@@ -75,8 +76,7 @@ def test_kind_filter_narrows_results():
     # Fallback results never claim high confidence: they stay in the
     # documented [0, 0.5) fallback band (#22) — kind_filter itself is only
     # applied on the string-match path (fallback honors no kind constraint).
-    filtered = sdk.suggest_entry_points("competitor", limit=5,
-                                        kind_filter="infrastructure")
+    filtered = sdk.search_knowledge("competitor", mode="entry_points", kind="infrastructure", limit=5)
     assert all(r["confidence"] < 0.5 for r in filtered)
     print("PASS test_kind_filter_narrows_results")
 
@@ -93,7 +93,7 @@ def test_no_match_returns_empty():
     db_path = _tmp_db()
     sdk = TortoiseSDK(db_path)
     _seed(sdk)
-    results = sdk.suggest_entry_points("nonexistentxyz123")
+    results = sdk.search_knowledge("nonexistentxyz123", mode="entry_points")
     assert results == [] or all(r["confidence"] < 0.5 for r in results), results
     print("PASS test_no_match_returns_empty")
 
@@ -107,7 +107,7 @@ def test_results_sorted_by_confidence():
     sdk.create_point("test", "quick fox jumps")
     sdk.create_point("test", "the fox says hello")
 
-    results = sdk.suggest_entry_points("quick")
+    results = sdk.search_knowledge("quick", mode="entry_points")
     # "quick fox jumps" (shortest content with match) should have highest confidence
     confidences = [r["confidence"] for r in results]
     assert confidences == sorted(confidences, reverse=True), \
@@ -116,12 +116,23 @@ def test_results_sorted_by_confidence():
 
 
 def test_empty_query_returns_empty():
-    """Empty or whitespace query returns [] — guard against CONTAINS ''."""
+    """Empty or whitespace query resolves nothing — guard against CONTAINS ''.
+
+    The public door is `search_knowledge(mode='entry_points')`: an EMPTY query is
+    refused there (a text-driven read has nothing to resolve) and the refusal
+    names the requirement, while a WHITESPACE-only query is accepted and resolves
+    to nothing (the lane strips it, so `CONTAINS ''` is never run). Both are
+    asserted below; the CONTAINS-'' guard itself lives in the lane the container
+    dispatches to, so it is asserted on that lane directly.
+    """
     db_path = _tmp_db()
     sdk = TortoiseSDK(db_path)
     _seed(sdk)
-    assert sdk.suggest_entry_points("") == []
-    assert sdk.suggest_entry_points("   ") == []
+    with pytest.raises(ValueError, match="requires query="):
+        sdk.search_knowledge("", mode="entry_points")
+    assert sdk.search_knowledge("   ", mode="entry_points") == []
+    assert sdk._suggest_entry_points("") == []
+    assert sdk._suggest_entry_points("   ") == []
     print("PASS test_empty_query_returns_empty")
 
 
@@ -139,7 +150,7 @@ def test_limit_respects_confidence_sort():
     # One exact match
     sdk.create_point("test", "competitor")
 
-    results = sdk.suggest_entry_points("competitor", limit=3)
+    results = sdk.search_knowledge("competitor", mode="entry_points", limit=3)
     # Exact match must be in results and at top
     assert any(r["confidence"] == 1.0 for r in results), \
         f"exact match missing from results: {results}"
@@ -163,7 +174,7 @@ def test_fallback_confidence_band_normalized_e2e():
     sdk = TortoiseSDK(db_path)
     _seed(sdk)
     # No content contains "analysis competitor" as a substring → fallback runs.
-    results = sdk.suggest_entry_points("analysis competitor", limit=5)
+    results = sdk.search_knowledge("analysis competitor", mode="entry_points", limit=5)
     assert len(results) >= 1, f"expected fallback results: {results}"
     confs = [r["confidence"] for r in results]
     assert all(0.0 <= c < 0.5 for c in confs), \
@@ -198,7 +209,7 @@ def test_fallback_confidence_scale_invariant_to_rrf():
         ]
 
     sdk.tortoise_fts_query = fake_fts
-    results = sdk.suggest_entry_points("no substring match at all", limit=5)
+    results = sdk.search_knowledge("no substring match at all", mode="entry_points", limit=5)
     confs = {r["id"]: r["confidence"] for r in results}
     assert confs["a"] == 0.49                       # strongest → top of band
     assert confs["b"] == 0.245                      # 0.49 * 0.5
@@ -224,7 +235,7 @@ def test_fallback_zero_signal_returns_empty():
         ]
 
     sdk.tortoise_fts_query = fake_fts
-    results = sdk.suggest_entry_points("zzz", limit=5)
+    results = sdk.search_knowledge("zzz", mode="entry_points", limit=5)
     assert results == []
     print("PASS test_fallback_zero_signal_returns_empty")
 

@@ -163,7 +163,7 @@ def test_hub_matches_raw_cypher(sdk):
     assert len(_raw_edge_types(graph, hub)) >= 3, "fixture must span ≥3 edge types"
 
     raw = _raw_relationships(graph, hub)
-    entries = sdk.expand_relationships(hub)
+    entries = sdk.explore_connections(hub, include_content=True)
 
     assert len(entries) == len(raw), (
         f"expand_relationships returned {len(entries)} of the {len(raw)} "
@@ -222,7 +222,7 @@ def test_direct_edge_hub_is_not_isolated(sdk):
         params={"id": hub},
     ).result_set
 
-    entries = sdk.expand_relationships(hub)
+    entries = sdk.explore_connections(hub, include_content=True)
     assert len(entries) == len(raw_edges), (
         f"a direct-edge hub read as {len(entries)} relationships, raw Cypher "
         f"reports {len(raw_edges)}: {entries!r}"
@@ -245,7 +245,7 @@ def test_direct_edge_target_is_not_isolated(sdk):
     target = _point(sdk, "claim E: the deploy was clean")
     sdk.create_direct_edge("NAND", source, target)
 
-    entries = sdk.expand_relationships(target)
+    entries = sdk.explore_connections(target, include_content=True)
     assert _expand_set(entries) == {("NAND", source)}, (
         f"the target of a direct edge read as isolated: {entries!r}"
     )
@@ -260,7 +260,7 @@ def test_direct_and_operator_edges_coexist(sdk):
     sdk.create_operator("IMPL", hub, [via_op])
     sdk.create_direct_edge("NAND", hub, direct)
 
-    entries = sdk.expand_relationships(hub)
+    entries = sdk.explore_connections(hub, include_content=True)
     assert _expand_set(entries) == {("IMPL", via_op), ("NAND", direct)}, (
         f"mixed wiring mis-reported: {entries!r}"
     )
@@ -273,7 +273,7 @@ def test_non_point_hub_is_not_isolated(sdk):
     nowhere, so the seed ``{id: []}`` was returned as the answer.
     """
     hub, peers = _hub_with_non_point_peers(sdk)
-    entries = sdk.expand_relationships(hub)
+    entries = sdk.explore_connections(hub, include_content=True)
     assert entries != [], (
         "an :Event hub with 4 operator-mediated relationships read as isolated "
         "— the anchor's label predicate excluded it (#6976)"
@@ -284,7 +284,7 @@ def test_non_point_hub_is_not_isolated(sdk):
 def test_non_point_peer_carries_its_own_layer_name(sdk):
     """A widened peer must not arrive empty: kind and text live per layer."""
     hub, peers = _hub_with_non_point_peers(sdk)
-    by_related = {e["related_id"]: e for e in sdk.expand_relationships(hub)}
+    by_related = {e["related_id"]: e for e in sdk.explore_connections(hub, include_content=True)}
     obj = by_related[peers["svc_a"]]
     assert obj["related_kind"] == "component", (
         "a :Object peer's kind lives on objectKind — reporting '' is the same "
@@ -318,7 +318,7 @@ def test_operator_without_is_operator_flag_is_visible(sdk):
         params={"oid": absent["id"]},
     )
 
-    related = {e["related_id"] for e in sdk.expand_relationships(hub)}
+    related = {e["related_id"] for e in sdk.explore_connections(hub, include_content=True)}
     assert {a, b} <= related, (
         "an operator carrying op_type with is_operator=false made its "
         "endpoints invisible (#943 parity is what every other reader uses)"
@@ -368,7 +368,7 @@ def test_hybrid_peer_is_not_a_co_endpoint(sdk):
     )
     sdk.create_operator("IMPL", hub, [plain_peer, hybrid["id"]])
 
-    related = {e["related_id"] for e in sdk.expand_relationships(hub)}
+    related = {e["related_id"] for e in sdk.explore_connections(hub, include_content=True)}
     assert plain_peer in related, (
         f"the genuine claim peer was dropped with the hybrid: {related!r}"
     )
@@ -384,13 +384,13 @@ def test_hybrid_peer_is_not_a_co_endpoint(sdk):
 def test_isolated_point_still_returns_empty(sdk):
     """The empty case stays an empty LIST — not an error, not a placeholder."""
     lonely = _point(sdk, "an isolated statement with no edges at all")
-    assert sdk.expand_relationships(lonely) == []
+    assert sdk.explore_connections(lonely, include_content=True) == []
 
 
 def test_isolated_non_point_still_returns_empty(sdk):
     """Same for the labels the widening admits — isolation is not label-bound."""
     lonely = _event(sdk, "an isolated incident with no edges")
-    assert sdk.expand_relationships(lonely) == []
+    assert sdk.explore_connections(lonely, include_content=True) == []
 
 
 def test_related_status_survives_the_widening(sdk):
@@ -421,7 +421,7 @@ def test_related_status_survives_the_widening(sdk):
     sdk.create_direct_edge("IMPL", hub, event_peer)
 
     statuses = {e["related_id"]: e["related_status"]
-                for e in sdk.expand_relationships(hub)}
+                for e in sdk.explore_connections(hub, include_content=True)}
     assert statuses[live_peer] == "live"
     assert statuses[stale_peer] == "superseded"
     # :Object / :Subject carry a `status` family, so the lookup must find it
@@ -547,7 +547,7 @@ def test_one_malformed_status_row_costs_one_peer_not_all(sdk):
     real_get_proj = sdk._get_proj
     sdk._get_proj = lambda: _Proj()
     try:
-        entries = sdk.expand_relationships(hub)
+        entries = sdk.explore_connections(hub, include_content=True)
     finally:
         sdk._get_proj = real_get_proj
 
@@ -581,7 +581,7 @@ def test_non_scalar_related_id_does_not_fail_the_read(sdk):
         params={"id": peer},
     )
 
-    entries = sdk.expand_relationships(hub)
+    entries = sdk.explore_connections(hub, include_content=True)
     assert entries, "the whole read was lost on a non-scalar related_id"
     # The corrupt peer cannot match a status row, so its annotation is blank —
     # but the ENTRY survives and the call returns.
@@ -605,7 +605,7 @@ def test_one_failing_label_does_not_blank_every_related_status(sdk):
     real_get_proj = sdk._get_proj
     sdk._get_proj = lambda: _Proj()
     try:
-        entries = sdk.expand_relationships(hub)
+        entries = sdk.explore_connections(hub, include_content=True)
     finally:
         sdk._get_proj = real_get_proj
 
@@ -725,7 +725,7 @@ def test_unhashable_peer_text_does_not_empty_the_batch(sdk):
         params={"oid": op["id"]},
     )
 
-    entries = sdk.expand_relationships(hub)
+    entries = sdk.explore_connections(hub, include_content=True)
     related = {e["related_id"] for e in entries}
     assert {good, list_content, num_content} <= related, (
         "a list/dict-valued peer text or operator label emptied the "
@@ -746,7 +746,7 @@ def test_operator_anchor_does_not_report_its_own_typed_edges_as_direct(sdk):
     peer_b = _point(sdk, "input B")
     op = sdk.create_operator("IMPL", hub, [peer_a, peer_b], label="addresses")
 
-    entries = sdk.expand_relationships(op["id"])
+    entries = sdk.explore_connections(op["id"], include_content=True)
     assert not [e for e in entries if e["operator_id"] == ""], (
         "the operator's own typed edges were reported as operator-less direct "
         f"edges of the operator itself: {entries!r}"

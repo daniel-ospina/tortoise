@@ -88,27 +88,25 @@ def test_search_sessions_temporal_after_before():
         _index_session(sdk, "s4", None)  # no startedAt — excluded when bound set
 
         # after only
-        got = _ids(sdk.search_sessions("session", after="2026-07-10T00:00:00Z"))
+        got = _ids(sdk.search_knowledge("session", mode="sessions", after="2026-07-10T00:00:00Z"))
         assert got == {"s2", "s3"}, got
         # before only (inclusive)
-        got = _ids(sdk.search_sessions("session", before="2026-07-31T18:45:00+00:00"))
+        got = _ids(sdk.search_knowledge("session", mode="sessions", before="2026-07-31T18:45:00+00:00"))
         assert got == {"s1", "s2", "s3"}, got
-        got = _ids(sdk.search_sessions("session", before="2026-07-16T00:00:00Z"))
+        got = _ids(sdk.search_knowledge("session", mode="sessions", before="2026-07-16T00:00:00Z"))
         assert got == {"s1", "s2"}, got
         # after + before window
-        got = _ids(sdk.search_sessions("session", after="2026-07-10T00:00:00Z",
-                                       before="2026-07-20T00:00:00Z"))
+        got = _ids(sdk.search_knowledge("session", mode="sessions", after="2026-07-10T00:00:00Z", before="2026-07-20T00:00:00Z"))
         assert got == {"s2"}, got
         # composed: agent + date bounds
         _index_session(sdk, "s5", _JUL_20, agent="opine")
-        got = _ids(sdk.search_sessions("session", agent="pi",
-                                       after="2026-07-15T00:00:00Z"))
+        got = _ids(sdk.search_knowledge("session", mode="sessions", agent="pi", after="2026-07-15T00:00:00Z"))
         assert got == {"s2", "s3"}, got
         # no-startedAt session is excluded whenever a bound is set
-        got = _ids(sdk.search_sessions("session", after="2026-01-01T00:00:00Z"))
+        got = _ids(sdk.search_knowledge("session", mode="sessions", after="2026-01-01T00:00:00Z"))
         assert "s4" not in got and len(got) == 4, got
         # ...but appears in unbounded results
-        got = _ids(sdk.search_sessions("session"))
+        got = _ids(sdk.search_knowledge("session", mode="sessions"))
         assert "s4" in got, got
     finally:
         sdk.close()
@@ -124,16 +122,14 @@ def test_search_sessions_temporal_datetime_bounds():
 
         # naive datetime treated as UTC
         after = datetime(2026, 7, 10)
-        got = _ids(sdk.search_sessions("session", after=after))
+        got = _ids(sdk.search_knowledge("session", mode="sessions", after=after))
         assert got == {"d2", "d3"}, got
         # aware datetime in another tz converted to UTC (PDT = UTC-7)
         before = datetime(2026, 7, 20, 12, 0, tzinfo=timezone(timedelta(hours=-7)))
-        got = _ids(sdk.search_sessions("session", before=before))
+        got = _ids(sdk.search_knowledge("session", mode="sessions", before=before))
         assert got == {"d1", "d2"}, got
         # string with Z + offset both work together
-        got = _ids(sdk.search_sessions("session",
-                                       after="2026-07-01T00:00:00Z",
-                                       before="2026-07-31T00:00:00+00:00"))
+        got = _ids(sdk.search_knowledge("session", mode="sessions", after="2026-07-01T00:00:00Z", before="2026-07-31T00:00:00+00:00"))
         assert got == {"d1", "d2", "d3"}, got
     finally:
         sdk.close()
@@ -149,10 +145,10 @@ def test_naive_iso_string_treated_as_utc():
         _index_session(sdk, "j1", _JUL_01)
         _index_session(sdk, "j2", _JUL_15)
         # Jul 1 10:00Z stored; after naive "2026-07-01T10:00:00" (= UTC) keeps j1.
-        res = sdk.search_sessions("kw-j1", after="2026-07-01T10:00:00", limit=5)
+        res = sdk.search_knowledge("kw-j1", mode="sessions", after="2026-07-01T10:00:00", limit=5)
         assert "j1" in _ids(res), res
         # The same bound expressed as a naive datetime keeps j1 (both = UTC).
-        res_dt = sdk.search_sessions("kw-j1", after=datetime(2026, 7, 1, 10, 0, 0), limit=5)
+        res_dt = sdk.search_knowledge("kw-j1", mode="sessions", after=datetime(2026, 7, 1, 10, 0, 0), limit=5)
         assert _ids(res) == _ids(res_dt), (res, res_dt)
     finally:
         sdk.close()
@@ -165,11 +161,11 @@ def test_offset_string_normalized_to_utc():
         _index_session(sdk, "j1", _JUL_01)   # 2026-07-01T10:00:00+00:00
         _index_session(sdk, "j2", _JUL_15)
         # 2026-07-01T12:00:00+02:00 == 2026-07-01T10:00:00Z → keeps j1.
-        res = sdk.search_sessions("kw-j1", after="2026-07-01T12:00:00+02:00", limit=5)
-        res_utc = sdk.search_sessions("kw-j1", after="2026-07-01T10:00:00Z", limit=5)
+        res = sdk.search_knowledge("kw-j1", mode="sessions", after="2026-07-01T12:00:00+02:00", limit=5)
+        res_utc = sdk.search_knowledge("kw-j1", mode="sessions", after="2026-07-01T10:00:00Z", limit=5)
         assert _ids(res) == _ids(res_utc), (res, res_utc)
         # 2026-07-01T13:00:00+02:00 == 11:00Z → after j1's 10:00Z → excluded.
-        res_after = sdk.search_sessions("kw-j1", after="2026-07-01T13:00:00+02:00", limit=5)
+        res_after = sdk.search_knowledge("kw-j1", mode="sessions", after="2026-07-01T13:00:00+02:00", limit=5)
         assert "j1" not in _ids(res_after), res_after
     finally:
         sdk.close()

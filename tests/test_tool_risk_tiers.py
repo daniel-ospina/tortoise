@@ -45,13 +45,28 @@ from tortoise.tool_registry import (
 
 #: The tools the #4122 ruling is about. They refresh stored state, so they are
 #: not pure reads; they keep a read permission, so they are not writes.
-#: ⛔ THREE -> TWO in #11609 batch 1: `tortoise_packs_list` was the third and is
-#: ARCHIVED (`archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py`), so
-#: the `maintenance` tier is carried by the two confidence tools today. The RULING is
-#: unchanged — a maintenance entry is not a read and must not claim `readOnlyHint`.
+#: ⛔ Counts are NOT the pin, the names below are: `tortoise_packs_list` was the third
+#: and is ARCHIVED (`archive/mcp-tools/b1-removed-no-destination/`), #11609 Phase 2 then
+#: added the four containers that reach a declared read-through writer, and #12951 added
+#: `tortoise_provenance`. The RULING is unchanged — a maintenance entry is not a read
+#: and must not claim `readOnlyHint`.
 MAINTENANCE_TOOLS = (
+    # #3883/#4282: the retired door keeps its entry (served() includes the shims).
     "tortoise_get_confidence",
     "tortoise_compute_confidence",
+    # #11609 Phase 2 — the containers that absorbed the confidence/topic reads are
+    # all "refreshes stored state, still callable by a `graphs:read` key": each
+    # recomputes or re-derives on read rather than serving a stored answer.
+    "tortoise_check_confidence",
+    "tortoise_list_knowledge",
+    "tortoise_search_knowledge",
+    # #12951 fresh-context review (ISSUE 1): the retired `tortoise_provenance` door
+    # answers the chain through `check_confidence`, whose claim arm reaches
+    # `get_confidence` — whose lazy-consistency path DREAMS a dirty root
+    # (`SET n.confidence`). It declared `read`, so its #3883 shim shipped
+    # `readOnlyHint: true` over a `graphs:read` call that writes. It is the same
+    # writer as the two rows above, reached through one more hop.
+    "tortoise_provenance",
 )
 
 
@@ -138,10 +153,16 @@ class TestTheRiskAxis:
         #   lane B's six containers reads — four are `destructive` and two are `write` — so
         #   that batch redistributed the WRITING census only.
         #   #11609 lane C then added ONE reading-eligible container, `tortoise_check_connection`
-        #   (tier `read`), and five writing ones, so 48 -> 49 here and the served census
-        #   97 -> 103 (59 live + 44 retired; the seven doors it retires stay SERVED as shims).
-        assert len(reading) == 49, sorted(reading)   # 47 read + 2 maintenance
-        assert len(served()) == 103, sorted(e.name for e in served())
+        #   (tier `read`), and five writing ones, so 48 -> 49 at ITS head.
+        #   THIS re-cut composes all four batches, so the reading census is the COMPOSITION,
+        #   not lane C's number: this PR's five READ/QUERY container doors are all
+        #   reading-tier (`tortoise_search_knowledge`, `tortoise_list_knowledge`,
+        #   `tortoise_check_confidence`, `tortoise_explore_connections`,
+        #   `tortoise_review_link_candidates`; `tortoise_graph_overview` was already live),
+        #   so 49 + 5 = 54 here, and the served census is 55 live + 53 retired = 108 (the
+        #   retired doors stay SERVED as shims and keep their tier).
+        assert len(reading) == 54, sorted(reading)
+        assert len(served()) == 108, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
@@ -621,7 +642,17 @@ class TestTheReadThroughToolsRegressionPin:
 
         tools = asyncio.run(_tools())
         assert tools, "served tool list is empty — the check would be vacuous"
-        for name in MAINTENANCE_TOOLS:
+        # #11609 Phase 2 retired `tortoise_get_confidence` FORWARD (#3883), so it is
+        # deliberately off the advertised list and a client never sees its hint —
+        # the loop below can only pin what is advertised. The skip is asserted, not
+        # assumed: every MAINTENANCE_TOOLS name that is absent from the list must be
+        # a RETIRED_TOOL_REGISTRY entry.
+        retired_names = {e.name for e in RETIRED_TOOL_REGISTRY}
+        off_list = [n for n in MAINTENANCE_TOOLS if n not in tools]
+        assert all(n in retired_names for n in off_list), (
+            f"maintenance tools missing from the served list without a retirement "
+            f"record: {sorted(set(off_list) - retired_names)}")
+        for name in (n for n in MAINTENANCE_TOOLS if n in tools):
             ann = tools[name].annotations
             assert ann is not None, f"{name}: no annotations on the served tool"
             assert ann.readOnlyHint is False, (
