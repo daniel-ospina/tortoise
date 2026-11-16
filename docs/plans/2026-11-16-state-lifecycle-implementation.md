@@ -4,7 +4,7 @@
 
 This is the *plan to build* the approved model. The design says what the model is; this says what changes, in what order, and what proves each change. The design's owner approval (2026-11-16, PR #12895) is the ruling that makes its reversals of earlier recorded positions stand — a lane landing S2–S5 depends on that ruling, not on its own reading of the code.
 
-**Status: drafted, two review rounds, NOT converged.** §8 records one conflict between the approved design and the code that this plan cannot resolve by choosing — it needs the owner. The second conflict is now resolved by protocol (see §8's second item). Do not dispatch execution until §8's first item is answered and a review round comes back clean.
+**Status: drafted, five review rounds on the text.** Both former conflicts are resolved (see §8), and resolving the **first** one **re-ordered the plan**: the write door is now S0, because every vocabulary change below is only safe once a word outside a kind's set can no longer land. Do not dispatch execution until the design text lands (#12954) and the two ungated surfaces in §4 are gated.
 
 ## 0. What is already true, so this plan does not rebuild it
 
@@ -25,6 +25,18 @@ This is the *plan to build* the approved model. The design says what the model i
 - **No general rule engine**; **no priority/importance design**.
 
 ## 2. Slices, in dependency order
+
+### S0 — the write door validates the status
+
+**Failure it prevents (live, and the reason every later slice is ordered behind it):** **any string can be written as a kind's `status`**. `status` is not a server-managed prop and `_update_entity` issues an unvalidated `SET n += $props`, so `tortoise_create_entity` / `tortoise_update_entity` accept `status='outdated'`, `'archived'`, or `'garbage'` on an Object today — and there is no `OBJECT_STATUS_VALUES` anywhere in `tortoise/`, only comments recording that it was considered and rejected (`sdk.py:49104`, `commit_ops.py:118`).
+
+**Why it is first.** A filter set is correct when it covers every value the writes can produce. Today a write can produce `status='outdated'` on an Object, which is exactly why `assembly._RECALL_OBJECT_EXCLUDED_STATUSES` carries `outdated` (`assembly.py:4370-4381` says so in its own comment: *"Dropping the member would flip such a successor from recall-excluded … to a verified link"*). **Removing a value from a filter before removing it from the write path does not narrow the vocabulary — it moves the failure from the door to the reader.** So the door goes first, and every drop below is then a deletion of provably unreachable weight.
+
+**Change:** validate `status` on the generic entity write against the kind's declared set where it has one, and the four-word base otherwise. Packs keep their words — as stages (S4), not as statuses.
+
+⚠️ **Pinned test this slice deliberately breaks:** `tests/test_11926_derived_invalidation.py:310-313` writes `update_entity(..., status='outdated')` on an Object and reads it back — the pin `commit_ops.py:53-56` names as today's behaviour. It is updated in the same commit, with the reason, exactly as S2 handles its own pin.
+
+**Acceptance:** `status='garbage'` is refused on every kind; each kind accepts exactly its declared set; nothing is dropped from any filter in this slice.
 
 ### S1 — the predicate reads the position axis, and every consumer uses it
 
@@ -52,7 +64,7 @@ This is the *plan to build* the approved model. The design says what the model i
 
 **Acceptance:** `written-off` is terminal **by slot**; a kind declaring stages without slots is refused at install; each built-in closing fold lands on a terminal stage the reopen path clears; the core default pipeline is named in this repo, not deferred.
 
-### S4 — the Object narrowing, and #12855 — **blocked on §8, conflict 1**
+### S4 — the Object narrowing, and #12855
 
 **Failure it prevents:** `commit_ops` still accepts `outdated`/`retracted` as Object words (#12855), and `archived` is writable on Objects while "reserved" for Points.
 
@@ -60,7 +72,7 @@ This is the *plan to build* the approved model. The design says what the model i
 
 ⚠️ **This cannot be written as "resolve per-kind"**: after S3 there is no per-kind *status* declaration left to resolve from, and `sdk.py:49101-49124` records the transition-only guard, not a per-kind route (that route is recorded at `commit_ops.py:119-120`, and S3 supersedes it). See §8.
 
-**Acceptance:** #12855's cases pass — **but** one of its required changes may conflict with the design's delta rule; see §8 before claiming it.
+**Acceptance:** #12855's cases pass, including its `assembly` row — which is only reachable once S0 has closed the write door (§8).
 
 ### S5 — `goalState` loses `guideline`, and its endings obey the lifecycle
 
@@ -76,7 +88,7 @@ This is the *plan to build* the approved model. The design says what the model i
 
 **Failure it prevents:** a caller cannot ask for ended rows on most read paths — the scope knob exists only as `include_retracted` on a subset of the MCP read tools (`sdk.py:26793`, `:26856`; `mcp_server.py:4335`), so "show me what was retired" is a per-tool accident rather than a read-scope choice.
 
-**Not a failure, and must not be "fixed":** the four sets the design's §1 lists by size are not four divergences. `live.TERMINAL_EXCLUDED_STATUSES` (`live.py:104`) is the base; `commit_ops.OBJECT_TERMINAL_STATUSES` (`:69`) and `assembly._RESOLVER_UNRESOLVABLE_OBJECT_STATUSES` (`assembly.py:1668`) are **declared deltas the design's §6 explicitly keeps** — the resolver narrowing exists so a superseded Object can still resolve to render its own state. `derived_invalidation.RETIRED_GOAL_STATES` (`:174`) answers a different question (retirement, not currency). Collapsing any of them at the base is forbidden by the design (§6) — a lane must not read this slice as licence to unify.
+**Not a failure, and must not be "fixed":** the four sets the design's §1 lists by size are not four divergences. `live.TERMINAL_EXCLUDED_STATUSES` (`live.py:104`) is the shared currency filter; `commit_ops.OBJECT_TERMINAL_STATUSES` (`:69`) and `assembly._RESOLVER_UNRESOLVABLE_OBJECT_STATUSES` (`assembly.py:1668`) answer *other questions* — the resolver's exists so a superseded Object can still be shown, which is how a reference avoids dangling; `derived_invalidation.RETIRED_GOAL_STATES` (`:174`) asks about retirement, not currency. **Until the design text lands (#12954), the design still states this as "one base set plus declared deltas, never re-pointed at the base" (§6); the pending edit replaces that with two questions (should it show up in search? can it be shown by name?) and the membership test that follows from them (§11824, issuecomment-6907321613).** Either way a lane must not read this slice as licence to unify the sets: the reason they differ is that they answer different questions.
 
 **Change:** one ended-scope parameter on the read tools, generalising `include_retracted`; every reader that hides something declares which delta it is. Nothing is added to the record.
 
@@ -94,9 +106,11 @@ This is the *plan to build* the approved model. The design says what the model i
 
 ## 3. Order and why
 
-**S1 → S2 → S3 → S4 → S5 → S6 → S7.**
+**S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7.**
 
-- **S1 first**: correctness with no vocabulary change, so nothing downstream is built on a predicate that serves dead rows.
+- **S0 first**, because every later drop is only safe once the write cannot produce the value being dropped (see §8, conflict 1).
+
+- **S1 next**: correctness with no vocabulary change, so nothing downstream is built on a predicate that serves dead rows. (S0 is first; S1 is first among the slices that change no vocabulary.)
 - **S2 before S3/S4**: the Point write set is the one place a word narrows without per-kind resolution.
 - **S3 before S4**: the Object narrowing has no vocabulary to narrow; the design's route is that pack words leave the status axis, so the four-word base applies.
 - **S5 after S2**: a Point goal cannot record an ending until Points can write `deprecated`.
@@ -113,8 +127,8 @@ This is the *plan to build* the approved model. The design says what the model i
 | `GOAL_STATE_VALUES` (S5) | SDK/MCP surface approval | approved in principle; the diff needs its own record |
 | **Read-tool scope parameter** (S6) | generalising `include_retracted` touches the MCP/SDK read surface | **not gated yet** |
 | `:Source` `status` | declares a field, a writer and a reader that do not exist | not proposed |
-| **§8 conflict 1** | the plan cannot pick a side on it | **open** |
-| §8 conflict 2 | was resolved by recording the reversal on #2901 before moving the pin | **resolved** |
+| §8 conflict 1 | resolved by deleting the rule it argued about; #12855's row is now S4's acceptance, gated behind S0 | **resolved** |
+| §8 conflict 2 | resolved by recording the reversal on #2901 before moving the pin | **resolved** |
 
 ## 5. What proves each slice
 
@@ -135,8 +149,8 @@ So: `retract_point` (no successor, `sdk.py:24172`) → `deprecated`; `invalidate
 
 ⚠️ **One gap this surfaced in today's code:** `invalidate_point` and `supersede_point` both stamp the dedicated expiry prop (`expiredAt`, `sdk.py:22541`, `:24130`), but **`retract_point` does not** — it writes `status`, the belief halves, `updatedAt = $now` and an optional `validTo` (`sdk.py:24303-24305`; the replay fold agrees, `projection/__init__.py:10256-10257`). So a retracted claim's ending instant survives **only in the generic `updatedAt`**, which any later write moves, rather than in the expiry prop the other two endings write (`sdk.py`'s own `:22464`: *"`expiredAt`/`updatedAt` record when the graph LEARNED of the end, not when the claim ended"*). S2 closes it: retraction stamps `expiredAt` like every other ending. Until then, "invalidation is the bookkeeping, not a word" describes the intended model rather than all of today's code.
 
-## 8. Two conflicts, and where each stands
+## 8. The two former conflicts, and how each closed
 
-**Conflict 1 — #12855's required change contradicts the design's delta rule. STILL OPEN.** #12855 requires `assembly._RECALL_OBJECT_EXCLUDED_STATUSES` (`assembly.py:4383`, literally `OBJECT_TERMINAL_STATUSES | {"outdated"}`) to drop `outdated`. That **is** re-pointing a declared delta at the base, which the design forbids (§6: *"never a list to be re-pointed at the base"*), and the set is frozen by `tests/test_assembly_pure.py` (`assembly.py:4378-4382` asserts it equals `OBJECT_TERMINAL_STATUSES | {"outdated"}`). Either #12855's case is dropped, or the design admits one more re-point with its reason recorded.
+**Conflict 1 — resolved: the rule it argued about is being deleted.** The question was whether #12855 may re-point `assembly._RECALL_OBJECT_EXCLUDED_STATUSES` at the base by dropping `outdated`. Researching it from first principles rather than from the recorded positions shows the row is **inverted**: `outdated` is only droppable *after* the write door validates the vocabulary (S0), because today any string can land as an Object's `status` and the member is the reader-side defence for that. So #12855's `assembly` row becomes **S4's acceptance test**, not an independent change — and the design's "never re-point a list at the base" rule is replaced by two questions (a filter is wrong when it omits a value a write can produce, or adds one its question does not cover), recorded on #11824. There is no delta to adjudicate.
 
-**Conflict 2 — S2 vs the pinned "no `deprecated` on a Point" invariant. RESOLVED BY PROTOCOL.** `tests/test_lifecycle_guards.py:87` pins a deliberate omission from a recorded decision. Per the AGENTS.md rule that a recorded decision is reopened in its own home, the reversal was **recorded on #2901** (issuecomment-6906438450) — the issue that made the decision — *before* the test moves. S2 therefore proceeds as: add the word and the transition entry, point `retract_point` at it, and update the pin in the same commit **linking #2901**, so the change is a recorded reversal rather than a silent test edit.
+**Conflict 2 — resolved by protocol.** `tests/test_lifecycle_guards.py:87` pins a deliberate omission from a recorded decision. Per the AGENTS.md rule that a recorded decision is reopened in its own home, the reversal was recorded on **#2901** (issuecomment-6906438450) — the issue that made the decision — before the test moves. S2 proceeds by adding the word and the transition entry, pointing `retract_point` at it, and updating the pin in the same commit **linking #2901**.
