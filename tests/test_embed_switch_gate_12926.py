@@ -612,6 +612,10 @@ def test_a_trailing_comment_is_not_part_of_the_value():
     [
         "setup() {\n  export TORTOISE_VALUE_GATE=1\n}\n",
         "if false; then\n  export TORTOISE_VALUE_GATE=1\nfi\n",
+        # ⛔ the MULTI-LINE form, and an INDENTED `if`: treating `then` as a closer dropped the
+        # depth so the body read as top level (review at `69ee7b1395`, measured).
+        "if false\n then\n  export TORTOISE_VALUE_GATE=1\nfi\n",
+        "  if false; then\n    export TORTOISE_VALUE_GATE=1\n  fi\n",
         "exit 0\nexport TORTOISE_VALUE_GATE=1\n",
         "for f in a b; do\n  export TORTOISE_VALUE_GATE=1\ndone\n",
     ],
@@ -629,6 +633,18 @@ def test_an_assignment_the_process_never_receives_is_refused(body):
     assert ambiguous == {"TORTOISE_VALUE_GATE"}, (body, ambiguous)
     stated, _ = gate._shell_assignments("export TORTOISE_EMBED_GATE=1\n" + body)
     assert stated == {"TORTOISE_EMBED_GATE": "1"}
+
+
+def test_a_later_unset_or_bare_assignment_supersedes_an_earlier_export():
+    """Review at `69ee7b1395`, P2: last-assignment-wins, in the direction that matters.
+
+    `export K=1` then `unset K` (or `K=`) leaves the process with NO value, but a reader that kept
+    the literal reported STATED — and `stated` outranks `ambiguous`, so the stale literal won.
+    """
+    for tail in ("unset TORTOISE_EMBED_GATE\n", "TORTOISE_EMBED_GATE=\n"):
+        stated, ambiguous = gate._shell_assignments("export TORTOISE_EMBED_GATE=1\n" + tail)
+        assert stated == {}, (tail, stated)
+        assert ambiguous == {"TORTOISE_EMBED_GATE"}, (tail, ambiguous)
 
 
 def test_the_shell_reader_requires_export():
