@@ -2335,10 +2335,13 @@ _ALLOCATOR_REMEDY = {
     "duplicate_position": (
         "the counter issued a position the record already holds — the counter is "
         "BEHIND the table (a restore that bulk-loaded `journal_event` without the "
-        "counter). Do NOT re-arm: `halt` it FIRST (`active → halted`) — `seed` "
-        "and `reopen` both REFUSE from `active`, so neither is the first step — "
-        "then re-seed (monotone `GREATEST`) and reopen, and re-cut with the floor "
-        "check the halted re-cut requires"),
+        "counter). Do NOT re-arm it WITHOUT re-seeding first — that is how the "
+        "same ordinal is issued twice; but `arm` is also the ONLY way back to an "
+        "allocating counter, so a remedy that forbids it outright closes the last "
+        "door. `halt` it FIRST (`active → halted`) — `seed` and `reopen` both "
+        "REFUSE from `active`, so neither is the first step — then re-seed "
+        "(monotone `GREATEST`), `reopen` (`halted → seeded`) and `arm` "
+        "(`seeded → active`)"),
 }
 
 

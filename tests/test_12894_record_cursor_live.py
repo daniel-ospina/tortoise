@@ -899,6 +899,80 @@ def test_a_reopened_graph_keeps_its_consumed_numbers_and_still_refuses(
         f"record at a second position: {written}")
 
 
+def test_the_printed_counter_repair_chain_terminates_allocatable(
+        schema, tenant, app):
+    """⛔ FRESH-CONTEXT REVIEW, P2: every refusal PRINTS a repair chain, and until
+    this test each chain was pinned only by needle PRESENCE — so a chain that
+    named real verbs in an order that cannot run was green. Three of them were
+    measured wrong on the same day: `halt → re-seed → arm` (stops at `halted`),
+    "`allocate=True` … and both REFUSE from here" (`ALLOCATION_SQL` is scoped
+    `AND mode='active'`, so it runs), and "`… and reopen`" as the last step
+    (leaves `seeded`, where every allocation raises `CursorNotActive`).
+
+    This test EXECUTES the chain instead of reading it. It is the falsifier the
+    needle tests cannot be: it fails for any remedy that does not reach an
+    allocating counter, whatever words it chooses.
+
+    The chain under test is the one `PositionCollision` and
+    `_ALLOCATOR_REMEDY['duplicate_position']` print for a counter that is BEHIND
+    the table: `halt → re-seed → reopen → arm`.
+
+    Non-vacuity: dropping `reopen` (the pre-fix wording) reds at the `arm` call
+    with `RecordAllocatorError`, and dropping `arm` (the other pre-fix wording)
+    reds at the allocation with `CursorNotActive`.
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2, 3])
+    _seed_and_arm(app, org, graph, 3)
+    app.commit()
+    assert _counter(schema, org, graph) == (3, ra.MODE_ACTIVE)
+
+    # ── step 1: halt (`active → halted`) ── the only transition out of `active`
+    ra.halt(app, org_id=org, graph_id=graph)
+    app.commit()
+    assert _counter(schema, org, graph) == (3, ra.MODE_HALTED)
+
+    # ── step 2: re-seed (monotone GREATEST) — and it must NOT move the mode
+    ra.seed(app, org_id=org, graph_id=graph, enumerated_floor=3)
+    app.commit()
+    assert _counter(schema, org, graph) == (3, ra.MODE_HALTED), (
+        "`seed` is not a transition: it sets `seq`/`updated_at` only, so the "
+        f"mode must still read `halted`: {_counter(schema, org, graph)}")
+
+    # ── ⛔ AND `arm` REFUSES HERE — this is why `reopen` is in the chain.
+    with pytest.raises(ra.RecordAllocatorError):
+        ra.arm(app, org_id=org, graph_id=graph)
+    app.rollback()
+    assert _counter(schema, org, graph) == (3, ra.MODE_HALTED), (
+        "a refused `arm` moved the counter, which would make the refusal a "
+        f"partial transition: {_counter(schema, org, graph)}")
+
+    # ── step 3: reopen (`halted → seeded`), keeping the consumed `seq`
+    ra.reopen(app, org_id=org, graph_id=graph)
+    app.commit()
+    assert _counter(schema, org, graph) == (3, ra.MODE_SEEDED)
+
+    # ── step 4: arm (`seeded → active`) — the ONLY writer back
+    ra.arm(app, org_id=org, graph_id=graph)
+    app.commit()
+    assert _counter(schema, org, graph) == (3, ra.MODE_ACTIVE)
+
+    # ── the chain TERMINATES ALLOCATABLE: the counter is `active` and its `seq`
+    #    covers the journal, so the next door write takes 4 rather than colliding.
+    assert _counter(schema, org, graph)[0] >= max(
+        row[0] for row in _journal_rows(schema, org, graph)), (
+        "the chain left the counter BEHIND the table — the first allocation "
+        f"after it would be a `23505`: counter={_counter(schema, org, graph)}, "
+        f"journal={[r[0] for r in _journal_rows(schema, org, graph)]}")
+
+    allocated = rp.replay([RECORD], app, org_id=org, graph_id=graph,
+                          allocate=True)
+    app.commit()
+    assert allocated.first_seq == 4, (
+        f"the repaired counter did not issue the next position: {allocated}")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3, 4]
+
+
 def test_the_allocated_position_cannot_be_absorbed_at_all(schema, tenant, app):
     """THE ALLOCATED PATH'S ADVANTAGE OVER THE DERIVED ONE, asserted rather than
     claimed — and the reason this lane deletes its own suppression counter.

@@ -349,7 +349,10 @@ def raise_named(exc: BaseException, *, where: str) -> None:
             f"'{MODE_ACTIVE}' (`SEED_SQL`'s conflict path is scoped to "
             f"'{MODE_SEEDED}'/'{MODE_HALTED}'; `REOPEN_SQL` to '{MODE_HALTED}'), "
             f"so `halt` it FIRST (`{MODE_ACTIVE} → {MODE_HALTED}`), then re-seed "
-            f"(monotone `GREATEST`) and reopen before allocating again"
+            f"(monotone `GREATEST`), `reopen` (`{MODE_HALTED} → {MODE_SEEDED}`) "
+            f"and `arm` (`{MODE_SEEDED} → {MODE_ACTIVE}`) before allocating again "
+            f"— `arm` is the last step because `ALLOCATION_SQL` is scoped to "
+            f"'{MODE_ACTIVE}', so reopening alone leaves the counter unallocatable"
         ) from exc
 
 

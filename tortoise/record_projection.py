@@ -7190,11 +7190,14 @@ def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
         # is therefore correct for both, and the premise must not claim more.
         remedy = (
             f"this graph is SEEDED with the counter at {seq!r} and is not armed, "
-            f"so ARM it — the cutover's arming step (`arm`, `seeded → "
-            f"{MODE_ACTIVE}`) — and then the door writes through the allocator "
-            f"(`allocate=True`), which refuses until then precisely because no "
-            f"position may be issued before the cutover is armed; a seed alone "
-            f"will not open this arm, and a replay never will"
+            f"so re-seed it first (`seed`, the cutover's 6.2 step — monotone "
+            f"`GREATEST`, so it is free when the counter is already right; a "
+            f"graph that resumed writing before arming is exactly the case that "
+            f"needs it) and then ARM it — the 6.3 arming step (`arm`, `seeded → "
+            f"{MODE_ACTIVE}`) — after which the door writes through the "
+            f"allocator (`allocate=True`), which refuses until then precisely "
+            f"because no position may be issued before the cutover is armed; a "
+            f"seed alone will not open this arm, and a replay never will"
         )
     elif mode == MODE_HALTED:
         remedy = (
@@ -7203,22 +7206,33 @@ def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
             f"arm — never a replay"
         )
     else:
-        # ⛔ THE `active` ARM, AND IT MAY ONLY NAME VERBS THAT RUN (fresh-context
-        # verification of this change, P1). The old sentence ended "or a seed" —
-        # and `SEED_SQL`'s conflict path is `WHERE cursor_row.mode IN ('seeded',
-        # 'halted')`, so `seed` REFUSES from `active`. `check (mode IN ('seeded',
-        # 'active', 'halted'))` makes this arm reachable ONLY for `active`, so
-        # the sentence named a verb that cannot execute — the precise defect this
-        # whole change exists to remove, surviving in the one arm cycle 1 did not
-        # touch. `halt` IS the writer that runs here (`HALT_SQL` is scoped
-        # `AND mode = 'active'`), so it is what the remedy names first.
+        # ⛔ THE `active` ARM, AND IT MAY ONLY NAME VERBS THAT RUN **IN ORDER**
+        # (fresh-context review, P2 ×2). Two defects were fixed here, and both
+        # were the same class this change exists to remove — a remedy naming a
+        # step that cannot execute:
+        #   · the old sentence ended "or a seed", and `SEED_SQL`'s conflict path
+        #     is `WHERE cursor_row.mode IN ('seeded','halted')`, so `seed` REFUSES
+        #     from `active`;
+        #   · the first correction named "`halt` … then re-seed and `arm`", and
+        #     `seed` sets ONLY `seq`/`updated_at` — it does not change `mode` — so
+        #     the graph is still `halted` afterwards and `ARM_SQL` (`AND mode =
+        #     'seeded'`) refuses. The chain stopped one step short of the state it
+        #     promised, and left the graph with no allocator at all.
+        # `reopen` is the step that makes `seeded` reachable from `halted`, so the
+        # chain is `halt → re-seed → reopen → arm` and every stage runs.
+        # `allocate=True` does NOT belong in the refusal list: `ALLOCATION_SQL` is
+        # scoped `AND mode = 'active'`, so it IS the write path here — it issues a
+        # NEW number, which is why it cannot RE-BASE a counter that is behind.
         remedy = (
-            f"this graph is {MODE_ACTIVE} and its positions are being issued, so "
-            f"a repair goes through the allocator (`allocate=True`) or a seed — "
-            f"and both REFUSE from here: `allocate=True` issues a NEW number, and "
-            f"`seed`/`reopen` require `seeded`/`halted`. To re-base a counter that "
-            f"is BEHIND the table, `halt` it FIRST (`{MODE_ACTIVE} → "
-            f"{MODE_HALTED}`), then re-seed and `arm` — never a replay"
+            f"this graph is {MODE_ACTIVE}: the allocator is issuing this graph's "
+            f"positions, so `allocate=True` IS the write path (`ALLOCATION_SQL` "
+            f"is scoped to '{MODE_ACTIVE}') and it issues a NEW number. A repair "
+            f"`allocate=True` cannot express is a COUNTER repair, not a replay: "
+            f"`halt` it FIRST (`{MODE_ACTIVE} → {MODE_HALTED}`) — `seed` and "
+            f"`reopen` both REFUSE from '{MODE_ACTIVE}', so neither is the first "
+            f"step — then re-seed (monotone `GREATEST`), `reopen` "
+            f"(`{MODE_HALTED} → {MODE_SEEDED}`) and `arm` (`{MODE_SEEDED} → "
+            f"{MODE_ACTIVE}`). Never a replay"
         )
     raise RecordProjectionError(
         f"an ENUMERATED replay is REFUSED for a graph whose positions are "

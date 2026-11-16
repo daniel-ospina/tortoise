@@ -558,21 +558,33 @@ def test_a_post_cutover_enumerated_replay_is_refused_not_duplicated() -> None:
     message = str(refused.value)
     for needle in ("ENUMERATED replay is REFUSED", "ISSUED", "record_cursor",
                    "mode='active'", "#9190", "allocate=True", "seed",
-                   # ⛔ `halt` IS PINNED BECAUSE `seed` ALONE IS A REFUSAL FROM
-                   # THIS MODE (fresh-context verification, P1). This arm is
-                   # reachable only for `active` (the CHECK constraint), and
-                   # `SEED_SQL`'s conflict path is scoped to `seeded`/`halted`, so
-                   # a remedy that leads with `seed` names a verb that REFUSES —
-                   # the defect the `seeded` arm was fixed for. Without this
-                   # needle the message can regress to "go through the allocator
-                   # or a seed" and stay green.
-                   "halt"):
+                   # ⛔ THE `halt` CHAIN IS PINNED AS A WHOLE, because naming
+                   # `halt` first is only half the fix: `seed` sets
+                   # `seq`/`updated_at` and NOT `mode` (`SEED_SQL:233-235`), so
+                   # `halt → re-seed → arm` stops at `halted` and `ARM_SQL`
+                   # (`AND mode='seeded'`) refuses there. `reopen` is the step
+                   # that makes `seeded` reachable, so without these two needles
+                   # a remedy that dead-ends one step short stays green.
+                   "halt", "reopen", "arm",
+                   # The write path must NOT be reported as refusing: this arm is
+                   # reachable only for `active`, and `ALLOCATION_SQL` is scoped
+                   # `AND mode='active'`, so `allocate=True` RUNS here.
+                   "IS the write path"):
         assert needle in message, (
             f"the refusal does not name {needle!r}, so an operator cannot tell it "
             f"from a lost write or a driver fault: {message}")
     assert cut_over.journal_statements() == [], (
         "the refusal came AFTER a position write — the duplicate the guard exists "
         f"to prevent was already stored: {cut_over.executed!r}")
+    # ⛔ AND THE `active` ARM'S CHAIN MUST BE ORDERED, not merely present: three
+    # arrows named out of order satisfy every needle above and still cannot run.
+    arrows = [f"{ra.MODE_ACTIVE} → {ra.MODE_HALTED}",
+              f"{ra.MODE_HALTED} → {ra.MODE_SEEDED}",
+              f"{ra.MODE_SEEDED} → {ra.MODE_ACTIVE}"]
+    where = [message.index(a) for a in arrows]
+    assert where == sorted(where), (
+        f"the printed transition chain is out of order ({where}) — each step's "
+        f"source state is the previous step's target: {message}")
 
     # 2. NOT CUT OVER — no cursor row, so the enumeration IS the coordinate and
     # the replay is byte-identical to what it was before the guard existed.
@@ -758,14 +770,38 @@ def test_a_duplicate_position_is_not_retryable() -> None:
 
     message = str(collision.value)
     for needle in ("halt", f"{ra.MODE_ACTIVE} → {ra.MODE_HALTED}", "re-seed",
-                   "REFUSE"):
+                   "REFUSE",
+                   # ⛔ AND THE CHAIN MUST END SOMEWHERE ALLOCATABLE. `seed` does
+                   # not change `mode`, and `ALLOCATION_SQL` is scoped
+                   # `AND mode='active'`, so a chain stopping at `reopen` leaves
+                   # `seeded` — where every allocation raises `CursorNotActive`.
+                   # `arm` is the step that closes it.
+                   f"{ra.MODE_HALTED} → {ra.MODE_SEEDED}",
+                   f"{ra.MODE_SEEDED} → {ra.MODE_ACTIVE}"):
         assert needle in message, (
             f"the duplicate-position refusal does not name {needle!r}, so the "
-            f"operator is told to seed a counter that refuses the seed — the "
-            f"same dead end the replay guard's arms were fixed for: {message}")
+            f"operator is given a chain that stops short of an allocatable "
+            f"counter — the same class of defect the replay guard's arms were "
+            f"fixed for: {message}")
     assert "re-seed (or reconcile) before allocating again" not in message, (
         f"the precondition-free re-seed instruction survived, and it contradicts "
         f"the writer's halt-first remedy on the same WARNING line: {message}")
+    assert "Do NOT re-arm:" not in message, (
+        "the refusal forbids `arm` outright, and `arm` is the ONLY writer back "
+        f"to an allocating counter — every route out is closed: {message}")
+    # ⛔ PRESENCE IS NOT ENOUGH — THE TRANSITIONS MUST BE IN A RUNNABLE ORDER.
+    # A message naming all three arrows in the wrong order still reads as a
+    # remedy and still satisfies every needle above. The chain is a PATH:
+    # `active → halted` makes `halted` reachable, `halted → seeded` makes
+    # `seeded` reachable, and `seeded → active` is what the allocator requires.
+    arrows = [f"{ra.MODE_ACTIVE} → {ra.MODE_HALTED}",
+              f"{ra.MODE_HALTED} → {ra.MODE_SEEDED}",
+              f"{ra.MODE_SEEDED} → {ra.MODE_ACTIVE}"]
+    where = [message.index(a) for a in arrows]
+    assert where == sorted(where), (
+        f"the printed transition chain is out of order ({where}) — each step's "
+        f"source state is the previous step's target, so a scrambled chain "
+        f"cannot run: {message}")
 
 
 def test_the_door_speaks_the_counters_vocabulary() -> None:
