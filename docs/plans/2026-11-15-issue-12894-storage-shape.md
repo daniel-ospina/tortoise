@@ -30,7 +30,7 @@ related:
 **This document changes no product code.** It is the map (A1–A6) and the ideal stated against the map
 (A7), for Stage A of `#12894`.
 
-**Measured at:** `main` @ `58f904ccf793` (this worktree, `.worktrees/12894-storage-archaeology`).
+**Measured at:** `main` @ `58f904ccf793`. ⚠️ That commit is the authority for every `file:line` below, not the live worktree: the worktree this was read in (`.worktrees/prd-12897`, then named `.worktrees/12894-storage-archaeology`) has since been merged forward, and `main` has moved `tortoise/sdk.py`, `tortoise/record_writer.py`, `tortoise/record_projection.py` and `tortoise/cache_projection.py` under these numbers since — so a reader who lands on a different line here is reading a LATER head, and the symbol named beside each number is the address (the same rule the #7949 bundle states).
 Every count in §A2 is **re-derivable from the command printed beside it** — the census blocks reproduce the
 command verbatim and, where the output is long, its contiguous head. ⛔ **`WORKTREE-REPORT.md` is NOT
 committed** (`.gitignore:158-159`), so no stored log can be retrieved and none is cited as if it could be:
