@@ -3215,6 +3215,14 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
             'case "${ENV}" in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n',
             "case ${ENV:-prod} in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n",
             'case "$ENV" in "prod") export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            # ⛔ …and a QUOTED PATTERN carrying a SPACE (`case "a b" in "a b")`). Quote
+            # removal happens before matching (bash(1) 3.2.5.2), so this MATCHES and arms
+            # the file (measured); an alternative class that excluded a space made it not
+            # a pattern, so the arm landed in no bucket and the file read a definite `OFF`
+            # — the quoted-SUBJECT false PASS on the pattern side (fresh review of
+            # `#12902`, P2).
+            'case "a b" in "a b") export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            'case "x y" in "p q"|"x y") export TORTOISE_EMBED_GATE=1 ;; esac\n',
             # ⛔ …and a QUOTED / COMMAND-SUBSTITUTED subject with an ALTERNATION arm: the
             # pattern-position test still spelled the subject as a class without `{`, `}`,
             # quotes or SPACES, so `case "${ENV}" in prod|staging)` and

@@ -4212,7 +4212,13 @@ _SHELL_LEADING_KEYWORD = re.compile(
 #: `#12902`, P2).
 #: A two-element-unspaced-only form dropped the rest — 36 of this repo's tracked arms — and
 #: the arm then landed in NO bucket (fresh review of `#12902`, P2).
-_SHELL_CASE_ALTERNATIVE = r"[^ \t(){};&|)]+"
+#: ⛔ An ALTERNATIVE is a PATTERN, and a pattern may be QUOTED — quote removal happens
+#: before matching (bash(1) 3.2.5.2), so `case "x y" in "x y") export FLAG=1 ;; esac`
+#: MATCHES and arms the file (measured). The single class here excluded a space, so a
+#: quoted pattern was not a pattern: the arm never matched, landed in no bucket, and the
+#: file published a definite `OFF` with an empty `indeterminate` bucket — the same false
+#: PASS as the quoted SUBJECT, on the pattern side (fresh review of `#12902`, P2).
+_SHELL_CASE_ALTERNATIVE = r'(?:[^ \t(){};&|)]+|\"[^\"]*\"|\'[^\']*\')'
 _SHELL_CASE_SEPARATOR = r"[ \t]*\|[ \t]*"
 _SHELL_CASE_PATTERN_LIST = (r"\(?[ \t]*" + _SHELL_CASE_ALTERNATIVE +
                             r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*"
