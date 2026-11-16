@@ -2030,7 +2030,7 @@ def test_a_short_circuited_retraction_still_retracts(retraction):
 
 
 def test_a_forked_retraction_does_NOT_retract():
-    """The other half of the split: a subshell cannot change the PARENT's environment.
+    r"""The other half of the split: a subshell cannot change the PARENT's environment.
 
     `K= | cat` and `K= &` run in a subshell, so the parent still has the exported K — retracting on
     them would be a FALSE REFUSAL of an honest config, the mirror of the fail-open above. Measured
