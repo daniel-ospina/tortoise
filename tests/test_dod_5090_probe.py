@@ -3442,6 +3442,22 @@ def test_a_heredoc_whose_DELIMITER_is_unknown_HOLDS_the_file(tmp_path, monkeypat
     # `<<` in a plainly quoted word still must not.
     assert "<<" in probe._shell_mask_quoted('_gate_out="$(python - "$@" <<\'PY\' 2>&1')
     assert "<<" not in probe._shell_mask_quoted('echo "a << b"')
+    # ⛔ …and `$((` is ARITHMETIC, not a command substitution: reclassifying it hid the
+    # `$(` from `_shell_mask_arithmetic` (where the `<<` IS a modelled left shift), left
+    # the `<<` standing as a heredoc OPERATOR, and read every following line as a BODY —
+    # so the export after it scored UNCONDITIONAL (`ON` where bash has `0`) and an `if`
+    # guard on the next line was skipped as a body line. Measured both directions (fresh
+    # review of `#12902`, P1).
+    arithmetic = ('export TORTOISE_EMBED_GATE=1\nx="$((1<<2))"\n'
+                  'export TORTOISE_EMBED_GATE=0\n')
+    assert probe._shell_heredoc_bodies(arithmetic) == set()
+    #: measured here: `UNMEASURED` (the assignment line holds the file); what must never
+    #: return is `ON` — the false ARM this pin exists for.
+    assert _walk(arithmetic)["per_surface"]["entrypoint"]["state"] != "ON"
+    arithmetic_guard = ('export TORTOISE_EMBED_GATE=1\nx="$(( 1 << 2 ))"\n'
+                        'if true; then export TORTOISE_EMBED_GATE=0; fi\n')
+    assert probe._shell_heredoc_bodies(arithmetic_guard) == set()
+    assert _walk(arithmetic_guard)["per_surface"]["entrypoint"]["state"] != "ON"
 
 
 def test_a_REDIRECTION_does_not_end_the_parent_shell(tmp_path, monkeypatch):

@@ -3751,8 +3751,15 @@ def _shell_mask_quoted(line: str) -> str:
             index += 1
             continue
         if quote is not None:
-            if (quote == '"' and char == "$" and index + 1 < length
-                    and line[index + 1] == "("):
+            #: ⛔ `$((` is ARITHMETIC, not a command substitution — `_shell_mask_arithmetic`
+            #: already models it (a `<<` there is a LEFT SHIFT). Reclassifying it made the
+            #: mask hide the `$(` from that pass, leave the `<<` standing, and read every
+            #: following line as a HEREDOC BODY: `x="$((1<<2))"` between two exports scored
+            #: the last one UNCONDITIONAL (`ON` where bash has `0`, and an `if` guard that
+            #: follows was skipped as a body line) — a false ARM, measured both directions
+            #: (fresh review of `#12902`, P1). `$((` keeps the normal quoted path.
+            if (quote == '"' and char == "$" and index + 2 < length
+                    and line[index + 1] == "(" and line[index + 2] != "("):
                 substitutions.append([quote, 0])
                 quote = None
                 masked.append("  ")
