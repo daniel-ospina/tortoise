@@ -2322,6 +2322,48 @@ def _report_live_write_refusal(reason: str, record_type: Any,
         f"{', '.join(LIVE_WRITE_REFUSALS)})")
 
 
+#: What to DO about each allocator refusal, keyed by the metric the allocator
+#: counted. The door cannot raise (its caller's append has already committed), so
+#: the remedy has to be in the log line or the operator is left with a token that
+#: says "something in the record failed".
+_ALLOCATOR_REMEDY = {
+    "cursor_not_active": (
+        "the counter has no row for this graph, or its mode is not 'active': run "
+        "the seed and then `arm` (a `seeded` cursor means the cut-over was never "
+        "armed; a `halted` one means a defect stopped it and `reopen` is the "
+        "resume)"),
+    "position_collision": (
+        "the counter issued a position the record already holds — the counter is "
+        "BEHIND the table (a restore that bulk-loaded `journal_event` without the "
+        "counter). Do NOT re-arm: investigate, then re-seed and reopen"),
+}
+
+
+def _allocator_refusal_cause(exc: BaseException | None,
+                             depth: int = 4) -> str | None:
+    """Which ALLOCATOR refusal is buried in this failure, or ``None`` (#12894).
+
+    Looked up by TYPE through the `from exc` chain, for the same reason
+    :func:`_journal_collision_cause` is: a message match would fire on a record
+    whose payload happens to contain the words. The return value is the metric
+    name the allocator counted, which is also the key into
+    :data:`_ALLOCATOR_REMEDY` — one vocabulary, so a new refusal cannot be
+    counted without a remedy being written for it.
+    """
+    from . import record_allocator as ra
+
+    kinds = {ra.CursorNotActive: "cursor_not_active",
+             ra.PositionCollision: "position_collision"}
+    seen = 0
+    while exc is not None and seen <= depth:
+        for kind, metric in kinds.items():
+            if isinstance(exc, kind):
+                return metric
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return None
+
+
 def _journal_collision_cause(
         exc: BaseException | None,
         depth: int = 4,
@@ -2556,8 +2598,15 @@ def write_live_record(record: Mapping[str, Any], *,
     DOES NOT RAISE, by its own contract (the journal append has already
     committed, so a record failure must not fail a write that persisted). That
     is a REFUSAL of a mis-armed deployment rather than a lost row to be healed
-    by replay, and the difference is visible in ``refusal`` and in
-    `record_allocator.metrics()`.
+    by replay. ⛔ THE DIFFERENCE IS **NOT** VISIBLE IN ``refusal``: all of these
+    carry ``refusal="write_failed"``, the same token as a genuine record-write
+    failure, because the vocabulary is closed and a new token would be a
+    surface change. What distinguishes them is the WARNING the door emits
+    (``_allocator_refusal_cause`` names the counter's state and the remedy —
+    ``arm``/``reopen`` — instead of "a replay heals the record", which cannot
+    apply) plus `record_allocator.metrics()`. An earlier cut of this docstring
+    claimed ``refusal`` carried it; a fresh-context review measured the door and
+    found the claim false (#12894 review cycle 3, P2).
 
     ``OVERRIDES:`` the module's decision 3 (`Armed but unreachable ⇒ the write
     FAILS (RecordWriteError)`) does not apply to this door, and that is a
@@ -2661,6 +2710,25 @@ def write_live_record(record: Mapping[str, Any], *,
                 record.get("type"), _record_identity(record), collision,
             )
             return _refused("journal_collision", seq)
+        allocator_state = _allocator_refusal_cause(exc)
+        if allocator_state is not None:
+            # ⛔ A MIS-ARMED COUNTER IS NOT A LOST WRITE, AND ITS REMEDY IS NOT
+            # "replay". Both `CursorNotActive` and `PositionCollision` arrive
+            # here on the allocated path; the generic arm below would tell the
+            # operator that "a replay heals the record", which is false twice
+            # over — a replay neither arms a cursor nor gets past #9318's
+            # collision refusal. Named and counted the same way (one counter, the
+            # closed `write_failed` token), but with the READING that applies.
+            _count_write_failure("write_failed")
+            _logger.warning(
+                "the record write was REFUSED (%s) — the journal holds the "
+                "record; the ORDINAL ALLOCATOR refused to issue a position. %s: "
+                "record=%s %s: %s",
+                allocator_state, _ALLOCATOR_REMEDY.get(
+                    allocator_state, "check record_allocator.metrics()"),
+                record.get("type"), _record_identity(record), exc,
+            )
+            return _refused("write_failed", seq)
         if isinstance(exc, RecordConnectError):
             # Unreachable RIGHT NOW (not a refusal of this one record): bound the
             # cost of the rest of the capture. A totality or statement failure

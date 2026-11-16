@@ -438,9 +438,25 @@ def live_door_writes_the_journals_position(
         bound = {kw.arg: kw.value for kw in call.keywords if kw.arg}
         value = bound.get("position")
         first_seq = bound.get("first_seq")
-        allocate = bound.get("allocate")
-        allocate_bound = (isinstance(allocate, ast.Name)
-                          and allocate.id == "allocate")
+        # ⛔ THE PRESENCE OF AN `allocate=` KEYWORD IS THE ARM, NOT THE SPELLING OF
+        # ITS VALUE. This used to read `isinstance(allocate, ast.Name) and
+        # allocate.id == "allocate"`, so `allocate=True`, `allocate=use_cursor`,
+        # `allocate=self._allocate` and `allocate=bool(allocate)` all fell
+        # through to the DERIVED arm — which accepts the ordinal pair — and the
+        # gate returned `[]` (WIRED, exit 0) for a body that refuses EVERY write
+        # at cut-over. Constructed and measured by a fresh-context review
+        # (#12894 review cycle 3, P1): each of those four spellings produced
+        # `[]` from this function while `replay_plan` refused the same call with
+        # `allocate=True derives the position from the record's counter, so
+        # start_seq must be left at 1`. A gate that has to recognise the NAME of
+        # a value is a gate an edit to the expression defeats.
+        #
+        # The allocator pair below is the right requirement for ANY value,
+        # because it is correct on BOTH arms: with `allocate` false it collapses
+        # to exactly the ordinal pair, and with `allocate` true it is the only
+        # binding `replay_plan` accepts. So a spelling this checker cannot
+        # evaluate still cannot be blessed into a runtime refusal.
+        allocate_bound = "allocate" in bound
         if not _is_position_from_ordinal(value, bound=bound):
             # ⛔ THE REMEDY IS PAIR-AWARE. Telling a caller whose body already
             # binds `allocate=` to "bind `position=seq is not None`" would send it
@@ -530,8 +546,10 @@ def _is_position_from_ordinal(value: ast.expr | None,
     if value is None:
         return False
     text = ast.unparse(value)
-    allocate = (bound or {}).get("allocate")
-    allocate_bound = isinstance(allocate, ast.Name) and allocate.id == "allocate"
+    # Any `allocate=` keyword makes this the allocator arm — see the call site's
+    # comment: recognising the VALUE's spelling let four ordinary spellings slip
+    # through to the derived arm and be blessed.
+    allocate_bound = "allocate" in (bound or {})
     if allocate_bound:
         return text == _POSITION_FROM_ALLOCATOR
     return text == _POSITION_FROM_ORDINAL

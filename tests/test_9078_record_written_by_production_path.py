@@ -1068,6 +1068,23 @@ def test_the_live_door_rule_fires_when_the_ordinal_is_dropped(wiring):
         "the gate accepts `first_seq=<the journal's ordinal>` beside "
         f"`allocate=`, which `replay_plan` refuses at every cut-over door: "
         f"{forwarded}")
+    # ⛔ AND THE ARM IS "AN `allocate=` KEYWORD IS PRESENT", NOT "ITS VALUE IS
+    # NAMED `allocate`" (review cycle 3, P1). Recognising the NAME let four
+    # ordinary spellings fall through to the derived arm and be blessed as WIRED
+    # while `replay_plan` refuses the same call — measured, `[]` for each:
+    # `allocate=True`, `allocate=use_cursor`, `allocate=self._a`,
+    # `allocate=bool(allocate)`. A rule that has to recognise the spelling of a
+    # VALUE is defeated by any edit to that expression, and the refusal it misses
+    # is "every write at cut-over fails". All four must RED, on the ORDINAL pair.
+    for spelling in ("allocate=True", "allocate=use_cursor",
+                     "allocate=self._a", "allocate=bool(allocate)"):
+        fired = module.live_door_writes_the_journals_position(
+            source % ("position=seq is not None, "
+                      "first_seq=seq if seq is not None else 1, " + spelling))
+        assert fired, (
+            f"the gate blessed the ORDINAL pair beside `{spelling}` — "
+            "`replay_plan` refuses an allocating call with a caller watermark, "
+            "so this body writes nothing at cut-over")
     unbound = ("position=True if allocate else seq is not None, "
                "first_seq=seq if seq is not None else 1")
     fired = module.live_door_writes_the_journals_position(source % unbound)

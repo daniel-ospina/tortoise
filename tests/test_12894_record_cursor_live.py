@@ -889,3 +889,43 @@ def test_the_live_door_takes_the_allocated_number_over_the_journals(
         f"{write.first_seq}..{write.last_seq}")
     assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3, 4], (
         "the position row is not the allocated number")
+
+
+def test_a_mis_armed_counter_is_refused_with_a_remedy_that_applies(
+        schema, tenant, app, monkeypatch, caplog):
+    """FINDING (review cycle 3, P2): the live door reported every allocator
+    refusal as ``refusal="write_failed"`` — the token a genuine record failure
+    carries — and its WARNING said *"a replay heals the record"*, which is false
+    for both of them: a replay neither arms a cursor nor gets past `#9318`'s
+    collision refusal. The docstring claimed ``refusal`` distinguished them; it
+    does not, and now says so.
+
+    Both halves asserted: the token stays in the closed vocabulary (`write_failed`
+    — a new token would be a surface change), and the LOG names the state and the
+    remedy that applies. A "heals the record" line here reds this test.
+    """
+    org, graph = tenant
+    # `seeded`, NOT armed: the counter exists and refuses to issue.
+    ra.seed(app, org_id=org, graph_id=graph, enumerated_floor=0)
+    app.commit()
+    from tests.test_9078_record_written_by_production_path import _app_role_dsn
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV,
+                       _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
+    before = ra.metrics()["cursor_not_active"]
+    caplog.clear()
+    write = rw.write_live_record(
+        RECORD, durable=True, seq=2, tenant=(org, graph), allocate=True)
+    assert write is not None and write.outcome is rw.RecordWriteOutcome.REFUSED
+    assert write.refusal == "write_failed", (
+        f"the refusal token moved out of the closed vocabulary: {write.refusal!r}")
+    assert ra.metrics()["cursor_not_active"] == before + 1
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "ORDINAL ALLOCATOR refused" in text, (
+        f"the log does not name the allocator: {text[-400:]!r}")
+    assert "seed" in text and "arm" in text, (
+        f"the remedy for a `seeded` cursor is seed-then-arm, not replay: "
+        f"{text[-400:]!r}")
+    assert "a replay heals the record" not in text, (
+        "the generic lost-write remedy was emitted for a mis-armed counter — a "
+        "replay cannot arm a cursor")
