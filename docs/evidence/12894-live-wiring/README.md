@@ -140,7 +140,7 @@ rather than designed away in this lane (#12894 review cycles 4–6, P1).
 
 ---
 
-## 2. The six falsifiers, each run red first
+## 2. The six falsifiers, and which of them ran red first
 
 Order and wording are the brief's. Every leg lives in
 `tests/test_12894_record_cursor_live.py` (the "wire" section) and drives the
@@ -182,6 +182,18 @@ number.
 The measured red, on the flag-only tree before the guard and the carried-ordinal
 read existed: **9 passed, 7 failed** (`WORKTREE-REPORT.md`, suite 2). Green after:
 **39 passed** for the file.
+
+⚠️ **Which legs that red actually covers, stated because the heading above used to
+claim all six.** The table rows carry the answer in their own last column: (3a) and
+(3b) are marked `— (proof)` because the mechanism they assert already existed and
+their legs cannot be red on any tree — they prove, they do not falsify. (3c)'s
+`test_replay_reads_a_carried_ordinal` also cannot be red: a plan that ignored `seq`
+entirely would enumerate to the same `5, 6` (its own docstring says so); the
+discriminating half is `test_replay_refuses_a_carried_ordinal_that_disagrees`.
+So the **7 failures** are the falsifiers proper — the carried-ordinal REFUSAL, (3d)'s
+two legs, (3e) and (3f) — against 4 of the 6 named properties; the other two, plus
+(3c)'s read leg, are proofs. Red-first is the strong claim, and it belongs only to
+the legs whose last column does not say `— (proof)`.
 
 ---
 
