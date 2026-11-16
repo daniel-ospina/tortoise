@@ -923,8 +923,18 @@ class TestSanitizeProps:
             sdk.update_knowledge(did, sourcePath="/etc/passwd")
         with pytest.raises(ValueError, match="server-managed"):
             sdk.update_knowledge(did, source_path="/etc/passwd")
+        # #11609 Phase 2 replaced `update_entity` with `update_knowledge`, whose
+        # first parameter IS named `id` — so the TOP-LEVEL spelling binds to the
+        # signature and raises TypeError at the call site, exactly like
+        # `update_point` below (`test_update_point_rejects_id_and_sourcepath`
+        # records that same shape). Node identity is never mutated either way.
+        with pytest.raises(TypeError):
+            sdk.update_knowledge(did, **{"id": "evil"})
+        # ⛔ …and the guard MESSAGE is not lost with it: the nested spelling that
+        # `update_knowledge` accepts reaches the named refusal, so a caller who
+        # tries to set the id still learns WHY it is refused.
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.update_knowledge(did, id="evil")
+            sdk.update_knowledge(did, props={"id": "evil"})
 
     def test_update_point_rejects_id_and_sourcepath(self, sdk):
         p = sdk.create_point("statement", "A")

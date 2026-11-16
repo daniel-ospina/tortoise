@@ -65,11 +65,13 @@ leaves the response unchanged is **not** a gate failure, but must be recorded.
 
 ## The reconciliation — MCP 91 → 27
 
-> Every figure below is the MERGED surface (68 live + 23 retired shims), not either branch's own
+> Every figure below is the MERGED surface (60 live + 37 retired shims), not either branch's own
 > measurement: the vision started at **99**, the five `run_onboarding` deletions removed five
 > (#4282 Phase 3.2, 81 → 76 advertised), the `graph_overview` container added one served name
-> while retiring five (#4282, 76 → 72 advertised), and #11609 batch 1 archived four no-destination
-> tools (72 → 68 live, names gone rather than retired). 99 − 5 + 1 − 4 = **91**. The target remains **27**.
+> while retiring five (#4282, 76 → 72 advertised), #11609 batch 1 archived four no-destination
+> tools (72 → 68 live, names gone rather than retired), and #11609 batch 2 retired fourteen WRITE/
+> MUTATE doors into six containers (68 → 60 live, 23 → 37 retired shims). 99 − 5 + 1 − 4 = **91**,
+> then + 6 served names for the six containers = **97**. The target remains **27**.
 
 **GENERATED — see `docs/product/bridge-table.md`**, produced by
 `uv run python tools/bridge_table.py`.
@@ -114,8 +116,10 @@ DELETED from the served registry rather than retired into nothing, because the o
 `tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`). The registry fell
 **99 → 94** with them (81 live + 18 retired shims → 76 live + 18 retired shims), the first
 movement of the advertised surface since #3540. The `graph_overview` container then moved the
-same population to 72 live + 23 retired shims = 95 served, and #11609 batch 1 moved it to
-**68 live + 23 retired shims = 91 served** — the figures the table above records. Every
+same population to 72 live + 23 retired shims, #11609 batch 1 moved it to 68 live + 23 retired
+shims (91 served), and #11609 batch 2 moved it once more to
+**60 live + 37 retired shims = 97 served** — the figures the table above records, and the
+numbers `config/surface-manifest.yml` derives. Every
 capability those five carried survives
 on REST — each route is hand-written in `tortoise/hosted_api.py` — and the two tenant-visible
 reads are rehomed to the tenancy block. Their recorded reasons live in
@@ -150,9 +154,10 @@ not complements.
 ## The reconciliation — SDK 150 → 40
 
 The starting figure in this heading is **historical**, the same way the MCP heading's is: the public
-SDK surface measured **150** when this heading was written — it now measures **125**: `#4282` deleted
-26 surplus names (150 -> 124) and `#10015` added `get_organisation_account` (124 -> 125; the 149 sketch
-predates one method; see the `canonical-sdk-methods.md` row above). The target — 40 — is unchanged.
+SDK surface measured **150** when this heading was written — it now measures **124**: `#4282` deleted
+26 surplus names (150 -> 124) and `#10015` added `get_organisation_account` (124 -> 125), while
+#11609 Phase 2 then retired four names into the containers it added and re-cut the count (125 -> 124;
+see the `canonical-sdk-methods.md` row above). The target — 40 — is unchanged.
 
 The ledger of the departing names — grouped, with the rationale for each group — is the
 **"Discarded — and why"** section of `docs/product/beta-sdk-surface.md`.

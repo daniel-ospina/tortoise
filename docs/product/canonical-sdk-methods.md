@@ -20,7 +20,7 @@ related:
 
 # Canonical SDK method surface — an inventory, not the target
 
-**Read this for coverage, not for names.** This document is two things: an **inventory of all 125
+**Read this for coverage, not for names.** This document is two things: an **inventory of all 124
 methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and,
 alongside that, an **earlier target sketch** (32 groups over 124 live members). The 26 names that left
 the surface on 2026-10-27 are recorded in *Removed from the surface* below rather than in a group.
@@ -43,8 +43,8 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **125** |
-| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **125** |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **124** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **124** |
 
 The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, then 149 → 147 on
 2026-10-25 (the plan-quota counter `graph_count` went internal as `_graph_count`; the
@@ -65,7 +65,15 @@ The last move is 150 → **124** on 2026-10-27: the owner ruled that the surplus
 archived at tag `archive/4282-surplus-sdk-methods`. The 111 that DO have callers are untouched here;
 privatising them is the remaining half of the migration. Then 124 → **125** on 2026-11-14, when
 approved row 28 `get_organisation_account` gained its `def` (#10015) — an IMPLEMENTATION of an
-already-approved name, not an addition to the approved 40. *Removed from the surface* below is the
+already-approved name, not an addition to the approved 40. Then 125 → **124** in #11609 Phase 2's
+WRITE/MUTATE batch (2026-11-16): three approved rows gained their `def` (`supersede_knowledge`,
+`write_question`, `record_decision` — `update_knowledge` already had one) while four absorbed doors
+were retired (`supersede`, `file_decision`, `file_human_approval`, `update_entity`), a net −1; four
+names stay live for stated reasons (`update_point`/`supersede_point` for their §17.1 write-lane
+declarations, `retract_point` for its instant-free retraction, `invalidate_point` for
+`valid_to_precision='unknown'`), and `update_entity`'s Point-lifecycle behaviour — the `restatus`
+journal record and the transition-naming refusal — is CARRIED by `update_knowledge`, not dropped with
+the name. *Removed from the surface* below is the
 per-method record.
 
 > A previous draft reported 152 and explained the two-method gap as the manifest excluding

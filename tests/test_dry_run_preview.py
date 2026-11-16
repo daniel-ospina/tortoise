@@ -22,6 +22,7 @@ import datetime as _dt
 import inspect
 import os
 import sys
+from typing import ClassVar
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1305,10 +1306,20 @@ class TestPreviewToolSetIsDeclared:
     that does not declare it. Pin the derivation against the REAL signatures
     so the gate cannot go stale."""
 
+    #: #11609 Phase 2: three of the six destructive doors were absorbed by a
+    #: container, and the PREVIEW follows the capability rather than the name —
+    #: a retired door that is no longer advertised cannot own the metering gate.
+    CONTAINER_OF: ClassVar[dict[str, str]] = {
+        "tortoise_supersede": "tortoise_supersede_knowledge",
+        "tortoise_invalidate": "tortoise_update_knowledge",
+        "tortoise_retract_point": "tortoise_update_knowledge",
+    }
+
     def test_the_six_preview_tools_declare_dry_run(self):
         import tortoise.mcp_server as m
         names = m._dry_run_tool_names()
-        assert set(DESTRUCTIVE_TOOLS) <= names, sorted(names)
+        live = {self.CONTAINER_OF.get(t, t) for t in DESTRUCTIVE_TOOLS}
+        assert live <= names, sorted(live - names)
 
     def test_a_write_tool_without_dry_run_is_not_in_the_set(self):
         import tortoise.mcp_server as m

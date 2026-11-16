@@ -204,9 +204,12 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   of them were in this listing (the fourth, `tortoise_backfill_v25`, was
     #   `http_policy=False`), so 66 - 3 = 63 measured here. Lowered to 63 with that
     #   measurement, not to whatever a green run last produced.
-    # Anything BELOW 63 is unexplained shrinkage and this arm reds on it; lowering the
+    #   #11609 batch 2 (this change) — fourteen WRITE/MUTATE doors retired into six
+    #   containers, all `http_policy=True` on both sides of the move, so the listing
+    #   moves by the same net -8 the live surface does: 63 - 8 = 55 measured here.
+    # Anything BELOW 55 is unexplained shrinkage and this arm reds on it; lowering the
     # floor again needs the same kind of recorded reason, never a green run.
-    assert len(names) >= 63, f"default surface shrank to {len(names)}"
+    assert len(names) >= 55, f"default surface shrank to {len(names)}"
     # The floor is a proxy for the real invariant, and a proxy cannot tell a
     # recorded consolidation from a silent drop. Pin the invariant itself: the
     # default HTTP listing serves EXACTLY the registry's `http_policy` population
