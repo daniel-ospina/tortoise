@@ -7102,11 +7102,29 @@ def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
     of the same kind, not a new exception class and not a crash.
 
     ⛔ NARROW BY CONSTRUCTION, and this is what keeps the whole existing suite
-    green: the refusal fires ONLY when the graph has a `record_cursor` row. A
-    graph with no row — every graph before cutover — replays exactly as it does
-    today. `position=False` never reaches here (it writes no position row, so
-    there is no second position to create), and neither does `allocate=True`
-    (the counter issues the number; that arm is the remedy this refusal names).
+    green: the refusal fires ONLY where the counter has actually ISSUED
+    positions — `mode` in (`active`, `halted`), plus any mode this code cannot
+    classify (an unknown mode FAILS CLOSED: it is not evidence that nothing was
+    issued). A graph with no row — every graph before cutover — replays exactly
+    as it does today. `position=False`
+    never reaches here (it writes no position row, so there is no second
+    position to create), and neither does `allocate=True` (the counter issues
+    the number; that arm is the remedy this refusal names).
+
+    ⛔ AND A `seeded` COUNTER IS NOT CUT OVER (#12894 review P1, measured). Row
+    PRESENCE is not the question — `seed()` writes its row in `seeded` mode to
+    record a coordinate it DERIVED, not one it ISSUED: `SEED_SQL` sets
+    `seq = GREATEST(row_max, enumerated_floor)`, i.e. the record's own maximum
+    (or the caller's enumeration floor), and `SeedResult.healed_tail` documents
+    the `None`-position tail as "the tail that a LATER REPLAY FILLS" ("it is
+    REPORTED, never repaired here"). Refusing on presence therefore deleted the
+    documented tail-heal on exactly the graph a seed had just prepared for it —
+    `ra.seed(..., enumerated_floor=0)` leaves `(seq=0, mode='seeded')` and the
+    replay of the journal's record at `start_seq=1` was refused for positions
+    "ISSUED" that no allocator had ever issued. So `seeded` RETURNS (nothing was
+    issued ⇒ enumeration is still the only coordinate), and only `active` /
+    `halted` are refused — a `halted` counter DID issue positions before it was
+    halted, which is why it stays refused rather than joining `seeded`.
 
     ⛔ AND AN ARM THAT CANNOT ASK MUST NOT GO QUIET. One statement — no `seq`
     row and no refusal; a read that FAILS is a refusal that names the migration
@@ -7140,6 +7158,14 @@ def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
         return
     seq, mode = ((row["seq"], row["mode"]) if isinstance(row, Mapping)
                  else (row[0], row[1]))
+    if mode == MODE_SEEDED:
+        # ⛔ A SEEDED COUNTER HAS ISSUED NOTHING, so there is no second position
+        # to create: the replay IS the documented tail-heal (see the docstring).
+        # This is deliberately an ALLOW list of the modes that refuse, not a
+        # deny of `seeded`: an unrecognised mode falls through to the refusal
+        # below (fail-closed), because a counter this code cannot classify is
+        # not evidence that nothing was issued.
+        return
     raise RecordProjectionError(
         f"an ENUMERATED replay is REFUSED for a graph whose positions are "
         f"ISSUED: public.{RECORD_CURSOR_TABLE} holds (seq={seq!r}, "
@@ -7203,13 +7229,15 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
 
     ⛔ AND AN ENUMERATED REPLAY IS REFUSED ONCE THE GRAPH IS CUT OVER (#9190).
     Before a single plan statement, and only when ``position`` is on and
-    ``allocate`` off, this asks whether the graph has a `public.record_cursor`
-    row — i.e. whether its positions are ISSUED. If they are, the replay is
-    refused by name: the ordinal is the allocator's to give and the journal's to
-    CARRY, so enumerating would store the same record at a second position with
-    no error (`ON CONFLICT … DO NOTHING` cannot see it, and the `#9318`
-    collision guard only fires on an ABSORBED insert). A graph with no row —
-    every graph before cutover — is unaffected; see
+    ``allocate`` off, this asks the counter for its ``(seq, mode)`` — i.e.
+    whether its positions are ISSUED. If they are (`active`, `halted`), the
+    replay is refused by name: the ordinal is the allocator's to give and the
+    journal's to CARRY, so enumerating would store the same record at a second
+    position with no error (`ON CONFLICT … DO NOTHING` cannot see it, and the
+    `#9318` collision guard only fires on an ABSORBED insert). A graph with no
+    row — every graph before cutover — is unaffected, and so is a `seeded` one:
+    a seed ISSUES nothing (its `seq` is derived from the record's own maximum),
+    so the replay it leaves behind is the documented tail-heal; see
     :func:`_refuse_an_enumerated_replay`.
 
     THE TENANT GUC (R6). The FIRST statement executed is
@@ -7294,7 +7322,8 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     # ⛔ AN ENUMERATED REPLAY ASKS FIRST WHETHER THE COUNTER HAS ALREADY ISSUED
     # THIS GRAPH'S POSITIONS (#9190). `position=False` writes no position row and
     # `allocate=True` IS the allocator's arm, so neither is asked; everything pre-
-    # cutover replays unchanged (no cursor row ⇒ no refusal). See
+    # cutover replays unchanged (no cursor row ⇒ no refusal) and so does a
+    # `seeded` counter (it issued nothing ⇒ the replay heals the tail). See
     # :func:`_refuse_an_enumerated_replay` for the duplication it closes.
     if position and not allocate and records:
         _refuse_an_enumerated_replay(cursor, org_id, graph_id)

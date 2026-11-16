@@ -294,13 +294,35 @@ def _metering_anchor(org_id: str) -> dict:
     calendar-month window (an unknown org has no subscription). A READ FAILURE
     raises instead — the caller must not spell "I could not find out" the same
     way as "this org has no subscription".
+
+    ⛔ THE REGISTRY READ IS WRITE-FREE, AND THAT IS LOAD-BEARING (#12894 review
+    finding 2, MEASURED). This resolver runs on the **write** path — every armed
+    record write's byte-meter increment calls ``_require_period`` → here — so the
+    registry hand-hold it uses must not issue graph DDL. The ordinary
+    ``_get_registry()`` does: its projection's ``_ensure_indexes()`` issued two
+    VECTOR INDEX statements, which
+    ``tests/test_9567_record_capstone.py``'s D3 legs measured as mutating cache
+    statements with no journal append and no APPLIED record behind them (the
+    write seam's ordering invariant, red on ``main`` + only the byte meter's
+    EXECUTE grant). ``no_schema_ddl=True`` builds the same derived handle on the
+    write-freedom pair (``skip_health_check=True, ensure_indexes=False``) and
+    creates no index, so this read issues no DDL at all.
+
+    WHICH LANE THAT PROTECTS, measured rather than assumed: the deployed hosted
+    record path does NOT reach the registry branch — ``fly.toml`` sets
+    ``TORTOISE_CONTROL_PLANE = "supabase"``, so ``_supabase_mode()`` is True and
+    the anchor comes from the control plane, touching no graph. The branch is
+    reached in REGISTRY mode (a self-host deployment, or any ``TORTOISE_DB_URI``
+    lane such as this suite's), which is exactly where the DDL-in-the-seam
+    occurred; the fix removes it there and costs the Supabase lane nothing (it
+    never takes this branch).
     """
     if _supabase_mode():
         from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, org_metering_anchor,
         )
         return dict(org_metering_anchor(get_control_plane(), org_id) or {})
-    rows = _reg_sdk()._get_registry().query(
+    rows = _reg_sdk()._get_registry(no_schema_ddl=True).query(
         "MATCH (o) WHERE (o:Organization OR o:Team) AND o.id = $id "
         "RETURN o.subscription_id, o.current_period_start, "
         "       o.current_period_end",
@@ -2909,7 +2931,16 @@ def record_postgres_bytes_written(org_id: str | None, *, n_bytes: int,
                     period.end_iso, n_bytes, n_records)
             else:
                 sdk = _reg_sdk()
-                reg = sdk._get_registry()
+                # ⛔ NO SCHEMA DDL ON THIS SEAM (#12894 review finding 2). This
+                # runs immediately after an armed record write COMMITS, so the
+                # ordinary hand-hold's `_ensure_indexes()` issued vector-index
+                # DDL here — measured by `tests/test_9567_record_capstone.py`'s
+                # D3 legs as mutating cache statements between a capture's
+                # journal append and its cache fold. The MERGE below is the
+                # ledger's own write and is unaffected; what is removed is the
+                # schema DDL and the open-time health probe the handle used to
+                # pay for.
+                reg = sdk._get_registry(no_schema_ddl=True)
                 reg.query(
                     "MERGE (m:MeteringRecord {org_id: $tid, "
                     "period_start: $pstart}) "

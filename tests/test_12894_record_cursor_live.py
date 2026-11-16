@@ -32,6 +32,9 @@ restore restarts the allocator    `test_a_restored_counter_continues_past_the_ro
   (B3)                              (the seed reads the rows, not a sequence)
 enumerated replay after cutover   `test_a_post_cutover_replay_cannot_add_a_second_position_`
   ⇒ same record at a 2nd position  `for_one_record` (refusal named; rows unchanged)
+  …and its MODE half              `test_a_halted_counter_refuses_an_enumerated_replay`
+    (`active`/`halted` ⇒ refused)   + `test_a_seeded_counter_permits_the_enumerated_tail_heal`
+                                    (`seeded` issued nothing ⇒ the replay writes)
 
 THE DSN GATE. `TEST_RECORD_DB_URI` is the record's own Postgres (the CI job
 `test-record-postgres` provisions it, and `provision.sh` makes it a SUPERUSER).
@@ -794,6 +797,68 @@ def test_a_post_cutover_replay_cannot_add_a_second_position_for_one_record(
         "a post-cutover replay added a position row for a record the allocator "
         f"had already numbered: {[row[0] for row in _journal_rows(schema, org, graph)]} "
         f"vs the door's {written}")
+
+
+def test_a_halted_counter_refuses_an_enumerated_replay(schema, tenant, app):
+    """`halted` is the OTHER mode that has ISSUED positions, and it stays refused.
+
+    `halt()` keeps the counter row on purpose ("the carried numbers are the only
+    record of what was issued"), so a halted graph's ordinals are exactly as
+    ALLOCATED as an active one's — an enumerated replay there is the same second
+    position. This is the sibling `active` already had, and the half that stops a
+    fix for the `seeded` case below from widening into "any row ⇒ allowed".
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2, 3])
+    _seed_and_arm(app, org, graph, 3)
+    ra.halt(app, org_id=org, graph_id=graph)
+    app.commit()
+    assert _counter(schema, org, graph) == (3, ra.MODE_HALTED)
+
+    with pytest.raises(rp.RecordProjectionError) as refused:
+        rp.replay([RECORD], app, org_id=org, graph_id=graph, start_seq=9)
+    app.rollback()
+    message = str(refused.value)
+    for needle in ("ENUMERATED replay is REFUSED", "ISSUED", "record_cursor",
+                   "mode='halted'", "#9190"):
+        assert needle in message, (
+            f"the refusal on a HALTED counter does not name {needle!r}: {message}")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3], (
+        "a replay on a halted counter wrote a position the allocator had issued")
+
+
+def test_a_seeded_counter_permits_the_enumerated_tail_heal(schema, tenant, app):
+    """FINDING (review P1): `seeded` issued NOTHING, so the replay must still write.
+
+    MEASURED PRE-FIX: `ra.seed(..., enumerated_floor=1)` left `(seq=1,
+    mode='seeded')` and `rp.replay([RECORD], …, start_seq=1)` RAISED `an
+    ENUMERATED replay is REFUSED for a graph whose positions are ISSUED` — over a
+    counter that had never issued anything. Its `seq` is DERIVED
+    (`GREATEST(row_max, enumerated_floor)`), which is the whole reason
+    `SeedResult.healed_tail` documents the `None`-position tail as "the tail that
+    a later replay fills" and why `seed()`'s own docstring says it "is REPORTED,
+    not repaired here". The refusal deleted that recovery path.
+
+    The falsifier is the position row itself: post-fix the replay writes it; the
+    earlier guard left the record with none.
+    """
+    org, graph = tenant
+    # A journal of ONE record with NO position row: the tail a replay fills.
+    result = ra.seed(app, org_id=org, graph_id=graph, enumerated_floor=1)
+    assert (result.seq, result.mode, result.healed_tail) == (
+        1, ra.MODE_SEEDED, True), result
+    app.commit()
+    assert _counter(schema, org, graph) == (1, ra.MODE_SEEDED)
+
+    report = rp.replay([RECORD], app, org_id=org, graph_id=graph, start_seq=1)
+    app.commit()
+    assert report.events == 1, f"the seeded tail-heal applied nothing: {report!r}"
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1], (
+        "the replay on a `seeded` counter did not fill the `None`-position tail "
+        f"`SeedResult.healed_tail` reports: {_journal_rows(schema, org, graph)!r}")
+    assert _counter(schema, org, graph) == (1, ra.MODE_SEEDED), (
+        "a replay must not move the counter — it CARRIES the number, it does not "
+        "issue one")
 
 
 def test_the_allocated_position_cannot_be_absorbed_at_all(schema, tenant, app):

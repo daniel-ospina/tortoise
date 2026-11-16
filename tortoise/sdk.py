@@ -13176,25 +13176,46 @@ class TortoiseSDK:
                 inner.args = (legible,)
             raise inner from None
 
+    def _build_proj(self, *, skip_health_check: bool = False,
+                    ensure_indexes: bool = True) -> FalkorProjection:
+        """Construct ONE projection for this SDK's own (derived) graph name.
+
+        ⛔ THE DERIVATION LIVES HERE, ONCE, so the two hand-holds cannot disagree
+        about WHICH graph they address: :meth:`_get_proj` (cached, full schema —
+        every ordinary caller) and the write-free read handle
+        :meth:`_get_registry` builds for the metering anchor (#12894 review
+        finding 2). The flags are passed straight through to
+        :class:`FalkorProjection`; `skip_health_check=True, ensure_indexes=False`
+        is the documented write-freedom PAIR (see that constructor: the open-time
+        health probe and the schema DDL are each a `GRAPH.QUERY`, and the first
+        DDL on a name is what brings the graph into being).
+        """
+        # Resolve the URI's own graph name first (used as the fallback
+        # when no namespace is set — preserves the conftest per-session
+        # test graph, #221).
+        uri_graph: str | None = None
+        if self._db_uri is not None:
+            from urllib.parse import urlparse
+            uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
+
+        graph_name = _derive_graph_name(
+            namespace=self._namespace, graph_name=self._graph_name,
+            uri_graph=uri_graph)
+        if self._db_uri is not None:
+            # Multi-tenant isolation (#7886): pass the namespaced graph
+            # name so tenants never share the URI's default graph.
+            return FalkorProjection.from_uri(
+                self._db_uri, graph_name=graph_name,
+                skip_health_check=skip_health_check,
+                ensure_indexes=ensure_indexes)
+        return FalkorProjection(
+            self._db_path, graph_name=graph_name,
+            skip_health_check=skip_health_check,
+            ensure_indexes=ensure_indexes)
+
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
-            # Resolve the URI's own graph name first (used as the fallback
-            # when no namespace is set — preserves the conftest per-session
-            # test graph, #221).
-            uri_graph: str | None = None
-            if self._db_uri is not None:
-                from urllib.parse import urlparse
-                uri_graph = urlparse(self._db_uri).path.lstrip('/') or "tortoise"
-
-            graph_name = _derive_graph_name(
-                namespace=self._namespace, graph_name=self._graph_name,
-                uri_graph=uri_graph)
-            if self._db_uri is not None:
-                # Multi-tenant isolation (#7886): pass the namespaced graph
-                # name so tenants never share the URI's default graph.
-                self._proj = FalkorProjection.from_uri(self._db_uri, graph_name=graph_name)
-            else:
-                self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
+            self._proj = self._build_proj()
             # #7951 §17.1: this projection is the DERIVED CACHE OF A JOURNAL
             # whenever one is configured, so it is under the single-writer
             # guard — a fold or a mutating raw-query on it is refused unless a
@@ -13285,7 +13306,8 @@ class TortoiseSDK:
                 f"Override with TORTOISE_ALLOW_PRODUCTION=1."
             )
 
-    def _get_registry(self, *, create: bool = True):
+    def _get_registry(self, *, create: bool = True,
+                      no_schema_ddl: bool = False):
         """Return the control_plane registry graph handle (cached).
 
         Uses the existing db connection — no second FalkorDB connection.
@@ -13314,63 +13336,33 @@ class TortoiseSDK:
         carries an approved ``test_``/``tortoise_test_`` prefix (#3634) so
         parallel test runs stay independent (#135, #139) and the reaper owns
         the graph.
+
+        ⛔ ``no_schema_ddl=True`` IS THE METER'S HAND-HOLD (#12894 review
+        finding 2, MEASURED). It returns the SAME derived handle, built on a
+        projection constructed with the write-freedom PAIR —
+        ``skip_health_check=True, ensure_indexes=False`` — and it creates no
+        index, so using it issues NO schema DDL and no open-time health probe.
+        It is not cached on the instance and it is not a second name derivation:
+        the caller owns that projection, and the callers build a throwaway SDK
+        per call anyway. The handle is still WRITABLE — ``metering`` MERGEs the
+        ledger row through it; what it cannot do is run schema DDL.
+        WHY IT EXISTS: both metering calls run on the ARMED RECORD-WRITE SEAM (a
+        committed write's byte-meter increment), and the ordinary form's first
+        DDL is what issued two VECTOR INDEX statements between a capture's
+        journal append and its cache fold — measured by
+        ``tests/test_9567_record_capstone.py``'s D3 legs as mutating cache
+        statements with no append and no APPLIED record behind them. A meter's
+        bookkeeping must not be graph schema DDL.
         """
+        if no_schema_ddl:
+            built = self._registry_handle_for(
+                self._build_proj(skip_health_check=True, ensure_indexes=False),
+                create=create)
+            return None if built is None else built[1]
         if self._registry_g is None:
-            proj = self._get_proj()
-            graph_name = getattr(proj, "graph_name", None)
-            ns = self._namespace or ""
-            # Epic #1647 (T7): the hyphenated test-* namespace family is
-            # normalized in _get_proj (test-tiers → test_tiers_tortoise); the
-            # control-plane path normalizes identically so it derives its name
-            # from the SAME `ns` string. For a test graph the emitted name is
-            # `{ns}_{test_graph}_control_plane`, prefixed with `test_` only when
-            # it does not already start with `test_`/`tortoise_test_` (below).
-            # So `test-hosted` emits
-            # `test_hosted_test_hosted_tortoise_control_plane`, never
-            # `test_test_hosted_...` — and that name therefore ALWAYS matches
-            # `_SERVER_WIPE_PREFIXES`: `wipe_server` owns it by prefix. The
-            # journal append below is the ADDITIONAL ownership record, read by
-            # the journal sweep (`_SWEEP_OWNED_PREFIXES`). The shared-name
-            # branch emits `{ns}_control_plane` / `control_plane`, never
-            # prefixed — for `registry` and the no-namespace path those match
-            # NEITHER set, but a `team_`/`org_` namespace DOES match
-            # `_SWEEP_OWNED_PREFIXES` (never `_SERVER_WIPE_PREFIXES`).
-            if ns.startswith("test-"):
-                ns = ns.replace("-", "_")
-            if graph_name and graph_name.startswith(("tortoise_test_", "test_")):
-                registry_name = f"{ns}_{graph_name}_control_plane" if ns else f"{graph_name}_control_plane"
-                # #3634 / epic CI-3 half 2: WITHOUT this the derived name matches
-                # NEITHER ownership set, so every mint leaks one server graph
-                # (E2E-7). Prepend only when absent — `test-hosted` derivatives
-                # already comply, and double-prefixing breaks
-                # tests/test_derived_names.py.
-                if not registry_name.startswith(("test_", "tortoise_test_")):
-                    registry_name = f"test_{registry_name}"
-            elif ns:
-                registry_name = f"{ns}_control_plane"      # shared — NEVER prefixed
-            else:
-                registry_name = "control_plane"            # shared — NEVER prefixed
-            if not create:
-                # `create=False` is the probe contract: a graph this store does
-                # not already hold is reported ABSENT, never brought into being.
-                # Checked on the DERIVED name (one derivation, above) so the two
-                # callers cannot disagree about which graph is the registry.
-                from .graph_delete_guard import graph_exists
-                if not graph_exists(proj.db, registry_name):
-                    return None
-            registry_graph = proj.db.select_graph(registry_name)
-            # Epic #1647 (CI P2): the registry name derived from a TEST graph
-            # must ALSO be journaled — the redirect only journals the main
-            # graph, so without this a test-derived registry never reached
-            # the session sweep. Journal the registry name too (product
-            # writer: env-gated no-op outside a test session).
-            # #3634: the journal append alone was not enough — the derived
-            # name must also carry an approved test_/tortoise_test_ prefix
-            # (applied above), or it matched neither ownership set and every
-            # mint still LEAKED one server graph (E2E-7 GRAPH.LIST bound red
-            # at 466+).
-            from tortoise.projection import _journal_append_product
-            _journal_append_product(registry_name)
+            built = self._registry_handle_for(self._get_proj(), create=create)
+            if built is None:
+                return None
             # #3214 (review P2): cache the handle only AFTER the append
             # succeeds. select_graph is client-side (no server call), so a
             # raise above mints nothing — but caching first left a
@@ -13386,8 +13378,7 @@ class TortoiseSDK:
             # `None` for a store that HAS the account — the one answer this method's
             # docstring forbids. (Do not "restore consistency" by matching `close()`:
             # the two directions are deliberately opposite.)
-            self._registry_name = registry_name
-            self._registry_g = registry_graph
+            self._registry_name, self._registry_g = built
             self._ensure_registry_indexes()
         elif not create:
             # A CACHED HANDLE IS NOT PROOF THE GRAPH STILL EXISTS. A sweep, or an
@@ -13407,6 +13398,73 @@ class TortoiseSDK:
             if not graph_exists(self._get_proj().db, self._registry_name):
                 return None
         return self._registry_g
+
+    def _registry_handle_for(self, proj, *, create: bool):
+        """The registry NAME derivation and handle for *proj*: `(name, graph)`.
+
+        `None` when ``create`` is False and the store does not already hold the
+        derived name. Split out of :meth:`_get_registry` so the CACHED hand-hold
+        and the write-free one cannot diverge about WHICH graph is the registry,
+        and so the ``create=False`` probe is answered by the same code in both.
+        The ownership journal append stays HERE (not in the caller) for the same
+        reason it was placed there originally: it is the ADDITIONAL ownership
+        record for a name the derived-prefix rule may not cover.
+        """
+        graph_name = getattr(proj, "graph_name", None)
+        ns = self._namespace or ""
+        # Epic #1647 (T7): the hyphenated test-* namespace family is
+        # normalized in _get_proj (test-tiers → test_tiers_tortoise); the
+        # control-plane path normalizes identically so it derives its name
+        # from the SAME `ns` string. For a test graph the emitted name is
+        # `{ns}_{test_graph}_control_plane`, prefixed with `test_` only when
+        # it does not already start with `test_`/`tortoise_test_` (below).
+        # So `test-hosted` emits
+        # `test_hosted_test_hosted_tortoise_control_plane`, never
+        # `test_test_hosted_...` — and that name therefore ALWAYS matches
+        # `_SERVER_WIPE_PREFIXES`: `wipe_server` owns it by prefix. The
+        # journal append below is the ADDITIONAL ownership record, read by
+        # the journal sweep (`_SWEEP_OWNED_PREFIXES`). The shared-name
+        # branch emits `{ns}_control_plane` / `control_plane`, never
+        # prefixed — for `registry` and the no-namespace path those match
+        # NEITHER set, but a `team_`/`org_` namespace DOES match
+        # `_SWEEP_OWNED_PREFIXES` (never `_SERVER_WIPE_PREFIXES`).
+        if ns.startswith("test-"):
+            ns = ns.replace("-", "_")
+        if graph_name and graph_name.startswith(("tortoise_test_", "test_")):
+            registry_name = f"{ns}_{graph_name}_control_plane" if ns else f"{graph_name}_control_plane"
+            # #3634 / epic CI-3 half 2: WITHOUT this the derived name matches
+            # NEITHER ownership set, so every mint leaks one server graph
+            # (E2E-7). Prepend only when absent — `test-hosted` derivatives
+            # already comply, and double-prefixing breaks
+            # tests/test_derived_names.py.
+            if not registry_name.startswith(("test_", "tortoise_test_")):
+                registry_name = f"test_{registry_name}"
+        elif ns:
+            registry_name = f"{ns}_control_plane"      # shared — NEVER prefixed
+        else:
+            registry_name = "control_plane"            # shared — NEVER prefixed
+        if not create:
+            # `create=False` is the probe contract: a graph this store does
+            # not already hold is reported ABSENT, never brought into being.
+            # Checked on the DERIVED name (one derivation, above) so the two
+            # callers cannot disagree about which graph is the registry.
+            from .graph_delete_guard import graph_exists
+            if not graph_exists(proj.db, registry_name):
+                return None
+        registry_graph = proj.db.select_graph(registry_name)
+        # Epic #1647 (CI P2): the registry name derived from a TEST graph
+        # must ALSO be journaled — the redirect only journals the main
+        # graph, so without this a test-derived registry never reached
+        # the session sweep. Journal the registry name too (product
+        # writer: env-gated no-op outside a test session).
+        # #3634: the journal append alone was not enough — the derived
+        # name must also carry an approved test_/tortoise_test_ prefix
+        # (applied above), or it matched neither ownership set and every
+        # mint still LEAKED one server graph (E2E-7 GRAPH.LIST bound red
+        # at 466+).
+        from tortoise.projection import _journal_append_product
+        _journal_append_product(registry_name)
+        return registry_name, registry_graph
 
     def _ensure_registry_indexes(self) -> None:
         """Create indexes on registry graph labels (idempotent)."""
