@@ -189,7 +189,8 @@ A graph with a large journal and **zero** `journal_event` rows is the population
 `floor = N`, and
 
 ```sql
-SELECT %s, %s, GREATEST(observed.row_max, observed.enumerated_floor)
+SELECT %s, %s, GREATEST(observed.row_max, observed.enumerated_floor),
+       ...                                    -- the mode literal, '{MODE_SEEDED}'
   FROM observed
  WHERE observed.row_max <= observed.enumerated_floor
 ```
@@ -260,14 +261,14 @@ ON CONFLICT (org_id, graph_id, seq) DO NOTHING
 |---|---|---|
 | genuine replay (same type, same payload, same capture) | silent — that is idempotence | `:6718-6723` (the arm), `:6812-6813` (the silent return — a genuine replay's conflict query returns no row, so it never reaches the drift return at `:6847`) |
 | same type **and** same capture, payload differs → read as *derivation drift* | **silent** — admitted as a *reading*, not evidence | `:6820-6846`, `:6847` |
-| anything else → `JournalPositionCollision` | loud: named refusal `journal_collision`, counter, WARNING | `:6858-6872`, `record_writer.py:2747-2771` |
+| anything else → `JournalPositionCollision` | loud: named refusal `journal_collision`, counter, WARNING | `:6858-6865`, `record_writer.py:2747-2771` |
 | `ts` is `NULL` and the payload differs | loud (`capture_state="unknown"`) | `record_projection.py:6849-6853` |
 
 The drift arm admits a shape the class docstring itself calls a *"mirror residual"*: *"TWO DIFFERENT
 RECORDS sharing an instant land here and are absorbed — with `_identity_evidence` never consulted, even
 where it would have answered `disagrees`"* (`record_projection.py:6829-6846`), pinned as admitted by
 `tests/test_9318_journal_collision.py::test_a_same_capture_instant_pair_is_ADMITTED_not_detected`.
-`#12965` (the head of `main`) is the commit that closed the two P0s in this guard, so the pair
+`#12965` (the head of `main` at the measurement point; `origin/main` has since moved on) is the commit that closed the two P0s in this guard, so the pair
 above is the post-`#12965` state.
 
 ### 4.2 `TORTOISE_JOURNAL_SEGMENTS` — the round-1 live trigger
@@ -279,11 +280,13 @@ counting.
 
 Under the allocator this class **narrows but does not vanish** (plan `§A7.6`/D-28): the allocator never
 recounts, so it survives a seal; the *seed* and the *replay floor* do not. On today's running path —
-enumeration, because V2 — a seal after a cutover is exactly the D-28 live trigger: the next append
-returns 1 again and collides with rows 1..N. That collision is now **loud** (guard, §4.1) unless the two
-records share `event_type` and `recorded_at`, and the journal's segment manifest is *designed* to make
-the reader count across segments (which is why the plan calls the trigger "one flip from live" rather
-than "broken").
+enumeration, because V2 — a seal on a graph with **no** `record_cursor` row is exactly the D-28 live
+trigger: the next append returns 1 again and collides with rows 1..N, and that collision is now **loud**
+(guard, §4.1) unless the two records share `event_type` and `recorded_at`. On a **cut-over** graph the
+same seal cannot reach that collision at all, because the enumerated-replay refusal pre-empts the insert
+(§4.5) — the write is refused before a row is written. Either way the journal's segment manifest is
+*designed* to make the reader count across segments (which is why the plan calls the trigger "one flip
+from live" rather than "broken").
 
 ### 4.3 The journal MUTATORS
 
@@ -426,8 +429,8 @@ document's own review rounds (§9 states no total, and deliberately). Each named
 
 | # | Defect named in review | Status | Evidence |
 |---|---|---|---|
-| 1 | **positional `params[:5]` unpack** in `_refuse_a_journal_collision` — the guard unpacked five params for a six-bind insert, so `journal_id` would have been read as `seq` etc. | **FIXED** | the 6-bind unpack `org_id, graph_id, seq, event_type, payload, ts = statement.params` at `record_projection.py:6796`, guarded by an arity/identity **bail before any unpacking** at `:6773-6794` (`_JOURNAL_POSITION_PARAM_COUNT = 6`, `:6354`), and the shape test at `:6339-6350` |
-| 2 | **`recorded_at` discriminator, both directions** — (a) an unguarded arm reported every replay of a `ts`-less record as a collision; (b) a content match at a *different* capture was silently absorbed | **FIXED** | (a) `WHERE … (%s::timestamptz IS NOT NULL AND recorded_at IS DISTINCT FROM %s::timestamptz)` at `:6455-6458` with the false-red explained at `:6445-6454`; (b) `same_capture` is computed by Postgres in `_JOURNAL_CONFLICT_CONTENT_SQL` (`:6437-6457`) and only `same_type and same_capture and ts is not None` returns silently (`:6847`); everything else raises `JournalPositionCollision` (`:6858-6872`) |
+| 1 | **positional `params[:5]` unpack** in `_refuse_a_journal_collision` — the guard unpacked five params for a six-bind insert, so `journal_id` would have been read as `seq` etc. | **FIXED** | the 6-bind unpack `org_id, graph_id, seq, event_type, payload, ts = statement.params` at `record_projection.py:6796`, guarded by an arity/identity **bail before any unpacking** at `:6773-6794` (`_JOURNAL_POSITION_PARAM_COUNT = 6`, `:6354`), and the shape test the comment at `:6339-6350` motivates, with the count at `:6354` and the bail at `:6773-6774` |
+| 2 | **`recorded_at` discriminator, both directions** — (a) an unguarded arm reported every replay of a `ts`-less record as a collision; (b) a content match at a *different* capture was silently absorbed | **FIXED** | (a) `WHERE … (%s::timestamptz IS NOT NULL AND recorded_at IS DISTINCT FROM %s::timestamptz)` at `:6455-6456` with the false-red explained at `:6445-6454`; (b) `same_capture` is computed by Postgres in `_JOURNAL_CONFLICT_CONTENT_SQL` (`:6437-6457`) and only `same_type and same_capture and ts is not None` returns silently (`:6847`); everything else raises `JournalPositionCollision` (`:6858-6865`) |
 | 3 | **`23514` on an empty-graph seed** — a `CHECK (seq > 0)` on the cursor made the *emptiest* graph's own seed fail | **FIXED** | `seq bigint NOT NULL DEFAULT 0 CHECK (seq >= 0)` at `supabase/migrations/20261116000001_record_cursor_allocator.sql:61`, with the reasoning at `:24-32`; `journal_event` keeps `seq > 0` (`20261012000001:84`) because a *position* is always ≥ 1 |
 | 4 | **`42501` from `FORCE ROW LEVEL SECURITY` without the GUC** | **FIXED / not applicable as written** | the landed migration uses `ENABLE ROW LEVEL SECURITY` (`20261116000001:78`), **not** `FORCE` — so an owner-role connection is not subjected to the policy by this table. The seed sets *and verifies* the tenant GUC itself (`record_allocator.py:396-397`, `:637-650`), and `record_projection._apply_tenant_scope` does the same plus the role gate (`record_projection.py:7003-7024`, whose body is the cited range), which `scope_connection` (`:7069-7087`) delegates to. The refusal-vs-divergence distinction is pinned by `tests/test_12894_record_cursor_live.py::test_a_seed_without_the_guc_is_a_refusal_not_a_divergence` (`record_allocator.py:383-394`). ⚠️ The plan text still says `FORCE` (`§A7.5.5`, *"FORCE ROW LEVEL SECURITY on `record_cursor`"*), so plan and migration disagree — the *migration* is what runs, and it is the more forgiving of the two |
 | 5 | **the placeholder converter** — *"a statement mixing a literal `$1` with `%s` is refused by the converter"* | ⛔ **NOT FIXED — the claim is false, and the test that pins it passes for the wrong reason** | measured: `to_dollar_placeholders` (`record_projection.py:7806-7824`) refuses only on **arity** (`len(parts)-1 != len(params)`). `Statement("SELECT $1, %s", ("a",))` → `SELECT $1, $1`; `Statement("SELECT $1, %s, %s", ("a","b"))` → `SELECT $1, $1, $2`, both silently. The comment asserting the refusal is `record_allocator.py:199-202`; the test is `tests/test_12894_record_cursor.py:294-319`, and its case `Statement("SELECT $1, %s", ("a","b"))` raises **because there are two params for one placeholder**, not because a literal `$n` was detected — delete the literal and the same case still raises. No *landed* statement mixes the two (checked: the only `$<n>` occurrences in `record_projection.py` are inside comments/docstrings at `record_projection.py:266` and `record_projection.py:7570`), so this is a **false-passing gate**, not a live data defect — the shape it cannot see is one a future edit can introduce |
@@ -471,8 +474,9 @@ three things that would make the ruling true of the running system are V5 items 
 The dispatch brief asked for this claim to be checked rather than trusted, so:
 
 The cap-archives live on **`origin`** under `refs/wip/`, and the same refs are visible locally — this
-worktree holds **322** `refs/wip/*` refs, and `git for-each-ref 'refs/wip/*12894*'` prints exactly the
-two-line listing below with the same shas, so a reader can reproduce it with either command. The one
+worktree holds **322** `refs/wip/*` refs, and `git for-each-ref 'refs/wip/*12894*'` names the same two
+refs at the same shas (it prints four fields — sha, type, object, ref — where the listing below has two),
+so a reader can reproduce the mapping with either command. The one
 quoted here is `git ls-remote`, because that is what was run and because it is the only form that
 speaks about `origin` rather than about this clone:
 
@@ -486,7 +490,8 @@ ec0bc91f6d8650105b4eb0f1a40c342c59451f14 refs/wip/feat-12894-allocator-spike
 Both say **"not for merge"** in their commit subject, which also carries the archive timestamps
 (`2026-11-16T06:29:21Z`, `2026-11-16T10:08:08Z`) — **transcribed from those subjects, not from the
 listing above**: the subjects record when the archive ran, and the `issue-` commit's own date is
-`10:08:19`, nine seconds later. The archive tool (agent-infra's `scripts/bg-rescue-wip.sh`,
+`10:08:19`, eleven seconds later — the subject's timestamp is the archive run, the commit date is when
+the archive commit itself was written. The archive tool (agent-infra's `scripts/bg-rescue-wip.sh`,
 materialised here as the gitignored `scripts/` pointer) writes a local `refs/wip-local/<slug>` and mirrors
 the remote copy back as `refs/wip-remote/<slug>`; in this clone those local refs are
 `refs/wip-local/feat-12894-allocator-spike` (`ec0bc91f6d`) and the `refs/wip/` pair above, and neither
@@ -513,15 +518,19 @@ commit only. The substantive commit's two halves are **not** in the same state:
 
 ⚠️ `git diff --stat origin/main <wip-ref>` is **not a usable reading here** (a three-dot diff re-inverts
 the whole squash-merged PR; a two-dot diff shows reverts of every `main` commit since the branch base).
-The honest comparison is `git log refs/pull/12959/head..<wip-ref>` plus a path-scoped two-dot diff.
+The honest comparison is `git log acc9cbc035..<wip-ref>` plus a path-scoped two-dot diff — `acc9cbc035`
+is `#12959`'s head as verified above, and it resolves locally; `refs/pull/12959/head` is the same commit
+but exists only after `git fetch origin 'refs/pull/*:refs/pull/*'`, so naming it would hand the reader a
+`fatal: ambiguous argument` in a fresh clone.
 
 ---
 
 ## 9. Commands used (verbatim)
 
 **Which invocations are registered, and which are not.** The lane's report tool took every check this
-lane ran, and `WORKTREE-REPORT.md` is the register: the wiring check after **most** fix batches (the
-cycle-2, cycle-3 and cycle-4 batches had no run between them), the docs lint
+lane ran, and `WORKTREE-REPORT.md` is the register: the wiring check after several of the fix batches,
+though not all of them — the cycle-2 and cycle-3 batches had no run between them, which is why this
+section places runs by their timestamps instead of asserting that every round got one — the docs lint
 first as a non-run (exit `2`, kept as a red row rather than deleted) and then through the workflow's own
 pinned producers, which returned `0` markdownlint issues in one file, `0` link errors over `total=0`
 links — this document contains no links, so that gate had nothing to resolve and its pass is vacuous —
@@ -549,10 +558,9 @@ them from memory, so the negative findings are re-runnable rather than asserted.
 file and warns when the branch has moved past it (`⚠ head moved since the report was written — re-run
 the affected suites so the report describes the tree you are actually shipping`), which every later
 docs-only commit would re-trigger. The runs above therefore say *when* they were taken and not that
-they cover the shipping commit. Each run is labelled with the round it follows, and the label is
-**checkable rather than asserted**: `.worktree-report/state.json` records every run's
-`started_at`/`finished_at`, so **each run can be placed between two commits by its own timestamps
-rather than by a label this text asserts**. The run that finished at 18:13:17Z is the clearest case: it
+they cover the shipping commit, and **no round label is asserted for them**: `.worktree-report/state.json`
+carries each run's `started_at`/`finished_at` (its `label` is a slug of the command, not a round), so each
+run is placed between two commits by its own timestamps. The run that finished at 18:13:17Z is the clearest case: it
 sits between `77951e15cf` (the cycle-1 fixes) and `3053bd2827` (the cycle-2 fixes), so it is a cycle-1
 run and covers nothing the cycle-2 round added — and an earlier draft of this section called it a
 cycle-3 run, which is the defect this paragraph exists to prevent. The run that finished at 18:33:28Z
