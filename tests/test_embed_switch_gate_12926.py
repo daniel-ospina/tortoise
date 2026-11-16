@@ -1005,6 +1005,58 @@ def test_a_heredoc_body_is_not_SHELL_either(tmp_path):
     assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
 
 
+def test_a_heredoc_delimiter_is_a_WORD_not_an_identifier():
+    r"""Review P1 at `c858544e71` — the opener regex demanded `[A-Za-z_][A-Za-z0-9_]*`.
+
+    bash's delimiter is a shell WORD, so `<<'END-OF-DATA'` (a hyphen), `<<E.O.F`, `<<'EO\F'` and
+    `<<$'EOF'` are all openers — and none matched, so the opener was invisible, the BODY was read
+    as SHELL, and a `fi` on the body's first line saturated the depth while the two body `export`s
+    were credited `STATED` (exit 0). Measured end-to-end: `env -i … bash script /usr/bin/env`
+    printed no `TORTOISE_*`, and the body was written to its file verbatim, proving bash took it
+    as DATA. The terminator is compared against the UNQUOTED word, as bash does.
+    """
+    for label, delim, quoted in (
+        ("a hyphenated delimiter", "END-OF-DATA", "'END-OF-DATA'"),
+        ("a dotted delimiter", "E.O.F", "E.O.F"),
+        ("a backslash-quoted delimiter", "EOF", "'\\EOF'"),
+        ("an ANSI-C quoted delimiter", "EOF", "$'EOF'"),
+    ):
+        stated, ambiguous = gate._shell_assignments(
+            "#!/bin/bash\n"
+            f"cat > /tmp/notes.txt <<{quoted}\n"
+            "fi\n"
+            "export TORTOISE_VALUE_GATE=1\n"
+            "export TORTOISE_EMBED_GATE=1\n"
+            f"{delim}\n"
+            'exec "$@"\n'
+        )
+        assert stated == {}, f"{label}: the body was read as shell: {stated}"
+
+    # The terminator is the UNQUOTED word, so the body really does close there: a top-level export
+    # AFTER it is a statement the process receives, and must still be credited.
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/bash\n"
+        "cat > /tmp/notes.txt <<'END-OF-DATA'\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+        "END-OF-DATA\n"
+        "export TORTOISE_VALUE_GATE=1\n"
+        'exec "$@"\n'
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1"}, stated
+    assert ambiguous == set(), ambiguous
+
+    # ⛔ A `<<` this reader cannot model STOPS the read (fail CLOSED), rather than being credited
+    # from lines that may sit inside a body nobody executes. A form the opener regex cannot match
+    # is the only way to reach it, so this pins the direction with a shape it cannot model.
+    stated, _ = gate._shell_assignments(
+        "#!/bin/bash\n"
+        "cat > /tmp/x <<\n"
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {}, f"an unmodelled `<<` let the rest of the file be read: {stated}"
+
+
 def test_an_arithmetic_shift_is_not_a_heredoc():
     """Review P3: `<<` inside `$(( … ))` is a SHIFT, and it swallowed the rest of the file.
 

@@ -243,8 +243,14 @@ _SHELL_OPENERS = re.compile(
     # OTHER `{`s out: `${VAR}` has a `$` before it (parameter expansion, not a block) and brace
     # expansion (`a{b,c}`) has a word character before it, as does a `{` inside an arithmetic or
     # quoted span — which is blanked before this runs anyway.
+    #
+    # ⛔ There is no `(` arm here (review P3, measured): a trailing `(` used to have one, but this
+    # pattern only ever runs on the STRUCTURAL view, where `_SPAN_SUBSHELL` has already blanked
+    # every `(` — so the arm could never fire (`_shell_structure('f() (')` → `'f    '`,
+    # `findall` → `[]`, against `['(']` on the raw line). A trailing `(` that opens anything is a
+    # subshell, and the span already models it; keeping a dead arm only made the comment claim a
+    # capability the regex did not have.
     r"|(?:^|[\s;&|()])\{"
-    r"|\(\s*$"
 )
 #: ⛔ A closer may follow a STATEMENT SEPARATOR on the same line (review P1, measured). The model
 #: was line-anchored, so a one-line `if [ -n "$X" ]; then echo hi; fi` opened a block and never
@@ -254,17 +260,30 @@ _SHELL_OPENERS = re.compile(
 _SHELL_CLOSERS = re.compile(
     r"(?:^|[;&|])\s*(?:fi|done|esac)\b|^\s*\}\s*(?:[0-9]*>&[0-9]+)?\s*$|^\s*\)\s*$"
 )
-#: A heredoc opener: `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"`, `<<\WORD`. Its BODY is data,
-#: not shell (review P1, measured): scanning the body let a `fi`/`done`/`esac` at line start inside
-#: it close the ENCLOSING block, so an `export` in a branch that never runs was credited `STATED`
-#: and the gate exited 0 over an unarmed process. `(?<!<)` keeps `<<<` (here-string) out.
-#: ⛔ A BACKSLASH-quoted delimiter (`<<\EOF`) is the third valid spelling (it suppresses expansion
-#: in the body exactly like quotes do) and was not accepted, so its body was read as SHELL —
-#: measured fail-open, same class (review). The backslash is matched separately rather than inside
-#: the quote group because `(?P=q)` must compare only the QUOTING delimiter.
+#: A heredoc opener: `<<WORD`, `<<-WORD`, and every QUOTING spelling of that word (`<<'WORD'`,
+#: `<<"WORD"`, `<<\WORD`, `<<$'WORD'`). Its BODY is data, not shell (review P1, measured):
+#: scanning the body let a `fi`/`done`/`esac` at line start inside it close the ENCLOSING block, so
+#: an `export` in a branch that never runs was credited `STATED` and the gate exited 0 over an
+#: unarmed process. `(?<!<)` keeps `<<<` (here-string) out.
+#:
+#: ⛔ **The delimiter is a bash WORD, not an identifier (review P1, measured).** This matched
+#: `[A-Za-z_][A-Za-z0-9_]*`, so every delimiter bash accepts and this did not — `<<'END-OF-DATA'`,
+#: `<<E.O.F`, `<<'EO\F'`, `<<$'EOF'` — left the opener unrecognised and its BODY was read as SHELL:
+#: measured on `cat > /tmp/notes.txt <<'END-OF-DATA'` whose body carried a `fi` and two `export`s —
+#: the gate printed `ok … =1 =1` (exit 0) while `env -i … bash script /usr/bin/env` printed no
+#: `TORTOISE_*` at all and the body was written out verbatim, proving bash took it as DATA.
+#: The word is matched loosely here and its QUOTING removed by `_heredoc_delimiter`, because the
+#: terminator is compared against the unquoted word, exactly as bash does. ⛔ A delimiter is NOT
+#: parameter-expanded (`<<$FOO` wants the literal `$FOO` — measured), which is why `$` is allowed
+#: inside the word rather than making those openers "unmodelled".
 _SHELL_HEREDOC = re.compile(
-    r"(?<!<)<<-?\s*(?P<bs>\\)?(?P<q>['\"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=q)"
+    r"(?<!<)<<-?\s*(?P<delim>(?:[^\s;&|<>()'\"\\]|\\.|'[^']*'|\"[^\"]*\"|\$'[^']*')+)"
 )
+#: Every `<<`/`<<-` that is not a HERE-STRING — the population the opener regex above must cover
+#: entirely. A `<<` left over after matching (a form this reader cannot model) STOPS the read, the
+#: same fail-CLOSED direction as an unterminated body: crediting nothing from the rest of the file
+#: refuses the channel rather than passing it on a body nobody executes.
+_SHELL_HEREDOC_START = re.compile(r"(?<!<)<<(?!<)")
 _SHELL_TERMINATES = re.compile(r"^\s*(?:exit|exec)\b")
 #: Two ways a LATER line takes an earlier `export K=1` back, both of which must drop the literal
 #: from `stated` — Docker and the shell are last-assignment-wins, and `stated` outranks `ambiguous`
@@ -681,6 +700,54 @@ def _word_at(text: str, index: int, word: str) -> bool:
     return end >= len(text) or not (text[end].isalnum() or text[end] == "_")
 
 
+def _shell_is_code(position: int, views: tuple[str, ...]) -> bool:
+    """True when ``position`` is CODE in at least one structural view.
+
+    Position-aligned: blanking preserves length, so `<` at the match start means the `<<` is CODE.
+    A match inside a span, or past a comment cut, is not an opener — and passing the SECOND
+    (substitution-transparent) view is what makes "inside a SUBSTITUTION" mean code here.
+    """
+    return any(position < len(view) and view[position] == "<" for view in views)
+
+
+def _heredoc_delimiter(word: str) -> str:
+    r"""``word`` with ONE layer of shell quoting removed — the terminator bash compares against.
+
+    A heredoc delimiter is a shell WORD: `<<'END-OF-DATA'`, `<<"E.O.F"`, `<<\EO\F` and `<<$'EOF'`
+    all name the same terminator their unquoted spelling does, because bash removes the quoting
+    before it stores it (the quoting only suppresses expansion in the BODY). Comparing the quoted
+    spelling against the raw terminator line — which is what a reader that never unquotes does —
+    leaves the body OPEN, so every statement in it runs as code (review P1, measured).
+
+    ⛔ Nothing else is expanded: `<<$FOO` wants the LITERAL `$FOO` (measured on bash 5.2), which is
+    why the opener regex admits `$` inside the word and this leaves it alone.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(word)
+    while index < length:
+        char = word[index]
+        if char == "\\" and index + 1 < length:
+            out.append(word[index + 1])
+            index += 2
+            continue
+        if word.startswith("$'", index):
+            end = word.find("'", index + 2)
+            end = length if end < 0 else end
+            out.append(word[index + 2 : end])
+            index = end + 1
+            continue
+        if char in "\"'":
+            end = word.find(char, index + 1)
+            end = length if end < 0 else end
+            out.append(word[index + 1 : end])
+            index = end + 1
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _shell_code_lines(text: str) -> list[str]:
     """``text``'s logical lines with every HEREDOC BODY removed (review P1).
 
@@ -735,16 +802,23 @@ def _shell_code_lines(text: str) -> list[str]:
         scan, scan_stack = _shell_structure(
             line, scan_stack, keep_delimiters=True, keep_substitutions=True
         )
-        for match in _SHELL_HEREDOC.finditer(line):
-            # Position-aligned: blanking preserves length, so `<` at the match start means the
-            # `<<` is CODE. A match inside a span, or past a comment cut, is not an opener — and
-            # the second view is what makes "inside a SUBSTITUTION" mean code here.
-            if not any(
-                match.start() < len(view) and view[match.start()] == "<"
-                for view in (structure, scan)
-            ):
-                continue
-            pending.append((match.group("delim"), match.group(0).startswith("<<-")))
+
+        views = (structure, scan)
+        openers = [
+            match for match in _SHELL_HEREDOC.finditer(line) if _shell_is_code(match.start(), views)
+        ]
+        if any(
+            _shell_is_code(candidate.start(), views)
+            and not any(o.start() <= candidate.start() < o.end() for o in openers)
+            for candidate in _SHELL_HEREDOC_START.finditer(line)
+        ):
+            # ⛔ A `<<` this reader cannot model: STOP, do not guess. The rest of the file is not
+            # read, which is the same fail-CLOSED direction as an unterminated body — the channel
+            # is then refused for not stating the switches instead of being credited from lines
+            # that may sit inside a body nobody executes.
+            return out
+        for match in openers:
+            pending.append((_heredoc_delimiter(match.group("delim")), match.group(0).startswith("<<-")))
     return out
 
 
