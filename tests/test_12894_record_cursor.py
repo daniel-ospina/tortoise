@@ -316,6 +316,88 @@ def test_the_written_watermark_is_the_allocated_one() -> None:
         "the byte meter is still measuring the caller's positions")
 
 
+def test_an_allocating_plan_never_asks_the_collision_question() -> None:
+    """REBASE FINDING (#12894 + #9318 met here, and the merge was silent):
+    `replay()`'s `#9318` guard selected its statements with
+    `_JOURNAL_INSERT_PREFIX in statement.sql`. The ALLOCATION statement's text
+    CONTAINS that prefix — it ends in `INSERT INTO public.journal_event …
+    RETURNING seq` — so the guard fired on it, read `_journal_row`'s parameter
+    ORDER out of `statement.params[:5]` (three ARRAYS and an int on this path),
+    and asked the database a question whose answer Postgres refused with
+    `operator does not exist: text = text[]` (42883, MEASURED on a real server).
+    The allocator's own `CursorNotActive` refusal was replaced by a
+    `RecordStatementError` naming a position nobody had asked for.
+
+    The guard decides whether an ABSORBED insert is a replay or a collision, and
+    the allocation has no `ON CONFLICT` — it can absorb nothing — so it must
+    never be asked. Driven here through a connection on which EVERY statement
+    reports `rowcount == 0` (the absorbed shape, and the shape an allocation
+    that wrote nothing has), which is exactly what made the guard proceed.
+    """
+    records = [{"type": "PointAdded", "ts": "2026-11-16T00:00:00Z", "id": "p1",
+                "point": {"id": "p1", "content": "c", "pointKind": "claim"}}]
+
+    class _Cursor:
+        #: Every insert is ABSORBED — the guard's own precondition.
+        rowcount = 0
+
+        def __init__(self, conn: _AbsorbedConn) -> None:
+            self._conn = conn
+            self._sql = ""
+
+        def execute(self, sql, params=None) -> None:
+            self._conn.executed.append(sql)
+            self._sql = sql
+            if sql == rp._JOURNAL_CONFLICT_CONTENT_SQL:
+                self._conn.conflict_reads += 1
+            if sql == rp.TENANT_GUC_SQL and params:
+                self._conn.guc_set = params[0]
+
+        def fetchall(self):
+            # The allocation's `RETURNING seq` — nothing was allocated.
+            return []
+
+        def fetchone(self):
+            if self._sql == ra.ISOLATION_SQL:
+                return (ra.READ_COMMITTED,)
+            if self._sql == rp.TENANT_SCOPE_SQL:
+                return (self._conn.guc_set, False)
+            return (self._conn.guc_set,)
+
+        def close(self) -> None:
+            pass
+
+    class _AbsorbedConn:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+            self.conflict_reads = 0
+            self.guc_set = None
+
+        def cursor(self) -> _Cursor:
+            return _Cursor(self)
+
+    conn = _AbsorbedConn()
+    #: The refusal this path OWES. `test_an_unarmed_cursor_allocates_nothing`
+    #: asserts it live; asserting it here is what makes the DB-free half a
+    #: falsifier rather than a `conflict_reads` counter nobody would notice.
+    with pytest.raises(ra.CursorNotActive):
+        rp.replay(records, conn, org_id="o", graph_id="g", allocate=True)
+
+    allocated = [sql for sql in conn.executed
+                 if sql.startswith(ra.ALLOCATION_STATEMENT_PREFIX)]
+    assert len(allocated) == 1, (
+        f"the allocation did not run on the allocating path: {conn.executed!r}")
+    assert conn.conflict_reads == 0, (
+        "the #9318 collision question was asked about the ALLOCATION statement — "
+        "its params are (event_types[], payloads[], recorded_at[], n, org_id, …), "
+        "not `_journal_row`'s (org_id, graph_id, seq, event_type, payload), so the "
+        "question is malformed and Postgres answers it with `operator does not "
+        "exist: text = text[]`, replacing the allocator's own CursorNotActive "
+        "refusal with a statement error naming a position nobody asked for. The "
+        "allocation has no `ON CONFLICT`, so it can absorb nothing and there is "
+        "nothing for that guard to decide")
+
+
 def test_allocate_and_position_false_is_refused() -> None:
     """An allocated number exists to be CARRIED by a position row. Both flags set
     their opposite is a contradiction, refused before a connection is opened."""
@@ -340,8 +422,29 @@ def _fake_error(sqlstate: str) -> Exception:
     is the class the server's error would be raised as. The LIVE sibling then
     exercises a real `57014` (a statement timeout through the allocator's own
     SQL), so the classify() path is not only ever fed a double.
+    ⛔ THE TIE IS CONDITIONAL ON THE DRIVER BEING INSTALLED, AND THAT IS NOT A
+    WEAKENING (measured 2026-11-16 on this branch's head). `psycopg2-binary` is
+    the OPTIONAL `[postgres]` extra (`pyproject.toml`), absent from
+    `dependency-groups.dev`, so it is absent from every fast shard
+    (`python-ci.yml`'s `test` job: `pip install -e '.[test,embeddings]'` +
+    `uv sync --frozen`) — and this DB-free file IS in the fast pool. An
+    unconditional import here raised `ModuleNotFoundError: No module named
+    'psycopg2'` out of both callers: `2 failed, 19 passed` on the URI-less pool,
+    which reds `test (x)` on the PR and on the push to `main`.
+
+    The registry cross-check therefore runs WHERE THE DRIVER EXISTS (a local
+    `uv sync --extra postgres`, and the `test-record-postgres` leg, which
+    installs `.[test,postgres]` and is where this file is now registered for
+    that reason) and is skipped by ABSENCE of the driver, never by an unreadable
+    value. The assertions that ARE the test — the SQLSTATE classification, the
+    counter, the `RetryableAllocationFailure`/`PositionCollision` split — run
+    unconditionally, so only the ORACLE can be degraded, never the behaviour
+    under test.
     """
-    from psycopg2 import errors as pg_errors
+    try:
+        from psycopg2 import errors as pg_errors
+    except ImportError:  # pragma: no cover - exercised on the URI-less pool
+        pg_errors = None
 
     expected = {
         "40001": "SerializationFailure",
@@ -349,8 +452,9 @@ def _fake_error(sqlstate: str) -> Exception:
         "57014": "QueryCanceled",
         "23505": "UniqueViolation",
     }[sqlstate]
-    assert pg_errors.lookup(sqlstate).__name__ == expected, (
-        f"psycopg2 maps {sqlstate} to {pg_errors.lookup(sqlstate).__name__}, "
+    if pg_errors is not None:
+        assert pg_errors.lookup(sqlstate).__name__ == expected, (
+            f"psycopg2 maps {sqlstate} to {pg_errors.lookup(sqlstate).__name__}, "
         f"not {expected} — the sqlstate this suite names is not the driver's")
 
     class _DriverError(Exception):
