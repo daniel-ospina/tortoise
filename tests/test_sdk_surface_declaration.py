@@ -19,7 +19,7 @@ What each test is for, and why the naive version of it would prove nothing:
      by the declaration's content, not by the test's other machinery.
   4. **An approved method that does not exist fails, and is NAMED** — the mirror direction,
      with the same non-vacuity pattern. A gate tested in one direction permits the other.
-  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 125 live, 112
+  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 120 live, 107
      off the surface, 26 approved-but-absent). This is the honest reading of #4282; it goes
      green when Phase 2 lands, not before — which is why the three live numbers carry an
      explicit "update this premise" note instead of being restated from the declaration.
@@ -192,7 +192,7 @@ def test_the_absence_failure_is_NOT_vacuous():
 
 
 def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
-    """#4282's true state: 40 approved, 125 live. Not green, and not vague.
+    """#4282's true state: 40 approved, 120 live. Not green, and not vague.
 
     The approved side has not moved: 14 of the 40 exist (13 live methods the
     declaration names, plus row 1's `Tortoise(...)`, which resolves to the class
@@ -203,7 +203,9 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     row 28 `get_organisation_account` was IMPLEMENTED, which moves `absent` 27 → 26 without
     touching the off-surface 112 (an approved name is not surplus). Nothing approved was
     removed: the 26 are all off-surface surplus, which is why this premise and the 40 are
-    separate numbers.
+    separate numbers. Then 125 → 120 on 2026-11-15 (#12901 wave 1), which retired the first
+    five off-surface methods with NO production caller, so the gap falls 112 → 107 without
+    moving `absent` (a surplus departure is not an approved name).
     """
     declared = _declaration()["__all__"]
     live = _live()
@@ -216,8 +218,8 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
     # verify nothing at all. Each literal carries its own premise note —
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    assert len(live) == 125, "the live surface moved — update this premise (it pins today's gap)"
-    assert len(off_surface) == 112, "the gap moved — update this premise (it pins today's gap)"
+    assert len(live) == 120, "the live surface moved — update this premise (it pins today's gap)"
+    assert len(off_surface) == 107, "the gap moved — update this premise (it pins today's gap)"
     assert len(absent) == 26, "the gap moved — update this premise (it pins today's gap)"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.

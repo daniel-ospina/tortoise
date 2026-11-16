@@ -156,16 +156,11 @@ class TestMembershipCRUD:
         with pytest.raises(ControlPlaneError, match="not found"):
             sdk.membership_create("bad-id", "user-1", "admin")
 
-
-
-    def test_membership_get_returns_membership(self, sdk, team):
-        m = sdk.membership_create(team["id"], "user-1", "admin")
-        result = sdk.membership_get(m["id"])
-        assert result is not None
-        assert result["user_id"] == "user-1"
-
-    def test_membership_get_returns_none_for_missing(self, sdk):
-        assert sdk.membership_get("nonexistent") is None
+    # #12901 wave 1 retired `membership_get` (off the approved surface, zero
+    # production callers — the console reads members via the approved
+    # `list_members`). Its two tests went with it: a test of a door that no longer
+    # exists cannot be re-pointed at another subject. The retirement itself is
+    # pinned in `tests/test_sdk_retirement.py`.
 
     def test_membership_create_rejects_at_max_users(self, sdk, team):
         """#4282 deleted `org_update`, which only SET the cap here.

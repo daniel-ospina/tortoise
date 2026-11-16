@@ -76,11 +76,11 @@ not something to reconcile silently.
 | 56 | `tortoise_list_sources` | `tool_registry.py:397` | `tortoise_graph_overview(section="sources")` | `graph_overview` | warning shim |
 | 57 | `tortoise_list_tags` | `tool_registry.py:446` | `tortoise_graph_overview(section="tags")` | `graph_overview` | warning shim |
 | 58 | `tortoise_list_topics` | `tool_registry.py:1083` | **no replacement** | `list_knowledge` | absent |
-| 59 | `tortoise_manage_sources` | `tool_registry.py:1497` | **no replacement** | `manage_sources` | absent |
+| 59 | `tortoise_manage_sources` | `tool_registry.py:1499` | **no replacement** | `manage_sources` | absent |
 | 60 | `tortoise_mine_conversations` | `tool_registry.py:535` | **no replacement** | `mine_knowledge_from_directory` | absent |
 | 61 | `tortoise_mitigate_operator` | `tool_registry.py:740` | **no replacement** | `adjust_relationship` | absent |
-| 62 | `tortoise_onboarding_github_index` | `tool_registry.py:1538` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `manage_sources` | warning shim |
-| 63 | `tortoise_onboarding_session_recording` | `tool_registry.py:1529` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `manage_sources` | warning shim |
+| 62 | `tortoise_onboarding_github_index` | `tool_registry.py:1540` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `manage_sources` | warning shim |
+| 63 | `tortoise_onboarding_session_recording` | `tool_registry.py:1531` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `manage_sources` | warning shim |
 | 64 | `tortoise_operator_action` | `tool_registry.py:1401` | **no replacement** | `adjust_relationship` | absent |
 | 65 | `tortoise_org_create` | `tool_registry.py:1160` | **no replacement** | `tenancy:create_memory_graph` | absent |
 | 66 | `tortoise_overview` | `tool_registry.py:1448` | `tortoise_graph_overview(section=...)` | `graph_overview` | warning shim |

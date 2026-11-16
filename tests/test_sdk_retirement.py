@@ -381,6 +381,37 @@ def test_a_name_that_was_never_public_gets_no_retirement_claim() -> None:
     )
 
 
+def test_a_removed_name_fails_with_the_documented_error() -> None:
+    """Every REMOVED name must FAIL — and must not claim a migration it does not have.
+
+    #12901 wave 1. The suite pinned record→surface and surface→record, but not the
+    BEHAVIOUR of a removal: a name could leave `TortoiseSDK` and still answer through
+    some inherited attribute with every record-side assertion green. `__getattr__` is
+    the one place a departure becomes a documented error, so it is exercised here for
+    every removed name — and, unlike a retirement, the error must NOT say "retired",
+    because a removal has no replacement to name.
+    """
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk_retired import REMOVED_SDK_METHODS
+
+    sdk = object.__new__(TortoiseSDK)  # no `__init__`: no graph, no DB, no fixture
+    resolved: list[str] = []
+    for name in REMOVED_SDK_METHODS:
+        try:
+            getattr(sdk, name)
+        except AttributeError as exc:
+            assert "retired" not in str(exc).lower(), (
+                f"`TortoiseSDK.{name}` is REMOVED (no replacement recorded) but its "
+                f"error claims a retirement: {exc}"
+            )
+        else:
+            resolved.append(name)
+    assert not resolved, (
+        f"declared REMOVED but still resolve on `TortoiseSDK`: {sorted(resolved)}. "
+        "A removal is a departure — the name must not answer."
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # #4282 surplus block (#10226 review, P2) — the RECORDED DESTINATION is a claim
 # ══════════════════════════════════════════════════════════════════════════
@@ -394,7 +425,7 @@ def test_a_name_that_was_never_public_gets_no_retirement_claim() -> None:
 # reason written from it, to the inventory — in both directions.
 
 def test_every_surplus_destination_is_the_one_the_record_records() -> None:
-    """The cell IS the inventory's column — re-typed values red here, not in production.
+    """Both destination cells ARE the inventory's column — re-typed values red here.
 
     Non-vacuity: on the pre-fix tree this fails on eight names — `batch_create_points`
     (`create_entity` vs `write_knowledge_batch`), `get_provenance_chain`
@@ -402,81 +433,128 @@ def test_every_surplus_destination_is_the_one_the_record_records() -> None:
     `list_knowledge`), `backfill_about_entities`/`backfill_sources`/`complete_source`
     (a target where the record has `—`), and `apikey_list`/`membership_list`/
     `membership_delete` (`—` where the record has a target).
+
+    The `#12901` wave-1 cell is held the same way and for the same reason: it was prose
+    only until 2026-11-16, and `quarantine_batch`'s recorded destination is a LIVE method
+    that the hint arm could therefore never see.
     """
-    from tortoise.sdk_retired import SURPLUS_DELETION_DESTINATIONS
+    from tortoise.sdk_retired import (
+        SURPLUS_DELETION_DESTINATIONS,
+        WAVE1_DELETION_DESTINATIONS,
+    )
 
     inventory = _inventory_destinations()
-    missing = sorted(n for n in SURPLUS_DELETION_DESTINATIONS if n not in inventory)
-    assert not missing, (
-        f"declared in the surplus destination cell but absent from "
-        f"{INVENTORY_DOC.name}: {missing}. The inventory is the record this cell "
-        "transcribes; a name it does not list has no recorded disposition."
-    )
-    wrong = {
-        n: (dests, inventory[n])
-        for n, dests in SURPLUS_DELETION_DESTINATIONS.items()
-        if dests != inventory[n]
-    }
-    assert not wrong, (
-        "a surplus name's recorded destination is not the one "
-        f"{INVENTORY_DOC.name} records (cell, inventory): {wrong}"
-    )
+    for cell_name, cell in (
+        ("SURPLUS_DELETION_DESTINATIONS", SURPLUS_DELETION_DESTINATIONS),
+        ("WAVE1_DELETION_DESTINATIONS", WAVE1_DELETION_DESTINATIONS),
+    ):
+        missing = sorted(n for n in cell if n not in inventory)
+        assert not missing, (
+            f"declared in {cell_name} but absent from "
+            f"{INVENTORY_DOC.name}: {missing}. The inventory is the record this cell "
+            "transcribes; a name it does not list has no recorded disposition."
+        )
+        wrong = {
+            n: (dests, inventory[n])
+            for n, dests in cell.items()
+            if dests != inventory[n]
+        }
+        assert not wrong, (
+            f"a {cell_name} entry's recorded destination is not the one "
+            f"{INVENTORY_DOC.name} records (cell, inventory): {wrong}"
+        )
 
 
-def test_a_surplus_reason_states_only_the_recorded_destination() -> None:
+def test_every_deletion_reason_states_only_its_recorded_destination() -> None:
     """The prose may neither miss the recorded destination nor invent a different one.
 
     The claim sentence is the only shape allowed to state a destination
     (`Recorded destination[s] `x``), so it is parsed and compared as a SET: a reason
     that names `create_entity` while the record says `write_knowledge_batch` reds even
     though it also mentions the right one somewhere else.
+
+    ⛔ BOTH CELLS, not just the surplus block. The `#12901` wave-1 reasons carried their
+    destinations in prose alone until 2026-11-16, so this pin — the one that keeps a
+    hand-typed destination from surviving next to the machine record — never read them
+    (measured by a fresh-context reviewer, who found the `quarantine_batch` claim outside
+    the pin that the docstring says covers it). The wave-1 reasons now state the same
+    claim sentence, and the non-vacuity assertion below holds the two cells to it: a
+    wave-1 name WITH a recorded destination must carry a claim, and one WITHOUT must not.
     """
-    from tortoise.sdk_retired import REMOVED_SDK_METHODS, SURPLUS_DELETION_DESTINATIONS
+    from tortoise.sdk_retired import (
+        REMOVED_SDK_METHODS,
+        SURPLUS_DELETION_DESTINATIONS,
+        WAVE1_DELETION_DESTINATIONS,
+    )
 
     wrong: dict[str, tuple] = {}
-    for name, dests in SURPLUS_DELETION_DESTINATIONS.items():
-        if name not in REMOVED_SDK_METHODS:
-            continue  # a RETIREMENT: pinned by test_every_retired_name_is_an_approved_rename
-        reason = REMOVED_SDK_METHODS[name]
-        claim = _DESTINATION_CLAIM.search(reason)
-        claimed = (
-            tuple(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", claim.group(1)))
-            if claim else ()
-        )
-        if claimed != dests:
-            wrong[name] = (claimed, dests, reason)
+    for cell_name, cell in (
+        ("SURPLUS_DELETION_DESTINATIONS", SURPLUS_DELETION_DESTINATIONS),
+        ("WAVE1_DELETION_DESTINATIONS", WAVE1_DELETION_DESTINATIONS),
+    ):
+        for name, dests in cell.items():
+            if name not in REMOVED_SDK_METHODS:
+                continue  # a RETIREMENT: pinned by test_every_retired_name_is_an_approved_rename
+            reason = REMOVED_SDK_METHODS[name]
+            claim = _DESTINATION_CLAIM.search(reason)
+            claimed = (
+                tuple(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", claim.group(1)))
+                if claim else ()
+            )
+            if claimed != dests:
+                wrong[name] = (cell_name, claimed, dests, reason)
     assert not wrong, (
-        "a surplus removal's stated destination is not its recorded one "
-        "(claimed, recorded, reason): "
-        f"{ {k: v[:2] for k, v in wrong.items()} }"
+        "a removal's stated destination is not its recorded one "
+        "(name: (cell, claimed, recorded, reason)): "
+        f"{ {k: v[:3] for k, v in wrong.items()} }"
+    )
+
+    # NON-VACUITY for the wave-1 cell: the loop above is only a pin if the reasons it
+    # reads actually STATE their claim. A reason that names its destination in some other
+    # phrasing parses as `()` and would only red when the cell is non-empty — so this arm
+    # says the two sides match exactly: claim present iff a destination is recorded.
+    claiming = {
+        name for name in WAVE1_DELETION_DESTINATIONS
+        if _DESTINATION_CLAIM.search(REMOVED_SDK_METHODS.get(name, ""))
+    }
+    recorded = {n for n, dests in WAVE1_DELETION_DESTINATIONS.items() if dests}
+    assert claiming == recorded, (
+        "the wave-1 claim pin does not read what it claims to read — a name whose reason "
+        "lacks the `Recorded destination `x`` sentence is outside the pin "
+        f"(claims, records a destination): {sorted(claiming)}, {sorted(recorded)}"
     )
 
 
 def test_a_live_recorded_destination_is_hinted_or_declared() -> None:
     """A destination a caller can actually call must be NAMED on failure (#3836 (c)).
 
-    Measured at this head two surplus names have a LIVE recorded destination. The hint is
-    free for `get_provenance_chain` (`get_entity` has a `def`), and it carries one;
-    `create_or_update_point` cannot, because two records disagree about its destination —
-    so that divergence is DECLARED in `UNHINTED_LIVE_DESTINATIONS` with its reason rather
-    than silently skipped. Both directions are pinned: an undeclared live miss reds, and
-    so does a declaration that has stopped being live (a stale excuse).
+    Measured at this head THREE declared destinations have a LIVE `def` on `TortoiseSDK`:
+    two surplus names and one wave-1 name. The hint is free for `get_provenance_chain`
+    (`get_entity` has a `def`), and it carries one; `create_or_update_point` and
+    `quarantine_batch` cannot, because two records disagree about their destination — so
+    each divergence is DECLARED in `UNHINTED_LIVE_DESTINATIONS` with its reason rather
+    than silently skipped. The population is BOTH deletion cells: the wave-1 destinations
+    were prose-only until 2026-11-16, which is how a live one escaped this arm. Both
+    directions are pinned: an undeclared live miss reds, and so does a declaration that
+    has stopped being live (a stale excuse).
     """
     from tortoise.sdk_retired import (
         RETIRED_SDK_METHODS,
         SURPLUS_DELETION_DESTINATIONS,
         UNHINTED_LIVE_DESTINATIONS,
+        WAVE1_DELETION_DESTINATIONS,
     )
 
     public = _public_methods()
+    destinations = {**SURPLUS_DELETION_DESTINATIONS, **WAVE1_DELETION_DESTINATIONS}
     live_unhinted = {
         name: dest
-        for name, dests in SURPLUS_DELETION_DESTINATIONS.items()
+        for name, dests in destinations.items()
         for dest in dests
         if dest in public and RETIRED_SDK_METHODS.get(name) != dest
     }
     assert set(live_unhinted) == set(UNHINTED_LIVE_DESTINATIONS), (
-        "a surplus name whose recorded destination is LIVE on `TortoiseSDK` today is "
+        "a name whose recorded destination is LIVE on `TortoiseSDK` today is "
         "neither hinted (RETIRED_SDK_METHODS -> that destination) nor declared as a "
         f"recorded divergence (live-and-unhinted, declared): {sorted(live_unhinted)}, "
         f"{sorted(UNHINTED_LIVE_DESTINATIONS)}"
