@@ -191,7 +191,90 @@ def test_refresh_confidence_arms_delegate_to_their_member(monkeypatch):
     assert dream.calls[0][1]["full"] is False
     assert dream.calls[1][1]["full"] is True
     assert promote.calls == [(("p1",), {})]
-    assert baseline.calls == [(("p1", 2.0, 1.0), {})]
+    assert baseline.calls == [(('p1', 2.0, 1.0), {})]
+
+
+@pytest.mark.parametrize("knob", [
+    {"full": True},
+    {"dirty_only": False},
+    {"max_hops": 9},
+    {"require_calibration": False},
+    {"mode": "full"},
+    {"budget": 7},
+])
+@pytest.mark.parametrize("scope", ["promote", "baseline"])
+def test_a_point_id_scope_REFUSES_the_dream_knobs(scope, knob, monkeypatch):
+    """#12915 final review F2-b: a keyword the chosen arm cannot record is
+    REFUSED, never dropped.
+
+    Measured before this fix, at `bebb2332`:
+    `refresh_confidence(scope='promote', point_id='p1', mode='full', budget=7,
+    max_hops=9, dirty_only=False, require_calibration=False)` → the promotion ran
+    (`tortoise_promote_point('p1')` was reached, returning the SDK's own
+    `{id, status, promoted, blocked, …}`) and every one of those five knobs was
+    silently discarded. A caller who asked for a whole-graph pass got a single
+    promotion and NO signal.
+
+    One parametrised row per knob, on BOTH point_id scopes, because the refusal
+    is one code path but a future arm that splits the scopes must not be able to
+    keep one and lose the other. Each row also asserts the member was NOT called:
+    a refusal that still writes is the defect it refuses.
+    """
+    promote, baseline = _Member(), _Member()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(mcp_server, "tortoise_promote_point", promote)
+        patch.setattr(mcp_server, "tortoise_set_point_baseline", baseline)
+        extra = {} if scope == "promote" else {"alpha": 2.0, "beta": 1.0}
+        got = mcp_server.tortoise_refresh_confidence(
+            scope=scope, point_id="p1", **extra, **knob)
+    message = str(got.get("error", ""))
+    assert list(knob)[0] in message, (knob, got)
+    assert "dream arms" in message, (knob, got)
+    assert promote.calls == [] and baseline.calls == [], (knob, promote.calls, baseline.calls)
+
+
+def test_an_explicit_dirty_scope_REFUSES_full_True(monkeypatch):
+    """The same one-arm rule, ONE ARM OVER (#12915 review of this fix, P2).
+
+    `scope` and `full=` both name the mechanism, and the dream arm derives
+    `full` FROM the scope — so `scope='dirty', full=True` used to run a DIRTY
+    dream while the caller asked for a whole-graph pass: the identical
+    silently-dropped-keyword defect the point_id rows above fix, on the arm
+    those rows do not reach.
+
+    `scope=None, full=True` is the supported spelling and still resolves to
+    'full' (pinned by the delegation row); this refuses only the contradiction.
+    """
+    dream = _Member()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(mcp_server, "tortoise_dream", dream)
+        got = mcp_server.tortoise_refresh_confidence(scope="dirty", full=True)
+    message = str(got.get("error", ""))
+    assert "two mechanisms" in message, got
+    assert dream.calls == [], f"a contradictory call must not dream: {dream.calls}"
+
+
+def test_the_dream_knobs_still_reach_the_dream_arm(monkeypatch):
+    """The mirror: the refusal must not swallow the knobs on their OWN arm.
+
+    ⚠️ NOT a guard against the `stray` check firing unconditionally — the dream
+    scopes RETURN before that block is reached (measured: mutants `if stray:` →
+    `if True:` leaves this row GREEN, and reds only the delegation row above).
+    What it pins is the dream arm's own kwarg MAPPING: all six knobs reach
+    `tortoise_dream` with the values the caller gave, so a future edit that
+    forwards, say, `budget=None` or swaps `dirty_only` for `full` reds here
+    rather than shipping a silently different dream. Same shape as the
+    `credibility`-dropped-on-a-write defect this batch exists to remove.
+    """
+    dream = _Member()
+    monkeypatch.setattr(mcp_server, "tortoise_dream", dream)
+    assert mcp_server.tortoise_refresh_confidence(
+        scope="full", mode="full", budget=7, max_hops=9,
+        dirty_only=False, require_calibration=False) is _Member.SENTINEL
+    kwargs = dream.calls[0][1]
+    assert kwargs == {"full": True, "dirty_only": False, "max_hops": 9,
+                      "require_calibration": False, "mode": "full",
+                      "budget": 7}, kwargs
 
 
 def test_write_question_and_record_decision_delegate_to_their_member(monkeypatch):
@@ -247,6 +330,37 @@ def test_action_mitigate_REFUSES_the_annotation_dimensions(monkeypatch):
     got = mcp_server.tortoise_adjust_relationship(
         "op1", reason="weak", bias=0.1, action="mitigate")
     assert "cannot record bias" in str(got.get("error", "")), got
+
+
+def test_the_RETIRED_door_itself_refuses_dimensions_on_its_mitigate_arm():
+    """The same one-arm rule, ONE LAYER DOWN — driven on `tortoise_operator_action`.
+
+    ⛔ WHY THIS IS A SEPARATE CASE (#12915 final review, F2-a). The container's
+    refusal above is reached by `tortoise_adjust_relationship`, which checks the
+    stray dimensions ITSELF before the door is ever called — so deleting the
+    door's own `stray` block reddened nothing (measured: the mutant survives,
+    `1 passed`). That is the defect shape this batch keeps meeting: a fix the
+    body claims, whose removal no row notices (#3442).
+
+    It is not cosmetic, because this door is RETIRED BUT SERVED: the #3883 shim
+    calls THIS function, not the container, so a caller arriving with the old
+    name and `bias=` got success with the dimension silently discarded.
+
+    Two halves, because a refusal that STILL writes is the defect it refuses:
+    the message must name the stray keyword, and the writer must not be reached.
+    The stub has `mitigate_operator` ONLY, so a call that fell through would be
+    recorded here (and any other name would `AttributeError` rather than pass).
+    """
+    mitigate = _Member()
+    stub = _stub_sdk(mitigate_operator=mitigate)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
+        got = mcp_server.tortoise_operator_action(
+            "mitigate", id="op1", reason="weak", bias=0.1)
+    message = str(got.get("error", ""))
+    assert "cannot record bias" in message, got
+    assert "ONE arm per call" in message, got
+    assert mitigate.calls == [], f"nothing may be written on a refusal: {mitigate.calls}"
 
 
 # ── 2b. `dry_run` is honoured or REFUSED on EVERY arm — never ignored ──

@@ -7658,6 +7658,18 @@ def tortoise_refresh_confidence(scope: str | None = None,
     `scope=None` resolves to 'dirty' (plus `full=True` ⇒ 'full') so the two
     dream call shapes that existed keep working verbatim through the shim.
 
+    ⛔ ONE ARM PER CALL, and the knobs follow the arm (#12915 final review, F2-b):
+    the four scopes take disjoint keyword sets. A point_id scope (`promote`,
+    `baseline`) REFUSES `full`/`dirty_only`/`max_hops`/`require_calibration`/
+    `mode`/`budget` rather than dropping them, exactly as the dream scopes
+    already refuse `point_id`/`alpha`/`beta`; and an explicit `scope='dirty'`
+    REFUSES `full=True`, which would otherwise be dropped because the dream arm
+    derives `full` from the scope. Bound, stated in the handler: the three knobs
+    whose defaults are not `None` (`full=False`, `dirty_only=True`,
+    `max_hops=2`) are refused when they DIFFER from the default, because an
+    explicit pass of the default value is indistinguishable from omission at
+    this boundary.
+
     ⛔ HTTP-EXCLUDED (#329), and the refusal is TOTAL rather than per-arm: the
     registry policy that guards an `http_policy=False` tool requires the handler to
     reject HTTP as its FIRST statement, because an unadvertised tool is still
@@ -7680,6 +7692,21 @@ def tortoise_refresh_confidence(scope: str | None = None,
                       "'full' (the whole graph), 'promote' and 'baseline'."),
             "code": ERR_INVALID})
     if scope in ("dirty", "full"):
+        if full and scope == "dirty":
+            # ⛔ The SAME one-arm rule, one arm over (#12915 final review, P2):
+            # `scope` and `full=` both name the mechanism, and a `full=True` on
+            # an explicit `scope='dirty'` was silently DROPPED —
+            # `tortoise_dream(full=(scope == "full"))` is computed from the scope,
+            # so the caller asking for a whole-graph pass got a dirty dream with
+            # no signal. `scope=None, full=True` is the supported spelling (it
+            # RESOLVES to 'full' above); naming both is a contradiction.
+            return _SafeError({
+                "error": ("refresh_confidence(scope='dirty', full=True) names "
+                          "two mechanisms — `full=True` is what selects the "
+                          "whole-graph scope. Pass scope='full' (or omit scope "
+                          "and let full=True resolve it) instead of asking for "
+                          "a dirty pass and a whole-graph one in the same call."),
+                "code": ERR_INVALID})
         if point_id is not None or alpha is not None or beta is not None:
             return _SafeError({
                 "error": (f"refresh_confidence(scope={scope!r}) stabilizes a "
@@ -7694,6 +7721,45 @@ def tortoise_refresh_confidence(scope: str | None = None,
         return _SafeError({
             "error": (f"refresh_confidence(scope={scope!r}) requires point_id — "
                       f"scope names HOW to refresh, point_id names WHAT."),
+            "code": ERR_INVALID})
+    # ⛔ A keyword the chosen arm cannot record is REFUSED, never dropped — the
+    # rule this container's siblings state in their own headers
+    # (#12915 final review, F2-b). This door refused the point_id-scope fields on
+    # the two DREAM scopes but not the reverse, so
+    # `refresh_confidence(scope='promote', point_id='p1', mode='full', budget=7)`
+    # returned success with both knobs silently discarded: a caller who asked for
+    # a whole-graph pass got a single promotion and no signal that the rest was
+    # ignored. Impact is small (`{ok: 1}`, the promotion does happen) but the
+    # class is the one this batch exists to remove — it is exactly the defect the
+    # `tortoise_adjust_relationship` header cites as the reason
+    # `tortoise_operator_action` was retired (`credibility` dropped on a write).
+    #
+    # ⚠️ BOUND, stated rather than implied: `full`, `dirty_only` and `max_hops`
+    # carry NON-None defaults (`False`, `True`, `2`), so an explicit pass of
+    # exactly the default is indistinguishable from omission at this boundary.
+    # Those three are refused only when they DIFFER from the default — which is
+    # every pass whose value could have changed a dream. The three
+    # `None`-defaulted knobs (`require_calibration`, `mode`, `budget`) are refused
+    # on any non-`None` value. Widening this would need the parameters to default
+    # to `None`, i.e. a change to the advertised tool's input schema, which is not
+    # this fix.
+    stray = [name for name, stated in (
+        ("full", bool(full)),
+        ("dirty_only", bool(dirty_only) is not True),
+        ("max_hops", max_hops != 2),
+        ("require_calibration", require_calibration is not None),
+        ("mode", mode is not None),
+        ("budget", budget is not None),
+    ) if stated]
+    if stray:
+        return _SafeError({
+            "error": (f"refresh_confidence(scope={scope!r}) takes no "
+                      f"{', '.join(stray)} — those belong to scope='dirty' or "
+                      "scope='full', the dream arms. The two mechanisms are "
+                      "different (this scope promotes or seeds ONE belief), so "
+                      "recording the scope and dropping the knobs would return "
+                      "success for a pass that never ran. Send the dream knobs "
+                      "to a dream scope, or drop them here."),
             "code": ERR_INVALID})
     if scope == "promote":
         if alpha is not None or beta is not None:
