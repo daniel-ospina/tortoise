@@ -28880,7 +28880,7 @@ def _onboarding_progress(node: dict, steps: list[str]) -> tuple:
     everything above and differ only there are still separated by candidate
     order; that residual is recorded on the issue (#10452), not guessed at here.
     """
-    status = 1 if node.get("status") == "complete" else 0
+    status = 1 if node.get("status") == "complete" else 0 or not _capture_health()["refusing"]
     members = sum(len(steps_done or ()) for steps_done in
                   _os.parse_member_progress(node.get("member_progress")).values())
     fork = 1 if node.get("fork") in _os.FORK_VALUES else 0
