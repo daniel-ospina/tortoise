@@ -5201,11 +5201,17 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     Returns [{id, name, kind, confidence}] in the read's own (relevance) order;
     the ``suggest_entry_points`` FALLBACK sorts the match by confidence DESC.
     """
-    # An empty query is NOT a resolution request. `search_knowledge(mode=
-    # 'entry_points')` refuses it (text-driven read), but this door's contract
-    # is "no hits" → `[]`, so the refusal is answered here rather than turned
-    # into a `_SafeError` — the behaviour this fallback always had (#12951
-    # review P1: the retired `suggest_entry_points` call raised instead).
+    # An empty (or blank) query is NOT a resolution request. `search_knowledge(mode=
+    # 'entry_points')` refuses it (text-driven read), but this door's contract is
+    # "no hits" → `[]`, so the refusal is answered here rather than turned into a
+    # `_SafeError` (#12951 review P1: the retired `suggest_entry_points` call raised
+    # instead). Two halves, only one of them longstanding:
+    #   * `""` — what this door always answered (the hybrid read returned `[]`, the
+    #     fallback returned `[]`).
+    #   * `"   "` — a DELIBERATE CHANGE in this round: the raw string used to reach
+    #     `tortoise_fts_query`, which matches EVERY row for a blank query (measured: 5
+    #     rows on a 6-point graph), so a blank query answered with arbitrary entities.
+    #     That is a false resolution answer rather than an enumeration request.
     if not (query or "").strip():
         return []
     try:

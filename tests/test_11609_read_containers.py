@@ -489,12 +489,43 @@ class TestWrapEnvelopeDoorsStayLive:
             "— the live door would raise on its first call")
 
     def test_the_six_are_the_whole_exception(self):
-        """The exception is these six NAMES, not a category — no seventh door."""
+        """No live door OUTSIDE these six both declares `-> list[dict]` and reaches a container.
+
+        The parametrized case above asserts the six individually, which makes a
+        `kept <= live_names` / `not retired_forward` restatement of it tautological
+        (#12951 review round 2, P3). The property that is NOT implied is the one this
+        exception is actually about: the envelope is kept for doors that answer through
+        a read/query CONTAINER, so a seventh such door must be a deliberate decision
+        recorded here, not an addition this file cannot see. Measured over the live
+        registry: three live doors also declare `-> list[dict]` and reach NO container
+        (`tortoise_calibrate_summary`, `tortoise_check_structure`, `tortoise_search`),
+        so a container reach — not the envelope alone — is what makes a door a member.
+        """
+        import inspect
+
+        from tortoise import mcp_server as ms
+
         live_names = {t.name for t in TOOL_REGISTRY}
         kept = {tool for tool, _ in WRAP_ENVELOPE_DOORS}
         assert kept <= live_names
         retired_forward = kept & set(RETIRED_USE_INSTEAD)
         assert not retired_forward, retired_forward
+
+        offenders = {}
+        for tool in sorted(live_names - kept):
+            fn = getattr(ms, tool, None)
+            if fn is None:  # a registered name with no handler is another test's finding
+                continue
+            annotation = inspect.signature(fn, eval_str=True).return_annotation
+            if annotation != list[dict]:
+                continue
+            hit = _handler_sdk_reach(fn) & set(CONTAINERS)
+            if hit:
+                offenders[tool] = sorted(hit)
+        assert not offenders, (
+            f"{offenders} declare `-> list[dict]` AND answer through a container: the "
+            "wrap-envelope exception is exactly these six doors, so a seventh carries "
+            "the same #8482/#10914 decision and belongs in WRAP_ENVELOPE_DOORS")
 
 
 class TestSuggestEntryPointsFallback:
@@ -535,8 +566,19 @@ class TestSuggestEntryPointsFallback:
         assert kwargs == {"mode": "entry_points", "kind": None, "limit": 3}, reached
 
     def test_an_empty_query_is_no_hits_and_touches_no_door(self, monkeypatch):
-        """`[]`, not a refusal: the container REFUSES an empty query, and this door's
-        contract has always been "no hits" — answered before either door is reached."""
+        """`[]`, not a refusal, for BOTH halves — and only one half is longstanding.
+
+        The container REFUSES a text-driven read with no text, and this door's contract
+        is "no hits", so the refusal is answered here rather than raised:
+
+        * `""` — the behaviour this door always had (the hybrid read returned `[]`, so
+          it fell through to the fallback, which returned `[]`).
+        * `"   "` — a DELIBERATE CHANGE in this fix round. The old handler reached the
+          hybrid read with the raw string, and `tortoise_fts_query("   ")` matches every
+          row (measured: 5 rows on a 6-point graph), so a blank query used to answer
+          with arbitrary entities. That is a false resolution answer, not an
+          enumeration request, so it is answered `[]` here (#12951 review round 2, P3).
+        """
         from tortoise import mcp_auth
         from tortoise import mcp_server as ms
 
