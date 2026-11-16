@@ -32,11 +32,16 @@ WHAT THIS FILE PINS, and in which order:
 2. **All THREE doors**, because the fix lives in the ONE constructor they all
    pass (``TortoiseSDK.__init__``): SDK direct, the hosted REST lane
    (``hosted_api._make_sdk``), the MCP lane (``mcp_auth``).
-3. **The three coherent shapes stay silent**, because two of them are recorded
+3. **The FOUR coherent shapes stay silent** — shared cache, unarmed record,
+   declared single tenant, test-lane redirect — because two of them are recorded
    decisions this must not reverse: an unarmed record (#7722's embedded
    fallback is deliberate) and a declared single-tenant deployment (both stores
    local to one box — ``record_writer.single_tenant_declared``, #9192). The
-   third is the test lane's own redirect onto an ambient server.
+   other two are the ordinary shared-cache deployment and the test lane's own
+   redirect onto an ambient server. ⚠️ There is deliberately NO "graph unbound"
+   member: the predicate has no graph-binding condition (a construction that
+   binds no graph is counted like any other), so naming one would send a reader
+   looking for a test that does not exist.
 4. **The convergence itself**, per door, against a REAL record and a REAL
    shared cache — the acceptance sentence ("after a write through each door,
    the cache's counts match the record's for that scope"). Those need both

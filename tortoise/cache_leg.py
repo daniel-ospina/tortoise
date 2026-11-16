@@ -164,10 +164,12 @@ def cache_leg_reason(*, cache_uri: str | None) -> str | None:
     ``None``.
 
     Returns :data:`CACHE_NOT_SHARED` for the split shape and ``None`` for every
-    coherent one, including the three that must keep working unchanged: an
-    unarmed record (#7722's onboarding lane), a declared single-tenant
-    deployment (both stores local to one box, by the operator's own statement),
-    and the test lane's redirect onto an ambient server.
+    coherent one — FOUR of them: a shared cache (the first arm below), an unarmed
+    record (#7722's onboarding lane), a declared single-tenant deployment (both
+    stores local to one box, by the operator's own statement), and the test
+    lane's redirect onto an ambient server. ⚠️ There is deliberately no
+    "graph unbound" member: this predicate has no graph-binding condition, so a
+    construction that binds no graph IS counted.
     """
     if cache_uri:
         return None

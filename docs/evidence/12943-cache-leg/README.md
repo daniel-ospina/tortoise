@@ -38,7 +38,9 @@ Three knobs make the second arm expressible:
 * **`OWNER_RECORD_DSN`** — the RLS-bypassing owner, for seeding and counting
   only. It is required and is not optional politeness: the app role below cannot
   see across tenants, so counting through it would answer 0 for the wrong reason.
-* **`EVENTS_BASE`** — where the per-run JSONL journal is written (default
+* **`EVENTS_BASE`** — where the per-run JSONL journal is written. ⚠️ The committed
+  captures record it as an ABSOLUTE path, so the exact string embeds the box that
+  produced it; reproduce the DIRECTORY, not the string. (Default
   `/tmp/12943-events-<run>/`). **Scratch, not evidence**: each run appends a
   run-unique `org_<hex>/events.jsonl`, and the record rows were projected from
   it. `SUMMARY_OUT` — where the JSON capture goes (default `last-run.json`), and
@@ -50,7 +52,7 @@ Both rows, copy-pasteable (fill the four DSNs/URIs from your own instances):
 export TEST_RECORD_DB_URI='postgresql://tortoise_record_app:…@127.0.0.1:33943/record'
 export OWNER_RECORD_DSN='postgresql://record:…@127.0.0.1:33943/record'
 export CACHE_COUNT_URI="$LANE_URI"          # e.g. docker://:pw@127.0.0.1:16419/db
-export EVENTS_BASE=.evidence-events         # the `events_base` in the captures
+export EVENTS_BASE="$PWD/.evidence-events"  # the `events_base` in the captures
 
 # ARM A — shared cache: count and write on the SAME server
 SUMMARY_OUT=last-run-arm-a-shared-cache.json \
