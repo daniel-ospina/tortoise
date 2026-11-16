@@ -244,11 +244,12 @@ def _no_ambient_store(monkeypatch, tmp_path):
     # list is exactly the fail-open that grew once already (#5200 added the
     # `TORTOISE_MCP_API_KEY` alias). A third name would answer ambiently, the store
     # branch would never be reached, and this module would send a REAL fleet key to
-    # the test daemon. The STORE pin would stay green in that state — it checks
-    # `path.is_file()` and never whether a store was READ — while the ENDPOINT pin
-    # below is what reds, on the third name exactly as it does on the alias today
-    # (see the paragraph above). That asymmetry is why the NAMES must come from the
-    # code rather than from a list here.
+    # the test daemon. The STORE pin cannot see a name leak at all — it only stats
+    # the chain, so it never consults env precedence — which is why the ENDPOINT pin
+    # beside it is the one that reds, on a third name exactly as it does on the
+    # alias today; a store that IS reachable stays caught by the STORE pin, whether
+    # or not an env key answers first. That asymmetry is why the NAMES must come
+    # from the code rather than from a list here.
     from tortoise.mcp_client import _ENV_KEY_NAMES
 
     for name in _ENV_KEY_NAMES:
@@ -288,9 +289,12 @@ class TestNoStoredCredentialDecidesTheEndpoint:
         found = [str(path) for path, _repo_controlled in candidates if path.is_file()]
         assert not found, (
             "an ambient credential store reached this test: "
-            f"{found}. It carries a KEY, and #2369 D1.1 makes the store that "
-            "supplies the key supply the HOST as well — so TORTOISE_MCP_URL below "
-            "is overridden and this module measures whatever host the store names. "
+            f"{found}. Two INDEPENDENT hazards follow, and which one bites depends "
+            "on whether an env key answers. If none does, the store supplies the "
+            "KEY and #2369 D1.1 makes it supply the HOST as well — so "
+            "TORTOISE_MCP_URL below is overridden and this module measures whatever "
+            "host the store names. If an ENV key answers first instead, the store is "
+            "never read and this module sends that REAL key to the test daemon. "
             "THIS IS NOT YOUR DIFF: `_no_ambient_store` is supposed to isolate every "
             "store in that chain; if one is visible here, the fixture is gone or bypassed."
         )
