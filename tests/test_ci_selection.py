@@ -10520,7 +10520,17 @@ def _durations_rows_claiming_unmeasured_on_ci(text: str):
 # on, not an incidental property.
 _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     r"\bflat\s+(?:2\.0s?(?:\s+default)?|default|reading|weight)\b"
-    r"[^.;]{0,40}?\b(?:UNDERSTATES|UNDERSTATE|OVERSTATES|OVERSTATE)\b"
+    # ⛔ The verb WINDOW is the SENTENCE, not a character budget (#12962 cycle 5).
+    # It was `[^.;]{0,40}?` — an undocumented 40-character bound, which is the same
+    # false clean one spelling over: a row can name the noun and the present-tense
+    # verb with more than 40 characters between them, and the arm then returned `[]`
+    # while the claim was on the page (measured: "the flat weight a PR-added row
+    # takes is, in this shard, one that UNDERSTATES it" — 48 chars — did not match).
+    # `[^.;]*?` keeps the bound MEANINGFUL (the claim and its subject in ONE
+    # sentence: `.` and `;` still terminate it) while removing a limit no reader of
+    # this file could have known about. The over-window shape is pinned in
+    # `test_the_still_owed_flat_default_guard_bites_and_stays_quiet`.
+    r"[^.;]*?\b(?:UNDERSTATES|UNDERSTATE|OVERSTATES|OVERSTATE)\b"
     # …and the FUTURE-SWEEP construction, which names the owed sweep without ever
     # writing UNDER/OVERSTATE — so the tense arm above cannot see it. Four rows
     # shipped this way at the 2026-11-16 refresh (`flat default until a CI sweep
@@ -10807,6 +10817,29 @@ def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
     assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
         widened, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5),
                            ("test_c.py", 25.1), ("test_d.py", 12.7)]
+    # ── The VERB-WINDOW shape (#12962 cycle 5) ────────────────────────────────
+    # The arm used to bound the gap between the noun and the present-tense verb at
+    # an undocumented 40 characters, so a row stating the same claim across a longer
+    # same-sentence clause read as absent. Pinned here because that bound was
+    # invisible: the claim is in ONE sentence, and the guard's job is to say so.
+    far_verb = (
+        "  test_a.py: 27.3  # the flat weight a PR-added row takes is, in this"
+        " shard, one that UNDERSTATES it" + basis + "\n"
+        "  test_b.py: 0.5  # the flat default a cold leg pays interpreter start for"
+        " here is one the census reading has already replaced, and on the slow leg"
+        " it still UNDERSTATES the body" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        far_verb, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5)], (
+        "the window is the SENTENCE — an arm bounded to 40 characters returns [] "
+        "while the claim is on the page, which is the false clean it exists to "
+        "prevent")
+    # …and the sentence bound is what keeps it honest: a `.` or `;` terminates the
+    # claim, so a healed past-tense sentence is never joined to a later verb.
+    cross_sentence = (
+        "  test_a.py: 27.3  # the flat weight was replaced by this sweep; the row"
+        " now UNDERSTATES nothing" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        cross_sentence, quad) == []
     # …and the PAST tense of every one of those spellings stays silent, because the
     # fix IS the past tense — a widening that bit the healed wording would red every
     # corrected row on the committed map and leave no legal way to write the note.

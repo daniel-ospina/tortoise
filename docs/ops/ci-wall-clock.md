@@ -622,8 +622,10 @@ mirror case: `4 / 4 / 3` and `5 / 3 / 3` each hold 11 matrix slots, past `12 - 3
 invariant 2.
 
 **The accepted regression has two components, and only the run-level number judges it.** The slow
-matrix gains its second wave (`ceil(5/3)` = 2): one wave of the measured slow-leg wall is ~8.2 m
-(row above), so its band goes ~8.2 m → ~16.4 m (1 wave → 2), still narrower than
+matrix gains its second wave (`ceil(5/3)` = 2): one wave of the slow-leg wall is ~8.2 m on the
+committed map's PROJECTION (`slow_wall_projection()`'s 8.18 m per leg, recomputed below — ⛔ not the
+measured p50, which the row above puts at 8.9 m; a projection is not a measurement and this file does
+not conflate them), so its band goes ~8.2 m → ~16.4 m (1 wave → 2), still narrower than
 the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. **The wall
 guard measures that band, not the per-leg share**: `slow_wall_projection()` takes the job's
 `max-parallel` and reports `waves x (max leg + setup)` — `8.18 m` per leg → **`16.35 m`** from the
