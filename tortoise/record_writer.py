@@ -2479,7 +2479,8 @@ def write_live_record(record: Mapping[str, Any], *,
     row was absorbed it asks the database whether the surviving row is a record
     this write CONTINUES (`record_projection._refuse_a_journal_collision`, in
     Postgres's own jsonb equality and its own `timestamptz` comparison of
-    `recorded_at`). Same content ⇒ a genuine replay ⇒ silent no-op, unchanged;
+    `recorded_at`). Same content AND the same capture ⇒ a genuine replay ⇒
+    silent no-op, unchanged;
     same `event_type` and same `recorded_at` with only the payload different ⇒
     READ AS the same record RE-DERIVED ⇒ also silent (#12904 P0-1) — a reading
     on two equal coordinates, not proof of one record (the mirror residual in

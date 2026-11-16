@@ -2162,9 +2162,9 @@ def record_record_write_failure(reason: str) -> None:
       SILENTLY. ``replay`` heals every other failure; it cannot heal this
       one, because the append-only row that owns the position carries that
       other content, and the key carries no journal identity — that is ``#12894``'s
-      schema decision. A genuine REPLAY (same position, same content) never
-      reaches this counter: the fold compares the surviving row's content and
-      stays silent;
+      schema decision. A genuine REPLAY (same position, same content AND the
+      same ``recorded_at``) never reaches this counter: it compares the surviving
+      row's content and its capture time and stays silent;
     * ``circuit_open`` — a connect to the record failed within
       ``record_writer.LIVE_WRITE_BREAKER_SECONDS``, so the live door refused this
       write locally: no socket, no timeout. The record is DEGRADED, not
