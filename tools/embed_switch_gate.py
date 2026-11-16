@@ -604,6 +604,58 @@ def _function_body_braces(raw: str, view: str) -> int:
         if position < len(view) and view[position] == "{":
             count += 1
     return count
+#: ⛔ A `case` ARM PATTERN is DATA, not code, and its keywords must not be counted as shell
+#: structure (review P2, measured 2026-11-16). `_SHELL_CLOSERS` sees a `fi`/`done`/`esac` at the
+#: start of a statement and spends a block level; inside a `case` body that statement is a PATTERN,
+#: so
+#:
+#:     case "${1:-}" in
+#:       start) echo go ;;
+#:       done|stop)
+#:         export TORTOISE_VALUE_GATE=1
+#:         export TORTOISE_EMBED_GATE=1
+#:         ;;
+#:     esac
+#:
+#: spends the `case`'s own level on the pattern `done|stop)`, and both exports of an arm that never
+#: ran read at depth 0 and were CREDITED — gate `ok`, exit 0, while `env -i … bash script
+#: /usr/bin/env` printed neither switch. The mirror is the same bug: a pattern spelled `if)` or
+#: `while)` would OPEN a block. Neither can be fixed inside the two keyword patterns (they cannot
+#: see they are in a `case`), so the pattern is masked out of the view BEFORE either is scanned.
+#: The PATTERN is everything from the arm's start (after `in` on the `case` line, else the
+#: statement's own start) up to and including its `)`. A `)` visible in the STRUCTURAL view is
+#: always an arm terminator: `_SPAN_SUBSHELL`/`_SPAN_CMDSUB` blank their own parens, and they also
+#: track `case` so an arm `)` inside a substitution is not read as the substitution's closer.
+_SHELL_CASE_OPEN = re.compile(
+    r"(?:^|[;&|])\s*(?:(?:!|time)\s+)*(?:(?:then|else|elif|do)\s+)?case\b"
+)
+#: The `in` that ends a `case` header — everything after it on that line is the first ARM PATTERN.
+_SHELL_CASE_IN = re.compile(r"\bin\b")
+
+
+def _mask_case_arm(view: str, case_open: int) -> str:
+    """``view`` with a `case` ARM PATTERN blanked (length preserved, so offsets still align).
+
+    Only applied where an arm pattern can be: inside an open `case` body, or on the statement that
+    OPENS one (`case $x in a) …`). Anywhere else the `)` would be invalid shell, so masking it
+    cannot hide a real closer — and every blanked region is a PATTERN, where a keyword is a word to
+    match against `$1`, never a block delimiter.
+    """
+    if case_open <= 0 and not _SHELL_CASE_OPEN.search(view):
+        return view
+    terminator = view.find(")")
+    if terminator < 0:
+        return view
+    # The LAST `in` before the `)` is the header's — a pattern may itself be spelled `in`.
+    header = None
+    for found in _SHELL_CASE_IN.finditer(view[:terminator]):
+        header = found
+    start = header.end() if header is not None else 0
+    if start > terminator:
+        return view
+    return view[:start] + " " * (terminator + 1 - start) + view[terminator + 1:]
+
+
 #: ⛔ A closer may follow a STATEMENT SEPARATOR on the same line (review P1, measured). The model
 #: was line-anchored, so a one-line `if [ -n "$X" ]; then echo hi; fi` opened a block and never
 #: closed it — the depth then leaked UP and any later top-level `export` was read as nested and
@@ -759,6 +811,12 @@ def _unquote_all(names: str) -> list[str]:
 #: channel as armed while the process resolves OFF (review P3). Neither reader resolves
 #: interpolation — there is no environment to resolve it against that would be the SHIPPED value —
 #: so a pure interpolation with no non-empty literal fallback is refused by name.
+#: Every EXPANSION in a value, for the structural test in `_states_a_literal`: `${…}` in any
+#: operator form, `$NAME`, `$1`/`$@`/`$?`/…, and a backtick command substitution. Stripping these
+#: leaves only the LITERAL text a reader with no resolver can vouch for.
+_INTERPOLATION_SPAN = re.compile(
+    r"\$\{[^}]*\}|\$\([^)]*\)|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@*#?$!-]|`[^`]*`"
+)
 _PURE_INTERPOLATION = re.compile(
     r"^\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<op>:?[-+])(?P<fallback>[^}]*))?\}$"
     r"|^\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)$"
@@ -768,9 +826,30 @@ _PURE_INTERPOLATION = re.compile(
 def _states_a_literal(value: str) -> bool:
     """Whether ``value`` states a value that does not depend on an unresolved interpolation."""
     text = _unquote(_strip_inline_comment(value))
+    # ⛔ A value made of SEVERAL interpolations is the same defect as one (review P3, measured):
+    # `_PURE_INTERPOLATION` matched exactly one `${NAME}`, so `"${VA}${VB}"` matched NOTHING and
+    # fell through the "literal enough" arm — credited `STATED` while the process resolves it
+    # EMPTY (`env -i … bash script /usr/bin/env` printed `TORTOISE_VALUE_GATE=`). Empty is strictly
+    # worse than unset here: unset means ON for `TORTOISE_VALUE_GATE`, blank means OFF, so the
+    # deployment ran the DISCARD half off while this gate said `ok`. The test is therefore
+    # STRUCTURAL — strip every expansion and see what literal text is left — not a match on one
+    # spelling. A backtick command substitution is in the same class and is stripped the same way,
+    # because a reader with no resolver cannot state what it produces.
+    # ⛔ A value with NO expansion in it is a literal, including the EMPTY one: emptiness has its
+    # own, more specific refusal (`Channel.switch_problem`'s EMPTY arm) and must keep reaching it.
+    if "$" not in text and "`" not in text:
+        return True
+    remainder = _INTERPOLATION_SPAN.sub("", text)
+    if "$" in remainder or "`" in remainder:
+        # ⛔ An expansion form this pattern cannot strip (an unbalanced `${`, a nested `$( … )`) is
+        # NOT literal text: a reader with no resolver cannot state what it expands to, so it takes
+        # the same fail-closed answer as a pure interpolation (review P3 at `d9b507ce90`).
+        return False
+    if remainder.strip():
+        return True  # real literal text survives, e.g. `a-${X}` — literal enough
     match = _PURE_INTERPOLATION.match(text)
     if not match:
-        return True  # a literal (a partial interpolation like `a-${X}` is literal enough)
+        return False  # nothing but expansions (two or more, or a form we cannot read)
     operator = match.group("op") or ""
     # ⛔ ONLY `-`/`:-` (default-when-UNSET) survives an unset variable. `${X:+1}`/`${X+1}` expand
     # to EMPTY exactly when X is unset — the shipped case — so accepting them was a fail-open in a
@@ -853,10 +932,18 @@ class Channel:
                 f"builder-stage ENV never reaches the process ({self.resolver})"
             )
         if switch in self.ambiguous:
+            # ⛔ TWO different defects land in `ambiguous`, and the message named only one of them
+            # (review P3, measured): an honest entrypoint that arms both switches inside a helper it
+            # CALLS is refused by this reader (it models position, not the call graph) — the right
+            # verdict, since a helper nobody calls is indistinguishable without one, but the text
+            # then blamed the VALUE while both values were plain literals. Name the class, not a
+            # guess at which member of it applies.
             return (
                 f"{self.channel} mentions {switch} but does not state a value this gate can read "
-                f"({self.resolver}) — state it as a literal assignment (a ${{…}} with no non-empty "
-                "fallback can resolve empty)"
+                f"({self.resolver}) — the assignment is either CONDITIONAL (a branch, a function "
+                "body, a group, or a statement behind `&&`/`||`/`|`/`&`) or an interpolation with no "
+                "non-empty literal fallback; state it as an unconditional top-level literal "
+                "assignment"
             )
         return f"{self.channel} does not state {switch} ({self.resolver})"
 
@@ -1762,6 +1849,10 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     #: `TORTOISE_*`, because the helper is never called. This counter is what tells a group's `}`
     #: from a body's, which `fn_body` alone cannot do.
     group_open = 0
+    #: How many `case` bodies are open. ⛔ Needed because an ARM PATTERN's `fi`/`done`/`esac` is a
+    #: word to match, not a delimiter (`_mask_case_arm`), and the counter is what tells the reader
+    #: it is inside one — see `_SHELL_CASE_OPEN`.
+    case_open = 0
 
     def _note_prior(key: str) -> None:
         """Remember ``key``'s pre-group state the first time an open group touches it."""
@@ -1811,7 +1902,13 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # ⛔ A GROUP's `}` is not a block closer (review P1, measured at `85217121`): see
             # `group_open`. The innermost open thing is the group, so the first `}` on the
             # statement is its closer and must not spend `depth`/`fn_body`.
-            closers = _SHELL_CLOSERS.findall(view)
+            # ⛔ Scan the closer/openers on a view whose `case` ARM PATTERN is blanked (review P2,
+            # measured — see `_mask_case_arm`): `done|stop)` in a `case` body is a PATTERN, and
+            # reading its first word as the block's closer spent the `case`'s own level, so a
+            # never-running arm's exports were credited. `case_view` is used for the two keyword
+            # scans and for `case_open`; everything else keeps reading `view`.
+            case_view = _mask_case_arm(view, case_open)
+            closers = _SHELL_CLOSERS.findall(case_view)
             if group_open > 0 and _SHELL_GROUP_CLOSE.match(view):
                 closers = closers[1:]
             depth = max(0, depth - len(closers))            # ⛔ `depth > 0 or terminated` is NOT the whole population of statements the process
@@ -2034,6 +2131,15 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # `{` to the anchor class instead would make `echo {if,while}` open a phantom
             # block and refuse an honest file.
             depth += len(_SHELL_OPENERS.findall(content_view)) + opened_fn
+            # ⛔ `case_open` follows the SAME masked view the two keyword scans read, so an arm
+            # pattern's `esac` word cannot close a case that is not closed. Saturating, like
+            # `depth`: a surplus can only make the reader MORE conservative.
+            case_open = max(
+                0,
+                case_open
+                + len(_SHELL_CASE_OPEN.findall(case_view))
+                - len([c for c in closers if "esac" in c]),
+            )
             # ⛔ `fn_body` is decremented only by a BRACE closer (review P2, measured).
             # Counting `fi`/`done`/`esac` against it let a balanced `if … fi` inside a helper
             # drop `fn_body` to 0 while the helper was still open, so the helper's `unset`

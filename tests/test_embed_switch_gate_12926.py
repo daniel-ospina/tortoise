@@ -33,6 +33,10 @@ Each test below is a falsifier for one claim the check makes:
 | `test_a_group_closer_inside_a_BODY_does_not_end_that_body` | a `}`'s owner decides what it closes | a group's closer inside a function or control-flow body spends the BODY's depth, so its later siblings read as top level and are credited |
 | `test_a_redefined_stage_name_resolves_to_the_MOST_RECENT_stage` | the image channel's stage model agrees with Docker | a repeated `AS <name>` is resolved to the FIRST definition, so a dead stage's `ENV` grades the image |
 | `test_a_trailing_guard_operator_is_consumed_by_the_next_statement` | a guard applies to the next statement, not the rest of the file | `carried` leaks past the statement it guards, or stops guarding across a blank line |
+| `test_a_case_ARM_PATTERN_is_neither_a_closer_nor_an_opener` | a `case` PATTERN's words are DATA | a pattern spelled `done|stop)`/`if|while)`/`esac|stop)` is read as that keyword, so a never-running arm's exports are credited (or a phantom block is opened) |
+| `test_a_case_dispatch_does_not_refuse_the_top_level_exports_below_it` | …and the `case`'s own level is still closed | masking the pattern stops `esac` from closing the `case`, so every later top-level `=1` is refused |
+| `test_a_value_made_of_SEVERAL_expansions_states_nothing` | a value is literal only where literal TEXT survives | `"${VA}${VB}"`, `` "`id -u`" `` or an unparseable `${…}` is credited although the process resolves it EMPTY |
+| `test_the_ambiguous_refusal_names_the_conditional_class` | the refusal names the class a reader can act on | the message asserts a CAUSE (a `${…}` fallback) it did not measure, over two plain `=1` literals |
 """
 
 from __future__ import annotations
@@ -1688,6 +1692,129 @@ def test_the_real_tree_states_both_switches():
             continue
         for switch in SWITCHES:
             assert channel.stated.get(switch, "").strip(), (channel.channel, switch)
+
+
+def test_a_case_ARM_PATTERN_is_neither_a_closer_nor_an_opener():
+    """Review P2 at `d9b507ce90` (fresh review, 2026-11-16) — a PATTERN's words are DATA.
+
+    In a `case` body the statement before the ``)`` is a word to match `$1`, not a shell delimiter —
+    but `_SHELL_CLOSERS`/`_SHELL_OPENERS` anchored on `^`/separator, so a pattern SPELLED with a
+    keyword was read as that keyword: `done|stop)` spent the level the `case` itself opened, every
+    later statement in the file read as TOP LEVEL, and an arm that never ran credited its exports
+    `STATED` — gate `ok`, exit 0, while `env -i … bash script /usr/bin/env` (measured) printed no
+    `TORTOISE_*` at all. The opener direction is the same defect mirrored: `if|while)` invented a
+    block nobody opened.
+
+    ``)`` is now found on the STRUCTURAL view (subshell/substitution spans blank their own parens)
+    and the pattern's text is masked before either keyword scan runs.
+    """
+    for label, script in (
+        (
+            "a CLOSER word first in the pattern",
+            '#!/bin/bash\n'
+            'case "${1:-}" in\n'
+            '  start) echo go ;;\n'
+            '  done|stop)\n'
+            '    export TORTOISE_VALUE_GATE=1\n'
+            '    export TORTOISE_EMBED_GATE=1\n'
+            '    ;;\n'
+            'esac\n'
+            'exec "$@"\n',
+        ),
+        (
+            "an OPENER word first in the pattern",
+            '#!/bin/bash\n'
+            'case "${1:-}" in\n'
+            '  if|while)\n'
+            '    export TORTOISE_VALUE_GATE=1\n'
+            '    export TORTOISE_EMBED_GATE=1\n'
+            '    ;;\n'
+            'esac\n'
+            'exec "$@"\n',
+        ),
+        (
+            "an `esac` word in the pattern, closing the case early",
+            '#!/bin/bash\n'
+            'case "${1:-}" in\n'
+            '  esac|stop)\n'
+            '    export TORTOISE_VALUE_GATE=1\n'
+            '    export TORTOISE_EMBED_GATE=1\n'
+            '    ;;\n'
+            'esac\n'
+            'exec "$@"\n',
+        ),
+    ):
+        stated, ambiguous = gate._shell_assignments(script)
+        assert stated == {}, f"{label}: a never-running arm was credited: {stated}"
+        assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, (label, ambiguous)
+
+
+def test_a_case_dispatch_does_not_refuse_the_top_level_exports_below_it():
+    """The mirror of `test_a_case_ARM_PATTERN_is_neither_a_closer_nor_an_opener`.
+
+    Masking the pattern must not spend the `case`'s own level either: if `esac` stopped closing
+    the `case` the depth would stay at 1 and EVERY later top-level export would be refused — the
+    false-refusal direction, on the most ordinary dispatch prologue there is (this repository's
+    own `entrypoint.sh` carried nine such one-liners before it was rewritten).
+    """
+    script = (
+        '#!/bin/bash\n'
+        'case "${1:-}" in\n'
+        '  start) echo go ;;\n'
+        '  *|help) echo other ;;\n'
+        'esac\n'
+        'export TORTOISE_VALUE_GATE=1\n'
+        'export TORTOISE_EMBED_GATE=1\n'
+        'exec "$@"\n'
+    )
+    stated, ambiguous = gate._shell_assignments(script)
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert ambiguous == set(), ambiguous
+
+
+def test_a_value_made_of_SEVERAL_expansions_states_nothing():
+    """Review P3 at `d9b507ce90` — `_PURE_INTERPOLATION` matched exactly ONE `${NAME}`.
+
+    So ``"${VA}${VB}"`` matched nothing and fell through the "literal enough" arm: credited
+    `STATED` while the process resolves it EMPTY (`env -i … bash script /usr/bin/env` printed
+    `TORTOISE_VALUE_GATE=`). Empty is strictly worse than unset for this switch — unset means ON
+    (`#10996`), blank means OFF — so the gate said `ok` over a deployment running the DISCARD half
+    turned off. The test is structural now (strip every expansion, see what literal text is left),
+    and a backtick substitution is in the same class.
+    """
+    for value in (
+        '"${VA}${VB}"',
+        '"${VA}${VB:-1}"',
+        '"${VA}$HOME"',
+        '"`id -u`"',
+        '"${VA}$(id -u)"',
+        '"${VA"',  # an expansion this reader cannot parse is not literal text either
+        '"${X:-/usr/local/bin"',  # … and an unclosed `${` is not a fallback
+    ):
+        assert gate._states_a_literal(value) is False, value
+    # The mirror: real literal text beside an expansion IS literal, and so is the empty value
+    # (which has its own, more specific refusal — `Channel.switch_problem`'s EMPTY arm).
+    for value in ('"a-${X}"', '"${X:-1}"', '"1"', '""', '"/usr/local/bin:${PATH}"'):
+        assert gate._states_a_literal(value) is True, value
+
+
+def test_the_ambiguous_refusal_names_the_conditional_class():
+    """Review P3 at `d9b507ce90` — the message blamed the VALUE for every `ambiguous` cause.
+
+    An entrypoint that arms both switches inside a helper it CALLS is refused (the reader models
+    position, not the call graph, and a helper nobody calls is indistinguishable without one — the
+    right fail-closed verdict), but the text then said "a `${…}` with no non-empty fallback can
+    resolve empty" about two plain `=1` literals. The refusal must name the CLASS a reader can act
+    on, and must not assert a cause it did not measure.
+    """
+    channel = gate.Channel(
+        "entrypoint.sh", "entrypoint", "shell assignments", ambiguous=set(SWITCHES)
+    )
+    problem = channel.problems()[0]
+    assert "CONDITIONAL" in problem, problem
+    assert "function body" in problem, problem
+    assert "interpolation with no non-empty literal fallback" in problem, problem
+    assert "state it as a literal assignment" not in problem, problem
 
 
 def test_a_case_arm_inside_a_substitution_is_not_the_substitutions_CLOSER():
