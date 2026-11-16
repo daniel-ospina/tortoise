@@ -321,11 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 269 collected
-                                 # (docker lane: 267 passed, 1 skipped)
+                                 # this tree: 276 collected
+                                 # (docker lane: 275 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **269 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **276 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -427,7 +427,7 @@ source line was counted as two no-value declarations; RED against a mutant that 
 state) and the COMMENTED-OUT heredoc opener, which queued a body and swallowed the lines below it as
 data (`# cat <<EOF` runs in bash; measured RED against a mutant that masks the un-stripped line — the
 interaction of the two readers, where the fourth review's own heredoc BODY table pins the other half)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 36 + 12 + 4 + 1 + 1 = 269`).
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 36 + 12 + 4 + 1 + 1 + 7 = 276`).
 The final `4` are `#12902`'s NOT-ARMED-half falsifiers — the SAME defect class as `#12549`
 defect 1 ("a bucket label naming a cause it did not measure"), found by a fresh review on
 the state `defect 2` ADDS: a `DISAGREE` file is in NEITHER `silent` nor `armed`, so row
@@ -438,7 +438,8 @@ disarming value inside a `DISAGREE` file was described by a per-FILE last-wins r
 same note contradicted four clauses later (`compose defines no override relation between
 two services`). Two of the four are the falsifiers, one is the POSITIVE CONTROL that keeps
 the per-FILE rule where it DOES hold (an `OFF` file really does have a last word, and
-deletes nothing), and one pins the armed file beside the disagreement.
+deletes nothing), and one pins the armed file beside the disagreement. The `23` are the `#12902` reviews'
+own falsifiers across all seven rounds, the `4` above included.
 The `36` are `#12549`'s channel-resolver falsifiers: both orderings of a per-service
 compose disagreement, a flow mapping, an anchor+merge key, a resolver that REFUSES
 (`UNRESOLVED`, never an answer), an unset interpolation that must not read as an
@@ -460,9 +461,10 @@ more a SECOND review measured after that first fix round, in the opposite direct
 a profile-gated ARM must not arm a file a default `up` does not start, and `compose.yaml`
 (a compose DEFAULT filename) must be measured rather than invisible. Each was
 shown RED against the pre-fix tool. Also from the reviews of PR #12902, each shown RED
-against the pre-fix tool and each **counted inside the `36`/`9` groups below, not on top of
-them** (the two groups are exactly the 45 new tests this branch adds — `36 + 9` — so nothing named
-here is an addition to the total): defect 4's own shape (`export FLAG=1` then `FLAG=0`
+against the pre-fix tool and each **counted inside the `36` and the trailing `#12902` groups in §6,
+not on top of them** (those two groups ARE this branch's new tests, so nothing named here is an
+addition to the total; the §6 arithmetic is the authority, and the pin re-derives it from
+`--collect-only` rather than trusting this paragraph): defect 4's own shape (`export FLAG=1` then `FLAG=0`
 — a FALSE ARM, because the exported-name matcher accepted only the bare form), the
 PER-KEY narrowing of the unset-interpolation signal (a literal `FLAG: ""` beside an
 unrelated `${MISSING}` in the same file stays a measured `OFF` instead of inheriting a
@@ -530,7 +532,7 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
-collected count — `268 passed, 1 skipped` and `267 passed, 2 skipped` here, both adding to the same `269` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+collected count — `275 passed, 1 skipped` and `274 passed, 2 skipped` here, both adding to the same `276` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
 `186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch

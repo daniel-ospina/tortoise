@@ -3124,6 +3124,215 @@ def test_a_COMMENTED_OUT_heredoc_opener_opens_NO_body(tmp_path, monkeypatch):
     assert _state("cat <<EOF  # note\nexport TORTOISE_EMBED_GATE=1\nEOF\n") == "OFF"
 
 
+def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
+    """An `if`/`case`/loop body is a CONDITIONAL OPERAND one construct over.
+
+    ⛔ Measured while reviewing the rounds of #12902: the reader applied every branch in
+    DOCUMENT order, so
+
+        if true; then export FLAG=0; else export FLAG=1; fi   bash: 0    reader: ON
+        case x in x) export FLAG=1 ;; esac                   bash: 1    reader: OFF
+
+    — a FALSE ARM in the row's certification direction (the first) and a false HOLD (the
+    second), both stated as measurements. This reader cannot evaluate a test, so a
+    flag-relevant command inside or on the same line as such a construct is reported
+    `indeterminate` and the FILE is held `UNMEASURED` — the three-valued rule the `&&` /
+    `||` operands already get.
+
+    ⛔ The one-line forms are also the reason `_shell_strip_leading_keywords` exists: the
+    splitter hands the scanner `` then export FLAG=1`` and ``x) export FLAG=1``, and
+    neither parses as an export, so the arm landed in NO bucket and the file read `OFF`
+    over a deployment bash arms. The keyword/pattern prefix is stripped before parsing.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _shipped(script: str) -> dict:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+
+    for script in (
+            # both branches scored; bash runs the first
+            "if true; then\nexport TORTOISE_EMBED_GATE=0\n"
+            "else\nexport TORTOISE_EMBED_GATE=1\nfi\n",
+            # one-line `if`: the arm was readable by nobody before the keyword strip
+            'if [ -z "" ]; then export TORTOISE_EMBED_GATE=1; fi\n',
+            # a loop body
+            "for i in 1 2; do\nexport TORTOISE_EMBED_GATE=1\ndone\n",
+            # a case arm
+            "case x in\n  x) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+    ):
+        shipped = _shipped(script)
+        assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
+            script, shipped["per_surface"]["entrypoint"])
+        assert shipped["indeterminate"], (script, shipped["indeterminate"])
+
+    # ── CONTROL: a construct that does NOT touch the flag must not hold the file ──
+    shipped = _shipped("if true; then\necho hi\nfi\nexport TORTOISE_EMBED_GATE=1\n")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+    # …and a plain group is unconditional, not a branch.
+    assert _shipped("{ export TORTOISE_EMBED_GATE=1; }\n")[
+        "per_surface"]["entrypoint"]["state"] == "ON"
+
+
+def test_an_ARITHMETIC_left_shift_opens_NO_heredoc_body(tmp_path, monkeypatch):
+    """`x=$((1<<2))` is a LEFT SHIFT, not a heredoc operator.
+
+    ⛔ Measured during the rebase of #12902's rounds: the operator scan matched the `<<`
+    inside the arithmetic expression, read `2` as a delimiter word, queued a body and
+    swallowed every following line as data — so `x=$((1<<2))` followed by
+    `export FLAG=1` published `OFF` while bash exports `1` (the same false-HOLD shape the
+    commented-out opener produced, one construct over).
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    assert _state("x=$((1<<2))\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
+    assert _state("(( x = 1 << 2 ))\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
+    assert _state("x=$(( (1+2) << 2 ))\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
+    # …and the helper sees no body either, so the two readings cannot drift.
+    assert probe._shell_heredoc_bodies("x=$((1<<2))\nexport F=1\n") == set()
+    # ── CONTROL: a REAL opener still opens its body, with or without the space.
+    assert probe._shell_heredoc_bodies("cat<<EOF\nbody\nEOF\n") == {2}
+    assert _state("cat<<EOF\nexport TORTOISE_EMBED_GATE=1\nEOF\n") == "OFF"
+
+
+def test_a_heredoc_whose_DELIMITER_is_unknown_HOLDS_the_file(tmp_path, monkeypatch):
+    """`cat <<$D` opens a body whose EXTENT this reader cannot know — so HOLD, never score.
+
+    ⛔ Fresh review of #12902, P2, and the fail-OPEN direction: the operator is visible and
+    the delimiter is not, so `_shell_heredoc_operator_delimiter` returned None, no body was
+    queued, and every line below was scanned as a COMMAND. Measured:
+
+        D=EOF / export FLAG=0 / cat <<$D >/dev/null / export FLAG=1 / $D
+          bash: 0    pre-fix reader: ON   (a FALSE ARM)
+
+    `cat <<~ >/dev/null` is the same shape (`~` IS a delimiter word bash accepts). Both
+    must read `UNMEASURED` — the extent is unknown, not absent.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _walk(script: str) -> dict:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+
+    shipped = _walk("D=EOF\nexport TORTOISE_EMBED_GATE=0\n"
+                    "cat <<$D >/dev/null\nexport TORTOISE_EMBED_GATE=1\n$D\n")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", shipped
+    assert shipped["indeterminate"], shipped["indeterminate"]
+    # …and the helper names the line, so the two readings cannot drift apart.
+    assert probe._shell_unresolved_heredoc_lines("cat <<$D\nx\n") == {1}
+    # ⛔ `<<~` is NOT in this class: `~` IS a delimiter word bash compares literally
+    # (`cat <<~ >/dev/null`, body, `~`), so it is a body of KNOWN extent and the file
+    # measures `OFF` — the same answer bash gives (`FLAG` absent). The review listed it
+    # beside `<<$D`; the two differ, and this control is what keeps them apart.
+    assert probe._shell_unresolved_heredoc_lines("cat <<~ >/dev/null\nx\n~\n") == set()
+    assert probe._shell_heredoc_bodies("cat <<~ >/dev/null\nx\n~\n") == {2}
+    assert _walk("cat <<~ >/dev/null\nexport TORTOISE_EMBED_GATE=1\n~\n")[
+        "per_surface"]["entrypoint"]["state"] == "OFF"
+    # ── CONTROL: a KNOWABLE delimiter is a body, not an unknown extent ──
+    assert probe._shell_unresolved_heredoc_lines("cat <<EOF\nx\nEOF\n") == set()
+    assert probe._shell_unresolved_heredoc_lines("cat <<'EOF'\nx\nEOF\n") == set()
+    assert probe._shell_unresolved_heredoc_lines("cat <<.EOF\nx\n.EOF\n") == set()
+    assert probe._shell_unresolved_heredoc_lines("x=$((1<<2))\n") == set()
+
+
+def test_a_REDIRECTION_does_not_end_the_parent_shell(tmp_path, monkeypatch):
+    """`>&`, `<&`, `&>`, `>|` are REDIRECTIONS, not the subshell operator.
+
+    ⛔ Fresh review of #12902, P2. `_shell_commands` returns early on a lone `&` / `|`
+    (the command runs in a SUBSHELL, so the parent environment never sees it), and it did
+    so for a redirection too — DROPPING the command and everything after it on the line:
+
+        export FLAG=0 >/dev/null 2>&1   (after `export FLAG=1`)  bash: 0  reader: ON
+        exec 3>&1; export FLAG=1                                 bash: 1  reader: OFF
+
+    Both were measured; the first is a FALSE ARM in the row's certification direction.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    assert _state("export TORTOISE_EMBED_GATE=1\n"
+                  "export TORTOISE_EMBED_GATE=0 >/dev/null 2>&1\n") == "OFF"
+    assert _state("exec 3>&1; export TORTOISE_EMBED_GATE=1\n") == "ON"
+    assert _state("export TORTOISE_EMBED_GATE=1 &>> /dev/null\n") == "ON"
+    # ── CONTROL: a REAL background/pipeline operator still ends the parent's view ──
+    assert probe._shell_commands("set -a &") == []
+    assert probe._shell_commands("export TORTOISE_EMBED_GATE=1 | cat") == []
+    assert _state("export TORTOISE_EMBED_GATE=1 | cat\n") == "OFF"
+
+
+def test_a_conditional_operand_that_never_touches_the_flag_is_SILENT(
+        tmp_path, monkeypatch):
+    """Held only when the flag is the operand's BUSINESS — not for any `unset`.
+
+    ⛔ Fresh review of #12902, P2. `_shell_command_affects_flag` treated EVERY `unset` as
+    flag-relevant (`_shell_unset_target` returns `"other"`, not `None`), so a benign
+    `true || unset SOME_OTHER` held the file `UNMEASURED` — contradicting the docstring
+    directly above it ("a conditional operand that never touches the flag is silence").
+    Measured: bash exports `FLAG=1`; the walk published `on=False`.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    assert _state("export TORTOISE_EMBED_GATE=1\ntrue || unset SOME_OTHER\n") == "ON"
+    assert _state("export TORTOISE_EMBED_GATE=1\ntrue || unset -f helper\n") == "ON"
+    # ── CONTROL: a COMPUTED target may be the flag, so it still holds the file ──
+    assert _state("export TORTOISE_EMBED_GATE=1\ntrue || unset \"$NAME\"\n") \
+        == "UNMEASURED"
+
+
+def test_a_workflow_RUN_body_gets_the_same_heredoc_reading(tmp_path, monkeypatch):
+    """A heredoc inside `run: |` is a BODY, not commands — the workflow channel included.
+
+    ⛔ Fresh review of #12902, P2: the heredoc analysis was gated on `posix.endswith(
+    ".sh")`, but this module deliberately scans a workflow's `run:` bodies as executed
+    shell (`EXECUTED_BLOCK_KEYS`). So a step whose heredoc merely MENTIONS the flag
+    published `ON` while the step exports nothing (measured through
+    `flag_in_shipped_configs` on a synthetic `.github/workflows/probe.yml`).
+    """
+    workflows = tmp_path / probe.WORKFLOW_SURFACE
+    workflows.mkdir(parents=True)
+    (workflows / "probe.yml").write_text(
+        "name: probe\non: push\njobs:\n  t:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: |\n"
+        "          cat <<'EOF' >/dev/null\n"
+        "          export TORTOISE_EMBED_GATE=1\n"
+        "          EOF\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    workflows_surface = shipped["per_surface"][".github/workflows"]
+    assert workflows_surface["state"] == "OFF", shipped["per_surface"]
+    assert not workflows_surface["hits"], workflows_surface
+
+
 def test_a_multi_command_line_carries_ONE_STATE_PER_COMMAND(tmp_path, monkeypatch):
     """The export state is per COMMAND, not per line — the last command cannot decide
     the first, and one source line cannot be counted as two declarations.
@@ -4280,23 +4489,69 @@ def test_a_HEREDOC_body_is_DATA_and_never_a_command(tmp_path, monkeypatch):
         + "\n  " + "\n  ".join(wrong))
 
 
-def test_the_ENTRYPOINT_declared_bound_does_not_certify_a_shape_the_reader_SCORES():
-    """A bound's `cannot_see` example must produce no ANSWER — else it certifies a false arm.
+def test_the_ENTRYPOINT_bounds_declare_family_names_the_FALSE_ARM_direction(
+        tmp_path, monkeypatch):
+    """The `declare`/`typeset`/`readonly` clause names BOTH directions it publishes.
+
+    ⛔ Measured while reviewing the rebase of #12902's rounds: the bound said the reader
+    "has no decision" for a `declare` family assignment "so a later truthy `export`
+    stands" — the UNDER-report direction only. The over-report is the one that matters:
+    with `export FLAG=1` FIRST and `declare -x FLAG=0` after it, bash ends at `0` (the
+    `declare` ASSIGNS and `-x` only sets the attribute) while the reader published `ON`
+    — a FALSE ARM, which `_declared_bound_note` must never certify under the "cannot
+    see" verb (the `#12978` class). The BEHAVIOUR is #12952's; this pin holds the CLAIM.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    # The measured FALSE ARM this bound must declare: reader `ON`, bash `0`.
+    assert _state("export TORTOISE_EMBED_GATE=1\n"
+                  "declare -x TORTOISE_EMBED_GATE=0\n") == "ON"
+    for spelling in ("typeset -x", "declare", "readonly"):
+        assert _state("export TORTOISE_EMBED_GATE=1\n"
+                      f"{spelling} TORTOISE_EMBED_GATE=0\n") == "ON"
+
+    cannot_see = next(row for row in probe.DECLARED_CHANNEL_BOUNDS
+                      if row["channel"] == "entrypoint")["cannot_see"]
+    # …and the bound states it, with the tracker and the direction named.
+    assert "FALSE ARM" in cannot_see, cannot_see
+    assert "EARLIER" in cannot_see and "LATER" in cannot_see, cannot_see
+    assert "#12952" in cannot_see, cannot_see
+
+
+def test_the_ENTRYPOINT_declared_bound_does_not_certify_a_shape_the_reader_SCORES(
+        tmp_path, monkeypatch):
+    """A bound's `cannot_see` examples must MEASURE as HELD — else it certifies a false arm.
 
     ⛔ Measured (fresh review of PR #12902, P2): the entrypoint bound named
     `[ -n "$X" ] && export FLAG=1` under `cannot_see` while the reader scored that exact
     spelling `ON`. `_declared_bound_note` prints `cannot see` as *"an under-report a
     reader can trust"*, and the Dockerfile bound was given a separate `reads_wrong` field
     precisely so a false ARM could not be published under that trust-me verb (`#12978`).
-    So a conditonal/indirect shape named here must be HELD, and every example the bound
-    names must be one of these shapes.
+
+    ⛔ AND THIS TEST WAS THE SAME DEFECT ONE LAYER UP (fresh review of `#12902`, P2): it
+    only asserted that the FIVE substrings appeared in the bound's text, so re-applying
+    the pre-fix behaviour — conditional operands scored as if they ran — left it GREEN
+    while the sentence it guards was false. Every shape the bound names is therefore
+    driven through `flag_in_shipped_configs` here and must read `UNMEASURED`.
     """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
     entrypoint = next(row for row in probe.DECLARED_CHANNEL_BOUNDS
                       if row["channel"] == "entrypoint")
     cannot_see = entrypoint["cannot_see"]
     # The bound must still NAME the shapes it is about — a silently trimmed sentence is
     # the same defect one layer up.
-    for shape in ("HEREDOC BODY", "CONDITIONAL operand", "shell INDIRECTION"):
+    for shape in ("HEREDOC BODY", "CONDITIONAL operand", "shell INDIRECTION", "BRANCH"):
         assert shape in cannot_see, (
             f"the entrypoint bound no longer names {shape!r} — a bound that stops naming "
             f"its shapes is an undeclared blind spot: {cannot_see!r}")
@@ -4304,6 +4559,34 @@ def test_the_ENTRYPOINT_declared_bound_does_not_certify_a_shape_the_reader_SCORE
     assert "indeterminate" in cannot_see and "UNMEASURED" in cannot_see, (
         "the entrypoint bound must say an unmeasurable shape is reported `indeterminate` "
         f"and the file held UNMEASURED, not scored either way: {cannot_see!r}")
+
+    # ── EVERY NAMED SHAPE MUST ACTUALLY BE HELD (this is the falsifier half) ──
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    for name, script in (
+            # CONDITIONAL operand (the `&&` form the bound quotes verbatim)
+            ("conditional", '[ -n "$X" ] && export TORTOISE_EMBED_GATE=1\n'),
+            ("or-list", "false || export TORTOISE_EMBED_GATE=1\n"),
+            # BRANCH
+            ("if", "if [ -n \"$X\" ]; then\nexport TORTOISE_EMBED_GATE=1\nfi\n"),
+            ("case", "case x in\n x) export TORTOISE_EMBED_GATE=1 ;;\nesac\n"),
+            # HEREDOC BODY (its extent is known; the file is not armed by it)
+            ("heredoc-body",
+             "cat <<EOF\nexport TORTOISE_EMBED_GATE=1\nEOF\n"),
+            # shell INDIRECTION
+            ("indirection", 'export TORTOISE_EMBED_GATE="${OTHER}"\n'),
+    ):
+        state = _state(script)
+        expected = "OFF" if name == "heredoc-body" else "UNMEASURED"
+        assert state == expected, (name, script, state)
+    # ⛔ The heredoc BODY is the one named shape whose answer is OFF, not a hold: a body
+    # of KNOWN extent contributes no arm and measures fine — holding it would be the
+    # false HOLD this exact test's sibling guards. Its bound clause is about an
+    # ARM inside a body being invisible, which this asserts by its absence.
 
 
 def test_a_RETRACTED_hit_is_not_published_at_the_SURFACE_either(tmp_path, monkeypatch):
@@ -10641,10 +10924,14 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `268 + 1` and `267 + 2` at THIS tree, both equal to the `269` the pin re-derives
+    count: `275 + 1` and `274 + 2` at THIS tree, both equal to the `276` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
-    which is why the doc states its split as
-    lane-bound: a carve-out run must not "correct" the docker lane's figure.
+    which is why the doc states its split as lane-bound: a carve-out run must not
+    "correct" the docker lane's figure.
+    ⛔ These two figures were stale for three review rounds while the PR re-cut §6 to this
+    tree, so the pin's own docstring stated a count a fifth time — at numbers nothing
+    measured (fresh review of `#12902`, P2). `own_splits` below re-derives THEM too, so
+    this docstring can no longer drift.
     """
     root = Path(probe.__file__).resolve().parent.parent
     doc = (root / "docs" / "epics" / "2026-11-04-5090-vector-layer"

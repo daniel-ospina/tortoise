@@ -2460,11 +2460,20 @@ DECLARED_CHANNEL_BOUNDS: tuple[dict[str, str], ...] = (
                        "`cond || unset FLAG`) — a conditional operand runs only if a "
                        "test this reader cannot evaluate passes, so it is reported "
                        "`indeterminate` and the FILE is held UNMEASURED rather than "
-                       "scored either way; and the `declare`/`typeset`/`readonly` "
+                       "scored either way; a BRANCH — any command on a line that "
+                       "opens an `if`/`case`/`for`/`while`/`until` construct, or sits "
+                       "inside one, whose test this reader cannot evaluate — and a "
+                       "heredoc whose DELIMITER is not knowable "
+                       "(`cat <<$D`, `cat <<~`, whose body EXTENT is therefore unknown), "
+                       "held the same way; and the `declare`/`typeset`/`readonly` "
                        "spellings of an assignment — `declare -x FLAG=0`, "
                        "`declare FLAG=0` and `readonly FLAG=0` all leave this reader "
-                       "with no decision, so a later truthy `export` stands (tracked as "
-                       "`#12952`; the `export NAME=value` spelling IS read); and a "
+                       "with no decision, so an `export` on EITHER side of one decides "
+                       "the file: a LATER truthy `export FLAG=1` stands (bash agrees), "
+                       "and an EARLIER one stands over a disarming "
+                       "`declare -x FLAG=0` — a FALSE ARM, because the `declare` "
+                       "ASSIGNS and export status does not change the value (tracked "
+                       "as `#12952`; the `export NAME=value` spelling IS read); and a "
                        "CRLF-terminated script, which text-mode reading makes look as "
                        "though its heredocs terminate (`EOF\\r` arrives as `EOF`) — such "
                        "a file cannot EXECUTE at all, so it is declared rather than "
@@ -3427,7 +3436,10 @@ _SHELL_ASSIGN = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=")
 #: FALSE ARM (fresh review of #12902, P1).
 #: ⛔ ONLY `;`, `&&` and `||` terminate: `set -a &` and `set -a|cat` run in a SUBSHELL, so
 #: the parent's allexport is untouched — accepting them here armed the parent's state from
-#: a command bash never runs there (measured: `bash -c 'set -a &; env'` has no FLAG).
+#: a command bash never runs there (measured: `bash -c 'set -a & wait; FLAG=1; env'` prints
+#: no FLAG. ⚠️ The earlier citation of this line was `bash -c 'set -a &; env'`, which bash
+#: REJECTS — `syntax error near unexpected token ';'`, rc=2 — so it measured nothing;
+#: corrected by the fresh review of `#12902`, P2).
 _SHELL_SET = re.compile(r"^\s*set\s+(?P<args>[^;&|]*?)\s*(?:(?:;|&&|\|\|).*)?$")
 #: A shell command SEPARATOR glued to a value (`FLAG=1;`, `FLAG="1"&&`).
 #: ⛔ `&` and a lone `|` are NOT in this set: bash runs `export FLAG=1&` and `…=1|cat` in
@@ -3732,6 +3744,81 @@ def _shell_mask_quoted(line: str) -> str:
     return "".join(masked)
 
 
+def _shell_mask_arithmetic(line: str) -> str:
+    """``line`` with every ARITHMETIC span (`$(( … ))`, `(( … ))`) blanked to spaces.
+
+    ⛔ **A `<<` inside an arithmetic context is a LEFT SHIFT, not a heredoc operator.**
+    `x=$((1<<2))` names no delimiter, but the operator scan matched the `<<`, read `2`
+    as a delimiter word, queued a body and swallowed every following line as data —
+    MEASURED: `x=$((1<<2))` then `export FLAG=1` publishes `OFF` while bash exports `1`
+    (the same false-HOLD direction the commented-out opener produced, one construct
+    over). `(( x = 1 << 2 ))` is the same shape.
+
+    Depth-counted on parentheses, so a nested `$(( (a+b) << 2 ))` closes at the right
+    place, and offsets are preserved so a match on the mask can be read from the
+    original. ⚠️ Declared bound: a construct this scanner does not model (a `<<` inside
+    a `$( … )` command substitution, or in `$[ … ]`) is left alone — nothing here
+    invents a span it is not sure of, so the worst case is the pre-fix reading.
+    """
+    masked = list(line)
+    index = 0
+    length = len(line)
+    while index < length:
+        if line.startswith("$((", index) or line.startswith("((", index):
+            start = index
+            depth = 0
+            while index < length:
+                if line[index] == "(":
+                    depth += 1
+                elif line[index] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        index += 1
+                        break
+                index += 1
+            for blank in range(start, index):
+                masked[blank] = " "
+            continue
+        index += 1
+    return "".join(masked)
+
+
+def _shell_control_flow_lines(text: str) -> set[int]:
+    """The 1-BASED lines whose commands may NOT have run, because control flow owns them.
+
+    ⛔ **A BRANCH IS A CONDITIONAL OPERAND one construct over, and the reader scored it
+    anyway.** `if true; then export FLAG=0; else export FLAG=1; fi` publishes the LAST
+    branch's value (`ON`) while bash runs only the first (`0`) — MEASURED, and the same
+    false-ARM direction the `&&` / `||` operands had (fresh review of `#12902`). A `case`
+    arm is the mirror: `case x in x) export FLAG=1 ;; esac` published `OFF` for a file
+    bash arms. This reader cannot evaluate a test, so a flag-relevant command inside (or
+    sharing a line with) such a construct is reported `indeterminate` and the FILE is
+    held `UNMEASURED` — the treatment `_shell_commands`' conditional operands get, which
+    is the whole point of the three-valued rule.
+
+    Nesting is counted (an `if` inside a `while` is depth 2), and a one-line construct
+    (`if …; then …; fi`) is caught by the keyword test rather than by depth, since its
+    depth returns to zero before the next line is read.
+
+    ⚠️ Declared bound: a keyword produced by an expansion (`eval`, a word built at run
+    time) is not seen here — the same class as the channel's other declared bounds.
+    """
+    keywords = {"if", "for", "while", "until", "case", "select"}
+    closers = {"fi", "done", "esac"}
+    bodies: set[int] = set()
+    depth = 0
+    for number, raw in enumerate(text.splitlines(), 1):
+        masked = _shell_mask_arithmetic(_shell_mask_quoted(_shell_strip_comment(raw)))
+        words = set(re.findall(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_])",
+                               masked))
+        opened = len(words & keywords)
+        closed = len(words & closers)
+        if depth > 0 or opened or closed:
+            bodies.add(number)
+        depth = max(depth + opened - closed, 0)
+    return bodies
+
+
 def _shell_heredoc_operator_delimiter(rest: str) -> str | None:
     """The heredoc DELIMITER WORD at the start of ``rest``, or None if there is none.
 
@@ -3754,6 +3841,55 @@ def _shell_heredoc_operator_delimiter(rest: str) -> str | None:
     # Metacharacters cannot appear in it, so they terminate the word.
     match = re.match(r"[^\s;&|<>()]+", rest)
     return match.group(0) if match else None
+
+
+def _shell_delimiter_is_static(word: str | None) -> bool:
+    """Can this heredoc DELIMITER be compared against a line WITHOUT running bash?
+
+    ⛔ `cat <<$D` is EXPANDED by the shell before the body is read (`D=EOF` makes bash look
+    for `EOF`), and a backticked or command-substituted word is the same class. A reader
+    that takes the literal `$D` as the delimiter searches for a terminator bash never
+    looks for, so it finds the wrong body — the fail-OPEN direction (fresh review of
+    `#12902`, P2: `D=EOF / export FLAG=0 / cat <<$D / export FLAG=1 / $D` measured
+    `reader ON, bash 0`). Everything after such an operator is UNMEASURED instead.
+    """
+    if not word:
+        return False
+    return "$" not in word and "`" not in word
+
+
+def _shell_unresolved_heredoc_lines(text: str) -> set[int]:
+    """1-BASED lines carrying a heredoc whose DELIMITER this reader cannot know.
+
+    ⛔ **An expanded or unword delimiter fails OPEN if it is ignored.** `cat <<$D` with
+    `D=EOF` OPENS the operator, and `_shell_heredoc_operator_delimiter` returns None for
+    `$D` — so no body was queued and every line below was scanned as a COMMAND. Measured
+    by the fresh review of `#12902` (P2):
+
+        D=EOF / export FLAG=0 / cat <<$D >/dev/null / export FLAG=1 / $D
+          bash: 0        reader: ON       (a FALSE ARM)
+
+    `cat <<~ >/dev/null` is the same shape (`~` is a valid delimiter word bash accepts).
+    The body's EXTENT is therefore unknown, not absent, so the caller reports the line
+    `indeterminate` and holds the FILE — the fail-closed half. The docstring of
+    `_shell_heredoc_bodies` used to claim this class was named in
+    `DECLARED_CHANNEL_BOUNDS`; it is handled here instead, which is stronger.
+    """
+    unresolved: set[int] = set()
+    for number, raw in enumerate(text.splitlines(), 1):
+        masked = _shell_mask_arithmetic(_shell_mask_quoted(_shell_strip_comment(raw)))
+        for match in _SHELL_HEREDOC_OP.finditer(masked):
+            rest = raw[match.end():]
+            # A `<<-` already consumed the dash; whatever follows must be a WORD bash can
+            # compare a line against. A bare word, a quoted one and a backslashed one are
+            # all STATIC; an EXPANDED one (`$D`, backticks) is not.
+            word = _shell_heredoc_operator_delimiter(rest)
+            stripped_rest = rest.strip()
+            if not _shell_delimiter_is_static(word):
+                if not stripped_rest or stripped_rest[0] in ";&|)":
+                    continue        # no operand at all: a SYNTAX ERROR, handled as opaque
+                unresolved.add(number)
+    return unresolved
 
 
 def _shell_heredoc_bodies(text: str) -> set[int]:
@@ -3784,6 +3920,12 @@ def _shell_heredoc_bodies(text: str) -> set[int]:
       because the same normalisation applies to every channel's reader, and because a
       CRLF shell script cannot EXECUTE at all (`#!` line ends in `\r`, so the kernel looks
       for an interpreter named `/bin/bash\r`). A file that cannot run is not a deployment.
+
+    ⚠️ The NEARER shape, an EXPANDED DELIMITER (`cat <<$D`), is NOT left to that bound:
+    the operator is visible and the delimiter is not, so `_shell_unresolved_heredoc_lines`
+    marks the line and the caller HOLDS the file rather than scanning the body as commands
+    (fresh review of `#12902`, P2 — measured `reader ON, bash 0` on
+    `D=EOF / export FLAG=0 / cat <<$D / export FLAG=1 / $D`).
 
     A TERMINATOR line is the one that equals the delimiter, after leading tabs when the
     operator was `<<-`; it is NOT a body line, so it is still scanned like any other
@@ -3818,12 +3960,24 @@ def _shell_heredoc_bodies(text: str) -> set[int]:
         # would swallow them as a body (measured: `bash -c '# cat <<EOF\nexport
         # FLAG=1'` exports FLAG, and this scanner read line 2 as a BODY). Offsets still
         # line up in `raw` because stripping only truncates the tail.
-        masked = _shell_mask_quoted(_shell_strip_comment(raw))
+        masked = _shell_mask_arithmetic(_shell_mask_quoted(_shell_strip_comment(raw)))
         for match in _SHELL_HEREDOC_OP.finditer(masked):
-            delimiter = _shell_heredoc_operator_delimiter(raw[match.end():])
+            rest = raw[match.end():]
+            delimiter = _shell_heredoc_operator_delimiter(rest)
             if delimiter is None:
+                # ⛔ A trailing `<<` with NO operand (`cat << ; …`) is a SYNTAX ERROR: bash
+                # parses nothing after it, so the rest of the file is opaque. Everything
+                # else with no parseable word is handled as an EXPANDED delimiter below.
+                if rest.strip() and rest.strip()[0] not in ";&|)":
+                    break
                 opaque = True
                 bodies.add(number)
+                break
+            if not _shell_delimiter_is_static(delimiter):
+                # ⛔ `cat <<$D` is EXPANDED by the shell (`D=EOF` → bash looks for `EOF`),
+                # so the literal word is NOT the terminator and the body's extent is
+                # unknown. Queueing the literal would find the WRONG body — the fail-OPEN
+                # direction (measured `reader ON, bash 0`). The caller holds the file.
                 break
             pending.append((delimiter, match.group(1) == "-"))
     return bodies
@@ -3887,7 +4041,9 @@ def _shell_command_affects_flag(command: str, flag: str) -> bool:
         return True
     # ⛔ `in ("value", "unknown")`, never `is not None` — see
     # `_shell_command_changes_ATTRIBUTE`. `unset OTHER_VAR` names another variable, so it
-    # revokes nothing this reader scores.
+    # revokes nothing this reader scores. (Measured by the fresh review of `#12902`, P2:
+    # `export FLAG=1` then `true || unset SOME_OTHER` exported `FLAG=1` in bash while the
+    # walk published `deployment on=False`.)
     if _shell_unset_target(command, flag) in ("value", "unknown"):
         return True
     return _assigned_value(command, flag) is not None
@@ -3939,11 +4095,60 @@ def _shell_strip_comment(line: str) -> str:
             previous = char
             index += 1
             continue
-        if char == "#" and previous in ("", " ", "\t", ";", "&", "|", "(", ")"):
+        # ⛔ `<` and `>` are OPERATORS too, so a `#` right after one starts a comment
+        # (`bash -c 'echo a >#f'` is a syntax error, not a file named `#f`) — leaving them
+        # out contradicted the rule stated above and read an arm for a script bash refuses
+        # to run (fresh review of `#12902`, P2).
+        if char == "#" and previous in ("", " ", "\t", ";", "&", "|", "(", ")",
+                                        "<", ">"):
             return line[:index]
         previous = char
         index += 1
     return line
+
+
+#: ⛔ A CONTROL-FLOW KEYWORD is not part of the command that follows it. `if …; then
+#: export FLAG=1; fi` hands the scanner the command `` then export FLAG=1``, whose leading
+#: word made `_shell_export_args` return None — so the assignment landed in NO bucket and
+#: the file read `OFF` over a deployment bash arms (a false HOLD, measured). The keywords
+#: are stripped from the FRONT of each command, which is the only place they can appear.
+_SHELL_LEADING_KEYWORD = re.compile(
+    r"(?:if|then|elif|else|fi|do|done|while|until|for|case|esac|select|in|time)[ \t]+")
+
+#: ⛔ A `case` ARM opens with its PATTERN (`x) export FLAG=1 ;;`, `*.json) …`), which is
+#: not part of the command — the pattern made `_shell_export_args` return None, so the arm
+#: landed in no bucket and a `case`-guarded export read `OFF` (measured). The pattern is
+#: only stripped when it is a single word-ish token, so a FUNCTION definition (`f() {`)
+#: is untouched: the parenthesis that opens the empty parameter list blocks the match.
+_SHELL_CASE_ARM_PATTERN = re.compile(r"^[^ \t(){};&|]+\)[ \t]+")
+
+
+def _shell_strip_leading_keywords(text: str) -> str:
+    """``text`` with any leading shell KEYWORDS (`then`, `do`, `!`, …) removed."""
+    while True:
+        stripped = text.strip()
+        if stripped.startswith("!") and (len(stripped) == 1
+                                         or stripped[1] in " \t("
+                                         or stripped.startswith("!=")):
+            if stripped.startswith("!="):
+                return stripped
+            text = stripped[1:]
+            continue
+        # A `{ … }` GROUP is unconditional in bash, and its brace is not part of the
+        # command: `{ export FLAG=1; }` splits into ``{ export FLAG=1`` and `` }``, and the
+        # leading brace made the export unparseable — a false HOLD on a spelling this
+        # repo's own entrypoint uses for its grouped cleanups.
+        if stripped.startswith("{") and (len(stripped) == 1 or stripped[1] in " \t"):
+            text = stripped[1:]
+            continue
+        match = _SHELL_LEADING_KEYWORD.match(stripped)
+        if not match:
+            arm = _SHELL_CASE_ARM_PATTERN.match(stripped)
+            if not arm:
+                return stripped
+            text = stripped[arm.end():]
+            continue
+        text = stripped[match.end():]
 
 
 def _shell_commands(line: str) -> list[tuple[str, bool]]:
@@ -4011,18 +4216,38 @@ def _shell_commands(line: str) -> list[tuple[str, bool]]:
             # flag across the `;` read a real arm as unmeasured — a false HOLD, the
             # mirror of the false ARM this whole branch is about (measured by this
             # lane's own adversarial pass before review).
-            commands.append(("".join(current), after_conditional))
+            commands.append((_shell_strip_leading_keywords("".join(current)),
+                              after_conditional))
             current = []
             after_conditional = False
             index += 1
             continue
         if char in "&|":
+            # ⛔ A REDIRECTION IS NOT A SUBSHELL (`>&`, `<&`, `&>`, `&>>`, `>|`): the
+            # early return below DROPS the command and everything after it, so
+            # `export FLAG=0 >/dev/null 2>&1` lost a real DISARM (reader `ON`, bash `0`)
+            # and `exec 3>&1; export FLAG=1` lost the arm — both measured by the fresh
+            # review of `#12902` (P2). The operator character is part of the redirect and
+            # changes nothing about the parent shell, so it is appended like ordinary
+            # text.
+            opens_redirect = False
+            if char == "&":
+                # `>&` / `<&` (previous char) and `&>` / `&>>` (next chars)
+                opens_redirect = (bool(current) and current[-1] in "<>") or \
+                    line[index:index + 2] == "&>" or line[index:index + 3] == "&>>"
+            elif char == "|":
+                opens_redirect = bool(current) and current[-1] == ">"   # `>|` clobber
+            if opens_redirect:
+                current.append(char)
+                index += 1
+                continue
             if line[index:index + 2] in ("&&", "||"):
                 # ⛔ The LEFT operand is unconditional; the RIGHT one runs only if the
                 # test passes (`&&`) or fails (`||`), and this reader cannot evaluate
                 # it. Both are emitted, but the flag is sticky from here on: `a && b &&
                 # c` makes c depend on b, which already depends on a.
-                commands.append(("".join(current), after_conditional))
+                commands.append((_shell_strip_leading_keywords("".join(current)),
+                              after_conditional))
                 current = []
                 after_conditional = True
                 index += 2
@@ -4032,7 +4257,8 @@ def _shell_commands(line: str) -> list[tuple[str, bool]]:
             return commands
         current.append(char)
         index += 1
-    commands.append(("".join(current), after_conditional))
+    commands.append((_shell_strip_leading_keywords("".join(current)),
+                              after_conditional))
     return commands
 
 
@@ -4092,6 +4318,7 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
     #: FLAG=0; EOF; env'` has `FLAG=1`). Precedent in this module: `_yaml_block_scalar_bodies`
     #: exists for the identical rule one grammar over.
     heredoc_bodies = _shell_heredoc_bodies(text)
+    control_lines = _shell_control_flow_lines(text)
     for number, line in enumerate(lines, 1):
         #: ⛔ ONE ENTRY PER COMMAND, as LISTS read at the COMMAND index by the caller.
         #: They were one scalar per LINE, and the caller applied that single line-final
@@ -4103,12 +4330,14 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
         #: the line runs — bash evaluates a `${FLAG:-…}` default against THAT value, so
         #: `_resolved_assignment` needs it (on `F=0; export F=${F:-1}` the second command
         #: must see `0`, not the line-start state).
-        states.append({"exported": [], "publish": [], "unexport": [], "values": [],
-                       "heredoc_body": False})
+        #: ⛔ No inert marker field: an earlier revision carried `heredoc_body` here and
+        #: wrote it in both arms while NOTHING read it (the caller recomputes
+        #: `_shell_heredoc_bodies` itself), so it documented an intent no code acted on
+        #: (fresh review of `#12902`, P2). The body line is still emitted, with one neutral
+        #: entry, so `len(states) == len(lines)` and `shell_exports[number - 1]` stays
+        #: aligned for the lines that follow it.
+        states.append({"exported": [], "publish": [], "unexport": [], "values": []})
         if number in heredoc_bodies:
-            # Keep the 1:1 line indexing the caller depends on
-            # (`shell_exports[number - 1]`), but change no state.
-            states[-1]["heredoc_body"] = True
             states[-1]["values"].append(current)
             continue
         # ⛔ ONE LINE IS NOT ONE COMMAND: `set -a; set +a;` runs BOTH, and reading only
@@ -4120,6 +4349,12 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
         # or modified AFTERWARDS* (bash(1)), so an assignment BEFORE `set -a` is a plain
         # shell variable and `set +a` ends the mode.
         for command, conditional in _shell_commands(line):
+            # ⛔ A BRANCH is a conditional operand one construct over: a command inside an
+            # `if`/`case`/loop may not have run, and this reader cannot evaluate the test.
+            # The caller holds the file for it; here it changes no state (fresh review of
+            # `#12902` — `if true; then export FLAG=0; else export FLAG=1; fi` published
+            # the LAST branch while bash runs the first).
+            conditional = conditional or number in control_lines
             states[-1]["values"].append(current)
             states[-1]["exported"].append(exported)
             states[-1]["unexport"].append(False)
@@ -4869,8 +5104,25 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # FLAG). Each PARENT-shell command is scanned as its own line under the SAME
             # source line number, so the per-line state (`shell_exports[number - 1]`) and
             # the reported `file:line` remain the original ones.
+            # ⛔ A BRANCH IS A CONDITIONAL OPERAND (see `_shell_control_flow_lines`): a
+            # flag-relevant command inside an `if`/`case`/loop may not have run, so it is
+            # reported `indeterminate` and the FILE held UNMEASURED, exactly as an
+            # `a && b` operand is. Measured before this: `if true; then export FLAG=0;
+            # else export FLAG=1; fi` published `ON` (bash runs the `if` branch: `0`) and
+            # `case x in x) export FLAG=1 ;; esac` published `OFF` (bash arms it).
+            # ⛔ THE SAME RULES APPLY TO A WORKFLOW'S `run:` BODY, which this module
+            # deliberately scans as executed shell (`EXECUTED_BLOCK_KEYS`): gating the
+            # heredoc/branch analysis on `.sh` alone left a body inside
+            # `run: | \n cat <<'EOF' \n export FLAG=1 \n EOF` scored as a COMMAND, so the
+            # workflow surface published `ON` for a step that exports nothing (fresh
+            # review of `#12902`, P2 — measured). `workflow` is the same predicate the
+            # executed-body arm uses.
+            reads_shell = posix.endswith(".sh") or workflow
+            control_lines = (_shell_control_flow_lines(text)
+                             if reads_shell else set())
             scan_lines = (
-                [(number, index, command, raw, conditional)
+                [(number, index, command, raw,
+                  conditional or number in control_lines)
                  for number, raw in enumerate(text.splitlines(), 1)
                  for index, (command, conditional)
                  in enumerate(_shell_commands(raw))]
@@ -4882,11 +5134,40 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # direction — a body `export FLAG=1` published a false ARM and a body
             # `FLAG=0` published a false DISARM over a deployment bash runs armed.
             heredoc_bodies = (_shell_heredoc_bodies(text)
-                              if posix.endswith(".sh") else set())
+                              if reads_shell else set())
+            # ⛔ …and a heredoc whose DELIMITER is not knowable (`cat <<$D`, `cat <<~`) is
+            # UNMEASURED, not "no body": ignoring it scanned the body as commands and
+            # published a FALSE ARM (fresh review of `#12902`, P2).
+            unresolved_heredocs = (_shell_unresolved_heredoc_lines(text)
+                                   if reads_shell else set())
+            if unresolved_heredocs:
+                # ⛔ THE EXTENT OF THAT BODY IS UNKNOWN, not absent, so EVERY line from the
+                # opener down is a reading the run did not necessarily make: they are
+                # marked conditional, which (for a flag-relevant command) reports them
+                # `indeterminate` and leaves the file's LAST decision UNKNOWN — i.e. the
+                # file is HELD. Marking only the opener left the body scanned as commands
+                # (measured: `reader ON, bash 0` on the review's `D=EOF` fixture).
+                control_lines = set(control_lines) | set(
+                    range(min(unresolved_heredocs), len(text.splitlines()) + 1))
             for number, index, line, shown, conditional in scan_lines:
+                # ⛔ Re-applied HERE, not only when `scan_lines` was built: the unknown-
+                # extent hold below EXTENDS `control_lines` after that comprehension runs,
+                # so a value captured there would miss every line it added.
+                conditional = conditional or number in control_lines
                 if number in heredoc_bodies:
                     if _assigned_value(line, flag) is not None:
                         documented_only += 1
+                    continue
+                # ⛔ A heredoc whose terminator this reader cannot know (`cat <<$D`) makes
+                # the EXTENT of its body unknown, so every following line is a reading the
+                # run did not make: hold the FILE rather than score them (fresh review of
+                # `#12902`, P2 — measured `reader ON, bash 0`).
+                if number in unresolved_heredocs:
+                    indeterminate.append(f"{posix}:{number}: {shown.strip()[:90]}")
+                    surface_indeterminate.append(posix)
+                    decisions.append((None,
+                                      f"{posix}: {shown.strip()[:90]}",
+                                      f"{posix}:{number}: {shown.strip()[:90]}"))
                     continue
                 # ⛔ A CONDITIONAL operand (`cond && export FLAG=1`) runs only if a test
                 # this reader CANNOT evaluate passes, so publishing either answer would
