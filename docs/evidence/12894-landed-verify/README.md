@@ -261,8 +261,8 @@ ON CONFLICT (org_id, graph_id, seq) DO NOTHING
 |---|---|---|
 | genuine replay — same `event_type` **and** same `payload`, and the conflict query selects no row: the same capture instant, **or no `ts` to compare** (the capture arm is inert then, `:6455-6456`) | silent — that is idempotence | `:6718-6723` (the arm), `:6812-6813` (the silent return — such a replay's conflict query returns no row, so it never reaches the drift return at `:6847`) |
 | same type **and** same capture **and** a `ts` exists, payload differs → read as *derivation drift* | **silent** — admitted as a *reading*, not evidence | `:6820-6846`, `:6847` |
-| anything else **the query selects** → `JournalPositionCollision` | loud: named refusal `journal_collision`, counter, WARNING | `:6858-6865`, `record_writer.py:2747-2771` |
-| `ts` is `NULL` and **any** difference the query selected — payload, `event_type`, or the row the capture arm cannot see | loud (`capture_state="unknown"`) | `record_projection.py:6849-6850` (the state), `:6858-6865` (the raise) |
+| anything else **the query selects** **and a `ts` exists** → `JournalPositionCollision` | loud: named refusal `journal_collision`, counter, WARNING | `:6858-6865`, `record_writer.py:2747-2771` |
+| `ts` is `NULL` and **any** difference the query selected — payload or `event_type`; a `recorded_at`-only difference is *not* selected when `ts` is `NULL`, so that pair is silent under row 1 | loud (`capture_state="unknown"`) | `record_projection.py:6849-6850` (the state), `:6858-6865` (the raise) |
 
 The drift arm admits a shape the class docstring itself calls a *"mirror residual"*: *"TWO DIFFERENT
 RECORDS sharing an instant land here and are absorbed — with `_identity_evidence` never consulted, even
@@ -456,7 +456,7 @@ had to be established by a call-site census rather than by the repo's own instru
 | the record allocates the ordinal (`record_cursor`, row-locked, transactional, allocation order = commit order) | **BUILT** — `record_allocator.py` (663 lines), `ALLOCATION_SQL` in `record_projection.py:6926`, two migrations |
 | the journal record CARRIES the ordinal | **BUILT on the class, not on the path** — the allocated number reaches `RecordWrite.last_seq` and the byte meter (`record_writer.py:1722-1742`); **no live caller enters the arm** |
 | replay READS the number instead of computing it | **BUILT for the refusal half** — an enumerated replay is REFUSED for a graph with a cursor row (`record_projection.py:7340-7510`); there is no carried-`seq` *read* yet, because nothing writes a `seq` onto the export line |
-| the duplicate position is a defect, not an absorption | **BUILT — loud for a DIFFERENT record, and still silent for one admitted pair**: `23505` → `PositionCollision` on the allocated insert; replay's `DO NOTHING` is interrogated by the `#9318` guard. Silence is decided first by whether the conflict query selects a row at all (`record_projection.py:6443-6456` — the `event_type`/`payload` disjunction at `:6443-6444`, and the capture arm at `:6455-6456`, which is inert when the write carries no `ts`), returning at `:6812`; past that, it returns silently only when `event_type` **and** `recorded_at` also agree **and** a `ts` exists (`:6847-6848`), while a `ts`-less pair whose payload *differs* computes `capture_state="unknown"` (`:6849-6850`) and raises (`:6858-6865`). So two different records sharing a capture instant are still absorbed (§4.1) — and so is a pair differing only in `event_id`, which `ENVELOPE_KEYS` strips (`:528-529`); that one is pinned silent by a **stub** leg — `tests/test_9318_journal_collision.py:721-778`, whose `Absorbed(stored=None)` (`:771`) makes the conflict query return no row. There is no database leg for the `event_id`-only shape; the database leg at `:1235-1270` covers a `ts`-less *replay* of the same record, not this one |
+| the duplicate position is a defect, not an absorption | **BUILT — loud for a DIFFERENT record, and still silent for one admitted pair**: `23505` → `PositionCollision` on the allocated insert; replay's `DO NOTHING` is interrogated by the `#9318` guard. Silence is decided first by whether the conflict query selects a row at all (`record_projection.py:6443-6456` — the `event_type`/`payload` disjunction at `:6443-6444`, and the capture arm at `:6455-6456`, which is inert when the write carries no `ts`), returning at `:6812`; past that, it returns silently only when `event_type` **and** `recorded_at` also agree **and** a `ts` exists (`:6847-6848`), while a `ts`-less pair whose payload **or `event_type`** differs computes `capture_state="unknown"` (`:6849-6850`) and raises (`:6858-6865`) — a `recorded_at`-only difference is not selected at all and is silent under row 1. So two different records sharing a capture instant are still absorbed (§4.1) — and so is a pair differing only in `event_id`, which `ENVELOPE_KEYS` strips (`:528-529`); that one is pinned silent by a **stub** leg — `tests/test_9318_journal_collision.py:721-778`, whose `Absorbed(stored=None)` (`:771`) makes the conflict query return no row. There is no database leg for the `event_id`-only shape; the database leg at `:1235-1270` covers a `ts`-less *replay* of the same record, not this one |
 | the seed / cutover for existing graphs | **BUILT, UNREACHABLE** (no verb, no RPC, no runbook); zero-row case correct; **2b lifted contrary to plan** |
 | the live writer allocates (§A7.7 6.3) | **NOT DONE** |
 | the creation hook (§A7.7 6.6) | **ABSENT** |
@@ -479,11 +479,10 @@ The dispatch brief asked for this claim to be checked rather than trusted, so:
 
 The cap-archives live on **`origin`** under `refs/wip/`. That is the only place this section asserts
 anything about them, because the **local** archive namespaces are not stable enough to describe: three
-drafts of this paragraph measured them three different ways in one session (`refs/wip/` holding 322 or
-297 refs; a local `refs/wip/*12894*` match present or absent; `refs/wip-local/issue-12894-allocator-spike`
-existing or not). The namespace is maintained by a rescue tool that keeps writing and pruning, so a
-count or a local ref name in this document is a measurement of one clone at one instant, not a fact
-about the repository. **The refs below
+drafts of this paragraph measured them three different ways in one session — in both directions, a ref
+present in one reading and absent in the next. The namespace is maintained by a rescue tool that keeps
+writing and pruning, so a count or a local ref name in this document would be a measurement of one
+clone at one instant, not a fact about the repository. **The refs below
 are therefore verified on `origin`, from a command that speaks about the remote and not about any
 clone:**
 
