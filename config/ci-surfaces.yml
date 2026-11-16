@@ -1002,6 +1002,16 @@ surfaces:
   # through to `core`. A one-surface registration drops this file on either
   # half's own diff — the #1349/#3332 silent-drop class the manifest exists for.
   - test_10602_wait_bound_breach_visible.py
+  # #12992: the capture gate's refusal and its `/health` block. `api` ONLY, and the
+  # single row is the measured answer rather than the `--register` default: the ONLY
+  # product module this suite exercises is `tortoise/hosted_api.py`, which is an exact
+  # `api` SOURCE_PATTERN (it REPLACES the `core` fallback), so a `core` row would buy
+  # nothing and would run the file twice. The sibling half of that gate —
+  # `tortoise/mcp_server.py`, whose `tortoise_session_capture` reaches the same
+  # `_reserve_capture_slot` — is a `SHARED_MODULE`, so its own diff forces the FULL
+  # matrix and selects this file regardless of any row (the same argument #10749 records
+  # for `mcp_server.py`).
+  - test_12992_capture_capacity_typed_refusal.py
   # #10749: the health tail must fit INSIDE the transport wait bound. Dual-registered
   # for the same reason as #10602 directly above and #3834 before it: the publish sites
   # live on BOTH halves — `setup_timeout_clamped` / `setup_timeout_clamped_s` on the
