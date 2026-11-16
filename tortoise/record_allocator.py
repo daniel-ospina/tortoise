@@ -345,7 +345,11 @@ def raise_named(exc: BaseException, *, where: str) -> None:
             f"{where} hit a duplicate journal position (23505). The position "
             f"insert has no ON CONFLICT DO NOTHING on this path on purpose: an "
             f"allocated number is unique, so a duplicate means the counter is "
-            f"behind the table — re-seed (or reconcile) before allocating again"
+            f"behind the table. `seed` and `reopen` both REFUSE from "
+            f"'{MODE_ACTIVE}' (`SEED_SQL`'s conflict path is scoped to "
+            f"'{MODE_SEEDED}'/'{MODE_HALTED}'; `REOPEN_SQL` to '{MODE_HALTED}'), "
+            f"so `halt` it FIRST (`{MODE_ACTIVE} → {MODE_HALTED}`), then re-seed "
+            f"(monotone `GREATEST`) and reopen before allocating again"
         ) from exc
 
 

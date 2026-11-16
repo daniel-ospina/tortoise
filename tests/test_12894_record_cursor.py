@@ -40,7 +40,8 @@ enumerated replay after cutover    `test_a_post_cutover_enumerated_replay_is_ref
   ⇒ same record at a 2nd position  (+ live `test_a_post_cutover_replay_cannot_`
                                      `add_a_second_position_for_one_record`)
 `seeded` treated as cut over      `test_a_post_cutover_enumerated_replay_is_refused_not_duplicated`
-  ⇒ a graph with NO writable path   (cases 3/3b: `seeded` allowed, `halted` not)
+  ⇒ the remedy named a verb      (cases 3/3b/3c: `seeded` names `arm`, `halted` the re-cut,
+     that refuses                 and a REOPENED graph — `seeded` with consumed `seq` — stays refused)
 the door's token is not the       `test_the_door_speaks_the_counters_vocabulary`
   counter's name (P3)              `position_collision` vs `duplicate_position`
 ==================================================================================
@@ -556,7 +557,16 @@ def test_a_post_cutover_enumerated_replay_is_refused_not_duplicated() -> None:
         rp.replay(records, cut_over, org_id="o", graph_id="g", start_seq=9)
     message = str(refused.value)
     for needle in ("ENUMERATED replay is REFUSED", "ISSUED", "record_cursor",
-                   "mode='active'", "#9190", "allocate=True", "seed"):
+                   "mode='active'", "#9190", "allocate=True", "seed",
+                   # ⛔ `halt` IS PINNED BECAUSE `seed` ALONE IS A REFUSAL FROM
+                   # THIS MODE (fresh-context verification, P1). This arm is
+                   # reachable only for `active` (the CHECK constraint), and
+                   # `SEED_SQL`'s conflict path is scoped to `seeded`/`halted`, so
+                   # a remedy that leads with `seed` names a verb that REFUSES —
+                   # the defect the `seeded` arm was fixed for. Without this
+                   # needle the message can regress to "go through the allocator
+                   # or a seed" and stay green.
+                   "halt"):
         assert needle in message, (
             f"the refusal does not name {needle!r}, so an operator cannot tell it "
             f"from a lost write or a driver fault: {message}")
@@ -591,33 +601,50 @@ def test_a_post_cutover_enumerated_replay_is_refused_not_duplicated() -> None:
         "a failed counter read still wrote a position row: "
         f"{unreadable.executed!r}")
 
-    # 3. SEEDED IS NOT CUT OVER, and keying on ROW EXISTENCE made it one
-    #    (fresh-context review, P2). The plan's own predicate (§A7.5.5 step (0))
-    #    is *"a row in mode 'allocating' or 'halted' is cut over; a row in
-    #    'seeded' is NOT"*. It matters because `seeded` is what `seed()` writes
-    #    and what `reopen()` restores a `halted` graph to, and it means "nobody
-    #    allocates" — `ALLOCATION_SQL` matches no row under `AND mode = 'active'`,
-    #    so `allocate=True` refuses `CursorNotActive`. Refusing the enumerated
-    #    arm as well left such a graph with NO writable path at all, which
-    #    defeats the plan's `halted → seeded` transition — the state for a graph
-    #    whose counter is DISCARDED and rebuilt FROM THE JOURNAL, i.e. exactly
-    #    this enumerated replay. Pre-fix this case raised; post-fix it writes.
+    # 3. `SEEDED` IS STILL REFUSED, and the MODE decides the REMEDY (cycle-1 P2
+    #    → cycle-2 P1). A `seeded` exemption was tried and MEASURED WRONG: §A7.7's
+    #    `halted → seeded` is `REOPEN_SQL`, which sets `mode='seeded'` and KEEPS
+    #    `seq`, so a reopened graph's ordinals WERE issued and an enumerated
+    #    replay put the same record at a second position, silently (measured live:
+    #    the record at 4, then a replay at 9, both rows present). What was right
+    #    in cycle 1's finding is narrower: the refusal named two verbs a `seeded`
+    #    graph cannot execute. Its writer is `arm`, and the message now names it.
     seeded = _CounterConn((0, ra.MODE_SEEDED))
-    report = rp.replay(records, seeded, org_id="o", graph_id="g", start_seq=1)
-    assert report.events == 1
-    assert len(seeded.journal_statements()) == 1, (
-        "a `seeded` graph — not cut over by the plan's own predicate — refused "
-        f"the only writable arm it has: {seeded.executed!r}")
+    with pytest.raises(rp.RecordProjectionError) as not_armed:
+        rp.replay(records, seeded, org_id="o", graph_id="g", start_seq=1)
+    seeded_message = str(not_armed.value)
+    for needle in ("SEEDED", "ARM it", "arm", "allocate=True", "seeded → active"):
+        assert needle in seeded_message, (
+            f"the `seeded` refusal does not name {needle!r}, so the operator is "
+            f"sent to a verb that refuses rather than to the arming step: "
+            f"{seeded_message}")
+    assert "allocate=True) or a seed, not through a replay" not in seeded_message, (
+        "the `seeded` arm still prints the generic remedy, whose two verbs both "
+        f"refuse from `seeded`: {seeded_message}")
+    assert seeded.journal_statements() == [], (
+        f"a `seeded` graph's replay wrote a position row: {seeded.executed!r}")
 
-    # 3b. HALTED *IS* cut over and is deliberately NOT exempted: its numbers were
-    #     consumed, and enumerating over them stores the same record at a second
-    #     position — the #9190 defect this guard exists to prevent.
+    # 3b. HALTED names the re-cut, which is the only route off a halted counter.
     halted = _CounterConn((5, ra.MODE_HALTED))
-    with pytest.raises(rp.RecordProjectionError):
+    with pytest.raises(rp.RecordProjectionError) as re_cut:
         rp.replay(records, halted, org_id="o", graph_id="g", start_seq=9)
+    halted_message = str(re_cut.value)
+    for needle in ("HALTED", "reopen", "re-seed"):
+        assert needle in halted_message, (
+            f"the `halted` refusal does not name {needle!r}: {halted_message}")
     assert halted.journal_statements() == [], (
         "a `halted` graph's CONSUMED numbers were enumerated over: "
         f"{halted.executed!r}")
+
+    # 3c. AND A REOPENED GRAPH KEEPS ITS CONSUMED NUMBERS (cycle-2 P1's exact
+    #     shape, DB-free): `halted → seeded` does not reset `seq`, so the row is
+    #     refused even though the mode reads `seeded`.
+    reopened = _CounterConn((4, ra.MODE_SEEDED))
+    with pytest.raises(rp.RecordProjectionError):
+        rp.replay(records, reopened, org_id="o", graph_id="g", start_seq=9)
+    assert reopened.journal_statements() == [], (
+        "a graph reopened from `halted` still holds consumed numbers, and "
+        f"enumerating over them duplicated a payload: {reopened.executed!r}")
 
 
 def test_allocate_and_position_false_is_refused() -> None:
@@ -708,12 +735,37 @@ def test_each_retryable_sqlstate_is_named_and_counted() -> None:
 
 def test_a_duplicate_position_is_not_retryable() -> None:
     """`23505` is a DEFECT, not a retry: the counter is behind the table, and
-    retrying would fail identically forever."""
+    retrying would fail identically forever.
+
+    ⛔ AND ITS REMEDY MUST NOT LEAD WITH A VERB THAT REFUSES (fresh-context
+    verification of this change, P1). The exception text is printed on the SAME
+    WARNING line as `record_writer._ALLOCATOR_REMEDY['duplicate_position']`, so a
+    `re-seed (or reconcile) before allocating again` here against the writer's
+    "`halt` it FIRST" is one log line carrying two opposite instructions. It was
+    also wrong on its own terms: `SEED_SQL`'s conflict path is scoped to
+    `seeded`/`halted`, so a `seed` attempted on the `active` counter in this very
+    failure refuses — the defect class the accepted-seeded-branch fix removes,
+    surviving in the allocator's own message.
+
+    Non-vacuity: pre-fix the message reads "re-seed (or reconcile) before
+    allocating again" and never names `halt`, so the second assertion reds.
+    """
     ra.reset_metrics()
-    with pytest.raises(ra.PositionCollision):
+    with pytest.raises(ra.PositionCollision) as collision:
         ra.raise_named(_fake_error("23505"), where="the position allocation")
     assert ra.metrics()["duplicate_position"] == 1
     assert ra.metrics()["serialization_failure"] == 0
+
+    message = str(collision.value)
+    for needle in ("halt", f"{ra.MODE_ACTIVE} → {ra.MODE_HALTED}", "re-seed",
+                   "REFUSE"):
+        assert needle in message, (
+            f"the duplicate-position refusal does not name {needle!r}, so the "
+            f"operator is told to seed a counter that refuses the seed — the "
+            f"same dead end the replay guard's arms were fixed for: {message}")
+    assert "re-seed (or reconcile) before allocating again" not in message, (
+        f"the precondition-free re-seed instruction survived, and it contradicts "
+        f"the writer's halt-first remedy on the same WARNING line: {message}")
 
 
 def test_the_door_speaks_the_counters_vocabulary() -> None:
