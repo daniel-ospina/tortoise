@@ -232,10 +232,15 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # The numbers are LITERALS, not restatements of the same set algebra: `|live − declared|`
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
     # verify nothing at all. Each literal carries its own premise note —
+    # 110 -> 94 on 2026-11-16 by #12901 wave 2: the canonical control-plane partition
+    # (`N1`–`N6`) left the public surface (sixteen members, every body privatised as the
+    # seam its hosted caller now uses), so the live set shrank and the off-surface set fell
+    # 82 -> 66 with it. `absent` is UNCHANGED at 11 — none of the sixteen was an approved
+    # row, so no approved name left the class and the 40-name target is untouched.
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    assert len(live) == 110, "the live surface moved — update this premise (it pins today's gap)"
+    assert len(live) == 94, "the live surface moved — update this premise (it pins today's gap)"
 
-    assert len(off_surface) == 82, "the gap moved — update this premise (it pins today's gap)"
+    assert len(off_surface) == 66, "the gap moved — update this premise (it pins today's gap)"
     assert len(absent) == 11, "the gap moved — update this premise (it pins today's gap)"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.

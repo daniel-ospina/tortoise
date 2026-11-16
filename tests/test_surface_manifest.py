@@ -660,7 +660,12 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 #:   re-keys carry both columns again. The number is re-derived from the MERGED manifest,
 #:   never carried from either side — 38 was main's own measured count and was two short
 #:   here, which is exactly the allowance this floor exists to forbid.
-COMPARABLE_CALLER_ROWS_FLOOR = 40
+#:   40 -> 27 on 2026-11-16 (#12901 wave 2): all sixteen retired control-plane doors carried
+#:   BOTH lists (each was called from `hosted_api`/`__main__`/`mcp_auth`), so they leave the
+#:   comparison with their rows — 43 -> 27 measured on the merged manifest. Still the
+#:   MEASURED count and not one below it: a floor with an allowance is the hole the
+#:   one-sided arm above closes.
+COMPARABLE_CALLER_ROWS_FLOOR = 27
 
 
 def test_the_reason_dependency_cross_check_can_fail():
@@ -4902,7 +4907,12 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # arrive (+6) and fourteen doors are re-privatised (-14). Measured on the merged tree:
     # AST 110 / reflection 110 / frozen 110, and `sdk_surface_declaration.py check` prints
     # 82 live-off-surface + 11 approved-but-absent against the approved 40.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 110
+    # 110 -> 94 on 2026-11-16 (#12901 wave 2): the canonical control-plane partition
+    # (`N1`–`N6`) left the PUBLIC surface — sixteen members, every body privatised as the
+    # seam its hosted caller now uses — so the live set shrank again without touching the
+    # approved 40 (none of the sixteen was an approved row). Measured on the merged tree:
+    # AST 94 / reflection 94 / frozen 94, 66 live-off-surface + 11 approved-but-absent.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 94
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

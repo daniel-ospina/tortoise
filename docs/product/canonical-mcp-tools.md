@@ -370,10 +370,11 @@ name — so the composed surface is:
   (68 − 9 + 5 − 14 + 6 − 7 + 6 = 55, and 23 + 9 + 14 + 7 = 53) over a SERVED population of
   **108** rows (55 live + 53 shims), which is what `config/surface-order.yml` totals and what
   `surface_manifest.py check` re-derives;
-- **110 public SDK methods** (measured at `origin/main` @ `d741bd4`: **118**; this PR's wave adds the
-  six READ containers and re-privatises fourteen doors, so 118 + 6 − 14 = **110**, AST /
-  reflection / frozen all 110). Neither wave's own SDK figure survives the merge: the WRITE/MUTATE
-  and SOURCES/MINE/SESSION halves are already inside the 118.
+- **94 public SDK methods** (measured at `origin/main` @ `486f5ca`: **110**; this PR's wave closes
+  the sixteen control-plane doors of `#12901` wave 2 — every body privatised, no approved row and no
+  MCP door touched — so 110 − 16 = **94**, AST / reflection / frozen all 94). No wave's own SDK
+  figure survives the merge, so this one is RE-DERIVED from the merged declaration rather than
+  inherited: wave 2 was authored on a base that measured 118 and recorded 102.
 
 Every number here is MEASURED off the merged registry, not added by hand — `tools/bridge_table.py`,
 `tools/surface_manifest.py` and `tests/test_tool_risk_tiers.py` read the same three.
@@ -562,7 +563,7 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 2. **Publish the bridge table** (MCP `type=`/`mode=` → SDK method).
 3. Implement the MCP list with the **SDK frozen** (method names + capabilities unchanged)
    so the handlers are written once.
-4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **110** public
+4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **94** public
    methods — a number DERIVED from the class, never typed; it moved 147 → 150 at #4282
    phase 2.2 because `link_entities`, `update_knowledge` and `delete_knowledge` were
    approved rows with no `def` yet, 150 → 124 on 2026-10-27 when the surplus methods

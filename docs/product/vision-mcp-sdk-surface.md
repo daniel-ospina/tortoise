@@ -21,10 +21,10 @@ container retired five names into one, #4282 Phase 3.2 deleted five `run_onboard
 batch-1 archives of #11609 removed four no-destination tools, #11609 Phase 2's READ/QUERY
 containers retired nine more, its WRITE/MUTATE containers retired fourteen more into six, and its
 SOURCES/MINE/SESSION containers retired seven more into six), and
-the SDK **110 methods** (14 re-privatised behind those same READ/QUERY containers; 26 surplus names
+the SDK **94 methods** (14 re-privatised behind those same READ/QUERY containers; 26 surplus names
 deleted by `#4282`; five retired by `#12901` wave 1; four WRITE/MUTATE doors retired into
 containers that delivered three; seven SOURCES/MINE/SESSION doors retired into six approved
-containers), with five
+containers; sixteen control-plane doors closed by `#12901` wave 2 with every body kept, privately), with five
 overlapping ways to search, four ways to revise, seven ways to create a node, and a
 lifecycle nobody owns. The target is a surface small enough to hold in your head, where every
 name says what it does, every operation says what it will do to your data, and
@@ -50,8 +50,8 @@ account — the builder pays; an end-customer never has an organisation account 
 | Document | What it is |
 |---|---|
 | **`docs/product/canonical-mcp-tools.md`** | **The approved MCP list — 23 tools**, 9 READ / 14 WRITE. Merged as `8375c7921`. This is the **naming authority** for the SDK. |
-| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 110 (the 150 it was written against, minus the 26 surplus names `#4282` deleted, plus the one `#10015` added, minus the 5 `#12901` wave 1 retired, minus the four WRITE/MUTATE doors retired, plus the three approved ones that batch delivered, minus the seven SOURCES/MINE/SESSION doors retired, plus the six containers that lane landed, minus the 14 `#11609` Phase 2 READ/QUERY re-privatised behind its six containers, plus the six containers it landed), from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
-| `docs/product/canonical-sdk-methods.md` | The full inventory of all 110 with descriptions (150 before `#4282` deleted the surplus set, 124 before `#10015` added one, 125 at `#12901`'s base, 120 after wave 1, 119 after the WRITE/MUTATE batch's four renames, 118 after the SOURCES/MINE/SESSION containers, 110 after this PR's READ/QUERY containers), plus an earlier 32-group sketch over 149 names. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
+| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 94 (the 150 it was written against, minus the 26 surplus names `#4282` deleted, plus the one `#10015` added, minus the 5 `#12901` wave 1 retired, minus the four WRITE/MUTATE doors retired, plus the three approved ones that batch delivered, minus the seven SOURCES/MINE/SESSION doors retired, plus the six containers that lane landed, minus the 14 `#11609` Phase 2 READ/QUERY re-privatised behind its six containers, plus the six containers it landed, minus the sixteen control-plane doors `#12901` wave 2 closed), from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
+| `docs/product/canonical-sdk-methods.md` | The full inventory of all 94 with descriptions (150 before `#4282` deleted the surplus set, 124 before `#10015` added one, 125 at `#12901`'s base, 120 after wave 1, 119 after the WRITE/MUTATE batch's four renames, 118 after the SOURCES/MINE/SESSION containers, 110 after the READ/QUERY containers, 94 after `#12901` wave 2), plus an earlier 32-group sketch over 149 names. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
 
 **These documents are the vision.** This file is the bridge from them to implementation.
 
@@ -167,14 +167,17 @@ not complements.
 ## The reconciliation — SDK 150 → 40
 
 The starting figure in this heading is **historical**, the same way the MCP heading's is: the public
-SDK surface measured **150** when this heading was written — it now measures **110**: `#4282` deleted
+SDK surface measured **150** when this heading was written — it now measures **94**: `#4282` deleted
 26 surplus names (150 -> 124), `#10015` added `get_organisation_account` (124 -> 125; the 149 sketch
 predates one method), `#12901` wave 1 retired the first five off-surface methods with no production
 caller (125 -> 120), `#11609` Phase 2 landed six READ/QUERY containers while re-privatising the
 fourteen read methods they cover (120 -> 112), and then retired four WRITE/MUTATE names into the
 containers it added AND delivered three approved ones, re-cutting the count (112 − 4 + 3 = 111; see
 the `canonical-sdk-methods.md` row above — the same split `tortoise/__all__.py` records as overlap
-13 → 16 and off-surface 107 → 103). The target — 40 — is unchanged.
+13 → 16 and off-surface 107 → 103), and then `#12901` wave 2 closed the sixteen control-plane doors
+of the canonical `N1`–`N6` partition with every body kept privately (110 − 16 = 94; the same split
+`tortoise/__all__.py` records as off-surface 82 → 66, overlap unchanged at 28). The target — 40 —
+is unchanged.
 
 The ledger of the departing names — grouped, with the rationale for each group — is the
 **"Discarded — and why"** section of `docs/product/beta-sdk-surface.md`.
@@ -251,7 +254,7 @@ handler twice.
 | **0.2** | **Name the target.** A short note in both canonical docs stating that **every name is a target, not a description of today.** | The review found the MCP column reads as present tense. A developer following it today calls tools that do not exist. |
 | **0.3** | **The MCP rename table.** old name → new name, per tool. | **Only 5 of the 27 is live at all** — every registered MCP tool carries a `tortoise_` prefix, so no target name matches a served name verbatim; exactly 5 (create_entity, get_entity, approve_merge, graph_set_recording, manage_sources) have a `tortoise_`-prefixed equivalent, and the other 22 have neither. Without this, implementation silently renames the whole MCP surface with no migration note. |
 | **0.3b** | **The SDK rename table.** old name → new name, per method — the SDK pair to 0.3. This exists because 0.3 is the *MCP* table; the SDK half would otherwise have had no owner. `beta-sdk-surface.md` and the SDK reconciliation above both delegate their per-name check here. | 0.1 |
-| **0.4** | **`__all__` in `tortoise/__init__.py`.** | The root cause of the 149-method surface of the day (150 when the row was written; 110 today — `tools/surface-guard.py` is the live count). The public surface is declared by *convention*; every design test presupposes a declaration. Without this the surface drifts back. |
+| **0.4** | **`__all__` in `tortoise/__init__.py`.** | The root cause of the 149-method surface of the day (150 when the row was written; 94 today — `tools/surface-guard.py` is the live count). The public surface is declared by *convention*; every design test presupposes a declaration. Without this the surface drifts back. |
 
 ### Phase 1 — the declaration and the gate
 

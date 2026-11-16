@@ -80,13 +80,17 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # the same epic composed: this PR's READ/QUERY wave re-privatised fourteen read doors and
 # landed six containers (119 + 6 - 14 = 111), and the SOURCES/MINE/SESSION lane retired
 # seven and landed six (+6 - 7 = -1, so 111 -> 110). Both are the CHEAP
-# direction for this pin, and `high_water_counts` stays 150. 110 is what
+# direction for this pin, and `high_water_counts` stays 150. Then #12901 wave 2 closed the
+# sixteen control-plane doors of the canonical `N1`-`N6` partition, every body kept PRIVATE
+# (110 - 16 = 94); no approved row moved with them, so the approved set and the absent
+# count are untouched. 94 is what
 # `config/surface-manifest.yml` derives and `tools/surface-guard.py` pins as the frozen
 # baseline — so this literal and the re-cut baseline move in the same PR, as the
 # paragraph above requires. The waves are disjoint by construction: wave 1's membership
 # rule excluded any name a `tool_registry` entry bound, and the four doors Phase 2
-# re-keys were live MCP tools at that time.
-DECLARED_COUNT = 110
+# re-keys were live MCP tools at that time; wave 2 is the `N1`-`N6` partition minus the
+# approved rows minus the one MCP-bound member (`org_create`).
+DECLARED_COUNT = 94
 
 
 def _declaration() -> dict:
