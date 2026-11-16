@@ -46,21 +46,26 @@ Three knobs make the second arm expressible:
   it. `SUMMARY_OUT` — where the JSON capture goes (default `last-run.json`), and
   how the two committed captures below were produced.
 
-Both rows, copy-pasteable (fill the four DSNs/URIs from your own instances):
+Both rows, copy-pasteable **from the repo root** (fill the four DSNs/URIs from your
+own instances). ⛔ `uv run python` and not a bare `python`: the driver imports
+(`psycopg2`, `falkordb`) are LAZY — a bare interpreter fails mid-run with
+`ModuleNotFoundError`, not at startup. ⛔ And run it from the repo ROOT: `$PWD` is
+what the capture records as `events_base`, so from this directory you would get a
+path the captures do not carry.
 
 ```bash
 export TEST_RECORD_DB_URI='postgresql://tortoise_record_app:…@127.0.0.1:33943/record'
 export OWNER_RECORD_DSN='postgresql://record:…@127.0.0.1:33943/record'
 export CACHE_COUNT_URI="$LANE_URI"          # e.g. docker://:pw@127.0.0.1:16419/db
-export EVENTS_BASE="$PWD/.evidence-events"  # the `events_base` in the captures
+export EVENTS_BASE="$PWD/.evidence-events"  # repo root — the `events_base` in the captures
 
 # ARM A — shared cache: count and write on the SAME server
-SUMMARY_OUT=last-run-arm-a-shared-cache.json \
-  TORTOISE_DB_URI="$LANE_URI" python measure.py
+SUMMARY_OUT=docs/evidence/12943-cache-leg/last-run-arm-a-shared-cache.json \
+  TORTOISE_DB_URI="$LANE_URI" uv run python docs/evidence/12943-cache-leg/measure.py
 
 # ARM B — the defect: record armed, write path URI-less, cache still COUNTED
-SUMMARY_OUT=last-run-arm-b-local-cache.json \
-  TORTOISE_DB_URI='' python measure.py
+SUMMARY_OUT=docs/evidence/12943-cache-leg/last-run-arm-b-local-cache.json \
+  TORTOISE_DB_URI='' uv run python docs/evidence/12943-cache-leg/measure.py
 ```
 
 ```text

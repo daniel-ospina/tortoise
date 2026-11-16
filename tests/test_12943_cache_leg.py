@@ -272,11 +272,20 @@ def test_the_warning_is_emitted_once_per_process(monkeypatch, tmp_path, caplog):
     assert len([r for r in caplog.records if "CACHE leg" in r.getMessage()]) == 1
 
 
-# ── 2. the three coherent shapes stay silent (recorded decisions) ────────────
+# ── 2. the four coherent shapes stay silent (recorded decisions) ────────────
 
 
 def test_a_shared_cache_is_not_counted(monkeypatch, tmp_path):
-    """The coherent deployment: one shared cache, one shared record."""
+    """The coherent deployment: one shared cache, one shared record.
+
+    ⚠️ PREDICATE-level, and deliberately so: a CONSTRUCTOR-level assertion for this
+    shape needs a REACHABLE shared cache, which is
+    `test_no_cache_leg_failure_is_counted_when_the_cache_is_shared` below — it SKIPS
+    when `TORTOISE_DB_URI` names nothing. This arm is the half that runs everywhere,
+    so it proves the predicate only; `_delta(before) == {}` is sound but weak on its
+    own (no construction happens between the two reads), which is why the skip-gated
+    test above is the one that pins the CONSTRUCTION.
+    """
     _arm_record(monkeypatch)
     before = _counts()
     assert cache_leg.cache_leg_reason(cache_uri="docker://:pw@h:6379/g") is None
