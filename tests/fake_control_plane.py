@@ -191,6 +191,13 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("organizations", "grace_until"),
     ("organizations", "onboarding_email_sent_at"),
     ("organizations", "suspended_at"),
+    # #12894 stage C: the ordinal allocator's counter row. `updated_at` is the
+    # allocation clock (the seed/heal stamps it), not an ontology instant — the
+    # same reading the `journal_event.recorded_at` row above takes. Registered
+    # because the registry is DERIVED: `test_registry_matches_the_migrations`
+    # replays every migration and asserts equality, so a new timestamptz column
+    # that is not named here reds that pin on the first run that reaches it.
+    ("record_cursor", "updated_at"),
     ("user_unlink_permits", "consumed_at"),
     ("user_unlink_permits", "created_at"),
     ("waitlist_subscribers", "consented_at"),

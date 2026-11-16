@@ -19,7 +19,7 @@ owned status is already the generic entity surface's job. The fold
 (`FalkorProjection._fold_entity_mutation`) applies `SET n += $state` on EVERY
 canonical label in all four replay engines, and `_update_entity`'s non-Point
 branch already journaled a replayable record for a `:Subject` status write.
-Measured before this landed: `update_entity(subject, status='superseded',
+Measured before this landed: `update_knowledge(subject, status='superseded',
 supersededBy=..., supersededAt=...)` round-tripped byte-identically through
 `rebuild_all`. Only the PRODUCER and the read filter were missing.
 
@@ -396,7 +396,7 @@ class TestSubjectStatusWriteIsValidated:
         sdk, proj, _events, _journal_path = env
         sid = node_id(sdk, "Subject", "Team Alpha")
         with pytest.raises(ValueError, match="Invalid status"):
-            sdk.update_entity(sid, status=bad)
+            sdk.update_knowledge(sid, status=bad)
         # refused BEFORE any write: the stored value is untouched — a status-less
         # birth leaves it ABSENT since #9974 R1 (absent reads LIVE).
         (status,), = _subject_row(proj, "Team Alpha", "status")
@@ -423,7 +423,7 @@ class TestSubjectStatusWriteIsValidated:
             # successor (ONTOLOGY §4.2), the other four need none.
             extra = ({"supersededBy": "Team Alpha II"} if st == "superseded"
                      else {})
-            sdk.update_entity(sid, status=st, **extra)
+            sdk.update_knowledge(sid, status=st, **extra)
             (got,), = _subject_row(proj, "Team Alpha", "status")
             assert got == st, (st, got)
 

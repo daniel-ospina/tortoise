@@ -905,11 +905,21 @@ def test_the_mechanical_gate_arms_the_vet_pass_on_the_default_path():
         "trusting either the ledger or the epic's 'zero selection' claim")
 
     # And the OR has a live right-hand term: the gate defaults ON.
+    #
+    # ⚠️ `#12926` moved the DEFAULT into `resolve_enabled(raw)` — the one site that applies it,
+    # shared with the startup diagnostic — so `value_gate_enabled()` is now a one-line delegate.
+    # The assertion follows the default to its new home instead of being relaxed: BOTH halves are
+    # required, because a delegate to a resolver that no longer defaults ON unarms the pass just
+    # as surely as a missing default here.
     body = _resolve(VALUE_GATE, "value_gate_enabled")
-    assert "is_truthy(os.environ.get(ENV_FLAG" in body and '"1"' in body, (
+    assert "resolve_enabled(os.environ.get(ENV_FLAG" in body, (
         f"value_gate.value_gate_enabled at "
-        f"{_cite(VALUE_GATE, 'value_gate_enabled')} no longer defaults ON; "
-        f"the S2.2 pass is now unarmed on the default path")
+        f"{_cite(VALUE_GATE, 'value_gate_enabled')} no longer resolves the flag through the one "
+        f"default site, so this pin cannot see the default: {body!r}")
+    default_site = _resolve(VALUE_GATE, "resolve_enabled")
+    assert 'is_truthy("1" if raw is None else raw)' in default_site, (
+        f"value_gate.resolve_enabled at {_cite(VALUE_GATE, 'resolve_enabled')} no longer defaults "
+        "ON (absent ⇒ \"1\"); the S2.2 pass is now unarmed on the default path")
 
 
 def test_the_seam_var_the_ledger_names_is_the_one_the_module_reads():

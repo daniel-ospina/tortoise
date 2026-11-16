@@ -14,7 +14,7 @@ def test_crash_recovery_restart():
     sdk = TortoiseSDK(db)
 
     points = [sdk.create_point("statement", f"point-{i}") for i in range(10)]
-    sdk.checkpoint([{"content": p["content"], "wing": "test", "room": "crash"}
+    sdk.mine_knowledge_from_session(items=[{"content": p["content"], "wing": "test", "room": "crash"}
                     for p in points])
     sdk.close()
 

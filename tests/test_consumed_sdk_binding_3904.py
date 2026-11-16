@@ -312,10 +312,12 @@ def drive_handler(name: str, fn: Any) -> DriveResult:
 # LISTED condition, closed in both directions — an unlisted no-read entry fails,
 # and a listed entry that starts reading fails as a stale ledger row.
 _HANDLER_SERVED_NO_SDK_READ: dict[str, str] = {
-    "tortoise_session_capture": (
-        "hosted-only: with no org (or the self-host sentinel) it returns the "
-        "requires-hosted-mode error before any SDK access."
-    ),
+    # #11609 Phase 2 lane C (`#12948` review B1 finding 7): `tortoise_session_capture`
+    # was RETIRED into `tortoise_mine_knowledge_from_session`, so it is no longer a
+    # registry entry and this ledger row became an orphan — which is exactly what the
+    # import-time orphan gate below caught (it redded COLLECTION, so the whole suite
+    # ran nowhere). The live successor reads the SDK, so it belongs in neither arm: a
+    # row for it here would fail the reverse direction the ledger is closed in.
     "tortoise_graph_set_recording": (
         "hosted control-plane (#2302): returns the requires-hosted-mode error when "
         "there is no org, before reading the SDK."
@@ -333,15 +335,42 @@ _HANDLER_SERVED_NO_SDK_READ: dict[str, str] = {
     # registered is a stale claim, not documentation.
 }
 
-# Targeted vectors for the three handlers whose declared read sits behind an
-# early-return branch a generic vector cannot satisfy. Each is explained; the
-# import-time gate below refuses an override that names no registry entry.
+# Targeted vectors for the handlers whose declared read sits behind an
+# early-return branch a generic vector cannot satisfy — one per such handler, so
+# the count is whatever the population is, never a typed number that can drift
+# with the suite green. Each is explained; the import-time gate below refuses an
+# override that names no registry entry.
 _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
-    "tortoise_index_files": (
+    # #11609 Phase 2 lane C (`#12948` review B1 finding 7): `tortoise_index_files` was
+    # RETIRED into `tortoise_index_sources_from_directory`, so the override is
+    # RE-POINTED rather than deleted — the successor keeps the same early return
+    # (`if not os.path.isdir(directory): return …` at `mcp_server.py`), which is the
+    # branch this vector exists to satisfy. Deleting it would drop the only vector that
+    # reaches the handler's SDK read at all.
+    "tortoise_index_sources_from_directory": (
         (
             "real-directory",
             (),
             {"directory": "."},  # the handler returns early unless os.path.isdir(directory)
+        ),
+    ),
+    # #11609 Phase 2 lane C (`#12948` review B1 finding 7): the two MINE containers
+    # need vectors for the same reason their INDEX sibling does — each returns an error
+    # BEFORE touching the SDK unless the arm it dispatches on is actually selected.
+    "tortoise_mine_knowledge_from_session": (
+        (
+            "distilled-batch",
+            (),
+            # `items=` is the BATCH arm; with neither `items` nor `conversation` the
+            # handler replies about the missing argument and reads nothing.
+            {"items": [{"wing": "w", "room": "r", "content": "c"}]},
+        ),
+    ),
+    "tortoise_mine_knowledge_from_directory": (
+        (
+            "real-directory",
+            (),
+            {"directory": "."},  # early return unless os.path.isdir(directory)
         ),
     ),
     "tortoise_get_entity": (
@@ -351,7 +380,13 @@ _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
             {"id": "x"},  # with id=None the handler delegates to tortoise_get and never reads get_entity
         ),
     ),
-    "tortoise_operator_action": (
+    # #4282 Phase 2: the MCP name moved to the container, `tortoise_adjust_relationship`,
+    # which delegates to the same handler (`mcp_server.py::tortoise_adjust_relationship`
+    # → `tortoise_operator_action`). The keyword names are unchanged, so the two
+    # vectors carry over verbatim; the OLD key is kept out of this map because the
+    # gate drives `TOOL_REGISTRY`, and `tortoise_operator_action` is now a RETIRED
+    # name served only through the #3883 shim (`RETIRED_TOOL_REGISTRY`).
+    "tortoise_adjust_relationship": (
         (
             "mitigate",
             (),
@@ -409,7 +444,10 @@ _EXPECTED_PUBLIC_READS: dict[str, frozenset[str]] = {
     # dispatches to ``mitigate_operator`` / ``annotate_operator``; the union is
     # exactly what the blanked consumed declaration was made honest about (the
     # consolidated ``operator_action`` SDK method is never reached).
-    "tortoise_operator_action": frozenset({"mitigate_operator", "annotate_operator"}),
+    # #4282 Phase 2: re-pointed from the retired MCP name `tortoise_operator_action` to
+    # the container that now owns the entry, `tortoise_adjust_relationship`. Same
+    # handler, same two reads.
+    "tortoise_adjust_relationship": frozenset({"mitigate_operator", "annotate_operator"}),
 }
 
 

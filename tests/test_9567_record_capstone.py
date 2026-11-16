@@ -111,20 +111,50 @@ CLIENT_IMAGES = ("mirror.gcr.io/postgres:16", "postgres:16")
 #: from that same function), so the mutation it was supposed to catch — a table
 #: dropped from `THE_RECORD_TABLES`, which removes it from the dump AND from the
 #: comparison in one edit, leaving a green verdict — would have been invisible
-#: (#11429 review cycle 2). This tuple is the record's ten tables as the capstone
+#: (#11429 review cycle 2). This tuple is the record's tables as the capstone
 #: states them; a table that disappears from the drill reds here by name.
+#:
+#: ⛔ #12894 ADDED `record_cursor`, AND THE SIZE PIN WAS RE-DERIVED RATHER THAN
+#: BUMPED. A literal `len(rp.THE_RECORD_TABLES) == 10` could only encode one
+#: side of the agreement above; the capstone now derives the expected set from
+#: the record MIGRATIONS (`_record_tables_created_by_migrations`), so a table
+#: created by a migration and missing from the tuple — or a tuple entry no
+#: migration creates — reds without anybody editing a numeral. `record_cursor`
+#: is here because D8 restores the record: a dump without the counter returns a
+#: populated `journal_event` and an allocator that restarts at 1 (round-1 B3).
 RECORD_TABLES_DECLARED = (
     "event",
     "journal_event",
     "node_identity",
     "object",
     "point",
+    "record_cursor",
     "relation",
     "session",
     "session_narrative",
     "source",
     "subject",
 )
+
+
+def _record_tables_created_by_migrations() -> set[str]:
+    """The record's tables as the MIGRATIONS declare them.
+
+    The other side of `RECORD_TABLES_DECLARED`'s independence, and the reason the
+    old `len(...) == 10` pin no longer exists: the record's table set is a fact
+    about the schema the record SHIPS, so the migrations are its source of truth.
+    A numeral is a third copy that must be edited by hand whenever a table lands,
+    which is exactly how a restore path silently loses one.
+    """
+    import re
+
+    tables: set[str] = set()
+    for name in rp.RECORD_MIGRATIONS:
+        text = (REPO_ROOT / "supabase" / "migrations" / name).read_text(
+            encoding="utf-8")
+        tables |= set(re.findall(
+            r"CREATE TABLE IF NOT EXISTS public\.(\w+)", text))
+    return tables
 
 #: One drill's wall clock (dump + encrypt + upload + download + decrypt + restore
 #: + two counts). `record_backup.RECORD_SUBPROCESS_TIMEOUT_S` bounds the drill's
@@ -280,8 +310,12 @@ def test_D1_every_record_table_exists_on_the_armed_record(armed, monkeypatch):
         present = {row[0] for row in cur.fetchall()}
     missing = [t for t in rp.THE_RECORD_TABLES if t not in present]
     assert missing == [], f"record tables absent from the armed record: {missing}"
-    assert len(rp.THE_RECORD_TABLES) == 10, (
-        "the record table set changed size — re-measure D1's baseline"
+    # ⛔ RE-DERIVED (#12894): the size pin is the MIGRATIONS' own set, not a
+    # numeral. A table the migrations create and the tuple omits (or the reverse)
+    # is the defect the literal 10 was proxying for.
+    assert set(rp.THE_RECORD_TABLES) == _record_tables_created_by_migrations(), (
+        "THE_RECORD_TABLES disagrees with the tables the record migrations "
+        "create — re-measure D1's baseline against the schema, not a count"
     )
 
 
@@ -311,6 +345,10 @@ def test_the_record_table_set_is_the_one_this_capstone_declares():
 
     runtime = set(rb.record_tables())
     declared = set(RECORD_TABLES_DECLARED)
+    # The MIGRATIONS are the third, independent statement of the same set: this
+    # is what makes the two above a comparison rather than two views of one list.
+    assert declared == _record_tables_created_by_migrations(), (
+        "this capstone's declared set disagrees with the record migrations")
     assert runtime == declared, (
         f"the record measures {sorted(runtime)} but this capstone declares "
         f"{sorted(declared)} — the drill no longer covers "

@@ -3274,7 +3274,7 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
                      ("objectKind", "document"),
                      ("object_kind", "document")):
         with pytest.raises(ValueError, match="retired field"):
-            sdk.update_entity(did, **{key: val})
+            sdk.update_knowledge(did, **{key: val})
     rows = sdk._get_proj().g.query(
         "MATCH (s:Source {url:$u}) "
         "RETURN s.content, s.doc_status, s.objectKind",
@@ -3292,7 +3292,7 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
     tid = tdoc["id"]
     assert tdoc["documentKind"] == "transcript"
     with pytest.raises(ValueError, match="retired field"):
-        sdk.update_entity(tid, content="SECRET BODY")
+        sdk.update_knowledge(tid, content="SECRET BODY")
     trows = sdk._get_proj().g.query(
         "MATCH (s:Source {url:$u}) "
         "RETURN s.content, s.doc_status, s.objectKind",
@@ -3301,7 +3301,7 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
         f"retired field written on a transcript document: {trows!r}"
     # Non-over-reach: a NON-retired key still rides the same surface, so the
     # refusal did not turn `update_entity` into a no-op for a document.
-    sdk.update_entity(did, domain="legal")
+    sdk.update_knowledge(did, domain="legal")
     assert sdk._get_proj().g.query(
         "MATCH (s:Source {url:$u}) RETURN s.domain",
         params={"u": did}).result_set[0][0] == "legal"
@@ -3341,7 +3341,7 @@ def test_5026_b6_retired_fields_do_not_survive_a_rebuild(tmp_path):
         # JOURNALS a SourceCreated, so the rebuild below re-materialises the
         # node — without that the absence assertions below would pass vacuously
         # against a node the wipe removed.
-        sdk.create_source(did, "document", documentKind="report",
+        sdk.register_source(did, "document", documentKind="report",
                           format="markdown")
 
         # (1) The BOUNDARY still refuses every retired spelling, so the only way
@@ -3353,7 +3353,7 @@ def test_5026_b6_retired_fields_do_not_survive_a_rebuild(tmp_path):
                          ("objectKind", "document"),
                          ("object_kind", "document")):
             with pytest.raises(ValueError, match="retired field"):
-                sdk.update_entity(did, **{key: val})
+                sdk.update_knowledge(did, **{key: val})
 
         # (2) The pre-guard record, emitted through the REAL producer so the
         # shape measured is the one that exists. `domain` rides the same map as
@@ -3404,7 +3404,7 @@ def test_5026_b6_promotion_scrubs_inherited_retired_fields(sdk_factory):
     refusal does not become a retired field when the node becomes a document.
     """
     sdk = sdk_factory()
-    sdk.create_source("doc/promo.md", "document")
+    sdk.register_source("doc/promo.md", "document")
     proj = sdk._get_proj()
     # The inherited value is seeded with raw Cypher — the shape a pre-ruling
     # deployment (or any direct graph writer) left behind. Ruling B on #3998
@@ -3516,7 +3516,7 @@ def test_5135_retired_registry_is_the_single_authority(sdk_factory, monkeypatch)
     # directly at the boundary.
     doc = sdk.create_document("Registry1", "report")
     with pytest.raises(ValueError, match="retired field"):
-        sdk.update_entity(doc["id"], **{probe: "FORGED"})
+        sdk.update_knowledge(doc["id"], **{probe: "FORGED"})
 
     # Door 2 — the document open passthrough (`_upsert_document`). The only
     # way to deny a key absent from the historical `_DOCUMENT_HANDLED` base is
@@ -3531,7 +3531,7 @@ def test_5135_retired_registry_is_the_single_authority(sdk_factory, monkeypatch)
     # Door 3 — the promotion scrub: a node that inherited the key, then became
     # a document, must lose it. Seeded by raw Cypher because the write paths
     # no longer produce such a node.
-    sdk.create_source("corpus://reg3", "document")
+    sdk.register_source("corpus://reg3", "document")
     proj.g.query(
         f"MATCH (s:Source {{url:$u}}) SET s.{probe}='INHERITED'",
         params={"u": "corpus://reg3"})

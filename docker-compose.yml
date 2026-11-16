@@ -81,6 +81,20 @@ services:
       # mechanism: durability is the sidecar's AOF + volume
       # (docs/durability-posture.md).
       TORTOISE_EVENT_LOG_BASE_DIR: "/data/events"
+      # ── #12926: the two embedding switches, STATED (not inherited) ─────────
+      # This file IS the shipped config for `docker compose up`, and until
+      # #12926 it armed neither switch — so a compose deployment ran with the
+      # EMBED gate OFF (`embed_gate_enabled()` is off when unset) while
+      # `.env.example` said otherwise. Stated explicitly here because a
+      # deployment's effective value is the one its OWN channel states; the
+      # image `ENV` in Dockerfile.selfhost is a default this mapping overrides.
+      # ⚠️ The two code defaults are OPPOSITE (`#11445`, recorded in both gate
+      # modules): unset means "value gate ON, embed gate OFF". Changing a
+      # default is a reopen of #11445, never a fix here. A pre-merge check
+      # refuses a deployment channel that omits either
+      # (`tools/embed_switch_gate.py`, wired into python-ci.yml).
+      TORTOISE_VALUE_GATE: "1"
+      TORTOISE_EMBED_GATE: "1"
     volumes:
       # #8497: the journal (and the embedded-eval DB, when that path is used)
       # must outlive the container — /data is the persistent root the journal

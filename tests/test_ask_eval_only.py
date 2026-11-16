@@ -204,9 +204,29 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   of them were in this listing (the fourth, `tortoise_backfill_v25`, was
     #   `http_policy=False`), so 66 - 3 = 63 measured here. Lowered to 63 with that
     #   measurement, not to whatever a green run last produced.
-    # Anything BELOW 63 is unexplained shrinkage and this arm reds on it; lowering the
+    #   #11609 batch 2 (this change) — fourteen WRITE/MUTATE doors retired into six
+    #   containers. The move is NOT `http_policy`-neutral at either end, and the
+    #   arithmetic must say so: `tortoise_dream` is the one absorbed door with
+    #   `http_policy=False` (so 13 of the 14 were in this listing) and
+    #   `tortoise_refresh_confidence` is the one container that is stdio-only (so 5
+    #   of the 6 join it): 63 - 13 + 5 = 55 measured here. The net is the same -8
+    #   the live surface moves by, but only because 13 - 5 = 8 — stating the net as
+    #   if both sides were wholly `http_policy=True` would have hidden a real
+    #   exemption behind a coincidence (the sibling derivation in
+    #   `test_10084_graph_argument_omit_first` records the same split).
+    #   #11609 lane C (SOURCES/MINE/SESSION, this PR) — the listing is EXACTLY the
+    #   ADVERTISED population minus its `http_policy=False` rows, so it moves with the
+    #   live surface and nothing else: this lane's six containers retire SEVEN advertised
+    #   doors and add six live names (67 - 7 + 6 = 66 at its own head; composed with
+    #   lane B, which retired fourteen and added six, 60 - 1 = 59). The exclusion set is
+    #   unchanged at FIVE (`tortoise_expand_relationships`, `tortoise_index_sources_from_directory`,
+    #   `tortoise_mine_knowledge_from_directory`, `tortoise_org_create`,
+    #   `tortoise_refresh_confidence` — measured, `set(TOOL_REGISTRY) - set(get_http_allowed())`),
+    #   so the floor moves 55 = 60 - 5 -> 54 = 59 - 5, the same -1 the live surface moves.
+    # Anything BELOW 54 is unexplained shrinkage and this arm reds on it; lowering the
     # floor again needs the same kind of recorded reason, never a green run.
-    assert len(names) >= 63, f"default surface shrank to {len(names)}"
+
+    assert len(names) >= 54, f"default surface shrank to {len(names)}"
     # The floor is a proxy for the real invariant, and a proxy cannot tell a
     # recorded consolidation from a silent drop. Pin the invariant itself: the
     # default HTTP listing serves EXACTLY the registry's `http_policy` population

@@ -413,7 +413,7 @@ def test_index_path_document_link_records_the_version_read(tmp_path):
     (corpus / "spec.md").write_text("---\ntitle: Spec\n---\nBody text about the spec.")
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         proj = sdk._get_proj()
         rows = proj.g.query(
             "MATCH (a:Source)-[r:references]->(b:Source) "

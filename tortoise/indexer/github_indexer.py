@@ -1069,7 +1069,7 @@ class GitHubIndexer:
                              **({"validFrom": valid_from}
                                 if valid_from else {}))
             self._link_about_object(proj, rec["id"], repo, n["number"])
-            sdk.supersede_point(cur_id, rec["id"],
+            sdk.supersede_knowledge(cur_id, rec["id"],
                                 **({"valid_from": valid_from}
                                    if valid_from else {}))
             out["points_created"] = 1

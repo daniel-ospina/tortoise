@@ -575,14 +575,14 @@ def test_memory_and_provenance_are_readable_and_labelled(sdk, cause):
         stored state to read back.
     """
     s, _events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
     pid = _memory(s)
     if cause == RAW_DELETED:
-        s.create_source(RAW_URL, "conversation", raw_state=cause)
+        s.register_source(RAW_URL, "conversation", raw_state=cause)
         raw = s.provenance(pid)["raw"]
     else:
         with pytest.raises(ValueError, match="observed live"):
-            s.create_source(RAW_URL, "conversation", raw_state=cause)
+            s.register_source(RAW_URL, "conversation", raw_state=cause)
         assert RAW_STATE_PROP not in _source_props(s), (
             "a CONDITION was STORED — the ruling says observed live, never stored"
         )
@@ -623,7 +623,7 @@ def test_the_three_causes_are_distinguishable_through_the_read_path(sdk):
         over the node the reader holds.
     """
     s, _events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
     pid = _memory(s)
     # Observe the two conditions over a node the deletion marker has NOT
     # touched: a recorded ACT wins over any observation (asserted in
@@ -631,7 +631,7 @@ def test_the_three_causes_are_distinguishable_through_the_read_path(sdk):
     # causes must be compared across a clean record.
     plain = _source_props(s)
     seen = {cause: raw_entry(plain, observed=cause) for cause in RAW_OBSERVED_STATES}
-    s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
+    s.register_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
     seen[RAW_DELETED] = s.provenance(pid)["raw"]
     assert len({r["raw_state"] for r in seen.values()}) == 3
     assert len({r["label"] for r in seen.values()}) == 3
@@ -655,11 +655,11 @@ def test_absence_is_preserved_by_a_later_upsert_that_carries_none(sdk):
         which is the shape of every ordinary re-ingest.
     """
     s, _events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
-    s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
     assert _source_props(s)[RAW_STATE_PROP] == RAW_DELETED
 
-    s.create_source(RAW_URL, "conversation", contentHash="h1")  # no raw_state
+    s.register_source(RAW_URL, "conversation", contentHash="h1")  # no raw_state
     props = _source_props(s)
     assert props[RAW_STATE_PROP] == RAW_DELETED, "absence was wiped by a later write"
     assert props["contentHash"] == "h1"
@@ -678,9 +678,9 @@ def test_present_is_the_documented_way_back(sdk):
     (2) REACHABLE: ``raw_state='present'`` below is one of WRITABLE_RAW_STATES.
     """
     s, _events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
+    s.register_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
     assert _source_props(s)[RAW_STATE_PROP] == RAW_DELETED
-    s.create_source(RAW_URL, "conversation", raw_state=RAW_PRESENT)
+    s.register_source(RAW_URL, "conversation", raw_state=RAW_PRESENT)
     props = _source_props(s)
     assert props[RAW_STATE_PROP] == RAW_PRESENT
     assert raw_availability(props).absent is False
@@ -701,10 +701,10 @@ def test_props_passthrough_cannot_set_or_clear_the_state(sdk):
         re-read after the refusals.
     """
     s, _events = sdk
-    s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
+    s.register_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
     for key in ("rawState", "rawStateAt"):
         with pytest.raises(ValueError):
-            s.create_source(RAW_URL, "conversation", **{key: RAW_PRESENT})
+            s.register_source(RAW_URL, "conversation", **{key: RAW_PRESENT})
     assert _source_props(s)[RAW_STATE_PROP] == RAW_DELETED, "props cleared the absence"
 
 
@@ -745,7 +745,7 @@ def test_graph_holds_an_index_entry_not_a_copy(sdk):
     # (a) the common spellings get a LOUD, actionable error.
     for key in ("content", "body", "raw", "payload", "raw_content", "rawContent"):
         with pytest.raises(ValueError):
-            s.create_source(RAW_URL, "conversation", contentHash=digest, **{key: body})
+            s.register_source(RAW_URL, "conversation", contentHash=digest, **{key: body})
 
     # (b) EVERY OTHER spelling is denied one layer down, by the closed surface.
     #     This is the half that does not depend on anyone having thought of the
@@ -753,11 +753,11 @@ def test_graph_holds_an_index_entry_not_a_copy(sdk):
     for key in ("text", "snippet", "excerpt", "transcript", "bodyText",
                 "rawText", "raw_text", "data", "blob", "bytes", "payloadText",
                 "contentText", "content_text", "fullText", "full_text"):
-        s.create_source(RAW_URL, "conversation", contentHash=digest, **{key: body})
-    s.create_source(RAW_URL, "conversation", contentHash=digest, chunks=[body])
+        s.register_source(RAW_URL, "conversation", contentHash=digest, **{key: body})
+    s.register_source(RAW_URL, "conversation", contentHash=digest, chunks=[body])
 
     # (c) the sanctioned route: identity + version + availability, no bytes.
-    s.create_source(RAW_URL, "conversation", contentHash=digest, raw_state=RAW_DELETED,
+    s.register_source(RAW_URL, "conversation", contentHash=digest, raw_state=RAW_DELETED,
                     title="Weekly sync", format="transcript")
 
     props = _source_props(s)
@@ -784,7 +784,7 @@ def test_the_raw_payload_guard_is_not_vacuous(sdk):
     """
     s, _events = sdk
     with pytest.raises(ValueError, match="raw payload"):
-        s.create_source(RAW_URL, "conversation", content="body bytes")
+        s.register_source(RAW_URL, "conversation", content="body bytes")
     assert not s._get_proj().g.query(
         "MATCH (s:Source {url:$u}) RETURN count(s)", params={"u": RAW_URL}
     ).result_set[0][0]
@@ -805,7 +805,7 @@ def test_rebuild_does_not_re_materialise_a_payload_from_the_journal(sdk):
     """
     s, events = sdk
     body = "PRE-GUARD PAYLOAD " + ("raw transcript body. " * 120)
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
     s._emit_event("SourceCreated", id=RAW_URL, url=RAW_URL, sourceKind="conversation",
                   contentHash="h1", content=body, text=body)
 
@@ -831,7 +831,7 @@ def test_the_generic_entity_route_cannot_reach_a_source_with_a_payload(sdk):
     (2) REACHABLE: the body is passed through the real tenant surface below.
     """
     s, _events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
     body = "UPDATE_ROUTE_PAYLOAD " + ("raw transcript. " * 150)
     # ⛔ `content`/`objectKind` ARE in this list, and that is the ruling-B case
     # (#3998): the D10 retirement is refused on EVERY `:Source`, not only a
@@ -844,17 +844,17 @@ def test_the_generic_entity_route_cannot_reach_a_source_with_a_payload(sdk):
     # guard (a different message than the closed-surface one below).
     for key in ("content", "objectKind"):
         with pytest.raises(ValueError, match="retired field"):
-            s.update_entity(RAW_URL, **{key: body})
+            s.update_knowledge(RAW_URL, **{key: body})
     for key in ("text", "transcript", "body"):
         with pytest.raises(ValueError, match="cannot be set on a :Source"):
-            s.update_entity(RAW_URL, **{key: body})
+            s.update_knowledge(RAW_URL, **{key: body})
     props = _source_props(s)
     assert "content" not in props and "objectKind" not in props, (
         "the generic entity route carried a retired field")
     assert body not in repr(props), "the generic entity route carried the payload"
     assert set(props) <= ALLOWED_SOURCE_NODE_PROPS
     # A DECLARED property is still updatable through the same route.
-    s.update_entity(RAW_URL, format="transcript")
+    s.update_knowledge(RAW_URL, format="transcript")
     assert _source_props(s)["format"] == "transcript"
 
 
@@ -880,7 +880,7 @@ def test_the_root_read_path_filters_a_pre_existing_payload_bearing_source(sdk):
 
     s, _events = sdk
     body = "LEGACY_PAYLOAD " + ("old raw bytes. " * 150)
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
     s._get_proj().g.query(
         "MATCH (s:Source {url:$u}) SET s.content=$b, s.text=$b",
         params={"u": RAW_URL, "b": body},
@@ -1012,15 +1012,15 @@ def test_a_state_carrying_recheck_is_repeat_safe(sdk):
             for line in p.read_text().splitlines() if line.strip()
         )
 
-    s.create_source(RAW_URL, "document", contentHash="h0")
+    s.register_source(RAW_URL, "document", contentHash="h0")
     n0 = _records()
-    s.create_source(RAW_URL, "document", contentHash="h0", raw_state=RAW_DELETED)
+    s.register_source(RAW_URL, "document", contentHash="h0", raw_state=RAW_DELETED)
     n1 = _records()
     assert n1 == n0 + 1, "the state change must ride the journal"
     assert _source_props(s)[RAW_STATE_PROP] == RAW_DELETED
 
     for _ in range(5):
-        s.create_source(RAW_URL, "document", contentHash="h0",
+        s.register_source(RAW_URL, "document", contentHash="h0",
                         raw_state=RAW_DELETED)
     assert _records() == n1, (
         "a state-carrying re-check that found the same state still appended a "
@@ -1045,8 +1045,8 @@ def test_the_raw_reference_is_deterministic_for_a_multi_source_point(sdk):
     b = "https://b.test/order-5196"
     # Insert in REVERSE identity order — an unambiguous fixture only proves
     # nondeterminism when the engine's natural order is a WRONG answer.
-    s.create_source(b, "document")
-    s.create_source(a, "document")
+    s.register_source(b, "document")
+    s.register_source(a, "document")
     pt = s.create_point("statement", "body", extractedFrom=[b, a])
     pid = pt["id"]
     s._get_proj()._link_source(pid, [b, a], label="Source")
@@ -1080,7 +1080,7 @@ def test_declared_metadata_values_are_not_length_bounded_the_stated_residual(sdk
     """
     s, _events = sdk
     body = "TITLE_SIZED_PAYLOAD " + ("raw. " * 300)
-    s.create_source(RAW_URL, "conversation", contentHash="h1", title=body)
+    s.register_source(RAW_URL, "conversation", contentHash="h1", title=body)
     assert _source_props(s)["title"] == body, (
         "a length policy now exists for a declared metadata field — update this "
         "test and the residual note in projection/entities.py"
@@ -1102,7 +1102,7 @@ def test_rebuild_drops_a_payload_carried_by_an_entity_mutated_record(sdk):
     """
     s, events = sdk
     body = "ENTITY_MUTATION PAYLOAD " + ("raw transcript body. " * 120)
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
     s._journal_entity_mutation(
         "Source", RAW_URL, "revise", state={"text": body, "format": "transcript"}
     )
@@ -1142,7 +1142,7 @@ def test_rebuild_does_not_replay_a_state_change_from_an_entity_mutation(sdk):
     from tortoise.raw_state import RAW_DELETED
 
     s, events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
+    s.register_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
     assert _raw(s)["raw_state"] == RAW_DELETED
     s._journal_entity_mutation("Source", RAW_URL, "revise", state={"rawState": None})
 
@@ -1177,23 +1177,23 @@ def test_the_generic_route_cannot_clear_or_forge_the_absent_state(sdk):
     from tortoise.raw_state import RAW_DELETED
 
     s, _events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
+    s.register_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
     assert _raw(s)["raw_state"] == RAW_DELETED
 
     # The CLEAR: without the server-managed guard this reads back as `present`.
     with pytest.raises(ValueError, match="server-managed"):
-        s.update_entity(RAW_URL, rawState=None)
+        s.update_knowledge(RAW_URL, rawState=None)
     assert _raw(s)["raw_state"] == RAW_DELETED, "the tenant route cleared the absence"
 
     # The FORGERY: an unvalidated value must not be persistable either.
     with pytest.raises(ValueError, match="server-managed"):
-        s.update_entity(RAW_URL, rawState="banana")
+        s.update_knowledge(RAW_URL, rawState="banana")
     assert _raw(s)["raw_state"] == RAW_DELETED
     assert "banana" not in repr(_source_props(s))
 
     # The state is still reachable the sanctioned way — the refusal is not a
     # dead end, and `present` remains the documented way back.
-    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state="present")
+    s.register_source(RAW_URL, "conversation", contentHash="h1", raw_state="present")
     assert _raw(s)["available"] is True
 
 
@@ -1231,7 +1231,7 @@ def test_the_declaration_covers_every_in_tree_source_writer(sdk):
         ).result_set
         return set(rows[0][0]) if rows else set()
 
-    s.create_source(RAW_URL, "document", contentHash="h1", title="t",
+    s.register_source(RAW_URL, "document", contentHash="h1", title="t",
                     source_path="/tmp/x.md")
     s.get_source_reliability(RAW_URL)          # the reliability cache writer
     produced = set(_source_props(s))
@@ -1256,7 +1256,7 @@ def test_the_declaration_covers_every_in_tree_source_writer(sdk):
     # the index-merge writer (`_upsert_source`'s `run_clause`) — it minted
     # `__runId`, which this test could not see, so the declaration's own invariant
     # was unchecked for that producer (#5196 review round 3, P2).
-    s.create_source(RAW_URL + "?merge", "document", contentHash="h1",
+    s.register_source(RAW_URL + "?merge", "document", contentHash="h1",
                     _merge_run_id="cov-rid-5196")
     merge_keys = _keys_at("url", RAW_URL + "?merge")
     assert merge_keys, "the index-merge writer produced no :Source"
@@ -1316,9 +1316,9 @@ def test_a_url_only_source_stub_is_guarded_like_any_other_source(sdk):
     assert stubs and stubs[0][0] is None, "the fixture node is not an id-less stub"
 
     with pytest.raises(ValueError, match="retired field"):
-        s.update_entity(RAW_URL, content=body)
+        s.update_knowledge(RAW_URL, content=body)
     with pytest.raises(ValueError, match="cannot be set on a :Source"):
-        s.update_entity(RAW_URL, text=body)
+        s.update_knowledge(RAW_URL, text=body)
 
     after = dict(s._get_proj().g.query(
         "MATCH (n:Source {url:$u}) RETURN properties(n)", params={"u": RAW_URL}
@@ -1342,7 +1342,7 @@ def test_a_create_echo_does_not_return_props_the_call_never_wrote(sdk):
     """
     s, _events = sdk
     body = "LEGACY " + ("y" * 2400)
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
     s._get_proj().g.query(
         "MATCH (s:Source {url:$u}) SET s.text=$b, s.content=$b",
         params={"u": RAW_URL, "b": body},
@@ -1352,7 +1352,7 @@ def test_a_create_echo_does_not_return_props_the_call_never_wrote(sdk):
     ).result_set[0][0])
     assert on_node.get("text") == body, "the fixture did not plant the payload"
 
-    again = s.create_source(RAW_URL, "conversation", contentHash="h1")
+    again = s.register_source(RAW_URL, "conversation", contentHash="h1")
     assert "text" not in again and "content" not in again, sorted(again)
     assert body not in repr(again), "the create echo handed back the legacy raw"
 
@@ -1371,7 +1371,7 @@ def test_a_create_echo_cannot_harvest_a_denied_key_from_the_node(sdk):
     s, _events = sdk
     body = "LEGACY_BODY " + ("B" * 2000)
     planted = {"text": body, "snippet": body, "chunks": body, "blob": body}
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
     sets = ", ".join(f"s.{k}=${k}" for k in planted)
     s._get_proj().g.query(
         f"MATCH (s:Source {{url:$u}}) SET {sets}",
@@ -1383,7 +1383,7 @@ def test_a_create_echo_cannot_harvest_a_denied_key_from_the_node(sdk):
     assert on_node.get("text") == body, "the fixture did not plant the payload"
 
     # One call NAMING every planted key, with a placeholder value.
-    again = s.create_source(
+    again = s.register_source(
         RAW_URL, "conversation", contentHash="h1",
         **{k: "placeholder" for k in planted},
     )
@@ -1402,7 +1402,7 @@ def test_a_create_echo_cannot_harvest_a_denied_key_from_the_node(sdk):
         "MATCH (s:Source {url:$u}) RETURN s.flag", params={"u": RAW_URL}
     ).result_set[0][0]
     assert planted_flag is True, "the fixture did not plant the bool"
-    same = s.create_source(RAW_URL, "conversation", contentHash="h1", flag=1)
+    same = s.register_source(RAW_URL, "conversation", contentHash="h1", flag=1)
     assert "flag" not in same, (
         f"a DENIED write was acknowledged with a value never stored: "
         f"{same.get('flag')!r} (the node holds the bool True)")
@@ -1430,9 +1430,9 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
         refusing everything.
     """
     s, events = sdk
-    s.create_source(RAW_URL, "document", contentHash="h1")
+    s.register_source(RAW_URL, "document", contentHash="h1")
     with pytest.raises(ValueError, match="server-managed"):
-        s.update_entity(RAW_URL, __runId="TENANT_FORGED")
+        s.update_knowledge(RAW_URL, __runId="TENANT_FORGED")
     # The two routes the entity-update guard does NOT cover (#5196 round 4, P1):
     # the open DOCUMENT passthrough (#228), and the ingest bundle — `entities`
     # items are splatted into `create_document(**item)`.
@@ -1457,7 +1457,7 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
     # route. Measured before this: `props={"_merge_run_id": ...}` wrote the
     # forged token onto the node.
     with pytest.raises(ValueError, match="server-managed"):
-        s.create_source(RAW_URL + "?kw", "document", contentHash="h1",
+        s.register_source(RAW_URL + "?kw", "document", contentHash="h1",
                         props={"_merge_run_id": "KW_FORGED"})
 
     # ...and the NESTED spelling inside a bundle item must be a Phase-1 abort.
@@ -1485,7 +1485,7 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
     assert _source_props(s).get("__runId") != "TENANT_FORGED", (
         "a forged merge-run token survived the rebuild")
     # The contrast: the route still accepts a DECLARED property.
-    s.update_entity(RAW_URL, format="transcript")
+    s.update_knowledge(RAW_URL, format="transcript")
     assert _source_props(s)["format"] == "transcript"
 
 
@@ -1524,13 +1524,13 @@ def test_a_same_state_recheck_does_not_move_the_stamp_live(sdk):
         and every re-check carries the SAME state.
     """
     s, events = sdk
-    s.create_source(RAW_URL, "document", contentHash="h0")
-    s.create_source(RAW_URL, "document", contentHash="h0", raw_state=RAW_DELETED)
+    s.register_source(RAW_URL, "document", contentHash="h0")
+    s.register_source(RAW_URL, "document", contentHash="h0", raw_state=RAW_DELETED)
     first = _source_props(s)["rawStateAt"]
     assert first, "the state write did not stamp rawStateAt"
 
     for _ in range(3):
-        s.create_source(RAW_URL, "document", contentHash="h0",
+        s.register_source(RAW_URL, "document", contentHash="h0",
                         raw_state=RAW_DELETED)
     live = _source_props(s)["rawStateAt"]
     assert live == first, "a same-state re-check moved the stamp on the live node"
@@ -1566,7 +1566,7 @@ def test_the_declaration_covers_an_id_less_source_stub(sdk):
     assert stubs and stubs[0][0] is None, "the fixture node is not an id-less stub"
     # A declared key: must NOT be refused (previously it raised, describing a
     # node the write could not reach).
-    s.update_entity(RAW_URL, format="transcript")
+    s.update_knowledge(RAW_URL, format="transcript")
 
 
 
@@ -1640,8 +1640,8 @@ def test_absence_survives_a_rebuild(sdk):
         recorded BEFORE the rebuild.
     """
     s, events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
-    s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
     assert _source_props(s)[RAW_STATE_PROP] == RAW_DELETED
     expected_expiry = deletion_marker_expires_at(_source_props(s))
     assert expected_expiry is not None, "the live marker carries no expiry policy"
@@ -1674,10 +1674,10 @@ def test_an_observed_condition_leaves_nothing_for_a_rebuild_to_resurrect(sdk):
         the rebuild, so the fixture would catch a stored condition.
     """
     s, events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
     for condition in RAW_OBSERVED_STATES:
         with pytest.raises(ValueError, match="observed live"):
-            s.create_source(RAW_URL, "conversation", raw_state=condition)
+            s.register_source(RAW_URL, "conversation", raw_state=condition)
     assert RAW_STATE_PROP not in _source_props(s), "a condition was stored live"
 
     s._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -1737,7 +1737,7 @@ def test_a_url_only_stub_that_collides_with_a_point_id_still_guards_the_write(sd
         "url-only shape this test exists to pin")
     # A DECLARED field is still writable, and this asserts the measurement the
     # correction above rests on — that the write reaches the colliding stub.
-    s.update_entity(pid, format="transcript")
+    s.update_knowledge(pid, format="transcript")
     assert s._get_proj().g.query(
         "MATCH (s:Source {url:$u}) RETURN s.format", params={"u": pid}
     ).result_set[0][0] == "transcript", (
@@ -1747,7 +1747,7 @@ def test_a_url_only_stub_that_collides_with_a_point_id_still_guards_the_write(sd
     # A D10-retired field IS refused, because the write would put it on the
     # `:Source` above — ruling B applies to every `:Source` the write reaches.
     with pytest.raises(ValueError, match="retired field"):
-        s.update_entity(pid, content="edited point A content")
+        s.update_knowledge(pid, content="edited point A content")
 
 def test_provenance_reads_do_not_raise_and_invent_no_raw_for_a_sourceless_point(sdk):
     """Criterion (2), on the SURVIVING read door: `provenance()` returns a VALUE.
@@ -1768,13 +1768,13 @@ def test_provenance_reads_do_not_raise_and_invent_no_raw_for_a_sourceless_point(
         created by `create_point` with no `extractedFrom` and no session context.
     """
     s, _events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s.register_source(RAW_URL, "conversation", contentHash="h1")
     pid = _memory(s)
     # Taken over a record with no marker (a recorded act wins), so the live reads
     # below observe the plain row rather than the deletion just written.
     plain = _source_props(s)
 
-    s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
+    s.register_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
     prov = s.provenance(pid)                     # must not raise
     assert prov["raw"]["raw_state"] == RAW_DELETED
     assert "error" not in prov

@@ -267,6 +267,20 @@ MANIFEST_HEADER = (
     "# deliberate, reviewable act in the approving PR \u2014 so a re-cut over a grown surface\n"
     "# cannot be green by construction.\n"
     "#\n"
+    "#\n"
+    "# LOWERED 72 \u2192 67 (tools) and 150 \u2192 124 (SDK methods) on 2026-11-13 by the\n"
+    "# SOURCES/MINE/SESSION batch of #4282 Phase 2 (#11609 lane C), to the live counts that\n"
+    "# batch produced. LOWERING, not raising, is what the pin needs here, and the reason is\n"
+    "# the pin's own: slack above the live surface is a false PASS waiting to happen \u2014 a\n"
+    "# re-added retired name (`tortoise_create_source`, `checkpoint`, `assess_source`, \u2026)\n"
+    "# would land UNDER a 72/150 ceiling and `surface-guard` step 7 would stay green over a\n"
+    "# surface that grew back. The same lowering was done after each earlier batch\n"
+    "# (#10906 82 \u2192 76, #10914 76 \u2192 72); batch 1 (#11609's four no-destination\n"
+    "# removals) moved the advertised set 72 \u2192 68 but left the pin at 72, which is the\n"
+    "# slack this removes. 124 is also the PLATEAU the three Phase-2 lanes converge on \u2014\n"
+    "# each replaces members with fewer containers than it retires, so a peer lane lands at\n"
+    "# or below it; a lane that would exceed it has ADDED surface and must say so.\n"
+    "#\n"
     "# RAISED 149 \u2192 150 on 2026-10-26 by PR #10053 (#4282 Phase 2.2 \u2014 the four merges as\n"
     "# dispatchers). The three NEW public methods are `link_entities`, `update_knowledge`\n"
     "# and `delete_knowledge`, and every one of them is a row of the owner's 40\n"
@@ -3431,8 +3445,16 @@ def cmd_render(args: argparse.Namespace) -> int:
                 # live table marked this \u26a0 FALSE DECLARATION, and the retired
                 # table must not silently upgrade a false declaration to a fact.
                 declared = f"~~{declared}~~ (no such method)"
+            # A replacement is a CALL SIGNATURE and can contain a literal `|`
+            # (`scope="dirty"|"full"`). In a GFM table an unescaped `|` ENDS the
+            # cell, so the row renders with more columns than its header and the
+            # tail of the signature is lost to the reader (markdownlint MD056).
+            # ESCAPE it: the pointer is contractual, so it is never rewritten to
+            # dodge the character. `tests/test_surface_manifest.py` compares the
+            # escaped form back to the declaration.
+            use_instead = str(r.get("use_instead") or "").replace("|", "\\|")
             add(
-                f"| `{r.get('name')}` | `{r.get('use_instead')}` | "
+                f"| `{r.get('name')}` | `{use_instead}` | "
                 f"{declared if declared.startswith('~~') else '`' + str(declared) + '`'} | {was} |"
             )
         add("")

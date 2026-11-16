@@ -285,6 +285,30 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # `*_record_*.sql` glob ships it, so an unlisted file is invisible to
     # `tests/test_9231_record_migrations_trigger.py`'s reverse direction.
     "20261102000002_record_point_search_keys_text.sql",
+    # #12894 stage C — the ORDINAL ALLOCATOR: `public.record_cursor`, its
+    # tenancy policy, and the first record table granted UPDATE **without**
+    # DELETE (⛔ not "the first UPDATE grant": `20261025000001` grants
+    # SELECT/INSERT/UPDATE/DELETE to the app role on nine record tables; the
+    # one exception is `journal_event`, which is SELECT+INSERT only). It
+    # contributes no COLUMN the projection reads, so it is listed for the
+    # registry reason this tuple's header states (the filename is the only total
+    # partition of "is this the record's schema"), and because the BACKUP must
+    # carry the counter WITH the rows it numbers: a restore that returned a
+    # populated `journal_event` and a counter at 0 would restart the allocator
+    # at 1 and collide with every existing position (round-1 finding B3).
+    "20261116000001_record_cursor_allocator.sql",
+    # #12894 stage C — the byte meter's EXECUTE grant for `tortoise_record_app`,
+    # split OUT of the allocator file above. ⛔ THE SPLIT IS LOAD-BEARING: the
+    # allocator file is `creates`-conditional in `RECORD_REAPPLY_STEPS` (its
+    # policies take an ACCESS EXCLUSIVE lock on the counter table, the #12399
+    # deadlock), so after the first apply it is never re-applied and a grant at
+    # its tail could never fire on a container whose metering migration arrived
+    # later — measured as `has_function_privilege(… 'EXECUTE') = false`, a meter
+    # that raised `InsufficientPrivilege`, and an org charged 0 bytes. This file
+    # creates no table, so it is always re-applied (that is the whole point) and
+    # it is listed here for the registry reason this tuple's header states: the
+    # filename is the only total partition of "is this the record's schema".
+    "20261116000002_record_cursor_meter_grant.sql",
     # #11642 / #4051 V1 — the vector move: `CREATE EXTENSION vector`, the
     # `record_embedding_vector(jsonb)` converter, three GENERATED
     # `embedding_vec public.vector(384)` columns and their HNSW indexes. It
@@ -340,7 +364,8 @@ TENANT_GUC_SQL = f"SELECT set_config('{TENANT_GUC}', %s, true)"
 #: 4. TABLE OWNERSHIP (or membership of the owning role). Owners bypass RLS
 #:    unless `FORCE ROW LEVEL SECURITY` is set, which is exactly why the
 #:    `postgres` DSN in R1's documented pre-change shape was rejected — it is
-#:    the owner of every record table (`THE_RECORD_TABLES` — ten, since #9555).
+#:    the owner of every record table (`THE_RECORD_TABLES` — eleven since #12894 added `record_cursor`,
+#:    ten before it from #9555).
 #:
 #: `current_setting(...)` keeps the GUC read-back and the role posture in ONE
 #: statement rather than two round trips, so the seam executes exactly TWO
@@ -413,6 +438,14 @@ THE_RECORD_TABLES: tuple[str, ...] = (
     "subject",
     "point",
     "relation",
+    # #12894 stage C — the per-graph POSITION ALLOCATOR. Not a layer table, and
+    # not a node table: it is the record's own ordinal counter, and it is here
+    # because everything this tuple drives must know about it — the dump
+    # (`record_backup`), the manifest column pin, the pre-backup counts, the RLS
+    # posture read, and the tenancy census. Leaving it out is round-1 finding
+    # B3: a restore returns a populated `journal_event` with the counter at 1,
+    # so every new position collides and is swallowed.
+    "record_cursor",
     # NOT a node table: the §9.1 narrative home (#9555). It is here because
     # `table_columns()` parses `CREATE TABLE` only for the tables this tuple
     # names, and the narrative columns must be readable as COLUMNS (PRIMARY,
@@ -876,7 +909,8 @@ class RefusedJournalOperation(RecordProjectionError):
 
 
 class JournalPositionCollision(RecordProjectionError):
-    """An absorbed journal position holds content this write would not produce (#9318).
+    """An absorbed journal position holds content this write would not produce, or one this
+    write captured at a different instant (#9318).
 
     `public.journal_event` is keyed `(org_id, graph_id, seq)`, and the schema
     calls that key *"the idempotency key: applying a position twice is a
@@ -897,19 +931,38 @@ class JournalPositionCollision(RecordProjectionError):
 
     ⛔ WHAT THIS IS NOT: a violation of idempotency. Re-applying the SAME
     position with the SAME content is a replay, stays a SILENT no-op, and never
-    raises this (`replay()` asks Postgres to compare the surviving row's
-    `event_type`/`payload` with what it was about to write, and only a
-    DIFFERENCE is a collision). A guard that turned every replay into an error
+    raises this. `replay()` asks Postgres to compare the surviving row's
+    `event_type`/`payload`/`recorded_at` with what it was about to write, and
+    that comparison is NECESSARY but not sufficient for a refusal: a difference
+    it can read as this record's own drift (same type, same capture, moved
+    payload) is silent, and a capture-time difference alone IS a refusal even
+    though the content matches. A guard that turned every replay into an error
     would be a worse defect than the one it fixes, which is why the comparison
-    is content, not merely "the key was taken".
+    is content AND capture, not merely "the key was taken".
 
-    ⛔ AND IT RETIRES. This is a DETECTOR, not the repair: the fix is journal
-    IDENTITY in the key — a journal column, or a per-tenant ordinal allocator —
-    which is `#12894`'s schema decision and deliberately NOT taken here (two
-    designs of one ordinal is the duplication this lane refuses to add). Once
-    the key carries the journal, two journals cannot collide, every conflict is
-    a replay, and this guard simply never fires — delete it then, and no caller's
-    behaviour changes.
+    ⛔ AND IT RETIRES — BY DELETION, ATOMIC WITH THE KEY CHANGE. This is a
+    DETECTOR, not the repair: the fix is journal IDENTITY in the key — a journal
+    column, or a per-tenant ordinal allocator — which is `#12894`'s schema
+    decision and deliberately NOT taken here (two designs of one ordinal is the
+    duplication this lane refuses to add).
+    ⛔ **DELETE THIS GUARD WITH THE KEY CHANGE; leaving it in place converts
+    legitimate old-journal replays into REFUSALS.** The earlier wording here
+    claimed that once the key carries the journal "this guard simply never fires"
+    — that is backwards (#12904 review P1-4). After `#12894` a conflict IS
+    same-journal-same-seq, so a payload difference there is necessarily THIS
+    record's own DERIVATION DRIFT — which the drift arm absorbs SILENTLY
+    (reported to NOBODY: no exception, no counter, no log line), so the guard
+    does not speak to that case at all. What it would still REFUSE is everything
+    the drift split does not absorb: a capture time this record's OWN derivation
+    moved, and every difference a `ts`-less write cannot compare at all — i.e.
+    legitimate replays of ONE journal, turned into refusals by a guard the key
+    change has made unnecessary.
+    And it could not even produce a coherent refusal —
+    :func:`_refuse_a_journal_collision` reads the position statement's bind
+    parameters POSITIONALLY, so the new key re-binds them (`journal_id` as
+    `seq`, `seq` as `event_type`) and the guard now BAILS on a shape it does not
+    recognise instead of guessing. Retirement is therefore a deletion on the
+    same commit as the key change, listed as an acceptance item on `#12894`.
 
     The message names the position and BOTH SIDES — two records, or one record
     and its earlier derivation — by `event_type`, payload digest and payload
@@ -918,78 +971,135 @@ class JournalPositionCollision(RecordProjectionError):
     decides. It also quotes no payload text: the record's own failure lines
     withhold content, and a payload can carry the tenant's own words.
 
-    ⚠️ RESIDUAL — WHAT THE VERDICT CANNOT KNOW, stated rather than implied
-    (#9318 review cycle 1, P2). The comparison is between the durable payload
-    and the payload THIS TREE derives now, and the durable one is a snapshot of
-    a derivation (`_journal_row` strips `ENVELOPE_KEYS`; that set is an actively
-    argued surface, not a constant — see its own note about `agent_id`). So a
-    future change to payload derivation makes an OLD row's content differ from
-    what this tree would write for the SAME record at the SAME position, and a
-    replay of that segment reports this class. Two things follow, and both are
-    deliberate:
+    ⚠️ THE ONE CASE THAT IS NOT A COLLISION: DERIVATION DRIFT (#12904 P0-1).
+    The comparison is between the durable payload and the payload THIS TREE
+    derives now, and the durable one is a snapshot of a DERIVATION
+    (`_journal_row` strips `ENVELOPE_KEYS`; that set is an actively argued
+    surface, not a constant — see its own note about `agent_id`). A change to
+    that derivation therefore makes an OLD row's content differ from what this
+    tree would write for the SAME record at the SAME position.
 
-    * the refusal is still CORRECT — the record's own copy of that position is
-      not what this tree would write, and silently absorbing the difference is
-      the mis-index this class exists to stop;
-    * the DIAGNOSIS must therefore not assert one cause, and it asserts NONE.
-      The message states the two possible causes ONCE, unconditionally — a
-      different record claimed the position (a second durable journal, a restore,
-      a rotation, a rebuild numbering below the high-water mark) OR this record's
-      own payload derivation changed since that row was written — and then
-      appends only the MECHANICAL reading of the two payloads
-      (:func:`_identity_evidence`): whether the identities they both carry agree,
-      disagree, exist on one side only, or are not comparable at all. That
-      reading is a fact about the payloads and supports no cause on its own,
-      which is why it is not allowed to choose one.
-      ⛔ The three earlier cuts of this class let the reading DECIDE the
-      diagnosis instead — "the SAME record", "two DIFFERENT records", "two
-      records about one node" — and each was falsified in review, because the
-      durable payload carries no record id at all (`event_id` is stripped by
-      `ENVELOPE_KEYS`, and there is no journal column): `id`, `node_key` and
-      `session_id` are COORDINATES a record shares with its neighbours, so no
-      combination of them can tell one record from two. A diagnosis built on
-      them is a claim the evidence cannot support whichever way it is phrased.
-      The uniform two-cause sentence cannot be wrong about the cause because it
-      names both possibilities every time; the appended reading is checkable
-      against the payloads themselves.
+    That is not a second record, and refusing it made every position written
+    before the change un-replayable — the repair story (`replay` heals the
+    record) silently version-pinned to the tree that wrote the row, which is the
+    OPPOSITE of the idempotency this class exists to protect. `recorded_at` is
+    what makes the two SEPARABLE, mostly: it is stamped at CAPTURE
+    (`_journal_row` binds
+    `COALESCE(%s::timestamptz, now())`), so a re-derivation of the payload
+    preserves it, while a second write normally brings its own. ⚠️ "Mostly" is
+    load-bearing: an equal instant does not PROVE one record — the mirror
+    residual below is the shape where it does not — it is only the coordinate
+    the drift reading rests on. The verdict is therefore:
 
-    ⚠️ THE OTHER RESIDUAL — WHAT THE VERDICT CANNOT SEE (#12904 review). The
-    residual above is a FALSE POSITIVE: a replay reported as a collision. This
-    one is the missing DETECTION, and it is reachable in the exact shape #9318
-    names. The verdict compares `event_type` and the DURABLE `payload`, and
-    `_journal_row` builds that payload by filtering `ENVELOPE_KEYS` out of the
-    record — `ts`, `event_id`, `initiated_by` and `projection_version` among
-    them. Two records that differ ONLY in those fields therefore bind identical
-    `event_type`/`payload` parameters, the `IS DISTINCT FROM` predicate matches
-    no row, and the second is absorbed exactly as a replay would be — SILENTLY.
-    That is two durable journals ingesting the SAME document (same type, same
-    payload, apart only in `ts`/`event_id`): the position row is still dropped
-    and layer 1 still under-records that journal. It is stated rather than
-    repaired because no comparison of the durable content can recover a field
-    the durable row does not carry. ⛔ Three of those stripped fields —
-    `event_id`, `initiated_by`, `projection_version` — really are absent from
-    the row, so no comparison can reach them. `ts` is the exception and the
-    wording must not overstate it: `ts` IS carried, bound into `recorded_at`
-    (`COALESCE(%s::timestamptz, now())`), so a `recorded_at` comparison could
-    see a `ts`-only difference — it is simply not what this verdict compares,
-    because `recorded_at` falls back to `now()` when `ts` is absent, and
-    comparing it would then report a COLLISION for two replays of one record
-    that omit `ts`. That is the false positive this class must never produce, so
-    the UNCONDITIONAL comparison stays on content. (A CONDITIONAL comparison —
-    compare `recorded_at` only when THIS write carries a `ts` — could reach the
-    `ts`-only case without that false positive; that is a scope judgement left
-    to `#12894`, not an impossibility, and it is not taken here.)
-    `#12894`'s journal IDENTITY in the key is
-    what removes the residual, exactly as for the residual above.
-    `test_an_ENVELOPE_only_difference_is_invisible_to_the_verdict` pins the
-    boundary so it is measured rather than implied, and reds when the key
-    carries the journal.
+    * same `event_type` AND same `recorded_at`, different payload ⇒ **READ AS
+      DRIFT**: the same record, re-derived. Reported to NOBODY — no exception, no
+      counter, no log line. The POSITION row was already consumed and stays as
+      the first derivation wrote it (the table is append-only by trigger); the
+      LAYER rows this write re-derives do LAND — the guard returns without
+      raising, so the write reaches its own commit and the record is repaired to
+      the new derivation. That is the repair story, and it is why this arm is
+      silent rather than fatal;
+    * anything else ⇒ a COLLISION, and this class.
+
+    ⛔ THE POLARITY THAT DECIDES THE TIE: silence is EARNED, never defaulted.
+    The guard is silent on ONE piece of POSITIVE evidence that the position
+    holds THIS record — the conflict query returning NO row, i.e. identical type,
+    identical payload AND identical capture (a replay) — and on ONE
+    DELIBERATE ADMISSION, made with its cost stated below: identical type AND
+    identical capture time, which is the DRIFT reading and NOT evidence of
+    identity (an identical `recorded_at` says only that two writes named one
+    instant, and `ts` is a per-record value the emission path supplies, not one
+    the position derives). ⚠️ A content match at a DIFFERENT capture is NOT
+    silent: the `recorded_at` arm selects it and it refuses (that is the shape
+    `#9318` names). A difference it cannot attribute to
+    drift is NOT silently absorbed: when this write carries no `ts` its capture
+    time cannot be compared, so that difference refuses (the false-red residual
+    at the end of this section).
+
+    ⛔ AND WHAT THE REFUSAL MAY STILL NOT DO: assert ONE cause. What reaches
+    this class is a different `event_type` at the row, a different capture time,
+    or a comparison this write cannot make for want of a `ts` — and each admits
+    more than one story: a second durable journal, a
+    restore, a rotation or a rebuild numbering below the high-water mark on one
+    reading; a derivation that moved a record's own `ts`, or a write with none
+    to compare, on another. The message therefore states the possibilities ONCE
+    and appends only the MECHANICAL reading of the two payloads
+    (:func:`_identity_evidence`) — what identities they both carry, whether they
+    agree, disagree, exist on one side only, or are not comparable. That reading
+    is a fact about the payloads and supports no cause on its own, which is why
+    it may not choose one: the durable payload carries no record id at all
+    (`event_id` is stripped by `ENVELOPE_KEYS`, and there is no journal column),
+    and `id`/`node_key`/`session_id` are COORDINATES a record shares with its
+    neighbours. Three earlier cuts of this class let the reading DECIDE the
+    diagnosis — "the SAME record", "two DIFFERENT records", "two records about
+    one node" — and each was falsified in review for exactly that reason.
+
+    ⚠️ RESIDUAL — WHAT THE VERDICT STILL CANNOT SEE, stated rather than implied
+    (#12904 P0-2, restated after the `recorded_at` arm). `_journal_row` builds
+    the durable payload by filtering `ENVELOPE_KEYS` out of the record, so the
+    row carries none of `event_id`, `initiated_by` or `projection_version`: two
+    records differing ONLY in those bind identical content AND identical
+    capture, and are absorbed as one. **Only `event_id` is unrecoverable in the
+    sense that matters** — it is the field that would have identified a record,
+    and no comparison of the durable row can reach it; `initiated_by` and
+    `projection_version` are compared by nothing here either, but neither names
+    a record. `ts` is NOT in that list: it is carried as `recorded_at` and this
+    guard now compares it, which is why the reachable #9318 shape — two durable
+    journals ingesting the SAME document, apart only in capture time — is
+    REFUSED rather than absorbed.
+    ⛔ THE MIRROR RESIDUAL, in the SILENT direction, named because the drift arm
+    above is an admission and not identity evidence: **same `event_type` AND
+    same `recorded_at`, but two DIFFERENT records, are absorbed as one.** The
+    capture arm compares `recorded_at`, so a pair differing only in payload
+    lands on the drift reading; `_identity_evidence` is never consulted before
+    that early return, and where it would have answered `disagrees` (the durable
+    row naming `obj-a` against this write's `obj-b`) the refuting evidence is
+    discarded. Two different records CAN share one instant: `ts` is a per-record
+    value the EMISSION path supplies (`_journal_row` binds `record.get("ts")`,
+    and `_emit_event` accepts a `recorded_ts`, minting `now_iso()` only when
+    none is given — `sdk.py`), so nothing ties the instant to the record's
+    identity — a caller of that seam may
+    hand one clock reading to several records, and two independent mints can also
+    land on the same microsecond. The code does not exclude the shape, and it
+    never asks whether an equal instant means one record. `main` (post-#12904)
+    REFUSED this pair — payload
+    differs ⇒ collision — so the drift split widens the silent window by exactly
+    this shape. ⚠️ AND ITS COST IS NOT ONLY THE MISSING ERROR: the POSITION row
+    is absorbed (append-only, it keeps the first record's content), but the
+    second record's LAYER rows are applied and COMMITTED — the guard returns
+    without raising, so the write reaches its own `commit()` — i.e. its content
+    lands at the first record's position, which is the mis-index shape `#9318`
+    exists to stop. It is ADMITTED, not detected, not counted, not repaired, and
+    it is PINNED AS ADMITTED (`tests/test_9318_journal_collision.py`,
+    `test_a_same_capture_instant_pair_is_ADMITTED_not_detected`), so a later
+    reader cannot mistake this silence for coverage.
+    ⚠️ Why it is admitted rather than closed HERE: closing it means requiring
+    that `_identity_evidence` did not answer `disagrees` before taking the drift
+    reading, which is a SEMANTICS change to this verdict — it belongs to a
+    recorded decision on `#9318` (open; `#12904` is MERGED and closed, so it
+    cannot carry one), not to the round that measured the window. That decision
+    is stated in full, with its measurement, on `#9318`. `#12894`'s
+    journal IDENTITY in the key removes it with the rest of the residual,
+    because two journals can then no longer meet at one position at all.
+    ⛔ The remaining false-red subset, named rather than implied — and it has TWO
+    shapes, not one. (a) A write with NO `ts` whose payload derivation has changed
+    at a position an earlier derivation wrote: `COALESCE(..., now())` gives such a
+    row a real `recorded_at` while this write has none to compare against, so the
+    difference cannot be attributed to drift and is refused. (b) A record whose
+    derivation MOVED its own `ts`: that takes the `recorded_at` arm and is
+    REFUSED, although it is one record re-derived, because the capture time is the
+    only signature a second journal has (P0-2). Refusing is the deliberate direction:
+    the alternative — treating an unexplained difference as drift — is the silent
+    absorption this class was built to end. `#12894`'s journal IDENTITY in the
+    key removes the whole residual, because two journals can then no longer meet
+    at one position at all.
 
     What would remove the residual rather than describe it: a derivation-version
     discriminator INSIDE the durable payload (`projection_version` is stripped
-    by `ENVELOPE_KEYS` today, so it is invisible to the row). That is a payload
-    shape change with its own blast radius and is NOT taken here — it belongs
-    with `#12894`, whose key decision retires the detector entirely.
+    by `ENVELOPE_KEYS` today, so it is invisible to the row), or `event_id`
+    carried as its own column. Both are payload/key shape changes with their own
+    blast radius and are NOT taken here — they belong with `#12894`, whose key
+    decision retires the detector entirely.
     """
 
     def __init__(self, *, org_id: str, graph_id: str, seq: int,
@@ -997,7 +1107,8 @@ class JournalPositionCollision(RecordProjectionError):
                  stored_event_type: Any, stored_payload_digest: str,
                  stored_payload_bytes: int,
                  identity_state: str = "none",
-                 identity_detail: str | None = None) -> None:
+                 identity_detail: str | None = None,
+                 capture_state: str = "unknown") -> None:
         self.org_id = org_id
         self.graph_id = graph_id
         self.seq = seq
@@ -1011,10 +1122,19 @@ class JournalPositionCollision(RecordProjectionError):
         #: identities both payloads carry say (:func:`_identity_evidence`). A
         #: mechanical FACT about the two payloads, appended to a diagnosis that
         #: names both possible causes unconditionally. Never decides the refusal:
-        #: any content difference refuses, and this only says what the ids look
+        #: a content difference this write CANNOT attribute to drift refuses, and
+        #: this only says what the ids look
         #: like. `agrees` does NOT mean "one record" — a shared `id` is a node
         #: coordinate (see the class docstring).
         self.identity_state = identity_state
+        #: ``differs`` / ``matches`` / ``unknown`` — whether the two sides were
+        #: CAPTURED at the same instant (`recorded_at`, stamped by the journal, so
+        #: a payload re-derivation preserves it). The mechanical half of the
+        #: drift-vs-second-write split (#12904 P0-1), printed because it is what
+        #: makes the refusal checkable: `differs` is the shape of a second journal,
+        #: `unknown` is a write carrying no `ts` at all. Like ``identity_state`` it
+        #: is a FACT, never a cause.
+        self.capture_state = capture_state
         if identity_state == "agrees":
             evidence = f"they share {identity_detail}"
         elif identity_state == "disagrees":
@@ -1026,11 +1146,27 @@ class JournalPositionCollision(RecordProjectionError):
         diagnosis = (
             f"either a DIFFERENT record claimed this position — a second "
             f"durable journal, a restore, a rotation, or a rebuild numbering "
-            f"below the high-water mark — or this record's own payload "
-            f"derivation changed since that row was written. The durable "
+            f"below the high-water mark — or this record's own derivation no "
+            f"longer produces what that row holds (a capture time it moved, or "
+            f"a payload written when this write carried no `ts`). The durable "
             f"payload carries no record id, so the record cannot tell which; "
             f"{evidence}"
         )
+        # ⛔ THE CAPTURE CLAUSE (#12904 P0-2). The arm that compares
+        # `recorded_at` is what turned a `ts`-only difference from an invisible
+        # absorption into this refusal, so the message says which side of it
+        # fired. No timestamp is PRINTED: the relation is the whole fact, and a
+        # rendered instant is one more datum on a log line whose budget is
+        # already shared with the payload digests.
+        capture = {
+            "differs": (
+                "This write and the surviving row were CAPTURED at different "
+                "times (`recorded_at`), which a re-derivation of the payload "
+                "alone does not change. "),
+            "unknown": (
+                "This write carries no `ts`, so its capture time cannot be "
+                "compared with the surviving row's. "),
+        }.get(capture_state, "")
         # ⛔ The CONSEQUENCE is cause-neutral too (review cycle 5). The earlier
         # wording — "every row written under it would be indexed by ANOTHER
         # RECORD's event" — re-asserted the one cause the sentence above just
@@ -1038,13 +1174,40 @@ class JournalPositionCollision(RecordProjectionError):
         # derivation-change cause: there, the surviving row IS this record's own
         # event. What is true under BOTH causes is what is written here.
         consequence = "the record cannot file this write's rows at that position"
+        # ⛔ WHICH DIFFERENCE THIS LINE NAMES (review cycle 7). The diagnosis below
+        # is CONTENT-shaped, and the capture arm is the one shape where the
+        # content can be BYTE-IDENTICAL: for a `ts`-only pair the two digests
+        # printed above MATCH, so saying "the surviving row's content is not what
+        # this write would produce" would be refuted by this very line.
+        if payload_digest != stored_payload_digest:
+            content = ("The surviving row's content is not what this write would "
+                       "produce")
+        else:
+            # ⛔ PAYLOAD-IDENTICAL IS NOT "ONLY THE CAPTURE TIME" (review cycle 8).
+            # `ENVELOPE_KEYS` strips `type`, so two DIFFERENT record types bind
+            # the SAME payload — naming the capture time alone would be false for
+            # them, on the line that prints both types.
+            differs = []
+            if stored_event_type != event_type:
+                differs.append("the record TYPE")
+            if capture_state == "differs":
+                differs.append("the CAPTURE TIME")
+            # Singular takes a singular verb: the sentence an operator pastes
+            # into a ticket read "only the CAPTURE TIME differ" (review P2).
+            content = (
+                "The surviving row's PAYLOAD is IDENTICAL to what this write "
+                "would produce; "
+                + (("only " + differs[0] + " differs") if len(differs) == 1
+                   else ("only " + " and ".join(differs) + " differ")
+                   if differs else "the difference is not in the payload")
+            )
         super().__init__(
             f"journal position {seq} of ({org_id!r}, {graph_id!r}) already "
             f"holds {stored_event_type!r} ({stored_payload_digest}, "
             f"{stored_payload_bytes} B of payload) while this write is "
             f"{event_type!r} ({payload_digest}, {payload_bytes} B). "
-            f"The surviving row's content is not what this write would "
-            f"produce — {diagnosis} — so {consequence}. The "
+            f"{capture}"
+            f"{content} — {diagnosis} — so {consequence}. The "
             f"journal still holds this record; the position row cannot be "
             f"repaired while the key carries no journal identity (#12894), "
             f"and `journal_event` is append-only by trigger."
@@ -6170,6 +6333,47 @@ def _narrative_statements(
 # ════════════════════════════════════════════════════════════════════════════
 
 
+#: The EXACT statement that writes a journal position, and the EXACT arity it
+#: binds — `(org_id, graph_id, seq, event_type, payload, ts)`. Module constants
+#: rather than an inline literal because
+#: :func:`_refuse_a_journal_collision` must be able to tell *the statement it
+#: knows how to read* from *a statement that was reshaped*: it unpacks these
+#: parameters POSITIONALLY, so a statement that gains one re-binds silently
+#: (`journal_id` read as `seq`, `seq` as `event_type`) and every ABSORBED
+#: position then errors instead of replaying (#12904 P1-3). `#12894` adds journal
+#: identity to this key — on that commit the guard is DELETED; until then a
+#: reshape must BAIL here rather than be mis-read.
+_JOURNAL_POSITION_INSERT_SQL = (
+    "INSERT INTO public.journal_event "
+    "(org_id, graph_id, seq, event_type, payload, recorded_at) "
+    "VALUES (%s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())) "
+    "ON CONFLICT (org_id, graph_id, seq) DO NOTHING"
+)
+
+#: …and how many parameters `_JOURNAL_POSITION_INSERT_SQL` binds.
+_JOURNAL_POSITION_PARAM_COUNT = 6
+
+
+def journal_payload(record: Mapping[str, Any]) -> str:
+    """The `jsonb` text of a journal row's payload — the ONE definition.
+
+    Two paths write `public.journal_event`: the REPLAY path (:func:`_journal_row`,
+    which numbers by enumeration) and the ALLOCATED path
+    (:mod:`tortoise.record_allocator`, which numbers from the counter). If each
+    built its own payload they could disagree about what a consumed position
+    carries — which is exactly the divergence the allocator exists to remove —
+    so both call this.
+
+    `ENVELOPE_KEYS` are the keys `_emit_event` owns and the row stores as
+    COLUMNS (`type`→`event_type`, `ts`→`recorded_at`) or not at all
+    (`event_id`, `initiated_by`, `projection_version`, and `seq`, which IS the
+    key). Their absence from the payload is why a JSONL line cannot be
+    re-rendered from a row alone (round-1 finding M15) — stated here, in the
+    one place that decides it, rather than left to be rediscovered.
+    """
+    return json.dumps({k: v for k, v in record.items() if k not in ENVELOPE_KEYS})
+
+
 def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
                  graph_id: str) -> Statement:
     """The record of WHAT the record consumed — `public.journal_event`.
@@ -6182,20 +6386,29 @@ def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
     ⛔ THE STATEMENT IS UNCHANGED BY #9318, and that is deliberate. The guard
     that tells a REPLAY from a COLLISION reads the cursor's affected-row count
     and, only when it is zero, asks the database whether the surviving row's
-    content differs (:func:`_refuse_a_journal_collision`). Rewriting this INSERT
+    content OR CAPTURE TIME differs — a content difference with the same type and
+    the same instant is drift and stays silent
+    (:func:`_refuse_a_journal_collision`). Rewriting this INSERT
     (a `RETURNING`, a `DO UPDATE`, a probe in the `VALUES` list) would change the
     plan every replay, seam and PGlite caller materializes — and the `#9187`
     snapshot pin (`tests/test_record_writer_seam.py`) exists to notice exactly
     that. The verdict belongs beside the statement, not inside it.
+
+    ⛔ THE `DO NOTHING` IS CORRECT **HERE** AND IS REMOVED ON THE ALLOCATED
+    PATH, and the difference is not stylistic. This builder is the REPLAY path,
+    whose contract is idempotence (`#5285`: replay twice and compare the tables),
+    so re-offering a consumed position must be a no-op. The allocated path
+    (`record_allocator.ALLOCATION_SQL`) has no such excuse: its number is issued
+    exactly once, so a duplicate can only mean the counter is behind the table —
+    and absorbing THAT would advance the counter, drop the caller's payload
+    without an error, and leave the layer rows with no idempotency key
+    (round-1 finding B5).
     """
     return Statement(
-        "INSERT INTO public.journal_event "
-        "(org_id, graph_id, seq, event_type, payload, recorded_at) "
-        "VALUES (%s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())) "
-        "ON CONFLICT (org_id, graph_id, seq) DO NOTHING",
+        _JOURNAL_POSITION_INSERT_SQL,
         (
             org_id, graph_id, seq, record.get("type"),
-            json.dumps({k: v for k, v in record.items() if k not in ENVELOPE_KEYS}),
+            journal_payload(record),
             record.get("ts"),
         ),
     )
@@ -6205,19 +6418,42 @@ def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
 #:
 #: It is asked only when the position row was ABSORBED (`ON CONFLICT DO NOTHING`
 #: affected no row), and it is asked of the DATABASE rather than of Python for
-#: one reason: `payload` is `jsonb`, and Postgres's own structural equality is
-#: the only comparison that cannot disagree with it. A Python re-normalisation
-#: (a `json.dumps` on each side, a numeric coercion, a key-order guess) is a
-#: second opinion about the same bytes, and its failure mode is the one a guard
+#: one reason: `payload` is `jsonb` and `recorded_at` is `timestamptz`, and
+#: Postgres's own structural/instant equality is the only comparison that cannot
+#: disagree with the stored row. A Python re-normalisation (a `json.dumps` on each
+#: side, a numeric coercion, a key-order guess, an offset read as a difference) is
+#: a second opinion about the same bytes, and its failure mode is the one a guard
 #: like this may never have: a RE-APPLIED SAME POSITION reported as a collision.
-#: `IS DISTINCT FROM` (not `<>`) because the row's payload is `NOT NULL` but the
+#: `IS DISTINCT FROM` (not `<>`) because the row's columns are `NOT NULL` but the
 #: CAST parameters are not, so a NULL-vs-something comparison must still answer
-#: "different" instead of "unknown".
+#: "different" instead of "unknown" (PostgreSQL §9.2.2: `1 IS DISTINCT FROM
+#: NULL` is true, not unknown).
+#:
+#: BIND ORDER, and it is deliberate that the two PROJECTED booleans come first:
+#: `(event_type, ts)` for the projection, `(org_id, graph_id, seq)` for the
+#: position, `(event_type, payload)` for the content, `(ts, ts)` for the capture
+#: arm. The projection is what makes the drift split (#12904 P0-1) answerable:
+#: `same_type`/`same_capture` are computed by Postgres, never by this module.
 _JOURNAL_CONFLICT_CONTENT_SQL = (
-    "SELECT event_type, payload FROM public.journal_event "
+    "SELECT event_type, payload, "
+    "       (event_type IS NOT DISTINCT FROM %s::text) AS same_type, "
+    "       (recorded_at IS NOT DISTINCT FROM %s::timestamptz) AS same_capture "
+    "FROM public.journal_event "
     "WHERE org_id = %s AND graph_id = %s AND seq = %s "
     "AND (event_type IS DISTINCT FROM %s::text "
-    "     OR payload IS DISTINCT FROM %s::jsonb)"
+    "     OR payload IS DISTINCT FROM %s::jsonb "
+    # ⛔ THE CAPTURE TIME (#12904 P0-2), and the GUARD is load-bearing.
+    # `_journal_row` binds `COALESCE(%s::timestamptz, now())`, so a write with no
+    # `ts` still stores a REAL `recorded_at` — an UNGUARDED arm therefore reports
+    # every replay of a `ts`-less record as different (measured in a real
+    # database: `now() IS DISTINCT FROM NULL::timestamptz` is TRUE). The
+    # `IS NOT NULL` test is what makes the arm conditional on THIS write having a
+    # capture time to compare, which is the false-red the review's P0-2 warned
+    # about. This is the reachable #9318 shape it closes: two durable journals
+    # ingesting one document, apart only in capture time, are now REFUSED
+    # instead of silently absorbed.
+    "     OR (%s::timestamptz IS NOT NULL "
+    "         AND recorded_at IS DISTINCT FROM %s::timestamptz))"
 )
 
 
@@ -6468,7 +6704,7 @@ def _identity_evidence(attempted: Any, stored: Any) -> tuple[str, str | None]:
 
 def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
                                 total: int) -> None:
-    """Fail LOUDLY when an absorbed position holds content this write would not produce (#9318).
+    """Fail LOUDLY when an absorbed position holds a record this write does not CONTINUE (#9318).
 
     THE ONE CALL SITE is :func:`replay`'s statement loop, which every
     journal-position insert already passes through — the live door, a full
@@ -6476,24 +6712,54 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     else (a caller, a second chokepoint) is how two writers come to disagree
     about what the record holds.
 
-    THREE OUTCOMES, and the distinction is the whole point of the change:
+    FOUR OUTCOMES, and the distinction is the whole point of the change:
 
     * the INSERT affected a row ⇒ nothing to decide, return;
-    * it affected none, and the surviving row's content MATCHES ⇒ a genuine
-      REPLAY. Return in SILENCE — no exception, no counter, no log line. The
-      schema's *"applying a position twice is a no-op"* is preserved exactly;
-    * it affected none, and the content DIFFERS ⇒ a COLLISION. Raise
-      :class:`JournalPositionCollision`.
+    * the conflict query returns NO row ⇒ nothing differs (same type, same
+      payload, same capture) ⇒ a genuine REPLAY. Return in SILENCE — no
+      exception, no counter, no log line. The schema's *"applying a position
+      twice is a no-op"* is preserved exactly. ⚠️ A content match at a DIFFERENT
+      capture does NOT reach this arm: the `recorded_at` arm selects it and it is
+      REFUSED (#12904 P0-2), which is the shape #9318 names;
+    * it affected none, the `event_type` matches and `recorded_at` matches, and
+      only the payload differs ⇒ READ AS DERIVATION DRIFT: the same record
+      re-derived since that row was written. Also SILENT (#12904 P0-1) —
+      refusing it made every position written before a payload-derivation
+      change un-replayable, which inverts the rule this guard protects.
+      ⚠️ This arm is a READING on two equal coordinates, not identity evidence;
+      `JournalPositionCollision`'s mirror residual names what that admits;
+    * anything else ⇒ a COLLISION. Raise :class:`JournalPositionCollision`.
 
-    ⚠️ A cursor that cannot report ``rowcount``, or a conflict query that
-    somehow returns no row, also returns silently: the guard may only fire on
-    POSITIVE evidence that the position holds content this write would not
-    produce. Its job is to make an existing silent failure loud, never to become
-    a new silent one. ⛔ Such a refusal is not an ALARM that is wrong, but its
-    CAUSE the row cannot name: a payload DERIVATION change since that row was
-    written makes an old row differ from what this tree would write for the SAME
-    record — one record, two derivations — and that case is documented in the
-    class's RESIDUAL block rather than treated as unreachable here.
+    ⛔ SILENCE IS EARNED. It is returned on ONE piece of POSITIVE evidence that
+    the position holds THIS record — the conflict query returning NO row, i.e.
+    identical type, identical payload AND identical capture (a replay) — and on
+    ONE DELIBERATE ADMISSION with its cost stated: identical type AND capture, which
+    is the drift reading and NOT evidence of identity (an equal `recorded_at`
+    says only that two writes named one instant). A difference this function
+    cannot attribute to drift (a `ts`-less write has no capture time to compare)
+    is refused, because defaulting to silence is exactly the silent absorption
+    #9318 exists to end. A cursor that
+    cannot report ``rowcount``, or a conflict query that returns no row, still
+    returns silently: the guard may only fire on evidence it can read.
+
+    ⛔ BAIL, DO NOT GUESS, WHEN THE STATEMENT IS RESHAPED (#12904 P1-3). The
+    parameters below are read POSITIONALLY. `#12894` puts journal identity in
+    this key, which changes the statement and its arity; unpacking it anyway
+    would re-bind silently and then fail on `%s::jsonb` for EVERY absorbed
+    position, i.e. turn the replay this guard protects into an error. So a
+    statement that is not `_JOURNAL_POSITION_INSERT_SQL`, or that does not bind
+    `_JOURNAL_POSITION_PARAM_COUNT` parameters, raises BEFORE the unpacking, with
+    the remedy named. **Delete this guard with the key change; leaving it in
+    place converts legitimate old-journal replays into refusals.**
+
+    ⚠️ THE LAYER ROWS ARE NOT PREVENTED, THEY ARE DISCARDED (#12904 P2-8).
+    `replay_plan` emits a record's `mutations_for` statements BEFORE its position
+    row, so by the time this refusal fires they have already executed — in a
+    transaction the caller never commits (`record_writer` rolls the borrow back).
+    The committed state is correct, which is what the acceptance legs assert; the
+    ordering is named here so a reader does not conclude that this guard stops
+    the layer statements, and so a future caller that writes its own transaction
+    knows it must roll back rather than commit on this exception.
 
     ⛔ THE READ IS TENANT-SCOPED. The conflict query runs after
     :func:`scope_connection` set the tenant GUC on this same connection, so RLS
@@ -6502,15 +6768,36 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     """
     if _affected_rows(cursor) != 0:
         return
-    # ⚠️ THIS PAIRING IS `_journal_row`'s PARAMETER ORDER, and it is pinned by
-    # `tests/test_9318_journal_collision.py` for exactly that reason: a reorder
-    # there would make this SELECT name a position that does not exist, which is
-    # a silent MISS (never a false alarm — see the helper's docstring), i.e. the
-    # one failure mode a guard cannot be allowed to have unobserved.
-    org_id, graph_id, seq, event_type, payload = statement.params[:5]
+    # ⛔ THE SHAPE BAIL (#12904 P1-3) — BEFORE any unpacking, because the
+    # unpacking is what would go wrong silently.
+    if (statement.sql != _JOURNAL_POSITION_INSERT_SQL
+            or len(statement.params) != _JOURNAL_POSITION_PARAM_COUNT):
+        raise RecordStatementError(_failure_line(
+            _statement_attribution(statement, index, total),
+            # ⚠️ BUDGETED: `_failure_line` bounds this half at
+            # `_ATTRIBUTION_EXC_LIMIT` (200 chars), so the REMEDY has to survive
+            # the cut — a bail that says "reshaped" and is then truncated is a
+            # driver-shaped failure to the next reader, which is the failure
+            # this bail exists to prevent.
+            "the journal position statement was RESHAPED ("
+            + ("the SQL moved, "
+               if statement.sql != _JOURNAL_POSITION_INSERT_SQL else "")
+            + str(len(statement.params)) + " binds, expected "
+            + str(_JOURNAL_POSITION_PARAM_COUNT)
+            + "), so this guard cannot read its positional binds — DELETE it "
+            "with the key change (#12894), or it refuses every replay",
+        ))
+    # ⚠️ THIS PAIRING IS `_JOURNAL_POSITION_INSERT_SQL`'s PARAMETER ORDER, and it
+    # is pinned by `tests/test_9318_journal_collision.py` for exactly that
+    # reason: a reorder would make this SELECT name a position that does not
+    # exist, which is a silent MISS — the one failure mode a guard may not have
+    # unobserved. The bail above is what makes a RESHAPE a refusal rather than a
+    # mis-read.
+    org_id, graph_id, seq, event_type, payload, ts = statement.params
     try:
         cursor.execute(_JOURNAL_CONFLICT_CONTENT_SQL,
-                       (org_id, graph_id, seq, event_type, payload))
+                       (event_type, ts, org_id, graph_id, seq, event_type,
+                        payload, ts, ts))
         stored = cursor.fetchone()
     except Exception as exc:
         # Attributed like any other plan statement: a failure to ASK is a
@@ -6526,8 +6813,45 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
         return
     if isinstance(stored, Mapping):
         stored_type, stored_payload = stored["event_type"], stored["payload"]
+        same_type, same_capture = stored["same_type"], stored["same_capture"]
     else:
         stored_type, stored_payload = stored[0], stored[1]
+        same_type, same_capture = stored[2], stored[3]
+    # ⛔ DRIFT IS NOT A COLLISION (#12904 P0-1). Same record type AND the same
+    # capture instant, only the payload differs ⇒ this is READ as the same
+    # record, whose derivation moved since that row was written. Silent: the
+    # position is already consumed and the row keeps the first derivation's
+    # content, while the LAYER rows this write re-derives do land (the guard
+    # returns without raising, so the write commits) — that is the repair
+    # story (`replay` heals the record), and it must not be version-pinned to the
+    # tree that wrote it.
+    # ⛔ AND IT IS A READING, NOT EVIDENCE OF IDENTITY — do not restore the
+    # stronger claim. Identical `recorded_at` says only that two writes named
+    # the same instant, and `ts` is a per-record value the EMISSION path supplies
+    # (`_journal_row` binds `record.get("ts")`; `_emit_event` accepts a
+    # `recorded_ts`, minting `now_iso()` only when none is given), so TWO
+    # DIFFERENT RECORDS sharing an instant land here and are absorbed — with
+    # `_identity_evidence` never consulted, even where it would have answered
+    # `disagrees`. That shape is the mirror residual the class docstring names,
+    # and it is PINNED AS ADMITTED (`tests/test_9318_journal_collision.py`,
+    # `test_a_same_capture_instant_pair_is_ADMITTED_not_detected`), so the
+    # silence cannot be mistaken for coverage. `main` (post-#12904) refused it
+    # (payload differs ⇒ collision); closing it here would mean refusing on
+    # `disagrees`, a semantics change to this verdict that belongs to a recorded
+    # decision on `#9318` (open; `#12904` is merged and closed and cannot carry
+    # one), and #12894's journal identity in the key retires it outright.
+    # ⚠️ `ts is not None` is written out even though a NULL bind can never read as
+    # `same_capture` (`recorded_at` is NOT NULL, so `IS NOT DISTINCT FROM NULL`
+    # is false): the two facts live in different places, and a reader must not
+    # have to infer the second to trust the first.
+    if same_type and same_capture and ts is not None:
+        return
+    if ts is None:
+        capture_state = "unknown"
+    elif same_capture:
+        capture_state = "matches"
+    else:
+        capture_state = "differs"
     digest, size = _payload_digest(payload)
     stored_digest, stored_size = _payload_digest(stored_payload)
     identity_state, identity_detail = _identity_evidence(payload, stored_payload)
@@ -6537,16 +6861,139 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
         stored_event_type=stored_type, stored_payload_digest=stored_digest,
         stored_payload_bytes=stored_size,
         identity_state=identity_state, identity_detail=identity_detail,
+        capture_state=capture_state,
+    )
+
+
+# ── the ordinal ALLOCATOR's statement (#12894) ──────────────────────────────
+#
+# ⛔ IT LIVES HERE, WITH EVERY OTHER PLAN STATEMENT, AND FOR A SECOND REASON: this
+# module is loaded BY FILE PATH by `supabase/tests/pglite/validate.mjs`, which
+# registers it as a package-less module — so any relative import inside
+# `replay_plan` raises `ImportError` and breaks the schema drill. MEASURED: the
+# first version of this change imported `tortoise.record_allocator` there and the
+# PGlite drill died at `#7969 record projection`. The operator flows (seed, mode
+# transitions, isolation guard, counters) live in `record_allocator`; the SQL and
+# its builder live here, and `replay(allocate=True)` imports the allocator only on
+# that arm.
+
+#: The table holding one row per graph: the LAST position the record allocated.
+RECORD_CURSOR_TABLE = "record_cursor"
+
+#: The allocator's states (`record_allocator` re-exports these).
+MODE_SEEDED = "seeded"
+MODE_ACTIVE = "active"
+MODE_HALTED = "halted"
+
+#: The graph's ISSUED position, or no row — and ⛔ THE SAME STATEMENT AS
+#: `record_allocator.READ_SQL`, not a second spelling of it (an equality pin in
+#: `tests/test_12894_record_cursor.py` holds the two together, for the reason
+#: `test_the_allocation_sql_has_one_definition` holds the allocation's copies).
+#:
+#: ONE statement, read after :func:`scope_connection` set the tenant GUC, so
+#: `record_cursor`'s RLS policy scopes it to the tenant this replay is about (a
+#: counter row another tenant holds is not visible, and could not be this
+#: graph's anyway — the pair is the key). It is ONE round trip on the live
+#: write path, which is why there is no `to_regclass` pre-probe in front of it:
+#: the derived door pays this on every record write (`#9558` is the cost
+#: register), and the counter table is a precondition this tree already assumes
+#: — `record_allocator.read_cursor` reads it with the same unguarded SELECT.
+CURSOR_PRESENCE_SQL = (
+    f"SELECT seq, mode FROM public.{RECORD_CURSOR_TABLE} "
+    "WHERE org_id = %s AND graph_id = %s"
+)
+
+#: The allocation, and the batch's payloads, in ONE statement.
+#:
+#: ⛔ `unnest(...) WITH ORDINALITY`, NOT `generate_series`: a series joined to a
+#: payload list emits THE SAME payload N times (round-2 finding). The ordinal is
+#: what pairs row i of the payload arrays with position `base + i`.
+#:
+#: ⛔ NO `ON CONFLICT … DO NOTHING` on this insert. The allocated number is unique
+#: by construction, so a duplicate is a DEFECT; absorbing it would advance the
+#: counter, suppress the insert without an error, and drop the caller's payload
+#: permanently (round-1 B5). A `23505` fails the transaction and the increment
+#: rolls back with it. (The REPLAY path keeps its `DO NOTHING` — see
+#: `_journal_row` — because a replay's contract is idempotence.)
+#:
+#: LOCK ORDER: this statement is appended LAST in a plan, after every layer
+#: mutation, so the counter's row lock is the last CONTENDED lock taken. The
+#: `journal_event` positions it then writes are not contended — each writer holds
+#: its own freshly issued `seq`.
+#:
+#: ⛔ `%s` PLACEHOLDERS ONLY. `to_dollar_placeholders` renumbers by splitting on
+#: `%s`, so a literal `$n` in the text would shift it.
+ALLOCATION_SQL = """WITH payloads AS (
+    SELECT p.event_type  AS event_type,
+           p.payload     AS payload,
+           p.recorded_at AS recorded_at,
+           p.ord         AS ord
+      FROM unnest(%s::text[], %s::jsonb[], %s::timestamptz[])
+           WITH ORDINALITY AS p(event_type, payload, recorded_at, ord)
+), allocated AS (
+    UPDATE public.record_cursor
+       SET seq = seq + %s::bigint,
+           updated_at = now()
+     WHERE org_id = %s AND graph_id = %s
+       AND mode = 'active'
+    RETURNING seq - %s::bigint AS base
+)
+INSERT INTO public.journal_event
+       (org_id, graph_id, seq, event_type, payload, recorded_at)
+SELECT %s, %s, allocated.base + payloads.ord, payloads.event_type,
+       payloads.payload, COALESCE(payloads.recorded_at, now())
+  FROM payloads CROSS JOIN allocated
+ ORDER BY payloads.ord
+RETURNING seq"""
+
+#: How an executor finds the allocation statement inside a plan without a second
+#: copy of its text. The constant IS the statement's first characters (a leading
+#: newline in the literal silently made `startswith` false once, so the allocation
+#: ran and its numbers were thrown away — measured before this shape).
+ALLOCATION_STATEMENT_PREFIX = "WITH payloads AS"
+
+
+def allocation_statement(*, org_id: str, graph_id: str,
+                         records: Sequence[Mapping[str, Any]]) -> Statement:
+    """The ONE statement that allocates `len(records)` positions and inserts the
+    rows carrying them, in plan order.
+
+    The payloads come from :func:`journal_payload` — the SAME function
+    :func:`_journal_row` uses — so the allocated path and the replay path cannot
+    disagree about what a journal row contains.
+    """
+    if not records:
+        raise RecordProjectionError(
+            "an allocation needs at least one record — an empty batch has no "
+            "position to allocate and must not move the counter")
+    event_types = [record.get("type") for record in records]
+    payloads = [journal_payload(record) for record in records]
+    recorded_at = [record.get("ts") for record in records]
+    n = len(records)
+    return Statement(
+        ALLOCATION_SQL,
+        (event_types, payloads, recorded_at, n, org_id, graph_id, n,
+         org_id, graph_id),
     )
 
 
 @dataclass
 class ReplayReport:
-    """What a replay consumed. A report, never a substitute for the failure."""
+    """What a replay consumed. A report, never a substitute for the failure.
+
+    `first_seq`/`last_seq` are the positions this call ALLOCATED, and are `0`
+    for a replay that did not allocate (every caller before #12894, and every
+    `position=False` replay). They exist because the allocated number must
+    reach :class:`tortoise.record_writer.RecordWrite.last_seq` and the byte
+    meter: before this, both were derived from the CALLER's `first_seq`, so a
+    number the allocator produced could never reach them.
+    """
 
     events: int = 0
     statements: int = 0
     no_effects: list[str] = field(default_factory=list)
+    first_seq: int = 0
+    last_seq: int = 0
 
     def __str__(self) -> str:  # pragma: no cover - cosmetic
         return (f"replayed {self.events} journal records → {self.statements} "
@@ -6890,9 +7337,181 @@ def _statement_attribution(statement: Statement, index: int, total: int) -> str:
     return " ".join(parts)
 
 
+def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
+                                 graph_id: str) -> None:
+    """Refuse an ENUMERATED replay on a graph whose positions are ISSUED (#9190).
+
+    THE DEFECT THIS CLOSES. `replay()` numbers records by ENUMERATION —
+    `enumerate(records, start=start_seq)`, where `start_seq` is the journal's own
+    ordinal for `records[0]`. On a graph that has been cut over, the number is no
+    longer the journal's to give: `#9190` was reopened by owner ruling (2026-11-15,
+    comment 6902871297) — *"the record allocates the ordinal and the journal
+    record CARRIES it; replay READS the number instead of computing it."* So an
+    enumerated replay there is an answer to a question the record has already
+    answered, and it is WRONG in the one direction nothing could see: the same
+    journal event, replayed, lands its payload at a SECOND position. Neither
+    guard fires — `ON CONFLICT (org_id, graph_id, seq) DO NOTHING` keys on `seq`
+    and the enumerated `seq` is free, and :func:`_refuse_a_journal_collision`
+    only runs on an INSERT that was ABSORBED (this one affects a row). No error,
+    no counter, one record at two positions, and the door's own refusal text —
+    *"a replay heals the record"* — pointed an operator straight at it.
+
+    ⛔ IT IS A REFUSAL, NOT A HEAL. A cut-over graph's repair path is the
+    ALLOCATOR (`allocate=True`, which issues the number and carries it) or a
+    SEED, never a replay that renumbers from a coordinate the record no longer
+    uses. `RecordProjectionError` is the channel :func:`replay` already refuses
+    on (`start_seq`/`allocate` contradictions) — this is a fifth contradiction
+    of the same kind, not a new exception class and not a crash.
+
+    ⛔ NARROW BY CONSTRUCTION, and this is what keeps the whole existing suite
+    green: the refusal fires ONLY when the graph has a `record_cursor` ROW, and
+    the row — not the mode — is the fact. A graph with no row, which is every
+    graph before the cutover, replays exactly as it does today. `position=False`
+    never reaches here (it writes no position row, so there is no second position
+    to create), and neither does `allocate=True` (the counter issues the number).
+
+    ⛔ AND THE MODE MUST NOT BE PROMOTED OVER THE ROW: a `seeded` exemption was
+    tried and MEASURED WRONG (cycle-2 review, P1). It looked right against
+    §A7.5.5 step (0)'s *"a row in mode 'allocating' or 'halted' is cut over; a
+    row in 'seeded' is NOT"* — but that sentence is about RE-SEEDABILITY, and
+    §A7.7's `halted → seeded` ("abandoning the counter") is `REOPEN_SQL`:
+    `SET mode='seeded'`, KEEPING `seq`. A reopened graph's ordinals were issued
+    and consumed while its mode says `seeded`, and the exemption let the same
+    payload land at a SECOND position silently: measured, positions 1-4 with the
+    door's record at 4, then `halt()`+`reopen()` → `(4, 'seeded')`, then an
+    enumerated replay at 9 WROTE, leaving `journal_event` holding that record at
+    4 AND 9. `seq` does not separate the cases either: a first-cutover seed at
+    floor N leaves the counter at N, so an enumerated write at N+1 makes every
+    later allocation a `23505`. What IS true is the narrower claim cycle 1 made:
+    the refusal used to name two verbs a `seeded` graph cannot execute. The mode
+    therefore selects the REMEDY (see the arms below) and nothing else.
+
+    ⚠️ AND A `seeded` GRAPH IS NOT A DEAD END — `arm` is its writer.
+    `ALLOCATION_SQL`'s `AND mode = 'active'` refuses `allocate=True` while
+    `seeded`, which is deliberate (no position may be issued before the cutover
+    is armed), and the arming step (`seeded → active`) is what opens it. That
+    transition has exactly one writer and it is the cutover's own 6.3 step, so
+    the refusal names it.
+
+    ⛔ AND AN ARM THAT CANNOT ASK MUST NOT GO QUIET. One statement — no `seq`
+    row and no refusal; a read that FAILS is a refusal that names the migration
+    it needs (see the `except` below), never a silent "no cursor". The one
+    direction this guard may be quiet in is ABSENCE, because absence of a cursor
+    row is exactly the pre-cutover state it exists to leave alone.
+    """
+    try:
+        cursor.execute(CURSOR_PRESENCE_SQL, (org_id, graph_id))
+        row = cursor.fetchone()
+    except Exception as exc:
+        # ⛔ A FAILURE TO ASK IS NOT AN ANSWER — and it is not a crash either.
+        # The one shape that reaches here on a real deployment is a database the
+        # counter migration has not reached (`42P01`), and the remedy is a
+        # MIGRATION, not a retry of the replay; so the refusal names it rather
+        # than escaping as a bare driver error the caller would read as a lost
+        # write. Catching-and-continuing is not an option: a failed statement
+        # aborts the caller's transaction (`25P02`), so a "tolerated" miss would
+        # poison every statement after it.
+        raise RecordProjectionError(
+            f"an ENUMERATED replay could not be classified: reading "
+            f"public.{RECORD_CURSOR_TABLE} for org_id={org_id!r} "
+            f"graph_id={graph_id!r} failed ({_driver_fault(exc)}). Apply the "
+            f"ordinal-allocator migration (20261116000001_record_cursor_"
+            f"allocator.sql) to this database — this replay cannot tell a "
+            f"pre-cutover graph from an allocated one, and enumerating an "
+            f"allocated one would store the same record at a second position "
+            f"(#9190)"
+        ) from exc
+    if row is None:
+        return
+    seq, mode = ((row["seq"], row["mode"]) if isinstance(row, Mapping)
+                 else (row[0], row[1]))
+    # ⛔ A ROW IS THE FACT, NOT THE MODE (cycle-2 review, P1 — MEASURED). An
+    # exemption for `seeded` looked right against the plan's "a row in 'seeded'
+    # is NOT cut over" (§A7.5.5 step (0)), and that sentence is about
+    # RE-SEEDABILITY, not about this guard. §A7.7's `halted → seeded`
+    # ("abandoning the counter") is `REOPEN_SQL`: `SET mode='seeded'` and it KEEPS
+    # `seq`. So a reopened graph's ordinals WERE issued and consumed while its
+    # mode says `seeded`, and the exemption let the same payload land at a second
+    # position silently — measured: positions 1-4 with the door's record at 4,
+    # then `halt()`+`reopen()` → `(4,'seeded')`, then an enumerated replay at 9
+    # WROTE, leaving `journal_event` holding that record at 4 AND 9. `seq` does
+    # not separate the cases either: a first-cutover seed at floor N leaves the
+    # counter at N, so an enumerated write at N+1 makes the next allocation a
+    # `23505` on every subsequent write. The mode is therefore used for the
+    # REMEDY only — the refusal itself stays keyed on the row.
+    # The mode decides the REMEDY, never the verdict (see above). Each arm names
+    # a step that actually RUNS from this state — cycle 1 was right that the old
+    # single sentence named two verbs a `seeded` graph cannot execute, and the
+    # answer is the correct verb, not an exemption.
+    if mode == MODE_SEEDED:
+        # ⛔ NOT "never armed": a graph reached through `reopen` (`halted →
+        # seeded`) WAS armed and its `seq` is consumed, which is why the row
+        # guards this replay at all (cycle-2 P1). What is common to both holes
+        # here — a first-cutover seed and a reopened graph — is that the mode is
+        # not `active`, so nothing may be issued until `arm` runs. Naming `arm`
+        # is therefore correct for both, and the premise must not claim more.
+        remedy = (
+            f"this graph is SEEDED with the counter at {seq!r} and is not armed, "
+            f"so re-seed it first (`seed`, the cutover's 6.2 step — monotone "
+            f"`GREATEST`, so it is free when the counter is already right; a "
+            f"graph that resumed writing before arming is exactly the case that "
+            f"needs it) and then ARM it — the 6.3 arming step (`arm`, `seeded → "
+            f"{MODE_ACTIVE}`) — after which the door writes through the "
+            f"allocator (`allocate=True`), which refuses until then precisely "
+            f"because no position may be issued before the cutover is armed; a "
+            f"seed alone will not open this arm, and a replay never will"
+        )
+    elif mode == MODE_HALTED:
+        remedy = (
+            f"this graph is HALTED and its carried numbers were consumed, so the "
+            f"re-cut is explicit: `reopen` (`halted → {MODE_SEEDED}`), re-seed, "
+            f"arm — never a replay"
+        )
+    else:
+        # ⛔ THE `active` ARM, AND IT MAY ONLY NAME VERBS THAT RUN **IN ORDER**
+        # (fresh-context review, P2 ×2). Two defects were fixed here, and both
+        # were the same class this change exists to remove — a remedy naming a
+        # step that cannot execute:
+        #   · the old sentence ended "or a seed", and `SEED_SQL`'s conflict path
+        #     is `WHERE cursor_row.mode IN ('seeded','halted')`, so `seed` REFUSES
+        #     from `active`;
+        #   · the first correction named "`halt` … then re-seed and `arm`", and
+        #     `seed` sets ONLY `seq`/`updated_at` — it does not change `mode` — so
+        #     the graph is still `halted` afterwards and `ARM_SQL` (`AND mode =
+        #     'seeded'`) refuses. The chain stopped one step short of the state it
+        #     promised, and left the graph with no allocator at all.
+        # `reopen` is the step that makes `seeded` reachable from `halted`, so the
+        # chain is `halt → re-seed → reopen → arm` and every stage runs.
+        # `allocate=True` does NOT belong in the refusal list: `ALLOCATION_SQL` is
+        # scoped `AND mode = 'active'`, so it IS the write path here — it issues a
+        # NEW number, which is why it cannot RE-BASE a counter that is behind.
+        remedy = (
+            f"this graph is {MODE_ACTIVE}: the allocator is issuing this graph's "
+            f"positions, so `allocate=True` IS the write path (`ALLOCATION_SQL` "
+            f"is scoped to '{MODE_ACTIVE}') and it issues a NEW number. A repair "
+            f"`allocate=True` cannot express is a COUNTER repair, not a replay: "
+            f"`halt` it FIRST (`{MODE_ACTIVE} → {MODE_HALTED}`) — `seed` and "
+            f"`reopen` both REFUSE from '{MODE_ACTIVE}', so neither is the first "
+            f"step — then re-seed (monotone `GREATEST`), `reopen` "
+            f"(`{MODE_HALTED} → {MODE_SEEDED}`) and `arm` (`{MODE_SEEDED} → "
+            f"{MODE_ACTIVE}`). Never a replay"
+        )
+    raise RecordProjectionError(
+        f"an ENUMERATED replay is REFUSED for a graph whose positions are "
+        f"ISSUED: public.{RECORD_CURSOR_TABLE} holds (seq={seq!r}, "
+        f"mode={mode!r}) for org_id={org_id!r} graph_id={graph_id!r}, so this "
+        f"graph's ordinals are ALLOCATED and CARRIED by the journal rather than "
+        f"computed by this replay (#9190, owner ruling 2026-11-15: \"the record "
+        f"allocates the ordinal and the journal record CARRIES it; replay READS "
+        f"the number instead of computing it\"). Enumerating here would store "
+        f"the same record at a SECOND position with no error: {remedy}"
+    )
+
+
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str, start_seq: int = 1,
-           position: bool = True) -> ReplayReport:
+           position: bool = True,
+           allocate: bool = False) -> ReplayReport:
     """Replay a journal into the record, on the CALLER's transaction.
 
     `§3`: *"One transaction covers the journal and its projection — no dual
@@ -6935,6 +7554,17 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     ``position=seq is not None`` and layer 1 is populated by production traffic,
     not only by a replay. ``True`` (the default) keeps every caller that
     predates the parameter byte-identical.
+
+    ⛔ AND AN ENUMERATED REPLAY IS REFUSED ONCE THE GRAPH IS CUT OVER (#9190).
+    Before a single plan statement, and only when ``position`` is on and
+    ``allocate`` off, this asks whether the graph has a `public.record_cursor`
+    row — i.e. whether its positions are ISSUED. If they are, the replay is
+    refused by name: the ordinal is the allocator's to give and the journal's to
+    CARRY, so enumerating would store the same record at a second position with
+    no error (`ON CONFLICT … DO NOTHING` cannot see it, and the `#9318`
+    collision guard only fires on an ABSORBED insert). A graph with no row —
+    every graph before cutover — is unaffected; see
+    :func:`_refuse_an_enumerated_replay`.
 
     THE TENANT GUC (R6). The FIRST statement executed is
     :data:`TENANT_GUC_SQL` — ``set_config('app.current_org_id', $1, true)`` —
@@ -6989,18 +7619,55 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     with the wrong DSN now fails closed on the first write instead of silently
     turning RLS off.
     """
+    # ⛔ THE ALLOCATOR IS IMPORTED ONLY ON THE ARM THAT USES IT. `replay_plan` is
+    # loaded BY FILE PATH by the PGlite harness (`supabase/tests/pglite/
+    # validate.mjs`), where a relative import raises; this function is not on that
+    # path, but a package-less caller of `replay(position=…)` must not break
+    # either. The derived path — every production write today — needs NOTHING
+    # from the allocator, and neither does the harness.
+    ra = None
+    if allocate:
+        from . import record_allocator as ra
+
     plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
-                       start_seq=start_seq, position=position)
+                       start_seq=start_seq, position=position,
+                       allocate=allocate)
+    # ⛔ THE ISOLATION GUARD RUNS INSIDE THE CALLER'S TRANSACTION, before any
+    # statement: the allocator's "allocation order = commit order" is a READ
+    # COMMITTED property, and under REPEATABLE READ/SERIALIZABLE the counter's
+    # blocked UPDATE raises 40001 with no retry on this path. Reading
+    # `transaction_isolation` anywhere else would answer about a DIFFERENT
+    # transaction than the one about to allocate.
+    if allocate:
+        ra.require_read_committed(conn)
     # The tenant, before anything it scopes. NOT part of `plan`: the plan stays
     # the pure journal→record declaration, and this statement is the session
     # context the plan is applied in — plus the role gate that decides whether
     # the context can mean anything at all.
     cursor = scope_connection(conn, org_id)
+    # ⛔ AN ENUMERATED REPLAY ASKS FIRST WHETHER THE COUNTER HAS ALREADY ISSUED
+    # THIS GRAPH'S POSITIONS (#9190). `position=False` writes no position row and
+    # `allocate=True` IS the allocator's arm, so neither is asked; a graph with no
+    # cursor row replays unchanged. A `seeded` row is asked too — see
+    # :func:`_refuse_an_enumerated_replay` for why the mode is the REMEDY and the
+    # row is the fact.
+    if position and not allocate and records:
+        _refuse_an_enumerated_replay(cursor, org_id, graph_id)
     total = len(plan)
+    allocated: list[int] = []
     for index, statement in enumerate(plan, start=1):
+        is_allocation = statement.sql.startswith(ALLOCATION_STATEMENT_PREFIX)
         try:
             cursor.execute(statement.sql, statement.params)
+            if is_allocation:
+                allocated.extend(int(row[0]) for row in cursor.fetchall())
         except Exception as exc:
+            # A NAMED allocator failure keeps its own class (retryable /
+            # collision) so the caller can act on it — 40001/40P01/57014 are the
+            # caller's to retry, 23505 is a defect to investigate. Anything else
+            # keeps this module's attribution.
+            if is_allocation and ra is not None:
+                ra.raise_named(exc, where="the position allocation")
             # ⛔ ATTRIBUTION, NOT A BARE RE-RAISE (#10620). The caller's wrap
             # (`RecordWriter.write`) used to name only the exception CLASS, so
             # the record's own log could not say which statement, table or
@@ -7012,19 +7679,47 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
                     _driver_fault(exc),
                 )
             ) from exc
-        if _JOURNAL_INSERT_PREFIX in statement.sql:
+        if statement.sql.startswith(_JOURNAL_INSERT_PREFIX) and not is_allocation:
             # ⛔ THE ONE CALL SITE (#9318). Everything that writes layer 1 — the
             # live door, a full replay, the reconciler, the backfill tools —
             # executes its position row HERE, so the replay-vs-collision verdict
             # cannot be forgotten by a caller and cannot be spelled twice. It
             # costs one `rowcount` read on the insert path, and one extra
             # tenant-scoped SELECT only when the insert was ABSORBED.
+            #
+            # ⛔ `startswith`, NOT `in`, AND `not is_allocation` — MEASURED, and
+            # it cost an armed write. `#9318` matched the journal insert by
+            # SUBSTRING, and the ALLOCATION statement CONTAINS
+            # `INSERT INTO public.journal_event` too (it is the statement that
+            # writes the positions). The guard then unpacked
+            # `statement.params[:5]` — which for the allocation are
+            # `(event_types[], payloads[], recorded_at[], n, org_id)` — and its
+            # conflict SELECT compared `org_id = <text[]>`:
+            # `UndefinedFunction 42883: operator does not exist: text = text[]`,
+            # raised as a `RecordStatementError` on statement 3/3 of EVERY armed
+            # write. The allocation needs no guard anyway: its insert has no
+            # `ON CONFLICT DO NOTHING`, so a duplicate is a `23505` that fails
+            # the transaction and rolls the counter's increment back.
             _refuse_a_journal_collision(cursor, statement, index, total)
     report = ReplayReport(events=len(records), statements=0)
     for statement in plan:
         if _JOURNAL_INSERT_PREFIX in statement.sql:
             continue
+        if statement.sql.startswith(ALLOCATION_STATEMENT_PREFIX):
+            # The allocated statement WRITES the position rows, so it is not a
+            # projection mutation — counting it would make `statements`
+            # incomparable with every reader of this report (and with
+            # `ReplayReport.statements`' own documented meaning).
+            continue
         report.statements += 1
+    if allocate and records:
+        # ⛔ AN EMPTY BATCH IS A NO-OP, NOT A REFUSAL: `write([])` is APPLIED and
+        # allocates nothing, so `replay([])` must not report `CursorNotActive` —
+        # that would be a false diagnosis of a non-event.
+        block = ra.allocation_from_seqs(allocated, org_id=org_id,
+                                        graph_id=graph_id)
+        report.first_seq = block.first_seq
+        report.last_seq = block.last_seq
     return report
 
 
@@ -7035,7 +7730,8 @@ _JOURNAL_INSERT_PREFIX = "INSERT INTO public.journal_event"
 
 def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
                 graph_id: str, start_seq: int = 1,
-                position: bool = True) -> list[Statement]:
+                position: bool = True,
+                allocate: bool = False) -> list[Statement]:
     """Every statement a full replay emits, in order, WITHOUT executing any.
 
     The totality gate lives here: an undeclared record type raises before a
@@ -7069,9 +7765,36 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
             f"start_seq is the journal position of records[0] and must be >= 1 "
             f"(got {start_seq!r})"
         )
+    if allocate and start_seq != 1:
+        # ⛔ NOT SILENTLY IGNORED. `allocate=True` means the RECORD issues the
+        # number (`#9190`'s reopen), so a caller-supplied watermark has no
+        # meaning — and a plan that quietly dropped one would leave the caller
+        # believing it had positioned the batch.
+        raise RecordProjectionError(
+            f"allocate=True derives the position from the record's counter, so "
+            f"start_seq must be left at 1 (got {start_seq!r})"
+        )
+    if allocate and not position:
+        raise RecordProjectionError(
+            "allocate=True writes the position rows (that is what the number "
+            "is for), so position=False is contradictory"
+        )
     columns = table_columns()
     refused = refused_props_names()
     plan: list[Statement] = []
+    if allocate:
+        # LAYER MUTATIONS FIRST, the allocation LAST: the counter's row lock is
+        # the last CONTENDED lock the transaction takes, which is what keeps two
+        # writers from deadlocking on (layer rows, counter) vs (counter, layer
+        # rows). The positions the allocation then writes are not contended —
+        # each writer holds its own freshly issued seq.
+        for record in records:
+            plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
+                                      columns=columns, refused=refused))
+        if records:
+            plan.append(allocation_statement(
+                org_id=org_id, graph_id=graph_id, records=records))
+        return plan
     for seq, record in enumerate(records, start=start_seq):
         plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
                                   columns=columns, refused=refused))

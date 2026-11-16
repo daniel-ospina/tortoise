@@ -495,7 +495,7 @@ class TestStubDiscriminatorIsNotCallerWritable:
             _legacy_stub(sdk, label, name)
             stub_id = _stub_ids(sdk)[(label, name)]
             with pytest.raises(ValueError, match="_stub"):
-                sdk.update_entity(stub_id, _stub=False)
+                sdk.update_knowledge(stub_id, _stub=False)
             assert "EntityMutated" not in [
                 e.get("type")
                 for e in EventLog(str(events / "events.jsonl")).read_all()
@@ -512,7 +512,7 @@ class TestStubDiscriminatorIsNotCallerWritable:
             _legacy_stub(sdk, "Object", "probe-object")
             stub_id = _stub_ids(sdk)[("Object", "probe-object")]
             with pytest.raises(ValueError, match="_stub"):
-                sdk.update_entity(stub_id, _stub=False)
+                sdk.update_knowledge(stub_id, _stub=False)
             sdk.create_entity("object", "probe-object",
                               objectKind="core:task", is_episodic=False)
             regs = _regs(events, "ObjectRegistered", "probe-object")

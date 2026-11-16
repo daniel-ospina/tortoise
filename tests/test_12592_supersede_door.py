@@ -11,16 +11,16 @@ Measured on ``main`` at ``58f904ccf7`` (2026-11-15) on THIS checkout, embedded
 engine, throwaway nodes — the defect, re-measured rather than inherited from the
 filing lane:
 
-    update_entity(<Point>,   status='superseded')  -> ACCEPTED  supersededBy=None
-    update_entity(<Object>,  status='superseded')  -> ACCEPTED  supersededBy=None
-    update_entity(<Subject>, status='superseded')  -> ACCEPTED  supersededBy=None
-    update_entity(<Object>,  status='superseded', supersededBy='v2') -> ACCEPTED
+    update_knowledge(<Point>,   status='superseded')  -> ACCEPTED  supersededBy=None
+    update_knowledge(<Object>,  status='superseded')  -> ACCEPTED  supersededBy=None
+    update_knowledge(<Subject>, status='superseded')  -> ACCEPTED  supersededBy=None
+    update_knowledge(<Object>,  status='superseded', supersededBy='v2') -> ACCEPTED
 
 and the door that reads as generic was Point-only:
 
-    sdk.supersede(<Point>, <new>)    -> OK (CORRECTS + outdated + status)
-    sdk.supersede(<Object>, <new>)   -> REFUSED  ValueError: No point '<id>'
-    sdk.supersede(<Subject>, <new>)  -> REFUSED  ValueError: No point '<id>'
+    sdk.supersede_knowledge(<Point>, <new>)    -> OK (CORRECTS + outdated + status)
+    sdk.supersede_knowledge(<Object>, <new>)   -> REFUSED  ValueError: No point '<id>'
+    sdk.supersede_knowledge(<Subject>, <new>)  -> REFUSED  ValueError: No point '<id>'
 
 So an Object/Subject could say "replaced" through one door and never name what
 replaced it through any door.
@@ -54,7 +54,7 @@ What this suite pins (each row names the mutation that reds it):
   (``rows[0]``) instead of the per-row loop -> the fan-out case reds; key the
   Point edge probe on ``n.id`` instead of ``ID(n)`` ->
   ``test_a_nameless_twin_is_not_authorised_by_its_siblings_corrects_edge`` reds.
-* ``sdk.supersede()`` dispatches on the OLD node's label: Point unchanged,
+* ``sdk.supersede_knowledge()`` dispatches on the OLD node's label: Point unchanged,
   Object/Subject write the coherent triple (status + successor NAME + instant)
   in ONE journaled write. Mutation: dispatch on nothing (today's Point-only
   chain) -> the two non-Point dispatch cases red with ``No point``; store the
@@ -71,12 +71,12 @@ What this suite pins (each row names the mutation that reds it):
   lifts a superseded row; a status-ONLY lift is still refused. Mutation: make
   the new guard fire on any status -> the un-supersede case reds.
 * The #12907 IMPOSTOR class, at all FOUR sites this door reads a caller value
-  through a ``str`` test: ``update_entity(status=<impostor>)`` still answers the
-  CARRIER ``ValueError``; ``supersede(<live>, <impostor>)`` still answers
+  through a ``str`` test: ``update_knowledge(status=<impostor>)`` still answers the
+  CARRIER ``ValueError``; ``supersede_knowledge(<live>, <impostor>)`` still answers
   ``no :<label> <id>`` on Object/Subject and the Point doors' own ``No point
   <id>`` on ``Point`` (the family dispatch bounds the SUCCESSOR operand on both
   arms — the first cut bounded only the entity arm and the Point arm still
-  raised ``TypeError``, #12914 review P2); ``supersede(<impostor>, <id>)``
+  raised ``TypeError``, #12914 review P2); ``supersede_knowledge(<impostor>, <id>)``
   answers a ``ValueError``
   rather than a ``TypeError``. Mutation: spell the base-content gate
   ``isinstance(x, str)`` instead of ``issubclass(type(x), str)`` -> the first two
@@ -107,7 +107,7 @@ What this suite pins (each row names the mutation that reds it):
   ``__eq__``. Mutation: restore a bare ``old_id == new_id`` ->
   ``test_the_POINT_arms_self_successor_gate_does_not_dispatch_to_the_caller``
   reds and a ``CORRECTS`` self-edge is written (measured:
-  ``supersede(<live Point>, SubLyingEq(<same id>))`` -> ACCEPTED, row
+  ``supersede_knowledge(<live Point>, SubLyingEq(<same id>))`` -> ACCEPTED, row
   ``['superseded', True, None]``). The ENTITY arm carries the same bound
   (cycle 7); a genuine successor still lands, pinned in the same case.
 
@@ -173,12 +173,12 @@ def test_a_bare_superseded_status_is_refused_on_every_label(sdk, tmp_path, label
     before_row = _row(sdk, label, node)
     before_records = len(_journal(tmp_path / "events.jsonl"))
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="superseded")
+        sdk.update_knowledge(node, status="superseded")
     msg = str(exc.value)
     assert "no successor" in msg, msg
     assert f":{label}" in msg, (
         f"the refusal must name the label it refused: {msg!r}")
-    assert "supersede(" in msg, (
+    assert "supersede_knowledge(" in msg, (
         f"the repair must name the door that can be taken: {msg!r}")
     assert _row(sdk, label, node) == before_row, (
         "a REFUSED write moved the row: "
@@ -198,7 +198,7 @@ def test_the_refusal_names_this_labels_own_section_of_the_model(sdk):
     for label, section in expect.items():
         node = _make(sdk, label, f"sect-{label.lower()}")
         with pytest.raises(ValueError) as exc:
-            sdk.update_entity(node, status="superseded")
+            sdk.update_knowledge(node, status="superseded")
         assert f"ONTOLOGY {section}" in str(exc.value), (
             f"{label} refusal must cite ONTOLOGY {section}: {exc.value!r}")
 
@@ -207,7 +207,7 @@ def test_a_point_refusal_prescribes_retract_not_reserved_archived(sdk):
     """§5 declares `archived` RESERVED on Points, so naming it is unperformable."""
     node = _make(sdk, "Point", "reserved-archived")
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="superseded")
+        sdk.update_knowledge(node, status="superseded")
     msg = str(exc.value)
     assert "retract_point" in msg, msg
     assert "RESERVED on Points" in msg, (
@@ -221,7 +221,7 @@ def test_the_coherent_pair_is_admitted_through_the_same_door(sdk, label):
     Mutation: make `_successor_named_by` return False unconditionally -> red.
     """
     node = _make(sdk, label, f"pair-{label.lower()}")
-    sdk.update_entity(node, status="superseded",
+    sdk.update_knowledge(node, status="superseded",
                       supersededBy=f"pair-{label.lower()}-v2")
     row = _row(sdk, label, node)
     assert row[0] == "superseded", row
@@ -237,10 +237,10 @@ def test_a_carried_row_may_restate_its_status(sdk, label):
     Mutation: drop the "every bound row already names one" early return -> red.
     """
     node = _make(sdk, label, f"echo-{label.lower()}")
-    sdk.update_entity(node, status="superseded",
+    sdk.update_knowledge(node, status="superseded",
                       supersededBy=f"echo-{label.lower()}-v2")
     before = _row(sdk, label, node)
-    sdk.update_entity(node, status="superseded")
+    sdk.update_knowledge(node, status="superseded")
     assert _row(sdk, label, node) == before
 
 
@@ -266,7 +266,7 @@ def test_a_point_superseded_the_documented_way_may_restate_its_status(sdk):
     assert before[1] is None, (
         "fixture drifted: `supersede_point` is expected to name the successor "
         f"by the EDGE, not the property: {before}")
-    sdk.update_entity(old, status="superseded")
+    sdk.update_knowledge(old, status="superseded")
     assert _row(sdk, "Point", old) == before, (
         "the echo of a correctly-superseded Point must be a no-op, not a refusal")
 
@@ -293,7 +293,7 @@ def test_a_carrier_that_names_nobody_does_not_satisfy_the_guard(sdk, carriers):
     """
     node = _make(sdk, "Object", "names-nobody")
     with pytest.raises(ValueError, match="no successor"):
-        sdk.update_entity(node, status="superseded", **carriers)
+        sdk.update_knowledge(node, status="superseded", **carriers)
     assert _row(sdk, "Object", node)[0] != "superseded", (
         "a refused write still left the row claiming superseded")
 
@@ -313,7 +313,7 @@ def test_the_verdict_is_over_every_bound_row(sdk):
     g.query("CREATE (:Object {id:$id, name:'fo-bare', status:'live'})",
             params={"id": shared})
     with pytest.raises(ValueError, match="no successor"):
-        sdk.update_entity(shared, status="superseded")
+        sdk.update_knowledge(shared, status="superseded")
     statuses = sorted(
         r[0] for r in g.query(
             "MATCH (n:Object {id:$id}) RETURN n.status",
@@ -332,7 +332,7 @@ def test_supersede_on_a_point_is_unchanged(sdk):
     """
     old = _make(sdk, "Point", "pt-old")
     new = _make(sdk, "Point", "pt-new")
-    result = sdk.supersede(old, new)
+    result = sdk.supersede_knowledge(old, new)
     assert result["invalidated"] is True, result
     assert result["id"] == old and result["corrected_by"] == new, result
     assert "edges_transferred" in result, (
@@ -361,7 +361,7 @@ def test_supersede_writes_the_coherent_triple_for_a_non_point(sdk, tmp_path,
     old = _make(sdk, label, f"ct-old-{label.lower()}")
     new_name = f"ct-new-{label.lower()}"
     new = _make(sdk, label, new_name)
-    result = sdk.supersede(old, new)
+    result = sdk.supersede_knowledge(old, new)
     assert result["superseded"] is True and result["label"] == label, result
     assert result["superseded_by"] == new_name, (
         "the CARRIER is the successor's NAME (§4.2/§4.3: stored verbatim), "
@@ -390,25 +390,25 @@ def test_supersede_writes_the_coherent_triple_for_a_non_point(sdk, tmp_path,
 def test_the_family_door_refuses_a_self_replacement(sdk, label):
     node = _make(sdk, label, f"self-{label.lower()}")
     with pytest.raises(ValueError, match="differ"):
-        sdk.supersede(node, node)
+        sdk.supersede_knowledge(node, node)
 
 
 @pytest.mark.parametrize("label", ["Object", "Subject"])
 def test_the_family_door_refuses_an_already_terminal_old(sdk, label):
     """Terminalization is one-way (#2498) — the same refusal the Point door makes."""
     old = _make(sdk, label, f"dead-old-{label.lower()}")
-    sdk.update_entity(old, status="archived")
+    sdk.update_knowledge(old, status="archived")
     with pytest.raises(ValueError, match="already terminal"):
-        sdk.supersede(old, _make(sdk, label, f"dead-old-new-{label.lower()}"))
+        sdk.supersede_knowledge(old, _make(sdk, label, f"dead-old-new-{label.lower()}"))
 
 
 @pytest.mark.parametrize("label", ["Object", "Subject"])
 def test_the_family_door_refuses_a_terminal_successor(sdk, label):
     old = _make(sdk, label, f"tnew-old-{label.lower()}")
     new = _make(sdk, label, f"tnew-new-{label.lower()}")
-    sdk.update_entity(new, status="archived")
+    sdk.update_knowledge(new, status="archived")
     with pytest.raises(ValueError, match="itself terminal"):
-        sdk.supersede(old, new)
+        sdk.supersede_knowledge(old, new)
     assert _row(sdk, label, old)[0] != "superseded", (
         "a refused supersession terminalized the old row anyway")
 
@@ -422,7 +422,7 @@ def test_the_family_door_refuses_a_cross_family_successor(sdk):
     old = _make(sdk, "Object", "xfamily-old")
     subj = _make(sdk, "Subject", "xfamily-subject")
     with pytest.raises(ValueError, match="same-family"):
-        sdk.supersede(old, subj)
+        sdk.supersede_knowledge(old, subj)
     assert _row(sdk, "Object", old)[0] != "superseded"
 
 
@@ -432,7 +432,7 @@ def test_the_family_door_refuses_a_nameless_successor(sdk):
     g.query("CREATE (:Object {id:'nameless-12592', status:'live'})")
     old = _make(sdk, "Object", "nameless-old")
     with pytest.raises(ValueError, match="no name"):
-        sdk.supersede(old, "nameless-12592")
+        sdk.supersede_knowledge(old, "nameless-12592")
 
 
 def test_transfer_edges_false_is_refused_on_a_non_point(sdk):
@@ -440,7 +440,7 @@ def test_transfer_edges_false_is_refused_on_a_non_point(sdk):
     old = _make(sdk, "Object", "xfer-old")
     new = _make(sdk, "Object", "xfer-new")
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(old, new, transfer_edges=False)
+        sdk.supersede_knowledge(old, new, transfer_edges=False)
     msg = str(exc.value)
     assert "Point-only" in msg, msg
     assert "status='archived'" in msg, (
@@ -451,7 +451,7 @@ def test_transfer_edges_false_is_refused_on_a_non_point(sdk):
 def test_a_missing_old_node_still_answers_the_point_shaped_message(sdk):
     """Absent input is unchanged: the door falls through to the Point path."""
     with pytest.raises(ValueError, match="No point"):
-        sdk.supersede("no-such-node-12592",
+        sdk.supersede_knowledge("no-such-node-12592",
                       _make(sdk, "Object", "absent-new"))
 
 
@@ -503,9 +503,9 @@ def test_the_record_carried_un_supersede_still_lifts_the_row(sdk):
     Mutation: make the new guard fire on any status-bearing write -> red.
     """
     node = _make(sdk, "Object", "unsup")
-    sdk.update_entity(node, status="superseded", supersededBy="unsup-v2",
+    sdk.update_knowledge(node, status="superseded", supersededBy="unsup-v2",
                       supersededAt="2026-01-01T00:00:00Z")
-    sdk.update_entity(node, status="live", supersededBy=None,
+    sdk.update_knowledge(node, status="live", supersededBy=None,
                       supersededAt=None)
     row = _row(sdk, "Object", node)
     assert row == ["live", None, None], (
@@ -515,9 +515,9 @@ def test_the_record_carried_un_supersede_still_lifts_the_row(sdk):
 def test_a_status_only_lift_is_still_refused(sdk):
     """…and the incoherent half stays refused — the carriers would still say so."""
     node = _make(sdk, "Object", "unsup-only")
-    sdk.update_entity(node, status="superseded", supersededBy="unsup-only-v2")
+    sdk.update_knowledge(node, status="superseded", supersededBy="unsup-only-v2")
     with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
-        sdk.update_entity(node, status="live")
+        sdk.update_knowledge(node, status="live")
     assert _row(sdk, "Object", node)[0] == "superseded", (
         "a refused status-only lift still moved the row")
 
@@ -551,7 +551,7 @@ def test_a_key_with_a_colliding_hash_is_refused_as_an_exotic_key(sdk):
 
     node = _make(sdk, "Object", "ambiguous")
     with pytest.raises(ValueError, match="CONFLICTING successor write"):
-        sdk.update_entity(node, status="superseded",
+        sdk.update_knowledge(node, status="superseded",
                           **{_K("supersededBy"): "amb-v2",
                              "supersededBy": None})
     assert _row(sdk, "Object", node) == [None, None, None], (
@@ -569,7 +569,7 @@ def test_a_non_string_carrier_names_nobody_and_is_refused(sdk, carrier):
     """
     node = _make(sdk, "Object", f"nonstr-{type(carrier).__name__}-{carrier!r}")
     with pytest.raises(ValueError, match="no successor"):
-        sdk.update_entity(node, status="superseded", supersededBy=carrier)
+        sdk.update_knowledge(node, status="superseded", supersededBy=carrier)
     assert _row(sdk, "Object", node)[0] is None
 
 
@@ -578,13 +578,13 @@ def test_a_hybrid_row_nameless_as_object_is_prescribed_the_point_remedy(sdk):
 
     ``:Point:Object`` with the Point arm satisfied by an incoming CORRECTS edge
     and the Object arm nameless: the prescription must be the Point one
-    (``retract_point``, or the edge ``supersede()`` writes on that path).
+    (``retract_point``, or the edge ``supersede_knowledge()`` writes on that path).
     ``archived`` is RESERVED on Points (§5) and this door REFUSES it there, so
     the Object-first wording would prescribe an unperformable repair.
 
     Mutation: choose the wording from ``nameless[0]`` instead of from the BOUND
     labels -> the message prescribes ``status='archived'`` and offers
-    ``supersede()`` as the route, and this reds. Second mutation: drop
+    ``supersede_knowledge()`` as the route, and this reds. Second mutation: drop
     ``mixed_clause`` -> the last assertion reds.
     """
     node = _make(sdk, "Point", "hybrid-12592")
@@ -592,11 +592,11 @@ def test_a_hybrid_row_nameless_as_object_is_prescribed_the_point_remedy(sdk):
         "MATCH (n:Point {id:$id}) SET n:Object",
         params={"id": node})
     successor = _make(sdk, "Point", "hybrid-12592-v2")
-    sdk.supersede(node, successor)          # Point path: CORRECTS edge, no prop
+    sdk.supersede_knowledge(node, successor)          # Point path: CORRECTS edge, no prop
     sdk._get_proj().g.query(
         "MATCH (o:Object {id:$id}) REMOVE o.supersededBy", params={"id": node})
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="superseded")
+        sdk.update_knowledge(node, status="superseded")
     message = str(exc.value)
     assert "retract_point" in message and "RESERVED" in message, (
         "a hybrid nameless as an Object was prescribed a Point-illegal "
@@ -605,6 +605,63 @@ def test_a_hybrid_row_nameless_as_object_is_prescribed_the_point_remedy(sdk):
     assert "binds :Object and :Point at once" in message, (
         f"a hybrid id was handed a route that cannot serve it: {message}")
     assert "is NOT the route here" in message, message
+
+
+def test_an_id_bound_by_two_families_is_refused_not_fanned_out(sdk):
+    """#12914 review P2: one resolved label must not be written to EVERY label.
+
+    `_supersession_label` resolves ONE label, but the write goes through
+    `update_knowledge`, whose non-Point arm applies ``SET n += $props`` to every
+    label the id binds. Measured on the reviewed head: an id bound by
+    :Object AND :Subject ended with BOTH rows carrying the Object's successor
+    name, while naming that Subject successor directly is refused as
+    cross-family — the same defect one step quieter. `supersededBy` is read by a
+    per-label successor probe, so one stored name cannot be right for two families.
+
+    Mutation: remove the sibling-label probe -> red (both rows take the Object's
+    successor and the call returns success).
+    """
+    node = _make(sdk, "Object", "twofam-12592")
+    sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$id}) SET o:Subject, o.subjectKind='core:organization'",
+        params={"id": node})
+    successor = _make(sdk, "Object", "twofam-12592-v2")
+    sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$id}) SET o:Subject, o.subjectKind='core:organization'",
+        params={"id": successor})
+    with pytest.raises(ValueError, match="binds BOTH"):
+        sdk.supersede_knowledge(node, successor)
+    assert _row(sdk, "Object", node) == [None, None, None], (
+        "a refused hybrid write moved the Object row")
+    assert _row(sdk, "Subject", node) == [None, None, None], (
+        "a refused hybrid write moved the Subject row")
+
+
+def test_a_successor_id_that_names_two_rows_is_refused(sdk):
+    """#12914 review P3: the SUCCESSOR side needs the source side's fan-out rule.
+
+    The source is adjudicated per row; the successor was not — ``names[0]`` took
+    whatever `collect(n.name)` returned first, so an id bound by two rows with
+    different names stored an engine-order choice the caller never made
+    (measured on the reviewed head: `Alpha` stored, no refusal).
+
+    Mutation: restore ``successor_name = names[0]`` -> red (the call is accepted
+    and stores one of the two names).
+    """
+    node = _make(sdk, "Object", "twoname-12592")
+    successor = _make(sdk, "Object", "twoname-12592-v2")
+    sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$id}) CREATE (o2:Object {id:$id, "
+        "name:'twoname-12592-alias', status:'live'})",
+        params={"id": successor})
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$id}) RETURN count(o)",
+        params={"id": successor}).result_set
+    assert rows[0][0] == 2, "fixture drifted: the successor needs two rows"
+    with pytest.raises(ValueError, match="MORE THAN ONE ROW"):
+        sdk.supersede_knowledge(node, successor)
+    assert _row(sdk, "Object", node) == [None, None, None], (
+        "a refused ambiguous-successor write moved the source row")
 
 
 # ── 6. The CLEAR and the per-node verdict (cycle-2 review P0 + P1) ────────
@@ -622,9 +679,9 @@ def test_a_point_named_by_the_property_loses_it_to_a_same_call_clear(sdk):
     this reds, because the call is accepted.
     """
     node = _make(sdk, "Point", "pointprop")
-    sdk.update_entity(node, status="superseded", supersededBy="pointprop-v2")
+    sdk.update_knowledge(node, status="superseded", supersededBy="pointprop-v2")
     with pytest.raises(ValueError, match="CLEARS `supersededBy`"):
-        sdk.update_entity(node, status="superseded", supersededBy=None)
+        sdk.update_knowledge(node, status="superseded", supersededBy=None)
     assert _row(sdk, "Point", node)[1] == "pointprop-v2", (
         "a refused clear still moved the row")
 
@@ -632,7 +689,7 @@ def test_clearing_the_carrier_in_the_same_call_as_the_word_is_refused(sdk):
     """A `supersededBy=None` beside the word splits the pair by the WRITE itself.
 
     Measured on the cycle-1 head: a coherent Object superseded with 'acme-v2',
-    then ``update_entity(o, status='superseded', supersededBy=None)`` was
+    then ``update_knowledge(o, status='superseded', supersededBy=None)`` was
     ACCEPTED and stored ``[['superseded', None]]`` — the exact state §4.3 says
     the model does not have. The stored-value allowance reads the PRE-write row,
     so it licensed a call that removed the very value it was reading.
@@ -641,9 +698,9 @@ def test_clearing_the_carrier_in_the_same_call_as_the_word_is_refused(sdk):
     (i.e. let the stored successor satisfy a call that clears it) -> red.
     """
     node = _make(sdk, "Object", "clearcall")
-    sdk.update_entity(node, status="superseded", supersededBy="acme-v2")
+    sdk.update_knowledge(node, status="superseded", supersededBy="acme-v2")
     with pytest.raises(ValueError, match="CLEARS `supersededBy`"):
-        sdk.update_entity(node, status="superseded", supersededBy=None)
+        sdk.update_knowledge(node, status="superseded", supersededBy=None)
     assert _row(sdk, "Object", node) == ["superseded", "acme-v2", None], (
         "a refused clear still moved the row")
 
@@ -667,9 +724,9 @@ def test_a_bare_carrier_clear_stays_ACCEPTED_and_leaves_the_row_dead(sdk, label)
     decision in one place.
     """
     node = _make(sdk, label, f"bareclear-{label.lower()}")
-    sdk.update_entity(node, status="superseded",
+    sdk.update_knowledge(node, status="superseded",
                       supersededBy=f"bareclear-{label.lower()}-v2")
-    sdk.update_entity(node, supersededBy=None)
+    sdk.update_knowledge(node, supersededBy=None)
     row = _row(sdk, label, node)
     assert row[0] == "superseded", (
         f"a bare carrier clear must leave the row dead (#12882 F2): {row}")
@@ -683,8 +740,8 @@ def test_clearing_the_carrier_is_still_allowed_when_the_call_leaves_the_word(sdk
     call -> red, and #12825's coherent un-supersede stops working.
     """
     node = _make(sdk, "Object", "clearok")
-    sdk.update_entity(node, status="superseded", supersededBy="clearok-v2")
-    sdk.update_entity(node, status="live", supersededBy=None, supersededAt=None)
+    sdk.update_knowledge(node, status="superseded", supersededBy="clearok-v2")
+    sdk.update_knowledge(node, status="live", supersededBy=None, supersededAt=None)
     assert _row(sdk, "Object", node) == ["live", None, None]
 
 
@@ -709,7 +766,7 @@ def test_a_nameless_twin_is_not_authorised_by_its_siblings_corrects_edge(sdk):
         "MATCH (n:Point {id:$id}) CREATE (m:Point) SET m = properties(n)",
         params={"id": first})
     with pytest.raises(ValueError, match="no successor"):
-        sdk.update_entity(first, status="superseded")
+        sdk.update_knowledge(first, status="superseded")
     stored = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN n.status AS st", params={"id": first}
     ).result_set
@@ -724,7 +781,7 @@ def test_the_SNAKE_spelling_of_a_same_call_clear_is_the_same_split(sdk):
     `supersededBy` write ONE column while `keys_rendering_as` sees only the camel
     key: measured ``keys_rendering_as({'superseded_by': None}, {'supersededBy'})
     == []``. On the cycle-3 head that let
-    ``update_entity(<superseded Object, supersededBy='acme-v2'>,
+    ``update_knowledge(<superseded Object, supersededBy='acme-v2'>,
     status='superseded', superseded_by=None)`` through — the graph kept the name
     every reader resolves while the record's `superseded_by` went NULL, so the
     record derived the word from a column the caller had just cleared.
@@ -737,15 +794,15 @@ def test_the_SNAKE_spelling_of_a_same_call_clear_is_the_same_split(sdk):
     camel spelling rather than "name someone".
     """
     node = _make(sdk, "Object", "snakesplit")
-    sdk.update_entity(node, status="superseded", supersededBy="snakesplit-v2")
+    sdk.update_knowledge(node, status="superseded", supersededBy="snakesplit-v2")
     with pytest.raises(ValueError, match="CLEARS `supersededBy`"):
-        sdk.update_entity(node, status="superseded", superseded_by=None)
+        sdk.update_knowledge(node, status="superseded", superseded_by=None)
     assert _row(sdk, "Object", node)[1] == "snakesplit-v2", (
         "a refused snake clear still moved the row")
 
     other = _make(sdk, "Object", "snakeset")
     with pytest.raises(ValueError, match="NO READER RESOLVES"):
-        sdk.update_entity(other, status="superseded", superseded_by="snakeset-v2")
+        sdk.update_knowledge(other, status="superseded", superseded_by="snakeset-v2")
     assert _row(sdk, "Object", other) == [None, None, None], (
         "a refused shadow-spelled name still moved the row")
 
@@ -758,7 +815,7 @@ def test_a_snake_key_beside_the_camel_key_is_the_conflict(sdk):
     """
     node = _make(sdk, "Object", "snakeconflict")
     with pytest.raises(ValueError, match="CONFLICTING successor write"):
-        sdk.update_entity(node, status="superseded", supersededBy="snakeconflict-v2",
+        sdk.update_knowledge(node, status="superseded", supersededBy="snakeconflict-v2",
                           superseded_by=None)
 
 
@@ -768,7 +825,7 @@ def test_a_key_whose_RENDERING_hides_the_column_is_refused_as_exotic(sdk):
     A `str` subclass whose CONTENT is `superseded_by` and whose `__str__` is
     something else is a carrier to `_split_properties` (`snake(prop)` on the
     journal prop) and invisible to a `str(k)`-only test. Measured on the cycle-4
-    head: `update_entity(<superseded Object, supersededBy='acme-v2'>,
+    head: `update_knowledge(<superseded Object, supersededBy='acme-v2'>,
     status='superseded', **{K: None})` was ADMITTED — the graph kept the camel
     name while the record's column went NULL, so the record folded `live`.
 
@@ -785,15 +842,15 @@ def test_a_key_whose_RENDERING_hides_the_column_is_refused_as_exotic(sdk):
             return "zzz"          # the live name; the CONTENT is the column
 
     node = _make(sdk, "Object", "renderhide")
-    sdk.update_entity(node, status="superseded", supersededBy="renderhide-v2")
+    sdk.update_knowledge(node, status="superseded", supersededBy="renderhide-v2")
     with pytest.raises(ValueError, match="not plain `str`"):
-        sdk.update_entity(node, status="superseded", **{_K("superseded_by"): None})
+        sdk.update_knowledge(node, status="superseded", **{_K("superseded_by"): None})
     assert _row(sdk, "Object", node)[1] == "renderhide-v2", (
         "a refused write through the hidden rendering still moved the row")
 
     other = _make(sdk, "Object", "renderconflict")
     with pytest.raises(ValueError, match="CONFLICTING successor write"):
-        sdk.update_entity(other, status="superseded", supersededBy="renderconflict-v2",
+        sdk.update_knowledge(other, status="superseded", supersededBy="renderconflict-v2",
                           **{_K("superseded_by"): None})
 
 
@@ -816,7 +873,7 @@ def test_a_value_that_lies_about_being_blank_does_not_name_a_successor(sdk):
 
     node = _make(sdk, "Object", "blanklies")
     with pytest.raises(ValueError, match="no successor"):
-        sdk.update_entity(node, status="superseded", supersededBy=BlankLies(""))
+        sdk.update_knowledge(node, status="superseded", supersededBy=BlankLies(""))
     assert _row(sdk, "Object", node) == [None, None, None], (
         "a refused lie still moved the row")
 
@@ -841,12 +898,12 @@ def test_a_status_word_that_lies_about_equality_is_still_the_word(sdk):
 
     node = _make(sdk, "Object", "eqliar")
     with pytest.raises(ValueError, match="no successor"):
-        sdk.update_entity(node, status=Liar("superseded"))
+        sdk.update_knowledge(node, status=Liar("superseded"))
     assert _row(sdk, "Object", node) == [None, None, None], (
         "a refused lying word still moved the row")
 
     # …and the coherent pair through the same object is still admitted.
-    sdk.update_entity(node, status=Liar("superseded"), supersededBy="eqliar-v2")
+    sdk.update_knowledge(node, status=Liar("superseded"), supersededBy="eqliar-v2")
     assert _row(sdk, "Object", node)[:2] == ["superseded", "eqliar-v2"]
 
 
@@ -872,7 +929,7 @@ def test_a_value_whose_rendering_blanks_the_wire_is_not_a_name(sdk):
     for name, value in (("len0", Len0("v2")), ("rep0", Rep0("v2"))):
         node = _make(sdk, "Object", f"wirelie-{name}")
         with pytest.raises(ValueError, match="no successor"):
-            sdk.update_entity(node, status="superseded", supersededBy=value)
+            sdk.update_knowledge(node, status="superseded", supersededBy=value)
         assert _row(sdk, "Object", node) == [None, None, None], (
             f"a refused {name} value still moved the row")
 
@@ -897,11 +954,58 @@ def test_a_key_whose_str_CHANGES_between_reads_cannot_be_checked_at_all(sdk):
             return "supersededBy" if calls["n"] >= 8 else "harmless"
 
     node = _make(sdk, "Object", "flip")
-    sdk.update_entity(node, status="superseded", supersededBy="flip-v2")
+    sdk.update_knowledge(node, status="superseded", supersededBy="flip-v2")
     with pytest.raises(ValueError, match="not plain `str`"):
-        sdk.update_entity(node, status="superseded", **{Flip("zzz"): None})
+        sdk.update_knowledge(node, status="superseded", **{Flip("zzz"): None})
     assert _row(sdk, "Object", node)[1] == "flip-v2", (
         "a refused flip-key write still stripped the carrier")
+
+
+def test_a_key_that_names_the_successor_to_the_guard_and_NOT_to_the_write_is_refused(sdk):
+    """P1, the shape the cycle-8 suite case could NOT discriminate (#12914).
+
+    The sibling case above passes a `None` VALUE, so `_successor_named_by` refuses
+    it on the value test whatever the KEY renders — the bound was therefore never
+    the thing under test. THIS case supplies a non-empty plain `str` value, so the
+    ALLOWANCE is what is being decided: a stateful `str` subclass whose CONTENT is
+    `supersededBy` (so `str.__str__` names the carrier) and whose `__str__` answers
+    the camel name for this guard's reads and a harmless name on the WRITER's later
+    call names the successor to the guard while filing a DIFFERENT property on the
+    wire — measured on the reviewed head (`f59a6451`) as `K>=7` admitted: graph
+    `['superseded', None, 'v2']` (the word, nobody named, plus an orphan `zzz`).
+
+    So the allowance must sit BELOW the key bound: "can any read here be trusted"
+    is prior to "does this call name a successor".
+
+    Mutation: put `if _successor_named_by(props): return` back ABOVE the
+    `type(k) is not str` bound -> red (the call is accepted, `supersededBy` goes
+    NULL and `zzz` is written).
+    """
+    calls = {"n": 0}
+
+    class Flip(str):
+        def __str__(self):
+            calls["n"] += 1
+            return "supersededBy" if calls["n"] <= 8 else "zzz"
+
+    node = _make(sdk, "Object", "flipkey")
+    sdk.update_knowledge(node, status="superseded", supersededBy="flipkey-v2")
+    before = _row(sdk, "Object", node)
+    with pytest.raises(ValueError, match="not plain `str`"):
+        sdk.update_knowledge(node, status="superseded",
+                             **{Flip("supersededBy"): "v2"})
+    assert _row(sdk, "Object", node) == before, (
+        "a refused flip-key write moved the row")
+    assert _row(sdk, "Object", node)[1] == "flipkey-v2", (
+        "the carrier was replaced by the key's wire spelling")
+    # ⛔ THE ORPHAN IS THE DAMAGE, and it is measured, not asserted: the write
+    # renders the key AGAIN, later, and files it under `zzz`. A guard that only
+    # checks the row's `supersededBy` cannot see it.
+    orphans = sdk._get_proj().g.query(
+        "MATCH (n:Object {id:$id}) RETURN n.zzz", params={"id": node}).result_set
+    assert [list(r) for r in orphans] == [[None]], (
+        f"the flip key parked the successor's name on a property no reader "
+        f"resolves: {[list(r) for r in orphans]}")
 
 
 def test_a_successor_with_a_lying_eq_is_still_the_same_row(sdk):
@@ -920,7 +1024,7 @@ def test_a_successor_with_a_lying_eq_is_still_the_same_row(sdk):
 
     node = _make(sdk, "Object", "selfeq")
     with pytest.raises(ValueError, match="cannot be its own successor"):
-        sdk.supersede(NeverEqual(node), NeverEqual(node))
+        sdk.supersede_knowledge(NeverEqual(node), NeverEqual(node))
     assert _row(sdk, "Object", node)[0] is None, (
         "a refused self-supersede still moved the row")
 
@@ -946,7 +1050,7 @@ class _Impostor:
 def test_an_impostor_status_still_answers_the_carrier_refusal(sdk, label):
     """the write door's carrier guard reads the status at BASE CONTENT — safely.
 
-    Measured on the #12914-reviewed head ``6823ed2b84``: ``update_entity(<live
+    Measured on the #12914-reviewed head ``6823ed2b84``: ``update_knowledge(<live
     Object>, status=<impostor>, supersededBy='y')`` escaped as ``TypeError:
     descriptor '__str__' requires a 'str' object`` (sdk.py:5806) where the same
     call with ``status='live'`` answers the documented carrier ``ValueError``.
@@ -960,7 +1064,7 @@ def test_an_impostor_status_still_answers_the_carrier_refusal(sdk, label):
     node = _make(sdk, label, f"impostor-status-{label.lower()}")
     before = _row(sdk, label, node)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status=_Impostor(), supersededBy="v2")
+        sdk.update_knowledge(node, status=_Impostor(), supersededBy="v2")
     msg = str(exc.value)
     assert "lifecycle CARRIER" in msg, msg
     assert f":{label}" in msg, f"the refusal must name the label: {msg!r}"
@@ -971,17 +1075,17 @@ def test_an_impostor_status_still_answers_the_carrier_refusal(sdk, label):
 
 @pytest.mark.parametrize("label", ["Point", "Object", "Subject"])
 def test_an_impostor_successor_answers_the_same_missing_node_refusal(sdk, label):
-    """``supersede(<live>, <impostor>)`` answers ``no <label> <id>``, not a TypeError.
+    """``supersede_knowledge(<live>, <impostor>)`` answers ``no <label> <id>``, not a TypeError.
 
     Measured at ``6823ed2b84``: ``TypeError: descriptor '__str__' requires a
     'str' object`` at the self-successor gate (sdk.py:22819), where
-    ``supersede(<live>, 'no-such-node')`` answers ``supersede: no :Object …``.
+    ``supersede_knowledge(<live>, 'no-such-node')`` answers ``supersede: no :Object …``.
     A value the graph cannot encode names no node, so it must reach that same
     refusal.
 
     ⛔ THE POINT ARM IS ITS OWN CASE (#12914 review P2, cycle 5): the first cut of
     this fix only bounded the Object/Subject dispatch, so
-    ``supersede(<live Point>, <impostor>)`` still escaped as ``TypeError:
+    ``supersede_knowledge(<live Point>, <impostor>)`` still escaped as ``TypeError:
     argument of type '…' is not iterable`` (measured) out of
     ``_assert_lifecycle_guard`` — the default and most-used family, untested
     because the parametrization stopped at the two entity labels. Its documented
@@ -997,7 +1101,7 @@ def test_an_impostor_successor_answers_the_same_missing_node_refusal(sdk, label)
     node = _make(sdk, label, f"impostor-new-{label.lower()}")
     before = _row(sdk, label, node)
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(node, _Impostor())
+        sdk.supersede_knowledge(node, _Impostor())
     msg = str(exc.value)
     expected = "No point" if label == "Point" else f"no :{label}"
     assert expected in msg, f"the missing-successor refusal must land: {msg!r}"
@@ -1007,7 +1111,7 @@ def test_an_impostor_successor_answers_the_same_missing_node_refusal(sdk, label)
     # The bound is the FORGED-CLASS shape, not a blanket `str`-only door.
     for genuine in (123, None):
         with pytest.raises(ValueError) as exc:
-            sdk.supersede(node, genuine)
+            sdk.supersede_knowledge(node, genuine)
         assert expected in str(exc.value), exc.value
         assert _row(sdk, label, node) == before, (
             f"a refused {genuine!r} successor moved the row: "
@@ -1015,7 +1119,7 @@ def test_an_impostor_successor_answers_the_same_missing_node_refusal(sdk, label)
 
 
 def test_an_impostor_old_id_is_refused_at_this_door(sdk):
-    """``supersede(<impostor>, <id>)`` is a ``ValueError``, never a ``TypeError``.
+    """``supersede_knowledge(<impostor>, <id>)`` is a ``ValueError``, never a ``TypeError``.
 
     Measured at ``6823ed2b84``: ``TypeError: argument of type 'Imp' is not
     iterable`` out of the driver's parameter check, reached from
@@ -1031,7 +1135,7 @@ def test_an_impostor_old_id_is_refused_at_this_door(sdk):
     node = _make(sdk, "Object", "impostor-old")
     before = _row(sdk, "Object", node)
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(_Impostor(), node)
+        sdk.supersede_knowledge(_Impostor(), node)
     msg = str(exc.value)
     assert "is not a node id" in msg, msg
     assert "cannot encode it" in msg, (
@@ -1057,7 +1161,7 @@ def test_every_GENUINE_non_str_id_keeps_the_documented_no_point_answer(sdk,
     """
     node = _make(sdk, "Object", f"genuine-non-str-{type(value).__name__}")
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(value, node)
+        sdk.supersede_knowledge(value, node)
     msg = str(exc.value)
     assert msg.startswith("No point "), (
         f"a genuine non-`str` id must keep the Point doors' documented answer: "
@@ -1083,9 +1187,9 @@ class _ImpostorBoomRepr(_Impostor):
 def test_a_hostile_repr_cannot_replace_THIS_doors_new_refusals(sdk):
     """Both arms added for the impostor class answer ``ValueError``, not ``repr``.
 
-    Measured on this fix's first cut: ``supersede(<impostor with a raising
+    Measured on this fix's first cut: ``supersede_knowledge(<impostor with a raising
     ``__repr__``>, <id>)`` -> ``RuntimeError: repr-boom`` from the new door
-    refusal, and ``supersede(<live Object>, <same>)`` -> ``RuntimeError`` from
+    refusal, and ``supersede_knowledge(<live Object>, <same>)`` -> ``RuntimeError`` from
     the missing-successor message, i.e. the arms escaped as the caller's own
     exception class. Not fail-open (no write, row unchanged) but the contract is
     the exception CLASS.
@@ -1097,11 +1201,11 @@ def test_a_hostile_repr_cannot_replace_THIS_doors_new_refusals(sdk):
     before = _row(sdk, "Object", node)
 
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(_ImpostorBoomRepr(), node)
+        sdk.supersede_knowledge(_ImpostorBoomRepr(), node)
     assert "is not a node id" in str(exc.value), exc.value
 
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(node, _ImpostorBoomRepr())
+        sdk.supersede_knowledge(node, _ImpostorBoomRepr())
     assert "no :Object" in str(exc.value), (
         f"the missing-successor refusal must land: {exc.value!r}")
 
@@ -1137,10 +1241,10 @@ class _ImpostorBoomBoth(_ImpostorBoomRepr, metaclass=_BoomNameMeta):
 def test_an_impostor_whose_class_name_raises_still_answers_this_door(sdk):
     """The refusal interpolates the class NAME — so that read must be safe too.
 
-    Measured on this fix's second cut: ``supersede(<impostor whose metaclass
+    Measured on this fix's second cut: ``supersede_knowledge(<impostor whose metaclass
     raises in ``__name__``>, <id>)`` escaped as ``RuntimeError: name-boom`` from
     the new door refusal, while the sibling arm
-    ``supersede(<live Object>, <same>)`` answered its ``no :Object`` ValueError.
+    ``supersede_knowledge(<live Object>, <same>)`` answered its ``no :Object`` ValueError.
     Not fail-open (no write, row unchanged), but the door's contract is the
     exception CLASS, and the name is a caller operand just as the ``repr`` is.
 
@@ -1150,7 +1254,7 @@ def test_an_impostor_whose_class_name_raises_still_answers_this_door(sdk):
     node = _make(sdk, "Object", "impostor-boom-name")
     before = _row(sdk, "Object", node)
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(_ImpostorBoomName(), node)
+        sdk.supersede_knowledge(_ImpostorBoomName(), node)
     msg = str(exc.value)
     assert "is not a node id" in msg, msg
     assert "metaclass raises" in msg, (
@@ -1158,7 +1262,7 @@ def test_an_impostor_whose_class_name_raises_still_answers_this_door(sdk):
     # Both reads hostile at once: the ``repr`` fallback calls the name helper,
     # so the second guard must hold inside the first one's fallback too.
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(_ImpostorBoomBoth(), node)
+        sdk.supersede_knowledge(_ImpostorBoomBoth(), node)
     assert "is not a node id" in str(exc.value), exc.value
 
     assert _row(sdk, "Object", node) == before, (
@@ -1201,7 +1305,7 @@ def test_a_class_name_that_is_not_a_str_cannot_escape_the_refusal(sdk):
 
     Measured on this fix's third cut: a metaclass returning an object whose
     ``__format__``/``__str__``/``__repr__`` raise made
-    ``supersede(<impostor>, <id>)`` escape as ``RuntimeError: fmt-boom`` at BOTH
+    ``supersede_knowledge(<impostor>, <id>)`` escape as ``RuntimeError: fmt-boom`` at BOTH
     call sites of ``_refusal_type_name`` (the door's message and
     ``_refusal_repr``'s fallback), where the contract is ``ValueError``.
     Fail-closed — the row does not move — but the contract is the exception CLASS.
@@ -1213,7 +1317,7 @@ def test_a_class_name_that_is_not_a_str_cannot_escape_the_refusal(sdk):
     before = _row(sdk, "Object", node)
 
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(_ImpostorFmtBoom(), node)
+        sdk.supersede_knowledge(_ImpostorFmtBoom(), node)
     msg = str(exc.value)
     assert "is not a node id" in msg, msg
     assert "its name is not a str" in msg, (
@@ -1221,7 +1325,7 @@ def test_a_class_name_that_is_not_a_str_cannot_escape_the_refusal(sdk):
 
     # The `_refusal_repr` fallback path: both reads hostile at once.
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(_ImpostorBoomReprFmt(), node)
+        sdk.supersede_knowledge(_ImpostorBoomReprFmt(), node)
     assert "is not a node id" in str(exc.value), exc.value
 
     assert _row(sdk, "Object", node) == before, (
@@ -1260,7 +1364,7 @@ def test_a_repr_that_ANSWERS_with_a_bad_subclass_cannot_escape_the_refusal(sdk):
 
     Measured on this fix's fourth cut (#12914 review P3): a caller ``__repr__``
     returning a ``str`` subclass whose ``__format__`` raises made
-    ``supersede(<impostor>, <id>)`` -> ``RuntimeError: fmt-boom``, and the same
+    ``supersede_knowledge(<impostor>, <id>)`` -> ``RuntimeError: fmt-boom``, and the same
     value reached the PRE-EXISTING ``{status!r}`` carrier message this PR's F1
     fix sits beside. Fail-closed (no write) but the contract is the exception
     CLASS, and it is the same rule ``_refusal_type_name`` already states for the
@@ -1276,25 +1380,25 @@ def test_a_repr_that_ANSWERS_with_a_bad_subclass_cannot_escape_the_refusal(sdk):
 
     # 1. the Point successor arm (the value this cycle added a bound for).
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(point, _ImpostorFmtAnswer())
+        sdk.supersede_knowledge(point, _ImpostorFmtAnswer())
     assert "No point <imp-fmt>" in str(exc.value), exc.value
 
     # 2. the old-id arm (this PR's door refusal).
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(_ImpostorFmtAnswer(), obj)
+        sdk.supersede_knowledge(_ImpostorFmtAnswer(), obj)
     assert "is not a node id" in str(exc.value), exc.value
     assert "but its class is" in str(exc.value), (
         f"the class name is the fallback's second read: {str(exc.value)!r}")
 
     # 3. the carrier message's `status=` operand.
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(obj, status=_ImpostorFmtAnswer(), supersededBy="v2")
+        sdk.update_knowledge(obj, status=_ImpostorFmtAnswer(), supersededBy="v2")
     assert "lifecycle CARRIER" in str(exc.value), exc.value
 
     # 4. the carrier message's KEY operand — a genuine `str` subclass is admitted
     #    as a keyword key by CPython's own check.
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(obj, status="live", **{_FmtBoomKey("supersededBy"): "v2"})
+        sdk.update_knowledge(obj, status="live", **{_FmtBoomKey("supersededBy"): "v2"})
     assert "lifecycle CARRIER" in str(exc.value), exc.value
 
     assert _row(sdk, "Point", point) == before_p, (
@@ -1317,7 +1421,7 @@ class _BoomNameKey(str, metaclass=_BoomNameMeta):
 def test_an_exotic_key_whose_class_name_raises_is_still_a_refusal(sdk):
     """The exotic-key refusal groups class NAMES — that read must be safe too.
 
-    Measured on this fix's third cut: ``update_entity(<live Object>,
+    Measured on this fix's third cut: ``update_knowledge(<live Object>,
     status='superseded', **{<str subclass with a raising ``__name__``>: 1})``
     escaped as ``RuntimeError: name-boom`` from the ``type(k).__name__`` set
     comprehension, where the benign control (a plain ``str`` subclass key)
@@ -1331,7 +1435,7 @@ def test_an_exotic_key_whose_class_name_raises_is_still_a_refusal(sdk):
     before = _row(sdk, "Object", node)
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="superseded", **{_BoomNameKey("harmless"): 1})
+        sdk.update_knowledge(node, status="superseded", **{_BoomNameKey("harmless"): 1})
     msg = str(exc.value)
     assert "are not plain `str`" in msg, msg
     assert "metaclass raises" in msg, (
@@ -1366,7 +1470,7 @@ def test_a_non_str_successor_on_a_word_keeping_write_is_the_clears_refusal(sdk, 
 
     for value in (_Impostor(), _ImpostorBoomRepr()):
         with pytest.raises(ValueError) as exc:
-            sdk.update_entity(node, status="superseded", **{spelling: value})
+            sdk.update_knowledge(node, status="superseded", **{spelling: value})
         msg = str(exc.value)
         assert "CLEARS" in msg, (
             f"a non-str successor must reach the clears refusal, not a crash: {msg!r}")
@@ -1378,7 +1482,7 @@ def test_a_non_str_successor_on_a_word_keeping_write_is_the_clears_refusal(sdk, 
     # shadow-column branch, so the bound did not swallow it.
     if spelling == "superseded_by":
         with pytest.raises(ValueError) as exc:
-            sdk.update_entity(node, status="superseded", superseded_by="v2")
+            sdk.update_knowledge(node, status="superseded", superseded_by="v2")
         assert "NO READER RESOLVES" in str(exc.value), str(exc.value)
         assert _row(sdk, "Object", node) == before, (
             f"a refused shadow-spelled write moved the row: "
@@ -1398,7 +1502,7 @@ def test_the_self_successor_gate_does_not_dispatch_to_the_caller(sdk):
     """``_old_word == _new_word`` must not run the caller's ``__eq__``.
 
     Measured on this fix's sixth cut (#12914 review P2, cycle 7):
-    ``supersede(<live Object>, <impostor defining a raising ``__eq__``>)`` raised
+    ``supersede_knowledge(<live Object>, <impostor defining a raising ``__eq__``>)`` raised
     ``RuntimeError: eq-boom`` from the self-successor comparison, where the same
     call with a plain impostor answers ``supersede: no :Object <id>``. The gate
     now runs only when BOTH operands are genuinely ``str`` — the only case in
@@ -1412,7 +1516,7 @@ def test_the_self_successor_gate_does_not_dispatch_to_the_caller(sdk):
     before = _row(sdk, "Object", node)
 
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(node, _ImpostorEqBoom())
+        sdk.supersede_knowledge(node, _ImpostorEqBoom())
     msg = str(exc.value)
     assert "no :Object" in msg, (
         f"the missing-successor refusal must land, not a caller exception: {msg!r}")
@@ -1422,7 +1526,7 @@ def test_the_self_successor_gate_does_not_dispatch_to_the_caller(sdk):
 
     # The genuine self-successor refusal is unchanged.
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(node, node)
+        sdk.supersede_knowledge(node, node)
     assert "must differ" in str(exc.value), str(exc.value)
 
 
@@ -1463,7 +1567,7 @@ def test_the_POINT_arms_self_successor_gate_does_not_dispatch_to_the_caller(sdk)
 
     Measured on this fix's eighth cut (#12914 review P2, cycle 9): a GENUINE
     ``str`` subclass whose ``__eq__`` answers False walked
-    ``supersede(<live Point>, SubLyingEq(<the same id>))`` past the self-successor
+    ``supersede_knowledge(<live Point>, SubLyingEq(<the same id>))`` past the self-successor
     gate — ``str.__eq__`` answers ``NotImplemented`` for a subclass that
     overrides ``__eq__``, so the CALLER's answer is the one that lands — and the
     write stored the row as its OWN successor (row
@@ -1481,7 +1585,7 @@ def test_the_POINT_arms_self_successor_gate_does_not_dispatch_to_the_caller(sdk)
         before = _row(sdk, "Point", node)
 
         with pytest.raises(ValueError) as exc:
-            sdk.supersede(node, successor(node))
+            sdk.supersede_knowledge(node, successor(node))
         assert "must differ" in str(exc.value), (
             f"{successor.__name__}: the self-successor refusal must land, not "
             f"{str(exc.value)!r}")
@@ -1501,11 +1605,11 @@ def test_the_POINT_arms_self_successor_gate_does_not_dispatch_to_the_caller(sdk)
     # still lands (the bound did not become a blanket refusal).
     node = _make(sdk, "Point", "point-arm-plain")
     with pytest.raises(ValueError) as exc:
-        sdk.supersede(node, node)
+        sdk.supersede_knowledge(node, node)
     assert "must differ" in str(exc.value), str(exc.value)
 
     other = _make(sdk, "Point", "point-arm-successor")
-    sdk.supersede(node, other)
+    sdk.supersede_knowledge(node, other)
     assert [other] in _corrects_self(sdk, node), (
         f"a genuine successor must still be recorded: {_corrects_self(sdk, node)}")
 
@@ -1518,7 +1622,7 @@ def test_a_camel_str_subclass_successor_is_not_diagnosed_as_a_shadow_spelling(sd
     """The repair must name the ACTUAL cause: the value's class, not the spelling.
 
     Measured on this fix's sixth cut (#12914 review P3, cycle 7):
-    ``update_entity(<live Object>, status='superseded', supersededBy=Name('v2'))``
+    ``update_knowledge(<live Object>, status='superseded', supersededBy=Name('v2'))``
     was refused with "supplies the successor under a spelling NO READER
     RESOLVES (`supersededBy`)" — false: `supersededBy` IS the resolving spelling
     and `supersededBy='v2'` is admitted. The shadow-column diagnosis is now
@@ -1530,7 +1634,7 @@ def test_a_camel_str_subclass_successor_is_not_diagnosed_as_a_shadow_spelling(sd
     before = _row(sdk, "Object", node)
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="superseded",
+        sdk.update_knowledge(node, status="superseded",
                           supersededBy=_PlainStrSubclassName("v2"))
     msg = str(exc.value)
     assert "NO READER RESOLVES" not in msg, (
@@ -1539,7 +1643,7 @@ def test_a_camel_str_subclass_successor_is_not_diagnosed_as_a_shadow_spelling(sd
 
     # The snake spelling keeps its own (correct) diagnosis.
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="superseded", **{"superseded_by": "v2"})
+        sdk.update_knowledge(node, status="superseded", **{"superseded_by": "v2"})
     assert "NO READER RESOLVES" in str(exc.value), str(exc.value)
 
     assert _row(sdk, "Object", node) == before, (

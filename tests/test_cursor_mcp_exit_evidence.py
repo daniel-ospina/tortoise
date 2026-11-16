@@ -15,13 +15,16 @@ in CI. The chain driven here is
       -> POST /oauth/consent      (browser-session JWT)
       -> POST /oauth/token        (PKCE S256 -> ``oat_`` access token)
       -> POST /mcp  tools/list    (``oat_`` authenticates the MCP boundary)
-      -> POST /mcp  tools/call    ``tortoise_session_capture`` harness=cursor
+      -> POST /mcp  tools/call    ``tortoise_mine_knowledge_from_session`` harness=cursor
       -> GET  /v1/onboarding/state -> ``session_capture_receipt_cursor``
 
 Why the last leg is the lane's exit receipt
 -------------------------------------------
-``tortoise_session_capture`` is the T3 filing tool every MCP-surface harness
-uses, and it calls the SAME hosted capture pipeline as ``POST /v1/sessions``
+``tortoise_mine_knowledge_from_session(conversation=...)`` is the T3 filing
+tool every MCP-surface harness uses (`#12948` retired the public
+``tortoise_session_capture`` name into it; the session arm delegates to the
+retired body verbatim, so the door and its gates are the same), and it calls
+the SAME hosted capture pipeline as ``POST /v1/sessions``
 (``hosted_api._capture_session_impl``) so the two surfaces cannot drift on
 gate order; it writes the per-harness receipt
 ``session_capture_receipt_cursor`` through the identical code path
@@ -319,10 +322,18 @@ def _assert_cursor_receipt_end_to_end(tc, cp, access: str, org_id: str,
         listed = _parse_sse_json(rr)
         assert "result" in listed, listed
         names = {t["name"] for t in listed["result"]["tools"]}
-        assert "tortoise_session_capture" in names, \
+        # `#12948` (review B1 finding 6): the witness follows the LIVE name. The
+        # retired `tortoise_session_capture` is no longer in `tools/list` — it
+        # resolves through `RETIRED_USE_INSTEAD` — so a witness pinned on it
+        # asserted the absence of a name the surface deliberately stopped
+        # listing. `tortoise_mine_knowledge_from_session(conversation=)` IS the
+        # same door: its session arm delegates to `tortoise_session_capture`
+        # verbatim (mcp_server.py), so the receipt below is written by the same
+        # production path.
+        assert "tortoise_mine_knowledge_from_session" in names, \
             f"capture tool absent from the Cursor-facing tool list: {names}"
 
-        rr = _mcp_call(mcp_tc, "tortoise_session_capture",
+        rr = _mcp_call(mcp_tc, "tortoise_mine_knowledge_from_session",
                        {"conversation": _CONV, "harness": harness})
         assert rr.status_code == 200, rr.text
         body = _parse_sse_json(rr)

@@ -494,18 +494,26 @@ class RecordWrite:
     #: reports the refusal and an operator reading the metric are naming one
     #: thing, and a second word list is a second thing to drift.
     #:
-    #: ⛔ ``journal_collision`` IS THE ONE CONFLICT-DECIDED TOKEN (#9318). Every other
-    #: value is decided before a socket is opened (`_live_write_verdict`) or by
-    #: a failed statement; this one is a VERDICT on a conflict: the position row
-    #: holds content this write would not produce (a different record, or this
-    #: record's payload re-derived since that row was written), which
+    #: ⛔ ``journal_collision`` IS THE ONE POST-WRITE CONFLICT TOKEN (#9318, #12904).
+    #: Every other value is decided before a socket is opened
+    #: (`_live_write_verdict`) or by a failed statement; this one is a VERDICT on
+    #: a conflict: the position row holds a record this write does NOT continue —
+    #: a different record, or (with no `ts` for the capture time to be compared) a
+    #: payload whose derivation moved — which
     #: `record_projection.JournalPositionCollision` detected by comparing the
-    #: surviving row's content. It is not in ``LIVE_WRITE_REFUSALS`` for that
-    #: reason — that tuple is what the PRE-write verdict can return — and a
-    #: consumer switching on this field must accept it. Nothing is lost (the
+    #: surviving row's content AND its `recorded_at`. It is not in
+    #: ``LIVE_WRITE_REFUSALS`` for that reason — that tuple is what the PRE-write
+    #: verdict can return — and a consumer switching on this field must accept it.
+    #: ⛔ A same-capture re-derivation is NOT this token: it is DRIFT, it repairs
+    #: itself, and it reports `applied` with no counter (#12904 P0-1). ⚠️ NOR IS a
+    #: DIFFERENT record captured at the same instant — the split cannot tell it
+    #: from drift and admits it silently, which is the mirror residual named in
+    #: `record_projection.JournalPositionCollision`: do not read "a different
+    #: record" above as "every different record is caught". Nothing is lost (the
     #: journal holds the record); what is refused is indexing it under a position
-    #: that holds content this write would not produce, which the record cannot fix while its key
-    #: carries no journal identity (#12894).
+    #: whose row this write does not CONTINUE (a different `event_type`, or a
+    #: different capture time), which the record cannot fix while its key carries
+    #: no journal identity (#12894).
     #:
     #: ⛔ ``no_tenant_carried`` IS A SEPARATE TOKEN ON PURPOSE (#10021 review P3).
     #: The live door splits the nil tenant from a MALFORMED CARRIED pair — one is
@@ -563,9 +571,9 @@ class RecordWrite:
             # misses, and NOTHING here has its own term: `write_failed` covers an
             # unreachable record AND a record that WAS reached and refused the
             # projection; `journal_collision` (#9318) is a record that WAS reached
-            # and refused to index it under a journal position holding content
-            # this write would not produce (a different record, OR this record's
-            # payload re-derived since that row was written); `malformed_dsn` is a SET-UP defect (a value IS set and
+            # and refused to file itself under a journal position it does not
+            # continue (a different record, OR — with no `ts` to compare — a
+            # payload whose derivation moved); `malformed_dsn` is a SET-UP defect (a value IS set and
             # is wrong, so not `unconfigured`, which is defined as no value at
             # all); `no_tenant` is a deployment/caller gap; `no_tenant_carried` is
             # the same gap one arm over (a CARRIED tenant pair that was unusable);
@@ -1546,6 +1554,7 @@ class RecordWriter:
         first_seq: int = 1,
         conn: Any | None = None,
         position: bool = True,
+        allocate: bool = False,
     ) -> RecordWrite:
         """Apply `records` to the record, on a transaction the CALLER owns.
 
@@ -1566,6 +1575,16 @@ class RecordWriter:
             ordinal passes ``False``; a guessed ``seq`` still collides with a
             later replay's numbering in silence, and the four ontology layers
             are written either way.
+        :param allocate: **the record issues the positions** (#12894). The
+            plan's layer mutations run first and ONE statement then increments
+            `public.record_cursor` and inserts the rows carrying the numbers it
+            issued, so this call's `first_seq`/`last_seq` are the ALLOCATED
+            positions — not the caller's watermark — and the byte meter reads
+            the rows it actually wrote. `first_seq` must be left at 1 (the plan
+            refuses a caller watermark that would be silently dropped) and the
+            graph's cursor must exist in mode `active`
+            (:mod:`tortoise.record_allocator`); a `seeded`/`halted`/absent
+            cursor raises `CursorNotActive` rather than inventing a number.
 
         :raises RecordWriteError: the record was ARMED and the write did not
             happen (malformed DSN, unreachable record, totality refusal, or a
@@ -1598,6 +1617,13 @@ class RecordWriter:
             return RecordWrite(outcome=RecordWriteOutcome.APPLIED,
                                first_seq=first_seq, last_seq=first_seq - 1)
 
+        if allocate and not position:
+            # Refused BEFORE a connection: an allocated number exists to be
+            # CARRIED by a position row, so the two flags cannot both be set.
+            raise RecordWriteError(
+                "allocate=True and position=False are contradictory: the "
+                "allocated number is carried by the journal_event row")
+
         opened: Any | None = None
         target = conn
         if target is None:
@@ -1619,7 +1645,7 @@ class RecordWriter:
         try:
             report = record_projection.replay(
                 records, target, org_id=org_id, graph_id=graph_id,
-                start_seq=first_seq, position=position,
+                start_seq=first_seq, position=position, allocate=allocate,
             )
         except Exception as exc:
             # Totality (an undeclared/refused record type raises before the
@@ -1685,6 +1711,18 @@ class RecordWriter:
                 f"({type(exc).__name__}: {_bounded_cause(exc)})"
             ) from exc
 
+        # ⛔ THE ALLOCATED NUMBER IS THE WATERMARK (#12894). When the record
+        # issues the positions, `first_seq`/`last_seq` MUST come from what the
+        # counter handed back — deriving them from the caller's `first_seq` is
+        # how an allocated number reached neither `RecordWrite.last_seq` nor the
+        # byte meter: the meter then matched ZERO rows and charged 0, silently,
+        # under a contract that says it never fails a write. Measured by
+        # `tests/test_12894_record_cursor_live.py::
+        # test_the_allocated_number_reaches_the_watermark_and_the_byte_meter`.
+        watermark_first = report.first_seq if allocate else first_seq
+        watermark_last = (report.last_seq if allocate
+                          else first_seq + len(records) - 1)
+
         # #12762: MEASURE what this write actually stored, for the org that
         # wrote it. Deliberately AFTER the projection succeeded: the reading is
         # of rows that now exist. ⛔ MEASURED, NOT RECORDED: this seam does not
@@ -1695,7 +1733,7 @@ class RecordWriter:
             target,
             org_id=org_id,
             graph_id=graph_id,
-            first_seq=first_seq,
+            first_seq=watermark_first,
             n_records=len(records),
             position=position,
         )
@@ -1704,8 +1742,8 @@ class RecordWriter:
             outcome=RecordWriteOutcome.APPLIED,
             events=report.events,
             statements=report.statements,
-            first_seq=first_seq,
-            last_seq=first_seq + len(records) - 1,
+            first_seq=watermark_first,
+            last_seq=watermark_last,
             connection=opened,
             written_bytes=written.row_bytes if written is not None else 0,
             written_rows=written.rows if written is not None else 0,
@@ -1814,6 +1852,7 @@ def write_records(
     first_seq: int = 1,
     conn: Any | None = None,
     position: bool = True,
+    allocate: bool = False,
     writer: RecordWriter | None = None,
 ) -> RecordWrite:
     """One-call form of :meth:`RecordWriter.write` — the chokepoint's entry point.
@@ -1823,10 +1862,13 @@ def write_records(
     resolved per call either way, so a late arming is seen by both spellings —
     and this function exists so a caller with no seam object to hold does not
     have to invent one.
+
+    ``allocate`` is passed through unchanged: #12894's allocator is a property
+    of the WRITE, not of this convenience wrapper.
     """
     return (writer or RecordWriter()).write(
         records, org_id=org_id, graph_id=graph_id, first_seq=first_seq,
-        conn=conn, position=position,
+        conn=conn, position=position, allocate=allocate,
     )
 
 
@@ -2288,6 +2330,89 @@ def _report_live_write_refusal(reason: str, record_type: Any,
         f"{', '.join(LIVE_WRITE_REFUSALS)})")
 
 
+#: What to DO about each allocator refusal, keyed by the metric the allocator
+#: counted. The door cannot raise (its caller's append has already committed), so
+#: the remedy has to be in the log line or the operator is left with a token that
+#: says "something in the record failed".
+_ALLOCATOR_REMEDY = {
+    "cursor_not_active": (
+        # ⛔ THE `halted` HALF USED TO DEAD-END (re-review, P2). It read "run the
+        # seed and then `arm`, … a `halted` one means … `reopen` is the resume" —
+        # but `seed` does NOT change `mode` (`SEED_SQL` sets `seq`/`updated_at`
+        # only), so a `seed` on a `halted` counter leaves it `halted` and `arm`
+        # (`AND mode='seeded'`) refuses. `reopen` is not a parenthetical aside,
+        # it is a REQUIRED STEP, and the chain must name it in order.
+        # ⛔ THE NO-ROW AND `seeded` BRANCHES CARRY NO TRANSITION ARROW ON
+        # PURPOSE (re-review, P2): they are single-step, and an arrow there
+        # interleaved a `seeded → active` ahead of the halted chain's
+        # `halted → seeded`, which makes the message's arrows read out of order
+        # by any prefix-order check and invites the reader to run them that way.
+        # ⛔ THE `seeded` BRANCH MUST NOT SAY "never armed" (re-review round 3,
+        # P2): `REOPEN_SQL` moves `halted → seeded` and KEEPS `seq`, so a
+        # reopened cursor WAS armed and its numbers WERE consumed — the very
+        # state this PR's live test constructs as `(4, 'seeded')`. The sibling
+        # refusal in `record_projection` forbids this wording verbatim ("⛔ NOT
+        # 'never armed'"); two operator-facing messages giving opposite advice
+        # for one state is the class being removed here.
+        # ⛔ AND IT MUST KEEP THE RE-SEED. `arm` sets only `mode`, so a `seeded`
+        # counter that is BEHIND the table (a restore, or a write made before
+        # arming) is armed into the colliding state — the next allocation then
+        # issues an ordinal the table already holds, i.e. this very
+        # `duplicate_position`. The seed is monotone `GREATEST`, so naming it
+        # costs nothing when the counter is already right.
+        "the counter has no row for this graph, or its mode is not 'active'. "
+        "With no row, run the seed and then `arm` — that arms it. A `halted` "
+        "cursor was stopped by a defect, and `seed` does NOT change the mode, so "
+        "it takes `reopen` (`halted → seeded`), re-seed, then `arm` "
+        "(`seeded → active`). A `seeded` cursor is not armed: re-seed it "
+        "(monotone `GREATEST`, so it is free when the counter is already right, "
+        "and it is required when a restore or a pre-arm write left the counter "
+        "behind) and then `arm`"),
+    "duplicate_position": (
+        "the counter issued a position the record already holds — the counter is "
+        "BEHIND the table (a restore that bulk-loaded `journal_event` without the "
+        "counter). Do NOT re-arm it WITHOUT re-seeding first — that is how the "
+        "same ordinal is issued twice; but `arm` is also the ONLY way back to an "
+        "allocating counter, so a remedy that forbids it outright closes the last "
+        "door. `halt` it FIRST (`active → halted`) — `seed` and `reopen` both "
+        "REFUSE from `active`, so neither is the first step — then re-seed "
+        "(monotone `GREATEST`), `reopen` (`halted → seeded`) and `arm` "
+        "(`seeded → active`)"),
+}
+
+
+def _allocator_refusal_cause(exc: BaseException | None,
+                             depth: int = 4) -> str | None:
+    """Which ALLOCATOR refusal is buried in this failure, or ``None`` (#12894).
+
+    Looked up by TYPE through the `from exc` chain, for the same reason
+    :func:`_journal_collision_cause` is: a message match would fire on a record
+    whose payload happens to contain the words. The return value is the metric
+    name the allocator counted, which is also the key into
+    :data:`_ALLOCATOR_REMEDY` — one vocabulary, pinned by
+    ``tests/test_12894_record_cursor.py::test_the_door_speaks_the_counters_vocabulary``:
+    a refusal cannot enter `kinds` below without naming a token
+    `record_allocator.metrics()` really keeps and `_ALLOCATOR_REMEDY` really
+    answers. The lookup at the call site stays a defensive ``.get`` with a
+    fallback rather than a strict index, because it runs in the door's failure
+    path where a ``KeyError`` would replace the failure being reported — so the
+    invariant is a test, not a raise (fresh-context review, P3: the token WAS
+    `position_collision` while the counter was `duplicate_position`).
+    """
+    from . import record_allocator as ra
+
+    kinds = {ra.CursorNotActive: "cursor_not_active",
+             ra.PositionCollision: "duplicate_position"}
+    seen = 0
+    while exc is not None and seen <= depth:
+        for kind, metric in kinds.items():
+            if isinstance(exc, kind):
+                return metric
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return None
+
+
 def _journal_collision_cause(
         exc: BaseException | None,
         depth: int = 4,
@@ -2322,6 +2447,7 @@ def write_live_record(record: Mapping[str, Any], *,
                       durable: bool = True,
                       seq: int | None = None,
                       tenant: tuple[str, str] | None = None,
+                      allocate: bool = False,
                       ) -> RecordWrite | None:
     """The LIVE door: one journal record that has ALREADY been appended.
 
@@ -2469,10 +2595,17 @@ def write_live_record(record: Mapping[str, Any], *,
 
     ⛔ SINCE #9318 IT IS NO LONGER SILENT, and still not REPAIRED. The fold's
     statement loop asks the cursor's affected-row count, and when the position
-    row was absorbed it asks the database whether the surviving row's content
-    DIFFERS (`record_projection._refuse_a_journal_collision`, in Postgres's own
-    jsonb equality). Same content ⇒ a genuine replay ⇒ silent no-op, unchanged.
-    Different content ⇒ `JournalPositionCollision`, reported HERE as the
+    row was absorbed it asks the database whether the surviving row is a record
+    this write CONTINUES (`record_projection._refuse_a_journal_collision`, in
+    Postgres's own jsonb equality and its own `timestamptz` comparison of
+    `recorded_at`). Same content AND the same capture ⇒ a genuine replay ⇒
+    silent no-op, unchanged;
+    same `event_type` and same `recorded_at` with only the payload different ⇒
+    READ AS the same record RE-DERIVED ⇒ also silent (#12904 P0-1) — a reading
+    on two equal coordinates, not proof of one record (the mirror residual in
+    `record_projection.JournalPositionCollision` names the shape it admits);
+    anything else ⇒
+    `JournalPositionCollision`, reported HERE as the
     ``journal_collision`` refusal — the same counter, the same WARNING, the same
     ``RecordWrite`` shape every other refusal uses — with a message naming the
     position and both payloads by digest.
@@ -2482,7 +2615,9 @@ def write_live_record(record: Mapping[str, Any], *,
     derive — do NOT paper it over by declining position rows on the live path,
     which is the #9190 defect this door exists to close. That decision is
     `#12894`'s; when it lands, a collision cannot occur, every conflict is a
-    replay, and the detector never fires — retire it then.
+    replay, and the detector must be DELETED with that key change — leaving it
+    in place converts legitimate old-journal replays into refusals (#12904
+    P1-4).
 
     ``tenant`` is the ``(org_id, graph_id)`` the CALLER already resolved for
     this write — carried explicitly by a lane that cannot hold the ambient scope
@@ -2508,6 +2643,29 @@ def write_live_record(record: Mapping[str, Any], *,
     a lane that mixed the two could split one request's rows across two tenants
     (#9346).
 
+    ``allocate`` hands the POSITION to the record (#12894): the plan allocates
+    from `public.record_cursor` and the resulting number is what this call
+    reports as `first_seq`/`last_seq` and what the byte meter reads. With
+    ``allocate=True`` the ``seq`` argument is IGNORED — there is one allocator
+    per coordinate, and a caller-supplied number alongside an allocated one is
+    two answers to one question — and the "no position was proven" arm below
+    does not apply, because a position WAS issued (by the counter, not by the
+    journal). The graph's cursor must be in mode ``active``. ⛔ A `seeded` /
+    `halted` / absent cursor, or a duplicate position, comes back as
+    ``outcome=REFUSED`` ``refusal="write_failed"`` and is counted — this door
+    DOES NOT RAISE, by its own contract (the journal append has already
+    committed, so a record failure must not fail a write that persisted). That
+    is a REFUSAL of a mis-armed deployment rather than a lost row to be healed
+    by replay. ⛔ THE DIFFERENCE IS **NOT** VISIBLE IN ``refusal``: all of these
+    carry ``refusal="write_failed"``, the same token as a genuine record-write
+    failure, because the vocabulary is closed and a new token would be a
+    surface change. What distinguishes them is the WARNING the door emits
+    (``_allocator_refusal_cause`` names the counter's state and the remedy —
+    ``arm``/``reopen`` — instead of "a replay heals the record", which cannot
+    apply) plus `record_allocator.metrics()`. An earlier cut of this docstring
+    claimed ``refusal`` carried it; a fresh-context review measured the door and
+    found the claim false (#12894 review cycle 3, P2).
+
     ``OVERRIDES:`` the module's decision 3 (`Armed but unreachable ⇒ the write
     FAILS (RecordWriteError)`) does not apply to this door, and that is a
     deliberate departure rather than an oversight. Decision 3 governs
@@ -2530,7 +2688,7 @@ def write_live_record(record: Mapping[str, Any], *,
     assert tenant is not None  # the verdict only clears with a resolved pair
     org_id, graph_id = tenant
     connection: Any | None = None
-    if seq is None:
+    if seq is None and not allocate:
         # A DURABLE journal whose append could not prove the record's position
         # (see `seq` above): layer 1 gets no row for this record, which is a
         # NAMED skip and never a silent one (#9307 review F1).
@@ -2540,9 +2698,21 @@ def write_live_record(record: Mapping[str, Any], *,
         # a durable journal could not PROVE the record's position (see `seq`): a
         # row needs a number, and inventing one collides with a later replay's
         # numbering. Counted and warned above, so the skip is observable.
+        # ⛔ With `allocate=True` the number comes from the RECORD's counter
+
+        # instead (#12894), so `seq` is neither needed nor consulted — and it
+        # must NOT be forwarded as `first_seq`, because `replay_plan` REFUSES a
+        # caller watermark on that arm (`allocate=True derives the position from
+        # the record's counter, so start_seq must be left at 1`). MEASURED
+        # (review cycle 1, P1): forwarding it made a cut-over door refuse EVERY
+        # write — all three production sites pass a real `seq` from `log.append`
+        # — while the wiring gate blessed the body. So the arm passes the one
+        # value the plan accepts and reports the ALLOCATED block back.
         write = write_records([record], org_id=org_id, graph_id=graph_id,
-                              position=seq is not None,
-                              first_seq=seq if seq is not None else 1)
+                              position=True if allocate else seq is not None,
+                              first_seq=(1 if allocate
+                                         else (seq if seq is not None else 1)),
+                              allocate=allocate)
         _close_live_breaker()
         connection = write.connection
         if connection is not None:
@@ -2562,20 +2732,24 @@ def write_live_record(record: Mapping[str, Any], *,
             # merely a missing increment — which `postgres_bytes.reconcile`
             # reports as `unmetered_bytes`, the safe direction.
             _record_written_bytes(org_id, write)
-        if seq is None:
+        if seq is None and not allocate:
             # No position was consumed, so the watermark must not report one
             # as if it had been (a caller advancing `last_seq + 1` must neither
             # rewind nor skip): the seam was handed the default `first_seq=1`
             # for a row-less write, and `first_seq - 1` is this class's own
             # spelling for "nothing consumed".
+            # ⛔ NOT with `allocate=True`: there the counter issued the number
+            # and `write.last_seq` IS it — overwriting it here would discard
+            # the one fact the allocation exists to produce.
             return replace(write, last_seq=write.first_seq - 1)
         return write
     except Exception as exc:
         collision = _journal_collision_cause(exc)
         if collision is not None:
             # ⛔ A COLLISION, NOT A LOST WRITE (#9318). The row at this position
-            # holds content this write would not produce, so writing the layer
-            # rows under it would index them by that other content — refused
+            # is a record this write does not CONTINUE (a different
+            # `event_type`, or a different capture time), so writing the layer
+            # rows under it would index them by that other record — refused
             # rather than shipped. Nothing is lost: the journal holds the record
             # and the message names both sides. Now made LOUD on the SAME
             # refused-write channel every other arm uses (one counter, one
@@ -2586,15 +2760,34 @@ def write_live_record(record: Mapping[str, Any], *,
             _logger.warning(
                 "the record write was REFUSED (journal_collision) — the "
                 "journal holds the record but the record's position row is "
-                "occupied by content this write would not produce (a "
+                "occupied by a record this write does not continue (a "
                 "different record — a second journal, a restore, a rotation, "
-                "a rebuild numbering below the high-water mark — or this "
-                "record's payload re-derived since that row was written); a "
+                "a rebuild numbering below the high-water mark — or, with no "
+                "`ts` to compare, a payload whose derivation moved); a "
                 "replay cannot heal it while the key carries no journal "
                 "identity (#12894): record=%s %s: %s",
                 record.get("type"), _record_identity(record), collision,
             )
             return _refused("journal_collision", seq)
+        allocator_state = _allocator_refusal_cause(exc)
+        if allocator_state is not None:
+            # ⛔ A MIS-ARMED COUNTER IS NOT A LOST WRITE, AND ITS REMEDY IS NOT
+            # "replay". Both `CursorNotActive` and `PositionCollision` arrive
+            # here on the allocated path; the generic arm below would tell the
+            # operator that "a replay heals the record", which is false twice
+            # over — a replay neither arms a cursor nor gets past #9318's
+            # collision refusal. Named and counted the same way (one counter, the
+            # closed `write_failed` token), but with the READING that applies.
+            _count_write_failure("write_failed")
+            _logger.warning(
+                "the record write was REFUSED (%s) — the journal holds the "
+                "record; the ORDINAL ALLOCATOR refused to issue a position. %s: "
+                "record=%s %s: %s",
+                allocator_state, _ALLOCATOR_REMEDY.get(
+                    allocator_state, "check record_allocator.metrics()"),
+                record.get("type"), _record_identity(record), exc,
+            )
+            return _refused("write_failed", seq)
         if isinstance(exc, RecordConnectError):
             # Unreachable RIGHT NOW (not a refusal of this one record): bound the
             # cost of the rest of the capture. A totality or statement failure

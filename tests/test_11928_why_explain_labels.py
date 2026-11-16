@@ -212,7 +212,7 @@ def test_a_retired_judgement_is_not_reported_as_a_live_verdict(sdk):
     The flip test above cannot reach it: `supersede_point` TRANSFERS the
     predecessor's operator edge (#6180), so a superseded judgement stops matching
     the wiring read at all and the filter is never exercised. This fixture
-    retires the judgement WITHOUT a transfer (a hand `update_entity(status=…)`,
+    retires the judgement WITHOUT a transfer (a hand `update_knowledge(status=…)`,
     and the shape an Object supersession leaves before #11826) — the arrow still
     points at the goal, so only `_live_only('j.status')` can drop it.
     """
@@ -222,7 +222,7 @@ def test_a_retired_judgement_is_not_reported_as_a_live_verdict(sdk):
     # #12592: the word names its successor (ONTOLOGY §5). The point of the
     # fixture is unchanged — a HAND retirement with no transfer, so the only
     # thing that can drop the arrow is the live-status filter.
-    sdk.update_entity(recorded["point_id"], status="superseded",
+    sdk.update_knowledge(recorded["point_id"], status="superseded",
                       supersededBy="the successor judgement")
 
     block = assemble_why_blocks(sdk._get_proj(), [goal["id"]])[goal["id"]]

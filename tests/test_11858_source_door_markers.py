@@ -132,7 +132,7 @@ def test_create_source_refuses_a_caller_embedding_marker(tmp_path, marker,
         kwargs["embedding"] = [0.5] * 4
     try:
         with pytest.raises(ValueError) as excinfo:
-            sdk.create_source(url, "web", **kwargs)
+            sdk.register_source(url, "web", **kwargs)
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -154,7 +154,7 @@ def test_the_refusal_precedes_the_write(tmp_path):
     url = "https://example.invalid/11858-order"
     try:
         with pytest.raises(ValueError):
-            sdk.create_source(url, "web", embedding_width="f16")
+            sdk.register_source(url, "web", embedding_width="f16")
         nodes = _source_count(sdk, url)
     finally:
         with contextlib.suppress(Exception):
@@ -176,7 +176,7 @@ def test_a_plain_source_still_journals_and_declares_no_marker(tmp_path):
     sdk, journal = _journal(tmp_path)
     url = "https://example.invalid/11858-control"
     try:
-        sdk.create_source(url, "web", contentHash="h1")
+        sdk.register_source(url, "web", contentHash="h1")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -250,7 +250,7 @@ def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
     """
     sdk, journal = _journal(tmp_path)
     try:
-        sdk.create_source("https://example.invalid/11858-vector", "web",
+        sdk.register_source("https://example.invalid/11858-vector", "web",
                          embedding=[0.5] * 4)
         # Read the NODE while the store is open: `close()` releases the embedded handle, and the
         # claim under test is about the graph, not only about the record.
@@ -346,7 +346,7 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
             elif door == "update_point":
                 sdk.update_point("p-census", embedding_width="f16")
             elif door == "update_entity":
-                sdk.update_entity("e-census", embedding_width="f16")
+                sdk.update_knowledge("e-census", embedding_width="f16")
             elif door == "update":
                 sdk.update(target, embedding_width="f16")
             elif door == "update_knowledge":

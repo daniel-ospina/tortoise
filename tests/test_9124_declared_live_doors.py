@@ -250,7 +250,12 @@ _DECLARATION_DECORATORS = (*_LIVE_LANE_NAMES, *_APPLY_FIRST_LANE_NAMES)
 #: record and to be genuinely apply-first.
 _APPLY_FIRST_DOORS = {
     "approve_merge",         # SET reviewed flags, then PointRevised/… records
-    "assess_source",         # SET reliability, then the assessment record
+    # ⛔ #12948 renamed the public `assess_source` to `_assess_source` (the container
+    # `manage_source_trust` is the door now). The census keys on the FUNCTION name, so
+    # the entry moves with the rename — leaving `assess_source` here made the set name a
+    # function that no longer exists, which reds as a stale entry AND leaves the renamed
+    # body reaching the write handle with no lane (measured before this: reds 1 and 2).
+    "_assess_source",        # SET reliability, then the assessment record
     "compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
     "mitigate_operator",     # CREATE the mitigation, then its records
     "promote_point",         # CAS SET status='live', then PointPromoted
@@ -342,9 +347,16 @@ _NO_JOURNAL = {
     "_touch_inherited_at",
     "_write_props",
     "_write_reliability_cache",
-    "backfill_v25",
+    # ⛔ #12901 wave 1 — `backfill_v25` LEFT this set: the door was DELETED from
+    # `TortoiseSDK` (one-shot ONTOLOGY v2.5 migration, zero callers anywhere), so a
+    # row here would be a STALE census entry — which
+    # `test_the_inventories_hold_no_stale_entry` reds on. A door that no longer
+    # exists has no lane to name.
     "ingest",
-    "set_source_tier",
+    # ⛔ #12948 renamed the public `set_source_tier` to `_set_source_tier` (the container
+    # `manage_source_trust` is the door now), so the entry moves with the rename for the
+    # same measured reason as `_assess_source` above.
+    "_set_source_tier",
 }
 
 #: A statement the enumerator cannot PROVE read-only, in a function that appends
@@ -396,6 +408,18 @@ _UNRESOLVED = {
     # `MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status,
     # coalesce(n.outdated, false)` — a read.
     "_lifecycle_terminal_marker",
+    # #12586: the promote arm's refusal diagnostic. Its ONLY handle reaches are
+    # READS, and the fan-out one is the shared `live.LIFECYCLE_FANOUT_QUERY`
+    # constant — which the resolver reads only as a module-level string of the
+    # scanned file, so it reports '<unresolved>' exactly as it does for
+    # `_lifecycle_terminal_marker` above (same constant, same reason). Checked
+    # by hand: `MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status,
+    # coalesce(n.outdated, false)` — no CREATE/MERGE/SET/DELETE/REMOVE, no write
+    # procedure — and the function appends no record: it RAISES, or returns
+    # `True` on the #1088 status-only already-live no-op (which writes and
+    # appends nothing either). The existence probe above it (`RETURN count(n)`)
+    # is a resolved read.
+    "_raise_update_point_status_error",
     "_window_closure",
     "expand_relationships",
     # f-string interpolates a computed fragment (`{_label}`, `{relationship_type}`,

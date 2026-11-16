@@ -211,7 +211,7 @@ class TestUpdate:
 
     def test_update_entity_via_legacy_alias(self, sdk):
         obj = sdk.create_entity("object", "Alias Entity", objectKind="service")["node"]
-        r = sdk.update_entity(obj["id"], tier="pro")
+        r = sdk.update_knowledge(obj["id"], tier="pro")
         assert r.get("tier") == "pro"
 
 
@@ -248,7 +248,7 @@ class TestSupersede:
 
     def test_default_is_full_supersede(self, sdk):
         old, new = self._old_new(sdk)
-        r = sdk.supersede(old["id"], new["id"])
+        r = sdk.supersede_knowledge(old["id"], new["id"])
         assert r["invalidated"] is True
         assert r.get("edges_transferred") == 0  # nothing to transfer, still full path
         assert sdk.get_point(old["id"])["status"] == "superseded"
@@ -259,7 +259,7 @@ class TestSupersede:
         old, new = self._old_new(sdk, "old alpha", "new alpha")
         r_legacy = sdk.invalidate_point(old["id"], new["id"])
         old2, new2 = self._old_new(sdk, "old beta", "new beta")
-        r_new = sdk.supersede(old2["id"], new2["id"], transfer_edges=False)
+        r_new = sdk.supersede_knowledge(old2["id"], new2["id"], transfer_edges=False)
         assert r_legacy["invalidated"] == r_new["invalidated"] is True
         assert sdk.get_point(old["id"]).get("outdated") is True
         assert sdk.get_point(old2["id"]).get("outdated") is True
@@ -268,15 +268,15 @@ class TestSupersede:
         """Missing/self endpoints still raise through the consolidated entry."""
         p = _make_point(sdk, content="guard point")
         with pytest.raises(ValueError, match="No point"):
-            sdk.supersede("missing-old", p["id"])
+            sdk.supersede_knowledge("missing-old", p["id"])
         with pytest.raises(ValueError, match="cannot be the point itself"):
-            sdk.supersede(p["id"], p["id"], transfer_edges=False)
+            sdk.supersede_knowledge(p["id"], p["id"], transfer_edges=False)
 
     def test_transfer_true_transfers_edges(self, sdk):
         old, new = self._old_new(sdk)
         obj = sdk.create_entity("object", "Sup Target", objectKind="product")["node"]
         sdk.create_edge("aboutObject", old["id"], obj["id"])
-        r = sdk.supersede(old["id"], new["id"], transfer_edges=True)
+        r = sdk.supersede_knowledge(old["id"], new["id"], transfer_edges=True)
         assert r["invalidated"] is True
         assert r["edges_transferred"] >= 1
         assert _about_targets(sdk, old["id"], "aboutObject") == []  # moved off
@@ -290,7 +290,7 @@ class TestSupersede:
         old, new = self._old_new(sdk)
         obj = sdk.create_entity("object", "Inv Target", objectKind="product")["node"]
         sdk.create_edge("aboutObject", old["id"], obj["id"])
-        r = sdk.supersede(old["id"], new["id"], transfer_edges=False)
+        r = sdk.supersede_knowledge(old["id"], new["id"], transfer_edges=False)
         assert r["invalidated"] is True
         assert "edges_transferred" not in r
         assert _about_targets(sdk, old["id"], "aboutObject") == [obj["id"]]  # stays

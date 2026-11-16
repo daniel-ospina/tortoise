@@ -111,7 +111,7 @@ def barrier_index_runs(corpus: str, db_path: str, n_runs: int = 2,
             barrier.wait(timeout=60)   # reuse verified (or not)
             if not reuse_holds:
                 return
-            results[i] = sdk.index_directory(corpus, **index_kwargs)
+            results[i] = sdk.index_sources_from_directory(corpus, **index_kwargs)
         except BaseException as e:  # noqa: BLE001, RUF100
             errors.append(e)
             try:  # noqa: SIM105
