@@ -91,6 +91,7 @@ sys.path.insert(0, str(ROOT))
 # the tool registry. Importing them is the point: a second `_sdk_targets()` would be a
 # second opinion about what the public surface IS, and the two would eventually differ.
 from tools.bridge_table import _sdk_targets  # noqa: E402
+
 # The single owner of "where did a RETIRED name go". A retired name is not a ROW in this
 # table (it maps the live surface), but when a quote we must trust MENTIONS one — beta's
 # W8 row routes `get_source_reliability`'s reads "via `list_sources`", which itself retires
