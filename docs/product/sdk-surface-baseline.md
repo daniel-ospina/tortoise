@@ -14,16 +14,16 @@
 | measured | count |
 |---|---|
 | approved methods (the target) | 40 |
-| live public methods on `TortoiseSDK` | 125 |
-| approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 14 |
-| approved but not implemented yet | 26 |
-| live and NOT approved (migration backlog) | 112 |
+| live public methods on `TortoiseSDK` | 124 |
+| approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 20 |
+| approved but not implemented yet | 20 |
+| live and NOT approved (migration backlog) | 105 |
 
 Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs. It resolves
 to `TortoiseSDK` (the only constructible entry point); it is not a method on it.
 
 `docs/product/beta-sdk-surface.md` states "only four of the 40 exist in the current SDK".
-That sentence is STALE: 13 exist, plus the constructor. It is recorded here rather than
+That sentence is STALE: 19 exist, plus the constructor. It is recorded here rather than
 edited there, because the approved document is the owner's ruling and this baseline is not
 the place to amend it (#10044).
 
@@ -35,22 +35,16 @@ Phase 2 implements them.
 - `add_member`
 - `adjust_relationship`
 - `check_confidence`
-- `check_connection`
 - `create_key`
 - `create_memory_graph`
 - `delete_memory_graph`
 - `explore_connections`
 - `graph_overview`
-- `index_sources_from_directory`
 - `list_keys`
 - `list_knowledge`
 - `list_members`
-- `manage_source_trust`
-- `mine_knowledge_from_directory`
-- `mine_knowledge_from_session`
 - `record_decision`
 - `refresh_confidence`
-- `register_source`
 - `remove_member`
 - `review_link_candidates`
 - `revoke_key`
@@ -69,14 +63,12 @@ the count above is the honest measure of the gap.
 - `apikey_create`
 - `apikey_revoke`
 - `apikey_verify`
-- `assess_source`
 - `audit`
 - `backfill_v25`
 - `belief_timeline`
 - `calibrate_summary`
 - `calibration_passed`
 - `check_structure`
-- `checkpoint`
 - `compute_confidence`
 - `compute_reputation`
 - `create_derivation`
@@ -87,7 +79,6 @@ the count above is the honest measure of the gap.
 - `create_object`
 - `create_operator`
 - `create_point`
-- `create_source`
 - `create_subject`
 - `delete`
 - `delete_entity`
@@ -111,8 +102,6 @@ the count above is the honest measure of the gap.
 - `graph_active_key_count`
 - `graph_delete`
 - `graph_key_ids`
-- `index_directory`
-- `index_sessions`
 - `ingest`
 - `ingest_corpus`
 - `invalidate_point`
@@ -133,7 +122,6 @@ the count above is the honest measure of the gap.
 - `list_topics`
 - `membership_create`
 - `membership_get`
-- `mine_corpus`
 - `mitigate_operator`
 - `org_create`
 - `org_get`
@@ -154,7 +142,6 @@ the count above is the honest measure of the gap.
 - `session_context`
 - `session_index_health`
 - `set_point_baseline`
-- `set_source_tier`
 - `signup_token_lookup`
 - `signup_token_recover`
 - `signup_token_revoke`

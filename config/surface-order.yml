@@ -135,14 +135,30 @@ family_rank:
 # operate 5->4 (`pack_install`); fetch / update / delete / check / link / trace unmoved.
 # Re-derived from the registry by `tools/surface_manifest.py check`, which reds on any
 # disagreement.
+#
+# #4282 Phase 2, the SOURCES/MINE/SESSION containers (#11609 lane C): SIX approved
+# targets replaced SEVEN advertised members, so the ADVERTISED set moved 68 -> 67 and
+# TWO keyword counts moved with them. Per row, from the registry's own derivation:
+#   create 14 -> 12 — `tortoise_create_source` and `tortoise_session_capture` both
+#     derived `create` and neither is advertised now (the new
+#     `tortoise_index_sources_from_directory` derives `create` too, and it REPLACES
+#     `tortoise_index_files`, whose row also derived `create` — the pair cancels).
+#   find 4 -> 5 — `tortoise_mine_knowledge_from_session` and
+#     `tortoise_mine_knowledge_from_directory` both derive `find`, against ONE
+#     leaving (`tortoise_mine_conversations`).
+# fetch / update / delete / list / trace / check / link / operate are UNMOVED: the
+# containers `tortoise_register_source` (operate), `tortoise_manage_source_trust`
+# (update) and `tortoise_check_connection` (check) each take the slot of a member
+# that derived the same keyword (`tortoise_checkpoint`, `tortoise_set_source_tier`
+# and `tortoise_assess_source` respectively).
 baseline_counts:
   fetch: 14
-  create: 14
+  create: 12
   list: 7
   check: 5
   operate: 4
   update: 8
-  find: 4
+  find: 5
   delete: 6
   link: 4
   trace: 2

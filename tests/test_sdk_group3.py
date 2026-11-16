@@ -159,7 +159,6 @@ class TestCheckpoint:
         from tortoise.exceptions import BundleValidationError
 
         for bad_items, needle in (
-            (None, "must be a list"),
             ("not-a-batch", "must be a list"),
             ({"content": "x"}, "must be a list"),
         ):
@@ -167,6 +166,14 @@ class TestCheckpoint:
                 sdk.mine_knowledge_from_session(items=bad_items)
             assert needle in str(exc.value), str(exc.value)
             assert "checkpoint" in str(exc.value)
+
+        # `items=None` is NOT a malformed batch here: `None` is the container's
+        # "this arm was not chosen" value (#11609 batch 2), so it refuses by naming
+        # BOTH arms instead of handing `None` to the batch door. An explicitly empty
+        # batch is `items=[]`, and that still files zero (`test_empty_items`).
+        with pytest.raises(ValueError) as exc:
+            sdk.mine_knowledge_from_session(items=None)
+        assert "conversation=" in str(exc.value) and "items=" in str(exc.value)
 
         with pytest.raises(BundleValidationError, match=r"items\[0\] must be a dict"):
             sdk.mine_knowledge_from_session(items=[["a"]])

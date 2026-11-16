@@ -65,7 +65,15 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # already approved"). `high_water_counts.sdk_public_methods` stays at 150 in
 # `config/surface-manifest.yml` — the growth pin did not move, and this literal tracks the
 # frozen row set, which must move whenever a row is added.
-DECLARED_COUNT = 125
+#
+# 125 → 124 (#11609 batch 2, 2026-11-14): the SOURCES/MINE/SESSION containers implemented SIX
+# approved rows (`register_source`, `manage_source_trust`,
+# `index_sources_from_directory`, `mine_knowledge_from_session`,
+# `mine_knowledge_from_directory`, `check_connection`) and retired SEVEN live names
+# (`create_source`, `assess_source`, `set_source_tier`, `index_directory`,
+# `index_sessions`, `mine_corpus`, `checkpoint`). The net is −1, and DOWN is the phase
+# rule: every #4282 Phase 2 batch must end with fewer public methods than it started with.
+DECLARED_COUNT = 124
 
 
 def _declaration() -> dict:

@@ -182,7 +182,34 @@ OUT_OF_BOUNDARY_MUTATORS: dict[str, str] = {
 # declaration is gone, so keeping it here would exempt a *future* row that
 # re-declares it from resolution — a re-declaration on a handler-served tool is
 # the defect, not an exemption.
-DANGLING_SDK_DECLARATIONS: frozenset[str] = frozenset({"health"})
+#: Declared `sdk_method` values that DO NOT resolve on `TortoiseSDK`, by name.
+#:
+#: `health` went private in #4282 and `tortoise_health` (a retired shim) still declares
+#: it. #11609 batch 2 (the SOURCES/MINE/SESSION containers) added SEVEN more of the same
+#: shape: each is a RETIRED tool whose frozen original body (#3883) calls the private
+#: door the container now fronts — `create_source` -> `_create_source`,
+#: `assess_source` -> `_assess_source`, `set_source_tier` -> `_set_source_tier`,
+#: `index_directory` -> `_index_directory`, `index_sessions` -> `_index_sessions`,
+#: `mine_corpus` -> `_mine_corpus`, `checkpoint` -> `_checkpoint`. The declaration is
+#: kept as the historical binding rather than blanked, because the retired table is what
+#: a caller reads to find the migration; the exemption is on the METHOD name, so a LIVE
+#: tool declaring one of these still reds (no live tool can: none of the seven resolves).
+#:
+#: ⛔ The alternative — pointing a retired row at the container — was rejected: a retired
+#: shim serves the ORIGINAL body, several of whose legacy branches deliberately diverge
+#: from the unified walker (see `_index_sessions`'s embedding behaviour), so a
+#: declaration naming the container would be a claim about reach the frozen body does not
+#: honour.
+DANGLING_SDK_DECLARATIONS: frozenset[str] = frozenset({
+    "health",
+    "create_source",
+    "assess_source",
+    "set_source_tier",
+    "index_directory",
+    "index_sessions",
+    "mine_corpus",
+    "checkpoint",
+})
 
 class DeclaredBindingDivergence(NamedTuple):
     """One recorded declared-binding divergence (#4337).
