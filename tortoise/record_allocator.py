@@ -374,12 +374,17 @@ def seed(conn: Any, *, org_id: str, graph_id: str,
     * re-seed of a `seeded`/`halted` row — allowed and MONOTONE.
 
     The seed SETS AND VERIFIES the tenant GUC ITSELF (:func:`_scope`, the same
-    contract :func:`record_projection.scope_connection` implements), because a
-    seed on the app role with no `app.current_org_id` raises `42501` — and its
-    read-back then looks like a DIVERGENCE, which is the wrong remedy for the
-    wrong cause. It is safe to do here and not in the generic plan: the seed runs
-    in the caller's transaction, so the scope it sets and the scope the plan then
-    uses cannot disagree.
+    contract :func:`record_projection.scope_connection` implements). ⛔ BE PRECISE
+    ABOUT WHAT THAT PREVENTS: an unset (or wrong) `app.current_org_id` does NOT
+    produce a divergence — `SEED_SQL` is refused by the policy with
+    `42501 InsufficientPrivilege`, so `written is None` is never reached and
+    `reason="divergence"` stays reachable ONLY through `row_max > floor` (a
+    replaced or shortened journal). Measured, and asserted by
+    `test_a_seed_without_the_guc_is_a_refusal_not_a_divergence`. What `_scope`
+    buys is that the gap is a REFUSAL AT THE TOP rather than a raw driver error
+    from the middle of the statement. It is safe to do here and not in the
+    generic plan: the seed runs in the caller's transaction, so the scope it
+    sets and the scope the plan then uses cannot disagree.
     """
     require_read_committed(conn)
     _scope(conn, org_id)
@@ -534,11 +539,13 @@ def allocation_statement(*, org_id: str, graph_id: str,
 
     Returns a `record_projection.Statement`. ⛔ The import is NOT lazy in THIS
     module: `record_allocator` imports `record_projection` at module level
-    (`_rp`, and the constants re-exported below come from it) and the cycle is
-    broken on the OTHER side — `record_projection.replay` imports THIS module
-    lazily, because `supabase/tests/pglite/validate.mjs` loads that file by path
-    and any relative import inside its functions breaks the schema drill
-    (measured). State the direction, so a lane does not "simplify" it away.
+    (`_rp`, and the constants re-exported below come from it). The lazy arm is
+    on the OTHER side and it is load-bearing for a SPECIFIC reason: the PGlite
+    schema drill loads `record_projection.py` BY PATH (no package) and calls
+    `replay_plan`, so a relative import in a function THAT PATH REACHES raises
+    `ImportError` and the drill dies (measured on the first version of #12894).
+    `record_projection.replay`'s own in-function import is safe precisely because
+    the drill never calls `replay` — do not "simplify" either side.
 
     ⚠️ THE PAYLOADS COME FROM `record_projection.journal_payload`, the SAME
     function `_journal_row` uses, so the allocated path and the replay path
@@ -623,13 +630,17 @@ def execute_allocations(conn: Any, statements: Iterable[Any], *, org_id: str,
 def _scope(conn: Any, org_id: str) -> None:
     """Set (and VERIFY) the tenant GUC on the caller's transaction.
 
-    Lazy import: `record_projection` owns the scope prologue and the role gate,
-    and importing it at module level here would make this module's import order
-    load-bearing.
+    `record_projection` owns the scope prologue and the role gate, and this
+    module ALREADY imports it at module level (`_rp`, whose constants are
+    re-exported below) — so there is nothing to defer here, and the import that
+    actually has to be lazy is on the OTHER side: `record_projection.replay`
+    imports THIS module inside the function, because
+    `supabase/tests/pglite/validate.mjs` loads `record_projection.py` BY PATH and
+    calls `replay_plan` — the first version of #12894 imported `record_allocator`
+    inside `replay_plan` and the drill died at `#7969 record projection`
+    (measured). State the direction, so a lane does not "simplify" the wrong one.
     """
-    from . import record_projection as rp
-
-    rp.scope_connection(conn, org_id)
+    _rp.scope_connection(conn, org_id)
 
 
 def _read_cursor(cursor: Any, org_id: str,

@@ -36,10 +36,13 @@
 -- constraint. A counter row without it could outlive its graph and be reused by
 -- a new graph with the same id.
 --
--- ⛔ THE APP ROLE MAY UPDATE THIS TABLE, AND ONLY THIS ONE. It is the first
--- record table with an UPDATE grant (`journal_event` is deliberately
--- SELECT+INSERT only). The rationale is mechanical: an allocator that cannot
--- UPDATE cannot allocate. DELETE stays withheld — the counter is never erased
+-- ⛔ THE APP ROLE MAY UPDATE THIS TABLE WITHOUT BEING ABLE TO DELETE FROM IT,
+-- and that combination is what is new here — NOT the UPDATE grant itself:
+-- `20261025000001` already grants SELECT/INSERT/UPDATE/DELETE on nine of the
+-- record tables, so `record_cursor` is the first whose grant WITHHOLDS DELETE
+-- (`journal_event` is the other exception, and it is SELECT+INSERT only). The
+-- rationale is mechanical: an allocator that cannot UPDATE cannot allocate, and
+-- DELETE stays withheld because the counter is never erased
 -- per-row; it goes with the graph via the FK's ON DELETE CASCADE, which is the
 -- tenant-erasure path.
 --

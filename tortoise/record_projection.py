@@ -286,7 +286,10 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # `tests/test_9231_record_migrations_trigger.py`'s reverse direction.
     "20261102000002_record_point_search_keys_text.sql",
     # #12894 stage C — the ORDINAL ALLOCATOR: `public.record_cursor`, its
-    # tenancy policy and the first UPDATE grant any record table carries. It
+    # tenancy policy, and the first record table granted UPDATE **without**
+    # DELETE (⛔ not "the first UPDATE grant": `20261025000001` grants
+    # SELECT/INSERT/UPDATE/DELETE to the app role on nine record tables; the
+    # one exception is `journal_event`, which is SELECT+INSERT only). It
     # contributes no COLUMN the projection reads, so it is listed for the
     # registry reason this tuple's header states (the filename is the only total
     # partition of "is this the record's schema"), and because the BACKUP must
@@ -349,7 +352,8 @@ TENANT_GUC_SQL = f"SELECT set_config('{TENANT_GUC}', %s, true)"
 #: 4. TABLE OWNERSHIP (or membership of the owning role). Owners bypass RLS
 #:    unless `FORCE ROW LEVEL SECURITY` is set, which is exactly why the
 #:    `postgres` DSN in R1's documented pre-change shape was rejected — it is
-#:    the owner of every record table (`THE_RECORD_TABLES` — ten, since #9555).
+#:    the owner of every record table (`THE_RECORD_TABLES` — eleven since #12894 added `record_cursor`,
+#:    ten before it from #9555).
 #:
 #: `current_setting(...)` keeps the GUC read-back and the role posture in ONE
 #: statement rather than two round trips, so the seam executes exactly TWO
