@@ -296,19 +296,39 @@ DECIDE_DEFAULT_CREDIBILITY = "medium"  # → Beta(3,1) via source_credibility
 # belief about a goal from its state, and `update_entity(id, status="met")`
 # was accepted (the #2977 OBJECT_STATUS_VALUES guard is not on main). The
 # vocabulary is the owner's closed set (the #7871 read-side comment: `met` /
-# `active` / `blocked` / `unmet` / `superseded` / `abandoned`) plus
-# `guideline` — the value the objective map already uses for the demoted
-# <10-min-CI "target" (tortoise#6792 form ruling: a guideline cannot outrank a
-# goal, so it is recorded as a goal state no reader treats as pass/fail).
+# `active` / `blocked` / `unmet` / `superseded` / `abandoned`) and, since
+# #13035, it is exactly that set: `guideline` was REMOVED by owner ruling
+# (2026-11-16) — whether a goal is directional is a question about PRIORITY,
+# not about outcome, so it was never an achievement state and the model's list
+# is six words (design: `docs/plans/2026-11-15-state-lifecycle-and-pipelines.md`
+# §5). Four of the six describe a LIVE commitment; the other two are the
+# lifecycle's endings spelled on this axis, and #13035 makes the write boundary
+# refuse a write that ends the goal on one field and leaves it running on the
+# other (see `_refuse_inconsistent_goal_ending`).
 GOAL_STATE_VALUES = frozenset({
     "met",         # achieved
     "active",      # being pursued
     "blocked",     # pursued but gated by an unmet dependency
     "unmet",       # not yet achieved and not yet being pursued
-    "superseded",  # replaced by a newer commitment
-    "abandoned",   # deliberately dropped
-    "guideline",   # directional, no pass/fail (owner ruling #6792)
+    "superseded",  # replaced by a newer commitment (an ENDING)
+    "abandoned",   # deliberately dropped (an ENDING)
 })
+
+#: The two ``goalState`` words that END a goal — the lifecycle's endings spelled
+#: on the achievement axis (#13035, design §5). ``abandoned`` IS ``deprecated``
+#: for a goal (ended, and nothing replaced it); ``superseded`` keeps its
+#: spelling on both axes (replaced by a named successor). The other four words
+#: (:data:`GOAL_LIVE_STATES`) describe a commitment that is still being pursued.
+GOAL_ENDING_STATES = frozenset({"abandoned", "superseded"})
+
+#: The ``goalState`` words that describe a LIVE commitment — DERIVED from the
+#: vocabulary, never re-spelled, so a change to the closed set cannot leave this
+#: companion behind (a hand-written copy is how `guideline` outlived its ruling).
+GOAL_LIVE_STATES = GOAL_STATE_VALUES - GOAL_ENDING_STATES
+
+#: The ``status`` word each ending is spelled as on the lifecycle axis (#13035).
+#: `abandoned` is `deprecated` under another name; `superseded` keeps the word.
+GOAL_ENDING_STATUS = {"abandoned": "deprecated", "superseded": "superseded"}
 
 # #7856 defect 2: the objective map's TOP node was a `goal` POINT created
 # without an explicit status, so it defaulted to `draft`. A draft point that
@@ -5814,6 +5834,243 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
     )
 
 
+# ── #13035: the two fields must AGREE about whether a goal has ended ───────
+#
+# THE DEFECT THIS CLOSES (measured on the pre-change tree): `goalState` was
+# validated against its own vocabulary and NEVER against `status`, while
+# `derived_invalidation`'s retirement arm retires a goal's derived caches on
+# `goalState in RETIRED_GOAL_STATES` (`{superseded, abandoned}`) and every other
+# reader asks `status`. So `goalState='abandoned'` with `status='live'` was
+# retired to the invalidation path and CURRENT to every reader — a word dead to
+# one surface and alive to another, which is the exact failure the two-axis
+# model exists to remove (design: `docs/plans/2026-11-15-state-lifecycle-and-
+# pipelines.md` §5).
+#
+# THE RULE (design §5, "One source of truth"): `status` ends the goal, and
+# `goalState` never ends it alone. The two endings are the lifecycle's endings
+# spelled on the achievement axis — `abandoned` IS `deprecated`, `superseded` is
+# `superseded` — so a write that ends the goal on ONE field and leaves it
+# running on the other is REFUSED, in either direction:
+#
+#   * `goalState` in GOAL_ENDING_STATES  ⇒ `status` must be that ending's own
+#     word (GOAL_ENDING_STATUS), and `superseded` must additionally NAME its
+#     successor;
+#   * `status` in the ended set           ⇒ `goalState` must be the matching
+#     ending, or absent/None — a goal carrying no achievement word makes no
+#     claim to contradict, so ending it on `status` alone stays legal.
+#
+# WHY THE ENDED SET IS IMPORTED, NOT RE-SPELLED: `status in
+# live.TERMINAL_EXCLUDED_STATUSES` is the SAME predicate every read surface uses
+# to answer "is this still current", so the door and the readers cannot start
+# disagreeing about which words end a record (the #2901 rule: no reader, and no
+# door, re-declares a status set). `superseded` is the one ending whose spelling
+# is kept on both axes; every OTHER ended word spells `abandoned`.
+#
+# WHERE IT IS ENFORCED — the payload boundary (`_sanitize_props`, which every
+# SDK/MCP write door meets) plus the two UPDATE doors' target-aware probe, since
+# only they can answer "what does the node ALREADY say"
+# (`_stored_goal_ending_view`). The verb-shaped raw writers (`supersede_point`, `retract_point`,
+# `invalidate_point`) do not pass here, and one of them must not be taught to
+# write the word: `goalState` on a `:Point` is NOT journalled (#4094's class,
+# `derived_invalidation.py` — the sweep refuses to repair a Point for that
+# reason), so stamping it there would mint a live-only word a rebuild silently
+# drops. A goal OBJECT (and a `:Subject` goal) is aligned in ONE write through
+# the approved revise verb — `update_knowledge(goal, status=…, goalState=…)`,
+# whose props ARE journalled and DO survive `rebuild_all`.
+
+#: The sentinel meaning "this write stated nothing, and the node's own value has
+#: not been read yet" — distinguishes an ABSENT key from an explicit `None`
+#: (which is the documented CLEAR: "this field makes no claim").
+_GOAL_ENDING_UNSET = object()
+
+
+def _status_words_for_goal_ending(ending: str) -> frozenset[str]:
+    """The ``status`` words that spell ``ending`` on the lifecycle axis.
+
+    Derived from :data:`live.TERMINAL_EXCLUDED_STATUSES` — the shared predicate's
+    own set — so this door cannot disagree with the readers about which words
+    end a record. ``superseded`` is the one ending that keeps its spelling; every
+    other ended word (``deprecated``, ``archived``, ``retracted``, the legacy
+    ``outdated``) means *ended and nothing replaced it*, i.e. ``abandoned``.
+    """
+    if ending == _SUPERSEDED_STATUS:
+        return frozenset({_SUPERSEDED_STATUS})
+    return frozenset(set(TERMINAL_EXCLUDED_STATUSES) - {_SUPERSEDED_STATUS})
+
+
+def _goal_successor_named(props: dict, stored_view) -> bool:
+    """Does this write — or the node — NAME the goal's successor?
+
+    The successor is never a field of ``goalState``: it is the ``supersededBy``
+    carrier on an Object/Subject goal (whose record derives ``status`` from those
+    columns) or the ``CORRECTS`` edge on a Point goal. ``supersededAt`` ALONE is
+    bookkeeping, not a name, so it does not satisfy this.
+    """
+    if "superseded_by" in _lifecycle_carrier_keys(props).values():
+        return True
+    view = stored_view() or {}
+    return bool(view.get("successor"))
+
+
+def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
+                                     goal_ending=None) -> None:
+    """Refuse a goal write that ends it on one field and runs it on the other.
+
+    #13035. Operates on the STATE THE WRITE LEAVES — the value in ``props`` when
+    the caller supplies one, otherwise the node's STORED value — the #2782
+    posture the sibling money gate already applies. ``goal_ending`` is the
+    caller's ZERO-ARG PROBE for that stored side (``{"status", "goalState",
+    "successor"}``) and it is called AT MOST ONCE, and only when the write alone
+    cannot answer: a bag naming both fields never pays for a read, which matters
+    because this runs on every SDK write. ``None`` means the CREATE reading,
+    where the node does not exist yet — so an absent ``status`` really is the
+    ordinary LIVE birth state and an absent ``goalState`` really is no claim.
+
+    REFUSED IN EITHER DIRECTION, with BOTH repairs named (the AX rule: say that
+    it refused, exactly what failed, and exactly what to do): add the ending to
+    the other field, or drop it from the one that carries it.
+    """
+    if "goalState" not in props and "status" not in props:
+        return
+
+    bag_goal = props.get("goalState", _GOAL_ENDING_UNSET)
+    bag_status = props.get("status", _GOAL_ENDING_UNSET)
+    goal_state, status = bag_goal, bag_status
+    _stored: dict = {}
+    _read = False
+
+    def _stored_view() -> dict:
+        nonlocal _read
+        if not _read:
+            _read = True
+            if goal_ending is not None:
+                _stored.update(goal_ending() or {})
+        return _stored
+
+    if goal_state is _GOAL_ENDING_UNSET or status is _GOAL_ENDING_UNSET:
+        # The write does not name both endpoints. Ask the node for the missing one
+        # — and only when it can decide anything, so the ordinary write pays
+        # nothing: a `status` write that is NOT an ending needs no stored
+        # `goalState` (nothing is being ended), while ANY `goalState` write needs
+        # the stored `status`, because an ending is FINAL — a live achievement
+        # word written over an ended goal is the same divergence from the other
+        # side, and catching it is the only thing standing between two separate
+        # writes and the incoherent pair. On a CREATE (`goal_ending is None`) the
+        # node does not exist, so the missing side really is absent — and absent
+        # `status` is the ordinary LIVE birth state.
+        if (status is _GOAL_ENDING_UNSET
+                and goal_state is not _GOAL_ENDING_UNSET):
+            status = _stored_view().get("status")
+        elif (goal_state is _GOAL_ENDING_UNSET
+                and status in TERMINAL_EXCLUDED_STATUSES):
+            goal_state = _stored_view().get("goalState")
+
+    if goal_state in GOAL_ENDING_STATES:
+        wanted = _status_words_for_goal_ending(goal_state)
+        if status not in wanted:
+            _also = ""
+            if status in TERMINAL_EXCLUDED_STATUSES:
+                _also = (f" The two endings are not interchangeable: "
+                         f"{sorted(wanted)} spell goalState={goal_state!r}, so "
+                         f"status={status!r} says the goal ended the OTHER way.")
+            raise ValueError(
+                f"REFUSED: goalState={goal_state!r} ends the goal, but "
+                f"status={status!r} leaves it running (through {surface}). "
+                f"#13035: a goal's two "
+                f"ending words are the lifecycle's endings spelled on the "
+                f"achievement axis, so `status` and `goalState` may not "
+                f"disagree about whether the goal ended — a goal "
+                f"retired on one field and left current on the other is "
+                f"retired to `derived_invalidation` and served as CURRENT by "
+                f"every other reader.{_also}\n"
+                f"Two ways to fix it, either is accepted:\n"
+                f"  1. add the ending to `status` — pass "
+                f"status={GOAL_ENDING_STATUS[goal_state]!r}"
+                + (" together with the successor's id, "
+                    "supersededBy=<successor id>"
+                    if goal_state == _SUPERSEDED_STATUS else
+                    " (or status='archived'/'retracted', the legacy "
+                    "spellings of the same ending)")
+                + f";\n"
+                f"  2. drop the ending from `goalState` — pass a word that "
+                f"describes a live commitment {sorted(GOAL_LIVE_STATES)} (or "
+                f"goalState=None to state nothing about the achievement)."
+            )
+        if goal_state == _SUPERSEDED_STATUS and not _goal_successor_named(
+                props, _stored_view):
+            raise ValueError(
+                f"REFUSED: goalState='superseded' says the goal was REPLACED, "
+                f"and this write names no successor (through {surface}). "
+                f"#13035: "
+                f"`superseded` means `deprecated`'s opposite — something "
+                f"replaced it — so the successor is part of the ending, not "
+                f"an optional extra.\n"
+                f"Two ways to fix it, either is accepted:\n"
+                f"  1. name the successor — `supersededBy=<successor id>` on an "
+                f"Object (or Subject) goal, or `supersede_point(goal, "
+                f"successor)` on a Point goal, which records it as the "
+                f"CORRECTS edge;\n"
+                f"  2. if nothing replaced it, say so — pass "
+                f"goalState='abandoned' with status='deprecated'."
+            )
+        return
+
+    if status in TERMINAL_EXCLUDED_STATUSES and goal_state in GOAL_LIVE_STATES:
+        want = (_SUPERSEDED_STATUS
+                if status == _SUPERSEDED_STATUS else "abandoned")
+        raise ValueError(
+            f"REFUSED: status={status!r} ends the goal, but "
+            f"goalState={goal_state!r} "
+            f"still describes a live commitment (through {surface}). #13035: "
+            f"`status` ends the goal and `goalState` never ends it alone, so "
+            f"the ending has to be said on BOTH fields — otherwise the goal "
+            f"reads as ended to one surface and as a live commitment to the "
+            f"next reader that asks about its achievement.\n"
+            f"Two ways to fix it, either is accepted:\n"
+            f"  1. add the ending to `goalState` — pass goalState={want!r}"
+            + (" together with the successor's id, supersededBy=<successor "
+                "id>" if want == _SUPERSEDED_STATUS else "")
+            + ";\n"
+            "  2. drop the ending from `status` — pass status='live' (or "
+            "'draft'), or leave `status` out of the call if you did not mean "
+            "to end the goal."
+        )
+
+
+def _stored_goal_ending_view(proj, id_val: str, *,
+                            label: str | None = None) -> dict:
+    """The goal-ending view a node ALREADY holds: ``status``/``goalState``/a
+    named successor — the stored half :func:`_refuse_inconsistent_goal_ending`
+    needs to answer for a write that names only one of the two fields.
+
+    One read, issued at most once per write and ONLY when the write alone cannot
+    answer (see the callers). ``label`` narrows the match where the door already
+    knows the label (``update_point``); the generic entity door does not, so it
+    matches on the identity property alone. A missing node answers ``{}`` — an
+    absent stored value is then the ordinary LIVE reading, exactly as the create
+    door treats it.
+
+    The successor is read from BOTH carriers of the model: the
+    ``supersededBy``/``superseded_by`` column an Object/Subject goal records, and
+    the ``CORRECTS`` edge a Point goal records (the edge points successor →
+    predecessor, so it arrives here as an INCOMING edge).
+    """
+    match = f"MATCH (n:{label} {{id:$id}})" if label else "MATCH (n {id:$id})"
+    rows = proj.g.query(
+        match + " OPTIONAL MATCH (s)-[:CORRECTS]->(n) "
+        "RETURN n.status, n.goalState, "
+        "coalesce(n.supersededBy, n.superseded_by), collect(s.id)",
+        params={"id": id_val},
+    ).result_set
+    if not rows:
+        return {}
+    status, goal_state, carrier, corrects = rows[0][:4]
+    named = carrier if carrier not in (None, "") else None
+    if named is None and corrects:
+        named = next((c for c in corrects if c), None)
+    return {"status": status, "goalState": goal_state, "successor": named}
+
+
 # ── #9964: the kind decides the layer ──────────────────────────────────────
 #
 # ONE authority answers "which layer does this kind belong to?"
@@ -7257,7 +7514,8 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
                     reject_belief_props: bool = False,
                     reject_claim_class: bool = False,
                     money_views: list[dict] | None = None,
-                    value_shapes: frozenset[str] | None = None) -> dict:
+                    value_shapes: frozenset[str] | None = None,
+                    goal_ending=None) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
@@ -7341,6 +7599,16 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     the read side stays lenient). `currency=None` on a carrier is caught
     because it LEAVES that half value, not because the bag "looks partial":
     deleting all four members together leaves no money and is admitted.
+
+    ``goal_ending`` (#13035): the STORED half of a goal's two ending fields,
+    for the same "grade the state the write leaves" reason as ``money_views``.
+    It is a ZERO-ARG CALLABLE returning ``{"status", "goalState",
+    "successor"}`` (see `_stored_goal_ending_view`) and it is called AT MOST
+    ONCE, and ONLY when the bag names one of the two fields and not the other —
+    so a write that restates both, or names neither, costs no read. ``None``
+    (the default) is the CREATE reading: the node does not exist yet, so an
+    absent ``status`` is the ordinary LIVE birth state and an absent
+    ``goalState`` is no claim. See `_refuse_inconsistent_goal_ending`.
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -7824,12 +8092,30 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     if "goalState" in props and props["goalState"] is not None:
         _goal_state = props["goalState"]
         if not isinstance(_goal_state, str) or _goal_state not in GOAL_STATE_VALUES:
+            _hint = ""
+            if _goal_state == "guideline":
+                _hint = (
+                    " `guideline` was REMOVED from this vocabulary (#13035, "
+                    "owner ruling 2026-11-16): whether a goal is directional "
+                    "is a question about priority, not about outcome, so it "
+                    "was never an achievement state. Record the priority "
+                    "elsewhere — the four live words ("
+                    f"{sorted(GOAL_LIVE_STATES)}) and the two endings "
+                    f"({sorted(GOAL_ENDING_STATES)}) are the whole set."
+                )
             raise ValueError(
                 f"Invalid goalState {_goal_state!r}. A goal's achievement "
                 f"state is a closed vocabulary: {sorted(GOAL_STATE_VALUES)}. "
                 "(Lifecycle is the separate `status` field — goalState is not "
-                "draft/live/retracted/archived.)"
+                "draft/live/retracted/archived.)" + _hint
             )
+    # #13035: the two fields must AGREE about whether the goal has ended. This
+    # is the fail-closed boundary every SDK write surface shares, so a caller
+    # cannot mint a goal that `derived_invalidation` retires (it reads
+    # `goalState`) while every other reader serves it as current (they read
+    # `status`). See `_refuse_inconsistent_goal_ending`.
+    _refuse_inconsistent_goal_ending(props, surface="_sanitize_props",
+                                     goal_ending=goal_ending)
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
     return props
@@ -20614,7 +20900,12 @@ class TortoiseSDK:
                                     label=":Point"),
                                 value_shapes=_stored_value_shapes(
                                     proj.g, props, node_id=id,
-                                    label=":Point"))
+                                    label=":Point"),
+                                # #13035: the stored half of the goal-ending
+                                # pair — read ONLY if this write names one
+                                # endpoint and not the other.
+                                goal_ending=lambda: _stored_goal_ending_view(
+                                    proj, id, label="Point"))
         # ⛔ #11702 (review cycle 12, P2): THIS is the THIRD writer that moves a
         # belief pair, and it was the one that left the `n.confidence` mirror
         # behind. `reject_belief_props` refuses `credibility` and the baseline
@@ -48491,7 +48782,16 @@ class TortoiseSDK:
                                 value_shapes=_stored_value_shapes(
                                     self._get_proj().g, props,
                                     node_id=id_val,
-                                    keys=_entity_identity_probes()))
+                                    keys=_entity_identity_probes()),
+                                # #13035: the stored half of the goal-ending
+                                # pair — read ONLY if this write names one
+                                # endpoint and not the other. Every goal shape
+                                # (`goal`/`target`/`strategy`/`plan`, on a
+                                # Point, an Object or a Subject) is keyed by
+                                # `id`, so the identity probe's primary key is
+                                # the whole key space this question needs.
+                                goal_ending=lambda: _stored_goal_ending_view(
+                                    self._get_proj(), id_val))
         # ── #5475 (residual): the UPDATE door onto every label ──
         # ``update_entity`` is the documented tenant route onto Object /
         # Subject / Event / Document / Source nodes, and each of those carries

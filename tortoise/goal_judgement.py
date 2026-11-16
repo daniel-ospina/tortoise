@@ -168,11 +168,16 @@ COMPARATORS: Mapping[str, str] = {
 }
 
 #: How a judgement state caches onto the goal's ``goalState`` word (the closed
-#: #7856 vocabulary). ⛔ ``unknown`` maps to ``None`` — NO cache write: the
-#: vocabulary has no word for "not decided", and writing ``active`` over a
-#: human's ``blocked`` or ``guideline`` because a reading went missing would let
+#: #7856 vocabulary, six words since #13035). ❛❛ ``unknown`` maps to ``None`` — NO
+#: cache write: the vocabulary has no word for "not decided", and writing
+#: ``active`` over a human's ``blocked`` because a reading went missing would let
 #: the cache outrank a word nobody measured. :func:`record_judgement` reports
-#: ``goalState: None`` in that case instead of guessing.
+#: ``goalState: None`` in that case instead of guessing. ⛔ The cache writes only
+#: the two words a MEASUREMENT can produce — ``met``/``unmet`` — and NEVER an
+#: ending (``abandoned``/``superseded``): an ending is a lifecycle decision that
+#: arrives with a verb, and since #13035 it also sets ``status``, so a cache that
+#: wrote one would either be refused at the write boundary or end a goal nobody
+#: decided to end.
 GOAL_STATE_CACHE: Mapping[str, str | None] = {
     "met": "met",
     "unmet": "unmet",
@@ -1483,7 +1488,7 @@ def _write_goal_state_cache(sdk: Any, goal_id: str, state: str) -> str | None:
     """Write the goal's ``goalState`` CACHE from the judgement, or nothing.
 
     ``unknown`` writes NOTHING (:data:`GOAL_STATE_CACHE`) rather than putting
-    ``active`` over a human's ``blocked``/``guideline``: a judgement that reaches
+    ``active`` over a human's ``blocked``: a judgement that reaches
     no state cannot improve the cache, and the closed vocabulary has no word for
     "not decided". The write is unconditional (rather than "only if it differs")
     because checking would mean READING ``goalState`` in this module — the one

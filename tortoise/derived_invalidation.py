@@ -105,7 +105,7 @@ extends to the retirement path, and the gate is on the WORD IN THE CACHE — not
 why the judgement went. A cache holding a word this engine wrote
 (:data:`DERIVED_GOAL_STATES`) is reconciled to what still stands, or cleared when
 nothing does; a cache holding ANY OTHER word (``active``, ``blocked``,
-``guideline``, ``superseded``, ``abandoned``) is a decision nobody measured, so it
+``superseded``, ``abandoned``) is a decision nobody measured, so it
 is preserved and reported. Gating on the REASON instead fails in both directions
 and is what a review measured: a goal retired by its ``status`` kept ``met``
 forever (the ``goal-retired`` arm reconciled nothing), while a ``blocked`` goal
@@ -169,8 +169,12 @@ STALE_REASONS = (
 #: The ``goalState`` words that mean the goal is no longer a pursued commitment.
 #: A SUBSET of the closed #7856 vocabulary (``sdk.GOAL_STATE_VALUES``) and pinned
 #: as such by a test — ``met``/``unmet``/``blocked``/``active`` are states OF a
-#: live commitment and must never be read as its retirement, and ``guideline`` is
-#: a demoted target (#6792), not a retired goal.
+#: live commitment and must never be read as its retirement. (§5 of
+#: ``docs/plans/2026-11-15-state-lifecycle-and-pipelines.md``: these are the
+#: lifecycle's endings spelled on the achievement axis, and since #13035 the SDK
+#: write boundary refuses a goal whose ``goalState`` ending and ``status`` ending
+#: disagree — so this arm and the readers that ask ``status`` now answer about
+#: the same goals.)
 RETIRED_GOAL_STATES = frozenset({"superseded", "abandoned"})
 
 #: The only ``goalState`` words :func:`goal_judgement.record_judgement` can write
@@ -1013,7 +1017,7 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     getting that wrong fails in BOTH directions, which is why it is stated as a
     rule rather than a special case. :data:`DERIVED_GOAL_STATES` names the only
     two words :func:`goal_judgement.record_judgement` can write. Everything else
-    on a goal (``active``, ``blocked``, ``guideline``, ``superseded``,
+    on a goal (``active``, ``blocked``, ``superseded``,
     ``abandoned``) was put there by a human or by the create door, so it must be
     LEFT ALONE: clearing it would erase a decision nobody measured, and rewriting
     it would be worse still. Two failures the reason-keyed version had, both
@@ -1388,7 +1392,7 @@ def reconcile_goal_states(
 
     ⛔ THE GATE IS ON THE WORD, AT BOTH ENDS. Only a goal holding a word in
     :data:`DERIVED_GOAL_STATES` is even a candidate (so a human's ``active``,
-    ``blocked``, ``guideline``, ``superseded`` or ``abandoned`` is not scanned, let
+    ``blocked``, ``superseded`` or ``abandoned`` is not scanned, let
     alone rewritten), and a word APPEARING BETWEEN THE SCAN AND THE DOOR'S READ
     that is outside :data:`DERIVED_GOAL_STATES` is PRESERVED and reported — never
     cleared, never rewritten. ⚠️ The precise scope of that promise: the door's
@@ -1464,8 +1468,8 @@ def reconcile_goal_states(
     * ``consistent`` — the word already matched, and NOTHING was written (a
       re-write per goal per run would journal a revision for work not done);
     * ``preserved`` — a word appearing between the scan and the door's read that is
-      NOT in :data:`DERIVED_GOAL_STATES` (a human's ``active``/``blocked``/
-      ``guideline``) was left alone and reported, so a sweep cannot read clean over
+      NOT in :data:`DERIVED_GOAL_STATES` (a human's ``active``/``blocked``) was
+      left alone and reported, so a sweep cannot read clean over
       a goal it refused to touch. ⚠️ Scoped by VALUE for the same reason the gate
       above is: a human ``met``/``unmet`` in that window IS overwritten;
     * ``gone`` — the goal node is GONE, so there is no cache to reconcile. The

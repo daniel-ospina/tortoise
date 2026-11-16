@@ -8239,12 +8239,30 @@ surfaces:
   # asks for — every reason in the CLOSED set is reachable, a retirement is
   # terminal and journals, and the derivation stops trending across a definition
   # boundary — plus the negative controls that give them meaning (a live
-  # `goalState` of `met`/`blocked`/`guideline` is never a retirement; a reading
+  # `goalState` of `met`/`blocked` is never a retirement; a reading
   # taken after the boundary leaves its judgement standing). Runs on the docker
   # lane AND under `TORTOISE_TEST_CARVE_OUT=1` (the shared `sdk_factory` fixture
   # is URI-aware), so it needs no `carve_out:` row and no
   # `TEST_NO_REDIRECT_STEMS` entry.
   - test_11926_derived_invalidation.py
+  # #13035: the goal-ending CONSISTENCY rule — `status` and `goalState` may not
+  # disagree about whether a goal has ended, in EITHER direction (design §5 of
+  # `docs/plans/2026-11-15-state-lifecycle-and-pipelines.md`). `core` is the only
+  # registration that helps, for the same measured reason the #11822/#11926 rows
+  # above state: the guard lives in `tortoise/sdk.py`, which no `SOURCE_PATTERNS`
+  # row names, while the arm that made the defect visible lives in
+  # `derived_invalidation` — so the files that can break this pair are exactly
+  # the ones the `tortoise/` fallback resolves to THIS surface. The file is the
+  # acceptance, not a case count: the refusal in both directions with both
+  # repairs named, `superseded`'s successor obligation (the `supersededBy`
+  # carrier AND the Point `CORRECTS` edge), the ordinary-verb retirement in ONE
+  # write, the cross-product proof that no writable `(goalState, status)` pair
+  # leaves the invalidation path and the reading rule disagreeing, `guideline`'s
+  # refusal plus an AST sweep showing no code path still expects it, and the
+  # cache's `met`/`unmet`-only rule. Runs on the docker lane AND under
+  # `TORTOISE_TEST_CARVE_OUT=1` (the shared `sdk_factory` fixture is URI-aware),
+  # so it needs no `carve_out:` row and no `TEST_NO_REDIRECT_STEMS` entry.
+  - test_13035_goal_ending_consistency.py
   # #12363: the PUBLISHED artifact's observability — the one reading the repo
   # never took. `tortoise-graph` 0.2.0 (uploaded 2026-08-08) ships a wheel whose
   # first documented command (`tortoise init`) exits 1 on a clean machine with
@@ -13313,6 +13331,19 @@ durations:
   test_7846_restore_doc_and_bounds.py: 0.1
   test_7853_confidence_label_propagation.py: 23.9  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 14.8
   test_7856_goal_state.py: 3.4  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 3.2
+  # #13035 new file; The row must EXIST, not merely default: the `core`
+  # registration above puts it in `fast_pool()`, and `--integrity`'s
+  # `duration_coverage_issues` floor is measured against that pool's own size.
+  # The weight is a DELIBERATE local reading, not a junit sweep (this file has
+  # never run on main): 11 cases, one graph per case through the shared
+  # `sdk_factory`, and the only expensive one is the cross-product proof (48
+  # single-write goal creates in ONE graph, no EP, no judgement). Measured whole
+  # file in ~119 s on this box at load ~110, so ~1/10 of that on an idle host —
+  # the weight below is the idle-order estimate, and
+  # `tools/ci_timing.py --refresh-durations` replaces it from the first
+  # push-to-main junit sweep that includes the file. ⛔ No CASE COUNT is recorded
+  # as a pin: it moves whenever a review round adds an arm.
+  test_13035_goal_ending_consistency.py: 6.0
   test_7902_write_path_label_widening.py: 8.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 7.4
   test_7925_route_parity.py: 2.3  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 61.0
   test_7951_delete_resurrection.py: 16.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 15.5

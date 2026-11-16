@@ -99,10 +99,13 @@ def test_the_reason_set_is_closed_and_every_reason_is_reachable(sdk):
     is either a red test or a reason nobody can build a graph for."""
     reachable: dict[str, str] = {}
 
-    # goal-retired
+    # goal-retired — retired on BOTH fields in one write: #13035's write
+    # boundary refuses `goalState='abandoned'` alone (that pair is the defect
+    # this module's retirement arm used to disagree with every other reader
+    # about).
     i, t, g = _world(sdk, tag="reason-goal")
     _judge(sdk, i, t, g)
-    sdk.update_knowledge(g["id"], goalState="abandoned")
+    sdk.update_knowledge(g["id"], goalState="abandoned", status="deprecated")
     reachable["goal-retired"] = _only(verdicts(sdk, goal_id=g["id"])).invalidation.reason
 
     # target-retired
@@ -148,8 +151,9 @@ def test_the_retired_goal_states_are_a_subset_of_the_goal_state_vocabulary():
     from tortoise.sdk import GOAL_STATE_VALUES
     assert RETIRED_GOAL_STATES < GOAL_STATE_VALUES
     # the words this module must NEVER read as a retirement, named so a later
-    # "simplification" to "any terminal-looking word" reds here.
-    assert not (RETIRED_GOAL_STATES & {"met", "unmet", "blocked", "active", "guideline"})
+    # "simplification" to "any terminal-looking word" reds here. `guideline` was
+    # in this list until #13035 removed it from the vocabulary altogether.
+    assert not (RETIRED_GOAL_STATES & {"met", "unmet", "blocked", "active"})
 
 
 # ── 2. no false positives: a healthy judgement is left alone ───────────────
@@ -307,7 +311,13 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_the_recall_lane(sdk, ret
     i, t, g = _world(sdk, tag=f"legacy-outdated-{retire}")
     made = _judge(sdk, i, t, g)
     node = {"target": t, "indicator": i, "goal": g}[retire]
-    sdk.update_knowledge(node["id"], status="outdated")
+    # A GOAL carries an achievement word as well, and #13035 refuses a goal ended
+    # on `status` and left running on `goalState` — so the legacy word arrives
+    # with the matching ending in the SAME write (`outdated` is one of the
+    # `abandoned` family's spellings). The other two inputs have no goalState,
+    # so nothing is paired for them.
+    pairing = {"goalState": "abandoned"} if retire == "goal" else {}
+    sdk.update_knowledge(node["id"], status="outdated", **pairing)
     # the write landed; this assertion is what the sweep will read back
     assert sdk.get_entity(node["id"])["status"] == "outdated"
     v = _only(verdicts(sdk, goal_id=g["id"]))
@@ -985,10 +995,16 @@ def test_the_boundary_is_read_from_the_NODE_already_fetched(sdk):
 
 # ── 5. the GOAL is retired (capability 12's derived half) ─────────────────
 
+#: Every member retires the goal on BOTH fields in ONE write — since #13035 the
+#: SDK write boundary refuses a goal ended on `goalState` and left running on
+#: `status` (and the reverse), so the one-field rows that used to stand here are
+#: exactly the shape the model forbids. `superseded` additionally names its
+#: successor, which is what the word obliges (design §5).
 @pytest.mark.parametrize("retirement", [
-    {"goalState": "abandoned"},
-    {"goalState": "superseded"},
-    {"status": "archived"},
+    {"goalState": "abandoned", "status": "deprecated"},
+    {"goalState": "superseded", "status": "superseded",
+     "supersededBy": "a-successor-goal"},
+    {"status": "archived", "goalState": "abandoned"},
 ])
 def test_retiring_the_goal_retires_the_states_derived_from_it(sdk, retirement):
     i, t, g = _world(sdk, tag=f"goal-{'-'.join(retirement)}")
@@ -1000,11 +1016,12 @@ def test_retiring_the_goal_retires_the_states_derived_from_it(sdk, retirement):
     assert sdk.get_entity(made["point_id"])["status"] == "retracted"
 
 
-@pytest.mark.parametrize("state", ["met", "unmet", "blocked", "active", "guideline"])
+@pytest.mark.parametrize("state", ["met", "unmet", "blocked", "active"])
 def test_a_live_goal_state_is_never_read_as_a_retirement(sdk, state):
-    """The negative control for the row above: four of these five are ordinary
-    states of a PURSUED commitment, and ``guideline`` is a demoted target (#6792).
-    Reading any of them as retirement would retire every blocked goal's evidence."""
+    """The negative control for the row above: these are ordinary
+    states of a PURSUED commitment. Reading any of them as retirement would
+    retire every blocked goal's evidence. (``guideline`` used to be listed here
+    and is gone since #13035 — it was never an achievement state at all.)"""
     i, t, g = _world(sdk, tag=f"live-{state}")
     _judge(sdk, i, t, g)
     sdk.update_knowledge(g["id"], goalState=state)
@@ -1024,14 +1041,25 @@ def test_a_goal_retired_by_its_STATUS_does_not_keep_a_derived_word(sdk):
     i, t, g = _world(sdk, tag="goal-status-word")
     _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"])["goalState"] == "met"
-    sdk.update_knowledge(g["id"], status="archived")
+    # ⛔ LEGACY DATA, and since #13035 deliberately so: the paired write that
+    # would produce this state — a goal ended on `status` while its cache still
+    # holds a derived word — is REFUSED at the write boundary (that pair IS the
+    # divergence this module exists to remove). The shape still exists in graphs
+    # written before that boundary, which is exactly the population a retirement
+    # sweep must not serve as live, so it is produced here the way `live.py`'s
+    # #2901 note sanctions: a RAW graph write, simulating legacy data.
+    sdk._get_proj().g.query(
+        "MATCH (n:Object) WHERE n.id = $id SET n.status = 'archived'",
+        params={"id": g["id"]},
+    )
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["counts"]["retired"] == 1
     assert report["invalidated"][0]["cache"]["cleared"] is True
     assert sdk.get_entity(g["id"]).get("goalState") is None
 
 
-@pytest.mark.parametrize("word", ["blocked", "guideline", "active"])
+@pytest.mark.parametrize("word", ["blocked", "active"])
 def test_a_word_this_engine_never_wrote_is_PRESERVED_by_a_retirement(sdk, word):
     """⛔ REVIEW P1, the other direction. A ``blocked`` goal used to lose its word
     to a ``target-revised`` retirement that cleared the cache under it — erasing a
@@ -1055,7 +1083,9 @@ def test_a_retired_goal_keeps_its_own_word_and_the_cache_never_overwrites_it(sdk
     inversion #11822's `GOAL_STATE_CACHE` rule exists to prevent."""
     i, t, g = _world(sdk, tag="goal-word")
     _judge(sdk, i, t, g)
-    sdk.update_knowledge(g["id"], goalState="abandoned")
+    # the paired write (#13035): `abandoned` is `deprecated` spelled on the
+    # achievement axis, so the goal is ended on both fields in ONE write.
+    sdk.update_knowledge(g["id"], goalState="abandoned", status="deprecated")
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["counts"]["retired"] == 1
     assert report["invalidated"][0]["cache"]["preserved"] is True
@@ -2537,17 +2567,24 @@ def test_the_repair_sweep_leaves_a_CONSISTENT_goal_alone_and_writes_NOTHING(sdk)
     assert sdk.get_entity(g["id"])["goalState"] == "met"
 
 
-@pytest.mark.parametrize("word", ["active", "blocked", "guideline",
-                                  "superseded", "abandoned"])
+@pytest.mark.parametrize("word,extra", [
+    ("active", {}),
+    ("blocked", {}),
+    # the two ENDINGS are lifecycle decisions, and since #13035 they arrive with
+    # the `status` ending they spell in the SAME write; `superseded` also names
+    # its successor, which is what the word obliges (design §5).
+    ("superseded", {"status": "superseded", "supersededBy": "successor-x"}),
+    ("abandoned", {"status": "deprecated"}),
+])
 def test_a_goal_whose_word_THIS_ENGINE_never_wrote_is_not_even_a_CANDIDATE(
-        sdk, word):
+        sdk, word, extra):
     """The reconcile's own rule, applied at the SWEEP's door: only a word
     `record_judgement` can write is a cache of a judgement. A human-set word is
     not a candidate at all, so a stale sweep cannot erase a decision nobody
     measured — and `superseded`/`abandoned` (the RETIRED_GOAL_STATES) are
     lifecycle decisions, not derived cache values."""
     _i, _t, g = _world(sdk, tag=f"sweep-human-{word}")
-    sdk.update_knowledge(g["id"], goalState=word)
+    sdk.update_knowledge(g["id"], goalState=word, **extra)
     report = reconcile_goal_states(sdk)
     assert report["counts"]["scanned"] == 0, report
     assert report["counts"]["repaired"] == 0, report
