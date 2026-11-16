@@ -55,6 +55,14 @@ measure.py                          one tenant, written through the hosted data
                                     plane's own seam, counted in BOTH stores
 last-run-arm-a-shared-cache.json    the ARM A capture, verbatim
 last-run-arm-b-local-cache.json     the ARM B capture, verbatim
+last-run-arm-c-reconcile.json       the ARM C capture (reconcile arm)
+reconcile-arm-c-clean.json          `record-reconcile --json` on ARM C's graph:
+                                    verdict=clean, divergent=0, exit 0
+reconcile-arm-b-with-operator-12949.json
+                                    the same command on a graph that ALSO has an
+                                    operator Point: divergent=1 — #12949, and
+                                    the section below says why that is not a
+                                    lost write
 both-arms.json                      the columns the table below reads, from
                                     those two captures, plus the
                                     same-server check arm A depends on
@@ -209,3 +217,46 @@ placement decision or a record narrowing — so it is filed as **#12949** with
 this measurement rather than folded into the cache-leg change. The lane does
 **not** report its DoD's reconcile item as met: on a write set that includes an
 operator, the verb reports `divergent` today.
+
+## Does the write actually RECONCILE? — yes, and here is the one caveat
+
+`record-reconcile --json` compares the record's view to the cache's node by node.
+Run on a **freshly-written** graph (arm C, `measure.py --skip-operator`):
+
+```json
+{
+  "checked": 4, "divergent": 0, "divergent_keys": [],
+  "missing_in_cache": 0, "extra_in_cache": 0, "field_mismatches": 0,
+  "form_normalized": 2, "graph_only_total": 8,
+  "declaration_coverage": "complete", "verdict": "clean"
+}
+```
+
+```bash
+# the capture, reproduced
+SUMMARY_OUT=last-run-arm-c-reconcile.json TORTOISE_DB_URI="$LANE_URI" \
+  python measure.py --skip-operator
+org=$(python3 -c "import json;print(json.load(open('last-run-arm-c-reconcile.json'))['org'])")
+gid=$(python3 -c "import json;print(json.load(open('last-run-arm-c-reconcile.json'))['graph_id'])")
+python -m tortoise record-reconcile --db "$LANE_URI" \
+  --record-dsn "$TEST_RECORD_DB_URI" --org "$org" --graph "$gid" \
+  --cache-graph "org_${org}_${gid}" --json
+```
+
+exit 0, on a tenant created and written inside the run. `graph_only` is the
+expected population (cache-held properties the record cannot place:
+`content_hash`, `embedding`, `ep_dirty`, `ep_dirty_at`), reported as its own
+bucket and **not** folded into divergence; `form_normalized: 2` is the float32
+JSONB round-trip on the two Point embeddings, likewise not a mismatch.
+
+⚠️ **Add an operator Point and it reads `divergent: 1`.** That residual is
+**#12949 and it is not a lost write**: the record's operator row carries an EMPTY
+`point_kind` and a structured `props.operator` echo (`{inputs, op_type}`), while
+the graph represents the same operator NATIVELY — `is_operator: true`,
+`op_type`, `direction`, plus the typed `IMPL`/`INPUT` edges. The information is in
+both stores, in the shape each store uses; the RECONCILER compares the record's
+echo to the graph's property names and reports the pair every time. Captured:
+`reconcile-arm-b-with-operator-12949.json`. Fixing it means deciding what the
+comparison surface should be for a record column that is a *spelling* of the
+graph's representation — its own root, its own decision, and deliberately not
+folded into a change about store SELECTION.

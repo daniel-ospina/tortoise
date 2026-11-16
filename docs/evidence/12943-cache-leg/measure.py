@@ -193,8 +193,20 @@ def main() -> int:
                                                   is_episodic=False)
         o = results["object:alpha"]
         p = results["point:gamma"]
-        results["operator"] = sdk.create_operator(
-            "IMPL", o["id"], [p["id"]], "supports")
+        # `--skip-operator` exists for the RECONCILE arm: the operator Point's
+        # record row carries an EMPTY ``point_kind`` and a structured
+        # ``props.operator`` echo (``{inputs, op_type}``) which the graph
+        # represents NATIVELY as ``op_type`` + typed edges — so a reconciler that
+        # compares the record's echo to the graph's properties reports it
+        # divergent every time, on a store that lost nothing. That comparison is
+        # its own root, filed as #12949; this harness can therefore measure the
+        # reconcile on a graph written through the ordinary doors, and name the
+        # operator residual rather than hide it.
+        if "--skip-operator" in sys.argv:
+            print("operator         SKIPPED (--skip-operator: see #12949)")
+        else:
+            results["operator"] = sdk.create_operator(
+                "IMPL", o["id"], [p["id"]], "supports")
     except Exception as exc:                            # noqa: BLE001
         print(f"WRITE RAISED: {type(exc).__name__}: {exc}")
 
