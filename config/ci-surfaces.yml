@@ -3915,9 +3915,10 @@ surfaces:
   # 13 skipped`, 28 collected; WITH the driver, `28 passed, 0 skipped`). The
   # measured cost is in `docs/evidence/9558-record-write-cost/`.
   - test_9558_record_write_cost.py
-  # #9318: the record's POSITION-KEY collision — a journal position already
-  # held by a DIFFERENT record must be REFUSED and reported, while a genuine
-  # replay (same position, same content) stays a silent no-op.
+  # #9318: the record's POSITION-KEY collision — a journal position whose
+  # content differs from what this write would produce must be REFUSED and
+  # reported, while a genuine replay (same position, same content) stays a
+  # silent no-op.
   # Registered on `core` for the same reason as the two rows above: its subject
   # is `tortoise/record_projection.py` (`replay()`'s statement loop — the one
   # call site — and the `JournalPositionCollision` class) plus

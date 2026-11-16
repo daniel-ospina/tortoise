@@ -511,9 +511,12 @@ class RecordWrite:
     #: The live door splits the nil tenant from a MALFORMED CARRIED pair — one is
     #: "nobody said whose turns these are", the other is "the caller said, and
     #: the answer was unusable" — and both count on the ``no_tenant`` COUNTER.
-    #: So the closed list above is the refusal vocabulary and the counter set is
-    #: one word coarser: a consumer branching on this field must accept seven
-    #: values, while an operator reading the metric sees six. Listing only the
+    #: So the closed list above is the refusal vocabulary, and the counter is a
+    #: DIFFERENT set OF THE SAME SIZE — seven labels, not the same seven. The
+    #: door folds `no_tenant_carried` onto `no_tenant` and counts
+    #: `no_durable_journal` on the skip counter, while the counter separately
+    #: carries the SDK-only `no_journal` and `seam_unimportable`; deriving one
+    #: set from the other is wrong in BOTH directions. Listing only the
     #: counter words here is what made a consumer's closed list miss a value the
     #: door actually returns (:func:`write_live_record`'s ``LIVE_WRITE_REFUSALS``
     #: declares them together, and that set is authoritative).

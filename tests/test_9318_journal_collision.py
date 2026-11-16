@@ -1,4 +1,4 @@
-"""#9318 — a position absorbed by a DIFFERENT record is refused LOUDLY.
+"""#9318 — a position holding content this write would not produce is refused LOUDLY.
 
 THE DEFECT THIS PINS. `public.journal_event` is keyed `(org_id, graph_id, seq)`
 and the schema calls that key *"the idempotency key: applying a position twice

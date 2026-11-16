@@ -1026,14 +1026,20 @@ class JournalPositionCollision(RecordProjectionError):
             f"payload carries no record id, so the record cannot tell which; "
             f"{evidence}"
         )
+        # ⛔ The CONSEQUENCE is cause-neutral too (review cycle 5). The earlier
+        # wording — "every row written under it would be indexed by ANOTHER
+        # RECORD's event" — re-asserted the one cause the sentence above just
+        # said it cannot decide, and it is outright false under the
+        # derivation-change cause: there, the surviving row IS this record's own
+        # event. What is true under BOTH causes is what is written here.
+        consequence = "the record cannot file this write's rows at that position"
         super().__init__(
             f"journal position {seq} of ({org_id!r}, {graph_id!r}) already "
             f"holds {stored_event_type!r} ({stored_payload_digest}, "
             f"{stored_payload_bytes} B of payload) while this write is "
             f"{event_type!r} ({payload_digest}, {payload_bytes} B). "
             f"The surviving row's content is not what this write would "
-            f"produce — {diagnosis} — so every row written under it would be "
-            f"indexed by another record's event. The "
+            f"produce — {diagnosis} — so {consequence}. The "
             f"journal still holds this record; the position row cannot be "
             f"repaired while the key carries no journal identity (#12894), "
             f"and `journal_event` is append-only by trigger."
