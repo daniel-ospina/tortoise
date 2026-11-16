@@ -497,8 +497,51 @@ PRODUCTION = REPO / "tortoise"
 
 
 def _attribute_names(tree: ast.AST) -> list[tuple[int, str]]:
-    return [(node.lineno, node.attr) for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute) and node.attr in RETIRED_SDK_METHODS]
+    """Every CALL of a retired SDK name: ``<receiver>.<retired>(…)``.
+
+    ⛔ CALL, not every attribute read (#12951 CI red). This collected every
+    ``ast.Attribute`` whose NAME was retired, which is receiver-blind: the
+    moment a wave retires a name that is also an ordinary field name, the gate
+    floods with data-model reads that reach no SDK at all. Measured when #11609
+    Phase 2 retired ``status`` and ``provenance`` — 86 offenders, 86 of them
+    plain reads on a row / record / exception object (``_held.status``,
+    ``r.provenance``, ``outcome.status`` …) and ZERO SDK call sites, so the red
+    said nothing about the defect this gate exists to catch while blocking
+    every merge until someone narrowed or deleted it.
+
+    The defect it exists to catch IS a call: ``goal_judgement`` kept
+    ``sdk.update_entity(…)`` and took every goal judgement down with it. A call
+    site is an ``ast.Call`` whose ``func`` IS the retired attribute, so this
+    keeps detection exact in the direction that matters —
+    ``test_the_census_still_catches_an_sdk_call_site`` below proves both
+    directions on synthetic trees rather than leaving the narrowing as an
+    unverified claim.
+    """
+    return [(node.func.lineno, node.func.attr) for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in RETIRED_SDK_METHODS]
+
+
+def test_the_census_still_catches_an_sdk_call_site():
+    """The narrowing above is name-blind, so prove it is not KIND-blind.
+
+    A call of a retired name is still caught; an ordinary attribute READ of the
+    same name is not. Without this pin the narrowing is an assertion about
+    behaviour that no test measures — the exact shape of change that turns a
+    gate into decoration.
+    """
+    retired = sorted(RETIRED_SDK_METHODS)
+    assert retired, "no retired names declared — the pin is vacuous"
+    name = retired[0]
+    caught = ast.parse(f"def f(sdk):\n    return sdk.{name}(1)\n")
+    missed = ast.parse(f"def f(row):\n    return row.{name}\n")
+    assert _attribute_names(caught) == [(2, name)], (
+        "a CALL of a retired name must still be caught — this is the "
+        "`goal_judgement`/`sdk.update_entity` defect the gate exists for")
+    assert _attribute_names(missed) == [], (
+        "a plain attribute READ of a name that happens to be retired must NOT "
+        "be flagged — it reaches no SDK")
 
 
 def test_no_production_module_reaches_a_retired_sdk_name():
