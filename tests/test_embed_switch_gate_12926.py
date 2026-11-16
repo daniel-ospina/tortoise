@@ -1749,3 +1749,106 @@ def test_export_dash_n_retracts_like_unset():
         )
         assert stated == {"TORTOISE_VALUE_GATE": "1"}, (tail, stated)
         assert "TORTOISE_EMBED_GATE" in ambiguous, (tail, ambiguous)
+
+
+#: The two shell controls that make a statement run SOMEWHERE ELSE. Each is a form the shipped
+#: `entrypoint.sh` could plausibly grow into, and each was credited `STATED` before this pin.
+_SHORT_CIRCUIT_BODIES = (
+    # an `if` spelled with `&&`/`||` instead of `then`/`fi` — a BRANCH all the same
+    '[ -n "$MAYBE" ] && export TORTOISE_VALUE_GATE=1',
+    'true || export TORTOISE_VALUE_GATE=1',
+    'false && export TORTOISE_VALUE_GATE=1',
+    'command -v uvicorn >/dev/null || export TORTOISE_VALUE_GATE=1',
+    # `&&` on a CONTINUATION line: the separator is what makes it conditional, not the line break
+    '[ -n "$MAYBE" ] \\\n  && export TORTOISE_VALUE_GATE=1',
+    # a BACKGROUNDED statement: the subshell exports, the process inherits nothing
+    'export TORTOISE_VALUE_GATE=1 &',
+    'export TORTOISE_VALUE_GATE=1 2>/dev/null &',
+)
+
+
+@pytest.mark.parametrize("body", _SHORT_CIRCUIT_BODIES)
+def test_a_statement_that_short_circuits_or_backgrounds_is_not_credited(body):
+    """Review P0 (measured) — `&&`/`||`/`&` are BRANCHES, and a branch states nothing.
+
+    `_shell_statements` splits a logical line on `;`/`&&`/`||` so a block closer sitting beside an
+    assignment is seen, and the split then handed the RIGHT-hand slice to the reader as an ordinary
+    top-level statement. The `conditional` test was `depth > 0 or terminated` — it had no notion of
+    the separator that produced the slice — so a guarded export was credited and the gate exited 0:
+
+        [ -n "$MAYBE" ] && export TORTOISE_VALUE_GATE=1     -> ok  TORTOISE_VALUE_GATE=1
+        true || export TORTOISE_EMBED_GATE=1                -> ok  TORTOISE_EMBED_GATE=1
+
+    while the same script under `env -i … bash` printed NEITHER switch: `MAYBE` is unset, so the
+    `&&` RHS never ran, and `true` succeeded, so the `||` RHS never ran. A bare `&` is the same
+    class from the other side — `export K=1 &` exports inside a SUBSHELL.
+
+    This is the exact shape the module's contract already refuses as `if …; then export …`: the
+    branch spelling is irrelevant, so the verdict must be `ambiguous` (fail CLOSED), never `STATED`.
+    Mutation-proved: reverting `conditional` to `depth > 0 or terminated` reds every case here.
+    """
+    stated, ambiguous = gate._shell_assignments(f"#!/bin/sh\n{body}\nexec \"$@\"\n")
+    assert stated == {}, f"a conditional/backgrounded export was credited as a statement: {body!r} -> {stated}"
+    assert "TORTOISE_VALUE_GATE" in ambiguous, (
+        f"a conditional export must land on the fail-closed verdict, not vanish: {body!r} -> {ambiguous}"
+    )
+
+
+def test_the_short_circuit_guard_does_not_refuse_an_honest_entrypoint():
+    """The guard is about the SEPARATOR, so an unconditional statement is untouched — both sides.
+
+    Fail-closed is only correct if it is not also false-closed: a `;`-separated second statement
+    (the reason the split exists), an export on the LEFT of `&&` (it runs unconditionally), and a
+    redirection containing `&` (`>&2`, `&>file`, `|&`) are all ordinary statements and stay
+    credited. Mutation-proved in the opposite direction from the test above.
+    """
+    for label, script, expected in (
+        (
+            "`;`-separated: both statements are unconditional",
+            "export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1",
+            {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"},
+        ),
+        (
+            "a closer beside a later assignment (`fi; export K=1`)",
+            "if false; then\n  echo x\nfi; export TORTOISE_VALUE_GATE=1\n",
+            {"TORTOISE_VALUE_GATE": "1"},
+        ),
+        (
+            "the LEFT of `&&` runs unconditionally",
+            "export TORTOISE_VALUE_GATE=1 && echo armed",
+            {"TORTOISE_VALUE_GATE": "1"},
+        ),
+        (
+            "an `>&2` redirect is not a background operator",
+            "export TORTOISE_VALUE_GATE=1 >&2",
+            {"TORTOISE_VALUE_GATE": "1"},
+        ),
+        (
+            "an `&>file` redirect is not a background operator",
+            "export TORTOISE_VALUE_GATE=1 &>/dev/null",
+            {"TORTOISE_VALUE_GATE": "1"},
+        ),
+        (
+            "a `|&` pipe is not a background operator",
+            "export TORTOISE_VALUE_GATE=1 |& cat",
+            {"TORTOISE_VALUE_GATE": "1"},
+        ),
+    ):
+        stated, ambiguous = gate._shell_assignments(script + "\n")
+        assert stated == expected, f"{label}: {script!r} -> {stated} / ambiguous={ambiguous}"
+
+
+def test_the_real_entrypoint_statements_are_unconditional():
+    """This repository's own channel must not be refused by the new guard — measured, not assumed.
+
+    The guard added above is the kind that can turn a passing repo red, so the population it
+    actually reads is pinned here: `entrypoint.sh` arms both switches with a TOP-LEVEL export, no
+    `&&`/`||`/`&` in the statement. If a future edit guards that line (`[ … ] && export …`), this
+    reds for the right reason: the shipped container may then never receive the value.
+    """
+    text = (REPO_ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+    stated, _ = gate._shell_assignments(text)
+    assert {key: value for key, value in stated.items() if key in SWITCHES} == {
+        "TORTOISE_VALUE_GATE": "${TORTOISE_VALUE_GATE:-1}",
+        "TORTOISE_EMBED_GATE": "${TORTOISE_EMBED_GATE:-1}",
+    }, stated
