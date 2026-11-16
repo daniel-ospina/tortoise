@@ -2820,11 +2820,17 @@ def write_live_record(record: Mapping[str, Any], *,
         #
         #   * the journal AHEAD of the counter — the refused-write and
         #     CONCURRENT-WRITER states above. Every refusal arm appends its line
-        #     and issues no counter number, so the gap never closes (a replay
-        #     writes rows, never the counter) and every LATER armed write refuses
-        #     for the same reason. Remedy in order: `halt` →
-        #     `seed --journal <path>` → `reopen` → `arm` (the seed is allowed
-        #     here, because the record's rows are BELOW the journal).
+        #     and issues no counter number, so an ENUMERATED replay cannot close
+        #     the gap: it writes rows and never the counter, and on a cut-over
+        #     graph it is refused outright (`_refuse_an_enumerated_replay`). So
+        #     every LATER armed write refuses for the same reason. ⚠️ An ARMED
+        #     replay of the missing record DOES close it — `replay(allocate=True)`
+        #     runs `ALLOCATION_SQL`, which issues and commits the position, and
+        #     `tests/test_12894_record_cursor_live.py` pins that. It is per-record
+        #     surgery, though, so the general remedy for a whole gap is the
+        #     operator chain: `halt` → `seed --journal <path>` → `reopen` → `arm`
+        #     (the seed is allowed here, because the record's rows are BELOW the
+        #     journal).
         #   * the journal BEHIND the counter — the RESTORED / TRUNCATED states
         #     above. WORSE, not better: each refused append still advances the
         #     journal by one, so the guard stops refusing after `counter - floor`
