@@ -468,7 +468,7 @@ class _FakeGraph:
         return (*base[:10], status, is_operator, prov_source, *base[10:])
 
     def apply_slot(self, props: dict) -> None:
-        """Simulate `update_point` landing: the read-back must SEE it."""
+        """Simulate a slot write landing: the read-back must SEE it."""
         row = list(self.canon_row)
         for key, value in props.items():
             if key in self._COLUMNS:
@@ -534,14 +534,34 @@ class _FakeProj:
 
 class _FakeSDK:
     """A write door that records the call and does NOT write the graph —
-    exactly the silent-success `update_point` gives for an absent id."""
+    exactly the silent-success `update_point` gives for an absent id.
+
+    ⚠️ The METHOD NAME is the channel `capture_fold` actually calls, so this
+    fake is a pin on it (#12915 CI attribution A1): the fold's evidence write
+    moved `update_point` → `update_knowledge` in this batch, and the 14
+    evidence-carrying cases below died with
+    `AttributeError: '_FakeSDK' object has no attribute 'update_knowledge'`
+    because only the old name was here. Re-pointing this fake at the channel the
+    fold no longer uses reds those 14 — which is the point: the suite now pins
+    the door the fold really uses instead of the one it used to.
+
+    ⚠️ `update_point` is NOT retired at the SDK layer (it is live, and the PR
+    body says so): what the #11609 batch retired is the MCP TOOL
+    `tortoise_update_point`, whose pointer is
+    `tortoise_update_knowledge(id, props=...)`. The fold moved channels for a
+    behavioural reason, not a retirement one — `update_point` appends no
+    journal record for a status write and refuses every non-promote
+    transition, which is the class `update_knowledge`'s own docstring spends
+    its opening lines on. The call is `update_knowledge` because the fold wants
+    the journalled writer.
+    """
 
     def __init__(self, *, raises: Exception | None = None, on_update=None):
         self.raises = raises
         self.on_update = on_update
         self.calls: list[dict] = []
 
-    def update_point(self, point_id, **props):
+    def update_knowledge(self, point_id, **props):
         self.calls.append({"id": point_id, **props})
         if self.raises:
             raise self.raises
@@ -627,7 +647,7 @@ def test_a_duplicate_with_nothing_to_carry_issues_no_writes():
 
 def test_a_silent_slot_write_is_detected_by_the_read_back():
     """The write returned cleanly and NOTHING landed — the absent-canonical
-    shape `update_point` reports as success. The carry must refuse rather than
+    shape the SDK's `update_point` reports as success. The carry must refuse rather than
     let the caller delete a duplicate whose evidence never arrived."""
     sdk = _FakeSDK()
     proj = _FakeProj(_FakeGraph(dup_row=_DUP_ROW_QUOTED))  # canonical stays free
@@ -772,7 +792,7 @@ def test_an_invalid_span_is_named_as_the_duplicates_own_evidence(
     as unwritable, and the EventAPI→projection passthrough stores both verbatim
     (it does not run `validate_span` — the SDK's write doors do).
 
-    RED before this: `validate_span` raised INSIDE `update_point`, so the
+    RED before this: `validate_span` raised INSIDE the SDK write door, so the
     refusal came back `slot_write_failed` / "its span_start, span_end evidence
     could not be written onto the canonical (ValueError: …)" — the receipt
     blaming the CANONICAL for evidence the DUPLICATE malformed, forever.

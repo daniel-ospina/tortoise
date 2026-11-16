@@ -861,7 +861,19 @@ def test_8169_onboarding_documents_the_support_direction_of_strength():
     # The weakening branch must survive: this change ADDS a direction.
     start = skill.index("5. **Mitigate, don't NAND, for fit.**")
     step = skill[start:skill.index("\n6. **Options can IMPL/NAND each other**")]
-    assert "tortoise_mitigate_operator" in step
+    # ⚠️ RE-KEYED at #12915 (#4282 Phase 2, lane B): the document now teaches the
+    # CONTAINER spelling because `tortoise_mitigate_operator` was retired-forward
+    # in that batch — it still answers through the #3883 shim, but a served
+    # onboarding document must teach the ADVERTISED door. The invariant is
+    # unchanged (#8169: "the dampener branch must survive the change that ADDS a
+    # direction"); only the name it is stated with follows the surface, and
+    # asserting the retired name here would pin the document to stop teaching the
+    # door the surface advertises.
+    assert "tortoise_adjust_relationship(action='mitigate')" in step, (
+        "step 5 must teach the advertised dampener door "
+        "(`tortoise_adjust_relationship(action='mitigate')`, which absorbed "
+        "`tortoise_mitigate_operator`) — a document that teaches only the "
+        "retired name sends the reader through the #3883 shim")
     assert "never >0.50" in step, (
         "the mitigation band is #2315's ruling and must stay stated")
 

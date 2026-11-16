@@ -80,17 +80,18 @@ class TestDe2e7:
     def test_phase4_tools_registered(self):
         from tortoise.tool_registry import TOOL_REGISTRY
         names = {t.name for t in TOOL_REGISTRY}
-        # `#12948` (review B1 finding 8): `tortoise_mine_conversations` was RETIRED
-        # into `tortoise_mine_knowledge_from_directory` (Phase 2 lane C's MINE
-        # container), so the pin follows the LIVE name. It is the same door — the
-        # retired entry still answers through `RETIRED_USE_INSTEAD` — so this is a
-        # re-point, not a widening: the phase-4 population still has five members.
+        # #4282 Phase 2 — TWO batches re-pointed this population's members and the
+        # merged pin follows the LIVE name for each: lane C retired
+        # `tortoise_mine_conversations` into `tortoise_mine_knowledge_from_directory`,
+        # and lane B retired `tortoise_promote_point` into
+        # `tortoise_refresh_confidence` (`scope='promote'`). Both are re-points, not
+        # widenings: the phase-4 population still has five members.
         phase4 = {"tortoise_mine_knowledge_from_directory", "tortoise_list_dedup_candidates",
-                  "tortoise_approve_merge", "tortoise_promote_point",
+                  "tortoise_approve_merge", "tortoise_refresh_confidence",
                   "tortoise_belief_timeline"}
         assert phase4 <= names, phase4 - names
         by_name = {t.name: t for t in TOOL_REGISTRY}
-        assert by_name["tortoise_promote_point"].sdk_method == "promote_point"
+        assert "scope='promote'" in by_name["tortoise_refresh_confidence"].description
         assert by_name["tortoise_belief_timeline"].sdk_method == "belief_timeline"
 
     def test_mcp_handler_error_contract(self, monkeypatch):

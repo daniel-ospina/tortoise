@@ -5,7 +5,7 @@
   "source": "tortoise/sdk.py",
   "derivation": "AST class-body walk (tools.bridge_table._sdk_targets)",
   "derivation_rule": "every `def`/`async def` in the AST class body of `TortoiseSDK` whose name does not begin with `_`",
-  "count": 119,
+  "count": 118,
   "methods": [
     "annotate_ask_hits",
     "annotate_operator",
@@ -42,8 +42,6 @@
     "dream_health_check",
     "dream_health_state",
     "expand_relationships",
-    "file_decision",
-    "file_human_approval",
     "get_confidence",
     "get_cross_lens_candidates",
     "get_entity",
@@ -94,6 +92,7 @@
     "recall_state",
     "recall_subgraph",
     "reconcile_sessions",
+    "record_decision",
     "register_source",
     "resolve_id",
     "restore_memory_graph",
@@ -110,7 +109,7 @@
     "status",
     "suggest_entry_points",
     "summarize_structure",
-    "supersede",
+    "supersede_knowledge",
     "supersede_point",
     "sweep_invite_ghost_memberships",
     "taxonomy",
@@ -120,11 +119,11 @@
     "trash_graphs",
     "ulid",
     "update",
-    "update_entity",
     "update_knowledge",
     "update_memory_graph",
     "update_point",
     "validate_domain",
-    "volunteer_context"
+    "volunteer_context",
+    "write_question"
   ]
 }

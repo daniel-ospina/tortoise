@@ -412,7 +412,7 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_an_event():
 
         with pytest.raises(ValueError,
                            match="not a caller-settable property on an :Event"):
-            sdk.update_entity(eid, story_arc=NARRATIVE)
+            sdk.update_knowledge(eid, story_arc=NARRATIVE)
 
         rows = sdk._get_proj().g.query(
             "MATCH (e:Event {eventId:$e}) RETURN e.story_arc",
@@ -423,7 +423,7 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_an_event():
             "— §9.1/D1 places it in public.session_narrative only (#10000)")
 
         # ...and the surface still works for a prop it is FOR.
-        sdk.update_entity(eid, eventStatus="completed")
+        sdk.update_knowledge(eid, eventStatus="completed")
         rows = sdk._get_proj().g.query(
             "MATCH (e:Event {eventId:$e}) RETURN e.eventStatus",
             params={"e": eid}).result_set

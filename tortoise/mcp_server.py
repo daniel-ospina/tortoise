@@ -3095,7 +3095,20 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # declare `dry_run` — whose schema will REJECT that key — would be
         # recorded as a READ the caller never performed. Gate on the declared
         # preview set, not on key presence in untrusted input.
-        dry_run=name in _dry_run_tool_names() and bool((arguments or {}).get("dry_run")),
+        #
+        # ⛔ AND READ THE SPELLING THE WAY THE HANDLER WILL (`_coerces_to_true`),
+        # not with `bool()`: `bool("false")` is True while pydantic coerces
+        # `"false"` to False, so the raw-dict truthiness counted a call that
+        # WRITES as a preview read — the same raw-dict trap `_is_preview` and
+        # `_arguments_say_preview` each document. Pre-existing for the live
+        # `dry_run` tools and reachable for the three retired-but-answering ones
+        # this batch added to the set; one predicate closes both (measured:
+        # `dry_run="false"`/`"no"`/`"0"` took the WRITE branch and were metered
+        # as reads under `bool`).
+        dry_run=(
+            name in _dry_run_tool_names()
+            and _coerces_to_true((arguments or {}).get("dry_run"))
+        ),
     )
     status, error_kind, result_count = "ok", None, None
     # #8135: open the per-dispatch failure holder BEFORE the dispatch task is
@@ -3404,6 +3417,14 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     "tortoise_retract_point",
     # epic #888 W2 consolidated write surface
     "tortoise_create_entity", "tortoise_update", "tortoise_operator_action",
+    # #11609 Phase 2 (#4282): the container that ABSORBED the update doors above.
+    # It is not in this set for parity's sake — its body reaches the same
+    # node/edge-creating writers through `tortoise_update` (properties),
+    # `invalidate_point` and `retract_point` (the temporal arms), so leaving it out
+    # let the #329 completeness gate go red in the very batch that retires the
+    # gates' own names (`tests/test_mcp_http.py::TestIntrospectiveQuotaCompleteness`
+    # measures membership, not intent).
+    "tortoise_update_knowledge",
     # #684: node-creating tools that were missed in the original #329 audit
     "tortoise_file_human_approval",  # creates Event + decision Point + IMPL edges
     "tortoise_assess_source",        # creates assessment Point
@@ -3456,13 +3477,43 @@ _DRY_RUN_TOOLS: frozenset[str] | None = None
 
 
 def _dry_run_tool_names() -> frozenset[str]:
-    """Registry names whose served handler declares `dry_run` (computed once)."""
+    """Names whose handler declares `dry_run`, from BOTH registries (computed once).
+
+    ⛔ THE POPULATION IS "NAMES THAT STILL ANSWER", NOT "NAMES IN `tools/list`".
+    A retired name is not advertised, but `_RetiredToolTransform` resolves it on
+    `get_tool` and `build_retired_tools` builds its shim from the ORIGINAL module
+    handler — so `tools/call` on it runs that very handler, `dry_run` argument and
+    all. Reading only `TOOL_REGISTRY` therefore dropped the preview arm for every
+    retired door whose handler still previews: measured at the #11609 Phase-2
+    head, `tortoise_supersede`, `tortoise_invalidate` and `tortoise_retract_point`
+    are each retired, still answering, still declaring `dry_run`, and were each
+    missing — so a real preview of a destructive write was reported
+    `committed: "unknown"` + "this call is NOT safe to repeat", the exact
+    falsehood #10084/#10849 fix (the CI red was
+    `test_wait_bound_write_ack.py::test_a_COERCED_true_is_a_preview_and_a_coerced_false_is_not`,   # noqa: E501
+    whose subject is `tortoise_supersede`).
+
+    Widening is safe in the other direction too: membership only ever permits a
+    PREVIEW reading, and every reader of it still asks the ARGUMENT as well —
+    `_arguments_say_preview` (the refusal's `committed` cell) coerces the spelling
+    the way the handler will, `_is_preview` (the "nothing was written" receipt)
+    keeps its deliberately STRICTER `is True` identity read — so an uncoerced
+    spelling MISSES that disclosure rather than forging it, which is the
+    fail-closed direction — and the metering half
+    (`maybe_record_mcp_read`'s caller) uses the coercing predicate rather than
+    `bool()` — so a `dry_run="false"` call that takes the WRITE branch is never
+    labelled a preview and never counted as a preview read. Each member is
+    verified by its own signature (a retired name with no module handler, or one
+    that does not declare `dry_run`, is not added), so the #4057 gate ("a client
+    cannot move the read counter for a tool whose schema REJECTS the key") is
+    untouched too: every member accepts the key.
+    """
     global _DRY_RUN_TOOLS
     if _DRY_RUN_TOOLS is None:
-        from tortoise.tool_registry import TOOL_REGISTRY
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
         names = set()
-        for entry in TOOL_REGISTRY:
+        for entry in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY):
             fn = globals().get(entry.name)
             if fn is None:
                 continue
@@ -4096,18 +4147,22 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 def _http_excluded_error() -> dict:
     """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
 
-    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding nine
-    tool bodies (four live, five retired-but-served), each of which returns it
+    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding ten
+    tool bodies (four live, six retired-but-served), each of which returns it
     verbatim, so the dispatch used to be recorded ``status="ok"``. The wire
     payload is unchanged (`_SafeError` is a ``dict`` subclass); the seam matches
     it by value. Its ``error`` is a MAPPING, so the seam's text arm cannot see
     it — the exact-dict arm is what classifies it.
 
     `#12948`: the population moved from seven (four live, three retired) to
-    nine (four live, five retired) — the six SOURCES/MINE/SESSION containers
-    replaced the public `tortoise_index_files` / `tortoise_index_sessions` /
-    `tortoise_ingest_corpus` / `tortoise_mine_conversations` doors, which keep
-    answering from the retired table and therefore keep returning this funnel.
+    TEN (four live, six retired) — two landed waves made the move and neither
+    side of the merge saw the other's: the six SOURCES/MINE/SESSION containers
+    (#11609 lane C) replaced the public `tortoise_index_files` /
+    `tortoise_index_sessions` / `tortoise_ingest_corpus` /
+    `tortoise_mine_conversations` doors (+2 retired callers), and the six
+    WRITE/MUTATE containers (#11609 lane B / #12915) replaced
+    `tortoise_refresh_confidence`'s three doors (+1). A retired body keeps
+    answering from the retired table, so all six keep returning this funnel.
     The pin that measures it is
     `tests/test_mcp_refusal_telemetry_9084.py::test_the_funnel_docstring_states_the_population_it_actually_feeds`,
     which counts the call sites rather than trusting this sentence.
@@ -5676,7 +5731,7 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
-    return _safe(_quota_gated(_get_org_sdk().update_point, "points"), id, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk().update_knowledge, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
                               direction: str = "bidirectional",
@@ -5844,7 +5899,7 @@ def tortoise_file_decision(options: Any, evidence: Any,
         return _SafeError({"error": f"file_decision evidence exceeds the cap "
                                     f"({MAX_FILE_DECISION_EVIDENCE})",
                            "code": ERR_QUOTA})
-    result = _safe(_quota_gated(_get_org_sdk().file_decision, "points",
+    result = _safe(_quota_gated(_get_org_sdk().write_question, "points",
                           abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
     # #3926: gate on the typed failure result, never on key presence.
     if not isinstance(result, _SafeError):
@@ -5874,7 +5929,7 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
     Returns {event_id, decision_point_id, impl_operator_ids, confidence_delta}.
     """
     point_ids = _parse(point_ids)
-    return _safe(_quota_gated(_get_org_sdk().file_human_approval, "points", abuse_weight=1),
+    return _safe(_quota_gated(_get_org_sdk().record_decision, "points", abuse_weight=1),
                  approver_id, artifact_id, point_ids, decision_content)
 
 
@@ -5920,7 +5975,7 @@ def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True,
     if dry_run:
         return _safe(_preview_supersede, _get_org_sdk(),
                      old_id, new_id, transfer_edges)
-    return _safe(_quota_gated(_get_org_sdk().supersede, "points"),
+    return _safe(_quota_gated(_get_org_sdk().supersede_knowledge, "points"),
                  old_id, new_id, transfer_edges=transfer_edges)
 
 
@@ -6646,13 +6701,26 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
 def tortoise_update(id: str, props: Any = None) -> dict:
     """Update a Point OR entity by id. Points get point-lifecycle semantics
     (draft→live promote via status — an already-live point is an idempotent
-    no-op, version increment for Point:Object, status validation); entities
-    get a plain property update."""
+    no-op, version increment for Point:Object, status validation, a journalled
+    `restatus` for a status write, and a named refusal for an undeclared
+    transition); entities get a plain property update.
+
+    ⛔ Route is `sdk.update_knowledge`, **not** `sdk.update` (#12915 review F1).
+    This door is the one `tortoise_update_knowledge`'s `props` arm delegates to,
+    and `sdk.update` sends a Point to `update_point`, which (a) appends NO
+    journal record for a status write — the `derived = replay(journal)` class,
+    so a rebuild loses the transition — and (b) refuses every non-promote
+    transition with one fixed sentence that names neither the target status nor
+    the transition. `update_knowledge`'s property arm is the same RELAY the
+    absorbed `tortoise_update_point` / `tortoise_update_entity` handlers below
+    already call (`_update_entity_any` → `_update_entity`), so all four doors
+    land on one writer and cannot disagree about behaviour.
+    """
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
-    return _safe(_quota_gated(_get_org_sdk().update, "points"),
+    return _safe(_quota_gated(_get_org_sdk().update_knowledge, "points"),
                  id, **(props or {}))
 
 
@@ -6712,28 +6780,60 @@ def tortoise_delete(id: str, dry_run: bool = False,
 
 
 def tortoise_operator_action(action: str, id: str, reason: str | None = None,
-                             strength: float = 0.5,
+                             strength: float | None = None,
+                             credibility: str | int | float | None = None,
                              bias: float | None = None,
                              precision: float | None = None,
                              consistency: float | None = None,
                              directness: float | None = None) -> dict:
     """Consolidated operator write action — action=mitigate|annotate.
 
-    mitigate: reason (required) + strength (0-1, default 0.5) — creates/updates
-    a CURRENT mitigation Point (idempotent only while it is current: a
-    re-assertion after withdrawal mints a NEW Point). annotate:
-    bias/precision/consistency/directness (all required, 0-1).
+    mitigate: reason (required) + strength (0-1, default 0.5) + credibility (an
+    optional validated label) — creates/updates a CURRENT mitigation Point
+    (idempotent only while it is current: a re-assertion after withdrawal mints
+    a NEW Point). annotate: bias/precision/consistency/directness (all
+    required, 0-1).
+
+    ⛔ `credibility` is CARRIED here, never dropped (#12915 review F4):
+    `mitigate_operator` takes it as a validated label, and this handler used to
+    accept it and silently discard it — the exact defect the
+    `tortoise_adjust_relationship` container header cites as the reason
+    `operator_action` was retired.
+
+    ⛔ AND ONE ARM PER CALL, here too (#12915 review, P2). This door is retired
+    but still SERVED through the #3883 shim, and the shim calls THIS function —
+    not the container — so fixing only the container left the two disagreeing:
+    a #3883 caller could still pass `bias=` to the mitigate arm and get success
+    with the dimension discarded. A keyword the chosen arm cannot record is now
+    refused here as well, naming the arm it belongs to.
     """
     if action == "mitigate":
         if not reason:
             return _SafeError({"error": "operator_action(action='mitigate') requires 'reason'"})
+        stray = [name for name, value in zip(
+            ("bias", "precision", "consistency", "directness"),
+            (bias, precision, consistency, directness), strict=True) if value is not None]
+        if stray:
+            return _SafeError({"error": (
+                f"operator_action(action='mitigate') cannot record "
+                f"{', '.join(stray)} — those belong to the 'annotate' arm. "
+                "ONE arm per call: a silent partial write is indistinguishable "
+                "from a full one.")})
         return _safe(_quota_gated(_get_org_sdk().mitigate_operator, "points", abuse_weight=1),
-                     id, reason, strength)
+                     id, reason, 0.5 if strength is None else strength, credibility)
     if action == "annotate":
         dims = (bias, precision, consistency, directness)
         if any(d is None for d in dims):
             return _SafeError({"error": "operator_action(action='annotate') requires "
                                          "bias, precision, consistency, directness"})
+        stray = [name for name, value in zip(
+            ("reason", "strength", "credibility"),
+            (reason, strength, credibility), strict=True) if value is not None]
+        if stray:
+            return _SafeError({"error": (
+                f"operator_action(action='annotate') cannot record "
+                f"{', '.join(stray)} — those belong to the 'mitigate' arm. "
+                "ONE arm per call.")})
         return _safe(_quota_gated(_get_org_sdk().annotate_operator, "points"),
                      id, *dims)
     return _SafeError({"error": f"operator_action: unknown action {action!r} — "
@@ -7175,7 +7275,7 @@ def tortoise_update_entity(id: str, props: Any = None) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
-    return _safe(_quota_gated(_get_org_sdk().update_entity, "points"), id, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk().update_knowledge, "points"), id, **(props or {}))
 
 def tortoise_delete_entity(id: str, dry_run: bool = False) -> dict | bool:
     """Delete any entity by ID.
@@ -7668,6 +7768,475 @@ def tortoise_graph_overview(section: str | None = None,
     return tortoise_overview(section=section, entity_id=entity_id, days=days,
                              limit=limit, domain=domain,
                              point_kinds=point_kinds)
+
+
+# ── The WRITE/MUTATE containers (#4282 Phase 2, #11609 lane B) ─────────────
+#
+# SIX approved target names (`tortoise/__all__.py` rows 20-26) replace FOURTEEN
+# doors. Every container DISPATCHES to the handler it absorbs — never a
+# re-implementation — so the retired door (which still answers through the #3883
+# warning shim, on this exact function) and the container cannot disagree. That is
+# the rule `tortoise_graph_overview` states for its sections and the reason these
+# bodies are three lines each rather than a second copy of the logic.
+#
+# The DISCRIMINATOR is the one `docs/product/bridge-table.md` Part A records for
+# each: `scope=` for refresh_confidence, "which fields" for update_knowledge, the
+# link policy for supersede_knowledge, the adjustment (strength vs the four
+# dimensions) for adjust_relationship. None is invented here.
+#
+# ⛔ A discriminator value outside the documented set is REFUSED, naming the field
+# and the values that exist (AIP-193: the message must let a reasonably technical
+# caller resolve it, and must not assume they know this implementation). Nothing
+# falls through to "some arm" — a fall-through is how `operator_action` used to
+# accept `credibility` and silently drop it.
+
+
+def tortoise_update_knowledge(id: str, props: Any = None,
+                              annotation: Any = None,
+                              valid_until: str | None = None,
+                              invalid_at: str | None = None,
+                              corrected_by_id: str | None = None,
+                              dry_run: bool = False) -> dict:
+    """Change what a stored thing says — or retract it (#4282 row 22).
+
+    Dispatches on WHICH FIELDS are set, exactly as `TortoiseSDK.update_knowledge`
+    does at the SDK layer:
+
+      props=                      → property update. Was `tortoise_update` (which
+                                    already dispatches Point-lifecycle vs plain
+                                    entity), so `tortoise_update_point` and
+                                    `tortoise_update_entity` are the same arm.
+      annotation={bias, precision, consistency, directness}
+                                  → annotate the LINK. Was `tortoise_annotate_operator`.
+      invalid_at=/valid_until=    → retract the claim: a tombstone whose window
+        (no corrected_by_id)       END is the instant given. Was `tortoise_retract_point`.
+      invalid_at=/valid_until=    → invalidate: mark outdated and link to the
+        + corrected_by_id=         successor. Was `tortoise_invalidate`.
+
+    ⛔ ONE arm per call. Two arms in one call is REFUSED below rather than
+    recorded partly — that is the contract the SDK verb states and the one this
+    door honours, because a caller cannot tell a partial write from a full one.
+    """
+    arms = {
+        "props": props is not None,
+        "annotation": annotation is not None,
+        "temporal": valid_until is not None or invalid_at is not None,
+    }
+    chosen = [name for name, on in arms.items() if on]
+    if len(chosen) > 1:
+        return _SafeError({
+            "error": ("update_knowledge: ONE arm per call — this call names "
+                      f"{', '.join(sorted(chosen))}. They record different "
+                      "things (a property bag, the four annotation dimensions, "
+                      "a window end + tombstone) and the writers take one each, "
+                      "so a combined call would return success having stored "
+                      "only part of it. Send them as separate calls."),
+            "code": ERR_INVALID})
+
+    if annotation is not None:
+        annotation = _parse(annotation)
+        if not isinstance(annotation, dict):
+            return _SafeError({"error": "update_knowledge: annotation= must be an "
+                                        "object of the four epistemic dimensions",
+                               "code": ERR_INVALID})
+        # ⛔ `dry_run` on THIS arm is REFUSED, never ignored (#12915 review F2).
+        # It used to be: the arm neither previewed nor refused, so it WROTE —
+        # while `_dry_run_tool_names()` lists this container (it declares a
+        # `dry_run` parameter) and `_arguments_say_preview` therefore recorded
+        # the call as a preview that "writes nothing". An agent asking for a
+        # preview got a real graph write plus a write-ack saying nothing had
+        # been written: a false PASS in the disclosure path (#10084), not a UX
+        # nit. The property arm refuses with the same shape — only the two
+        # temporal arms have a preview to return.
+        if dry_run:
+            return _SafeError({
+                "error": ("update_knowledge: dry_run applies to the retract and "
+                          "invalidate arms only — annotating a link has no "
+                          "preview, so this call would have WRITTEN the four "
+                          "dimensions while reporting a preview. Drop dry_run "
+                          "to record the annotation."),
+                "code": ERR_INVALID})
+        try:
+            return tortoise_annotate_operator(id, **annotation)
+        except TypeError as exc:
+            # `annotate_operator` takes four REQUIRED dimensions, so a partial or
+            # typo'd dict raises TypeError out of a public verb whose every other
+            # malformed input raises a structured error. Name what is missing.
+            return _SafeError({
+                "error": ("update_knowledge: annotation= takes exactly bias, "
+                          f"precision, consistency, directness — {exc}. A partial "
+                          "rating is not a smaller update: leaving them unset is "
+                          "the neutral default (factor 1.0), so pass all four."),
+                "code": ERR_INVALID})
+
+    if corrected_by_id is not None:
+        if not arms["temporal"]:
+            return _SafeError({
+                "error": ("update_knowledge: corrected_by_id needs a temporal "
+                          "field — pass invalid_at= or valid_until= with it "
+                          "(that is what makes it an invalidation rather than a "
+                          "silent no-op)."),
+                "code": ERR_INVALID})
+        # Two spellings of ONE field with different values cannot both be the
+        # window end: refuse rather than record one and drop the other.
+        if (valid_until is not None and invalid_at is not None
+                and valid_until != invalid_at):
+            return _SafeError({
+                "error": (f"update_knowledge: valid_until={valid_until!r} and "
+                          f"invalid_at={invalid_at!r} name two different window "
+                          "ends. They are two spellings of the same `validTo` — "
+                          "pass one (or two equal values)."),
+                "code": ERR_INVALID})
+        end = invalid_at if invalid_at is not None else valid_until
+        if dry_run:
+            return _safe(_preview_invalidate, _get_org_sdk(), id, corrected_by_id)
+        return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"),
+                     id, corrected_by_id, valid_to=end)
+
+    if arms["temporal"]:
+        if (valid_until is not None and invalid_at is not None
+                and valid_until != invalid_at):
+            return _SafeError({
+                "error": (f"update_knowledge: valid_until={valid_until!r} and "
+                          f"invalid_at={invalid_at!r} name two different window "
+                          "ends. They are two spellings of the same `validTo` — "
+                          "pass one (or two equal values)."),
+                "code": ERR_INVALID})
+        end = invalid_at if invalid_at is not None else valid_until
+        if dry_run:
+            return _safe(_preview_retract_point, _get_org_sdk(), id)
+        return _safe(_quota_gated(_get_org_sdk().retract_point, "points"),
+                     id, valid_to=end)
+
+    if dry_run:
+        return _SafeError({"error": "update_knowledge: dry_run applies to the "
+                                    "retract and invalidate arms only — a property "
+                                    "update has no preview.",
+                           "code": ERR_INVALID})
+    # The property arm: `tortoise_update` IS the Point/entity dispatcher, so this
+    # does not choose a type and cannot choose it wrongly. It routes through
+    # `sdk.update_knowledge` (#12915 review F1), the same relay the absorbed
+    # `tortoise_update_point` / `tortoise_update_entity` handlers call — so the
+    # Point arm journals its `restatus` and names a refused transition here too.
+    return tortoise_update(id, props=props)
+
+
+def tortoise_supersede_knowledge(old_id: str, new_id: str,
+                                 transfer_edges: bool = True,
+                                 dry_run: bool = False) -> dict:
+    """Replace a node with a successor — dispatching on the LINK POLICY (#4282 row 23).
+
+      transfer_edges=True  (default) → FULL SUPERSEED. CORRECTS edge, outdated flag,
+                                       and every edge moves from old to new.
+                                       Was `tortoise_supersede`.
+      transfer_edges=False           → INVALIDATE ONLY. Outdated flag + a CORRECTS
+                                       edge; nothing is transferred. This is the
+                                       whole of `tortoise_invalidate`, so that door
+                                       retires here rather than into a fourth verb.
+
+    dry_run=True previews the transition — which edges would move — and changes
+    nothing; it runs the same guards, so a rejected input is rejected in the
+    preview too.
+    """
+    return tortoise_supersede(old_id, new_id, transfer_edges=transfer_edges,
+                              dry_run=dry_run)
+
+
+def tortoise_adjust_relationship(id: str,
+                                 reason: str | None = None,
+                                 strength: float | None = None,
+                                 credibility: str | int | float | None = None,
+                                 bias: float | None = None,
+                                 precision: float | None = None,
+                                 consistency: float | None = None,
+                                 directness: float | None = None,
+                                 action: str | None = None) -> dict:
+    """Adjust an existing epistemic link (#4282 row 25).
+
+    Dispatches on the ADJUSTMENT:
+
+      reason=/strength=/credibility=  → MITIGATE (the graded dampener). Was
+                                        `tortoise_mitigate_operator`.
+      bias/precision/consistency/directness
+                                      → ANNOTATE the four dimensions. Was
+                                        `tortoise_annotate_operator`.
+
+    `action='mitigate'|'annotate'` keeps the spelling `tortoise_operator_action`
+    published, and selects the same two arms explicitly — so that door retires
+    here as well, with no third code path. An unknown `action` is refused with the
+    two values that exist (never defaulted: a wrong arm writes the wrong thing).
+
+    ⛔ Annotating a link IS `update_knowledge` on it (`beta-sdk-surface.md` row 25,
+    which states it in both directions) — the container accepts it because the
+    approved bridge map absorbs `annotate_operator` here, and mirrors it rather
+    than introducing a second annotation writer.
+    """
+    dims = (bias, precision, consistency, directness)
+    if action is not None:
+        if action not in ("mitigate", "annotate"):
+            return _SafeError({
+                "error": (f"adjust_relationship: unknown action {action!r} — the "
+                          "documented values are 'mitigate' (reason=/strength=) "
+                          "and 'annotate' (bias/precision/consistency/directness)."),
+                "code": ERR_INVALID})
+        if action == "annotate" and any(d is None for d in dims):
+            return _SafeError({
+                "error": ("adjust_relationship(action='annotate') requires all "
+                          "four dimensions: bias, precision, consistency, "
+                          "directness."),
+                "code": ERR_INVALID})
+        if action == "mitigate" and not reason:
+            return _SafeError({
+                "error": "adjust_relationship(action='mitigate') requires 'reason'.",
+                "code": ERR_INVALID})
+        # ⛔ ONE arm per call — the SAME rule the fields-only spelling below
+        # enforces. A keyword the chosen arm cannot record is REFUSED here, not
+        # dropped: the `action=` spelling used to hand `credibility` (and
+        # `bias..directness` under 'mitigate', `reason`/`strength` under
+        # 'annotate') to `tortoise_operator_action`, which discarded whatever its
+        # single branch did not read and returned success (#12915 review F4).
+        if action == "annotate":
+            stray = [name for name, value in
+                     (("reason", reason), ("strength", strength),
+                      ("credibility", credibility)) if value is not None]
+        else:
+            stray = [name for name, value in zip(
+                ("bias", "precision", "consistency", "directness"), dims,
+                strict=True)
+                if value is not None]
+        if stray:
+            return _SafeError({
+                "error": (f"adjust_relationship(action={action!r}) cannot record "
+                          f"{', '.join(stray)} — that keyword belongs to the "
+                          f"{'mitigate' if action == 'annotate' else 'annotate'} "
+                          "arm. ONE arm per call: send them as two calls, "
+                          "because a silent partial write is indistinguishable "
+                          "from a full one."),
+                "code": ERR_INVALID})
+        if action == "mitigate":
+            return tortoise_operator_action(
+                action, id, reason=reason,
+                strength=0.5 if strength is None else strength,
+                credibility=credibility)
+        # The annotate arm takes the four dimensions and NOTHING else: `strength`
+        # has a mitigate-side default, so forwarding it here would hand the
+        # annotate branch a keyword it must refuse (#12915 review).
+        return tortoise_operator_action(
+            action, id, bias=bias, precision=precision, consistency=consistency,
+            directness=directness)
+
+    named_dims = [name for name, value in zip(("bias", "precision", "consistency",
+                                               "directness"), dims, strict=True)
+                  if value is not None]
+    if named_dims and len(named_dims) != 4:
+        return _SafeError({
+            "error": (f"adjust_relationship: the annotation arm takes all four "
+                      f"dimensions — this call named {', '.join(named_dims)}. "
+                      "Leaving them unset is the neutral default (factor 1.0), "
+                      "so pass all four or none."),
+            "code": ERR_INVALID})
+    if named_dims:
+        if reason is not None or strength is not None or credibility is not None:
+            return _SafeError({
+                "error": ("adjust_relationship: ONE arm per call — the annotation "
+                          "arm records the four dimensions and the mitigation arm "
+                          "records a reason + strength. Send them as two calls."),
+                "code": ERR_INVALID})
+        return tortoise_annotate_operator(id, bias, precision, consistency,
+                                         directness)
+
+    if reason is not None or strength is not None or credibility is not None:
+        if not reason:
+            return _SafeError({
+                "error": ("adjust_relationship: the mitigation arm requires "
+                          "'reason' — strength= alone says how much weaker the "
+                          "edge is without saying why."),
+                "code": ERR_INVALID})
+        return tortoise_mitigate_operator(
+            id, reason, 0.5 if strength is None else strength, credibility)
+
+    return _SafeError({
+        "error": ("adjust_relationship: nothing to adjust — pass reason=/strength= "
+                  "to mitigate the edge, or all four of bias/precision/"
+                  "consistency/directness to annotate it."),
+        "code": ERR_INVALID})
+
+
+def tortoise_refresh_confidence(scope: str | None = None,
+                                point_id: str | None = None,
+                                full: bool = False,
+                                dirty_only: bool = True,
+                                max_hops: int = 2,
+                                require_calibration: bool | None = None,
+                                mode: str | None = None,
+                                budget: int | None = None,
+                                alpha: float | None = None,
+                                beta: float | None = None) -> dict:
+    """Recompute or seed a belief's confidence — dispatching on SCOPE (#4282 row 26).
+
+    The approved surface states the two scopes of a confidence refresh as a
+    PARAMETER rather than choosing silently (`beta-sdk-surface.md` row 26):
+
+      scope='dirty'  (default) → dream the accumulated dirty subgraph. Was
+                                 `tortoise_dream(dirty_only=True)`.
+      scope='full'             → whole-graph EP stabilization. Was
+                                 `tortoise_dream(full=True)`.
+      scope='promote'          → the reviewer-gated draft→live promotion of
+                                 `point_id`. Was `tortoise_promote_point`.
+      scope='baseline'         → set `point_id`'s Beta prior (`alpha`, `beta`).
+                                 Was `tortoise_set_point_baseline`.
+
+    ⚠️ RECORDED DISAGREEMENT, not decided here: `docs/product/sdk-rename-table.md`
+    §C3b and `bridge-table.md` §D2c record that the beta doc names the promote and
+    baseline states as FIELDS on `update_knowledge`, while this map places them in
+    `refresh_confidence`. The map is owner-approved, so this door follows it and
+    the disagreement stays visible there — reopening it is an owner decision, not
+    a build step.
+
+    `scope=None` resolves to 'dirty' (plus `full=True` ⇒ 'full') so the two
+    dream call shapes that existed keep working verbatim through the shim.
+
+    ⛔ ONE ARM PER CALL, and the knobs follow the arm (#12915 final review, F2-b):
+    the four scopes take disjoint keyword sets. A point_id scope (`promote`,
+    `baseline`) REFUSES `full`/`dirty_only`/`max_hops`/`require_calibration`/
+    `mode`/`budget` rather than dropping them, exactly as the dream scopes
+    already refuse `point_id`/`alpha`/`beta`; and an explicit `scope='dirty'`
+    REFUSES `full=True`, which would otherwise be dropped because the dream arm
+    derives `full` from the scope. Bound, stated in the handler: the three knobs
+    whose defaults are not `None` (`full=False`, `dirty_only=True`,
+    `max_hops=2`) are refused when they DIFFER from the default, because an
+    explicit pass of the default value is indistinguishable from omission at
+    this boundary.
+
+    ⛔ HTTP-EXCLUDED (#329), and the refusal is TOTAL rather than per-arm: the
+    registry policy that guards an `http_policy=False` tool requires the handler to
+    reject HTTP as its FIRST statement, because an unadvertised tool is still
+    callable BY NAME. Whole-graph EP is CPU-heavy and must not be reachable over the
+    tenant HTTP surface, so the STRICTEST arm sets the policy for the tool. The
+    DISCLOSED consequence of the #11609 lane B consolidation: `scope='promote'` and
+    `scope='baseline'` are no longer advertised over tenant HTTP MCP (they were,
+    as `tortoise_promote_point` / `tortoise_set_point_baseline`); they remain
+    callable by name on the stdio/operator surface, and the REST door to whole-graph
+    EP survives as `POST /v1/dream`, separately budgeted at the hosted layer.
+    """
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
+    if scope is None:
+        scope = "full" if full else "dirty"
+    if scope not in ("dirty", "full", "promote", "baseline"):
+        return _SafeError({
+            "error": (f"refresh_confidence: unknown scope {scope!r} — the "
+                      "documented values are 'dirty' (the changed nodes), "
+                      "'full' (the whole graph), 'promote' and 'baseline'."),
+            "code": ERR_INVALID})
+    if scope in ("dirty", "full"):
+        if full and scope == "dirty":
+            # ⛔ The SAME one-arm rule, one arm over (#12915 final review, P2):
+            # `scope` and `full=` both name the mechanism, and a `full=True` on
+            # an explicit `scope='dirty'` was silently DROPPED —
+            # `tortoise_dream(full=(scope == "full"))` is computed from the scope,
+            # so the caller asking for a whole-graph pass got a dirty dream with
+            # no signal. `scope=None, full=True` is the supported spelling (it
+            # RESOLVES to 'full' above); naming both is a contradiction.
+            return _SafeError({
+                "error": ("refresh_confidence(scope='dirty', full=True) names "
+                          "two mechanisms — `full=True` is what selects the "
+                          "whole-graph scope. Pass scope='full' (or omit scope "
+                          "and let full=True resolve it) instead of asking for "
+                          "a dirty pass and a whole-graph one in the same call."),
+                "code": ERR_INVALID})
+        if point_id is not None or alpha is not None or beta is not None:
+            return _SafeError({
+                "error": (f"refresh_confidence(scope={scope!r}) stabilizes a "
+                          "subgraph and takes no point_id/alpha/beta — those "
+                          "belong to scope='promote' and scope='baseline'."),
+                "code": ERR_INVALID})
+        return tortoise_dream(full=(scope == "full"), dirty_only=dirty_only,
+                              max_hops=max_hops,
+                              require_calibration=require_calibration,
+                              mode=mode, budget=budget)
+    if not point_id:
+        return _SafeError({
+            "error": (f"refresh_confidence(scope={scope!r}) requires point_id — "
+                      f"scope names HOW to refresh, point_id names WHAT."),
+            "code": ERR_INVALID})
+    # ⛔ A keyword the chosen arm cannot record is REFUSED, never dropped — the
+    # rule this container's siblings state in their own headers
+    # (#12915 final review, F2-b). This door refused the point_id-scope fields on
+    # the two DREAM scopes but not the reverse, so
+    # `refresh_confidence(scope='promote', point_id='p1', mode='full', budget=7)`
+    # returned success with both knobs silently discarded: a caller who asked for
+    # a whole-graph pass got a single promotion and no signal that the rest was
+    # ignored. Impact is small (`{ok: 1}`, the promotion does happen) but the
+    # class is the one this batch exists to remove — it is exactly the defect the
+    # `tortoise_adjust_relationship` header cites as the reason
+    # `tortoise_operator_action` was retired (`credibility` dropped on a write).
+    #
+    # ⚠️ BOUND, stated rather than implied: `full`, `dirty_only` and `max_hops`
+    # carry NON-None defaults (`False`, `True`, `2`), so an explicit pass of
+    # exactly the default is indistinguishable from omission at this boundary.
+    # Those three are refused only when they DIFFER from the default — which is
+    # every pass whose value could have changed a dream. The three
+    # `None`-defaulted knobs (`require_calibration`, `mode`, `budget`) are refused
+    # on any non-`None` value. Widening this would need the parameters to default
+    # to `None`, i.e. a change to the advertised tool's input schema, which is not
+    # this fix.
+    stray = [name for name, stated in (
+        ("full", bool(full)),
+        ("dirty_only", bool(dirty_only) is not True),
+        ("max_hops", max_hops != 2),
+        ("require_calibration", require_calibration is not None),
+        ("mode", mode is not None),
+        ("budget", budget is not None),
+    ) if stated]
+    if stray:
+        return _SafeError({
+            "error": (f"refresh_confidence(scope={scope!r}) takes no "
+                      f"{', '.join(stray)} — those belong to scope='dirty' or "
+                      "scope='full', the dream arms. The two mechanisms are "
+                      "different (this scope promotes or seeds ONE belief), so "
+                      "recording the scope and dropping the knobs would return "
+                      "success for a pass that never ran. Send the dream knobs "
+                      "to a dream scope, or drop them here."),
+            "code": ERR_INVALID})
+    if scope == "promote":
+        if alpha is not None or beta is not None:
+            return _SafeError({
+                "error": ("refresh_confidence(scope='promote') promotes a draft "
+                          "and takes no alpha/beta — use scope='baseline' to set "
+                          "the Beta prior."),
+                "code": ERR_INVALID})
+        return tortoise_promote_point(point_id)
+    if alpha is None or beta is None:
+        return _SafeError({
+            "error": ("refresh_confidence(scope='baseline') requires alpha and "
+                      "beta — the Beta prior's two shape parameters."),
+            "code": ERR_INVALID})
+    return tortoise_set_point_baseline(point_id, alpha, beta)
+
+
+def tortoise_write_question(options: Any, evidence: Any, choice: int) -> dict:
+    """File a QUESTION with its options and the evidence behind them (#4282 row 20).
+
+    Was `tortoise_file_decision` — it was filing a *question* and calling it a
+    decision (`beta-sdk-surface.md`). The body is that handler, unchanged: a
+    question Point, one Point per option, one per evidence statement, and the IMPL
+    edges between them, written atomically.
+    """
+    return tortoise_file_decision(options, evidence, choice)
+
+
+def tortoise_record_decision(approver_id: str, artifact_id: str, point_ids: Any,
+                             decision_content: str | None = None) -> dict:
+    """Record that a question was resolved — the human-approval record (#4282 row 21).
+
+    Was `tortoise_file_human_approval`. The body is that handler, unchanged: an
+    Event (eventKind humanApproval) with full provenance, a decision Point that
+    carries an EP evidence prior, and unidirectional IMPL (approvedBy) edges to
+    the approved claims.
+    """
+    return tortoise_file_human_approval(approver_id, artifact_id, point_ids,
+                                        decision_content)
 
 
 _GET_TYPES = ("point", "operator", "entity", "event", "session",

@@ -136,29 +136,46 @@ family_rank:
 # Re-derived from the registry by `tools/surface_manifest.py check`, which reds on any
 # disagreement.
 #
-# #4282 Phase 2, the SOURCES/MINE/SESSION containers (#11609 lane C): SIX approved
-# targets replaced SEVEN advertised members, so the ADVERTISED set moved 68 -> 67 and
-# TWO keyword counts moved with them. Per row, from the registry's own derivation:
-#   create 14 -> 12 — `tortoise_create_source` and `tortoise_session_capture` both
-#     derived `create` and neither is advertised now (the new
+# #4282 Phase 2 landed in TWO disjoint batches that this merge joins, and BOTH moved
+# these counts — so the numbers below are RE-DERIVED on the merged registry (59
+# advertised = 14 create + 14 fetch + 7 list + 5 check + 5 update + 4 find + 4 delete +
+# 2 link + 2 operate + 2 trace), not taken from either side. Neither side's arithmetic
+# survives alone: lane C's "68 -> 67" and lane B's "68 -> 60" both predate the other.
+#
+# Lane C (#11609, the SOURCES/MINE/SESSION containers): SIX approved targets replaced
+# SEVEN advertised members. Per row, from the registry's own derivation:
+#   create -2 — `tortoise_create_source` and `tortoise_session_capture` both derived
+#     `create` and neither is advertised now (the new
 #     `tortoise_index_sources_from_directory` derives `create` too, and it REPLACES
 #     `tortoise_index_files`, whose row also derived `create` — the pair cancels).
-#   find 4 -> 5 — `tortoise_mine_knowledge_from_session` and
+#   find +1 — `tortoise_mine_knowledge_from_session` and
 #     `tortoise_mine_knowledge_from_directory` both derive `find`, against ONE
 #     leaving (`tortoise_mine_conversations`).
-# fetch / update / delete / list / trace / check / link / operate are UNMOVED: the
-# containers `tortoise_register_source` (operate), `tortoise_manage_source_trust`
-# (update) and `tortoise_check_connection` (check) each take the slot of a member
-# that derived the same keyword (`tortoise_checkpoint`, `tortoise_set_source_tier`
-# and `tortoise_assess_source` respectively).
+#   fetch / update / delete / list / trace / check / link / operate unmoved by THIS
+#     batch: `tortoise_register_source` (operate), `tortoise_manage_source_trust`
+#     (update) and `tortoise_check_connection` (check) each take the slot of a member
+#     that derived the same keyword (`tortoise_checkpoint`, `tortoise_set_source_tier`
+#     and `tortoise_assess_source` respectively).
+#
+# Lane B (#11609 lane B / #12915, the WRITE/MUTATE containers): FOURTEEN rows retired
+# into SIX containers, and the six new names derive create +2 (`write_question`,
+# `record_decision`), update +2 (`update_knowledge`, `refresh_confidence`), delete +1
+# (`supersede_knowledge`) and link +1 (`adjust_relationship`); their 14 absorbed rows
+# leave update -5, delete -3, link -3, operate -2 and find -1. Net on its own base:
+# create 14->16, update 8->5, delete 6->4, operate 4->2, link 4->2, find 4->3.
+#
+# Composed on the merged registry the two cancel where they overlap (lane B's six
+# containers are not lane C's members): create 14, update 5, delete 4, link 2,
+# operate 2, find 4. `tools/surface_manifest.py check` is the authority here — it reds
+# on any disagreement with the registry, and this prose is not.
 baseline_counts:
   fetch: 14
-  create: 12
+  create: 14
   list: 7
   check: 5
-  operate: 4
-  update: 8
-  find: 5
-  delete: 6
-  link: 4
+  operate: 2
+  update: 5
+  find: 4
+  delete: 4
+  link: 2
   trace: 2

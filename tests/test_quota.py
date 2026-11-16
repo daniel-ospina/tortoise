@@ -723,16 +723,16 @@ class TestDocumentsQuota:
                 "create_source/document_kind": (lambda: tenant.register_source(
                     "doc_1", "document", document_kind="transcript"),
                     "inert second spelling"),
-                "update_entity/documentKind": (lambda: tenant.update_entity(
+                "update_entity/documentKind": (lambda: tenant.update_knowledge(
                     "doc_2", documentKind="transcript"),
                     "metered `documents` set"),
-                "update_entity/document_kind": (lambda: tenant.update_entity(
+                "update_entity/document_kind": (lambda: tenant.update_knowledge(
                     "doc_3", document_kind="transcript"),
                     "inert second spelling"),
                 # `None` through `SET n += $p` REMOVES the property, so the
                 # generic surface's null is a demotion too (the passthrough
                 # skips null values — see `_persist_extra_props`).
-                "update_entity/documentKind=None": (lambda: tenant.update_entity(
+                "update_entity/documentKind=None": (lambda: tenant.update_knowledge(
                     "doc_4", documentKind=None), "metered `documents` set"),
                 # ⛔ #5140 REVIEW CYCLE 3 — the snake spelling is refused for
                 # EVERY value on a metered document, not only the demoting one.
@@ -745,10 +745,10 @@ class TestDocumentsQuota:
                 # both arms are pinned here: they FAIL on the value-scoped
                 # predicate, the first with DID NOT RAISE.
                 "update_entity/document_kind='brief' (2nd home)": (
-                    lambda: tenant.update_entity("doc_5", document_kind="brief"),
+                    lambda: tenant.update_knowledge("doc_5", document_kind="brief"),
                     "inert second spelling"),
                 "update_entity/document_kind=None": (
-                    lambda: tenant.update_entity("doc_6", document_kind=None),
+                    lambda: tenant.update_knowledge("doc_6", document_kind=None),
                     "inert second spelling"),
                 "create_source/document_kind='report' (2nd home)": (
                     lambda: tenant.register_source(
@@ -979,7 +979,7 @@ class TestDocumentsQuota:
                     params={"i": "shared5140", "u": "shared5140"})
             assert count_org_usage(tid, "documents", sdk=tenant) == 1
             with pytest.raises(ValueError, match="metered `documents` set"):
-                tenant.update_entity("shared5140", documentKind="transcript")
+                tenant.update_knowledge("shared5140", documentKind="transcript")
             kinds = g.query(
                 "MATCH (s:Source) WHERE s.id = 'shared5140' "
                 "RETURN s.documentKind ORDER BY s.url").result_set

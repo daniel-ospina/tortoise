@@ -204,17 +204,30 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   of them were in this listing (the fourth, `tortoise_backfill_v25`, was
     #   `http_policy=False`), so 66 - 3 = 63 measured here. Lowered to 63 with that
     #   measurement, not to whatever a green run last produced.
-    # Anything BELOW 63 is unexplained shrinkage and this arm reds on it; lowering the
+    #   #11609 batch 2 (this change) — fourteen WRITE/MUTATE doors retired into six
+    #   containers. The move is NOT `http_policy`-neutral at either end, and the
+    #   arithmetic must say so: `tortoise_dream` is the one absorbed door with
+    #   `http_policy=False` (so 13 of the 14 were in this listing) and
+    #   `tortoise_refresh_confidence` is the one container that is stdio-only (so 5
+    #   of the 6 join it): 63 - 13 + 5 = 55 measured here. The net is the same -8
+    #   the live surface moves by, but only because 13 - 5 = 8 — stating the net as
+    #   if both sides were wholly `http_policy=True` would have hidden a real
+    #   exemption behind a coincidence (the sibling derivation in
+    #   `test_10084_graph_argument_omit_first` records the same split).
+    # Anything BELOW 55 is unexplained shrinkage and this arm reds on it; lowering the
     # floor again needs the same kind of recorded reason, never a green run.
-    #
-    #   #11609 Phase 2 lane C (`#12948` review B1 finding 8) — the six
-    #   SOURCES/MINE/SESSION containers replaced seven public doors, one of them an
-    #   `http_policy=True` member of THIS listing, so 63 - 1 = 62. Measured on the
-    #   registry, not on a green run: every live entry with `http_policy` true
-    #   (absent = true) is 63 at the merge base `2dfbb5d4` and 62 at the PR head.
-    #   The `get_http_allowed()` equality asserted directly below is the real
-    #   invariant; this floor only catches a listing that shrinks underneath BOTH.
-    assert len(names) >= 62, f"default surface shrank to {len(names)}"
+    #   #11609 Phase 2 landed TWO disjoint batches on the same 63: lane C retired one
+    #   `http_policy=True` door into a container (`62`), and lane B's WRITE/MUTATE batch
+    #   retired fourteen doors of which THIRTEEN were in this listing while five of its
+    #   six containers joined it (`63 - 1 - 13 + 5 = 54`). Measured on the merged
+    #   registry, not on a green run: every live entry with `http_policy` true is 54 at
+    #   this head. The arithmetic must state both ends — stating the net as if both
+    #   sides were wholly `http_policy=True` would hide a real exemption behind a
+    #   coincidence (`tortoise_dream` is the one absorbed door that is stdio-only, and
+    #   `tortoise_refresh_confidence` is the one container that is).
+    # Anything BELOW 54 is unexplained shrinkage and this arm reds on it; lowering the
+    # floor again needs the same kind of recorded reason, never a green run.
+    assert len(names) >= 54, f"default surface shrank to {len(names)}"
     # The floor is a proxy for the real invariant, and a proxy cannot tell a
     # recorded consolidation from a silent drop. Pin the invariant itself: the
     # default HTTP listing serves EXACTLY the registry's `http_policy` population

@@ -318,8 +318,8 @@ def test_the_gate_passage_separates_the_verdict_from_the_action():
 # re-imposes a metric the owner rejected. Neither change would say so.
 
 #: The decided site (`#4899` DEC-1; shipped in PR `#5237`). The predicate is
-#: `tortoise/value_gate.py:370` (`mechanical_verdict`), called from
-#: `tortoise/vet_gate.py:469` — Level-2 of `vet_candidates`, before the arbiter
+#: `mechanical_verdict` in `tortoise/value_gate.py`, called from `vet_candidates` in
+#: `tortoise/vet_gate.py` — Level-2, before the arbiter
 #: and before S3 RESOLVE (`tortoise/extractor_v2.py`, `_run_vet_pass`, inside
 #: `extract_session_v2`). Cited by symbol, not by line: the line number rotted
 #: twice while this branch was open (the `#8443` review), and the document's own

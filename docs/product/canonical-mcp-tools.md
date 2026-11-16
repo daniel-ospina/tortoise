@@ -228,7 +228,9 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools then).
 > **This branch's `graph_overview` container then moved the live surface from 76 to 72 at that
 > head**, so 72 was the figure there until #11609 batch 1 removed four more of them (72 → 68),
-> and batch 2's SOURCES/MINE/SESSION containers then **took the live surface 68 → 67**
+> and then TWO disjoint #11609 Phase 2 batches landed on that 68: lane C's SOURCES/MINE/SESSION
+> containers retired seven advertised members into six and lane B's WRITE/MUTATE containers
+> retired fourteen more into six, so **the live surface is 59**
 > (`uv run python tools/surface_manifest.py check` is the live count).
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
@@ -285,7 +287,8 @@ Any deletion PR must use **26 / 111**.
 status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
 
 **Amended 2026-11-03** (execution record, #4282): the **first container batch has landed**, so the
-surface was **72 advertised tools** at that head with 23 retired-forward entries — the 18 above
+surface was **72 advertised tools** at that head, carrying the 23 retired-forward entries
+recorded above
 plus five more. `tortoise_graph_overview` (row 6) absorbs `tortoise_overview`, `tortoise_summarize_structure`,
 `tortoise_validate_domain`, `tortoise_audit` and `tortoise_dream_health`.
 
@@ -295,16 +298,58 @@ REMOVED and their code ARCHIVED under `archive/mcp-tools/b1-removed-no-destinati
 ruling quoted below, so the surface moved **72 → 68 advertised tools**, carrying the same 23
 retired-forward entries it had at the previous head. Nothing was retired-forward into a replacement: a name with no destination gets no shim.
 
-**Amended 2026-11-14** (execution record, #11609 batch 2 — the SOURCES/MINE/SESSION containers):
+**Amended 2026-11-14** (execution record, #11609 — the SOURCES/MINE/SESSION containers, lane C):
 rows 14–18 and row 40 landed as `tortoise_register_source`, `tortoise_manage_source_trust`,
 `tortoise_index_sources_from_directory`, `tortoise_mine_knowledge_from_session`,
 `tortoise_mine_knowledge_from_directory` and `tortoise_check_connection`, and **seven** advertised
 members retired INTO them — `tortoise_create_source`, `tortoise_assess_source`,
 `tortoise_set_source_tier`, `tortoise_index_files`, `tortoise_checkpoint`, `tortoise_session_capture`
-and `tortoise_mine_conversations`. Six in, seven out, so the surface is now **67 advertised tools**
-with **30** retired-forward entries — every one of the seven still ANSWERS
+and `tortoise_mine_conversations`. Six in, seven out, so on that batch's own base the surface was
+**67 advertised tools**, carrying **30** retired-forward entries at that head — every one of the seven still ANSWERS
 on its retired name (#3883), which is why the advertised count falls while the served count does
 not, and **none of them is archived** — a name with a destination keeps its shim.
+
+**Amended 2026-11-16** (execution record, #11609 lane B — #4282 Phase 2): the **WRITE/MUTATE
+containers have landed** too, and the two batches are DISJOINT — neither one's members are the
+other's. SIX approved target names (`tortoise_update_knowledge`, `tortoise_supersede_knowledge`,
+`tortoise_adjust_relationship`, `tortoise_refresh_confidence`, `tortoise_write_question`,
+`tortoise_record_decision`) absorb FOURTEEN doors: `tortoise_update`, `tortoise_update_point`,
+`tortoise_update_entity`, `tortoise_retract_point`, `tortoise_supersede`, `tortoise_invalidate`,
+`tortoise_annotate_operator`, `tortoise_mitigate_operator`, `tortoise_operator_action`,
+`tortoise_dream`, `tortoise_promote_point`, `tortoise_set_point_baseline`,
+`tortoise_file_decision`, `tortoise_file_human_approval`. Each container's handler DELEGATES to the
+handler it absorbs, so a retired name still answers through the #3883 shim with the same body — which
+means the SERVED population GROWS rather than staying put, because a retired door keeps its row
+while the container is added.
+
+⛔ **THE NUMBERS AT THIS MERGE ARE THE COMPOSED ONES, NOT EITHER BATCH'S**: the two batches landed
+against the same base (68 advertised / 23 retired / 91 served) and neither witnessed the other, so
+`68 → 67` and `68 → 60` are both true of their own base — so the surface is now **59 advertised tools**
+with **44** retired-forward entries: each batch moved its OWN base (lane C 68 → 67, lane B
+68 → 60, neither witnessing the other), and composed here the two took the live surface 68 → 59 (see the arithmetic below);
+**68 − 7 − 14 + 6 + 6 = 59 advertised**,
+**23 + 7 + 14 = 44 retired-forward**, **59 + 44 = 103 served**. `uv run python tools/surface_manifest.py check` is the live count and it derives all
+three; this paragraph is the arithmetic, not the authority.
+
+The SDK half of lane B is FOUR stated renames, not six: `supersede` → `supersede_knowledge`,
+`update_entity` → `update_knowledge`, `file_decision` → `write_question`, `file_human_approval` →
+`record_decision` (`update_knowledge` already existed, so it is +0); lane C's half retires seven and
+delivers six (`register_source`, `manage_source_trust`, `index_sources_from_directory`,
+`mine_knowledge_from_session`, `mine_knowledge_from_directory`, `check_connection`, against
+`create_source`, `assess_source`, `set_source_tier`, `index_directory`, `index_sessions`,
+`mine_corpus`, `checkpoint`). Both waves are disjoint from `#12901` wave 1, which retired five
+OFF-SURFACE methods neither batch touches. **The merged public count is 118**, derived by
+`uv run python tools/sdk_surface.py --check` (AST 118 = reflection 118 = frozen 118).
+⛔ `update_point` and `supersede_point` are NOT retired and must not be read as retired: both are
+still public, because each carries a §17.1 write-lane declaration keyed by the door's name, and
+`sdk_retired.py` says so in its own block. Each retired name's body is
+kept as the internal door its container calls, so no code was deleted. Two recorded consequences, not
+tidy-ups: `tortoise_refresh_confidence` is `http_policy=False` because it reaches whole-graph EP
+(#329) — so `promote`/`baseline` are no longer ADVERTISED over tenant HTTP MCP though the handler
+still answers them by name — and `invalidate_point` / `retract_point` / `promote_point` /
+`set_point_baseline` / `annotate_operator` / `mitigate_operator` STAY on the SDK surface, because
+each carries a state or an approving row this batch cannot retire without deleting a capability or
+inventing a destination (see `docs/product/bridge-table.md` §D2c).
 
 Three consequences for readers of the paragraph below, which is left as written because it records
 the 2026-10-27 ruling, not the current state:
@@ -489,22 +534,24 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 2. **Publish the bridge table** (MCP `type=`/`mode=` → SDK method).
 3. Implement the MCP list with the **SDK frozen** (method names + capabilities unchanged)
    so the handlers are written once.
-4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **119** public
+4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **118** public
    methods — a number DERIVED from the class, never typed; it moved 147 → 150 at #4282
    phase 2.2 because `link_entities`, `update_knowledge` and `delete_knowledge` were
    approved rows with no `def` yet, 150 → 124 on 2026-10-27 when the surplus methods
    nothing calls were deleted under the owner's ruling on this issue (26 methods, code
    archived at tag `archive/4282-surplus-sdk-methods`), 124 → 125 on 2026-11-14 when
-   approved row 28 `get_organisation_account` was implemented on #10015, and 125 → 124 on
-   2026-11-14 by the SOURCES/MINE/SESSION containers (#11609 batch 2), which ADDED six
-   approved methods (`register_source`, `manage_source_trust`,
-   `index_sources_from_directory`, `mine_knowledge_from_session`,
-   `mine_knowledge_from_directory`, `check_connection`) and retired seven
-   (`create_source`, `assess_source`, `set_source_tier`, `index_directory`,
-   `index_sessions`, `mine_corpus`, `checkpoint`) for a net −1, and 124 → 119 on
+   approved row 28 `get_organisation_account` was implemented on #10015, 125 → 120 on
    2026-11-15 when `#12901` wave 1 retired five OFF-SURFACE methods
    (`backfill_v25`, `calibration_passed`, `list_relations`, `membership_get`,
-   `quarantine_batch`) — in none of these moves did the declared surface change, so
+   `quarantine_batch`), and then TWO disjoint #11609 Phase 2 batches on 2026-11-16:
+   the WRITE/MUTATE containers retired four names into the containers they added and
+   delivered three approved ones (120 − 4 + 3 = 119), and the SOURCES/MINE/SESSION
+   containers ADDED six approved methods (`register_source`, `manage_source_trust`,
+   `index_sources_from_directory`, `mine_knowledge_from_session`,
+   `mine_knowledge_from_directory`, `check_connection`) against seven retirements
+   (`create_source`, `assess_source`, `set_source_tier`, `index_directory`,
+   `index_sessions`, `mine_corpus`, `checkpoint`) for a net −1 (**119 → 118**) — in
+   none of these moves did the declared surface change, so
    the declaration stays at 40 — and
    `docs/product/canonical-sdk-methods.md` agrees; reconcile the per-name mapping when
    that pass starts). Renames there are mechanical for the

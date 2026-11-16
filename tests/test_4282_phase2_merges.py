@@ -82,6 +82,7 @@ def sdk(monkeypatch):
         "create_edge",
         "link_source_to_entity",
         "update",
+        "_update_entity_any",
         "retract_point",
         "invalidate_point",
         "annotate_operator",
@@ -330,9 +331,19 @@ def test_the_refused_spellings_are_not_silently_mapped_to_a_meaning():
 
 
 def test_update_knowledge_is_the_door_update_lives_in(sdk):
+    """The property arm reaches the UPDATE writer, never a re-implementation.
+
+    ⛔ The writer is `_update_entity_any` — the relay the retired `update_entity`
+    used — and NOT `update()`. `update()` routes a **Point** to `update_point`,
+    which appends no journal record for a status write and refuses every
+    non-promote transition with a fixed sentence naming neither the target nor
+    the transition; delegating there would have made this container a silent
+    behaviour regression for every Point writer (#12915 review, the blocking
+    finding, measured below in `tests/test_11609_write_containers.py`).
+    """
     sdk.update_knowledge("p1", content="new text")
     door, args, kwargs = sdk.calls[-1]
-    assert door == "update"
+    assert door == "_update_entity_any"
     assert args[0] == "p1" and kwargs["content"] == "new text"
 
 

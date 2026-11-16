@@ -8,12 +8,24 @@ derivable from code.
 
 WHAT IS NOT IN HERE, AND WHY THAT IS THE POINT
     **119** public methods are live on `TortoiseSDK` today and 40 are approved, but the two
-    sets only overlap in 19: 19 approved methods are implemented and stay, so **100 of the
+    **118** public methods are live on `TortoiseSDK` today and 40 are approved, but the two
+    sets only overlap in 22: 22 approved methods are implemented and stay, so **96 of the
     live methods are off the approved surface** — those are what Phase 2 of #4282 REMOVES.
-    Phase 2 IMPLEMENTS the remaining **20** methods — the count the gate prints for approved
-    methods it cannot resolve on the live class. The row-1 `Tortoise(...)` is NOT one of
-    them: it names the `TortoiseSDK` class rather than a method on it, so it already
-    resolves and needs no implementation. Those 100 off-surface methods are deliberately
+    Phase 2 IMPLEMENTS the remaining **17** methods — the count the gate prints for approved
+    methods it cannot resolve on the live class. These numbers are MEASURED at this merge
+    (`uv run python tools/sdk_surface_declaration.py show`), because four landed waves moved
+    them, and no two of them saw each other: **#12901 wave 1** retired five off-surface
+    methods no production code called; #4282 **Phase 2 lane B / #12915** retired four public
+    names into approved containers and delivered three approved ones; #4282 **Phase 2 lane C
+    / #11609** retired seven names into the SOURCES/MINE/SESSION containers and delivered six
+    approved ones (`check_connection`, `register_source`, `manage_source_trust`,
+    `index_sources_from_directory`, `mine_knowledge_from_directory`,
+    `mine_knowledge_from_session`); and the intervening maintenance waves moved the live
+    count again. The retirements are disjoint by construction: each wave's membership rule
+    excluded any name a `tool_registry` entry bound, live or retired, so no wave consumed
+    another's candidates. The row-1 `Tortoise(...)` is NOT one of them: it names the
+    `TortoiseSDK` class rather than a method on it, so it already
+    resolves and needs no implementation. Those 96 off-surface methods are deliberately
     NOT declared in this module: a declaration that also lists everything that exists cannot
     hold a line, because the gate then answers "the surface is what the surface is" and
     every surplus method is blessed instead of caught.
@@ -38,10 +50,10 @@ THE GATE
     dropped from here) and against the live class in both directions (a public method that
     is not on the approved surface; an approved method that does not exist on the SDK).
     Both gap directions FAIL by design while the migration is open: the honest reading of
-    this declaration today is "40 approved, 119 live, 19 of the approved implemented and 100
-    live-but-unapproved" — never "green". (119 − 40 = 79 is only the DELTA to the target
+    this declaration today is "40 approved, 118 live, 22 of the approved implemented and 96
+    live-but-unapproved" — never "green". (118 − 40 = 78 is only the DELTA to the target
     count, which is a different measurement from the set that has to be removed; the
-    removals are the 100.)
+    removals are the 96.)
 
     Adding or removing a name here is a **surface change** and needs Daniel's approval FIRST
     (`AGENTS.md` → "MCP/SDK Surface Approval"). The gate makes such a change VISIBLE; it

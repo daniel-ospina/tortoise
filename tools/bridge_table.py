@@ -113,6 +113,15 @@ DESTINATION = {
     "tortoise_create_edge": "link_entities",
     "tortoise_create_source": "register_source",
     "tortoise_get": "get_entity",
+    # ── The WRITE/MUTATE containers (#4282 Phase 2, #11609 lane B) ────
+    # Like `tortoise_graph_overview` below: each is a REGISTRY tool, so the map
+    # owes it a row, and its destination is its own target name.
+    "tortoise_update_knowledge": "update_knowledge",
+    "tortoise_supersede_knowledge": "supersede_knowledge",
+    "tortoise_adjust_relationship": "adjust_relationship",
+    "tortoise_refresh_confidence": "refresh_confidence",
+    "tortoise_write_question": "write_question",
+    "tortoise_record_decision": "record_decision",
     "tortoise_get_entity": "get_entity",
     "tortoise_get_point": "get_entity",
     "tortoise_get_operator": "get_entity",
