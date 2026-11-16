@@ -425,8 +425,16 @@ class _FakeSDK:
         self.calls.append(("create_point", kind, content))
         return {"id": "p-1", "pointKind": kind, "content": content}
 
-    def file_decision(self, options, evidence, choice):
-        self.calls.append(("file_decision", options, evidence, choice))
+    def write_question(self, options, evidence, choice):
+        """The SDK door the handler CALLS — `#4282` row 20 renamed
+        `file_decision` -> `write_question` on the SDK (the MCP tool
+        `tortoise_file_decision` still answers via the retired shim).
+
+        The method NAME is the pin: a stub still keyed `file_decision` leaves
+        the real handler raising `AttributeError` instead of observing a
+        decision, because that name no longer exists on `TortoiseSDK`.
+        """
+        self.calls.append(("write_question", options, evidence, choice))
         return {"decision_id": "d-1", "option_ids": [], "evidence_ids": []}
 
 
@@ -496,9 +504,15 @@ class TestCallSiteObservation:
         assert recorded == [{"decision_observed": True}]
 
     def test_file_decision_claims_a_decision(self, handler_env):
-        _sdk, recorded = handler_env
+        """The MCP tool `tortoise_file_decision` (retired into
+        `tortoise_write_question`, still answering) reaches the SDK's
+        `write_question` door and observes a decision."""
+        sdk, recorded = handler_env
         res = mcp.tortoise_file_decision(["JSON", "YAML"], ["fits"], 0)
         assert "error" not in res, res
+        assert [c[0] for c in sdk.calls] == ["write_question"], (
+            "the handler drove a door other than the SDK's `write_question` — "
+            "`#4282` row 20 renamed it and `file_decision` no longer exists")
         assert recorded == [{"decision_observed": True}]
 
     def test_failed_write_never_reaches_the_auto_complete(self, handler_env):
