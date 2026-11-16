@@ -62,12 +62,15 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # approved 40 did NOT grow — the owner's approval (`#10015` comment `6863608333`) is for
 # delivering a name that was already approved and unshipped, which is the same move PR
 # #10053 made for three rows ("what grew is the IMPLEMENTATION of three names the owner
-# already approved"). `high_water_counts.sdk_public_methods` stays at 150 in
-# `config/surface-manifest.yml` — the growth pin did not move, and this literal tracks the
+# already approved"). `high_water_counts.sdk_public_methods` stayed at 150 at that head —
+# that move did not touch the growth pin (it has since been lowered to 111; see the
+# three-move chain below), and this literal tracks the
 # frozen row set, which must move whenever a row is added.
 #
-# 125 → 112 across TWO 2026-11-15 waves. Neither is growth, both move DOWN toward the
-# owner's target of 40 — the direction #4282 requires:
+# 125 → 111 across THREE moves, none of them growth — every one moves DOWN toward the
+# owner's target of 40, the direction #4282 requires. The two #11609 waves are DISJOINT
+# (wave 1's membership rule excluded any name a `tool_registry` entry bound, and the
+# doors Phase 2 re-keys were live MCP tools at that time):
 #   #12901 wave 1 — five off-surface methods with no production caller were deleted
 #                   (`backfill_v25`, `list_relations`, `quarantine_batch`,
 #                   `calibration_passed`, `membership_get`), frozen into
@@ -78,9 +81,16 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 #                   `check_confidence`, `explore_connections`,
 #                   `review_link_candidates`) and RE-PRIVATISED the 14 read methods they
 #                   cover.                                        +6 − 14
-# 125 + 6 − 14 − 5 = 112. The frozen baseline moved with it (`config/surface-manifest.yml`
-# `counts` + `high_water_counts`), re-cut rather than hand-edited.
-DECLARED_COUNT = 112
+#   #11609 Phase 2 — the WRITE/MUTATE container family landed SIX approved containers
+#                   (`update_knowledge`, `supersede_knowledge`, `adjust_relationship`,
+#                   `refresh_confidence`, `write_question`, `record_decision`) and
+#                   RETIRED four public names into them (`supersede`, `update_entity`,
+#                   `file_decision`, `file_human_approval`), a net −1.   −4 + 3
+# 125 + 6 − 14 − 5 − 4 + 3 = 111. The frozen baseline moved with it
+# (`config/surface-manifest.yml` `counts` + `high_water_counts`), re-cut rather than
+# hand-edited — and the pin is LOWERED to 111, because slack in a growth pin is the thing
+# the pin exists to stop.
+DECLARED_COUNT = 111
 
 
 def _declaration() -> dict:

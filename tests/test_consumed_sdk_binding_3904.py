@@ -351,7 +351,13 @@ _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
             {"id": "x"},  # with id=None the handler delegates to tortoise_get and never reads get_entity
         ),
     ),
-    "tortoise_operator_action": (
+    # #4282 Phase 2: the MCP name moved to the container, `tortoise_adjust_relationship`,
+    # which delegates to the same handler (`mcp_server.py::tortoise_adjust_relationship`
+    # → `tortoise_operator_action`). The keyword names are unchanged, so the two
+    # vectors carry over verbatim; the OLD key is kept out of this map because the
+    # gate drives `TOOL_REGISTRY`, and `tortoise_operator_action` is now a RETIRED
+    # name served only through the #3883 shim (`RETIRED_TOOL_REGISTRY`).
+    "tortoise_adjust_relationship": (
         (
             "mitigate",
             (),
@@ -413,7 +419,10 @@ _EXPECTED_PUBLIC_READS: dict[str, frozenset[str]] = {
     # dispatches to ``mitigate_operator`` / ``annotate_operator``; the union is
     # exactly what the blanked consumed declaration was made honest about (the
     # consolidated ``operator_action`` SDK method is never reached).
-    "tortoise_operator_action": frozenset({"mitigate_operator", "annotate_operator"}),
+    # #4282 Phase 2: re-pointed from the retired MCP name `tortoise_operator_action` to
+    # the container that now owns the entry, `tortoise_adjust_relationship`. Same
+    # handler, same two reads.
+    "tortoise_adjust_relationship": frozenset({"mitigate_operator", "annotate_operator"}),
 }
 
 

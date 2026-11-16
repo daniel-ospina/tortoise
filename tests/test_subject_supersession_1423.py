@@ -391,7 +391,7 @@ class TestSubjectStatusWriteIsValidated:
         sdk, proj, _events, _journal_path = env
         sid = node_id(sdk, "Subject", "Team Alpha")
         with pytest.raises(ValueError, match="Invalid status"):
-            sdk.update_entity(sid, status=bad)
+            sdk.update_knowledge(sid, status=bad)
         # refused BEFORE any write: the stored value is untouched — a status-less
         # birth leaves it ABSENT since #9974 R1 (absent reads LIVE).
         (status,), = _subject_row(proj, "Team Alpha", "status")
@@ -413,7 +413,7 @@ class TestSubjectStatusWriteIsValidated:
         sdk, proj, _events, _journal_path = env
         sid = node_id(sdk, "Subject", "Team Alpha")
         for st in ("draft", "live", "superseded", "deprecated", "archived"):
-            sdk.update_entity(sid, status=st)
+            sdk.update_knowledge(sid, status=st)
             (got,), = _subject_row(proj, "Team Alpha", "status")
             assert got == st, (st, got)
 

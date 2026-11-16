@@ -297,25 +297,30 @@ MANIFEST_HEADER = (
     "# not \u2014 that re-opens the slack. #10906 and #10914 compose because their retired name\n"
     "# sets are disjoint (77 \u2212 5 = 72 advertised at #10914's head).\n"
     "#\n"
-    "# LOWERED 72 → 64 and 150 → 112 on 2026-11-15 by PR #12951 (#11609 Phase 2, the READ/QUERY\n"
-    "# container family). The ADVERTISED set on `main` was 68 at this base, so the tool arithmetic\n"
-    "# is 68 − 9 + 5 = 64: NINE member doors retired into their containers (issue_insight,\n"
+    "# LOWERED 72 → 56 and 150 → 111 on 2026-11-15 by PR #12951 (#11609 Phase 2, BOTH container\n"
+    "# families: the READ/QUERY half is this PR, the WRITE/MUTATE half landed on `main` as\n"
+    "# #12915). The ADVERTISED set on `main` was 68 at this base, and the two waves retire\n"
+    "# DISJOINT door sets, so the tool arithmetic is 68 − 9 + 5 − 14 + 6 = 56: NINE read doors\n"
+    "# retired into their containers (issue_insight,\n"
     "# list_topics, provenance, session_context, entity_profile, traverse, review_connections,\n"
-    "# list_dedup_candidates, get_source_reliability) and FIVE container rows arrived\n"
+    "# list_dedup_candidates, get_source_reliability) with FIVE container rows arriving\n"
     "# (search_knowledge, list_knowledge, check_confidence, explore_connections,\n"
-    "# review_link_candidates — `tortoise_graph_overview` was already one of the 68). The SDK\n"
-    "# side moved 125 → 112: SIX containers arrived (the five above plus `graph_overview`) and\n"
-    "# FOURTEEN read methods were re-privatised behind them (125 + 6 − 14 = 117), on top of the FIVE\n"
-    "# `#12901` wave 1 had already retired from `main` (117 − 5 = 112), so the\n"
+    "# review_link_candidates — `tortoise_graph_overview` was already one of the 68), then\n"
+    "# FOURTEEN write doors retired into SIX containers (update_knowledge,\n"
+    "# supersede_knowledge, adjust_relationship, refresh_confidence, write_question,\n"
+    "# record_decision). The SDK side moved 125 → 111: SIX read containers arrived and FOURTEEN\n"
+    "# read methods were re-privatised behind them (125 + 6 − 14 = 117), the FIVE `#12901` wave 1\n"
+    "# had already retired took it to 112, and the write family's four retiring re-keys against\n"
+    "# three newly-implemented approved names took it to 111 (112 − 4 + 3), so the\n"
     "# owner's 40-name approved list did not change and the backlog did not grow.\n"
-    "# ⛔ SIX of this family's list-returning doors are DELIBERATELY left live — retiring one\n"
+    "# ⛔ SIX of the read family's list-returning doors are DELIBERATELY left live — retiring one\n"
     "# moves its #8482 failure repair off the advertised path, because a `-> Any` container has\n"
     "# no array envelope to carry the failure payload (the reason #10914 kept\n"
     "# `tortoise_check_structure`). They answer through their containers today.\n"
     "# Both numbers are LOWERED rather than left alone for the reason the 82 → 76 step names: a\n"
     "# pin that keeps slack stops being a growth pin — re-adding any retired name would pass\n"
-    "# `surface-guard.py` green. ⛔ 64/112 IS DELIBERATE, NOT AN ANOMALY: if you read `tools: 64`\n"
-    "# next to a live 64 and wonder whether to \"restore\" 72, do not — the nine retired names are\n"
+    "# `surface-guard.py` green. ⛔ 56/111 IS DELIBERATE, NOT AN ANOMALY: if you read `tools: 56`\n"
+    "# next to a live 56 and wonder whether to \"restore\" 72, do not — the retired names are\n"
     "# pinned by `tests/test_tool_registry.py` and the slack would hide their return.\n"
     "#\n"
     "# THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so\n"
@@ -3452,8 +3457,16 @@ def cmd_render(args: argparse.Namespace) -> int:
                 # live table marked this \u26a0 FALSE DECLARATION, and the retired
                 # table must not silently upgrade a false declaration to a fact.
                 declared = f"~~{declared}~~ (no such method)"
+            # A replacement is a CALL SIGNATURE and can contain a literal `|`
+            # (`scope="dirty"|"full"`). In a GFM table an unescaped `|` ENDS the
+            # cell, so the row renders with more columns than its header and the
+            # tail of the signature is lost to the reader (markdownlint MD056).
+            # ESCAPE it: the pointer is contractual, so it is never rewritten to
+            # dodge the character. `tests/test_surface_manifest.py` compares the
+            # escaped form back to the declaration.
+            use_instead = str(r.get("use_instead") or "").replace("|", "\\|")
             add(
-                f"| `{r.get('name')}` | `{r.get('use_instead')}` | "
+                f"| `{r.get('name')}` | `{use_instead}` | "
                 f"{declared if declared.startswith('~~') else '`' + str(declared) + '`'} | {was} |"
             )
         add("")

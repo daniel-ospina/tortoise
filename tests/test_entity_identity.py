@@ -429,7 +429,7 @@ class TestFileHumanApproval:
         sdk = sdk_factory()
         sdk.create_subject("approver-x", "analyst")
         obj = sdk.create_object("artifact-x", "thing")
-        result = sdk.file_human_approval(
+        result = sdk.record_decision(
             approver_id="approver-x", artifact_id="artifact-x",
             point_ids=[self._claim(sdk)["id"]])
         assert result["event_id"]
@@ -452,7 +452,7 @@ class TestFileHumanApproval:
         sdk = sdk_factory()
         sdk.create_subject("approver-d", "analyst")
         doc = sdk.create_document("artifact-doc", "artifact")
-        result = sdk.file_human_approval(
+        result = sdk.record_decision(
             approver_id="approver-d", artifact_id=doc["id"],
             point_ids=[self._claim(sdk)["id"]])
         assert result["event_id"]
@@ -474,7 +474,7 @@ class TestFileHumanApproval:
                      "status:'live'})")
         obj = sdk.create_object("artifact-w", "thing")
         with pytest.raises(AmbiguousEntityName):
-            sdk.file_human_approval(
+            sdk.record_decision(
                 approver_id="alice", artifact_id=obj["id"],
                 point_ids=[self._claim(sdk)["id"]])
         assert [e.shape for e in non_folded_entries()] == ["endpoint-collision"]
@@ -488,7 +488,7 @@ class TestFileHumanApproval:
         proj.g.query("CREATE (s:Subject {id:'X', name:'n2', status:'live'})")
         obj = sdk.create_object("artifact-q", "thing")
         with pytest.raises(AmbiguousEntityName):
-            sdk.file_human_approval(
+            sdk.record_decision(
                 approver_id="n1", artifact_id=obj["id"],
                 point_ids=[self._claim(sdk)["id"]])
 
@@ -497,7 +497,7 @@ class TestFileHumanApproval:
         _create_subject_rows(sdk, "approver-dup", ["sub-a", "sub-b"])
         doc = sdk.create_document("artifact-y", "artifact")
         with pytest.raises(AmbiguousEntityName):
-            sdk.file_human_approval(
+            sdk.record_decision(
                 approver_id="approver-dup", artifact_id=doc["id"],
                 point_ids=[self._claim(sdk)["id"]])
 
@@ -506,7 +506,7 @@ class TestFileHumanApproval:
         sdk.create_subject("approver-z", "analyst")
         _create_object_rows(sdk, "artifact-dup", ["obj-a", "obj-b"])
         with pytest.raises(AmbiguousEntityName):
-            sdk.file_human_approval(
+            sdk.record_decision(
                 approver_id="approver-z", artifact_id="artifact-dup",
                 point_ids=[self._claim(sdk)["id"]])
 

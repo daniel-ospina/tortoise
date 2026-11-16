@@ -75,7 +75,7 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """64 live tools = 98 − 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5 − 4 − 9 + 5.
+        """56 live tools = 98 − 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5 − 4 − 9 + 5 − 14 + 6.
 
         The −1 is #3540 ruling B: the two per-source switches were consolidated into
         `tortoise_manage_sources`, which is the ruling's own requirement ("the surface
@@ -121,7 +121,7 @@ class TestRegistryEquivalence:
         in that nine: each carries a `rest_spec` (`GET /v1/issue-insight`,
         `GET /v1/context`), and retiring the registry entry would delete its REST
         route with it — a public API removal, not a rename (the reason is spelled
-        out at `tortoise/tool_registry.py:2255-2260`). The membership above is
+        out at `tortoise/tool_registry.py:2439-2444`). The membership above is
         re-derived from `RETIRED_USE_INSTEAD`, not typed: `config/surface-order.yml`
         records the same nine.
         ⛔ SIX of the family's members are DELIBERATELY still live —
@@ -132,15 +132,22 @@ class TestRegistryEquivalence:
         retire with the envelope (the same reasoning #10914 applied to
         `check_structure`). Pinned by
         `tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`.
+
+        #11609 lane B (#4282 Phase 2, the WRITE/MUTATE containers): FOURTEEN advertised
+        names retire into SIX approved containers and the six containers arrive —
+        64 − 14 + 6 = **56** live, 32 + 14 = **46** retired. The move is a net −8 and it
+        is the approved direction; every retired name still ANSWERS through the #3883
+        shim, so the SERVED set rises 96 → 102 with the six container rows and no
+        capability is lost.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 64, f"Expected 64, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 56, f"Expected 56, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
-        # consolidated and the 5 #4282 container members are NOT live, and each one is
-        # declared retired (#3883).
+        # consolidated, the 5 #4282 container members and the 14 #11609 lane B
+        # WRITE/MUTATE members are NOT live, and each one is declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        assert len(retired) == 32, f"Expected 32 retired, got {len(retired)}"
+        assert len(retired) == 46, f"Expected 46 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -171,7 +178,17 @@ class TestRegistryEquivalence:
             assert gone not in names, (
                 f"{gone} is back on the served surface — #4282 Phase 3.2 removed it and "
                 "the owner's 2026-09-22 ruling keeps `run_onboarding` off the MCP")
-        assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
+        # #531's human-approval write, reached through its #11609 lane B container:
+        # the door retired (into the #3883 shim) and `tortoise_record_decision` is the
+        # name that resolves now.
+        assert "tortoise_record_decision" in names, "Missing the record_decision container"
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD as _rui
+        assert "tortoise_file_human_approval" not in names, (
+            "tortoise_file_human_approval retired into tortoise_record_decision but is "
+            "still live")
+        assert "record_decision" in _rui["tortoise_file_human_approval"], (
+            "#531's human-approval write must point at record_decision — a retired name "
+            "with no resolvable replacement is the #3836 (c) failure")
         # #11609 Phase 2: #913's `review_connections` door retired into the
         # `review_link_candidates` container (kind="connections"). As with
         # `validate_domain` above, the assertion follows the CAPABILITY rather than
@@ -179,10 +196,12 @@ class TestRegistryEquivalence:
         assert "tortoise_review_link_candidates" in names, (
             "Missing the review_link_candidates container that #913's review_connections "
             "read now answers through")
-        from tortoise.tool_registry import RETIRED_USE_INSTEAD as _rui
         assert "review_link_candidates" in _rui["tortoise_review_connections"]
         assert "tortoise_events_poll" in names, "Missing #432 poll_events tool"
-        assert "tortoise_retract_point" in names, "Missing #432 retract_point tool"
+        # #432's retraction, reached through `tortoise_update_knowledge`: retraction is a
+        # TEMPORAL FIELD on the revise verb (#11609 lane B), so the door retired and the
+        # container is what resolves.
+        assert "tortoise_update_knowledge" in names, "Missing the update_knowledge container"
         assert "tortoise_find_cross_lens_candidates" in names, "Missing #438 cross-lens tool"
         # #348's audit capability, reached through the #4282 container: the door retired and
         # `graph_overview(section="audit")` is the name that resolves now.
@@ -194,10 +213,14 @@ class TestRegistryEquivalence:
         # (owner decision, docs/product/canonical-mcp-tools.md @ approval_pr 4120).
         # `tortoise_overview` left this set when #4282 retired it into
         # `tortoise_graph_overview` — the container is the W3 consolidation now.
-        w_consolidations = {"tortoise_recall", "tortoise_update", "tortoise_delete",
-                            "tortoise_operator_action", "tortoise_create_edge",
+        w_consolidations = {"tortoise_recall", "tortoise_delete",
+                            "tortoise_create_edge",
                             "tortoise_graph_overview", "tortoise_get_entity",
-                            "tortoise_ingest"}
+                            "tortoise_ingest",
+                            # #11609 lane B: W2's update/operator_action arms moved
+                            # into the approved WRITE/MUTATE containers.
+                            "tortoise_update_knowledge",
+                            "tortoise_adjust_relationship"}
         assert w_consolidations <= names, (
             f"Missing W1–W4 tools: {w_consolidations - names}")
         # #454-era surface tools covered by this PR's tests
@@ -205,18 +228,20 @@ class TestRegistryEquivalence:
                      "tortoise_graph_overview"):
             assert name in names, f"Missing tool: {name}"
         # Phase-4 mining/promotion/dedup/timeline surface (#787).
-        # ⛔ TWO of the five original names retired into #11609 Phase 2's containers
-        # (`tortoise_list_dedup_candidates` → `review_link_candidates(kind="dedup")`,
-        # `tortoise_belief_timeline` → `check_confidence(topic=…)`), so this pin follows
-        # the CAPABILITY, not the removed name — the same idiom the `tortoise_validate_domain`
-        # line above uses. Each retired name must also still name a live replacement, or
-        # the #3883 shim would answer a caller with a dead end.
+        # ⛔ THREE of the five original names retired into #11609 containers —
+        # `tortoise_list_dedup_candidates` → `review_link_candidates(kind="dedup")`,
+        # `tortoise_belief_timeline` → `check_confidence(topic=…)` (Phase 2), and
+        # `tortoise_promote_point` → `refresh_confidence(scope="promote")` (lane B) —
+        # so this pin follows the CAPABILITY, not the removed names — the same idiom the
+        # `tortoise_validate_domain` line above uses. Each retired name must also still
+        # name a live replacement, or the #3883 shim would answer a caller with a dead end.
         phase4 = {"tortoise_mine_conversations", "tortoise_approve_merge",
-                  "tortoise_promote_point", "tortoise_review_link_candidates",
-                  "tortoise_check_confidence"}
+                  "tortoise_review_link_candidates", "tortoise_check_confidence",
+                  "tortoise_refresh_confidence"}
         assert phase4 <= names, f"Missing #787 tools: {phase4 - names}"
         retired_phase4 = {"tortoise_list_dedup_candidates": "review_link_candidates",
-                          "tortoise_belief_timeline": "check_confidence"}
+                          "tortoise_belief_timeline": "check_confidence",
+                          "tortoise_promote_point": "refresh_confidence"}
         for gone, successor in retired_phase4.items():
             assert gone not in names, f"{gone} retired into {successor} but is still live"
             assert successor in RETIRED_USE_INSTEAD[gone], (
@@ -262,9 +287,21 @@ class TestCurationGroups:
     """
 
     def test_retract_point_explicitly_in_memory(self):
-        from tortoise.tool_registry import TOOL_REGISTRY
-        entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_retract_point")
+        """#432's retraction stays in "memory" through its #11609 lane B container.
+
+        The DOOR retired (retraction is a temporal field on the revise verb), so
+        this follows the capability rather than re-asserting the removed name: the
+        container that now answers for it carries the same group, and the retired
+        entry keeps it too (a shim serving a name the role-filter dropped would be a
+        capability loss wearing a rename).
+        """
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        entry = next(t for t in TOOL_REGISTRY
+                     if t.name == "tortoise_update_knowledge")
         assert entry.group == "memory", f"got {entry.group}"
+        retired = next(t for t in RETIRED_TOOL_REGISTRY
+                       if t.name == "tortoise_retract_point")
+        assert retired.group == "memory", f"got {retired.group}"
 
     def test_poll_events_in_sessions_group(self):
         from tortoise.tool_registry import TOOL_REGISTRY
@@ -303,7 +340,10 @@ class TestCurationGroups:
         """tools_by_group / tool_groups expose the corrected groups (#523)."""
         from tortoise.tool_registry import tools_by_group, tool_groups  # noqa: I001
         memory = {t.name for t in tools_by_group("memory")}
-        assert "tortoise_retract_point" in memory
+        # #432's retraction is a temporal field on the revise verb (#11609 lane B):
+        # the DOOR retired, so the capability assertion follows the container that
+        # now serves it rather than re-asserting the removed name.
+        assert "tortoise_update_knowledge" in memory
         groups = tool_groups()
         assert "tortoise_events_poll" in groups["sessions"]
 
@@ -1357,8 +1397,17 @@ class TestCapabilityModel:
         assert any("stale map" in v
                    for v in write_surface_map_violations(dropped))
         # FORWARD: a wrap site with no map entry is reported (no KeyError)
+        # #4282 Phase 2: the dropped key must be a method that really HAS a wrap
+        # site in `tortoise/mcp_server.py` — this mutation is only non-vacuous
+        # while the key it deletes exists in the map AND in the AST scan.
+        # `update_point` retired into the container, so deleting it became a
+        # no-op and the assertion could never fire; `update_knowledge` is the
+        # live site (three of them: `tortoise_update_point` 5578,
+        # `tortoise_update` 6529, `tortoise_update_entity` 6832 — #12915 review F1
+        # added the middle one when the container's `props` arm was re-routed).
+        assert "update_knowledge" in DECLARED_WRITE_SURFACE_MAP
         omitted = {k: v for k, v in DECLARED_WRITE_SURFACE_MAP.items()
-                   if k != "update_point"}
+                   if k != "update_knowledge"}
         assert any("unmapped" in v
                    for v in write_surface_map_violations(omitted))
 
@@ -2255,9 +2304,16 @@ class TestToolIdentity:
         # `s.reliability`) — so LIVE 39 -> 38 while SERVED holds at 43, because the
         # #3883 shim still serves the name. This is the #3540-ruling-B shape exactly:
         # the advertised surface falls, the served one does not.
-        assert len(WRITE_TOOL_NAMES) == 43, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+        # #11609 lane B (#4282 Phase 2): the WRITE/MUTATE containers add SIX
+        # destructive rows and retire FOURTEEN (twelve destructive, two write) into
+        # them. get_write_tool_names covers TOOL_REGISTRY **and**
+        # RETIRED_TOOL_REGISTRY (a shim still WRITES, #3883), so the SERVED number
+        # moves 43 → 49 (43 + 6) while the ADVERTISED (live) number moves 38 → 30
+        # (38 − 14 + 6). A change to either is a permission change and needs the
+        # owner's eye, not a test edit.
+        assert len(WRITE_TOOL_NAMES) == 49, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 38, f"live write census moved: {len(live)}"
+        assert len(live) == 30, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.
@@ -2285,9 +2341,10 @@ class TestToolIdentity:
 
         served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
         writers = sorted(e.name for e in served if e.writes)
-        # 43 = the served writer census (39 live + 4 retired shims). Pinned
-        # here so the derived loop below can never pass by covering nothing.
-        assert len(writers) == 43, writers
+        # 49 = the served writer census (30 live + 19 retired shims; #11609 lane B
+        # moved the advertised number and left the served one larger than 43).
+        # Pinned here so the derived loop below can never pass by covering nothing.
+        assert len(writers) == 49, writers
         for name in ("tortoise_index_files", "tortoise_dream",
                      "tortoise_index_sessions", "tortoise_ingest_corpus",
                      "tortoise_org_create"):

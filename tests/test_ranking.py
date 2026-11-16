@@ -407,7 +407,7 @@ def test_event_signal_includes_produces_confidence(sdk):
 
     NB: ranking.py queries `-[:PRODUCES]->` (uppercase). Production emits
     lowercase `produces` (``entities.py::_EntityHandlers._event_plain_merge`` for the
-    Event→Object/Source edge; ``sdk.py::TortoiseSDK.file_human_approval`` for the
+    Event→Object/Source edge; ``sdk.py::TortoiseSDK.record_decision`` for the
     Event→Point edge) — a PRE-EXISTING case mismatch (#25) that leaves this
     branch dead in production (confidence
     always coalesces to 0.5). This test pins the branch as ranking.py
@@ -438,7 +438,7 @@ def test_event_signal_includes_produces_confidence(sdk):
 
 def test_event_signal_lowercase_produces_edge_not_matched(sdk):
     """Production-reality pin: the SDK emits lowercase `produces`
-    (``entities.py::_EntityHandlers._event_plain_merge``, ``sdk.py::TortoiseSDK.file_human_approval``),
+    (``entities.py::_EntityHandlers._event_plain_merge``, ``sdk.py::TortoiseSDK.record_decision``),
     which the uppercase `-[:PRODUCES]->` query never matches — so coalesce 0.5
     stays live even when produced Points exist (pre-existing #25 case
     mismatch). The #25 fix (lowercasing the query) flips FOUR tests: this one

@@ -2495,12 +2495,12 @@ def test_update_entity_cannot_restamp_or_clear_the_class(lane):
     for spelling in ("claimClass", "claim_class"):
         for bad in ("asserted", None, "bogus"):
             with pytest.raises(ValueError, match="written by create_point"):
-                lane.update_entity(pid, **{spelling: bad})
+                lane.update_knowledge(pid, **{spelling: bad})
             # The refusal is BEFORE the write: the marker is untouched.
             assert _props(lane, pid).get(cc.PROP) == cc.DERIVED
     # ... and the door still WORKS for an ordinary property, so the refusal is
     # one name and not a dead surface.
-    lane.update_entity(pid, summary="authored summary")
+    lane.update_knowledge(pid, summary="authored summary")
     assert _props(lane, pid).get("summary") == "authored summary"
     assert _props(lane, pid).get(cc.PROP) == cc.DERIVED
 

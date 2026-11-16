@@ -2763,9 +2763,34 @@ def test_a_control_builtin_argument_is_graded_not_skipped(tmp_path):
         )
 
 
+def _an_absent_path() -> str:
+    """A path under a directory that does NOT exist, built rather than assumed.
+
+    ⛔ `/nonexistent/…` was the original operand, and `/nonexistent` is NOT guaranteed
+    absent: the shell hooks pass `${HOME:-/nonexistent}` as a sentinel, so any process
+    that runs one with `HOME` unset `mkdir -p`s that very directory at the filesystem
+    root — after which `tee /nonexistent/9664-carriage-probe` EXITS 0, `tee` measures
+    INERT, and this pin reds on a claim that is still true of the code (measured
+    2026-11-16 on two fleet runners: `ls -ld /nonexistent` -> a directory created by
+    `tortoise/claude-hooks/*.sh`, inert set `[…, 'tee', …]`, this row red). A sentinel
+    whose absence is the premise of the measurement has to be CONSTRUCTED, per run,
+    under a `mkdtemp` parent that is then removed — never a fixed path some other
+    process may have created.
+    """
+    parent = tempfile.mkdtemp(prefix="9664-absent-")
+    os.rmdir(parent)
+    return os.path.join(parent, "9664-carriage-probe")
+
+
 _SENTINEL_OPERANDS = (
     "'I did not run this'",
-    "/nonexistent/9664-carriage-probe",
+    # ⛔ QUOTED, because the path is interpolated into the probe's `bash -c` string below
+    # and `mkdtemp` honours `$TMPDIR`: an UNQUOTED operand under a spaced TMPDIR word-splits,
+    # `tee` writes the first fragment and exits 0 (`tee: dir/9664-absent-…: No such file`),
+    # and the head measures INERT again — the same premise-not-guaranteed failure this
+    # helper exists to remove, one indirection further out (measured by review, 2026-11-16:
+    # `TMPDIR="/tmp/sp dir"` -> a leaked `/tmp/sp` and a false INERT bucket).
+    f'"{_an_absent_path()}"',
 )
 
 

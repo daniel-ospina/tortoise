@@ -2622,6 +2622,12 @@ def test_every_shipped_surface_is_named_with_a_state(tmp_path, monkeypatch):
     states = {rel: shipped["per_surface"][rel]["state"] for rel in probe.CONFIG_SURFACES}
     assert states == {
         ".env.example": "ON",
+        # ⛔ `compose.yaml`/`compose.yml` are compose's FIRST-choice filenames
+        # (Docker's CLI reference: compose looks for a `compose.yaml` or a
+        # `docker-compose.yaml`), so they are surfaces in their own right — ABSENT
+        # here because this fixture ships only `docker-compose.yml`.
+        "compose.yaml": "ABSENT",
+        "compose.yml": "ABSENT",
         "docker-compose.yml": "OFF",
         "docker-compose.yaml": "ABSENT",
         "Dockerfile": "ABSENT",
@@ -2886,7 +2892,12 @@ def test_fly_toml_ENV_table_arms_the_deployment_and_build_args_do_not(
     # …and the ignored assignment is NAMED, never silently dropped: a reader has to
     # be able to see that the walk found the line and decided it is not runtime env.
     assert shipped["outside_runtime"], shipped
-    assert shipped["outside_runtime"][0].startswith("fly.toml:2:"), shipped["outside_runtime"]
+    # ⛔ The RESOLVER's vocabulary, not a line number (`#12549`): the table PATH is the
+    # thing that decides whether a key is a runtime environment, and a line number moves
+    # whenever the file is reflowed. `[build.args]` reaches `docker build`, never the
+    # process, so it is reported as outside the runtime environment.
+    assert shipped["outside_runtime"][0].startswith(
+        "fly.toml: [build.args] TORTOISE_EMBED_GATE"), shipped["outside_runtime"]
 
     # The SAME line inside `[env]` does arm it — so the OFF above is the table, not
     # an inability to read TOML.
@@ -2956,6 +2967,628 @@ def test_the_entrypoint_is_DISCOVERED_from_the_image_and_its_exports_are_read(
     assert shipped["deployment"]["on"] is False, shipped["deployment"]
     note = _gate_note(shipped)
     assert "entrypoint.sh=ON(shell:export)" in note, note
+
+
+def test_a_self_referencing_default_respects_the_value_ALREADY_SET(
+        tmp_path, monkeypatch):
+    """`${FLAG:-1}` is a default, and a DEFAULT does not overwrite a set value.
+
+    ⛔ OPEN P1 of the fresh review of #12902. `_resolved_assignment` answered the
+    default UNCONDITIONALLY, with no input for what the variable already held — while
+    the shell state machine had already computed it. MEASURED against bash, not
+    reasoned about:
+
+    ```
+    $ bash -c 'export F=0; export F=${F:-1}; echo $F'
+    0
+    ```
+
+    so the container runs the gate OFF while the walk published `entrypoint.sh=ON`,
+    and `deployment["on"]` (what `score_rule_bullet` reads as `on_by_default`) is a
+    published `True` over a deployment whose gate is off — the `#11455` class this
+    row exists to remove.
+
+    Every arm below is a `bash -c` transcript of the SAME two lines, so a later
+    "simplification" that reads the default unconditionally reds here rather than
+    silently re-opening the false arm.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    # ── the P1 itself: a SET value survives `:-`, so the file reads OFF ──
+    # `bash -c 'export F=0; export F=${F:-1}; echo $F'` → 0
+    assert _state('export TORTOISE_EMBED_GATE=0\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-1}\n') == "OFF"
+    # …and the SAME two commands on ONE line, which is why the prior value is tracked
+    # per COMMAND: a per-line value would hand the second command the line-start state.
+    # `bash -c 'export F=0; export F=${F:-1}; echo $F'` → 0
+    assert _state('export TORTOISE_EMBED_GATE=0; '
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-1}\n') == "OFF"
+    # …`-` and `:=` behave the same on a SET value: all three keep it.
+    # `bash -c 'export F=0; export F=${F-1}; echo $F'` → 0
+    assert _state('export TORTOISE_EMBED_GATE=0\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE-1}\n') == "OFF"
+    # `bash -c 'export F=0; export F=${F:=1}; echo $F'` → 0
+    assert _state('export TORTOISE_EMBED_GATE=0\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:=1}\n') == "OFF"
+
+    # ── CONTROLS: the fix must not disarm a real default ──
+    # nothing assigned first → `bash -c 'export F=${F:-1}'` → 1
+    assert _state('export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-1}\n') == "ON"
+    # an EMPTY value is NULL to `:-`/`:=` but NOT to `-`, which is bash's own split:
+    # `bash -c 'export F=; export F=${F:-1}; echo $F'` → 1, `…${F-1}` → ``
+    assert _state('export TORTOISE_EMBED_GATE=\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-1}\n') == "ON"
+    assert _state('export TORTOISE_EMBED_GATE=\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE-1}\n') == "OFF"
+
+    # ── a PRIOR VALUE THAT IS ITSELF AN EXPANSION is not a value: reading the raw
+    # `${OTHER}` text as a literal would publish a MEASURED `OFF` about a question the
+    # run never measured. UNMEASURED holds the surface instead.
+    assert _state('export TORTOISE_EMBED_GATE=${OTHER_VAR}\n'
+                  'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-1}\n') == "UNMEASURED"
+
+
+def test_a_COMMENT_is_not_shell_syntax_so_a_disarm_inside_one_still_disarms(
+        tmp_path, monkeypatch):
+    """A `#` comment is PROSE, and reading its operators as grammar destroyed a disarm.
+
+    ⛔ P1 of the fresh review of #12902, and a REGRESSION against `main`. The splitter
+    tracked quotes and escapes but not comments, so:
+
+    * `export FLAG=0   # CPU & memory` returned **no commands at all** — the lone `&`
+      hit the subshell early-return, which DROPS the command before it — so the line's
+      disarm vanished and last-wins left the earlier truthy arm standing;
+    * `export FLAG=0   # off; FLAG=1` split on the commented `;` and scanned the
+      commented-out text as a real assignment.
+
+    Ground truth, measured: `env -i bash -c 'export TORTOISE_EMBED_GATE=1; export
+    TORTOISE_EMBED_GATE=0   # CPU & memory; env'` has `TORTOISE_EMBED_GATE=0`.
+
+    These shapes are not exotic in this repo's own shipped shell files —
+    `.github/scripts/auto-file-issue.test.sh` carries a commented `gh api` URL whose
+    query string contains `&per_page=100`.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
+        'ENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _files(script: str) -> dict:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["deployment"]["files"]
+
+    armed_then_disarmed = "export TORTOISE_EMBED_GATE=1\n"
+    for comment in ("# CPU & memory",          # a lone `&` in prose
+                    "# 0 | 1",                  # a lone `|` in prose
+                    "# see http://h/?a=1&b=2"):  # a URL query string
+        files = _files(armed_then_disarmed
+                       + f"export TORTOISE_EMBED_GATE=0   {comment}\n")
+        assert files["entrypoint.sh"] == "OFF", (comment, files)
+    # …and a `;` in a comment does not turn the prose after it into a command.
+    files = _files("export TORTOISE_EMBED_GATE=0   # off; TORTOISE_EMBED_GATE=1\n")
+    assert files["entrypoint.sh"] == "OFF", files
+    assert files["Dockerfile.hosted"] == "ON", files
+
+    # ── CONTROLS: a `#` that bash does NOT treat as a comment must keep its text ──
+    # `echo a#b` prints `a#b`; only a word-START `#` begins a comment. The returns are
+    # `(command, conditional)` pairs since the fourth review, so each control is read at
+    # index 0 and every one of them is UNCONDITIONAL.
+    assert probe._shell_commands("echo a#b") == [("echo a#b", False)]
+    # `$#` and `${#name}` are parameter syntax, not comments.
+    assert probe._shell_commands("echo ${#TORTOISE_EMBED_GATE}") == [
+        ("echo ${#TORTOISE_EMBED_GATE}", False)]
+    # a quoted `#` is data (`bash -c 'echo "1 # 2"'` prints `1 # 2`).
+    assert probe._shell_commands('echo "1 # 2"') == [('echo "1 # 2"', False)]
+
+
+def test_a_COMMENTED_OUT_heredoc_opener_opens_NO_body(tmp_path, monkeypatch):
+    """`# cat <<EOF` is PROSE: bash runs the lines below it, so they must still be read.
+
+    ⛔ The interaction between the two readers, measured on the rebase of the fourth
+    review onto this one (both halves were green alone): the heredoc scanner matched
+    `<<` on a quote-masked copy but did not strip COMMENTS, so a commented-out opener
+    still queued a body and swallowed every line below it as data. Ground truth:
+    `bash -c '# cat <<EOF\nexport TORTOISE_EMBED_GATE=1; env'` DOES export the flag
+    (`TORTOISE_EMBED_GATE=1`), while the walker read line 2 as a heredoc body and
+    published `OFF` — a FALSE HOLD, the fail-closed direction of a reading the run
+    never made. `_shell_heredoc_bodies` now masks the comment-stripped line.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    assert _state("# cat <<EOF\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
+    assert _state('# done <<< "$uri"\nexport TORTOISE_EMBED_GATE=1\n') == "ON"
+    # …and the helper says the same thing directly, so the arms cannot drift apart.
+    assert probe._shell_heredoc_bodies(
+        "# cat <<EOF\nexport TORTOISE_EMBED_GATE=1\n") == set()
+    # ── CONTROL: a REAL opener carrying a trailing comment still opens its body ──
+    assert probe._shell_heredoc_bodies(
+        "cat <<EOF  # note\nexport TORTOISE_EMBED_GATE=1\nEOF\n") == {2}
+    assert _state("cat <<EOF  # note\nexport TORTOISE_EMBED_GATE=1\nEOF\n") == "OFF"
+
+
+def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
+    """An `if`/`case`/loop body is a CONDITIONAL OPERAND one construct over.
+
+    ⛔ Measured while reviewing the rounds of #12902: the reader applied every branch in
+    DOCUMENT order, so
+
+        if true; then export FLAG=0; else export FLAG=1; fi   bash: 0    reader: ON
+        case x in x) export FLAG=1 ;; esac                   bash: 1    reader: OFF
+
+    — a FALSE ARM in the row's certification direction (the first) and a false HOLD (the
+    second), both stated as measurements. This reader cannot evaluate a test, so a
+    flag-relevant command inside or on the same line as such a construct is reported
+    `indeterminate` and the FILE is held `UNMEASURED` — the three-valued rule the `&&` /
+    `||` operands already get.
+
+    ⛔ The one-line forms are also the reason `_shell_strip_leading_keywords` exists: the
+    splitter hands the scanner `` then export FLAG=1`` and ``x) export FLAG=1``, and
+    neither parses as an export, so the arm landed in NO bucket and the file read `OFF`
+    over a deployment bash arms. The keyword/pattern prefix is stripped before parsing.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _shipped(script: str) -> dict:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+
+    for script in (
+            # both branches scored; bash runs the first
+            "if true; then\nexport TORTOISE_EMBED_GATE=0\n"
+            "else\nexport TORTOISE_EMBED_GATE=1\nfi\n",
+            # one-line `if`: the arm was readable by nobody before the keyword strip
+            'if [ -z "" ]; then export TORTOISE_EMBED_GATE=1; fi\n',
+            # a loop body
+            "for i in 1 2; do\nexport TORTOISE_EMBED_GATE=1\ndone\n",
+            # a case arm
+            "case x in\n  x) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+            # ⛔ …and the ONE-LINE `case` spelling, which published a DEFINITE `OFF` until
+            # the subject form was stripped: the splitter hands the scanner
+            # ``x in x) export …``, and `<subject> in ` blocked the arm pattern. It must
+            # read the same three-valued answer as the multi-line form, because the test
+            # is what this reader cannot evaluate (`bash -c 'case x in x) export FLAG=1
+            # ;; esac; env'` does export it — the row may not claim that, it did not
+            # evaluate the subject). Fresh review of #12902, P2.
+            "case x in x) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            # ⛔ …and a PATTERN ALTERNATION (`prod|staging)`), the mainstream spelling. Its
+            # `|` hit the splitter's SUBSHELL early-return FIRST, which dropped the whole
+            # line — every command on it — so the arm landed in NO bucket and the file
+            # published a definite `OFF` even after the subject strip (PRE == POST; the
+            # same P2 class, one mechanism over). All three spellings of the alternation,
+            # because the quoted one and the multi-line one are separate paths.
+            "case $ENV in prod|staging) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            'case $ENV in "prod|staging") export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            "case $ENV in\n  prod|staging) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+            # ⛔ …and an alternation with MORE THAN TWO elements, and one with SPACES around
+            # the bars: the first `|` rule matched the 2-element unspaced spelling only, so
+            # `prod|staging|dev)` (36 of them in this repo's tracked shell) and
+            # `prod | staging)` were DROPPED by the subshell return — a definite verdict over
+            # a held shape, and a MEASURED false `ON` where bash disarms (fresh review of
+            # `#12902`, P2).
+            "case $ENV in prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $ENV in prod | staging) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $ENV in prod | staging | dev ) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $ENV in\n  prod | staging | dev ) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+            # ⛔ bash's OPTIONAL leading `(` in a pattern list, and a case HEAD SPLIT across
+            # two lines (`case $E` / `in …)`). Neither was a pattern position, so the arm's
+            # `|` hit the subshell return and the line was dropped — a definite verdict over
+            # a shape the declared bounds promise is held (fresh review of `#12902`, P2/P3).
+            "case $ENV in (prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $ENV in\n  (prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+            "case $ENV\nin prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+            # ⛔ …and a SPACE between the leading `(` and the first alternative, or before the
+            # closing `)` (`case $E in ( prod | staging ) …`). `bash` ARMS that spelling
+            # (measured), but the pattern list took the paren and then required an
+            # alternative IMMEDIATELY, so the arm matched nothing, landed in NO bucket, and
+            # the file published a DEFINITE `OFF` over a shape the run never measured (fresh
+            # review of `#12902`, P2).
+            "case $ENV in ( prod | staging ) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $ENV in ( prod | staging | dev ) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            # ⛔ …and a QUOTED or PARAMETERISED SUBJECT (`case "${ENV}" in prod)`,
+            # `case ${ENV:-prod} in prod)`). bash expands the `case` word before matching
+            # (bash(1) 3.2.5.2), so both are ordinary and both ARM the file — but the
+            # subject character class rejected `{`, `}` and quotes, so the arm landed in no
+            # bucket and the file published a DEFINITE `OFF` with an empty `indeterminate`
+            # bucket: a false PASS, and one the SAFER spelling caused (the unquoted control
+            # read `UNMEASURED`; fresh review of `#12902`, P2).
+            'case "${ENV}" in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            "case ${ENV:-prod} in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            'case "$ENV" in "prod") export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            # ⛔ …and a QUOTED PATTERN carrying a SPACE (`case "a b" in "a b")`). Quote
+            # removal happens before matching (bash(1) 3.2.5.2), so this MATCHES and arms
+            # the file (measured); an alternative class that excluded a space made it not
+            # a pattern, so the arm landed in no bucket and the file read a definite `OFF`
+            # — the quoted-SUBJECT false PASS on the pattern side (fresh review of
+            # `#12902`, P2).
+            'case "a b" in "a b") export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            'case "x y" in "p q"|"x y") export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            # ⛔ …and a QUOTED / COMMAND-SUBSTITUTED subject with an ALTERNATION arm: the
+            # pattern-position test still spelled the subject as a class without `{`, `}`,
+            # quotes or SPACES, so `case "${ENV}" in prod|staging)` and
+            # `case $(echo prod) in prod)` failed it, the `|` fell through to the subshell
+            # return, and the line was dropped — a definite `OFF` with an EMPTY
+            # `indeterminate` bucket where bash arms (measured; fresh review of `#12902`,
+            # P1/P2). The subject is now any shell WORD up to the ` in ` before the pattern.
+            'case "${ENV}" in prod|staging) export TORTOISE_EMBED_GATE=1 ;; esac\n',
+            "case ${ENV:-prod} in prod|staging) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $(echo prod) in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case `echo prod` in prod) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+    ):
+        shipped = _shipped(script)
+        assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
+            script, shipped["per_surface"]["entrypoint"])
+        assert shipped["indeterminate"], (script, shipped["indeterminate"])
+
+    # ── CONTROL: a construct that does NOT touch the flag must not hold the file ──
+    shipped = _shipped("if true; then\necho hi\nfi\nexport TORTOISE_EMBED_GATE=1\n")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+    # …and a plain group is unconditional, not a branch.
+    assert _shipped("{ export TORTOISE_EMBED_GATE=1; }\n")[
+        "per_surface"]["entrypoint"]["state"] == "ON"
+    # ⛔ CONTROL: the SUBJECT form is stripped only under the `case` keyword, and only
+    # where a PATTERN follows it. A loop's word list (`for x in a b`) carries no `<word>)`,
+    # so it must not be eaten by the case strip, and a line with no `case` at all must not
+    # have an ARM invented out of it: `echo in y) export FLAG=1` is a bash SYNTAX ERROR
+    # (measured: `syntax error near unexpected token ')'`, exit 2, no flag), so reading it
+    # `ON` would be a false ARM in the certification direction — the defect the generic
+    # subject strip introduced (fresh review of #12902, P3).
+    assert probe._shell_strip_leading_keywords("x in a b") == "x in a b"
+    assert probe._shell_strip_leading_keywords(
+        "echo in y) export TORTOISE_EMBED_GATE=1") == \
+        "echo in y) export TORTOISE_EMBED_GATE=1"
+    assert _shipped("echo in y) export TORTOISE_EMBED_GATE=1\n")[
+        "per_surface"]["entrypoint"]["state"] == "OFF"
+    # ⛔ A CLOSER INSIDE A `case` BODY IS A WORD, NOT THE END OF A LOOP. Counting every
+    # `done` as a depth decrement closed the construct, so an arm that may never run was
+    # scored DEFINITE — `ON` with `indeterminate: []` where bash has `0` (a false ARM in the
+    # certification direction), and the mirror shape dropped the arm (fresh review of
+    # #12902, P1). A closer now pops only the construct that opened it; a mismatched one is
+    # inert.
+    for first in ("0", "1"):
+        word_done = (f"export TORTOISE_EMBED_GATE={first}\ncase x in\n  x) echo done ;;\n"
+                     f"  a) export TORTOISE_EMBED_GATE={1 - int(first)} ;;\nesac\n")
+        held = _shipped(word_done)
+        assert held["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
+            first, held["per_surface"]["entrypoint"])
+        assert held["indeterminate"], held["indeterminate"]
+    # …and the stack still closes a REAL loop, so a line AFTER the `done` is unconditional
+    # again (pinned at the helper: `export` is an ATTRIBUTE decision, so a conditional one
+    # legitimately holds the whole file and the walk state cannot show the closure).
+    looped = ("for i in 1 2; do\nexport TORTOISE_EMBED_GATE=1\ndone\n"
+              "export TORTOISE_EMBED_GATE=0\n")
+    assert 3 in probe._shell_control_flow_lines(looped)
+    assert 4 not in probe._shell_control_flow_lines(looped)
+    # …and on the ARM path the strip still happens, which is what the one-line `case` row
+    # above depends on (pinned here at the helper so the two cannot drift).
+    assert probe._shell_commands(
+        "case x in x) export TORTOISE_EMBED_GATE=1 ;; esac")[0][0] == \
+        "export TORTOISE_EMBED_GATE=1"
+    assert probe._shell_commands(
+        "case $ENV in prod|staging) export TORTOISE_EMBED_GATE=1 ;; esac")[0][0] == \
+        "export TORTOISE_EMBED_GATE=1"
+    assert probe._shell_commands(
+        "case $ENV in prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;; esac")[0][0] == \
+        "export TORTOISE_EMBED_GATE=1"
+    # ⛔ THE FALSE-ARM DIRECTION of a SPLIT head: `export FLAG=1` stands, then a `case` arm
+    # whose `|` used to drop the whole line — bash runs `FLAG=0`, so reading the earlier `1`
+    # was a false ARM (measured `ON`, `indeterminate: []`; the same script WITHOUT a `|` read
+    # `UNMEASURED`, which is what showed the bar was the cause).
+    split_disarm = ("export TORTOISE_EMBED_GATE=1\ncase $ENV\n"
+                    "in prod|staging|dev) export TORTOISE_EMBED_GATE=0 ;;\nesac\n")
+    shipped = _shipped(split_disarm)
+    assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
+        shipped["per_surface"]["entrypoint"])
+    assert shipped["indeterminate"], shipped["indeterminate"]
+    # ⛔ THE MIRROR OF THE `echo in y)` CONTROL, one spelling over: a bare ARM outside a
+    # `case` is not a pattern, and `foo|bar) export FLAG=1` is a line bash REFUSES
+    # (`syntax error near unexpected token ')'`, exit 2, nothing exported). While the arm
+    # strip was unconditional, the `|`-tolerance kept the bar (a single word is a valid
+    # pattern POSITION) and the pseudo-arm was stripped, so the file read `ON` — a FALSE
+    # ARM in the certification direction, published over a line that cannot ship at all
+    # (fresh review of `#12902`, P3). bash leaves the flag UNSET here, so `OFF` is the
+    # measured reading; what must never return is `ON`.
+    assert _shipped("foo|bar) export TORTOISE_EMBED_GATE=1\n")[
+        "per_surface"]["entrypoint"]["state"] == "OFF"
+    # ⛔ …and the same FALSE-ARM direction through the CONSTRUCT GATE, where the two depth
+    # counters can DESYNC: an unmatched `done`/`fi` inside a `case` leaves the line
+    # "covered" by `_shell_case_open_lines` while `_shell_control_flow_lines` no longer
+    # calls it a control line, and the arm was then stripped and scored UNCONDITIONALLY —
+    # definite `ON` over a script bash REFUSES (`bash -n` exit 2, nothing runs, so the flag
+    # is UNSET). `in_case` now requires BOTH, so a desync can over-hold but never over-arm
+    # (fresh review of `#12902`, P3).
+    assert _shipped("case $ENV in\n  prod) ;;\ndone\n"
+                    "  prod) export TORTOISE_EMBED_GATE=1 ;;\nesac\n")[
+        "per_surface"]["entrypoint"]["state"] != "ON"
+    # …pinned at the helper too, so the strip and the construct test cannot drift: the same
+    # text IS stripped once a `case` covers it, and is NOT stripped when none does.
+    assert probe._shell_strip_leading_keywords(
+        "prod|staging) export TORTOISE_EMBED_GATE=1") == \
+        "prod|staging) export TORTOISE_EMBED_GATE=1"
+    assert probe._shell_strip_leading_keywords(
+        "prod|staging) export TORTOISE_EMBED_GATE=1", in_case=True) == \
+        "export TORTOISE_EMBED_GATE=1"
+    # …and the construct test itself, both directions (a one-line `case` covers its own
+    # line; an `esac` closes the cover again).
+    assert probe._shell_case_open_lines(
+        "case x in x) export F=1 ;; esac\n") == {1}
+    assert probe._shell_case_open_lines(
+        "case $E in\n  prod|staging) export F=1 ;;\nesac\nexport F=0\n") == {1, 2, 3}
+    assert probe._shell_case_open_lines("foo|bar) export F=1\n") == set()
+    # ── CONTROL: a pipe between two REAL commands still drops the line (subshell) ──
+    assert probe._shell_commands("export TORTOISE_EMBED_GATE=1 |cat") == []
+    assert _shipped("for x in a b; do\nexport TORTOISE_EMBED_GATE=1\ndone\n")[
+        "per_surface"]["entrypoint"]["state"] == "UNMEASURED"
+
+
+def test_an_ARITHMETIC_left_shift_opens_NO_heredoc_body(tmp_path, monkeypatch):
+    """`x=$((1<<2))` is a LEFT SHIFT, not a heredoc operator.
+
+    ⛔ Measured during the rebase of #12902's rounds: the operator scan matched the `<<`
+    inside the arithmetic expression, read `2` as a delimiter word, queued a body and
+    swallowed every following line as data — so `x=$((1<<2))` followed by
+    `export FLAG=1` published `OFF` while bash exports `1` (the same false-HOLD shape the
+    commented-out opener produced, one construct over).
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    assert _state("x=$((1<<2))\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
+    assert _state("(( x = 1 << 2 ))\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
+    assert _state("x=$(( (1+2) << 2 ))\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
+    # …and the helper sees no body either, so the two readings cannot drift.
+    assert probe._shell_heredoc_bodies("x=$((1<<2))\nexport F=1\n") == set()
+    # ── CONTROL: a REAL opener still opens its body, with or without the space.
+    assert probe._shell_heredoc_bodies("cat<<EOF\nbody\nEOF\n") == {2}
+    assert _state("cat<<EOF\nexport TORTOISE_EMBED_GATE=1\nEOF\n") == "OFF"
+
+
+def test_a_heredoc_whose_DELIMITER_is_unknown_HOLDS_the_file(tmp_path, monkeypatch):
+    """`cat <<$D` opens a body whose EXTENT this reader cannot know — so HOLD, never score.
+
+    ⛔ Fresh review of #12902, P2, and the fail-OPEN direction: the operator is visible and
+    the delimiter is not, so `_shell_heredoc_operator_delimiter` returned None, no body was
+    queued, and every line below was scanned as a COMMAND. Measured:
+
+        D=EOF / export FLAG=0 / cat <<$D >/dev/null / export FLAG=1 / $D
+          bash: 0    pre-fix reader: ON   (a FALSE ARM)
+
+    `cat <<~ >/dev/null` is the same shape (`~` IS a delimiter word bash accepts). Both
+    must read `UNMEASURED` — the extent is unknown, not absent.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _walk(script: str) -> dict:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+
+    shipped = _walk("D=EOF\nexport TORTOISE_EMBED_GATE=0\n"
+                    "cat <<$D >/dev/null\nexport TORTOISE_EMBED_GATE=1\n$D\n")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", shipped
+    assert shipped["indeterminate"], shipped["indeterminate"]
+    # …and the helper names the line, so the two readings cannot drift apart.
+    assert probe._shell_unresolved_heredoc_lines("cat <<$D\nx\n") == {1}
+    # ⛔ `<<~` is NOT in this class: `~` IS a delimiter word bash compares literally
+    # (`cat <<~ >/dev/null`, body, `~`), so it is a body of KNOWN extent and the file
+    # measures `OFF` — the same answer bash gives (`FLAG` absent). The review listed it
+    # beside `<<$D`; the two differ, and this control is what keeps them apart.
+    assert probe._shell_unresolved_heredoc_lines("cat <<~ >/dev/null\nx\n~\n") == set()
+    assert probe._shell_heredoc_bodies("cat <<~ >/dev/null\nx\n~\n") == {2}
+    assert _walk("cat <<~ >/dev/null\nexport TORTOISE_EMBED_GATE=1\n~\n")[
+        "per_surface"]["entrypoint"]["state"] == "OFF"
+    # ── CONTROL: a KNOWABLE delimiter is a body, not an unknown extent ──
+    assert probe._shell_unresolved_heredoc_lines("cat <<EOF\nx\nEOF\n") == set()
+    assert probe._shell_unresolved_heredoc_lines("cat <<'EOF'\nx\nEOF\n") == set()
+    assert probe._shell_unresolved_heredoc_lines("cat <<.EOF\nx\n.EOF\n") == set()
+    assert probe._shell_unresolved_heredoc_lines("x=$((1<<2))\n") == set()
+    # ⛔ A LINE THAT IS ALREADY A HEREDOC BODY IS DATA: an operator SPELLED inside one is
+    # not an operator. Scanning it held a file bash arms (fresh review of #12902, P3) —
+    # the same line was both a body (line 2) and an unresolved delimiter, and the file
+    # read `UNMEASURED` where bash exports the flag.
+    nested = "cat <<EOF\ncat <<$D\nEOF\nexport TORTOISE_EMBED_GATE=1\n"
+    assert probe._shell_heredoc_bodies(nested) == {2}
+    assert probe._shell_unresolved_heredoc_lines(nested) == set()
+    assert _walk(nested)["per_surface"]["entrypoint"]["state"] == "ON"
+    # …and a genuinely unresolved operator on a COMMAND line is still named, even when
+    # another heredoc's body sits above it — the skip is per LINE, not per file.
+    mixed = ("cat <<EOF\ncat <<$D\nEOF\n"
+             "cat <<$D >/dev/null\nexport TORTOISE_EMBED_GATE=1\n")
+    assert probe._shell_unresolved_heredoc_lines(mixed) == {4}
+    assert _walk(mixed)["per_surface"]["entrypoint"]["state"] == "UNMEASURED"
+
+    # ⛔ A HEREDOC OPENED INSIDE A QUOTED `$( … )` IS STILL A HEREDOC. `_shell_mask_quoted`
+    # read the `"` before `"$@"` as CLOSING the outer quote and the `"` after it as
+    # OPENING one, so everything from the operator to the end of the line was masked and
+    # `_shell_heredoc_bodies` answered NOTHING — the body was scored as commands. Both
+    # directions were measured wrong (fresh review of #12902, P1):
+    #
+    #     export FLAG=1 / x="$(cat - <<'EOF' 2>&1 / FLAG=0 / EOF / )"
+    #       bash: FLAG=1     reader: OFF    ← the arm was SWALLOWED into the "body"
+    #     body `export FLAG=1`            reader: ON     ← and the body was scored as commands
+    #
+    # Not a synthetic shape: THIS REPO'S OWN `entrypoint.sh:1111` opens its Python heredoc
+    # as `_gate_out="$(python - "$@" <<'PY' 2>&1`, and the masker answered ZERO bodies over
+    # 1138 lines — the Python body was scanned as shell, where its `if` opened a construct
+    # nothing closes. After the fix the real file reports 12 bodies.
+    quoted_heredoc = ("export TORTOISE_EMBED_GATE=1\n"
+                      "x=\"$(cat - <<'EOF' 2>&1\nTORTOISE_EMBED_GATE=0\nEOF\n)\"\n")
+    assert probe._shell_heredoc_bodies(quoted_heredoc) == {3}
+    assert _walk(quoted_heredoc)["per_surface"]["entrypoint"]["state"] == "ON"
+    quoted_disarm = "x=\"$(cat - <<'EOF' 2>&1\nexport TORTOISE_EMBED_GATE=1\nEOF\n)\"\n"
+    assert _walk(quoted_disarm)["per_surface"]["entrypoint"]["state"] == "OFF"
+    # …and the masker itself: the operator inside the substitution must survive, while a
+    # `<<` in a plainly quoted word still must not.
+    assert "<<" in probe._shell_mask_quoted('_gate_out="$(python - "$@" <<\'PY\' 2>&1')
+    assert "<<" not in probe._shell_mask_quoted('echo "a << b"')
+    # ⛔ …and `$((` is ARITHMETIC, not a command substitution: reclassifying it hid the
+    # `$(` from `_shell_mask_arithmetic` (where the `<<` IS a modelled left shift), left
+    # the `<<` standing as a heredoc OPERATOR, and read every following line as a BODY —
+    # so the export after it scored UNCONDITIONAL (`ON` where bash has `0`) and an `if`
+    # guard on the next line was skipped as a body line. Measured both directions (fresh
+    # review of `#12902`, P1).
+    arithmetic = ('export TORTOISE_EMBED_GATE=1\nx="$((1<<2))"\n'
+                  'export TORTOISE_EMBED_GATE=0\n')
+    assert probe._shell_heredoc_bodies(arithmetic) == set()
+    #: measured here: `UNMEASURED` (the assignment line holds the file); what must never
+    #: return is `ON` — the false ARM this pin exists for.
+    assert _walk(arithmetic)["per_surface"]["entrypoint"]["state"] != "ON"
+    arithmetic_guard = ('export TORTOISE_EMBED_GATE=1\nx="$(( 1 << 2 ))"\n'
+                        'if true; then export TORTOISE_EMBED_GATE=0; fi\n')
+    assert probe._shell_heredoc_bodies(arithmetic_guard) == set()
+    assert _walk(arithmetic_guard)["per_surface"]["entrypoint"]["state"] != "ON"
+
+
+def test_a_REDIRECTION_does_not_end_the_parent_shell(tmp_path, monkeypatch):
+    """`>&`, `<&`, `&>`, `>|` are REDIRECTIONS, not the subshell operator.
+
+    ⛔ Fresh review of #12902, P2. `_shell_commands` returns early on a lone `&` / `|`
+    (the command runs in a SUBSHELL, so the parent environment never sees it), and it did
+    so for a redirection too — DROPPING the command and everything after it on the line:
+
+        export FLAG=0 >/dev/null 2>&1   (after `export FLAG=1`)  bash: 0  reader: ON
+        exec 3>&1; export FLAG=1                                 bash: 1  reader: OFF
+
+    Both were measured; the first is a FALSE ARM in the row's certification direction.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    assert _state("export TORTOISE_EMBED_GATE=1\n"
+                  "export TORTOISE_EMBED_GATE=0 >/dev/null 2>&1\n") == "OFF"
+    assert _state("exec 3>&1; export TORTOISE_EMBED_GATE=1\n") == "ON"
+    assert _state("export TORTOISE_EMBED_GATE=1 &>> /dev/null\n") == "ON"
+    # ── CONTROL: a REAL background/pipeline operator still ends the parent's view ──
+    assert probe._shell_commands("set -a &") == []
+    assert probe._shell_commands("export TORTOISE_EMBED_GATE=1 | cat") == []
+    assert _state("export TORTOISE_EMBED_GATE=1 | cat\n") == "OFF"
+
+
+def test_a_conditional_operand_that_never_touches_the_flag_is_SILENT(
+        tmp_path, monkeypatch):
+    """Held only when the flag is the operand's BUSINESS — not for any `unset`.
+
+    ⛔ Fresh review of #12902, P2. `_shell_command_affects_flag` treated EVERY `unset` as
+    flag-relevant (`_shell_unset_target` returns `"other"`, not `None`), so a benign
+    `true || unset SOME_OTHER` held the file `UNMEASURED` — contradicting the docstring
+    directly above it ("a conditional operand that never touches the flag is silence").
+    Measured: bash exports `FLAG=1`; the walk published `on=False`.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    assert _state("export TORTOISE_EMBED_GATE=1\ntrue || unset SOME_OTHER\n") == "ON"
+    assert _state("export TORTOISE_EMBED_GATE=1\ntrue || unset -f helper\n") == "ON"
+    # ── CONTROL: a COMPUTED target may be the flag, so it still holds the file ──
+    assert _state("export TORTOISE_EMBED_GATE=1\ntrue || unset \"$NAME\"\n") \
+        == "UNMEASURED"
+
+
+def test_a_workflow_RUN_body_gets_the_same_heredoc_reading(tmp_path, monkeypatch):
+    """A heredoc inside `run: |` is a BODY, not commands — the workflow channel included.
+
+    ⛔ Fresh review of #12902, P2: the heredoc analysis was gated on `posix.endswith(
+    ".sh")`, but this module deliberately scans a workflow's `run:` bodies as executed
+    shell (`EXECUTED_BLOCK_KEYS`). So a step whose heredoc merely MENTIONS the flag
+    published `ON` while the step exports nothing (measured through
+    `flag_in_shipped_configs` on a synthetic `.github/workflows/probe.yml`).
+    """
+    workflows = tmp_path / probe.WORKFLOW_SURFACE
+    workflows.mkdir(parents=True)
+    (workflows / "probe.yml").write_text(
+        "name: probe\non: push\njobs:\n  t:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: |\n"
+        "          cat <<'EOF' >/dev/null\n"
+        "          export TORTOISE_EMBED_GATE=1\n"
+        "          EOF\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    workflows_surface = shipped["per_surface"][".github/workflows"]
+    assert workflows_surface["state"] == "OFF", shipped["per_surface"]
+    assert not workflows_surface["hits"], workflows_surface
+
+
+def test_a_multi_command_line_carries_ONE_STATE_PER_COMMAND(tmp_path, monkeypatch):
+    """The export state is per COMMAND, not per line — the last command cannot decide
+    the first, and one source line cannot be counted as two declarations.
+
+    ⛔ Fresh review of #12902, P2. `_shell_export_states` recorded ONE dict per line
+    (its `values` list was per command, the rest were not) and the caller applied that
+    single line-final dict to every command on the line:
+
+    * `unset FLAG; export FLAG=1` published `OFF` while bash has `1` (false HOLD), and
+      the note reported the line as TWO no-value declarations, naming the arming
+      `export …=1` as the thing that "fixes NO VALUE";
+    * `export FLAG=1; export -n FLAG` (three `_shell_commands` elements, the last
+      empty) reported the same line THREE times.
+
+    Ground truth: `env -i bash -c 'unset TORTOISE_EMBED_GATE; export
+    TORTOISE_EMBED_GATE=1; env'` has `TORTOISE_EMBED_GATE=1`.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _walk(script: str) -> dict:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+
+    shipped = _walk("unset TORTOISE_EMBED_GATE; export TORTOISE_EMBED_GATE=1\n")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+    assert len(shipped["unset_declarations"]) == 1, shipped["unset_declarations"]
+
+    shipped = _walk("export TORTOISE_EMBED_GATE=1; export -n TORTOISE_EMBED_GATE\n")
+    assert len(shipped["unset_declarations"]) == 1, shipped["unset_declarations"]
+
+    # ── CONTROL, the shape the per-line pin already held: separate lines are unchanged.
+    shipped = _walk("TORTOISE_EMBED_GATE=1\nexport -n TORTOISE_EMBED_GATE\n"
+                    "export TORTOISE_EMBED_GATE\n")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
 
 
 def test_an_unexported_shell_assignment_is_not_a_shipped_environment_entry(
@@ -3457,20 +4090,22 @@ def test_a_superseded_unset_does_not_claim_this_tree_DISARMS_the_flag(
     # The fixture's whole point: the value-less entry is REPORTED, and the file it sits
     # in ends `ON` because a LATER truthy assignment decides it. A silent sibling holds
     # the tree at `on: False`, which is what reached the false cause in the first place.
-    assert shipped["unset_declarations"], shipped
     assert files["docker-compose.yml"] == "ON", files
     assert files["Dockerfile.hosted"] == "OFF", files
     assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    # ⛔ `#12549`: compose COLLAPSES a superseded duplicate before the model exists, so
+    # the resolved reading is `FLAG = "1"` and the earlier no-value entry is not in it.
+    # That is the resolver's own semantics and it is DECLARED (`_compose_channel`), not
+    # a direction silently dropped: the entry has no effect on the value a deployment
+    # gets, so there is nothing for this reading to report about it.
+    assert shipped["unset_declarations"] == [], shipped["unset_declarations"]
 
     caveat = probe.per_file_scope_note(shipped["deployment"])
     assert "DISARMS it" not in caveat, (
         "the caveat claimed this tree is disarmed BY a declaration whose own file it "
         "reads `ON`: " + caveat)
-    # …and the direction is still REPORTED, not dropped to make the sentence true.
-    assert "UNSET it" in caveat, caveat
     note = _gate_note(shipped)
     assert "DISARMS it" not in note, note
-    assert "declarations that UNSET it: ['docker-compose.yml:" in note, note
 
     # The POSITIVE control, in the same fixture shape: move the truthy assignment FIRST
     # and the value-less entry becomes the last word — the file ends `OFF`, and now the
@@ -3491,14 +4126,19 @@ def test_a_superseded_unset_does_not_claim_this_tree_DISARMS_the_flag(
 
 def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
         tmp_path, monkeypatch):
-    """A compose entry with NO value DISARMS the container — the direction that costs.
+    """A compose entry with NO value fixes NO value — a PASS-THROUGH, not a removal.
 
-    ⛔ Measured (fresh review of PR #12474, P2): `environment: - FLAG` / `FLAG:` /
-    `FLAG: null` REMOVES the variable from the container, so the caveat's
-    "inheritance can only ADD an arm" was false on a reachable shape — and the line
-    landed in NO bucket, so nothing a reader could consult said so. It is now reported,
-    the caveat names the bound, and the file still reads silent on that line (which is
-    right: it declares no value to arm with).
+    ⛔ Measured (`#12549`): `environment: - FLAG` / `FLAG:` / `FLAG: null` resolves to a
+    PASS-THROUGH from the environment `docker compose` runs in (with `FLAG=1` in the
+    shell the container gets `"1"`), so the file fixes NO value — which is why the line
+    is reported in a disarming bucket and the file still reads silent on it (it declares
+    no value to arm with, and the walk must not score an ambient value it cannot see).
+
+    ⚠️ The earlier docstring here — and the `#12474` caveat — said such an entry
+    *REMOVES* the variable from the container. That is the cause `#12549` measured to be
+    FALSE, reported by a line reader that never resolved the file: exactly the class of
+    claim this instrument exists to stop publishing. The test's NAME is kept for
+    continuity; the direction it asserts is the measured one.
     """
     (tmp_path / "docker-compose.yml").write_text(
         "services:\n  tortoise:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
@@ -3515,12 +4155,13 @@ def test_a_value_less_compose_environment_entry_is_reported_as_UNSET(
     # something: the empty reading cannot produce the DISARMS sentence (fresh review of
     # PR #12474, P3 — the first version's two arms passed for every input).
     assert "DISARMS it" in caveat, caveat
-    assert "UNSET it" in caveat, caveat
+    assert "fix NO VALUE for it" in caveat, caveat
     empty = probe.per_file_scope_note(
         {**shipped["deployment"], "unset_declarations": [], "disarming_assignments": []})
     assert "DISARMS it" not in empty, empty
     note = _gate_note(shipped)
-    assert "declarations that UNSET it: ['docker-compose.yml:" in note, note
+    assert ("declarations that fix NO VALUE for it (shell `unset` / compose no-value): "
+            "['docker-compose.yml:") in note, note
     # ⛔ …and the EXPLICIT-FALSE override is the other disarming direction: compose
     # `environment:` OVERRIDES the image's `ENV`, so a `"0"` here disarms a deployment
     # whose image arms it — and calling the file merely "silent" steered a reader to
@@ -3627,9 +4268,24 @@ def test_the_LAST_assignment_in_a_file_decides_its_arming(tmp_path, monkeypatch)
         "    - TORTOISE_EMBED_GATE=\t# empty\n", encoding="utf-8")
     assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
         "disarming_assignments"]
-    # …and a TAB comment on the LEGACY space form keeps the hit.
+    # ⛔ A TAB comment on the LEGACY space form is PART OF THE VALUE, so it is NOT an arm.
+    # Measured with Docker 29.1.3 on this exact line:
+    #   $ docker build -t zz . && docker run --rm zz env | cat -A
+    #   TORTOISE_EMBED_GATE=1^I# on
+    # Docker's legacy `ENV KEY value` sets KEY to the REST OF THE LINE — `#` starts a
+    # comment only at the START of a line — so the image's value is `1\t# on`, which this
+    # module's own truthiness contract (`tortoise/env_truthy.py`) scores FALSE. This pin
+    # asserted `ON`, i.e. it encoded a FALSE PASS: a shipper writing a trailing comment on
+    # the legacy form was published as armed over an image whose gate is off (fresh review
+    # of `#12902`, P1). The `key=value` spelling cannot hit this (Docker rejects it), so the
+    # exposure is exactly this form.
     (tmp_path / "Dockerfile.hosted").write_text(
         "FROM python:3.12\nENV TORTOISE_EMBED_GATE 1\t# on\n", encoding="utf-8")
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "per_surface"]["Dockerfile"]["state"] == "OFF"
+    # …and a BARE legacy value with no comment still arms it.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE 1\n", encoding="utf-8")
     assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
         "per_surface"]["Dockerfile"]["state"] == "ON"
 
@@ -3801,13 +4457,19 @@ _UNSET_SHAPES = [
     ("export TORTOISE_EMBED_GATE=1\nunset -f TORTOISE_EMBED_GATE\n", "ON", "-f is a function"),
     ("export TORTOISE_EMBED_GATE=1\nunset -n TORTOISE_EMBED_GATE\n", "ON", "-n is a nameref"),
     # …CONTROLS: another name, a longer name the flag PREFIXES, and a non-builtin word.
-    # ⛔ An OPERATOR glued to the last name (`unset FLAG;`, `unset FLAG|cmd`) was split on
-    # whitespace only, so `FLAG;` matched nothing and the earlier arm stood — fail-OPEN,
-    # and inconsistent with the SPACED ` ;` which read correctly (fresh review PR #12474, P3).
+    # ⛔ An OPERATOR glued to the last name (`unset FLAG;`) was split on whitespace only,
+    # so `FLAG;` matched nothing and the earlier arm stood — fail-OPEN, and inconsistent
+    # with the SPACED ` ;` which read correctly (fresh review PR #12474, P3).
+    # ⛔ `|` is NOT in that class and expecting it to disarm was itself a FALSE ARM: a
+    # pipeline runs EVERY stage in a SUBSHELL, so the `unset` never reaches the parent
+    # environment — measured, `bash -c 'export FLAG=1; unset FLAG|cat; env'` still HAS
+    # FLAG. `_shell_commands` now ends the parent's view at a lone `|` / `&` (fresh
+    # review of #12902, P1).
     ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE;\n", "OFF", "glued ;"),
     ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE; exec python -m x\n", "OFF",
      "glued ; then a command"),
-    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE|cat\n", "OFF", "glued |"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE|cat\n", "ON",
+     "glued | (pipeline subshell)"),
     ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE 2>/dev/null\n", "OFF",
      "redirect"),
     ("export TORTOISE_EMBED_GATE=1\nunset OTHER_VAR\n", "ON", "a different name"),
@@ -3851,6 +4513,336 @@ def test_every_unset_SHAPE_is_classified_and_the_controls_do_not_disarm(
         + "\n  " + "\n  ".join(wrong))
 
 
+#: ⛔ The CONDITIONAL shapes the ENTRYPOINT channel's declared bound names in
+#: `cannot_see` (`DECLARED_CHANNEL_BOUNDS`). A conditional operand runs only if a test
+#: this reader cannot evaluate passes, so the file must be HELD — never answered either
+#: way. The CONTROLS are half the table: `;` IS a true separator, and a conditional that
+#: never touches the flag is silence, not an unmeasured reading.
+_CONDITIONAL_SHAPES = [
+    # (script body, expected entrypoint state, the `bash -c '…; env'` truth, why)
+    ('[ -n "" ] && export TORTOISE_EMBED_GATE=1\n', "UNMEASURED",
+     "bash: FLAG absent — the test fails, so the export never runs",
+     "&& whose test failed"),
+    ('export TORTOISE_EMBED_GATE=0\n[ -n "" ] && export TORTOISE_EMBED_GATE=1\n',
+     "UNMEASURED", "bash: FLAG=0 — the earlier disarm IS the last word",
+     "&& over an existing disarm"),
+    ('command -v definitely-not-a-command && export TORTOISE_EMBED_GATE=1\n',
+     "UNMEASURED", "bash: FLAG absent — command -v failed",
+     "&& on a command that does not exist"),
+    ('true || export TORTOISE_EMBED_GATE=1\n', "UNMEASURED",
+     "bash: FLAG absent — || never runs its right side on success",
+     "|| whose left side succeeded"),
+    ('export TORTOISE_EMBED_GATE=1\ncond || unset TORTOISE_EMBED_GATE\n', "UNMEASURED",
+     "bash: FLAG=1 — the unset is unreachable when `cond` succeeds",
+     "conditional DISARM"),
+    ('export TORTOISE_EMBED_GATE=1\nfalse && unset TORTOISE_EMBED_GATE\n', "UNMEASURED",
+     "bash: FLAG=1 — the unset never runs", "&& disarm that did not run"),
+    # ⛔ A conditional `set -a` decides whether a LATER BARE assignment exports, so it is
+    # flag-relevant even though it never names the flag — and it is not observable.
+    ('cond && set -a\nTORTOISE_EMBED_GATE=1\n', "UNMEASURED",
+     "bash: FLAG present only when `cond` succeeds — allexport decides it",
+     "conditional set -a"),
+    # ⛔ An ATTRIBUTE-level conditional is NOT overridden by a later hit, and these two are
+    # the P1 of the fifth review: the file ended `ON` — a false ARM in the certification
+    # direction — because the indeterminate was recorded and then discarded by the
+    # "only downgrade a file that is not ON" rule, while the conditional `set +a` /
+    # `export -n` was the very thing deciding whether the last line exports at all.
+    ('set -a\ntrue && set +a\nTORTOISE_EMBED_GATE=1\n', "UNMEASURED",
+     "bash: FLAG absent — the conditional `set +a` ran and ended allexport",
+     "conditional set +a before a bare assignment"),
+    ('export TORTOISE_EMBED_GATE=1\ntrue && export -n TORTOISE_EMBED_GATE\n'
+     'TORTOISE_EMBED_GATE=1\n', "UNMEASURED",
+     "bash: FLAG absent — `export -n` removed the attribute, so the last line is a shell "
+     "variable the process never sees",
+     "conditional export -n before a bare assignment"),
+    # …CONTROL: a deferred VALUE decision IS overridden by a later definite arm, which is
+    # why the two are tracked apart — `cond && export F=1; export F=1` runs `F=1`
+    # whatever `cond` did, so the file is genuinely ON.
+    ('cond && export TORTOISE_EMBED_GATE=1\nexport TORTOISE_EMBED_GATE=1\n', "ON",
+     "bash: FLAG=1 — the last line arms it unconditionally",
+     "a deferred VALUE decision loses to a later definite arm"),
+    # …CONTROLS — `;` is a real separator and must keep being READ, in both directions.
+    # ⛔ `a && b; export FLAG=1` runs the export whatever a/b did: `;` ENDS the and-or
+    # list. Carrying the conditional flag across the `;` read a real arm UNMEASURED — the
+    # mirror of the false ARM, found by this lane's own adversarial pass.
+    ('false && true; export TORTOISE_EMBED_GATE=1\n', "ON",
+     "bash: FLAG=1 — `;` ends the and-or list", "; RESETS the conditional list"),
+    ('export TORTOISE_EMBED_GATE=1; true\n', "ON", "bash: FLAG=1",
+     "; is a true separator (arm)"),
+    ('export TORTOISE_EMBED_GATE=1; unset TORTOISE_EMBED_GATE\n', "OFF",
+     "bash: FLAG absent", "; is a true separator (disarm)"),
+    ('export TORTOISE_EMBED_GATE=1\n[ -n "" ] && echo nope\n', "ON",
+     "bash: FLAG=1 — a conditional that never touches the flag is silence",
+     "unrelated conditional"),
+    # ⛔ An `unset` of ANOTHER name is not the flag's business, and `_shell_unset_target`
+    # answers `"other"` for it — a predicate testing `is not None` read that as "flag
+    # relevant" and held the file for ever, a permanent row-1 hold over an entrypoint
+    # nothing was ambiguous about. The control above could not catch it (it uses `echo`,
+    # which never reaches the unset clause) — fresh review of `#12902`, P2.
+    ('export TORTOISE_EMBED_GATE=1\n[ -n "x" ] && unset OTHER_VAR\n', "ON",
+     "bash: FLAG=1 — an unset of another name cannot touch it",
+     "unrelated conditional unset"),
+    ('export TORTOISE_EMBED_GATE=1\n[ -n "x" ] && unset -f helper_fn\n', "ON",
+     "bash: FLAG=1 — `unset -f` names a FUNCTION namespace",
+     "conditional unset of a function"),
+]
+
+
+#: ⛔ A HEREDOC BODY is an ARGUMENT, not a script — everything between the operator and
+#: its terminator is text handed to the command, so nothing in it runs. Both directions
+#: were scored before this, and the DISARM direction was a regression against `main`.
+_HEREDOC_SHAPES = [
+    # (script body, expected entrypoint state, the `bash -c '…; env'` truth, why)
+    ("export TORTOISE_EMBED_GATE=1\ncat <<'EOF' >/dev/null\n"
+     "TORTOISE_EMBED_GATE=0\nEOF\n", "ON",
+     "bash: FLAG=1 — the body is an argument to cat, not an assignment",
+     "a body DISARM after a real arm (regression against main)"),
+    ("cat <<'EOF' >/dev/null\nexport TORTOISE_EMBED_GATE=1\nEOF\n", "OFF",
+     "bash: FLAG absent — nothing in the body runs",
+     "a body ARM on an otherwise silent script"),
+    ("cat <<-EOF >/dev/null\n\texport TORTOISE_EMBED_GATE=1\n\tEOF\n", "OFF",
+     "bash: FLAG absent — <<- strips leading TABS from the terminator",
+     "the <<- tab-indented spelling"),
+    ("cat <<\\EOF >/dev/null\nexport TORTOISE_EMBED_GATE=1\nEOF\n", "OFF",
+     "bash: FLAG absent — a backslash-quoted delimiter is still a delimiter",
+     "the <<\\WORD spelling"),
+    ('cat <<"EOF" >/dev/null\nexport TORTOISE_EMBED_GATE=1\nEOF\n', "OFF",
+     "bash: FLAG absent — a double-quoted delimiter is still a delimiter",
+     'the <<"WORD" spelling'),
+    ("cat <<A <<'B' >/dev/null\nbody1\nA\nbody2\nexport TORTOISE_EMBED_GATE=1\nB\n", "OFF",
+     "bash: FLAG absent — TWO heredocs on one line, bodies read in order",
+     "two heredocs on one command"),
+    # …CONTROLS — neither of these opens a body, so the arm must STILL be read.
+    ('_u="x"\nwhile read -r l; do :; done <<< "$_u"\nexport TORTOISE_EMBED_GATE=1\n',
+     "ON", "bash: FLAG=1 — `<<<` is a HERESTRING, not a heredoc",
+     "a herestring opens no body"),
+    ('echo "a << b"\nexport TORTOISE_EMBED_GATE=1\n', "ON",
+     "bash: FLAG=1 — a `<<` inside a quoted word is not an operator",
+     "a quoted << is not an operator"),
+    # ⛔ The DELIMITER may begin with a NON-WORD character: `cat <<.EOF` is legal, and a
+    # `[A-Za-z0-9_]` start read it as "no delimiter", so the body was scanned as commands
+    # and its `export FLAG=1` published a FALSE ARM (fresh review of #12902, P2).
+    ("cat <<.EOF >/dev/null\nexport TORTOISE_EMBED_GATE=1\n.EOF\n", "OFF",
+     "bash: FLAG absent — `.EOF` is the terminator",
+     "a delimiter beginning with a non-word character"),
+    # ⛔ `cat << ; …` is a SYNTAX ERROR — bash parses nothing after it, so nothing in the
+    # rest of the file runs. `main` read this `OFF`; the arm that followed the operator
+    # was being published as `ON`.
+    ("cat << ; export TORTOISE_EMBED_GATE=1\n", "OFF",
+     "bash: refuses to parse the script (syntax error near `;`) — nothing runs",
+     "an operator with NO delimiter"),
+    # ⛔ A terminator carrying TRAILING WHITESPACE does not terminate, so what follows is
+    # still body. This row is the pin on the `candidate == delimiter` EXACTNESS: under a
+    # `.rstrip()` mutant the whole suite was green and this shape read `ON` — a false ARM
+    # (fresh review of #12902, P2).
+    ("cat <<'EOF' >/dev/null\nbody\nEOF   \nexport TORTOISE_EMBED_GATE=1\n", "OFF",
+     "bash: `EOF   ` is NOT the delimiter `EOF`, so the arm stays inside the body",
+     "a terminator with trailing whitespace"),
+]
+
+
+def _entrypoint_state(tmp_path, monkeypatch, body: str) -> str:
+    """The `entrypoint.sh` verdict for one script body, through the real walk."""
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + body, encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    return shipped["per_surface"]["entrypoint"]["files"]["entrypoint.sh"]["state"]
+
+
+def test_a_CONDITIONAL_operand_is_never_scored_as_if_it_ran(tmp_path, monkeypatch):
+    """`cond && export FLAG=1` runs only if `cond` passes — so the file must be HELD.
+
+    ⛔ Measured RED before this test existed (fresh review of PR #12902, P1):
+    `_shell_commands` split a `&&` / `||` list and handed BOTH operands to the state
+    machine as commands that ran, so every flag command under a condition was scored as
+    if it had run — a FALSE ARM in the row's certification direction, and a regression
+    against `main`, which read these shapes `OFF`:
+
+        script: '[ -n "" ] && export TORTOISE_EMBED_GATE=1'
+        bash -c '…; env'      -> FLAG absent      (main: OFF, head: ON)
+        script: 'true || export TORTOISE_EMBED_GATE=1'
+        bash -c '…; env'      -> FLAG absent      (main: OFF, head: ON)
+        script: 'export …=0' then '[ -n "$X" ] && export …=1'
+        bash -c '…; env'      -> FLAG=0           (main: OFF, head: ON)
+
+    It was also unpinned in the other direction: reverting any `&&` handling left the
+    suite GREEN, because the two `&` / `|` rows in `_UNSET_SHAPES` are the only
+    separators any test names.
+    """
+    wrong: list[str] = []
+    for body, expected, truth, why in _CONDITIONAL_SHAPES:
+        actual = _entrypoint_state(tmp_path, monkeypatch, body)
+        if actual != expected:
+            wrong.append(f"{why}: expected {expected}, read {actual} ({body!r}; {truth})")
+    assert not wrong, (
+        "a CONDITIONAL shell operand was scored as if it ran — publishing an answer for "
+        "a test this reader cannot evaluate (fail-OPEN in the ARM direction):"
+        + "\n  " + "\n  ".join(wrong))
+
+
+def test_a_HEREDOC_body_is_DATA_and_never_a_command(tmp_path, monkeypatch):
+    """Everything between `<<WORD` and its terminator is an ARGUMENT, so nothing runs.
+
+    ⛔ Measured RED before this test existed (fresh review of PR #12902, P2), in BOTH
+    directions — and the DISARM one is a regression against `main`, because this PR's
+    per-line model is what lets a plain assignment inside a body reach `_assigned_value`
+    with `exported=True`:
+
+        'export …=1' + body 'FLAG=0'   bash: FLAG=1   main: ON   head: OFF  (regression)
+        body 'export …=1', nothing else bash: absent   main: ON   head: ON   (both wrong)
+
+    Reachability on THIS tree is nil (`entrypoint.sh`'s one multiline heredoc carries no
+    `export`/`unset`/flag token), which is why this is a pin on the reader rather than a
+    row change — but the reader is the artifact row 1 is scored from.
+    """
+    wrong: list[str] = []
+    for body, expected, truth, why in _HEREDOC_SHAPES:
+        actual = _entrypoint_state(tmp_path, monkeypatch, body)
+        if actual != expected:
+            wrong.append(f"{why}: expected {expected}, read {actual} ({body!r}; {truth})")
+    assert not wrong, (
+        "a HEREDOC BODY was read as shell commands — its content is an argument, so a "
+        "disarm inside one published a false DISARM and an arm inside one a false ARM:"
+        + "\n  " + "\n  ".join(wrong))
+
+
+def test_the_ENTRYPOINT_bounds_declare_family_names_the_FALSE_ARM_direction(
+        tmp_path, monkeypatch):
+    """The `declare`/`typeset`/`readonly` clause names BOTH directions it publishes.
+
+    ⛔ Measured while reviewing the rebase of #12902's rounds: the bound said the reader
+    "has no decision" for a `declare` family assignment "so a later truthy `export`
+    stands" — the UNDER-report direction only. The over-report is the one that matters:
+    with `export FLAG=1` FIRST and `declare -x FLAG=0` after it, bash ends at `0` (the
+    `declare` ASSIGNS and `-x` only sets the attribute) while the reader published `ON`
+    — a FALSE ARM, which `_declared_bound_note` must never certify under the "cannot
+    see" verb (the `#12978` class). The BEHAVIOUR is #12952's; this pin holds the CLAIM.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    # The measured FALSE ARM this bound must declare: reader `ON`, bash `0`.
+    assert _state("export TORTOISE_EMBED_GATE=1\n"
+                  "declare -x TORTOISE_EMBED_GATE=0\n") == "ON"
+    for spelling in ("typeset -x", "declare", "readonly"):
+        assert _state("export TORTOISE_EMBED_GATE=1\n"
+                      f"{spelling} TORTOISE_EMBED_GATE=0\n") == "ON"
+
+    cannot_see = next(row for row in probe.DECLARED_CHANNEL_BOUNDS
+                      if row["channel"] == "entrypoint")["cannot_see"]
+    # …and the bound states it, with the tracker and the direction named.
+    assert "FALSE ARM" in cannot_see, cannot_see
+    assert "EARLIER" in cannot_see and "LATER" in cannot_see, cannot_see
+    assert "#12952" in cannot_see, cannot_see
+
+
+def test_the_ENTRYPOINT_declared_bound_does_not_certify_a_shape_the_reader_SCORES(
+        tmp_path, monkeypatch):
+    """A bound's `cannot_see` examples must MEASURE as HELD — else it certifies a false arm.
+
+    ⛔ Measured (fresh review of PR #12902, P2): the entrypoint bound named
+    `[ -n "$X" ] && export FLAG=1` under `cannot_see` while the reader scored that exact
+    spelling `ON`. `_declared_bound_note` prints `cannot see` as *"an under-report a
+    reader can trust"*, and the Dockerfile bound was given a separate `reads_wrong` field
+    precisely so a false ARM could not be published under that trust-me verb (`#12978`).
+
+    ⛔ AND THIS TEST WAS THE SAME DEFECT ONE LAYER UP (fresh review of `#12902`, P2): it
+    only asserted that the FIVE substrings appeared in the bound's text, so re-applying
+    the pre-fix behaviour — conditional operands scored as if they ran — left it GREEN
+    while the sentence it guards was false. Every shape the bound names is therefore
+    driven through `flag_in_shipped_configs` here and must read `UNMEASURED`.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    entrypoint = next(row for row in probe.DECLARED_CHANNEL_BOUNDS
+                      if row["channel"] == "entrypoint")
+    cannot_see = entrypoint["cannot_see"]
+    # The bound must still NAME the shapes it is about — a silently trimmed sentence is
+    # the same defect one layer up.
+    for shape in ("HEREDOC BODY", "CONDITIONAL operand", "shell INDIRECTION", "BRANCH"):
+        assert shape in cannot_see, (
+            f"the entrypoint bound no longer names {shape!r} — a bound that stops naming "
+            f"its shapes is an undeclared blind spot: {cannot_see!r}")
+    # …and it must state the TREATMENT, so a reader can tell `held` from `answered`.
+    assert "indeterminate" in cannot_see and "UNMEASURED" in cannot_see, (
+        "the entrypoint bound must say an unmeasurable shape is reported `indeterminate` "
+        f"and the file held UNMEASURED, not scored either way: {cannot_see!r}")
+
+    # ── EVERY NAMED SHAPE MUST ACTUALLY BE HELD (this is the falsifier half) ──
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    for name, script in (
+            # CONDITIONAL operand (the `&&` form the bound quotes verbatim)
+            ("conditional", '[ -n "$X" ] && export TORTOISE_EMBED_GATE=1\n'),
+            ("or-list", "false || export TORTOISE_EMBED_GATE=1\n"),
+            # BRANCH
+            ("if", "if [ -n \"$X\" ]; then\nexport TORTOISE_EMBED_GATE=1\nfi\n"),
+            ("case", "case x in\n x) export TORTOISE_EMBED_GATE=1 ;;\nesac\n"),
+            # HEREDOC BODY (its extent is known; the file is not armed by it)
+            ("heredoc-body",
+             "cat <<EOF\nexport TORTOISE_EMBED_GATE=1\nEOF\n"),
+            # shell INDIRECTION
+            ("indirection", 'export TORTOISE_EMBED_GATE="${OTHER}"\n'),
+    ):
+        state = _state(script)
+        expected = "OFF" if name == "heredoc-body" else "UNMEASURED"
+        assert state == expected, (name, script, state)
+    # ⛔ The heredoc BODY is the one named shape whose answer is OFF, not a hold: a body
+    # of KNOWN extent contributes no arm and measures fine — holding it would be the
+    # false HOLD this exact test's sibling guards. Its bound clause is about an
+    # ARM inside a body being invisible, which this asserts by its absence.
+
+
+def test_a_RETRACTED_hit_is_not_published_at_the_SURFACE_either(tmp_path, monkeypatch):
+    """A held FILE must not leave `entrypoint=ON` / `armed` / `set ON in` behind.
+
+    ⛔ Measured RED before this test existed (fresh review of PR #12902, P2): the
+    attribute override corrected `file_states` but the SURFACE reduction had already run,
+    so ONE reading published and retracted the same hit in the same sentence —
+
+        surface state : ON
+        surface hits  : ['entrypoint.sh: TORTOISE_EMBED_GATE=1']
+        file state    : {'entrypoint.sh': {'state': 'UNMEASURED', 'hits': []}}
+        armed         : ['entrypoint']
+        set ON in     : ['entrypoint.sh: TORTOISE_EMBED_GATE=1']
+
+    while `bash` on that script has no flag at all. `set ON in:` is the instrument's
+    strongest ARM claim, and it was asserting a cause the walk had just refused to
+    measure. `_entrypoint_state` reads only the FILE verdict, which is why the rows above
+    could not see it — the surface is the half a DoD reader quotes.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=0\n'
+        'ENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nset -a\ntrue && set +a\nTORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    surface = shipped["per_surface"]["entrypoint"]
+    assert surface["files"]["entrypoint.sh"]["state"] == "UNMEASURED", surface["files"]
+    assert surface["state"] == "UNMEASURED", (
+        f"the surface still reads {surface['state']} over a hit the file verdict retracted")
+    assert surface["hits"] == [], surface["hits"]
+    assert shipped["armed"] == [], shipped["armed"]
+    assert shipped["files"] == [], shipped["files"]
+    assert shipped["on"] is False, shipped["on"]
+
+
 def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, monkeypatch):
     """A compose value-less entry UNSETS the variable, so a later one must win.
 
@@ -3875,10 +4867,11 @@ def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, mon
                for entry in shipped["unset_declarations"]), shipped["unset_declarations"]
     assert not shipped["disarming_assignments"], shipped["disarming_assignments"]
 
-    # …and the reverse order leaves the arm standing — and the unset line is claimed ONCE.
-    # ⛔ It used to appear in BOTH lists here, the second time under a heading that calls an
-    # `unset` "a value that OVERRIDES it OFF" — false about it, and no longer even the
-    # direction the file ends in (fresh review of PR #12474, P2, measured).
+    # …and the reverse order leaves the arm standing. ⛔ `#12549`: compose COLLAPSES the
+    # superseded value-less entry before the model exists, so the resolved reading is
+    # `FLAG = "1"` and there is no no-value declaration left to report — the resolver's
+    # own semantics, declared on `_compose_channel` rather than papered over. The pin
+    # that survives is the one that matters: ONE line is never published as TWO claims.
     (tmp_path / "docker-compose.yml").write_text(
         "services:\n  tortoise:\n    environment:\n"
         "      - TORTOISE_EMBED_GATE\n"
@@ -3886,7 +4879,7 @@ def test_a_compose_VALUE_LESS_entry_is_LAST_WINS_not_just_reported(tmp_path, mon
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["per_surface"]["docker-compose.yml"]["state"] == "ON", (
         shipped["per_surface"]["docker-compose.yml"])
-    assert len(shipped["unset_declarations"]) == 1, shipped["unset_declarations"]
+    assert shipped["unset_declarations"] == [], shipped["unset_declarations"]
     assert not shipped["disarming_assignments"], shipped["disarming_assignments"]
 
 
@@ -4070,16 +5063,21 @@ def test_a_run_key_outside_the_workflow_surface_is_not_executed(
 
 def test_a_real_mapping_after_a_block_scalar_still_reads_as_shipped_ON(
         tmp_path, monkeypatch):
-    """The block predicate must END where the scalar does.
+    """A documented mention does not swallow the REAL mapping beside it.
 
-    Skipping a body is only correct if the walk resumes at the next real
-    mapping key; a scanner that never ends the block would drop genuine
-    assignments and report `off by default` for a flag that ships ON.
+    ⛔ `#12549` moved compose to its resolver, so the shape this test can still
+    falsify is the one that survives that: a block scalar is a VALUE, never a key,
+    so the resolver cannot read a documented mention as a setting — and the real
+    `environment:` mapping beside it still arms the service. (The line-scanner whose
+    block predicate this test used to pin is gone; the fixture's `note:` key was not
+    even valid compose — `services.app additional properties 'note' not allowed`,
+    measured — so the old fixture was asserting against a document no deployment
+    could be built from. `x-note` is an extension field compose accepts.)
     """
     (tmp_path / "docker-compose.yml").write_text(
         "services:\n"
         "  app:\n"
-        "    note: >-\n"
+        "    x-note: |-\n"
         "      TORTOISE_EMBED_GATE is documented here, not set.\n"
         "    environment:\n"
         "      TORTOISE_EMBED_GATE: \"true\"\n",
@@ -4088,8 +5086,12 @@ def test_a_real_mapping_after_a_block_scalar_still_reads_as_shipped_ON(
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["on"] is True, shipped
-    assert shipped["files"] == [
-        'docker-compose.yml: TORTOISE_EMBED_GATE: "true"'], shipped
+    # ⛔ The HIT is the resolver's own path now (`#12549`), not a line rendering: the
+    # line-shaped text moved whenever the fixture was reflowed, while
+    # `services.app.environment` is the thing that decides the value.
+    assert len(shipped["files"]) == 1, shipped
+    assert shipped["files"][0].startswith(
+        "docker-compose.yml: services.app.environment.TORTOISE_EMBED_GATE = 'true'"), shipped
 
 
 def test_searched_is_the_walk_not_the_list_of_mentions(tmp_path, monkeypatch):
@@ -10153,10 +11155,14 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `214 + 1` and `213 + 2` at THIS tree, both equal to the `215` the pin re-derives
+    count: `275 + 1` and `274 + 2` at THIS tree, both equal to the `276` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
-    which is why the doc states its split as
-    lane-bound: a carve-out run must not "correct" the docker lane's figure.
+    which is why the doc states its split as lane-bound: a carve-out run must not
+    "correct" the docker lane's figure.
+    ⛔ These two figures were stale for three review rounds while the PR re-cut §6 to this
+    tree, so the pin's own docstring stated a count a fifth time — at numbers nothing
+    measured (fresh review of `#12902`, P2). `own_splits` below re-derives THEM too, so
+    this docstring can no longer drift.
     """
     root = Path(probe.__file__).resolve().parent.parent
     doc = (root / "docs" / "epics" / "2026-11-04-5090-vector-layer"
@@ -10212,6 +11218,57 @@ def test_the_census_doc_collects_what_the_file_collects():
         f"§6 states {wrong} where the file collects {actual} (every statement must "
         f"agree: {statements}): the row describes a measurement it no longer matches "
         f"— re-cut EVERY figure, or delete them and let this pin stand alone")
+
+    # ⛔ THIS PIN'S OWN DOCSTRING states the same figure too, and it was the ONE place a
+    # stale count survived review: the arms above read the DOC, never this string, so the
+    # docstring sat at `256 + 1` / `255 + 2` / `257` while the tree collected 260 (fresh
+    # review of PR `#12902`, P2). A docstring is a claim like any other and gets the same
+    # gate. The SPLITS are lane-bound on purpose — the docker lane reads one more pass and
+    # one fewer skip than the carve-out lane — so they are held to the invariant the
+    # docstring itself states rather than to either figure: each pair must ADD to the
+    # count this tree collects.
+    own = test_the_census_doc_collects_what_the_file_collects.__doc__ or ""
+    own_splits = [(int(a), int(b)) for a, b in
+                  re.findall(r"`(\d+) \+ (\d+)`", own)]
+    assert len(own_splits) == 2, (
+        f"this pin's docstring states the two lane splits as `N + M` and this arm found "
+        f"{len(own_splits)}: {own_splits} — a pattern that matches nothing is a DEAD ARM")
+    bad_splits = [f"{a} + {b}" for a, b in own_splits if a + b != actual]
+    assert not bad_splits, (
+        f"this pin's own docstring states the lane splits {bad_splits}, which do NOT add "
+        f"to the {actual} this tree collects — the docstring describes a tree that is "
+        f"not this one, the same rule §6's figures are held to")
+    # ⛔ THE SUM ALONE IS NOT THE INVARIANT, and a guard weaker than the sentence it
+    # protects is not a guard: `266 + 1` copied into BOTH lanes, the two roles SWAPPED, and
+    # `268 + 0` all kept the sum and left this arm green, while the docstring publishes a
+    # false lane split — which is what the next editor reads to avoid "correcting" the
+    # docker figure (fresh review of `#12902`, P2). The relation the docstring itself
+    # states is pinned order-INDEPENDENTLY, so it does not fix which lane is which (the
+    # doc deliberately declines that, and a carve-out run must not "correct" the docker
+    # lane's figure): one lane reads one MORE pass and one FEWER skip than the other.
+    (first, second) = own_splits
+    related = ((first[0] == second[0] + 1 and first[1] == second[1] - 1)
+               or (second[0] == first[0] + 1 and second[1] == first[1] - 1))
+    assert related, (
+        f"this pin's own docstring states the lane splits {own_splits}, which add up but "
+        f"do not have the lane relation the docstring itself asserts ('one more skip and "
+        f"one fewer pass'): the docker lane must read exactly one MORE pass and one FEWER "
+        f"skip than the carve-out lane, in either order. A same-sum mutant — the same pair "
+        f"twice, the roles swapped, or a zero-skip pair — publishes a lane split that "
+        f"cannot exist, and this arm exists to catch exactly that")
+    # …and the ABSOLUTE skips are 1 (the `<3.12` re-derive) and 2 (plus `_live_utils.py`'s
+    # live-graph fixture, which only a lane with a `TORTOISE_DB_URI` satisfies) — which the
+    # docstring states. Without this, `268 + 0` beside `267 + 1` satisfies the relation
+    # above and publishes "the docker lane skips nothing", a claim the docstring's own
+    # next sentence contradicts.
+    assert sorted(skip for _passed, skip in own_splits) == [1, 2], (
+        f"this pin's own docstring must state the two lanes' skips as 1 and 2 (the "
+        f"`<3.12` re-derive, plus the live-graph fixture), and it states "
+        f"{[skip for _passed, skip in own_splits]}")
+    own_total = [int(n) for n in re.findall(r"the `(\d+)` the pin re-derives", own)]
+    assert own_total == [actual], (
+        f"this pin's own docstring says it re-derives {own_total} where the file collects "
+        f"{actual}")
 
 
 def test_a_pass_through_tool_changes_NOTHING_when_the_affected_set_is_EMPTY():
@@ -11447,3 +12504,1594 @@ def test_the_citation_check_REDS_on_a_deliberately_broken_citation():
     # documentation EXAMPLE is not a claim about this repo.
     example = f"`tests/test_x.py::{'test' + '_y'}`"
     assert _unresolved_citations(example, defined, modules, by_file) == []
+
+
+#: ── `#12549`: each deployment channel is read by the tool that owns its grammar ──────
+#: The four defects on the issue are the acceptance cases, and every one of them was
+#: reproduced by importing the tool and calling `flag_in_shipped_configs()` on a
+#: SYNTHETIC TREE — the technique the issue used, and the technique these keep. ⛔ The
+#: lesson across the five PRs that patched this walk before this lane is that each fix
+#: added a SHAPE and the next review found the adjacent one; so these falsifiers are
+#: about the CHANNEL's value, never about a spelling.
+
+
+def test_12549_compose_reads_PER_SERVICE_so_two_services_cannot_flip_the_answer(
+        tmp_path, monkeypatch):
+    """`#12549` defect 2 (both directions): no document-order coin flip.
+
+    The defect: `decisions` was one list per FILE, so the last `environment:` entry
+    anywhere in a multi-service document decided the whole file — the same facts in the
+    other order gave the opposite verdict, and the loser was published as
+    `(OVERRIDES an earlier truthy value)`, a compose claim that does not exist. Compose
+    defines NO override relation between two services.
+
+    ⛔ Both orderings are asserted, because a fix that flipped the coin rather than
+    removing it would pass one arm.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    fixtures = {
+        "app=1 first": ("app", "1", "worker", "0"),
+        "worker=1 first": ("worker", "1", "app", "0"),
+    }
+    for label, (first, first_value, second, second_value) in fixtures.items():
+        (tmp_path / "docker-compose.yml").write_text(
+            "services:\n"
+            f"  {first}:\n    image: alpine\n    environment:\n"
+            f"      TORTOISE_EMBED_GATE: \"{first_value}\"\n"
+            f"  {second}:\n    image: alpine\n    environment:\n"
+            f"      TORTOISE_EMBED_GATE: \"{second_value}\"\n",
+            encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        deployment = shipped["deployment"]
+        assert deployment["files"] == {"docker-compose.yml": "DISAGREE"}, (label, deployment)
+        assert deployment["disagreeing"] == ["docker-compose.yml"], (label, deployment)
+        # ⛔ NOT armed and NOT silent: both are false statements about a file that arms
+        # the gate in one service and disarms it in another.
+        assert deployment["armed"] == [] and deployment["silent"] == [], (label, deployment)
+        assert deployment["on"] is False, (label, deployment)
+        # …and the disagreement is STATED per service, in the row's own text.
+        note = _gate_note(shipped)
+        assert "PER-SERVICE DISAGREEMENT" in note, note
+        assert f"{first}=ARMED" in note and f"{second}=NOT_ARMED" in note, note
+        assert "compose defines no override relation between two services" in note, note
+
+
+def test_12549_a_compose_FLOW_MAPPING_is_read_by_the_resolver(
+        tmp_path, monkeypatch):
+    """`#12549` defect 3: the flow mapping that armed the gate read as SILENT.
+
+    `services: {app: {environment: {FLAG: "1"}}}` has no line for a line reader to
+    match — the value is inline, so no scope is pushed, and the inner key is mid-line
+    — so the only manifest that arms the gate was published as OFF with nothing
+    naming the line. The resolver models the document, so there is nothing to match.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        'services: {app: {image: alpine, environment: {TORTOISE_EMBED_GATE: "1"}}}\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "ON"}, shipped["deployment"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+    assert shipped["files"][0].startswith(
+        "docker-compose.yml: services.app.environment.TORTOISE_EMBED_GATE"), shipped["files"]
+
+
+def test_12549_an_ANCHOR_and_a_MERGE_KEY_are_resolved_too(tmp_path, monkeypatch):
+    """The same class as defect 3, one spelling over: a merge key is not a line.
+
+    `x-env: &common` + `<<: *common` arms the service and no line in the service says
+    so — the value arrives from a document-level anchor. A text reader sees the anchor
+    line and cannot tell whether any service merges it.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "x-env: &common\n"
+        "  TORTOISE_EMBED_GATE: \"1\"\n"
+        "services:\n"
+        "  app:\n"
+        "    image: alpine\n"
+        "    environment:\n"
+        "      <<: *common\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "ON"}, shipped["deployment"]
+
+
+def test_12549_a_resolver_that_REFUSES_is_UNRESOLVED_and_never_an_answer(
+        tmp_path, monkeypatch):
+    """`#12549` defect 1's doctrine, at the channel: a refusal is not a verdict.
+
+    A required interpolation (compose's own `${FLAG:?…}`) makes the resolver exit
+    non-zero. The file was READ; what could not be resolved is the VALUE — so it holds
+    the reading at `UNMEASURED` with the resolver's own reason, and it is never
+    published as `OFF` (a measurement never made) or as `ON`.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n"
+        "    image: alpine\n"
+        "    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${TORTOISE_EMBED_GATE:?deployments must say}\"\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    assert shipped["deployment"]["measured"] is False, shipped["deployment"]
+    # ⛔ The reason is CARRIED, and it is the resolver's, not a guess.
+    assert shipped["indeterminate"], shipped
+    assert "CHANNEL UNRESOLVED" in shipped["indeterminate"][0], shipped["indeterminate"]
+    note = _gate_note(shipped)
+    assert "deployment file(s) this walk cannot RESOLVE" in note, note
+    # ⛔ AND IT IS NOT CALLED UNREADABLE — the defect-1 misattribution, at its source.
+    assert "UNREADABLE deployment file(s)" not in note, note
+    assert "unreadable: none" in note, note
+
+
+def test_12549_an_UNSET_interpolation_is_not_read_as_an_explicit_empty(
+        tmp_path, monkeypatch):
+    """`${OTHER}` with `OTHER` unset must not read as `FLAG: ""` — same model, diff fact.
+
+    Compose WARNS and writes a blank string, so the model cannot tell an explicit
+    `""` from a variable it could not resolve. The warning is the only surviving
+    evidence, and it is what keeps this `UNRESOLVED` instead of a measured `OFF`.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${SOME_OTHER_FLAG}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    # …the POSITIVE control: an explicit empty string IS a measured OFF (the file says
+    # so, deterministically) — the arm cannot pass by calling every blank UNRESOLVED.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped
+
+
+def test_12549_an_EXPORTED_assignment_exports_its_name_too(tmp_path, monkeypatch):
+    """`#12549` defect 4: `export FLAG=1` then `FLAG=0` runs `0` — so it must read OFF.
+
+    ⛔ This is the FALSE-ARM direction, the class this instrument exists to remove, and
+    it survived the first conversion: the exported-name matcher accepted only the BARE
+    `export NAME` form, so `export FLAG=1` left the exported set empty, the later plain
+    `FLAG=0` was not a decision at all, and the file published `ON` while `bash -c
+    'export F=1; F=0; env'` holds `0` (measured, fresh review of `#12902`, P1).
+    """
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=0\n'
+        'ENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nTORTOISE_EMBED_GATE=0\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
+    # …and the arm is NOT over-collected: `export FLAG=1` with nothing overriding it is
+    # still the last decision, so a reader on the other side cannot be a blanket OFF.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped
+    # …and a MIXED `export A=1 B` argument list exports both names, and a quoted value
+    # with a space does not truncate the one beside it.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport OTHER_VAR=\"a b\" TORTOISE_EMBED_GATE=1\n"
+        "TORTOISE_EMBED_GATE=0\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
+    # ⛔ `export -n FLAG` REMOVES the export attribute and `export -f FLAG` exports a
+    # FUNCTION (a different namespace), so neither may ADD the name — reading either as a
+    # plain arm would be a NEW false arm, one option character over from defect 4. The
+    # QUOTED argument is the same command and must behave identically.
+    for revoke in ("export -n TORTOISE_EMBED_GATE", "export -f TORTOISE_EMBED_GATE",
+                   'export -n "TORTOISE_EMBED_GATE"'):
+        (tmp_path / "entrypoint.sh").write_text(
+            "#!/bin/bash\n" + revoke + "\nTORTOISE_EMBED_GATE=1\n",
+            encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", (revoke, shipped)
+        assert any("TORTOISE_EMBED_GATE=1" in hit
+                   for hit in shipped["outside_runtime"]), (revoke, shipped)
+
+
+def test_12549_the_export_attribute_is_a_MOMENT_not_a_file_property(
+        tmp_path, monkeypatch):
+    """`unset` / `export -n` REVOKE the export attribute — a later plain assignment is a
+    shell variable again, and reading it as a decision is a FALSE ARM.
+
+    ⛔ MEASURED by the fresh review as a REGRESSION the defect-4 fix introduced: a
+    whole-file exported-name set kept the name across an `unset`, so
+
+        export TORTOISE_EMBED_GATE=0
+        unset TORTOISE_EMBED_GATE
+        TORTOISE_EMBED_GATE=1
+
+    read `ON` here while `bash -c '...; env'` has NO such variable at all — `main`
+    read it `OFF`. The state is now per line, and the revocation line is a DISARMING
+    declaration rather than a line that lands in no bucket.
+    """
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
+        'ENTRYPOINT ["./entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    revocations = {
+        "unset": "unset TORTOISE_EMBED_GATE",
+        # ⛔ The spelling shell scripts really use: the operator glues to the last name,
+        # so a whitespace-only split failed to revoke and the false ARM came back.
+        "unset with `;`": "unset TORTOISE_EMBED_GATE;",
+        "unset with `&&`": "unset TORTOISE_EMBED_GATE && true",
+        "unset -v": "unset -v TORTOISE_EMBED_GATE",
+        # ⛔ QUOTED targets are the same `unset`, and dropping them put the arm and the
+        # disarm in one record: `on: True` beside a `unset_declarations` entry for the
+        # very line that revoked it (fresh review, P1).
+        'unset "F"': 'unset "TORTOISE_EMBED_GATE"',
+        "unset 'F'": "unset 'TORTOISE_EMBED_GATE'",
+        # `help export`: "-n remove the export property from each NAME".
+        "export -n": "export -n TORTOISE_EMBED_GATE",
+        'export -n "F"': 'export -n "TORTOISE_EMBED_GATE"',
+    }
+    for spelling, revocation in revocations.items():
+        (tmp_path / "entrypoint.sh").write_text(
+            "#!/bin/bash\nexport TORTOISE_EMBED_GATE=0\n"
+            + revocation + "\nTORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", (spelling, shipped)
+        assert any("TORTOISE_EMBED_GATE=1" in hit
+                   for hit in shipped["outside_runtime"]), (spelling, shipped)
+        assert any(revocation in entry
+                   for entry in shipped["unset_declarations"]), (spelling, shipped)
+        # …and the arming IMAGE BUILD file does not paper over it.
+        assert shipped["deployment"]["on"] is False, (spelling, shipped["deployment"])
+    # ⛔ `set -a` (allexport) is NOT a file-level shortcut: it confers the export
+    # attribute on each assignment while it is in force, so a later `export -n` still
+    # takes the flag OUT of the environment. A file-wide "everything exported" published
+    # this as `ON` (fresh review, P2-2), and it ALSO armed an assignment written BEFORE
+    # `set -a`, which bash leaves unexported (fresh review, P2-2 again — the ordering).
+    for spelling, script, want in (
+        ("set -a; export -n", "set -a\nexport TORTOISE_EMBED_GATE=1\n"
+                              "export -n TORTOISE_EMBED_GATE\n", "OFF"),
+        ("set -a then assign", "set -a\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        ("assign then set -a", "TORTOISE_EMBED_GATE=1\nset -a\n", "OFF"),
+        ("set -a; set +a", "set -a\nset +a\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        ("set -a re-confers", "set -a\nexport TORTOISE_EMBED_GATE=1\n"
+                              "export -n TORTOISE_EMBED_GATE\n"
+                              "TORTOISE_EMBED_GATE=1\n", "ON"),
+        # ⛔ EVERY option cluster counts, because bash accepts more than one: `set -eu -a`
+        # arms allexport and the single-cluster matcher did not see it, so an entrypoint
+        # that DOES arm the flag read NOT_ARMED (measured: walker OFF while
+        # `bash -c 'set -eu -a; FLAG=1; env'` holds FLAG=1) — a false HOLD, the
+        # conservative side, but still a reading published without measuring it.
+        ("set -eu -a", "set -eu -a\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        ("set -e -u -a", "set -e -u -a\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        # …and the unset side of the same spelling, so a later cluster still wins.
+        ("set +a -e", "set -a\nset +a -e\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        # ⛔ The LONG spelling of the same option, and `--`: both were unread and both
+        # published a FALSE ARM (walker `ON` while `bash` leaves the assignment OUT of
+        # the process env), which is the direction that reaches row 1's `MET` (fresh
+        # review of #12902, P1 — measured: `set +o allexport; FLAG=1; env` has no FLAG,
+        # `set -- -a; FLAG=1; env` has no FLAG).
+        ("set -o allexport", "set -o allexport\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        ("set +o allexport", "set +o allexport\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        ("set -eo allexport", "set -eo allexport\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        # `--` ENDS option processing, so the `-a` after it is a POSITIONAL parameter.
+        ("set -- -a", "set -- -a\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        ("set -- -o allexport", "set -- -o allexport\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        # ⛔ A trailing shell OPERATOR ends the `set` command, so `set +a;` DISARMS — and
+        # all three matchers anchored at end-of-line, read the line as "no `set` at all",
+        # left the state armed, and published a FALSE ARM over an entrypoint that turns
+        # the gate off (measured: `set -a; set +a; FLAG=1; env` has no FLAG; fresh review
+        # of #12902, P1). The ARM spelling `set -a;` was a false HOLD in the same way.
+        ("set -a;", "set -a;\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        ("set +a; after set -a", "set -a\nset +a;\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        # …and the long spelling with a QUOTED name arms too (`set -o "allexport"`).
+        ('set -o "allexport"', 'set -o "allexport"\nTORTOISE_EMBED_GATE=1\n', "ON"),
+        # ⛔ A GLUED OPERATOR is not part of the VALUE: `export FLAG=1;` runs `FLAG=1`, and
+        # the ASSERTION path stripped it while the PUBLISH path did not — so a later bare
+        # `export FLAG` republished `1;` (not truthy) and the run stated an override that
+        # does not exist (false hold plus a false cause).
+        # ⛔ `&` is NOT in that class: bash runs `export FLAG=1&` in a SUBSHELL, so the
+        # parent environment never receives it — stripping it would be a false ARM. Both
+        # measured (fresh review of #12902, P2 / P1).
+        ("export F=1; then bare export",
+         "export TORTOISE_EMBED_GATE=1;\nexport TORTOISE_EMBED_GATE\n", "ON"),
+        ("export F=1& lands in a subshell", "export TORTOISE_EMBED_GATE=1&\n", "OFF"),
+        # ⛔ ONE LINE IS NOT ONE COMMAND, and a SUBSHELL operator ends the parent's view.
+        # `set -a; set +a;` runs BOTH, so the mode is OFF (answering from the first command
+        # published an ARM bash had already ended); `set -a &` and `set -a|cat` run the
+        # `set` in a SUBSHELL, so the parent is never armed at all. All measured against
+        # `bash -c '<line>\nFLAG=1\nenv'` (fresh review of #12902, P1 x3).
+        ("set -a; set +a;", "set -a; set +a;\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        ("set -a; and the assign on one line",
+         "set -a; TORTOISE_EMBED_GATE=1\n", "ON"),
+        ("set -a & runs in a subshell", "set -a &\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        ("set -a|cat runs in a pipeline", "set -a|cat\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        # …and the SPACED subshell operator after an export is the adjacent spelling of
+        # the glued `&` case above: the operator is its own word, so a per-word reader
+        # dropped it and published the value (`bash` exports nothing).
+        ("export F=1 & then bare export",
+         "export TORTOISE_EMBED_GATE=1 &\nexport TORTOISE_EMBED_GATE\n", "OFF"),
+        ("export F=1 |cat", "export TORTOISE_EMBED_GATE=1 |cat\n", "OFF"),
+        # …and a GLUED `;` before the NEXT command stays inside the command boundary:
+        # `export FLAG=1;export OTHER=2` exports FLAG (bash measured).
+        ("export F=1;export OTHER=2",
+         "export TORTOISE_EMBED_GATE=1;export OTHER=2\n", "ON"),
+    ):
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                                encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["deployment"]["files"]["entrypoint.sh"] == want, (spelling, shipped)
+    # ⛔ `-f` OUTRANKS `-n`: `export -nf FLAG` asks bash to remove the export attribute
+    # from a FUNCTION, so the VARIABLE stays exported. Reading `n` first published a
+    # DISARM — and a `unset_declarations` entry — for a line that changed nothing
+    # (fresh review, P2-5).
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n"
+        "export -nf TORTOISE_EMBED_GATE\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped
+    assert not shipped["unset_declarations"], shipped
+    # ⛔ `export -n` RETAINS the variable's value (`help export`: it removes only the
+    # attribute), so a later bare `export FLAG` RE-PUBLISHES it. Clearing the value here
+    # published a false OFF (fresh review, P2-3).
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n"
+        "export -n TORTOISE_EMBED_GATE\nexport TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped
+    # ⛔ BUT "RETAINED" does not mean "UNCHANGED": the option does not discard an
+    # ASSIGNMENT it is given. MEASURED against the grammar owner —
+    # `bash -c 'export FLAG=1; export -n FLAG=0; export FLAG; env | grep ^FLAG='` prints
+    # `FLAG=0`. Ignoring the argument kept the PRE-revocation `1`, so the later bare
+    # export republished it and a deployment whose last word is `0` read `ON` (fresh
+    # review cycle 3, P1).
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n"
+        "export -n TORTOISE_EMBED_GATE=0\nexport TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
+    # …and the assignment ALONE (no later bare export) is the same `0`: the revocation
+    # line's own argument decides the file, not only what it re-publishes later.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n"
+        "export -n TORTOISE_EMBED_GATE=0\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
+    # …the POSITIVE control: the bare-export HOUSE IDIOM still arms the file, because the
+    # export publishes the value already assigned. Without this arm the per-line state
+    # would read every `FLAG=...` + `export FLAG` entrypoint as silence.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nTORTOISE_EMBED_GATE=1\nexport TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped
+    # …and a revocation FOLLOWED by a bare export publishes nothing: `export FLAG` after
+    # `unset FLAG` exports a variable that no longer exists.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nTORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE\n"
+        "export TORTOISE_EMBED_GATE\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
+
+
+def test_12549_a_blank_gate_key_is_not_blamed_on_an_UNRELATED_unset_variable(
+        tmp_path, monkeypatch):
+    """The unset-interpolation signal is PER KEY, not per FILE (fresh review, P2).
+
+    ⛔ MEASURED before this: a literal `FLAG: ""` beside an unrelated
+    `OTHER: "${MISSING_VAR}"` in the SAME file was published as *"compose defaulted an
+    unset interpolation variable (MISSING_VAR) to a blank string — the file fixes no
+    value"*, and a MEASURED `OFF` became `UNMEASURED` — `#12549` defect 1's own class
+    (a cause the run did not measure), one layer in. The per-key question is answered by
+    the resolver's own UNINTERPOLATED model (`config --no-interpolate`), so the literal
+    blank stays a measured `OFF`.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"\"\n"
+        "      UNRELATED: \"${MISSING_VAR}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped
+    # …and the key that DOES lean on the variable still holds the row UNMEASURED, so the
+    # per-key narrowing cannot pass by never resolving an interpolation at all.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${MISSING_VAR}\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    assert any("MISSING_VAR" in hit for hit in shipped["indeterminate"]), shipped[
+        "indeterminate"]
+
+
+def test_12549_a_blank_declaration_is_judged_from_the_UNINTERPOLATED_model(
+        tmp_path, monkeypatch):
+    """A blank is `UNRESOLVED` iff THIS key INTERPOLATES — not iff the file warned.
+
+    ⏔ MEASURED by the fresh review as two separate defects, both fixed by asking the
+    resolver rather than its stderr:
+
+    1. `${MISSING:+1}` resolves to `""` with **no warning at all**, so a stderr-driven
+       test read it as a measured `\'\'` ("set to a non-truthy value") and an arming path
+       became invisible — the class this instrument exists to remove.
+    2. The warning is FILE-level, so the published reason named a variable the key never
+       references (a gate blank beside an unrelated `${MISSING_A}` blamed `MISSING_A`).
+
+    `--no-interpolate` answers *"does this declaration interpolate, and with which
+    names"* for the KEY, which is the question actually being asked.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${MISSING_PLUS:+1}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    # ⏔ THE FALSIFIER for #12549-P2-1: compose does not warn about `:+`, so a
+    # warning-driven test reads this `OFF` and an arming path disappears.
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    assert "non-truthy" not in " ".join(shipped["indeterminate"]), shipped["indeterminate"]
+
+    # ⏔ THE FALSIFIER for #12549-P2-2: the reason names only the variable THIS key
+    # interpolates — never a neighbour the file also left unset.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${MISSING_B}\"\n"
+        "      OTHER_KEY: \"${MISSING_A}\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    reason = " ".join(shipped["indeterminate"])
+    assert "MISSING_B" in reason and "MISSING_A" not in reason, reason
+
+
+def test_12549_an_uninterpolate_probe_with_NO_MODEL_holds_the_blank(
+        tmp_path, monkeypatch):
+    """An answer with no model is NOT an answer — the blank must stay `UNRESOLVED`.
+
+    ⛔ MEASURED (`#12902` review, P2): `json.loads(run["stdout"] or "{}")` turned an
+    EMPTY stdout into `{}`, and `model.get("services") or {}` turned an absent
+    `services` into `{}`, so `_compose_blank_declarations` returned an EMPTY
+    `declarations` — and `_compose_blank_is_interpolated` then answered `False` for a key
+    whose declaration it had never seen. A gate set to `"${MISSING_VAR}"` was published
+    as a MEASURED `OFF`: a false PASS on the blocking axis, on the one branch of the
+    helper's own announced fail-closed rule that was not applied.
+
+    The four probe answers below are the whole surface: a REFUSAL and a non-JSON body
+    already failed closed; the two model-less successes did not. All four must hold the
+    file, because this probe is only asked when the PRIMARY model had services, so a
+    supplementary model with none contradicts the file it just read.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${MISSING_VAR}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    real = probe._run_config_resolver
+    for label, fake in (
+            ("refuses", {"ok": False, "stdout": "", "stderr": "", "reason": "x",
+                          "argv": []}),
+            ("non-json", {"ok": True, "stdout": "not json", "stderr": "",
+                          "reason": None, "argv": []}),
+            ("empty model", {"ok": True, "stdout": "{}", "stderr": "",
+                             "reason": None, "argv": []}),
+            ("empty stdout", {"ok": True, "stdout": "", "stderr": "",
+                              "reason": None, "argv": []})):
+        calls = {"n": 0}
+
+        def patched(argv, *, extra_env=None, _fake=fake, _count=calls):
+            # call 1 is the PRIMARY resolve and must stay real (it is what makes the
+            # key blank); only the `--no-interpolate` probe is faked.
+            _count["n"] += 1
+            return (real(argv, extra_env=extra_env) if _count["n"] == 1
+                    else dict(_fake))
+
+        monkeypatch.setattr(probe, "_run_config_resolver", patched)
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, (
+            f"a model-less probe answer ({label}) was read as a MEASURED answer: "
+            f"{shipped['deployment']['files']}")
+        assert shipped["deployment"]["measured"] is False, shipped["deployment"]
+    monkeypatch.setattr(probe, "_run_config_resolver", real)
+
+
+def test_12549_the_LIST_spelling_of_environment_is_measured_too(tmp_path, monkeypatch):
+    """`environment: [- FLAG=${MISSING}]` must not become a MEASURED `OFF`.
+
+    ⛔ MEASURED REGRESSION against `main` (`#12902` review, P1): the primary model
+    normalises `environment:` to a MAPPING, but `config --no-interpolate` KEEPS the LIST
+    form the author wrote — so a dict-only reader left the service out of
+    `declarations` and `_compose_blank_is_interpolated` answered "no `$`" about a
+    declaration it had never seen. A gate the resolver could not resolve was published
+    as a measured disarm, with a fabricated "OVERRIDES an inherited value", while the
+    MAP spelling of the identical declaration correctly held `UNMEASURED`.
+
+    ⛔ And the control matters as much as the fix: a LIST-form literal `""` is still a
+    measured `OFF`. Holding every list-form blank would trade a false PASS for a false
+    HOLD on the spelling half this repo's own compose files use.
+    """
+    head = "services:\n  app:\n    image: alpine\n    environment:\n"
+    for body, expected in (
+            ("      - TORTOISE_EMBED_GATE=${MISSING_VAR}\n", "UNMEASURED"),
+            ("      - TORTOISE_EMBED_GATE=${MISSING_VAR:+1}\n", "UNMEASURED"),
+            ("      - TORTOISE_EMBED_GATE=\n", "OFF"),
+    ):
+        (tmp_path / "docker-compose.yml").write_text(head + body, encoding="utf-8")
+        monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["deployment"]["files"] == {"docker-compose.yml": expected}, (
+            f"LIST spelling {body.strip()!r} read "
+            f"{shipped['deployment']['files']}, expected {expected}")
+
+
+def test_12549_an_EMPTY_project_answer_is_not_reported_as_NO_model(tmp_path, monkeypatch):
+    """`services: {}` is a MEASURED answer — the profile pass must not call it "no model".
+
+    ⛔ MEASURED (fresh review of `119bd5e74bae`, P2): the model-less guard added there
+    could not tell "no model" from "a model that declares zero services", so every
+    `services: {}` tree published *"answered with NO model, so profile-gated services
+    were NOT read"* into row 1 — a cause the run did not measure, the exact defect class
+    this PR removes, about a resolve that answered `{"name": …, "services": {}}`.
+    """
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    channel = shipped["deployment"]["resolved"]["docker-compose.yml"]
+    assert channel["warnings"] == [], channel["warnings"]
+    # …and the verdict is unchanged: an empty project declares nothing, so it is OFF.
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped
+
+
+def test_12549_an_UNREAD_blank_scope_HOLDS_instead_of_reading_OFF(tmp_path, monkeypatch):
+    """A blank with NO declaration read is UNANSWERED, never a measured `""`.
+
+    ⛔ MEASURED (same review, P2 — this half of the P1 fix had no falsifier): `env_file:`
+    resolves to `environment: null` in the uninterpolated model, so the service has no
+    entry in `declarations`; answering `"$" in ""` turned "I could not read it" into a
+    measured disarm.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    env_file: [cfg.env]\n",
+        encoding="utf-8")
+    (tmp_path / "cfg.env").write_text("TORTOISE_EMBED_GATE=\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+
+
+def test_12549_a_PROFILED_blank_is_NOT_published_as_a_disarm(tmp_path, monkeypatch):
+    """The mirror half: the all-profiles pass never consulted the unset warning.
+
+    ⛔ MEASURED before this: the same `${MISSING}` shape inside a `profiles:`-gated
+    service was scored `''` and published as a DISARMING assignment, i.e. a value claim
+    about a value the resolver had just said it could not resolve. A deployment that
+    ENABLES that profile runs with whatever the variable is, so the file is
+    `UNMEASURED` — fail closed, and named as unresolved rather than as a `0`.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  debug:\n    image: alpine\n    profiles: [debug]\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${MISSING_OTHER}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    # …and a PROFILED literal blank is still a measured disarm (the narrowing is per
+    # key, not a blanket refusal to score profiled blanks).
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  debug:\n    image: alpine\n    profiles: [debug]\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "DISAGREE"}, shipped
+
+
+def test_12549_row_ones_HOLD_note_splits_unreadable_from_unresolved(
+        tmp_path, monkeypatch):
+    """`#12549` defect 1 must be fixed in BOTH notes a reader reads, not just the gate's.
+
+    ⛔ MEASURED by the fresh review of `#12902` as the missing falsifier: reverting ROW
+    1's hold note to `unreadable {deployment['unmeasured']}` left the whole suite GREEN,
+    so the half of defect 1 a DoD reader actually reads could be undone silently. A file
+    the walk READ whose value it could not RESOLVE is named as such — and is never
+    called unreadable, which sends a reader to chase permissions on a file with none.
+    """
+    _fake_rule_tree(tmp_path)
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=0\n'
+        'ENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        '#!/bin/bash\nexport TORTOISE_EMBED_GATE="${SOME_OTHER_FLAG}"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["measured"] is False, shipped["deployment"]
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default UNMEASURED"))
+    assert "unreadable none" in hold, hold
+    assert "cannot RESOLVE" in hold and "entrypoint.sh" in hold, hold
+    assert "UNREADABLE deployment file(s)" not in hold, hold
+
+
+def test_12549_the_AMBIENT_environment_cannot_make_a_compose_default_read_armed(
+        tmp_path, monkeypatch):
+    """The lane's own exported flag is not a shipped arm (`#10996`, moved into compose).
+
+    Compose interpolates `${VAR}` from the SHELL first, so `${FLAG:-0}` resolves to the
+    lane's `FLAG=1` unless the resolver is run with the ambient environment dropped —
+    which would publish a false arm off the instrument's own shell. The default `0` is
+    what the FILE says, so `0` is the answer.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${TORTOISE_EMBED_GATE:-0}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("TORTOISE_EMBED_GATE", "1")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped
+    # …and a file that says ON still reads ON with the environment dropped, so the
+    # scrub is a scrub and not a blanket OFF.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${TORTOISE_EMBED_GATE:-1}\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "ON"}, shipped
+
+
+def test_12549_the_FLY_channel_is_read_by_the_TOML_grammar_owner(
+        tmp_path, monkeypatch):
+    """A quoted / dotted `[env]` key and a `[env]` written LAST are shapes, not corners.
+
+    The line reader this lane deletes matched `^KEY = "value"`. TOML's grammar allows a
+    QUOTED key, a DOTTED key and a table header anywhere in the document, so the walk
+    read real arms as `OFF` — and this lane's box has no `fly` binary at all, so the
+    channel is answered by `tomllib` and the row says WHICH resolver answered.
+    """
+    (tmp_path / "fly.toml").write_text(
+        "app = \"tortoise\"\n"
+        "[[services]]\n  internal_port = 8000\n"
+        "[env]\n"
+        "  \"TORTOISE_EMBED_GATE\" = \"1\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"fly.toml": "ON"}, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "fly=" in note and "answered for THIS tree by" in note, note
+    # ⛔ The resolver that answered is NAMED, and it is not assumed: `fly config show`
+    # is not installed on every box (measured: not on this lane's), so a note naming
+    # only the intended one would be a claim the run did not make.
+    assert "tomllib [env]" in note, note
+
+
+def test_12549_a_DISCOVERED_channel_with_NO_reader_HOLDS_the_row(
+        tmp_path, monkeypatch):
+    """`#12549` item 3: a channel the walk did not enumerate must HOLD, not vanish.
+
+    A systemd unit's `Environment=` sets a deployed process's environment and this
+    module has no reader for it. Before this lane the file was excluded by a COMMENT
+    (`COMPOSE_BASE_NAMES`'s override boundary, `#12070` item 8 — the direction that
+    fails OPEN); now a discovered manifest of that type makes the row `UNMEASURED`,
+    NAMED with the file and the reason.
+    """
+    (tmp_path / "deploy").mkdir()
+    (tmp_path / "deploy" / "tortoise.service").write_text(
+        "[Service]\nEnvironment=TORTOISE_EMBED_GATE=1\nExecStart=/app/entrypoint.sh\n",
+        encoding="utf-8")
+    (tmp_path / "Dockerfile.hosted").write_text("FROM python:3.12\n", encoding="utf-8")
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    assert [entry["path"] for entry in deployment["unread_channels"]] == [
+        "deploy/tortoise.service"], deployment["unread_channels"]
+    # ⛔ A DISCOVERED-but-UNREAD channel is not a pass: "every deployment file is armed"
+    # over a population that excluded it is the `#12022` claim, one channel over.
+    assert deployment["measured"] is False, deployment
+    assert deployment["on"] is False, deployment
+    note = _gate_note(shipped)
+    assert "deployment CHANNEL(S) this walk has no reader for" in note, note
+    assert "deploy/tortoise.service" in note, note
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", row.observed
+    hold = next(n for n in row.notes if n.startswith("shipped default UNMEASURED"))
+    assert "deploy/tortoise.service" in hold, hold
+
+
+def test_12549_the_COMPUTED_population_is_named_and_a_Procfile_is_declared_HARMLESS(
+        tmp_path, monkeypatch):
+    """The word "every" is a COMPUTED set, and a non-environment manifest says so.
+
+    `Procfile` names a command and carries no environment (Heroku/Railway config vars
+    live on the platform), so discovering one must NOT hold the row — while discovering
+    a systemd unit must (the test above). Both are DECLARED sets, so the difference is
+    a decision a reader can see rather than a glob that happened to miss.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text("FROM python:3.12\n", encoding="utf-8")
+    (tmp_path / "Procfile").write_text("web: gunicorn app:app\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    assert deployment["unread_channels"] == [], deployment["unread_channels"]
+    assert deployment["measured"] is True, deployment
+    note = _gate_note(shipped)
+    assert "computed deployment population:" in note, note
+    assert "recognised as carrying NO environment: Procfile" in note, note
+
+
+def test_12549_the_TWO_unconverted_channels_PUBLISH_their_bounds(
+        tmp_path, monkeypatch):
+    """Item 5: `Dockerfile` and `entrypoint.sh` are DECLARED, each naming its shape.
+
+    ⛔ The `#11437`/`#11541` discipline: a declared bound says *"this NAMED shape was not
+    measured"*, never *"nothing was measured"*. A note that dropped them would let a
+    reader assume every channel was resolved by a grammar owner.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text("FROM python:3.12\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    bounds = shipped["deployment"]["declared_bounds"]
+    assert {row["channel"] for row in bounds} == {"dockerfile", "entrypoint"}, bounds
+    dockerfile = next(row for row in bounds if row["channel"] == "dockerfile")
+    entrypoint = next(row for row in bounds if row["channel"] == "entrypoint")
+    # The shape each cannot see, and WHY — both are the load-bearing half.
+    assert "ARG" in dockerfile["cannot_see"], dockerfile
+    assert "--build-arg" in dockerfile["why"], dockerfile
+    assert "INDIRECTION" in entrypoint["cannot_see"], entrypoint
+    assert "ShellCheck" in entrypoint["why"], entrypoint
+    note = _gate_note(shipped)
+    assert "channels NOT converted (declared bounds):" in note, note
+    assert "ARG" in note and "INDIRECTION" in note, note
+    # ⛔ ABSENT IS NOT EMPTY: a reading built without the bounds must not print "none".
+    assert "carries no declared bounds" in probe._declared_bound_note({}), (
+        probe._declared_bound_note({}))
+
+
+def test_12549_a_platform_resolver_that_answers_NON_TOML_falls_back_to_the_file(
+        tmp_path, monkeypatch):
+    """`fly config show` is trusted only after its OUTPUT parses — the box's box problem.
+
+    ⛔ Measured risk in the other direction from "fly is absent": a `fly` binary that
+    answers with a banner, a JSON rendering or a future format would make the channel
+    `UNRESOLVED` on a box where it is perfectly readable — an instrument measuring its
+    own wiring. So the platform output is VERIFIED before it is trusted, and a failed
+    verification falls through to the grammar owner on the FILE, with the reason named.
+    """
+    (tmp_path / "fly.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "1"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _bad_platform(argv):
+        assert argv[:3] == ["fly", "config", "show"], argv
+        return {"ok": True, "stdout": "Update available: v9.9.9 -> v9.9.10\n",
+                "stderr": "", "argv": argv, "reason": None}
+
+    monkeypatch.setattr(probe, "_run_config_resolver", _bad_platform)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"fly.toml": "ON"}, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "answered but its output is not TOML" in note, note
+    assert "tomllib [env]" in note, note
+
+    # …and a platform resolver whose output IS toml is used, and named as the answerer.
+    def _good_platform(argv):
+        return {"ok": True, "stdout": '[env]\n  TORTOISE_EMBED_GATE = "1"\n',
+                "stderr": "", "argv": argv, "reason": None}
+
+    monkeypatch.setattr(probe, "_run_config_resolver", _good_platform)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"fly.toml": "ON"}, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "answered for THIS tree by: fly=fly config show" in note, note
+
+
+def test_12549_an_env_file_and_a_non_truthy_env_value_are_both_read(
+        tmp_path, monkeypatch):
+    """`env_file:` expands into the resolved environment; a non-truthy value DISARMS.
+
+    Two facts the line reader could not have: a compose `env_file:` entry reaches the
+    container's environment (compose expands it into `environment` before the model
+    exists), and a `[env]` value of `"0"` in `fly.toml` is the DISARMING direction — it
+    OVERRIDES an image `ENV`, so calling that file merely "silent" steers a reader
+    toward "armed".
+    """
+    (tmp_path / "svc.env").write_text("TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    env_file: [svc.env]\n", encoding="utf-8")
+    (tmp_path / "fly.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "0"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {
+        "docker-compose.yml": "ON", "fly.toml": "OFF"}, shipped["deployment"]
+    # ⛔ The disarm is REPORTED, by path, exactly as the compose one is.
+    assert any("fly.toml: [env].TORTOISE_EMBED_GATE" in entry
+               for entry in shipped["disarming_assignments"]), \
+        shipped["disarming_assignments"]
+    note = _gate_note(shipped)
+    assert "values that OVERRIDE it OFF: [" in note, note
+    assert "fly.toml: [env].TORTOISE_EMBED_GATE" in note, note
+
+
+def test_12549_a_SILENT_sidecar_service_is_not_a_disagreement(tmp_path, monkeypatch):
+    """A sibling that declares nothing does not make an armed file a DISAGREEMENT.
+
+    ⛔ The boundary of defect 2's fix, and the one that decides whether the row is
+    REACHABLE: a multi-service compose file routinely carries a sidecar (this repo's own
+    file carries `falkordb`) that will never set this flag. Counting a SILENT sibling as
+    a disagreement would hold the row on every tree with a sidecar — a declared false
+    hold, the mirror of the false PASS this lane removes. Only an EXPLICIT contrary
+    value disagrees; this arm pins both sides of that line.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  tortoise:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  falkordb:\n    image: falkordb/falkordb-server\n    environment:\n"
+        "      REDIS_ARGS: \"--appendonly yes\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "ON"}, shipped["deployment"]
+    assert shipped["deployment"]["on"] is True, shipped["deployment"]
+
+    # …and an EXPLICIT contrary value on the sibling IS a disagreement.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  tortoise:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  worker:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "DISAGREE"}, shipped
+
+
+def test_12549_a_MIXED_tree_names_the_silent_half_beside_the_disagreement(
+        tmp_path, monkeypatch):
+    """A disagreement must not swallow the OTHER files the same reading measured.
+
+    The DISAGREE sentence is the leading clause a reader quotes, so on a tree that has
+    BOTH a disagreeing compose file and a silent image build file, the silent half is
+    named beside it rather than left to a subordinate clause — the `#12070` item 4 rule
+    (the leading clause carries the whole measured state, never a retracted one).
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  worker:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.hosted").write_text("FROM python:3.12\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    note = _gate_note(shipped)
+    assert "PER-SERVICE DISAGREEMENT" in note, note
+    assert "other deployment file(s) SILENT: ['Dockerfile.hosted']" in note, note
+
+
+def _disagreeing_row_one(tmp_path, monkeypatch, *, armed_sibling: bool):
+    """A row-1 tree whose only deployment facts are a PER-SERVICE disagreement.
+
+    `#12902` fresh review, P1/P2: the hold note's leading clause was hardcoded to
+    `deployment["silent"]`, and the disarm narrative to a per-FILE last-wins rule —
+    both of which are wrong on the `DISAGREE` state that `#12549` defect 2 adds.
+    """
+    _fake_rule_tree(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  worker:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    if armed_sibling:
+        (tmp_path / "Dockerfile.hosted").write_text(
+            "FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    return probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+
+
+def _row_one_hold(row) -> str:
+    return next(n for n in row.notes
+                if n.startswith("shipped default NOT armed"))
+
+
+def test_12902_row1_hold_note_never_names_an_EMPTY_silent_population(
+        tmp_path, monkeypatch):
+    """A `DISAGREE` file is in NEITHER `silent` nor `armed`, so naming `silent` alone
+    published a cause about a population of zero.
+
+    ⛔ Measured pre-fix on the pure-disagreement tree: `silent deployment file(s): []
+    declare no gate of their own — read from that file ALONE the deployment is
+    unarmed` — a vacuous cause, and a consequence claim about nothing.
+    """
+    shipped = _disagreeing_row_one(tmp_path, monkeypatch, armed_sibling=False)
+    dep = shipped["deployment"]
+    assert dep["silent"] == [], shipped
+    assert dep["disagreeing"] == ["docker-compose.yml"], shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = _row_one_hold(row)
+    assert "silent deployment file(s): []" not in hold, hold
+    assert "no deployment file ends silent" in hold, hold
+
+
+def test_12902_row1_hold_note_NAMES_the_armed_file_beside_a_disagreement(
+        tmp_path, monkeypatch):
+    """`armed_clause` takes its DISAGREE arm first, so on a MIXED tree the ARMED file
+    was named NOWHERE in the note — the note then opened by asserting nothing arms it.
+
+    ⛔ Measured pre-fix on `{'docker-compose.yml': 'DISAGREE', 'Dockerfile.hosted':
+    'ON'}`: `armed: ['Dockerfile']` / `silent: []`, and the hold note contained no
+    mention of the armed file at all.
+    """
+    shipped = _disagreeing_row_one(tmp_path, monkeypatch, armed_sibling=True)
+    dep = shipped["deployment"]
+    assert dep["files"]["Dockerfile.hosted"] == "ON", shipped
+    assert dep["armed"] and dep["silent"] == [], shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = _row_one_hold(row)
+    assert "silent deployment file(s): []" not in hold, hold
+    assert "Dockerfile.hosted" in hold, hold
+    assert "DO arm it" in hold, hold
+
+
+def test_12902_a_PER_SERVICE_disarm_publishes_no_FILE_order_rule(
+        tmp_path, monkeypatch):
+    """A disarming value inside a `DISAGREE` file is a PER-SERVICE fact.
+
+    ⛔ Publishing `the LAST of them by compose override or by FILE order (an earlier
+    truthy assignment does not survive a later non-truthy one)` over it made ONE note
+    say two opposite things — that, and four clauses later `compose defines no override
+    relation between two services`. The truthy value PROSPERS in the service carrying
+    it, so the FILE-order rule is simply not in play.
+    """
+    shipped = _disagreeing_row_one(tmp_path, monkeypatch, armed_sibling=True)
+    dep = shipped["deployment"]
+    assert dep["disarming_assignments"], shipped
+    caveat = probe.per_file_scope_note(dep)
+    assert "by FILE order" not in caveat, caveat
+    assert "PER-SERVICE fact" in caveat, caveat
+    assert "FOR SOME SERVICES ONLY" in caveat, caveat
+
+
+def test_12902_a_VALUE_LESS_entry_in_a_DISAGREE_file_is_not_a_file_last_word(
+        tmp_path, monkeypatch):
+    """The `unset_declarations` half needs the SAME split as the disarming half.
+
+    ⛔ Measured pre-fix (`649c30c568`): ONE sentence asserted the per-FILE rule for the
+    value-less entry — *"scored as the file's last word where it is last"* — and its
+    negation four clauses later, `a PER-SERVICE fact, never a per-FILE last word`. The
+    dismissal of this half argued the `unset` clause "never claims a per-FILE last
+    word", which that quoted phrase falsifies.
+    """
+    _fake_rule_tree(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE:\n"
+        "  worker:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n"
+        "  api:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    dep = shipped["deployment"]
+    assert dep["files"]["docker-compose.yml"] == "DISAGREE", shipped
+    assert dep["unset_declarations"], shipped
+    assert dep["disarming_assignments"], shipped
+    caveat = probe.per_file_scope_note(dep)
+    # BOTH halves present, so the old single-population wording WOULD have fired here.
+    assert "fix NO VALUE for it IN THE SERVICE(S) THAT CARRY THEM" in caveat, caveat
+    assert "scored as the file's last word where it is last" not in caveat, caveat
+    assert "FOR SOME SERVICES ONLY" in caveat, caveat
+
+
+def test_12902_an_OFF_file_STILL_publishes_the_FILE_order_rule(
+        tmp_path, monkeypatch):
+    """The POSITIVE CONTROL: the fix must not delete the per-FILE rule where it holds.
+
+    A single-service compose file that ends `OFF` HAS a per-FILE last word, and the
+    narrative (and the `this tree DISARMS it in` lead) must still be published.
+
+    ⛔ The fixture needs an INHERITED arm for the `OFF` value to be a disarming
+    ASSIGNMENT (`OVERRIDES an inherited value`); a lone `FLAG: "0"` is not one, and a
+    duplicate YAML key under the same mapping resolves `UNMEASURED`, not `OFF` — both
+    measured while writing this falsifier.
+    """
+    _fake_rule_tree(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  tortoise:\n    build:\n      dockerfile: Dockerfile.selfhost\n"
+        "    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    dep = shipped["deployment"]
+    assert dep["files"]["docker-compose.yml"] == "OFF", shipped
+    assert dep["disarming_assignments"], shipped
+    caveat = probe.per_file_scope_note(dep)
+    assert "by FILE order" in caveat, caveat
+    assert "this tree DISARMS it in " in caveat, caveat
+    assert "FOR SOME SERVICES ONLY" not in caveat, caveat
+
+
+def test_12549_an_UNTRACKED_dotenv_cannot_arm_a_compose_default(tmp_path, monkeypatch):
+    """A machine-local `.env` must not decide a published DoD reading (review P1).
+
+    ⛔ `.env` is gitignored (`.gitignore:30`) and untracked, so it is NOT a shipped
+    input — yet compose reads it as an interpolation source, and this repo's own
+    documented setup step (`cp .env.example .env`, with `.env.example:1644` setting
+    `TORTOISE_EMBED_GATE=1`) CREATES one. So without `COMPOSE_DISABLE_ENV_FILE=1` the
+    row reads ARMED on every developer box and OFF in CI, from a file nobody shipped.
+    Measured on this fixture: no `.env` → `"0"`; with `.env` → `"1"`.
+
+    The pre-existing ambient-env guard beside this one cannot see this: it only sets
+    an environment VARIABLE, and the leak arrives through a FILE.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${TORTOISE_EMBED_GATE:-0}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    # Baseline: the manifest's own default, no `.env` anywhere.
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped["deployment"]
+
+    # …now the untracked dev file appears, with the value `.env.example` recommends.
+    (tmp_path / ".env").write_text("TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, (
+        "an untracked .env must not arm the row: " + repr(shipped["deployment"]))
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+
+
+def test_12549_a_profile_gated_service_still_REPORTS_its_disarm(tmp_path, monkeypatch):
+    """A disarm inside a profiled service must be SEEN, not dropped (review P1).
+
+    ⛔ `docker compose config` OMITS every profile-gated service unless a profile is
+    enabled, so an explicit contrary value living in one vanished from the resolved
+    model and the file read ARMED — a deterministic green where the superseded line
+    reader had reported OFF. That is a fail-open in the worst class this instrument
+    has, and it is invisible in the output: the service is simply absent.
+    `--profile '*'` (a TOP-LEVEL flag, before `config`) puts every declaration in the
+    model. Measured: default → `{'app': {'FLAG': '1'}}`; with the flag → both services.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  worker:\n    image: alpine\n"
+        "    profiles: [\"batch\"]\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    # The profiled service's `0` is a real contrary value, so this is a DISAGREEMENT —
+    # not an arm. Reading it as ON is the fail-open this arm exists to catch.
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "DISAGREE"}, shipped["deployment"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    note = _gate_note(shipped)
+    assert "worker" in note, note
+
+
+def test_12549_the_platform_resolver_is_told_WHICH_file_and_asked_LOCALLY(
+        tmp_path, monkeypatch):
+    """`fly config show` must resolve THIS manifest, offline, as TOML (review P1).
+
+    ⛔ flyctl's docs for `fly config show`: *"The configuration is presented by default
+    in JSON format. The configuration data is retrieved from the Fly service."* A bare
+    invocation therefore (a) fetches over the NETWORK with credentials from a DoD probe
+    that must be offline, and (b) resolves flyctl's DEFAULT `fly.toml` rather than the
+    manifest under measurement — so on a tree carrying both `fly.toml` and
+    `fly.staging.toml` (a shape `FLY_MANIFEST_GLOB` explicitly claims to support) one
+    file's `[env]` is published as the other's. `--local` parses the local file,
+    `-c/--config` names it, and `--toml` asks for the format the trust check verifies.
+    """
+    seen: list[list[str]] = []
+
+    def _recording(argv):
+        seen.append(list(argv))
+        return {"ok": False, "stdout": "", "stderr": "not installed", "argv": argv,
+                "reason": "resolver-unavailable: not installed"}
+
+    monkeypatch.setattr(probe, "_run_config_resolver", _recording)
+    (tmp_path / "fly.staging.toml").write_text(
+        '[env]\n  TORTOISE_EMBED_GATE = "0"\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert seen, "the platform resolver was never invoked"
+    argv = seen[0]
+    assert "--local" in argv, argv
+    assert "--toml" in argv, argv
+    # ⛔ And it must NAME the manifest, so the answer cannot be another file's.
+    assert str(tmp_path / "fly.staging.toml") in argv, argv
+
+
+def test_12549_a_SIBLING_worktree_manifest_does_not_hold_this_row(tmp_path, monkeypatch):
+    """Another lane's checkout is not part of the tree being measured (review P2).
+
+    ⛔ Every lane works in `<repo>/.worktrees/<lane>/`, so a recursive `**/Chart.yaml`
+    or `**/kustomization.yaml` glob reaches OTHER branches' manifests. Finding one sets
+    `deployment["measured"]` False and HOLDS row 1 — so one lane's in-flight change
+    would silently hold the row for every other lane, and the reading would depend on
+    files outside the measured tree. `_DISCOVERY_PRUNE` bounds the walk instead.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    # A sibling worktree carrying a manifest type this walk has no reader for.
+    sibling = tmp_path / ".worktrees" / "some-other-lane"
+    sibling.mkdir(parents=True)
+    (sibling / "Chart.yaml").write_text("name: whatever\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "ON"}, shipped["deployment"]
+    assert shipped["deployment"]["measured"] is True, shipped["deployment"]
+
+
+def test_12549_a_PROFILE_GATED_arm_does_not_arm_the_file(tmp_path, monkeypatch):
+    """The OTHER direction: a profiled `1` must not arm a deployment that skips it (P1).
+
+    ⛔ `--profile '*'` answers "what is DECLARED", but a plain `docker compose up` starts
+    the DEFAULT service set only. Reading an arm out of a service that a default `up`
+    never starts publishes "armed" over a deployment whose gate is off — `#11455`'s
+    false-PASS class, and the mirror of the disarm that same flag exists to reveal. So
+    the two directions are deliberately asymmetric: a profiled DISARM blocks, a profiled
+    ARM is reported and never arms.
+
+    Measured: plain `up` on this fixture starts `['app']` with no FLAG at all; only
+    `--profile '*'` shows `debug-shell=1`.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n"
+        "  debug-shell:\n    image: alpine\n"
+        "    profiles: [\"debug\"]\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped["deployment"]
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    # ⛔ And it is REPORTED, not silently dropped — the reader can see the declaration.
+    note = _gate_note(shipped)
+    assert "profile-gated" in note, note
+    assert "debug-shell" in note, note
+
+
+def test_12549_the_compose_DEFAULT_filename_is_measured(tmp_path, monkeypatch):
+    """`compose.yaml` is compose's FIRST-choice filename and must not be invisible (P1).
+
+    Docker's CLI reference: compose *"traverses the working directory and its parent
+    directories looking for a `compose.yaml` or `docker-compose.yaml` file"* — so a tree
+    whose only compose file is `compose.yaml` is a real deployment surface. Measured: a
+    directory holding only `compose.yaml` resolves under a bare `docker compose config`.
+    Before `COMPOSE_BASE_NAMES` carried it, the file was neither read nor HELD, so a
+    disarm inside it never reached the row and an armed Dockerfile beside it made the
+    deployment read ARMED.
+    """
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    files = shipped["deployment"]["files"]
+    assert "compose.yaml" in files, (
+        "compose.yaml is a compose default filename and must be measured: " + repr(files))
+    assert files["compose.yaml"] == "OFF", files
+    # The disarming default file must not be hidden behind the armed Dockerfile.
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+
+
+def test_12549_the_OVERRIDE_family_HOLDS_the_row_under_compose_yaml_too(tmp_path, monkeypatch):
+    """`compose.override.yaml` must HOLD the row, exactly as its `docker-compose` twin does.
+
+    ⛔ The recorded decision (`#12070` item 8) is that an override file's merge order is
+    the caller's decision, so a discovered override HOLDS the row rather than being
+    resolved. Adding `compose.yaml` as a base name without its override companions
+    opened the hole that decision closes: measured on `compose.yaml` armed `"1"` +
+    `compose.override.yaml` disarming `"0"`, default discovery (what a real
+    `docker compose up` reads) resolves `"0"` — the gate is OFF — while the walk's
+    explicit `-f compose.yaml` resolves `"1"` (a `-f` SUPPRESSES the auto-merge). The
+    row therefore published ARMED over a disarmed deployment.
+    """
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    (tmp_path / "compose.override.yaml").write_text(
+        "services:\n  app:\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    unread = [entry["path"] for entry in deployment["discovery"]["unread"]]
+    assert "compose.override.yaml" in unread, (
+        "a compose override must HOLD the row, naming the file: " + repr(unread))
+    assert deployment["measured"] is False, deployment
+    assert deployment["on"] is False, deployment
+
+
+def test_12549_a_fully_PROFILED_file_still_REPORTS_that_it_mentions_the_flag(
+        tmp_path, monkeypatch):
+    """An all-profiled file must not be published as declaring nothing.
+
+    ⛔ The empty-DEFAULT-set early return used to skip the all-profiles pass, so a file
+    whose only service is `profiles:`-gated was reported as `mentions: none` and
+    "declare no gate of their own" — two prose claims the run did not measure, about a
+    file that spells the flag out. The VERDICT is still OFF (a default `up` selects no
+    service), but the declaration must be visible.
+    """
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n"
+        "  debug-shell:\n    image: alpine\n"
+        "    profiles: [\"debug\"]\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"compose.yaml": "OFF"}, shipped["deployment"]
+    note = _gate_note(shipped)
+    # The declaration is REPORTED, and the gate is still not armed by it.
+    assert "profile-gated" in note, note
+    assert "debug-shell" in note, note
+
+
+def test_12549_compose_yaml_is_labelled_COMPOSE_not_dockerfile(tmp_path, monkeypatch):
+    """The per-file reader label must name the reader that actually answered.
+
+    ⛔ The label was `"compose" if posix.startswith("docker-compose") else "dockerfile"`,
+    so `compose.yaml` — a compose base since this PR — was published as
+    `compose.yaml=ON(dockerfile)` beside a note citing `docker compose … config`: two
+    labels for one fact, the "diagnostic naming a neighbour's state" class this module
+    polices.
+    """
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["channels"] == {"compose.yaml": "compose"}, \
+        shipped["deployment"]["channels"]
+
+
+def test_12549_a_PROFILED_disarm_is_not_rendered_as_an_OVERRIDE(tmp_path, monkeypatch):
+    """A profile-gated `0` must not claim "OVERRIDES an inherited value".
+
+    ⛔ Nothing is inherited in the deployment a default `up` describes: that deployment
+    never starts the service. The verifier's own `detail["reason"]` says so ("in a
+    profile-gated service"), so rendering the override sentence is a cause the resolver
+    did not measure — `#12549` defect 1's class, one layer down.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  worker:\n    image: alpine\n    profiles: [\"batch\"]\n"
+        "    environment:\n      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    # The verdict is unchanged: an explicit contrary value beside an arm is a DISAGREE.
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "DISAGREE"}, \
+        shipped["deployment"]
+    entries = shipped["disarming_assignments"]
+    assert any("DISARMS only when its `profiles:` entry is enabled" in e for e in entries), entries
+    assert not any("OVERRIDES an inherited value" in e for e in entries), entries
+
+
+def test_12549_a_SUPERSEDED_compose_base_is_reported_not_measured(tmp_path, monkeypatch):
+    """With two base names present, only the one compose SELECTS decides the reading.
+
+    ⛔ Compose picks ONE base file by fixed precedence and warns (`Found multiple config
+    files … Using compose.yaml`). Measuring both invents a deployment file that does not
+    exist: it produced a false HOLD on any tree mid-migration and attributed a disarm to
+    a file nothing reads. The superseded name is REPORTED (`non_env`) so it does not
+    vanish, and it contributes nothing to the verdict.
+    """
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    # Only the SELECTED file is a deployment file.
+    assert "docker-compose.yml" not in deployment["files"], deployment["files"]
+    assert deployment["files"].get("compose.yaml") == "ON", deployment["files"]
+    assert deployment["on"] is True, deployment
+    # …and the superseded one is reported rather than silently dropped.
+    superseded = [entry for entry in deployment["discovery"]["non_env"]
+                  if entry["path"] == "docker-compose.yml"]
+    assert superseded, deployment["discovery"]["non_env"]
+    assert "superseded" in superseded[0]["reason"], superseded[0]
+
+
+def test_12549_a_MULTI_ARG_export_line_publishes_the_value_it_assigns(
+        tmp_path, monkeypatch):
+    """⛔ A shell `export` assigns EVERY `NAME=value` word on its line, not just the first.
+
+    The value used to be read by `_assigned_value`, which is LINE-START-scoped, so
+    `export OTHER=1 FLAG=0` put `FLAG` in the `assigned` set but yielded no VALUE — the
+    line appended no decision at all, and the earlier truthy decision stood. Measured
+    against bash: `export F=1; export OTHER=1 F=0; env` holds `0`, while the walk
+    published `ON` with nothing in any bucket. The mirror direction was just as wrong:
+    `export OTHER=1 F=1` alone produced NO decision, so a genuinely armed entrypoint
+    could read `OFF`. Argument ORDER must not decide the verdict — that is the coin
+    flip the compose conversion exists to remove, and it was still live in the shell
+    channel (fresh review of `#12902`, P1).
+    """
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    flag = "TORTOISE_EMBED_GATE"
+    cases = [
+        # (script body, expected verdict, why)
+        (f"export {flag}=1\nexport OTHER=1 {flag}=0\n", "OFF",
+         "bash runs 0 — the flag is assigned at position 1"),
+        (f"export OTHER=1 {flag}=0\n", "OFF",
+         "the only decision is the falsy one, at position 1"),
+        (f"export OTHER=1 {flag}=1\n", "ON",
+         "the only decision is the truthy one, at position 1"),
+        (f'export OTHER="a b" {flag}=0\n', "OFF",
+         "a quoted sibling value does not truncate the flag beside it"),
+        (f'export "{flag}=0"\n', "OFF",
+         "a QUOTED `NAME=value` word is the same command"),
+    ]
+    for body, expected, why in cases:
+        (tmp_path / "entrypoint.sh").write_text(
+            f"#!/bin/bash\n{body}exec app\n", encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs(flag)
+        got = shipped["deployment"]["files"]["entrypoint.sh"]
+        assert got == expected, (body, why, got, shipped)
+    # ⛔ And the truthy value is not merely "not OFF": it reaches the verdict as an
+    # ARMING decision, so a reader on the other side cannot read it as silence.
+    # (`deployment["on"]` is NOT the assertion here: it is "every present file is ON",
+    # and this fixture's Dockerfile is legitimately silent — the per-FILE verdict is what
+    # this test is about.)
+    (tmp_path / "entrypoint.sh").write_text(
+        f"#!/bin/bash\nexport OTHER=1 {flag}=1\nexec app\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs(flag)
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped["deployment"]
+    surface = (shipped.get("per_surface") or {}).get("entrypoint") or {}
+    hits = ((surface.get("files") or {}).get("entrypoint.sh") or {}).get("hits") or []
+    assert any(f"entrypoint.sh: export OTHER=1 {flag}=1" in hit for hit in hits), hits
+
+
+def test_12549_a_MULTI_KEY_dockerfile_ENV_is_read_for_every_pair(
+        tmp_path, monkeypatch):
+    """⛔ A multi-key `ENV` line assigns EVERY pair; reading only the leading key is a false PASS.
+
+    `ENV FLAG=1` then `ENV LANG=C.UTF-8 FLAG=0` used to read `ON` with
+    `on: True` and NOTHING in `indeterminate` / `outside_runtime` / `unset_declarations`,
+    over an image whose environment really holds `0` (measured with `docker build` +
+    `docker run` on the fixture below). `ENV key=value key2=value2` is the Dockerfile's
+    OWN multi-assignment spelling, so the file's last-wins ordering has to see every
+    pair — a position-dependent verdict inside one line is the `#11455` false PASS.
+    """
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    flag = "TORTOISE_EMBED_GATE"
+    cases = [
+        (f"FROM alpine\nENV {flag}=1\nENV LANG=C.UTF-8 {flag}=0\n", "OFF"),
+        (f"FROM alpine\nENV LANG=C.UTF-8 {flag}=0\n", "OFF"),
+        (f"FROM alpine\nENV LANG=C.UTF-8 {flag}=1\n", "ON"),
+        (f'FROM alpine\nENV LANG="a b" {flag}=0\n', "OFF"),
+        # …and the LEGACY `ENV KEY value` form still sets KEY to the rest of the line.
+        (f"FROM alpine\nENV {flag} 0\n", "OFF"),
+        (f"FROM alpine\nENV {flag} 1\n", "ON"),
+        # ⛔ An EMPTY value is an ASSIGNMENT: `ENV FLAG=` builds an image holding `FLAG=`,
+        # which is falsy. Folding it into "no decision" let an EARLIER `ENV FLAG=1` stand,
+        # so the row published `gate enabled by default: True` over a disarmed image — a
+        # false PASS (measured with `docker build` + `docker run`; fresh review, P1).
+        (f"FROM alpine\nENV {flag}=1\nENV {flag}=\n", "OFF"),
+        (f'FROM alpine\nENV {flag}=1\nENV {flag}=""\n', "OFF"),
+        # ⛔ `ENV OTHER FLAG=1` is the LEGACY form — it sets OTHER to the WHOLE rest of the
+        # line — so the image has no FLAG and harvesting the pair out of it was a false
+        # ARM (measured: `docker run … env` shows `OTHER=TORTOISE_EMBED_GATE=1`, no FLAG).
+        # Docker decides the form from the FIRST word after `ENV`, as here.
+        (f"FROM alpine\nENV OTHER {flag}=1\n", "OFF"),
+    ]
+    for body, expected in cases:
+        (tmp_path / "Dockerfile").write_text(body, encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs(flag)
+        got = shipped["deployment"]["files"]["Dockerfile"]
+        assert got == expected, (body, got, shipped["deployment"])
+    # ⛔ The disarming pair is REPORTED, so a reader can see which line armed and which
+    # disarmed — a verdict without its cause is the `#12549` defect 1 shape.
+    (tmp_path / "Dockerfile").write_text(
+        f"FROM alpine\nENV {flag}=1\nENV LANG=C.UTF-8 {flag}=0\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs(flag)
+    note = _gate_note(shipped)
+    assert flag in note, note
+    assert "OVERRIDES" in note, note
+
+
+def test_12549_an_env_file_interpolated_blank_is_not_a_measured_empty(
+        tmp_path, monkeypatch):
+    """⛔ A blank from `env_file:` is NOT a literal `""`, so it must not be published as one.
+
+    `--no-interpolate` leaves `env_file:` UNEXPANDED, so a key that reaches the model
+    through it has no declaration to inspect — and "no declaration" was read as "the
+    file fixes a literal `''`", publishing the cause *"OVERRIDES an inherited value"*
+    for a file that actually defers to a variable compose interpolates from the
+    environment it runs in (`env_file` holding `FLAG=${MISSING}`; measured — compose
+    really does interpolate that file, `FLAG=${HOME}` resolved to the host value). The
+    verdict stays fail-closed either way; what changes is that the run stops claiming a
+    cause it did not measure, which is `#12549` defect 1 one layer in (fresh review,
+    P2).
+    """
+    (tmp_path / "svc.env").write_text(
+        "TORTOISE_EMBED_GATE=${MISSING_VAR}\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    env_file: [svc.env]\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    # Fail closed: never published as a MEASURED empty.
+    assert deployment["files"].get("docker-compose.yml") != "OFF", deployment["files"]
+    note = _gate_note(shipped)
+    # …and the cause it publishes is "could not say", not a literal `''` it never saw.
+    assert "OVERRIDES an inherited value" not in note, note
+    assert "literal" in note or "could not say" in note or "cannot" in note, note
+
+
+# ---------------------------------------------------------------------------
+# Cycle 5 of PR #12902's review: three published CLAIMS that the run did not
+# make. Each test below reds against the pre-fix tool.
+# ---------------------------------------------------------------------------
+
+
+def test_12549_a_FALSE_ARM_bound_is_never_published_as_cannot_see(
+        tmp_path, monkeypatch):
+    """⛔ THE TWO DECLARED BOUNDS FAIL IN OPPOSITE DIRECTIONS (`#12978`).
+
+    A `cannot_see` clause is an UNDER-report: "this named shape was not measured", which
+    a reader can trust as an absence. The Dockerfile reader has no `FROM`/stage model, so
+    a builder-stage-only `ENV` in a multi-stage build is not *missed* — it is read as the
+    file's value and the file reads **ON** while the image ships without it:
+
+        $ docker build -q -t mstage . && docker run --rm mstage       # FROM alpine AS builder
+        NOFLAG                                                        #   ENV FLAG=1
+        $ flag_in_shipped_configs(...)["deployment"]                  # FROM alpine
+        files={'Dockerfile': 'ON'} on=True armed=['Dockerfile']
+        unmeasured=[] outside=[] indet=[]
+
+    Every bucket but `armed` is empty, so row 1 publishes "armed" and nothing tells the
+    reader a shape went unmeasured — and the earlier text made it WORSE by certifying it
+    as fail-closed under `cannot_see`. The bound therefore gets its own field and its own
+    verb (fresh review, P1; the BEHAVIOUR is `#12978`, this pins only what may be claimed).
+    """
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine AS builder\nENV TORTOISE_EMBED_GATE=1\nFROM alpine\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    dockerfile = next(row for row in shipped["deployment"]["declared_bounds"]
+                      if row["channel"] == "dockerfile")
+    # ⛔ THE PREMISE THE TEXT PUBLISHES, asserted here (fresh review, cycle 2, P2): the
+    # `reads_wrong` clause states a MEASUREMENT — `{'Dockerfile': 'ON'}`, `on: True`,
+    # every other bucket empty. Without this, `#12978` can change the walker and the
+    # bound will keep publishing that sentence as if it had measured it.
+    deployment = shipped["deployment"]
+    assert deployment["files"].get("Dockerfile") == "ON", deployment["files"]
+    assert deployment["on"] is True, deployment["on"]
+    assert deployment["armed"] == ["Dockerfile"], deployment["armed"]
+    assert not deployment["unmeasured"], deployment["unmeasured"]
+    assert not shipped["outside_runtime"], shipped["outside_runtime"]
+    assert not shipped["indeterminate"], shipped["indeterminate"]
+    # The false-ARM shape must NOT be claimed as an under-report…
+    assert "builder-stage" not in dockerfile["cannot_see"], dockerfile
+    # …it must be named, with its direction, its measurement and its tracker.
+    wrong = dockerfile["reads_wrong"]
+    assert "builder-stage-only" in wrong and "MULTI-STAGE" in wrong, dockerfile
+    assert "ARMED" in wrong, wrong
+    assert "#12978" in wrong, wrong
+    assert "stage GRAPH" in wrong, wrong
+    note = probe._declared_bound_note(shipped["deployment"])
+    # TWO VERBS in the published note, or the field is decorative.
+    assert "cannot see" in note and "READS" in note, note
+    assert "builder-stage-only" in note, note
+
+
+def test_12549_a_VALUE_LESS_compose_entry_names_BOTH_directions(
+        tmp_path, monkeypatch):
+    """⛔ A PASS-THROUGH AND AN UNSET ARE DIFFERENT CAUSES, and the entry is both.
+
+    Measured on this box (`docker compose v2`, image with `ENV FLAG=1`,
+    `environment: [FLAG]`):
+
+      * host EXPORTS the flag → compose substitutes the ambient value (`"1"`) — the
+        file supplies nothing, it passes the environment through;
+      * host does NOT → the container is given the variable with no value and the
+        image's `ENV` is **REMOVED** (the container prints nothing for it).
+
+    So "NOT an unset, it is a pass-through" is only half true, and the half it drops is
+    the one that can take an INHERITED arm away — the shape this bucket exists to
+    report. The score is `NOT_ARMED` either way (fail-closed); the CLAIM is what changes
+    (fresh review, P2).
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      - TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    # Fail closed, unchanged by this fix.
+    assert shipped["deployment"]["files"].get("docker-compose.yml") != "ON", shipped
+    note = _gate_note(shipped)
+    scope_reason = " ".join(
+        scope.get("reason", "")
+        for scope in shipped["deployment"]["resolved"].values()
+        for scope in (scope.get("scopes") or {}).values())
+    # ⛔ ASSERTED PER SURFACE, never over a concatenation (fresh review, cycle 2, P2,
+    # measured): the identical phrases live in `per_file_scope_note`, so reverting only
+    # the per-scope `reason` left a joined assertion GREEN. One carrier may not mask
+    # another.
+    for surface, text in (("scope reason", scope_reason), ("per-file note", note)):
+        assert "passes the ambient value through" in text, (surface, text)
+        # …and the CLEARING half, which the previous text denied outright.
+        assert "CLEARS an inherited one" in text, (surface, text)
+
+
+def test_12549_a_REFUSED_resolver_is_never_published_as_having_ANSWERED(
+        tmp_path, monkeypatch):
+    """⛔ "ANSWERED" MEANS IT SUCCEEDED — a resolver that exits 1 did not answer.
+
+    `_compose_channel`/`_fly_channel` set `resolver` on their FAILURE returns too, and
+    the note filtered on `resolver` alone, so a malformed compose file published
+
+        … answered for THIS tree by: compose=docker compose -f … config --format json
+
+    in the SAME string as `CHANNEL UNRESOLVED — … exited 1: yaml: line 3 …`. A note that
+    names a resolver as having answered a question it refused is a claim the run did not
+    make — the defect class `flag_in_shipped_configs` exists to police, one layer in
+    (fresh review, P2).
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n\timage: [unclosed\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    # The resolver really did refuse, so the case is the one it claims to be.
+    compose = next(reading for reading in deployment["resolved"].values()
+                   if reading.get("channel") == "compose")
+    assert compose.get("ok") is False, compose
+    note = probe._channel_reader_note(deployment)
+    assert "answered for THIS tree by: compose=" not in note, note
+    assert "REFUSED" in note, note
+    # ⛔ AND A RESOLVER THAT EXITED 0 IS NOT A REFUSAL (fresh review, cycle 2, P2). The
+    # `ok is False` branches also cover "printed no model", an unparseable model and a
+    # non-dict `services` — in every one the RESOLVER did its job and the WALK named the
+    # reason, so publishing "REFUSED" would be a claim wider than the measurement.
+    monkeypatch.setattr(probe, "_run_config_resolver",
+                        lambda *a, **k: {"ok": True, "stdout": "", "stderr": "",
+                                         "argv": ["docker"], "reason": None})
+    shipped_unreadable = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    unreadable_note = probe._channel_reader_note(shipped_unreadable["deployment"])
+    assert "REFUSED" not in unreadable_note, unreadable_note
+    assert "UNREADABLE OUTPUT" in unreadable_note, unreadable_note
+    assert "answered for THIS tree by: compose=" not in unreadable_note, unreadable_note

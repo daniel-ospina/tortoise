@@ -78,20 +78,29 @@ class TestDe2e7:
         assert calls, "gh runner must be invoked for the issue body + deps"
 
     def test_phase4_tools_registered(self):
-        from tortoise.tool_registry import TOOL_REGISTRY
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
         names = {t.name for t in TOOL_REGISTRY}
-        phase4 = {"tortoise_mine_conversations", "tortoise_review_link_candidates",
-                  "tortoise_approve_merge", "tortoise_promote_point",
-                  "tortoise_check_confidence"}
+        # #4282 Phase 2: `tortoise_promote_point` retired into the
+        # `tortoise_refresh_confidence` container (scope='promote', point_id=...)
+        # — the capability is what this pin follows, not the surface shape.
+        # #11609 Phase 2 retired `tortoise_list_dedup_candidates` and
+        # `tortoise_belief_timeline` into the containers named here, by the same
+        # idiom; the pin moves with the doors rather than being dropped (the SDK
+        # methods `promote_point` and `belief_timeline` themselves are still live
+        # and are driven below through their #3883 shims).
+        phase4 = {"tortoise_mine_conversations", "tortoise_approve_merge",
+                  "tortoise_review_link_candidates", "tortoise_check_confidence",
+                  "tortoise_refresh_confidence"}
         assert phase4 <= names, phase4 - names
         by_name = {t.name: t for t in TOOL_REGISTRY}
-        assert by_name["tortoise_promote_point"].sdk_method == "promote_point"
-        # #11609 Phase 2 retired `tortoise_list_dedup_candidates` and
-        # `tortoise_belief_timeline` into the containers named here; the pin moves
-        # with the doors rather than being dropped (the SDK method
-        # `belief_timeline` itself is still live and is driven below).
+        assert "scope='promote'" in by_name["tortoise_refresh_confidence"].description
         assert by_name["tortoise_review_link_candidates"].sdk_method == "review_link_candidates"
         assert by_name["tortoise_check_confidence"].sdk_method == "check_confidence"
+        # The retired doors still DRIVE their original SDK methods, which is what
+        # makes each container above the same answer rather than a new capability.
+        retired_by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+        assert retired_by_name["tortoise_promote_point"].sdk_method == "promote_point"
+        assert retired_by_name["tortoise_belief_timeline"].sdk_method == "belief_timeline"
 
     def test_mcp_handler_error_contract(self, monkeypatch):
         """J-6: handlers return {error: message} on failure — the REAL SDK

@@ -210,13 +210,13 @@ class TestUpdateEntityRefuses:
     def test_update_entity_refuses_and_writes_nothing(self, sdk, kwargs):
         p = sdk.create_point("statement", "Victim", status="live")
         with pytest.raises(ValueError, match="pointKind must be an identifier"):
-            sdk.update_entity(p["id"], **kwargs)
+            sdk.update_knowledge(p["id"], **kwargs)
         assert _kinds_in_graph(sdk, p["id"]) == ["statement"]
         assert sdk._uncalibrated_ep_participants(None) == [p["id"]]
 
     def test_update_entity_still_writes_a_clean_kind(self, sdk):
         p = sdk.create_point("statement", "Victim", status="live")
-        sdk.update_entity(p["id"], pointKind="observation")
+        sdk.update_knowledge(p["id"], pointKind="observation")
         assert _kinds_in_graph(sdk, p["id"]) == ["observation"]
 
     def test_the_refusal_is_ATOMIC_with_the_status_write_of_the_same_call(
@@ -244,7 +244,7 @@ class TestUpdateEntityRefuses:
                       if e.get("type") == "EntityMutated"]
             with pytest.raises(ValueError,
                                match="pointKind must be an identifier"):
-                sdk.update_entity(p["id"], status="live",
+                sdk.update_knowledge(p["id"], status="live",
                                   point_kind="\u2003statement\u2003")
             assert sdk.get_point(p["id"])["status"] == "draft", (
                 "the REFUSED call had already committed the status change")
@@ -288,7 +288,7 @@ class TestUpdateEntityRefuses:
         and still CLOSED on a real ``:Point`` (the test above).
         """
         obj = sdk.create_object("Thing", props={"point_kind": "statement\u200b"})
-        sdk.update_entity(obj["id"], point_kind="statement\u200b")
+        sdk.update_knowledge(obj["id"], point_kind="statement\u200b")
         assert obj["id"]
 
     @pytest.mark.parametrize("value", [None, 42, ["statement"]])
@@ -304,7 +304,7 @@ class TestUpdateEntityRefuses:
         whole-bundle ``BundleValidationError``.
         """
         obj = sdk.create_object("Thing")
-        sdk.update_entity(obj["id"], point_kind=value)
+        sdk.update_knowledge(obj["id"], point_kind=value)
         assert obj["id"]
         # …and Phase 1 agrees with the writer on the props spelling.
         violations = sdk._validate_bundle({"points": [

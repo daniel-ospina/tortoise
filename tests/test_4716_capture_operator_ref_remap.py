@@ -191,7 +191,7 @@ def test_capture_commit_remaps_pt_supersession_ref(sdk, monkeypatch):
     """The adjacent hole, answered by analysis and fixed here: a supersession
     record's ``supersedes_by`` is the NEW payload point's ``pt_<sha>`` id, so
     it shares the operators' two-id-space hole. Unremapped, the CORRECTS fold
-    is lost the same way the operators are — ``sdk.supersede(prior,
+    is lost the same way the operators are — ``sdk.supersede_knowledge(prior,
     '<payload id>')`` targets a node that does not exist, RAISES, and
     ``apply_supersessions`` swallows it as ``point supersede '<prior>' →
     '<payload id>' failed: …``; remapped, the fold lands on the resolved

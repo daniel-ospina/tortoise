@@ -133,15 +133,25 @@ class TestTheRiskAxis:
         #   (47 read + 3 maintenance -> 46 read + 2 maintenance). The other two left the
         #   writing side: `tortoise_backfill_v25` (destructive) and `tortoise_pack_install`
         #   (admin).
-        #   #11609 Phase 2 (this branch) — nine READ/QUERY doors RETIRED-FORWARD, so they
-        #   stay in `served()` as shims (no served-count move), while the FIVE containers
-        #   they retired into are NEW entries: 91 -> 96 served, and the reading-eligible
+        #   #11609 Phase 2's READ/QUERY wave — nine doors RETIRED-FORWARD, so they stay in
+        #   `served()` as shims (no served-count move), while the FIVE containers they
+        #   retired into are NEW entries: 91 -> 96 served, and the reading-eligible
         #   population 48 -> 53. Their tiers, measured from the registry: three are
         #   `maintenance` (`tortoise_check_confidence`, `tortoise_list_knowledge`,
         #   `tortoise_search_knowledge`) and two are `read`
         #   (`tortoise_explore_connections`, `tortoise_review_link_candidates`).
+        #   #11609 Phase 2's WRITE/MUTATE wave — FOURTEEN doors into SIX containers. That
+        #   does NOT shrink the SERVED census either: a retired door stays SERVED as a shim
+        #   (`RETIRED_TOOL_REGISTRY`), and `served()` is live + retired by definition. Its
+        #   live half moves 64 -> 56 (64 - 14 retired + 6 containers) and its retired half
+        #   32 -> 46 (32 + 14), so 96 -> 102 = 96 + 6 — exactly the six containers, which is
+        #   the arithmetic a reader can check against the two registry lengths (56 live +
+        #   46 retired shims).
+        #   The READING population is unchanged at 53 (48 read + 5 maintenance): none of the
+        #   six containers reads — four are `destructive` and two are `write` — so this
+        #   batch redistributes the WRITING census only and leaves this one alone.
         assert len(reading) == 53, sorted(reading)   # 48 read + 5 maintenance
-        assert len(served()) == 96, sorted(e.name for e in served())
+        assert len(served()) == 102, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
@@ -187,6 +197,15 @@ class TestTheRiskAxis:
             "tortoise_supersede", "tortoise_invalidate", "tortoise_promote_point",
             # whole-graph rewrites
             "tortoise_dream",
+            # #11609 Phase 2 containers — each carries the tier of the writer it IS, and
+            # each inherits the confirmation its retired doors carried: `update_knowledge`
+            # overwrites user-authored props (`update_point`/`update_entity`),
+            # `supersede_knowledge` moves every edge off the old point (`supersede`),
+            # `adjust_relationship` re-runs `update_point` + `set_point_baseline` on its
+            # mitigate path (`mitigate_operator`/`operator_action`), and
+            # `refresh_confidence` rewrites stored confidence graph-wide (`dream`).
+            "tortoise_update_knowledge", "tortoise_supersede_knowledge",
+            "tortoise_adjust_relationship", "tortoise_refresh_confidence",
             # bulk re-ingest that rewrites an existing corpus' stored rows
             "tortoise_index_files", "tortoise_ingest_corpus",
             "tortoise_index_sessions", "tortoise_mine_conversations",
@@ -236,6 +255,11 @@ class TestTheRiskAxis:
             "tortoise_ingest",
             "tortoise_onboarding_github_index",
             "tortoise_session_capture",
+            # #11609 Phase 2 containers — additive in the same sense as the rows above:
+            # `write_question` appends a question row (`create_point` family) and
+            # `record_decision` appends a decision row (`file_decision`), and neither
+            # rewrites a row the call did not name.
+            "tortoise_write_question", "tortoise_record_decision",
         }, sorted(writes)
 
     def test_the_maintenance_tier_is_exactly_the_ruling(self):
@@ -434,7 +458,13 @@ class TestHintsCannotDrift:
         # 45 -> 43: #11609 batch 1 removed two more writing tools, both ARCHIVED rather
         # than retired-forward (`tortoise_backfill_v25` (destructive) and
         # `tortoise_pack_install` (admin)).
-        assert len(expected) == 43, sorted(expected)  # census, hard-coded
+        # 43 -> 49: #11609 Phase 2 +6 — the six containers are all writing-tier, and the
+        # fourteen doors they absorb are NOT subtracted because a retired door stays
+        # SERVED and keeps its tier: destructive 24 -> 28 (+4: `update_knowledge`,
+        # `supersede_knowledge`, `adjust_relationship`, `refresh_confidence`), write
+        # 15 -> 17 (+2: `write_question`, `record_decision`), admin unchanged at 4.
+        # 28 + 17 + 4 = 49, which is the measured `len(expected)`.
+        assert len(expected) == 49, sorted(expected)  # census, hard-coded
 
 
 class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
@@ -487,12 +517,20 @@ class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
                 found.append(entry)
         return found
 
-    def test_the_enumeration_finds_both_doors_to_the_same_writer(self):
+    def test_the_enumeration_finds_every_door_to_the_same_writer(self):
         """Pinned by name so the enumeration cannot silently collapse to empty
-        and make the property below vacuously true."""
+        and make the property below vacuously true.
+
+        Renamed from `…both_doors…` by #11609 Phase 2: the ENUMERATION found a
+        THIRD door when the container shipped, which is the enumeration working as
+        designed — `tortoise_adjust_relationship`'s handler reaches
+        `mitigate_operator` on its reason=/strength=/credibility= arm. Pinning the
+        new door here is what keeps the property below covering it.
+        """
         assert {e.name for e in self.mitigation_writers()} == {
             "tortoise_mitigate_operator",   # the direct binding
             "tortoise_operator_action",     # handler-served, same writer
+            "tortoise_adjust_relationship",  # handler-served, same writer (#11609 P2)
         }
 
     def test_no_door_to_the_mitigation_write_claims_unqualified_idempotence(self):

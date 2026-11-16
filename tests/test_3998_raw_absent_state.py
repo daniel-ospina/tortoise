@@ -849,17 +849,17 @@ def test_the_generic_entity_route_cannot_reach_a_source_with_a_payload(sdk):
     # guard (a different message than the closed-surface one below).
     for key in ("content", "objectKind"):
         with pytest.raises(ValueError, match="retired field"):
-            s.update_entity(RAW_URL, **{key: body})
+            s.update_knowledge(RAW_URL, **{key: body})
     for key in ("text", "transcript", "body"):
         with pytest.raises(ValueError, match="cannot be set on a :Source"):
-            s.update_entity(RAW_URL, **{key: body})
+            s.update_knowledge(RAW_URL, **{key: body})
     props = _source_props(s)
     assert "content" not in props and "objectKind" not in props, (
         "the generic entity route carried a retired field")
     assert body not in repr(props), "the generic entity route carried the payload"
     assert set(props) <= ALLOWED_SOURCE_NODE_PROPS
     # A DECLARED property is still updatable through the same route.
-    s.update_entity(RAW_URL, format="transcript")
+    s.update_knowledge(RAW_URL, format="transcript")
     assert _source_props(s)["format"] == "transcript"
 
 
@@ -1187,12 +1187,12 @@ def test_the_generic_route_cannot_clear_or_forge_the_absent_state(sdk):
 
     # The CLEAR: without the server-managed guard this reads back as `present`.
     with pytest.raises(ValueError, match="server-managed"):
-        s.update_entity(RAW_URL, rawState=None)
+        s.update_knowledge(RAW_URL, rawState=None)
     assert _raw(s)["raw_state"] == RAW_DELETED, "the tenant route cleared the absence"
 
     # The FORGERY: an unvalidated value must not be persistable either.
     with pytest.raises(ValueError, match="server-managed"):
-        s.update_entity(RAW_URL, rawState="banana")
+        s.update_knowledge(RAW_URL, rawState="banana")
     assert _raw(s)["raw_state"] == RAW_DELETED
     assert "banana" not in repr(_source_props(s))
 
@@ -1321,9 +1321,9 @@ def test_a_url_only_source_stub_is_guarded_like_any_other_source(sdk):
     assert stubs and stubs[0][0] is None, "the fixture node is not an id-less stub"
 
     with pytest.raises(ValueError, match="retired field"):
-        s.update_entity(RAW_URL, content=body)
+        s.update_knowledge(RAW_URL, content=body)
     with pytest.raises(ValueError, match="cannot be set on a :Source"):
-        s.update_entity(RAW_URL, text=body)
+        s.update_knowledge(RAW_URL, text=body)
 
     after = dict(s._get_proj().g.query(
         "MATCH (n:Source {url:$u}) RETURN properties(n)", params={"u": RAW_URL}
@@ -1437,7 +1437,7 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
     s, events = sdk
     s.create_source(RAW_URL, "document", contentHash="h1")
     with pytest.raises(ValueError, match="server-managed"):
-        s.update_entity(RAW_URL, __runId="TENANT_FORGED")
+        s.update_knowledge(RAW_URL, __runId="TENANT_FORGED")
     # The two routes the entity-update guard does NOT cover (#5196 round 4, P1):
     # the open DOCUMENT passthrough (#228), and the ingest bundle — `entities`
     # items are splatted into `create_document(**item)`.
@@ -1490,7 +1490,7 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
     assert _source_props(s).get("__runId") != "TENANT_FORGED", (
         "a forged merge-run token survived the rebuild")
     # The contrast: the route still accepts a DECLARED property.
-    s.update_entity(RAW_URL, format="transcript")
+    s.update_knowledge(RAW_URL, format="transcript")
     assert _source_props(s)["format"] == "transcript"
 
 
@@ -1571,7 +1571,7 @@ def test_the_declaration_covers_an_id_less_source_stub(sdk):
     assert stubs and stubs[0][0] is None, "the fixture node is not an id-less stub"
     # A declared key: must NOT be refused (previously it raised, describing a
     # node the write could not reach).
-    s.update_entity(RAW_URL, format="transcript")
+    s.update_knowledge(RAW_URL, format="transcript")
 
 
 
@@ -1742,7 +1742,7 @@ def test_a_url_only_stub_that_collides_with_a_point_id_still_guards_the_write(sd
         "url-only shape this test exists to pin")
     # A DECLARED field is still writable, and this asserts the measurement the
     # correction above rests on — that the write reaches the colliding stub.
-    s.update_entity(pid, format="transcript")
+    s.update_knowledge(pid, format="transcript")
     assert s._get_proj().g.query(
         "MATCH (s:Source {url:$u}) RETURN s.format", params={"u": pid}
     ).result_set[0][0] == "transcript", (
@@ -1752,7 +1752,7 @@ def test_a_url_only_stub_that_collides_with_a_point_id_still_guards_the_write(sd
     # A D10-retired field IS refused, because the write would put it on the
     # `:Source` above — ruling B applies to every `:Source` the write reaches.
     with pytest.raises(ValueError, match="retired field"):
-        s.update_entity(pid, content="edited point A content")
+        s.update_knowledge(pid, content="edited point A content")
 
 def test_provenance_reads_do_not_raise_and_invent_no_raw_for_a_sourceless_point(sdk):
     """Criterion (2), on the SURVIVING read door: `provenance()` returns a VALUE.

@@ -210,7 +210,7 @@ class TestDigestKeepsSdkDecisionShapes:
         """A file_decision() call leaves its 'Decision: …' point AND its
         'Option N: …' rows in session recent_points (pre-fix the decision
         point was filtered as rule noise; only options/evidence survived)."""
-        res = sdk.file_decision(
+        res = sdk.write_question(
             ["adopt FalkorDB as the primary graph store",
              "keep the current store"],
             ["FalkorDB survives the 10k-node benchmark",
@@ -234,7 +234,7 @@ class TestDigestKeepsSdkDecisionShapes:
         claim = sdk.create_point("decision", "ship the scanner build to internal testing")
         subj = sdk.create_subject("daniel", "engineer")
         doc = sdk.create_document("scanner-release-2.4.1", "artifact")
-        res = sdk.file_human_approval(
+        res = sdk.record_decision(
             approver_id=subj["id"],
             artifact_id=doc["id"],
             point_ids=[claim["id"]],
@@ -275,7 +275,7 @@ class TestDigestKeepsSdkDecisionShapes:
     def test_rule_noise_still_filtered_beside_decision_shapes(self, sdk):
         """The #2207 filter keeps working: rule/config residue created in
         the SAME graph as decision shapes never reaches the digest."""
-        sdk.file_decision(["adopt YAML"], ["schemas validate"], choice=0)
+        sdk.write_question(["adopt YAML"], ["schemas validate"], choice=0)
         for content in ("---", "*Gate: filed as child issue via `issue-creation`.",
                         "| Trigger | Must invoke |", "model: gpt-5",
                         "TORTOISE_DB_URI: docker://:x@localhost:6379/t",

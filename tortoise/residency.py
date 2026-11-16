@@ -50,6 +50,20 @@ must not re-implement the classifier.
 ``TORTOISE_RESIDENCY`` (the #4097 truthy contract); unset or ``0`` leaves every
 response byte-identical, and the read path never issues the declaration query
 at all.
+
+⚠️ ONE EXCEPTION, and it is the RECORD-SERVE seam's, not this flag's (#12941).
+When ``TORTOISE_RECORD_SERVE`` is ARMED, an empty read the truth store could not
+answer carries ``residency: "not-hot"`` — emitted by
+``record_serve.ServedAnswer.absent_wire`` and the SDK's
+``get_point(served_out=…)`` WITHOUT reading this flag, because there the verdict
+is not this marker's guess about a partial store: it is a fact about which store
+was asked, and ``record_serve.RECORD_ANSWERED_REASONS`` is what separates it from
+an established absence. That is #7952's load-bearing rule — *a cache miss must
+say ``not-hot``, never return empty* — and gating it on a SECOND flag would make
+an armed deployment report a false absence whenever an operator armed one switch
+and not the other. So the sentence above is exactly true of this module's own
+emission path (the search read: ``mark_residency`` / ``read_declaration``) and is
+not a claim about the record-serve seam.
 """
 from __future__ import annotations
 

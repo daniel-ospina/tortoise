@@ -143,7 +143,7 @@ def test_update_entity_point_branch_warns(sdk, caplog):
     caplog.clear()
 
     with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
-        sdk.update_entity(pid, name=_TITLE)
+        sdk.update_knowledge(pid, name=_TITLE)
 
     advisories = _advisories(caplog)
     assert len(advisories) == 1, advisories
@@ -187,7 +187,7 @@ def test_update_entity_on_a_non_point_does_not_warn(sdk, caplog):
     caplog.clear()
 
     with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
-        sdk.update_entity(subject["id"], name="10122 subject renamed")
+        sdk.update_knowledge(subject["id"], name="10122 subject renamed")
 
     assert _advisories(caplog) == []
 
@@ -196,7 +196,7 @@ def test_update_entity_miss_does_not_warn(sdk, caplog):
     """A write that matched nothing stored no name — ``update_entity``'s own
     rule for its rename warning ("must not cry wolf"), applied to this one."""
     with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
-        sdk.update_entity("no-such-id-10122", name=_TITLE)
+        sdk.update_knowledge("no-such-id-10122", name=_TITLE)
 
     assert _advisories(caplog) == []
 
