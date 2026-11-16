@@ -195,7 +195,19 @@ _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s
 _SHELL_OPENERS = re.compile(
     r"^\s*(?:if|while|until|for|case|select)\b|\bdo\s*$|\{\s*$|\(\s*$"
 )
-_SHELL_CLOSERS = re.compile(r"^\s*(?:fi|done|esac)\b|^\s*\}\s*$|^\s*\)\s*$")
+#: ⛔ A closer may follow a STATEMENT SEPARATOR on the same line (review P1, measured). The model
+#: was line-anchored, so a one-line `if [ -n "$X" ]; then echo hi; fi` opened a block and never
+#: closed it — the depth then leaked UP and any later top-level `export` was read as nested and
+#: refused. The repo's own `entrypoint.sh` carries nine such one-liners, so an honest `=1` file
+#: was one appended export from a red. A brace closer may also carry a redirect (`} >&2`).
+_SHELL_CLOSERS = re.compile(
+    r"(?:^|[;&|])\s*(?:fi|done|esac)\b|^\s*\}\s*(?:[0-9]*>&[0-9]+)?\s*$|^\s*\)\s*$"
+)
+#: A heredoc opener: `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"`. Its BODY is data, not shell
+#: (review P1, measured): scanning the body let a `fi`/`done`/`esac` at line start inside it close
+#: the ENCLOSING block, so an `export` in a branch that never runs was credited `STATED` and the
+#: gate exited 0 over an unarmed process. `(?<!<)` keeps `<<<` (here-string) out.
+_SHELL_HEREDOC = re.compile(r"(?<!<)<<-?\s*(?P<q>['\"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=q)")
 _SHELL_TERMINATES = re.compile(r"^\s*(?:exit|exec)\b")
 #: Two ways a LATER line takes an earlier `export K=1` back, both of which must drop the literal
 #: from `stated` — Docker and the shell are last-assignment-wins, and `stated` outranks `ambiguous`
@@ -558,6 +570,33 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str], dict[str, str]
     return stated, ambiguous, shadowed
 
 
+def _shell_code_lines(text: str) -> list[str]:
+    """``text``'s logical lines with every HEREDOC BODY removed (review P1).
+
+    A heredoc body is DATA the script writes out, not a statement it runs, so it must not be read
+    as shell. Scanning it was a measured fail-OPEN: a ``fi``/``done``/``esac`` at line start
+    inside the body closed the enclosing block, the depth leaked down, and an ``export`` in a
+    branch that never runs was credited ``STATED`` — the gate then exited 0 over an unarmed
+    process. ``entrypoint.sh`` already opens a ``<<'PY'`` body, and writing a config snippet from
+    a heredoc is an ordinary entrypoint job, so the shape is not contrived.
+
+    A heredoc whose delimiter never appears swallows the rest of the file: the script is
+    incomplete shell, and crediting nothing from it is the fail-CLOSED direction (the channel is
+    then refused for not stating the switches rather than passing on a body nobody executes).
+    """
+    out: list[str] = []
+    pending: list[str] = []
+    for line in _logical_lines(text):
+        if pending:
+            if line.strip() == pending[0]:
+                pending.pop(0)
+            continue
+        out.append(line)
+        for match in _SHELL_HEREDOC.finditer(line):
+            pending.append(match.group("delim"))
+    return out
+
+
 def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     """Assignments an entrypoint script exports at TOP LEVEL (last wins) + ambiguous switch names.
 
@@ -571,8 +610,8 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     ambiguous: set[str] = set()
     depth = 0
     terminated = False
-    for line in _logical_lines(text):
-        if _SHELL_CLOSERS.match(line):
+    for line in _shell_code_lines(text):
+        if _SHELL_CLOSERS.search(line):
             depth = max(0, depth - 1)
             ambiguous.update(_mentioned_switches(line))
             continue
@@ -595,14 +634,21 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
         unset = _SHELL_UNSET.match(line)
         if unset:
             for name in unset.group("names").split():
-                if name in SWITCHES:
+                if name in SWITCHES and not conditional:
+                    # ⛔ A NESTED `unset` neither credits nor retracts (review P2, measured). These
+                    # two branches ran before, and ignored, the `conditional` guard, so a helper's
+                    # local `unset K` retracted a TOP-LEVEL `export K=1` the process does receive
+                    # — a false refusal of an honest config.
                     ambiguous.add(name)
                     stated.pop(name, None)
             continue
         unexported = _SHELL_UNEXPORTED.match(line)
         if unexported and unexported.group("key") in SWITCHES:
-            ambiguous.add(unexported.group("key"))
-            stated.pop(unexported.group("key"), None)
+            # Same rule, same reason: only a TOP-LEVEL bare assignment is a statement about what
+            # the process gets.
+            if not conditional:
+                ambiguous.add(unexported.group("key"))
+                stated.pop(unexported.group("key"), None)
             continue
         if _SHELL_EXPORT_NAME.match(line):
             continue  # `export NAME` states no value; not an arm

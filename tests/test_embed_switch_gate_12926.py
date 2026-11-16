@@ -910,6 +910,107 @@ def test_a_heredoc_body_is_data_not_instructions():
     assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
 
 
+def test_a_heredoc_body_is_not_SHELL_either(tmp_path):
+    """Review P1 at `04dc33c1f3` — the shell reader had no heredoc model at all.
+
+    The Dockerfile reader was given one (see the test above), but `_shell_assignments` still
+    scanned the body as shell. A `fi`/`done`/`esac` at line start INSIDE the body then closed the
+    ENCLOSING block, the depth leaked DOWN, and an `export` in a branch that never runs was
+    credited `STATED`. Measured end-to-end: the gate printed `ok entrypoint.sh …` and exited 0
+    over a process that receives neither switch.
+
+    Not contrived: `entrypoint.sh:1124` already opens a `<<'PY'` body, and writing a config
+    snippet from a heredoc is an ordinary entrypoint job.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        'if [ -z "$X" ]; then\n'
+        "cat > /tmp/x <<EOF\n"
+        "fi\n"
+        "EOF\n"
+        "  export TORTOISE_VALUE_GATE=1\n"
+        "  export TORTOISE_EMBED_GATE=1\n"
+        "fi\n"
+    )
+    assert stated == {}, (
+        f"an export inside an untaken branch was credited STATED because a `fi` in the heredoc "
+        f"body closed the enclosing block: {stated}"
+    )
+    assert "TORTOISE_VALUE_GATE" in ambiguous and "TORTOISE_EMBED_GATE" in ambiguous, ambiguous
+
+    # ...and a heredoc's body does not swallow the statements AFTER it: the shipped shape
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        "cat > /tmp/x <<'PY'\n"
+        "print('hi')\n"
+        "PY\n"
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert ambiguous == set(), ambiguous
+
+    # a here-string (`<<<`) is NOT a heredoc opener — it must not eat the rest of the file
+    stated, _ = gate._shell_assignments(
+        "#!/bin/sh\n"
+        'cat <<< "$X"\n'
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+
+
+def test_a_one_line_compound_statement_does_not_leak_depth_up():
+    """Review P2 at `04dc33c1f3` — a closer after a statement separator is still a closer.
+
+    `_SHELL_CLOSERS` was line-anchored while `_SHELL_OPENERS` matches at line start, so
+    `if …; then …; fi` on ONE line opened a block and never closed it. The depth then leaked UP and
+    every later top-level `export` was read as nested and REFUSED — a false block on an honest
+    file. `entrypoint.sh` carries nine such one-liners (`:573 :723 :884 :933 :991 :993 :994 :1007`
+    and the `for …; done` at `:809`), so this was one appended export away from a red.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        'if [ -n "$X" ]; then echo hi; fi\n'
+        "for f in a b; do echo $f; done\n"
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"a one-line compound statement left the depth open, so an honest top-level export was "
+        f"refused as nested: {stated} / {ambiguous}"
+    )
+    assert ambiguous == set(), ambiguous
+
+    # the multi-line form still nests: an export inside it is conditional, not a statement
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        "if [ -n \"$X\" ]; then\n"
+        "  export TORTOISE_VALUE_GATE=1\n"
+        "fi\n"
+    )
+    assert stated == {}, stated
+    assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
+
+
+def test_a_NESTED_unset_neither_credits_nor_retracts():
+    """Review P2 at `04dc33c1f3` — these two branches ignored the `conditional` guard.
+
+    A helper's local `unset K` / bare `K=` retracted a TOP-LEVEL `export K=1` that the process
+    does receive, so an honest config was refused. The test above pins the TOP-LEVEL direction
+    (where last-wins really does retract); this one pins the nested direction, which must not.
+    """
+    for tail in (
+        "helper() {\n  TORTOISE_EMBED_GATE=\n}\n",
+        "helper() {\n  unset TORTOISE_EMBED_GATE\n}\n",
+    ):
+        stated, ambiguous = gate._shell_assignments(
+            "#!/bin/sh\nexport TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n" + tail
+        )
+        assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (tail, stated)
+        assert ambiguous == set(), (tail, ambiguous)
+
+
 # ── the PROCESS VERDICT — the only thing CI consumes ────────────────────────────────────────
 
 
