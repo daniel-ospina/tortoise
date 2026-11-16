@@ -106,13 +106,18 @@ eats. `seed --journal` refuses in this state (`SEED_SQL` requires
 (`GREATEST(cursor_row.seq, EXCLUDED.seq)` is monotone), so `--enumerated-floor` is
 not a remedy — it only lets the seed RUN. The remedy is to restore the journal, so
 its enumeration reaches the counter again.
-* **a SEALED journal** is a third case with neither property, and it is why the seal
-is a gated operator transition. After a seal `EventLog.append` reports the
-**file-local** index (it restarts at 1) while the counter is per-graph over the
-whole layout, so the guard refuses for `local` 1..`counter` and then *accepts* at
-`local == counter + 1` — writing a row whose number is not the journal's position,
-a silent and permanent split of the two coordinates the guard exists to keep.
-Re-seed from a segment-aware count; never drive-and-watch.
+* **a SEALED journal** is a third case and is *strictly worse* than either, which is
+why the seal is a gated operator transition. After a seal `EventLog.append` reports
+the **file-local** index (it restarts at 1) while the counter is per-graph over the
+whole layout, so the guard refuses for `local` 1..`counter` — and every one of those
+appends already committed its journal line and writes no row, so it **eats `counter`
+records**, more than the behind case's `counter - floor` — then *accepts* at
+`local == counter + 1`, writing a row whose number is not the journal's position: a
+silent and permanent split of the two coordinates the guard exists to keep. **No
+counter value fixes that comparison**, because the two sides are different
+*coordinates* — re-seeding corrects the seed, never the comparison. So the gate is
+procedural: **do not arm across a seal; halt the graph before sealing it.**
+Segment-aware numbering is #13050, not a re-seed.
 
 This is the price of keeping one invariant rather than guessing which side of a
 disagreement is right, and it is a real operational consequence of the design, not

@@ -1530,26 +1530,35 @@ def test_the_armed_door_charges_real_bytes(schema, tenant, app, monkeypatch):
     """The review's P0, driven through the DOOR: the byte meter charged 0 because
     the watermark came from the caller's `first_seq` and matched no row.
 
-    ⛔ A ZERO HERE IS THE DEFECT, not a quiet pass: `written_bytes == 0` is what
-    the pre-fix code reported for every allocated write.
+    ⛔ THE COUNTER IS SEEDED TO A NON-ZERO FLOOR ON PURPOSE. The meter bug is only
+    observable when the ALLOCATED number differs from the watermark the plan would
+    receive without it (`first_seq` is 1 on the allocated arm —
+    `record_writer.py`, `first_seq=(1 if allocate else …)`). With the counter at 0
+    the allocation returns 1, the caller's `seq` is 1, and BOTH watermark sources
+    are 1 — the leg would then stay green with the fix reverted, which is exactly
+    the "a leg that cannot fail" class review cycles 4 and 5 removed from its
+    siblings (#12894 review cycle 7, P2). Seeded at 3 the allocated number is 4
+    while the caller's `seq` is 4 and the plan's watermark would be 1: a reverted
+    meter matches no row at 1 and charges 0.
     """
     org, graph = tenant
-    _seed_and_arm(app, org, graph, 0)
+    _append_positions(schema, org, graph, [1, 2, 3])
+    _seed_and_arm(app, org, graph, 3)
     _arm_door(monkeypatch, flag=True)
 
-    write = rw.write_live_record(RECORD, durable=True, seq=1,
+    write = rw.write_live_record(RECORD, durable=True, seq=4,
                                  tenant=(org, graph))
     assert write is not None and write.applied
+    assert (write.first_seq, write.last_seq) == (4, 4), (
+        "the write did not land at the allocated 4 — the fixture no longer "
+        "makes the allocated number differ from the plan watermark")
     assert write.written_rows >= 1, (
         f"the meter matched no rows for an allocated write: rows="
         f"{write.written_rows} bytes={write.written_bytes}")
     assert write.written_bytes > 0, (
         "the byte meter charged 0 for an allocated write — the watermark is not "
         "the allocated position")
-    # The same discriminator as the flag leg: the row and the byte count are
-    # identical on the enumerated arm, so the counter is what proves the
-    # allocation actually ran (#12894 review cycle 4, P2).
-    assert _counter(schema, org, graph) == (1, "active"), (
+    assert _counter(schema, org, graph) == (4, "active"), (
         "the byte-meter leg did not move the counter — it would pass on the "
         "enumerated arm too")
 

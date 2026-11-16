@@ -2835,16 +2835,19 @@ def write_live_record(record: Mapping[str, Any], *,
         #     EXCLUDED.seq)` is monotone), so `--enumerated-floor` only lets the
         #     SEED RUN — it is not a remedy. The remedy is to RESTORE the journal
         #     so its enumeration reaches the counter again.
-        #   * SEALED (`TORTOISE_JOURNAL_SEGMENTS=1`) is NEITHER, and it must not be
-        #     filed under the bullet above: after a seal `EventLog.append` reports
-        #     the FILE-LOCAL index (it restarts at 1) while the counter is
-        #     per-GRAPH over the whole layout, so the guard refuses for `local`
-        #     1..`counter` and then ACCEPTS at `local == counter + 1`, writing a row
-        #     whose number is NOT the journal's position — a silent, permanent
-        #     split of the two coordinates this guard exists to keep. That is why
-        #     the seal is a GATED operator transition: re-seed from a SEGMENT-AWARE
-        #     count, never drive-and-watch. (Tracked in #13050: the guard cannot
-        #     see the seal from here.)
+        #   * SEALED (`TORTOISE_JOURNAL_SEGMENTS=1`) is STRICTLY WORSE, and it is
+        #     the reason the seal is a gated operator transition. After a seal
+        #     `EventLog.append` reports the FILE-LOCAL index (it restarts at 1)
+        #     while the counter is per-GRAPH over the whole layout, so the guard
+        #     refuses for `local` 1..`counter` — every one of those appends already
+        #     committed its journal line and writes NO row, so it EATS `counter`
+        #     records, more than the behind case's `counter - floor` — and then
+        #     ACCEPTS at `local == counter + 1`, writing a row whose number is NOT
+        #     the journal's position: a silent, permanent split of the two
+        #     coordinates this guard exists to keep. NO counter value fixes that
+        #     comparison, because the two sides are different COORDINATES, so the
+        #     gate is procedural: ⛔ DO NOT ARM ACROSS A SEAL — halt the graph
+        #     before sealing it. Segment-aware numbering is #13050, not a re-seed.
         #
         # That is the price of keeping one invariant — the line and its row carry
         # the same number — instead of guessing which side is right.
@@ -2884,15 +2887,18 @@ def write_live_record(record: Mapping[str, Any], *,
                     "SILENTLY LOSES ITS ROW; `seed --journal` refuses there and "
                     "a re-seed cannot lower the counter, so RESTORE THE "
                     "JOURNAL (`--enumerated-floor` only lets the seed run, it is "
-                    "not a remedy). A SEALED journal is a THIRD case and neither "
-                    "of the above: `status --journal` REFUSES a segmented layout "
-                    "by design (it will not half-count one), and measuring the "
-                    "layout total with `journal_segments.read_all_segments` and "
-                    "passing it as `--enumerated-floor N` corrects the SEED, not "
-                    "the comparison — the append's number stays FILE-LOCAL while "
-                    "the counter is per-graph, so the guard later ACCEPTS at "
-                    "`local == counter + 1` and writes a MIS-numbered row. A seal "
-                    "is a gated operator transition; tracked in #13050. "
+                    "not a remedy). A SEALED journal is a THIRD case and is "
+                    "STRICTLY WORSE than either: `status --journal` REFUSES a "
+                    "segmented layout by design (it will not half-count one), and "
+                    "measuring the layout total with "
+                    "`journal_segments.read_all_segments` and passing it as "
+                    "`--enumerated-floor N` corrects the SEED, not the "
+                    "comparison, because the append's number stays FILE-LOCAL "
+                    "while the counter is per-graph. So it EATS `counter` records' "
+                    "rows and then ACCEPTS at `local == counter + 1` with a "
+                    "MIS-numbered row. NO counter value fixes that — the gate is "
+                    "procedural: do not arm across a seal, halt the graph first "
+                    "(#13050 owns segment-aware numbering). "
                     "record=%s %s",
                     seq, allocated_first, record.get("type"),
                     _record_identity(record),
