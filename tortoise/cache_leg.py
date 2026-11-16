@@ -152,6 +152,17 @@ def cache_leg_reason(*, cache_uri: str | None) -> str | None:
     ``cache_uri`` is the SDK's resolved ``TORTOISE_DB_URI`` — the value that
     decided host-vs-embedded one line earlier. A falsy value means embedded.
 
+    ⚠️ **A truthy ``cache_uri`` is PRESENCE, not LOCALITY — the one split this
+    predicate cannot see.** A deployment with a shared Postgres and
+    ``TORTOISE_DB_URI=redis://localhost:6379`` (a sidecar, a per-container cache,
+    a single-node Redis on the same host) IS the split #12943 measured, and it
+    reports ``None`` here: something names a cache, and nothing in a constructor
+    can tell whether the server behind it is shared with the record. Named rather
+    than silently over-trusted — narrowing it (treating a loopback/sidecar cache
+    host as the split shape) is its own decision, because a genuinely
+    single-tenant self-host runs both stores on ONE box and must keep reading
+    ``None``.
+
     Returns :data:`CACHE_NOT_SHARED` for the split shape and ``None`` for every
     coherent one, including the three that must keep working unchanged: an
     unarmed record (#7722's onboarding lane), a declared single-tenant
@@ -213,5 +224,5 @@ def note_local_cache(*, cache_uri: str | None,
                 cache_path,
             )
         return reason
-    except Exception:  # noqa: BLE001 — observability must never deny the caller
+    except Exception:
         return None

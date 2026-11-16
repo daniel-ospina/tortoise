@@ -20,12 +20,15 @@ Three knobs make the second arm expressible:
   meaningful when `cache_count_uri_matches_write_target` is `true`**: a
   `CACHE_COUNT_URI` naming a different server reads `0 / 0` and looks exactly
   like arm B. The harness records that boolean so the claim cannot be
-  transcribed wrongly.
+  transcribed wrongly. ⚠️ It is a validity gate for **arm A only**: arm B's
+  `write_path_uri` is `null` by construction (there is no write target to
+  match), so `false` is arm B's CORRECT value and seeing it there is not the
+  failure this warning describes.
 * **`OWNER_RECORD_DSN`** — the RLS-bypassing owner, for seeding and counting
   only. It is required and is not optional politeness: the app role below cannot
   see across tenants, so counting through it would answer 0 for the wrong reason.
 * **`EVENTS_BASE`** — where the per-run JSONL journal is written (default
-  `.evidence-events/`, gitignored). **Scratch, not evidence**: each run appends a
+  `/tmp/12943-events-<run>/`). **Scratch, not evidence**: each run appends a
   run-unique `org_<hex>/events.jsonl`, and the record rows were projected from
   it. `SUMMARY_OUT` — where the JSON capture goes (default `last-run.json`), and
   how the two committed captures below were produced.
@@ -58,14 +61,16 @@ last-run-arm-b-local-cache.json     the ARM B capture, verbatim
 last-run-arm-c-reconcile.json       the ARM C capture (reconcile arm)
 reconcile-arm-c-clean.json          `record-reconcile --json` on ARM C's graph:
                                     verdict=clean, divergent=0, exit 0
-reconcile-arm-b-with-operator-12949.json
+reconcile-arm-c-with-operator-12949.json
                                     the same command on a graph that ALSO has an
                                     operator Point: divergent=1 — #12949, and
                                     the section below says why that is not a
                                     lost write
-both-arms.json                      the columns the table below reads, from
-                                    those two captures, plus the
-                                    same-server check arm A depends on
+both-arms.json                      EVERY column the table below reads (all
+                                    three arms), plus the same-server check arm A
+                                    depends on and each arm's record-DSN
+                                    fingerprint — so a capture can show WHICH
+                                    record it hit, not merely that one was set
 ```
 
 ## The measurement
@@ -76,6 +81,16 @@ Same tenant, same writes, same record. The only difference is `TORTOISE_DB_URI`.
 |---|---|---|---|---|
 | `TORTOISE_DB_URI` **set** | 2 / 3 / 6 | **2 / 3** | `0 → 6`, no failure | **`{}`** |
 | `TORTOISE_DB_URI` **empty** | 2 / 3 / 6 | **0 / 0** | `0 → 6`, no failure | **`{"cache_not_shared": 2}`** |
+
+Every capture also carries `record_dsn_fingerprint` (`scheme://host:port/db#8hex`,
+never the credential), `record_writes_applied_delta` and
+`record_write_failures_published`. The harness **assigns**
+`TORTOISE_RECORD_DSN` / `TORTOISE_EVENT_LOG_BASE_DIR` rather than defaulting them,
+and **refuses to run** when an ambient value disagrees — because `setdefault`
+would let an operator's exported `TORTOISE_RECORD_DSN` win, so the SDK would
+write to the ambient record while the counts read the throwaway one, and the
+capture would look perfectly normal. That is the same variable-vs-server defect
+this whole change is about, one level down.
 
 The last column is the fix's own instrument, and reading it beside the others is
 the whole point: **`record_writes_applied` is identical in both rows (0 → 6, no
@@ -179,7 +194,7 @@ is no queue to drain: the graph write is synchronous and precedes the record's.
 built (a no-journal process, then an owner-role connection). The counter gap is
 specific to the cache.
 
-## `record-reconcile` on a freshly-written tenant — NOT clean, and why
+## `record-reconcile` on a freshly-written tenant — the operator-inclusive arm
 
 A pair written entirely through the sanctioned SDK door (2 Objects, 2 Points,
 1 `IMPL` operator with a DECLARED label):
@@ -214,9 +229,12 @@ two writers default differently.
 
 This is a DIFFERENT root from #12943 (store selection) — it needs a §17.5
 placement decision or a record narrowing — so it is filed as **#12949** with
-this measurement rather than folded into the cache-leg change. The lane does
-**not** report its DoD's reconcile item as met: on a write set that includes an
-operator, the verb reports `divergent` today.
+this measurement rather than folded into the cache-leg change.
+
+⚠️ **This is ONE ARM, not the verdict.** A write set that includes an operator
+reads `divergent`; the same command on a write set that does not is `clean`, and
+that is the section immediately below. Both captures are committed so neither
+number is quotable without the other.
 
 ## Does the write actually RECONCILE? — yes, and here is the one caveat
 
@@ -256,7 +274,7 @@ the graph represents the same operator NATIVELY — `is_operator: true`,
 `op_type`, `direction`, plus the typed `IMPL`/`INPUT` edges. The information is in
 both stores, in the shape each store uses; the RECONCILER compares the record's
 echo to the graph's property names and reports the pair every time. Captured:
-`reconcile-arm-b-with-operator-12949.json`. Fixing it means deciding what the
+`reconcile-arm-c-with-operator-12949.json`. Fixing it means deciding what the
 comparison surface should be for a record column that is a *spelling* of the
 graph's representation — its own root, its own decision, and deliberately not
 folded into a change about store SELECTION.

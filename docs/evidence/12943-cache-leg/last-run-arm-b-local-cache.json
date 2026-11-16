@@ -1,11 +1,15 @@
 {
-  "org": "org129431b76c66b72",
-  "graph_id": "g_129431b76c66b72",
-  "cache_graph": "org_org129431b76c66b72_g_129431b76c66b72",
+  "org": "org1294328a1fbcb0e",
+  "graph_id": "g_1294328a1fbcb0e",
+  "cache_graph": "org_org1294328a1fbcb0e_g_1294328a1fbcb0e",
   "write_path_uri": null,
   "cache_count_uri": "docker://:@127.0.0.1:16419/tortoise_test_matrix",
   "cache_count_uri_source": "CACHE_COUNT_URI",
   "cache_count_uri_matches_write_target": false,
+  "record_dsn_fingerprint": "postgresql://127.0.0.1:33943/record#0367bb5d",
+  "events_base": "/home/cmux/tortoise/.worktrees/12943-cachewrite/.evidence-events",
+  "record_writes_applied_delta": "0 -> 6",
+  "record_write_failures_published": {},
   "record": {
     "object": 2,
     "subject": 0,
@@ -29,10 +33,10 @@
       "cache_not_shared": 2
     },
     "record_writes_applied": "0 -> 6",
-    "record_last_write_at": "None -> '2026-11-16T02:22:53.327974+00:00'",
+    "record_last_write_at": "None -> '2026-11-16T02:46:41.145834+00:00'",
     "server_code": {
       "tracked": 19
     },
-    "uptime": "1.36 -> 10.76"
+    "uptime": "1.12 -> 10.22"
   }
 }

@@ -57,10 +57,11 @@ APP_PASSWORD = "app12943"
 
 
 def main() -> int:
-    import psycopg2                                   # noqa: PLC0415
-    from urllib.parse import urlparse                  # noqa: PLC0415
+    from urllib.parse import urlparse
 
-    from tortoise import record_projection            # noqa: PLC0415
+    import psycopg2
+
+    from tortoise import record_projection
 
     dsn = os.environ["RECORD_DSN"]
     conn = psycopg2.connect(dsn)

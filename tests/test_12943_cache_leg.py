@@ -587,7 +587,8 @@ def test_the_mcp_door_writes_both_stores(monkeypatch, tmp_path):
         for var, token in reversed(list(zip(
                 (mcp_auth._transport_mode, mcp_auth._current_org_id,
                  mcp_auth._current_graph_id,
-                 mcp_auth._current_graph_namespace), tokens))):
+                 mcp_auth._current_graph_namespace),
+                tokens, strict=True))):
             var.reset(token)
 
     record = _count_record(owner, org, graph_id)
@@ -616,10 +617,10 @@ def test_the_rest_door_shares_both_seams_with_the_measured_door(monkeypatch):
     PASSES the cache-leg guard; the graph branch is measured in
     ``docs/evidence/12943-cache-leg/``.
     """
-    from tortoise import hosted_api
-
     # The handler's own text, not a re-statement: the write must be an SDK call.
     import inspect
+
+    from tortoise import hosted_api
 
     handler = inspect.getsource(hosted_api.create_object)
     assert "sdk.create_object" in handler

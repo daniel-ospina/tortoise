@@ -14,20 +14,29 @@ argument:
   H3  the graph handle resolved to a different namespace than the record tenant
   H4  a deferred/async projection that had not run yet
 
-Run:
+Run (the canonical, copy-pasteable form is in ``README.md`` — it names all four
+targets and the two arm shapes; this is the short version):
 
-    TEST_RECORD_DSN=postgresql://record:record@127.0.0.1:33500/record \\
+    TEST_RECORD_DB_URI=postgresql://tortoise_record_app:PW@127.0.0.1:33943/record \\
+    OWNER_RECORD_DSN=postgresql://record:record@127.0.0.1:33943/record \\
+    CACHE_COUNT_URI=docker://:@127.0.0.1:16419/tortoise_test_matrix \\
     TORTOISE_DB_URI=docker://:@127.0.0.1:16419/tortoise_test_matrix \\
-    TORTOISE_RECORD_DSN=postgresql://record:record@127.0.0.1:33500/record \\
     uv run python docs/evidence/12943-cache-leg/measure.py
+
+⚠️ Do NOT set ``TORTOISE_RECORD_DSN`` or ``TORTOISE_EVENT_LOG_BASE_DIR`` in the
+ambient environment: this harness ASSIGNS both (from ``TEST_RECORD_DSN``/
+``TEST_RECORD_DB_URI`` and ``EVENTS_BASE``) and REFUSES to run if an ambient
+value disagrees, because a silent override here measures the wrong database.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 import uuid
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
@@ -53,6 +62,17 @@ def _record_dsn() -> str:
     return dsn
 
 
+def _fingerprint(dsn: str) -> str:
+    """`scheme://host:port/db#8hex` — enough to tell two targets apart in a
+    capture, and never the credential (the same rule `/health`'s `dsn` field
+    follows)."""
+    h = hashlib.sha256(dsn.encode()).hexdigest()[:8]
+    parsed = urlparse(dsn)
+    host = parsed.hostname or "?"
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme or '?'}://{host}{port}{parsed.path}#{h}"
+
+
 def _owner_dsn() -> str:
     """The OWNER DSN — seeding and counting only, never the write path.
 
@@ -67,7 +87,7 @@ def _owner_dsn() -> str:
 
 
 def _psycopg2():
-    import psycopg2  # noqa: PLC0415
+    import psycopg2
     return psycopg2
 
 
@@ -100,7 +120,7 @@ def _cache_counts(db, graph_name: str) -> dict[str, int]:
         try:
             res = g.query(f"MATCH (n:{label}) RETURN count(n) AS c")
             out[label] = int(res.result_set[0][0]) if res.result_set else 0
-        except Exception as exc:                       # noqa: BLE001
+        except Exception as exc:
             out[label] = f"ERR {type(exc).__name__}: {exc}"
     return out
 
@@ -113,9 +133,8 @@ def _falkor_client():
     ``redis://host:6379/0`` (or ``rediss://``, or a bare path) raised
     ``ValueError`` here instead of being reported as the unusable URI it is.
     """
-    from urllib.parse import unquote, urlparse  # noqa: PLC0415
 
-    from falkordb import FalkorDB  # noqa: PLC0415
+    from falkordb import FalkorDB
     # ⛔ THE COUNTING CLIENT TAKES ITS URI FROM ITS OWN VARIABLE. To reproduce the
     # DEFECT shape the write path must run with `TORTOISE_DB_URI` EMPTY
     # (`_make_sdk` branches on its truthiness) — but the cache then has to be
@@ -149,20 +168,45 @@ def main() -> int:
     ns = f"org_{org}_{graph_id}"
 
     dsn = _record_dsn()
-    os.environ.setdefault("TORTOISE_RECORD_DSN", dsn)
+    # ⛔ ASSIGN, NEVER `setdefault`. This whole harness exists because two
+    # variables pick two stores and nothing compares them — and `setdefault`
+    # reproduced that defect one level down: an ambient `TORTOISE_RECORD_DSN`
+    # (the variable an operator of this deployment is most likely to have
+    # exported) would WIN, so the SDK would write to the AMBIENT record while the
+    # counts read the THROWAWAY one, and the capture would look normal. Refusing
+    # on a disagreement is the only safe shape: a silent override here is a
+    # measurement of the wrong database (review cycle 4).
+    ambient = (os.environ.get("TORTOISE_RECORD_DSN") or "").strip()
+    if ambient and ambient != dsn:
+        raise SystemExit(
+            "TORTOISE_RECORD_DSN is set to a DIFFERENT value than the one this "
+            "run would write to.\n  ambient (would win): "
+            f"{_fingerprint(ambient)}\n  this run's target : {_fingerprint(dsn)}\n"
+            "Unset TORTOISE_RECORD_DSN (the harness assigns it from "
+            "TEST_RECORD_DB_URI) or point both at the same throwaway database.")
+    os.environ["TORTOISE_RECORD_DSN"] = dsn
     # The record's only durable source is the JSONL journal (`write_live_record`
     # refuses `no_journal` without it), and production arms it
-    # (`TORTOISE_EVENT_LOG_BASE_DIR=/data/events`). One dir per run.
+    # (`TORTOISE_EVENT_LOG_BASE_DIR=/data/events`). One dir per run — and, for
+    # the same reason as the DSN above, ASSIGNED rather than defaulted, so an
+    # ambient production `/data/events` cannot receive this harness's journals.
     base = Path(os.environ.get("EVENTS_BASE", f"/tmp/12943-events-{run}"))
     base.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("TORTOISE_EVENT_LOG_BASE_DIR", str(base))
+    ambient_base = (os.environ.get("TORTOISE_EVENT_LOG_BASE_DIR") or "").strip()
+    if ambient_base and Path(ambient_base).resolve() != base.resolve():
+        raise SystemExit(
+            "TORTOISE_EVENT_LOG_BASE_DIR is set to a DIFFERENT directory than "
+            f"this run would append to.\n  ambient (would win): {ambient_base}\n"
+            f"  this run's target : {base}\n"
+            "Unset it, or pass EVENTS_BASE with the same value.")
+    os.environ["TORTOISE_EVENT_LOG_BASE_DIR"] = str(base)
     psycopg2 = _psycopg2()
     # OWNER connection: seeding + counting only (see `_owner_dsn`).
     conn = psycopg2.connect(_owner_dsn())
     conn.autocommit = True
     _seed_tenant(conn, org, graph_id)
 
-    from tortoise import hosted_api, monitoring  # noqa: PLC0415
+    from tortoise import hosted_api, monitoring
 
     before_metrics = dict(monitoring.metrics())
 
@@ -180,9 +224,12 @@ def main() -> int:
           f"  (write path)")
     print(f"CACHE_COUNT_URI  "
           f"{os.environ.get('CACHE_COUNT_URI', '<defaults to TORTOISE_DB_URI>')}")
-    print(f"record DSN set   {'yes' if os.environ.get('TORTOISE_RECORD_DSN') else 'no'}")
+    print(f"record DSN       {_fingerprint(os.environ['TORTOISE_RECORD_DSN'])}"
+          f"  (write path)")
+    print(f"events base      {base}")
+    print(f"cache count URI  {os.environ.get('CACHE_COUNT_URI')
+                             or os.environ.get('TORTOISE_DB_URI') or '<none>'}")
 
-    writes: list[dict] = []
     results = {}
     try:
         results["object:alpha"] = sdk.create_object("alpha", objectKind="goal")
@@ -207,7 +254,7 @@ def main() -> int:
         else:
             results["operator"] = sdk.create_operator(
                 "IMPL", o["id"], [p["id"]], "supports")
-    except Exception as exc:                            # noqa: BLE001
+    except Exception as exc:
         print(f"WRITE RAISED: {type(exc).__name__}: {exc}")
 
     sdk.close()
@@ -265,6 +312,17 @@ def main() -> int:
             (os.environ.get("CACHE_COUNT_URI")
              or os.environ.get("TORTOISE_DB_URI") or None)
             == (os.environ.get("TORTOISE_DB_URI") or None),
+        # WHICH record and WHICH journal dir, fingerprinted: a capture that
+        # records only "a DSN was set" cannot show that it measured the
+        # throwaway rather than the ambient database (review cycle 4).
+        "record_dsn_fingerprint": _fingerprint(
+            os.environ["TORTOISE_RECORD_DSN"]),
+        "events_base": str(base),
+        # The counter columns, so `both-arms.json` can carry EVERY column of the
+        # README table rather than a subset of it.
+        "record_writes_applied_delta": deltas.get("record_writes_applied"),
+        "record_write_failures_published": after_metrics.get(
+            "record_write_failures"),
         "record": record, "cache": cache,
         "cache_leg_failures": monitoring.cache_leg_failure_counts(),
         "metric_deltas": deltas,
