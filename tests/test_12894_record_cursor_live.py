@@ -1136,8 +1136,11 @@ def test_the_live_door_takes_the_allocated_number_over_the_journals(
     invariant): a journal ordinal of 9 against a counter at 3 means the journal and
     the counter disagree about how long the journal is, and writing at 4 would put
     the line at 9 and the row at 4. That half lives in
-    `tests/test_12894_live_allocator_armed.py::
-    test_a_divergent_journal_position_is_refused_not_renumbered`; it was previously
+    `tests/test_12894_record_cursor_live.py::
+    test_a_divergent_journal_position_is_refused_not_renumbered` (the same file —
+    an earlier cut of this pointer named a
+    `tests/test_12894_live_allocator_armed.py` that does not exist); it was
+    previously
     asserted HERE as an APPLIED write at 4, which pinned the divergence this change
     removes.
     """
@@ -1245,18 +1248,6 @@ def test_a_mis_armed_counter_is_refused_with_a_remedy_that_applies(
 
 
 # ── harness for the wire section ────────────────────────────────────────────
-
-def _door_dsn() -> str:
-    from tests.test_9078_record_written_by_production_path import _app_role_dsn
-
-    return _app_role_dsn(os.environ["TEST_RECORD_DB_URI"])
-
-
-def _app_conn():
-    psycopg2 = pytest.importorskip("psycopg2")
-    conn = psycopg2.connect(_door_dsn())
-    conn.autocommit = False
-    return conn
 
 def _door_dsn() -> str:
     from tests.test_9078_record_written_by_production_path import _app_role_dsn as dsn
@@ -1442,6 +1433,15 @@ def test_the_flag_arms_the_door_and_the_row_carries_the_allocated_number(
     assert (write.first_seq, write.last_seq) == (1, 1), (
         "the reported watermark is not the allocated position")
     assert [row[0] for row in _journal_rows(schema, org, graph)] == [1]
+    # ⛔ THE ASSERTION THAT MAKES THIS LEG DISCRIMINATE THE SWITCH. The two arms
+    # produce the SAME row and the SAME watermark here (counter at 0 + `seq=1`
+    # versus the enumeration's own 1), so without this line the leg stays green
+    # with the flag wiring removed entirely (#12894 review cycle 4, P2). The
+    # counter is the one value only the allocated arm moves — the flag-OFF leg
+    # below asserts it is untouched, and this is the mirror of that assertion.
+    assert _counter(schema, org, graph) == (1, "active"), (
+        "the flag-armed door did not issue the position from the counter — "
+        "the row and watermark alone cannot tell the two arms apart")
 
 
 def test_the_flag_off_keeps_the_enumerated_arm(schema, tenant, monkeypatch):
@@ -1483,6 +1483,12 @@ def test_the_armed_door_charges_real_bytes(schema, tenant, app, monkeypatch):
     assert write.written_bytes > 0, (
         "the byte meter charged 0 for an allocated write — the watermark is not "
         "the allocated position")
+    # The same discriminator as the flag leg: the row and the byte count are
+    # identical on the enumerated arm, so the counter is what proves the
+    # allocation actually ran (#12894 review cycle 4, P2).
+    assert _counter(schema, org, graph) == (1, "active"), (
+        "the byte-meter leg did not move the counter — it would pass on the "
+        "enumerated arm too")
 
 
 def test_the_armed_door_refuses_a_record_whose_position_is_unproven(

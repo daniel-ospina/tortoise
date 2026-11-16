@@ -162,9 +162,22 @@ def _cmd_status(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         # The count the seed would use, beside the count the record holds. A
         # `journal_row_max` ABOVE this is the `divergence` refusal; an EQUAL or
         # lower one is seedable, and `row_max < floor` is the `None`-position tail.
+        #
+        # ⛔ THIS IS THE **SEED'S** REFUSAL CONDITION, and it is deliberately not
+        # the only divergence reported. `write_live_record` refuses on a DIFFERENT
+        # pair — the counter's next number against this journal position — so a
+        # wedged armed graph can show `divergence: false` here while the door
+        # refuses every write. `position_divergence` below reports the DOOR's
+        # condition; the door's own warning names that field, so the two cannot be
+        # mistaken for each other (#12894 review cycle 4, P2).
         payload["journal_enumerated_floor"] = args.floor
         payload["divergence"] = row_max > args.floor
         payload["healed_tail"] = args.floor > row_max
+        payload["position_divergence"] = (
+            cursor is not None
+            and cursor[1] == ra.MODE_ACTIVE
+            and cursor[0] + 1 != args.floor
+        )
     return payload
 
 

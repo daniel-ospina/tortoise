@@ -7823,6 +7823,14 @@ def _carried_position(record: Mapping[str, Any], enumerated: int,
     record's index, so an operator can tell a reordered batch from a corrupted
     one.
 
+    ⛔ AND "CARRIES A NUMBER" IS `int`, NOT "COERCES TO ONE". An earlier cut used
+    `int(carried)` inside a try/except, which ACCEPTED `5.9` (truncated to 5) and
+    `"5"` (parsed) — i.e. a value that DISAGREES with the enumeration was silently
+    renumbered into agreement, which is precisely the failure the paragraph above
+    says is impossible (#12894 review cycle 4, P2). The type is checked, not
+    coerced: `True`/`False` are rejected too, because `bool` is an `int` subclass
+    and `int(True) == 1` would smuggle a non-position past this check.
+
     ⚠️ SCOPE, stated because a reader will ask: `seq` is a journal POSITION here.
     `:GraphEvent.seq` (`event_store_meta.last_seq`) is a DIFFERENT coordinate with
     its own allocator (`record_allocator`'s docstring says so, and `§A7.7` step 4
@@ -7834,14 +7842,15 @@ def _carried_position(record: Mapping[str, Any], enumerated: int,
     carried = record.get("seq")
     if carried is None:
         return enumerated
-    try:
-        carried_seq = int(carried)
-    except (TypeError, ValueError):
+    if isinstance(carried, bool) or not isinstance(carried, int):
         raise RecordProjectionError(
             f"record {index} carries seq={carried!r}, which is not an integer: a "
-            f"record that CARRIES its position must carry a number (or no `seq` "
-            f"at all, which means 'enumerate me')"
-        ) from None
+            f"record that CARRIES its position must carry an integer (or no "
+            f"`seq` at all, which means 'enumerate me'). A value that only "
+            f"COERCES to an integer is refused rather than truncated or parsed: "
+            f"renumbering a disagreement into agreement is the #9190 defect"
+        )
+    carried_seq = carried
     if carried_seq != enumerated:
         raise RecordProjectionError(
             f"record {index} carries journal position {carried_seq} but the "

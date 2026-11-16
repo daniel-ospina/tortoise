@@ -2678,12 +2678,22 @@ def write_live_record(record: Mapping[str, Any], *,
 
     ``allocate`` hands the POSITION to the record (#12894): the plan allocates
     from `public.record_cursor` and the resulting number is what this call
-    reports as `first_seq`/`last_seq` and what the byte meter reads. With
-    ``allocate=True`` the ``seq`` argument is IGNORED — there is one allocator
-    per coordinate, and a caller-supplied number alongside an allocated one is
-    two answers to one question — and the "no position was proven" arm below
-    does not apply, because a position WAS issued (by the counter, not by the
-    journal). The graph's cursor must be in mode ``active``. ⛔ A `seeded` /
+    reports as `first_seq`/`last_seq` and what the byte meter reads.
+
+    ⛔ ON THAT ARM ``seq`` IS **NOT** IGNORED — it is the OTHER SIDE of the
+    cutover invariant. The record's counter issues the number and the journal's
+    append reported one, and while BOTH allocators exist they must AGREE; a
+    disagreement is refused and the allocation rolled back (the
+    ``position_divergence`` arm below). Two further arms exist only on the
+    allocated arm, and neither is the enumerated arm's behaviour: ``seq=None``
+    is a REFUSAL (``position_unverifiable`` — the counter would issue a number
+    nothing corroborates), not the enumerated arm's row-less named skip. An
+    earlier cut of this docstring said ``seq`` was ignored and that both arms
+    did not apply; a fresh-context review measured the door and found the claim
+    false (#12894 review cycle 4, P1), the same defect class this file's history
+    already records once.
+
+    The graph's cursor must be in mode ``active``. ⛔ A `seeded` /
     `halted` / absent cursor, or a duplicate position, comes back as
     ``outcome=REFUSED`` ``refusal="write_failed"`` and is counted — this door
     DOES NOT RAISE, by its own contract (the journal append has already
@@ -2784,6 +2794,18 @@ def write_live_record(record: Mapping[str, Any], *,
         # a SEALED one (`TORTOISE_JOURNAL_SEGMENTS=1` restarts the file-local
         # index at 1), and a counter left behind by a refused write.
         #
+        # ⛔ THE THIRD STATE IS NOT RARE, AND ITS COST IS NOT "one refused
+        # record" — say it here rather than let an operator discover it. Every
+        # refusal arm above appends its journal line and writes NO row, so the
+        # JOURNAL's position advances while the COUNTER's does not. The gap does
+        # not close on its own (a replay writes rows, never the counter), so
+        # every LATER armed write refuses for the same reason: once one record is
+        # declined, this arm refuses every subsequent record until an operator
+        # re-seeds. That is the price of keeping one invariant — the line and its
+        # row carry the same number — instead of guessing which side is right,
+        # and the remedy is named in the warning below: `halt` →
+        # `seed --journal <path>` → `reopen` → `arm`.
+        #
         # ⛔ THE ROLLBACK IS THE OTHER HALF. Detecting the mismatch AFTER the
         # insert but BEFORE the commit is what makes this free: the allocation
         # (the counter increment) rolls back with the row, so the position is
@@ -2807,10 +2829,15 @@ def write_live_record(record: Mapping[str, Any], *,
                     "of the journal could reproduce; the allocation was rolled "
                     "BACK so nothing was burned or renumbered. Compare the two "
                     "readings with `tools/record_allocator_cli.py status "
-                    "--journal <path>` (it prints the record's max position and "
-                    "the journal's own enumeration side by side) before "
-                    "re-seeding, and check for a restored, truncated or "
-                    "re-sealed journal. record=%s %s",
+                    "--journal <path>`, whose position_divergence field is THIS "
+                    "door's condition. THE GAP DOES NOT CLOSE ON ITS OWN: a "
+                    "refused write keeps its journal line and issues no counter "
+                    "number, so EVERY later armed write refuses for the same "
+                    "reason until the counter is re-seeded. Remedy, in order: "
+                    "`halt`, `seed --journal <path>`, `reopen`, `arm` (seed and "
+                    "reopen both refuse from `active`, so halt is first). Then "
+                    "check for a restored, truncated or re-sealed journal. "
+                    "record=%s %s",
                     seq, allocated_first, record.get("type"),
                     _record_identity(record),
                 )
