@@ -1983,6 +1983,20 @@ test("INDICATOR 2: the health line separates INERT, DEGRADED, OK and UNREADABLE"
   assert.match(unreadable.line, /^volunteer: UNREADABLE \(cannot parse /);
   assert.equal(readVolunteerStatus(okPath) && "unreadable" in readVolunteerStatus(okPath), true);
 
+  // DISABLED — the kill switch reports ITSELF and outranks every other state:
+  // `volunteer: OK` over a seam the operator switched off is the same
+  // false-inference class this line exists to remove.
+  const switchedOff = volunteerHealthLine(okCfg, [], join(okHome, "absent-status.json"), {
+    disabled: true,
+  });
+  assert.equal(switchedOff.state, "disabled");
+  assert.match(switchedOff.line, /^volunteer: DISABLED \(TORTOISE_VOLUNTEER_DISABLE/);
+
+  // A write that FAILS reports nothing, so no health line is printed off it.
+  const unwritable = join(okHome, "a-file", STATUS_FILE);
+  writeFileSync(join(okHome, "a-file"), "not a directory");
+  assert.equal(recordVolunteerDegradation(unwritable, "timeout"), undefined);
+
   // A DIFFERENT reason starts a NEW run (the count is about one failure mode).
   recordVolunteerDegradation(okPath, "breaker_open", () => Date.UTC(2026, 10, 16, 15, 0, 0));
   const restarted = readVolunteerStatus(okPath);

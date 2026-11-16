@@ -5078,7 +5078,14 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # by one `volunteer: …` health line at `session_start`. A generation-23
     # install injects NOTHING on a degraded turn and says nothing about it, so it
     # must read STALE ("reinstall") rather than the user's `modified-artifact`.
-    24: "e2f8947ef24464a2208e340c274c279f8edaef113d567ca5e24d4db07795a60f",
+    #
+    # ⛔ RE-PINNED IN PLACE, not bumped (4a59982c…), and that is legitimate for
+    # exactly one reason: generation 24 of the READ half has NEVER SHIPPED — it
+    # is created by this same PR — so there is no installed copy whose "local
+    # edit" verdict a re-pin could falsify. The entry is still being CREATED. A
+    # later byte change to a SHIPPED generation is a BUMP (25 in BOTH Pi
+    # artifacts, a new entry here, the paired pin below moved with it).
+    24: "4a59982cd0dd2095f53e5ee08cc45f34e74581a9f5b35e2420b054460493f869",
     # Generation 23 (#12603): only the header line moves — the read half's
     # behaviour is untouched, but `contract_version_for('pi')` grades the PAIR as
     # one contract and answers None when the two markers disagree, so the read
@@ -5123,7 +5130,7 @@ _READ_SEAM_GENERATION_DIGESTS = {
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    24, "e2f8947ef24464a2208e340c274c279f8edaef113d567ca5e24d4db07795a60f")
+    24, "4a59982cd0dd2095f53e5ee08cc45f34e74581a9f5b35e2420b054460493f869")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

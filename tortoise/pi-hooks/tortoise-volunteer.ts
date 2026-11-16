@@ -1142,7 +1142,8 @@ export function recordInstallInert(
 //
 // The record is deliberately tiny and is written ONLY on a transition (a
 // degradation that starts, changes reason or advances; and the clear back to
-// healthy), never on a healthy turn.
+// healthy), never on a healthy turn. A write that FAILS reports `undefined`, so
+// the caller never prints a health line it cannot back with a record.
 
 /** The per-box status record, beside the `capture-errors/` slot the inert
  *  breadcrumb uses — one relocated root (`TORTOISE_IMPORT_RECEIPT_DIR`, or
@@ -1261,8 +1262,11 @@ export function recordVolunteerDegradation(
     prior && prior.reason === reason
       ? { reason, count: prior.count + 1, since: prior.since || at, last_at: at }
       : { reason, count: 1, since: at, last_at: at };
-  writeVolunteerStatus(statusPath, { version: 1, degradation: next });
-  return next;
+  // `undefined` on a failed write, NOT the streak we could not record: the
+  // caller prints a health line off this return value, and a line read from a
+  // record that was never written says `OK` about a degradation we just
+  // observed. The turn's own disclosure already reached the model either way.
+  return writeVolunteerStatus(statusPath, { version: 1, degradation: next }) ? next : undefined;
 }
 
 /**
@@ -1289,7 +1293,7 @@ export function clearVolunteerDegradation(
 }
 
 export interface VolunteerHealth {
-  state: "unreadable" | "inert" | "degraded" | "ok";
+  state: "disabled" | "unreadable" | "inert" | "degraded" | "ok";
   line: string;
 }
 
@@ -1298,6 +1302,10 @@ export interface VolunteerHealth {
  *
  * Five facts are separable on this line, and separating them is the point:
  *
+ *   * `DISABLED` — the kill switch is set, so nothing injects. Reported FIRST,
+ *     because every other line would describe a seam that is not running: an
+ *     `OK` here would be a cheerful status for a seam the operator switched off,
+ *     which is the same false-inference class the issue is about.
  *   * `UNREADABLE` — the status record exists but cannot be read/parsed, so an
  *     `OK` would be a claim with no evidence behind it.
  *   * `INERT` — nothing can run at all (no CLI resolved AND no hosted key). This
@@ -1309,17 +1317,25 @@ export interface VolunteerHealth {
  *   * `OK` — nothing recorded and a transport resolved: "no injection this turn"
  *     here means routine silence, not a silent failure.
  *
- * Precedence is `UNREADABLE` > `INERT` > `DEGRADED` > `OK`. `INERT` outranks a
- * recorded degradation because it is FRESH evidence from THIS process (the
- * record may describe a different configuration), and because it subsumes: an
- * install that cannot run injects nothing at all.
+ * Precedence is `DISABLED` > `UNREADABLE` > `INERT` > `DEGRADED` > `OK`. `INERT`
+ * outranks a recorded degradation because it is FRESH evidence from THIS process
+ * (the record may describe a different configuration), and because it subsumes:
+ * an install that cannot run injects nothing at all.
  */
 export function volunteerHealthLine(
   cfg: VolunteerConfig,
   candidates: string[],
   statusPath: string,
-  opts: { stubReflex?: boolean } = {},
+  opts: { stubReflex?: boolean; disabled?: boolean } = {},
 ): VolunteerHealth {
+  if (opts.disabled) {
+    return {
+      state: "disabled",
+      line:
+        "volunteer: DISABLED (TORTOISE_VOLUNTEER_DISABLE is set — nothing is injected " +
+        "on any turn; unset it to re-enable the read seam)",
+    };
+  }
   const read = readVolunteerStatus(statusPath);
   if (!("status" in read)) {
     return { state: "unreadable", line: `volunteer: UNREADABLE (${read.unreadable})` };
@@ -1699,6 +1715,9 @@ export default function tortoiseVolunteer(
           // CLI), so the line must not call a stubbed seam inert — the same
           // reason `resolveBlock` is never consulted on that path.
           stubReflex: deps.reflexImpl !== undefined,
+          // A switched-off seam says so, rather than reporting a transport it
+          // is not using.
+          disabled: disabled(env),
         }).line,
       );
     } catch {
