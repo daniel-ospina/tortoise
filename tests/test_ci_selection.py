@@ -12224,9 +12224,21 @@ def test_no_durations_row_calls_an_unchanged_weight_one_it_does_not_hold():
 #: ⛔ Anchored to the PRESENT-TENSE forms only. A note recording history must stay
 #: silent: "the weight WAS 0.9", the sweep's own `was 3.7`, and the `-> declared
 #: 23.8` derivation of a superseded figure all name a past value deliberately.
+#:
+#: ⛔ AND THE PREDICATE-BEFORE-NUMBER SPELLING (#12962 cycle 7, review P1). The
+#: first cut required the digit IMMEDIATELY after `is`, so
+#: `test_8843_malformed_envelope_accounting.py` — row `0.2`, note "The WEIGHT is
+#: rounded UP to 3.0 on the neighbouring rows' rule (never correct a weight downward
+#: without a CI junit reading)" with its own tail reading `was 0.3` — was unread by
+#: BOTH arms and the refresh corrected it DOWNWARD against that very sentence. That
+#: is the third spelling in a row that this class has shipped in, so the arm reads
+#: the verb window too: `the WEIGHT is <verb …> to N`. The window is the SENTENCE
+#: (the documented bounds elsewhere in this family), and the copula must still be
+#: PRESENT — `the WEIGHT WAS rounded UP to 3.0` is history and stays silent.
 _WEIGHT_IS_CLAIM_RE = re.compile(
     r"\bthe\s+weight\s+is\s+(?P<w1>\d+(?:\.\d+)?)"
-    r"|\bDeclared\s+(?P<w2>\d+(?:\.\d+)?)\s*s\b",
+    r"|\bDeclared\s+(?P<w2>\d+(?:\.\d+)?)\s*s\b"
+    r"|\bthe\s+weight\s+is\b[^.;]{0,120}?\bto\s+(?P<w3>\d+(?:\.\d+)?)",
     re.IGNORECASE)
 
 
@@ -12243,7 +12255,8 @@ def _durations_rows_declaring_a_weight_they_do_not_hold(text: str):
         if row is None:  # pragma: no cover — every judged note came from a row
             continue
         value = float(_DURATIONS_ROW_RE.match(row).group("value"))
-        claimed = float(claim.group("w1") or claim.group("w2"))
+        claimed = float(claim.group("w1") or claim.group("w2")
+                        or claim.group("w3"))
         if abs(claimed - value) > 1e-9:
             out.append((key, claimed, value))
     return out
@@ -12272,9 +12285,14 @@ def test_the_declared_weight_claim_check_is_not_vacuous():
         "durations:\n"
         "  test_a.py: 1.4  # The weight is 0.9, the refresh-durations replacement.\n"
         "  test_b.py: 0.9  # Declared 7.0s — ~1.4x the measured body.\n"
+        # test_8843_malformed_envelope_accounting.py: row 0.2, note asserting 3.0.
+        # VERBATIM from the row that shipped past the first cut of this arm: the
+        # digit follows the verb, not the copula, so `the weight is <N>` misses it.
+        "  test_c.py: 0.2  # The WEIGHT is rounded UP to 3.0 on the neighbouring"
+        " rows' rule (never correct a weight downward without a CI junit reading).\n"
         "surfaces: []\n")
     assert _durations_rows_declaring_a_weight_they_do_not_hold(stale) == [
-        ("test_a.py", 0.9, 1.4), ("test_b.py", 7.0, 0.9)]
+        ("test_a.py", 0.9, 1.4), ("test_b.py", 7.0, 0.9), ("test_c.py", 3.0, 0.2)]
     legitimate = (
         "durations:\n"
         "  test_a.py: 1.4  # The weight WAS 0.9 from the 2026-11-02 sweep.\n"
@@ -12282,6 +12300,10 @@ def test_the_declared_weight_claim_check_is_not_vacuous():
         " day's map.\n"
         "  test_c.py: 0.9  # Declared 0.9s, and the row still holds it.\n"
         "  test_d.py: 1.4  # the census reading, not a declaration at all.\n"
+        # the PAST copula in the predicate-before-number spelling is history: this
+        # is the exact form every repaired row takes, so it must stay silent.
+        "  test_e.py: 0.2  # The WEIGHT WAS rounded UP to 3.0 until the 2026-11-16"
+        " census read 0.2.\n"
         "surfaces: []\n")
     assert _durations_rows_declaring_a_weight_they_do_not_hold(legitimate) == []
 
