@@ -1743,6 +1743,44 @@ def test_a_case_ARM_PATTERN_is_neither_a_closer_nor_an_opener():
             'esac\n'
             'exec "$@"\n',
         ),
+        (
+            "the `case` one GROUP brace in — the mask gate must not be an anchored statement test",
+            '#!/bin/bash\n'
+            '{ case "${1:-}" in\n'
+            '    start) echo go ;;\n'
+            '    done|stop)\n'
+            '      export TORTOISE_VALUE_GATE=1\n'
+            '      export TORTOISE_EMBED_GATE=1\n'
+            '      ;;\n'
+            '  esac\n'
+            '}\n'
+            'exec "$@"\n',
+        ),
+        (
+            "the `case` one FUNCTION BODY brace in — this is the helper-nobody-calls shape",
+            '#!/bin/bash\n'
+            'arm() { case "${1:-}" in\n'
+            '    start) echo go ;;\n'
+            '    done|stop)\n'
+            '      export TORTOISE_VALUE_GATE=1\n'
+            '      export TORTOISE_EMBED_GATE=1\n'
+            '      ;;\n'
+            '  esac\n'
+            '}\n'
+            'exec "$@"\n',
+        ),
+        (
+            "a pattern whose second word is `in` — the mask must start at the HEADER's `in`",
+            '#!/bin/bash\n'
+            'case "${1:-}" in\n'
+            '  start) echo go ;;\n'
+            '  done|in)\n'
+            '    export TORTOISE_VALUE_GATE=1\n'
+            '    export TORTOISE_EMBED_GATE=1\n'
+            '    ;;\n'
+            'esac\n'
+            'exec "$@"\n',
+        ),
     ):
         stated, ambiguous = gate._shell_assignments(script)
         assert stated == {}, f"{label}: a never-running arm was credited: {stated}"
@@ -1762,6 +1800,11 @@ def test_a_case_dispatch_does_not_refuse_the_top_level_exports_below_it():
         'case "${1:-}" in\n'
         '  start) echo go ;;\n'
         '  *|help) echo other ;;\n'
+        # ⛔ THIS arm is the discriminator the fail-open row above cannot be: a pattern spelled
+        # `if)` must not OPEN a block. Asserting only "refused" on its dishonest mirror cannot see
+        # the difference — a PHANTOM block refuses for the wrong reason and satisfies the same
+        # assertion (measured by the re-review at `31aab6cc`, which is why this arm exists).
+        '  if) echo "[info] mode is if" ;;\n'
         'esac\n'
         'export TORTOISE_VALUE_GATE=1\n'
         'export TORTOISE_EMBED_GATE=1\n'
@@ -1794,6 +1837,7 @@ def test_a_value_made_of_SEVERAL_expansions_states_nothing():
         '"${X:-/usr/local/bin"',  # … and an unclosed `${` is not a fallback
         '"${X:+1}"',  # expands EMPTY exactly when X is unset — the shipped case
         '"${X:-$Y}"',  # a fallback that is itself an expansion
+        '"${X:-${Y:-}}"',  # a NESTED expansion: its inner `}` must not read as literal text
     ):
         assert gate._states_a_literal(value) is False, value
     # The mirror: real literal text beside an expansion IS literal, and so is the empty value
@@ -1825,9 +1869,19 @@ def test_the_ambiguous_refusal_names_the_conditional_class():
         "entrypoint.sh", "entrypoint", "shell assignments", ambiguous=set(SWITCHES)
     )
     problem = channel.problems()[0]
-    assert "CONDITIONAL" in problem, problem
-    assert "function body" in problem, problem
-    assert "interpolation with no non-empty literal fallback" in problem, problem
+    # ⛔ ALL FOUR causes `ambiguous` is fed by, and no assertion of which one applies (review P3 at
+    # `31aab6cc`): an `unset` line has no assignment in it at all, and a `printf` naming the switch
+    # has no statement either, so a message naming only the first two blamed a cause it had not
+    # measured.
+    for cause in (
+        "named only",
+        "retracted later",
+        "CONDITIONAL",
+        "`coproc`",
+        "`env K=V cmd`",
+        "interpolated value",
+    ):
+        assert cause in problem, (cause, problem)
     assert "state it as a literal assignment" not in problem, problem
 
 

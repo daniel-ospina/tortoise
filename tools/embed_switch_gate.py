@@ -631,26 +631,42 @@ _SHELL_CASE_OPEN = re.compile(
 )
 #: The `in` that ends a `case` header — everything after it on that line is the first ARM PATTERN.
 _SHELL_CASE_IN = re.compile(r"\bin\b")
+#: The `case` WORD, unanchored. ⛔ The gate cannot be an anchored statement-start test (review P2 at
+#: `31aab6cc`, measured): `{ case …` and `arm() { case …` are the SAME construct one brace in, and
+#: an anchored pattern misses both — so the mask was skipped and the arm's `done|stop)` spent the
+#: level the `case` (or the function body) opened, crediting a never-running arm's exports
+#: (`ok`, exit 0, bash sets neither). A `case` inside a string or a substitution is blanked in the
+#: view, so an unanchored word cannot invent one.
+_SHELL_CASE_WORD = re.compile(r"\bcase\b")
 
 
 def _mask_case_arm(view: str, case_open: int) -> str:
     """``view`` with a `case` ARM PATTERN blanked (length preserved, so offsets still align).
 
-    Only applied where an arm pattern can be: inside an open `case` body, or on the statement that
-    OPENS one (`case $x in a) …`). Anywhere else the `)` would be invalid shell, so masking it
+    Only applied where an arm pattern can be: inside an open `case` body, or on a statement that
+    carries a `case` word before its ``)`` (`case $x in a) …`, `{ case $x in a) …`,
+    `arm() { case $x in a) …`). Anywhere else the ``)`` would be invalid shell, so masking it
     cannot hide a real closer — and every blanked region is a PATTERN, where a keyword is a word to
     match against `$1`, never a block delimiter.
+
+    ⛔ The pattern starts after the HEADER's `in`, and only when THIS statement carries the `case`
+    word (review P2 at `31aab6cc`, measured): an arm statement has no header, so taking its last
+    `in` — the original rule — left everything before that `in` unmasked, and a pattern spelled
+    `done|in)` kept its leading `done` in the view, where it spent the `case`'s level again.
     """
-    if case_open <= 0 and not _SHELL_CASE_OPEN.search(view):
-        return view
     terminator = view.find(")")
     if terminator < 0:
         return view
-    # The LAST `in` before the `)` is the header's — a pattern may itself be spelled `in`.
-    header = None
-    for found in _SHELL_CASE_IN.finditer(view[:terminator]):
-        header = found
-    start = header.end() if header is not None else 0
+    case_word = None
+    for found in _SHELL_CASE_WORD.finditer(view[:terminator]):
+        case_word = found
+    if case_open <= 0 and case_word is None:
+        return view
+    start = 0
+    if case_word is not None:
+        in_word = _SHELL_CASE_IN.search(view, case_word.end(), terminator)
+        if in_word is not None:
+            start = in_word.end()
     if start > terminator:
         return view
     return view[:start] + " " * (terminator + 1 - start) + view[terminator + 1:]
@@ -852,8 +868,17 @@ def _states_a_literal(value: str) -> bool:
     if "$" not in text and "`" not in text:
         return True
     remainder = _INTERPOLATION_SPAN.sub("", text)
-    if "$" in remainder or "`" in remainder:
-        # ⛔ An expansion form this pattern cannot strip (an unbalanced `${`, a nested `$( … )`) is
+    # ⛔ ONE pass is not enough (review P3 at `31aab6cc`, measured): `\$\{[^}]*\}` cannot cross a
+    # `}`, so a NESTED expansion `${X:-${Y:-}}` stripped to a lone `}` that read as literal text and
+    # was credited — while the process resolves it EMPTY. Strip to a FIXPOINT and refuse any
+    # leftover expansion punctuation, which can only be an expansion this reader could not parse.
+    while True:
+        stripped = _INTERPOLATION_SPAN.sub("", remainder)
+        if stripped == remainder:
+            break
+        remainder = stripped
+    if "$" in remainder or "`" in remainder or "{" in remainder or "}" in remainder:
+        # ⛔ An expansion form this pattern cannot strip (an unbalanced `${`, a NESTED `$( … )`) is
         # NOT literal text: a reader with no resolver cannot state what it expands to, so it takes
         # the same fail-closed answer as a pure interpolation (review P3 at `d9b507ce90`).
         return False
@@ -962,19 +987,19 @@ class Channel:
                 f"builder-stage ENV never reaches the process ({self.resolver})"
             )
         if switch in self.ambiguous:
-            # ⛔ TWO different defects land in `ambiguous`, and the message named only one of them
-            # (review P3, measured): an honest entrypoint that arms both switches inside a helper it
-            # CALLS is refused by this reader (it models position, not the call graph) — the right
-            # verdict, since a helper nobody calls is indistinguishable without one, but the text
-            # then blamed the VALUE while both values were plain literals. Name the class, not a
-            # guess at which member of it applies.
+            # ⛔ `ambiguous` has FOUR causes, not two (review P3 at `31aab6cc`, measured): a
+            # CONDITIONAL assignment, a non-literal value, a bare MENTION (a `printf` or a doc line
+            # naming the switch), and a RETRACTION (`unset`). Naming only the first two asserted a
+            # cause it had not measured — an `unset` line has no assignment in it at all. The text
+            # now enumerates the class and asserts none of its members.
             return (
                 f"{self.channel} mentions {switch} but does not state a value this gate can read "
-                f"({self.resolver}) — the assignment is either CONDITIONAL (a branch, a function "
-                "body, a group, a `coproc`, or a statement behind `&&`/`||`/`|`/`&`), stated only "
-                "through an `env K=V cmd` call (the reader credits top-level assignments, not env "
-                "calls), or an interpolation with no non-empty literal fallback; state it as an "
-                "unconditional top-level literal assignment"
+                f"({self.resolver}) — it is named only (a comment, a printed string), retracted "
+                "later (`unset`/`export -n`/`env -u`/`env -i`), made CONDITIONAL (a branch, a "
+                "function body, a group, a `coproc`, or a statement behind `&&`/`||`/`|`/`&`), "
+                "stated only through an `env K=V cmd` call (the reader credits top-level "
+                "assignments, not env calls), or given an interpolated value with no non-empty "
+                "literal fallback; state it as an unconditional top-level literal assignment"
             )
         return f"{self.channel} does not state {switch} ({self.resolver})"
 
@@ -1974,7 +1999,7 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # this cannot refuse an honest channel (`test_the_real_entrypoint_statements_are_unconditional`).
             # ⛔ Statements are read WITHOUT their prefix (`{`, `command`, `builtin`), which do
             # not change what the statement does — see `_strip_statement_prefix`.
-            content_raw, content_view = _strip_statement_prefix(raw, view)
+            content_raw, content_view = _strip_statement_prefix(raw, case_view)
             # ⛔ An Allman function body: a lone `{` on the line AFTER its header (see
             # `_SHELL_FN_HEADER`). The header is remembered, and the next statement's `{` is a body.
             # ⛔ read from RAW, not the stripped text: `_strip_statement_prefix` removes a leading
@@ -2194,7 +2219,7 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             case_open = max(
                 0,
                 case_open
-                + len(_SHELL_CASE_OPEN.findall(case_view))
+                + len(_SHELL_CASE_WORD.findall(case_view))
                 - len([c for c in closers if "esac" in c]),
             )
             # ⛔ `fn_body` is decremented only by a BRACE closer (review P2, measured).
