@@ -321,11 +321,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 260 collected
-                                 # (docker lane: 259 passed, 1 skipped)
+                                 # this tree: 263 collected
+                                 # (docker lane: 262 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **260 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **263 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -405,7 +405,7 @@ falsifier a later review measured at this head (PR #12474, P2) — that the `UNM
 one ordering it does not cover, since a LATER resolvable assignment still decides the file while the
 unresolvable line stays REPORTED in `indeterminate` in both orders; shown RED by reverting its own fix,
 with the phrase pin normalising the docstring's whitespace so a reflow cannot red it)
-and four by the fresh review of `#12902` — a shape that assigns MULTIPLE names on ONE line, where the
+and twelve by the fresh reviews of `#12902` — among them a shape that assigns MULTIPLE names on ONE line, where the
 flag is not the first: a shell `export OTHER=1 FLAG=0` (bash runs `0`; the value was read
 line-start-only, so the line appended NO decision and the earlier truthy one stood — a false ARM, and
 `export OTHER=1 FLAG=1` alone produced no decision either, so a genuinely armed entrypoint could read
@@ -415,11 +415,19 @@ shown RED against the unfixed blob and green after), and the self-referencing de
 `export FLAG=${FLAG:-1}` judged against the value the variable ALREADY holds (`bash -c 'export F=0;
 export F=${F:-1}; echo $F'` prints `0`, so the file is OFF while the pre-fix walker published `ON` —
 the open P1 of that review; RED against a mutant that ignores the tracked value, and its same-line
-arm RED against a mutant that tracks the value per LINE instead of per COMMAND), and three more that
+arm RED against a mutant that tracks the value per LINE instead of per COMMAND), three more that
 published a CLAIM the run did not make: a FALSE-ARM bound certified as `cannot_see` (`#12978`), a
 value-less compose entry described as "not an unset" when the deployment removes the image's `ENV`,
-and a REFUSED resolver named as having "answered"
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 36 + 9 = 260`).
+and a REFUSED resolver named as having "answered"; and three by the SECOND fresh review of `#12902` —
+the comment-blind splitter (a lone `&`/`|`, and a `;`, inside a `#` comment were executed as shell
+grammar, so `export FLAG=0   # CPU & memory` returned NO commands and the earlier truthy arm stood: a
+REGRESSION against `main`, which read `OFF`; RED against a mutant that drops the comment strip) and
+the per-COMMAND export state (`unset FLAG; export FLAG=1` published `OFF` while bash has `1`, and one
+source line was counted as two no-value declarations; RED against a mutant that reads the line-final
+state) and the COMMENTED-OUT heredoc opener, which queued a body and swallowed the lines below it as
+data (`# cat <<EOF` runs in bash; measured RED against a mutant that masks the un-stripped line — the
+interaction of the two readers, where the fourth review's own heredoc BODY table pins the other half)
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 36 + 12 = 263`).
 The `36` are `#12549`'s channel-resolver falsifiers: both orderings of a per-service
 compose disagreement, a flow mapping, an anchor+merge key, a resolver that REFUSES
 (`UNRESOLVED`, never an answer), an unset interpolation that must not read as an
@@ -511,7 +519,7 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
-collected count — `259 passed, 1 skipped` and `258 passed, 2 skipped` here, both adding to the same `260` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+collected count — `262 passed, 1 skipped` and `261 passed, 2 skipped` here, both adding to the same `263` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
 `186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch

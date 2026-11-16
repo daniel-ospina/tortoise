@@ -3036,6 +3036,133 @@ def test_a_self_referencing_default_respects_the_value_ALREADY_SET(
                   'export TORTOISE_EMBED_GATE=${TORTOISE_EMBED_GATE:-1}\n') == "UNMEASURED"
 
 
+def test_a_COMMENT_is_not_shell_syntax_so_a_disarm_inside_one_still_disarms(
+        tmp_path, monkeypatch):
+    """A `#` comment is PROSE, and reading its operators as grammar destroyed a disarm.
+
+    ⛔ P1 of the fresh review of #12902, and a REGRESSION against `main`. The splitter
+    tracked quotes and escapes but not comments, so:
+
+    * `export FLAG=0   # CPU & memory` returned **no commands at all** — the lone `&`
+      hit the subshell early-return, which DROPS the command before it — so the line's
+      disarm vanished and last-wins left the earlier truthy arm standing;
+    * `export FLAG=0   # off; FLAG=1` split on the commented `;` and scanned the
+      commented-out text as a real assignment.
+
+    Ground truth, measured: `env -i bash -c 'export TORTOISE_EMBED_GATE=1; export
+    TORTOISE_EMBED_GATE=0   # CPU & memory; env'` has `TORTOISE_EMBED_GATE=0`.
+
+    These shapes are not exotic in this repo's own shipped shell files —
+    `.github/scripts/auto-file-issue.test.sh` carries a commented `gh api` URL whose
+    query string contains `&per_page=100`.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
+        'ENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _files(script: str) -> dict:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["deployment"]["files"]
+
+    armed_then_disarmed = "export TORTOISE_EMBED_GATE=1\n"
+    for comment in ("# CPU & memory",          # a lone `&` in prose
+                    "# 0 | 1",                  # a lone `|` in prose
+                    "# see http://h/?a=1&b=2"):  # a URL query string
+        files = _files(armed_then_disarmed
+                       + f"export TORTOISE_EMBED_GATE=0   {comment}\n")
+        assert files["entrypoint.sh"] == "OFF", (comment, files)
+    # …and a `;` in a comment does not turn the prose after it into a command.
+    files = _files("export TORTOISE_EMBED_GATE=0   # off; TORTOISE_EMBED_GATE=1\n")
+    assert files["entrypoint.sh"] == "OFF", files
+    assert files["Dockerfile.hosted"] == "ON", files
+
+    # ── CONTROLS: a `#` that bash does NOT treat as a comment must keep its text ──
+    # `echo a#b` prints `a#b`; only a word-START `#` begins a comment. The returns are
+    # `(command, conditional)` pairs since the fourth review, so each control is read at
+    # index 0 and every one of them is UNCONDITIONAL.
+    assert probe._shell_commands("echo a#b") == [("echo a#b", False)]
+    # `$#` and `${#name}` are parameter syntax, not comments.
+    assert probe._shell_commands("echo ${#TORTOISE_EMBED_GATE}") == [
+        ("echo ${#TORTOISE_EMBED_GATE}", False)]
+    # a quoted `#` is data (`bash -c 'echo "1 # 2"'` prints `1 # 2`).
+    assert probe._shell_commands('echo "1 # 2"') == [('echo "1 # 2"', False)]
+
+
+def test_a_COMMENTED_OUT_heredoc_opener_opens_NO_body(tmp_path, monkeypatch):
+    """`# cat <<EOF` is PROSE: bash runs the lines below it, so they must still be read.
+
+    ⛔ The interaction between the two readers, measured on the rebase of the fourth
+    review onto this one (both halves were green alone): the heredoc scanner matched
+    `<<` on a quote-masked copy but did not strip COMMENTS, so a commented-out opener
+    still queued a body and swallowed every line below it as data. Ground truth:
+    `bash -c '# cat <<EOF\nexport TORTOISE_EMBED_GATE=1; env'` DOES export the flag
+    (`TORTOISE_EMBED_GATE=1`), while the walker read line 2 as a heredoc body and
+    published `OFF` — a FALSE HOLD, the fail-closed direction of a reading the run
+    never made. `_shell_heredoc_bodies` now masks the comment-stripped line.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _state(script: str) -> str:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs(
+            "TORTOISE_EMBED_GATE")["per_surface"]["entrypoint"]["state"]
+
+    assert _state("# cat <<EOF\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
+    assert _state('# done <<< "$uri"\nexport TORTOISE_EMBED_GATE=1\n') == "ON"
+    # …and the helper says the same thing directly, so the arms cannot drift apart.
+    assert probe._shell_heredoc_bodies(
+        "# cat <<EOF\nexport TORTOISE_EMBED_GATE=1\n") == set()
+    # ── CONTROL: a REAL opener carrying a trailing comment still opens its body ──
+    assert probe._shell_heredoc_bodies(
+        "cat <<EOF  # note\nexport TORTOISE_EMBED_GATE=1\nEOF\n") == {2}
+    assert _state("cat <<EOF  # note\nexport TORTOISE_EMBED_GATE=1\nEOF\n") == "OFF"
+
+
+def test_a_multi_command_line_carries_ONE_STATE_PER_COMMAND(tmp_path, monkeypatch):
+    """The export state is per COMMAND, not per line — the last command cannot decide
+    the first, and one source line cannot be counted as two declarations.
+
+    ⛔ Fresh review of #12902, P2. `_shell_export_states` recorded ONE dict per line
+    (its `values` list was per command, the rest were not) and the caller applied that
+    single line-final dict to every command on the line:
+
+    * `unset FLAG; export FLAG=1` published `OFF` while bash has `1` (false HOLD), and
+      the note reported the line as TWO no-value declarations, naming the arming
+      `export …=1` as the thing that "fixes NO VALUE";
+    * `export FLAG=1; export -n FLAG` (three `_shell_commands` elements, the last
+      empty) reported the same line THREE times.
+
+    Ground truth: `env -i bash -c 'unset TORTOISE_EMBED_GATE; export
+    TORTOISE_EMBED_GATE=1; env'` has `TORTOISE_EMBED_GATE=1`.
+    """
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    def _walk(script: str) -> dict:
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                               encoding="utf-8")
+        return probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+
+    shipped = _walk("unset TORTOISE_EMBED_GATE; export TORTOISE_EMBED_GATE=1\n")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+    assert len(shipped["unset_declarations"]) == 1, shipped["unset_declarations"]
+
+    shipped = _walk("export TORTOISE_EMBED_GATE=1; export -n TORTOISE_EMBED_GATE\n")
+    assert len(shipped["unset_declarations"]) == 1, shipped["unset_declarations"]
+
+    # ── CONTROL, the shape the per-line pin already held: separate lines are unchanged.
+    shipped = _walk("TORTOISE_EMBED_GATE=1\nexport -n TORTOISE_EMBED_GATE\n"
+                    "export TORTOISE_EMBED_GATE\n")
+    assert shipped["per_surface"]["entrypoint"]["state"] == "ON", shipped["per_surface"]
+
+
 def test_an_unexported_shell_assignment_is_not_a_shipped_environment_entry(
         tmp_path, monkeypatch):
     """A shell VARIABLE is not the process environment; only `export` reaches Python.
