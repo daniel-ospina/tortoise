@@ -3379,6 +3379,8 @@ _SHELL_ALLEXPORT = re.compile(r"^\s*set\s+-[a-zA-Z]*a[a-zA-Z]*\s*$")
 _SHELL_ALLEXPORT_OFF = re.compile(r"^\s*set\s+\+[a-zA-Z]*a[a-zA-Z]*\s*$")
 #: A `set` line and its arguments, up to a command separator.
 _SHELL_SET = re.compile(r"^\s*set\s+(?P<args>[^;&|]*)$")
+#: A shell command SEPARATOR glued to a value (`FLAG=1;`, `FLAG="1"&&`).
+_SHELL_OPERATOR_TAIL = re.compile(r"(?:;|&&?|\|\|?|&)+$")
 
 
 def _shell_set_allexport(line: str) -> bool | None:
@@ -3900,10 +3902,15 @@ def _assigned_value(line: str, flag: str) -> str | None:
     # `indeterminate: []`/`outside_runtime: []` — nothing in ANY bucket). The
     # `ENV key=value key2=value2` form is the Dockerfile's own multi-assignment
     # spelling, so every pair is read rather than only the first (fresh review, P1).
-    if legacy_value_form and "=" in stripped and not stripped.startswith(flag):
+    if legacy_value_form and "=" in stripped:
         pairs = {m.group("name"): m.group("value").strip("'\"")
                  for m in _DOCKERFILE_ENV_PAIR.finditer(stripped)}
         if flag in pairs:
+            # ⛔ The DICT takes the LAST pair, which is what Docker and bash both do for
+            # a name assigned twice on one line: `ENV FLAG=1 FLAG=0` builds an image with
+            # `0` (measured with `docker build` + `docker run`), so returning the FIRST
+            # was a false ARM (fresh review, P2). This branch is reached whenever the
+            # line carries `=`, so the single-pair spelling is unchanged.
             return pairs[flag] or None
     # The flag must be the KEY: at the start of the line, followed by `=` or
     # `:` and nothing but the value. `Set FLAG=1 to enable` and
@@ -3923,7 +3930,13 @@ def _assigned_value(line: str, flag: str) -> str | None:
         # ENV: no other surface has this form, and `ARG` never reaches the process.
         if not (legacy_value_form and rest_raw[:1] in (" ", "\t")):
             return None
-        legacy = _strip_inline_comment(rest).strip().strip("'\"")
+        # ⛔ A trailing `#` IS PART OF THE VALUE in this form. Docker's legacy
+        # `ENV KEY value` sets KEY to the REST OF THE LINE — a `#` starts a comment only
+        # at the START of a line — so `ENV FLAG 1 # enable the gate` builds an image whose
+        # value is the whole string `1 # enable the gate`, which this module's own
+        # truthiness contract scores FALSE. Stripping it published `ON` over that image
+        # (measured with `docker build` + `docker run`; fresh review, P1).
+        legacy = rest.strip().strip("'\"")
         return legacy or None
     value = _strip_inline_comment(rest[1:]).strip()
     # A genuine assignment's value is ONE token, optionally followed by a
@@ -3938,6 +3951,12 @@ def _assigned_value(line: str, flag: str) -> str | None:
     if len(tokens) > 1 and not all("=" in token for token in tokens[1:]):
         return None
     value = tokens[0] if tokens else ""
+    # ⛔ A TRAILING SHELL OPERATOR is not part of the value: `export FLAG=1;` runs
+    # `FLAG=1` and the `;` ends the command. Reading the token whole gave `1;`, which is
+    # not truthy, so an ARMED entrypoint read `OFF`. The operator-gluing class was already
+    # fixed for `unset` (see `_shell_unset_values`) and not for assignments (fresh review,
+    # P2).
+    value = _SHELL_OPERATOR_TAIL.sub("", value)
     value = value.strip("'\"")
     if len(value.split()) > 1:
         return None

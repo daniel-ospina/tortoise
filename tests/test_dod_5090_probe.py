@@ -3641,9 +3641,24 @@ def test_the_LAST_assignment_in_a_file_decides_its_arming(tmp_path, monkeypatch)
         "    - TORTOISE_EMBED_GATE=\t# empty\n", encoding="utf-8")
     assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
         "disarming_assignments"]
-    # …and a TAB comment on the LEGACY space form keeps the hit.
+    # ⛔ A TAB comment on the LEGACY space form is PART OF THE VALUE, so it is NOT an arm.
+    # Measured with Docker 29.1.3 on this exact line:
+    #   $ docker build -t zz . && docker run --rm zz env | cat -A
+    #   TORTOISE_EMBED_GATE=1^I# on
+    # Docker's legacy `ENV KEY value` sets KEY to the REST OF THE LINE — `#` starts a
+    # comment only at the START of a line — so the image's value is `1\t# on`, which this
+    # module's own truthiness contract (`tortoise/env_truthy.py`) scores FALSE. This pin
+    # asserted `ON`, i.e. it encoded a FALSE PASS: a shipper writing a trailing comment on
+    # the legacy form was published as armed over an image whose gate is off (fresh review
+    # of `#12902`, P1). The `key=value` spelling cannot hit this (Docker rejects it), so the
+    # exposure is exactly this form.
     (tmp_path / "Dockerfile.hosted").write_text(
         "FROM python:3.12\nENV TORTOISE_EMBED_GATE 1\t# on\n", encoding="utf-8")
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
+        "per_surface"]["Dockerfile"]["state"] == "OFF"
+    # …and a BARE legacy value with no comment still arms it.
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nENV TORTOISE_EMBED_GATE 1\n", encoding="utf-8")
     assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")[
         "per_surface"]["Dockerfile"]["state"] == "ON"
 
