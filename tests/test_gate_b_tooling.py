@@ -389,9 +389,9 @@ def test_gate_b_cli_reads_the_private_marker_seam(monkeypatch, capsys):
             targets: list[ast.AST] = []
             if isinstance(node, ast.Assign):
                 targets = list(node.targets)
-            elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
-                targets = [node.target]
-            elif isinstance(node, (ast.For, ast.AsyncFor)):
+            elif isinstance(
+                node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.For, ast.AsyncFor)
+            ):
                 targets = [node.target]
             elif isinstance(node, (ast.With, ast.AsyncWith)):
                 targets = [i.optional_vars for i in node.items if i.optional_vars]
@@ -506,7 +506,10 @@ def test_gate_b_cli_reads_the_private_marker_seam(monkeypatch, capsys):
     )
     blocked_srcs = [
         ast.unparse(v)
-        for k, v in zip(blocked.value.keys, blocked.value.values)
+        # `strict=True`: an AST Dict's keys/values are parallel by construction, so a
+        # mismatch means the tree is malformed — raise rather than silently truncate and
+        # inspect a shorter list than the node holds.
+        for k, v in zip(blocked.value.keys, blocked.value.values, strict=True)
         if isinstance(k, ast.Constant) and k.value == "blocked"
     ]
     assert blocked_srcs == ["bool(reasons)"], (
