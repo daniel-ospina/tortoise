@@ -39,7 +39,7 @@ Method, in the order the brief prescribes: `record_allocator.py` end to end, the
 `ALLOCATION_SQL`, then `tortoise/log.py::EventLog.append` — and then **outwards along the call graph**
 (call sites, not PR bodies), because the decisive question turned out to be a call site, not a module.
 
-What this lane did **not** do: it did not run a Postgres-backed suite (the one DB-free gate below was
+What this lane did **not** do: it did not run a Postgres-backed suite (the one DB-free **suite** below was
 run, `tools/record_wiring_check.py`, which is DB-free by design), and it did not modify product code.
 The docs lint is the one instrument whose history had to be corrected rather than simply reported: the
 first invocation exited **2** on its own missing required inputs (`--markdownlint-output`,
@@ -189,9 +189,9 @@ A graph with a large journal and **zero** `journal_event` rows is the population
 `floor = N`, and
 
 ```sql
- WHERE observed.row_max <= observed.enumerated_floor
-...
 SELECT %s, %s, GREATEST(observed.row_max, observed.enumerated_floor)
+  FROM observed
+ WHERE observed.row_max <= observed.enumerated_floor
 ```
 
 (`record_allocator.py:221-237`) writes `seq = GREATEST(0, N) = N`, and the next allocation takes
@@ -335,7 +335,7 @@ refusal is keyed on the **row**, not on the mode: `_refuse_an_enumerated_replay`
 when there is no row (`:7424-7425`), and every mode arm below it ends in an unconditional
 `raise RecordProjectionError` (`:7499`) — `seeded` (`:7446`), `halted` (`:7464`) and **`active`**
 (`:7470`, the `else` arm) differ only in the remedy each names
-(`arm` / `reopen`+re-seed+`arm` / `halt`+re-seed+`reopen`+`arm` — from `active`, `seed` and `reopen`
+(`seed`+`arm` / `reopen`+re-seed+`arm` / `halt`+re-seed+`reopen`+`arm` — from `active`, `seed` and `reopen`
 both REFUSE, so the remedy must start with a `halt`, `:7493-7496`). So **on any graph that has a `record_cursor` row,
 every live write is refused as an enumerated replay** while `write_live_record` passes the carried
 `seq` with `position=True`.
@@ -421,15 +421,15 @@ it. `§A7.7` step numbers are the plan's.
 
 ## V6 — anything merged that should not have been
 
-The **landed PRs** had four review rounds between them — that count is theirs and is unrelated to the
-eight rounds *this document* went through in §9. Each named defect, and where it stands now:
+The **landed PRs** had four review rounds between them — that count is theirs and is unrelated to this
+document's own review rounds (§9 states no total, and deliberately). Each named defect, and where it stands now:
 
 | # | Defect named in review | Status | Evidence |
 |---|---|---|---|
 | 1 | **positional `params[:5]` unpack** in `_refuse_a_journal_collision` — the guard unpacked five params for a six-bind insert, so `journal_id` would have been read as `seq` etc. | **FIXED** | the 6-bind unpack `org_id, graph_id, seq, event_type, payload, ts = statement.params` at `record_projection.py:6796`, guarded by an arity/identity **bail before any unpacking** at `:6773-6794` (`_JOURNAL_POSITION_PARAM_COUNT = 6`, `:6354`), and the shape test at `:6339-6350` |
-| 2 | **`recorded_at` discriminator, both directions** — (a) an unguarded arm reported every replay of a `ts`-less record as a collision; (b) a content match at a *different* capture was silently absorbed | **FIXED** | (a) `WHERE … (%s::timestamptz IS NOT NULL AND recorded_at IS DISTINCT FROM %s::timestamptz)` at `:6455-6458` with the false-red explained at `:6445-6454`; (b) `same_capture` is computed by Postgres in `_JOURNAL_CONFLICT_CONTENT_SQL` (`:6437-6460`) and only `same_type and same_capture and ts is not None` returns silently (`:6847`); everything else raises `JournalPositionCollision` (`:6858-6872`) |
+| 2 | **`recorded_at` discriminator, both directions** — (a) an unguarded arm reported every replay of a `ts`-less record as a collision; (b) a content match at a *different* capture was silently absorbed | **FIXED** | (a) `WHERE … (%s::timestamptz IS NOT NULL AND recorded_at IS DISTINCT FROM %s::timestamptz)` at `:6455-6458` with the false-red explained at `:6445-6454`; (b) `same_capture` is computed by Postgres in `_JOURNAL_CONFLICT_CONTENT_SQL` (`:6437-6457`) and only `same_type and same_capture and ts is not None` returns silently (`:6847`); everything else raises `JournalPositionCollision` (`:6858-6872`) |
 | 3 | **`23514` on an empty-graph seed** — a `CHECK (seq > 0)` on the cursor made the *emptiest* graph's own seed fail | **FIXED** | `seq bigint NOT NULL DEFAULT 0 CHECK (seq >= 0)` at `supabase/migrations/20261116000001_record_cursor_allocator.sql:61`, with the reasoning at `:24-32`; `journal_event` keeps `seq > 0` (`20261012000001:84`) because a *position* is always ≥ 1 |
-| 4 | **`42501` from `FORCE ROW LEVEL SECURITY` without the GUC** | **FIXED / not applicable as written** | the landed migration uses `ENABLE ROW LEVEL SECURITY` (`20261116000001:78`), **not** `FORCE` — so an owner-role connection is not subjected to the policy by this table. The seed sets *and verifies* the tenant GUC itself (`record_allocator.py:396-397`, `:637-650`), and `record_projection.scope_connection` does the same plus the role gate (`record_projection.py:7021-7024`). The refusal-vs-divergence distinction is pinned by `tests/test_12894_record_cursor_live.py::test_a_seed_without_the_guc_is_a_refusal_not_a_divergence` (`record_allocator.py:383-394`). ⚠️ The plan text still says `FORCE` (`§A7.5.5`, *"FORCE ROW LEVEL SECURITY on `record_cursor`"*), so plan and migration disagree — the *migration* is what runs, and it is the more forgiving of the two |
+| 4 | **`42501` from `FORCE ROW LEVEL SECURITY` without the GUC** | **FIXED / not applicable as written** | the landed migration uses `ENABLE ROW LEVEL SECURITY` (`20261116000001:78`), **not** `FORCE` — so an owner-role connection is not subjected to the policy by this table. The seed sets *and verifies* the tenant GUC itself (`record_allocator.py:396-397`, `:637-650`), and `record_projection._apply_tenant_scope` does the same plus the role gate (`record_projection.py:7003-7024`, whose body is the cited range), which `scope_connection` (`:7069-7087`) delegates to. The refusal-vs-divergence distinction is pinned by `tests/test_12894_record_cursor_live.py::test_a_seed_without_the_guc_is_a_refusal_not_a_divergence` (`record_allocator.py:383-394`). ⚠️ The plan text still says `FORCE` (`§A7.5.5`, *"FORCE ROW LEVEL SECURITY on `record_cursor`"*), so plan and migration disagree — the *migration* is what runs, and it is the more forgiving of the two |
 | 5 | **the placeholder converter** — *"a statement mixing a literal `$1` with `%s` is refused by the converter"* | ⛔ **NOT FIXED — the claim is false, and the test that pins it passes for the wrong reason** | measured: `to_dollar_placeholders` (`record_projection.py:7806-7824`) refuses only on **arity** (`len(parts)-1 != len(params)`). `Statement("SELECT $1, %s", ("a",))` → `SELECT $1, $1`; `Statement("SELECT $1, %s, %s", ("a","b"))` → `SELECT $1, $1, $2`, both silently. The comment asserting the refusal is `record_allocator.py:199-202`; the test is `tests/test_12894_record_cursor.py:294-319`, and its case `Statement("SELECT $1, %s", ("a","b"))` raises **because there are two params for one placeholder**, not because a literal `$n` was detected — delete the literal and the same case still raises. No *landed* statement mixes the two (checked: the only `$<n>` occurrences in `record_projection.py` are inside comments/docstrings at `record_projection.py:266` and `record_projection.py:7570`), so this is a **false-passing gate**, not a live data defect — the shape it cannot see is one a future edit can introduce |
 | 6 | **`record_cursor` ships `ON DELETE CASCADE`** — a *recorded plan decision*, not a review finding, and the plan forbids it by name | ⛔ **MERGED CONTRARY TO THE PLAN** (already tracked as `#12987`) | migration: `FOREIGN KEY (org_id, graph_id) REFERENCES public.graphs (org_id, id) **ON DELETE CASCADE**` (`supabase/migrations/20261116000001_record_cursor_allocator.sql:70`). Plan `§A7.8` item 1 (`docs/plans/2026-11-15-issue-12894-storage-shape.md:1840`): *"⛔ **and NO `REFERENCES public.graphs … ON DELETE CASCADE`, deliberately, unlike every sibling record table** … `purge_org_record` deletes `public.organizations` and relies on that cascade, so a cascade FK here would **delete the counter with the purge** and let a re-armed graph restart at 1 — the exact outcome item 7 rules against"*. ⛔ **And the migration's own header (`supabase/migrations/20261116000001_record_cursor_allocator.sql:45-47`) ENDORSES the cascade** — *"DELETE stays withheld because the counter is never erased per-row; it goes with the graph via the FK's ON DELETE CASCADE, which is the tenant-erasure path"* — which is a direct contradiction of the plan's reasoning, not an oversight. So the finding is sharper than "unrecorded DDL": **two recorded reasonings disagree about the same constraint**, the plan's (a cascade lets a purge delete the counter, so a re-armed graph restarts at 1 — item 7 rules against it) and the migration's (the cascade *is* the tenant-erasure path, so withholding DELETE per-row is deliberate). `#12987`'s two options turn on exactly that question |
 
@@ -470,12 +470,11 @@ three things that would make the ruling true of the running system are V5 items 
 
 The dispatch brief asked for this claim to be checked rather than trusted, so:
 
-The cap-archives live on **`origin`** under `refs/wip/` — a *local* `git for-each-ref refs/wip/`
-returns nothing here, and a command in that namespace can never produce the listing below. The archive
-tool (agent-infra's `scripts/bg-rescue-wip.sh`, materialised in this repo as the gitignored `scripts/`
-pointer) writes `refs/wip-local/<slug>` locally at `:321` and only *pushes* to `origin refs/wip/<slug>`,
-fetching the remote copy back as `refs/wip-remote/<slug>` at `:336`. The command that reproduces is
-`git ls-remote`, quoted verbatim:
+The cap-archives live on **`origin`** under `refs/wip/`, and the same refs are visible locally — this
+worktree holds **322** `refs/wip/*` refs, and `git for-each-ref 'refs/wip/*12894*'` prints exactly the
+two-line listing below with the same shas, so a reader can reproduce it with either command. The one
+quoted here is `git ls-remote`, because that is what was run and because it is the only form that
+speaks about `origin` rather than about this clone:
 
 ```text
 $ git ls-remote origin 'refs/wip/*12894*'
@@ -487,9 +486,13 @@ ec0bc91f6d8650105b4eb0f1a40c342c59451f14 refs/wip/feat-12894-allocator-spike
 Both say **"not for merge"** in their commit subject, which also carries the archive timestamps
 (`2026-11-16T06:29:21Z`, `2026-11-16T10:08:08Z`) — **transcribed from those subjects, not from the
 listing above**: the subjects record when the archive ran, and the `issue-` commit's own date is
-`10:08:19`, nine seconds later. Locally the same objects surface as
-`refs/wip-local/issue-12894-allocator-spike` (`703613fa0c`) plus a stale
-`refs/wip-remote/issue-12894-allocator-spike` (`7d4e802fdf`).
+`10:08:19`, nine seconds later. The archive tool (agent-infra's `scripts/bg-rescue-wip.sh`,
+materialised here as the gitignored `scripts/` pointer) writes a local `refs/wip-local/<slug>` and mirrors
+the remote copy back as `refs/wip-remote/<slug>`; in this clone those local refs are
+`refs/wip-local/feat-12894-allocator-spike` (`ec0bc91f6d`) and the `refs/wip/` pair above, and neither
+`refs/wip-local/` nor `refs/wip-remote/` carries an `issue-12894-allocator-spike` ref — an earlier draft
+of this paragraph named two refs that do not resolve here, which a reader would have discovered by
+following it.
 
 Relative to the merged `#12959` head (`acc9cbc035`), **only the `issue-` ref** carries a substantive
 commit — `e2a9eadb87` (`acc9cbc035..refs/wip/issue-12894-allocator-spike` = `703613fa0c`, `7d4e802fdf`,
@@ -517,7 +520,8 @@ The honest comparison is `git log refs/pull/12959/head..<wip-ref>` plus a path-s
 ## 9. Commands used (verbatim)
 
 **Which invocations are registered, and which are not.** The lane's report tool took every check this
-lane ran, and `WORKTREE-REPORT.md` is the register: the wiring check after each fix batch, the docs lint
+lane ran, and `WORKTREE-REPORT.md` is the register: the wiring check after **most** fix batches (the
+cycle-2, cycle-3 and cycle-4 batches had no run between them), the docs lint
 first as a non-run (exit `2`, kept as a red row rather than deleted) and then through the workflow's own
 pinned producers, which returned `0` markdownlint issues in one file, `0` link errors over `total=0`
 links — this document contains no links, so that gate had nothing to resolve and its pass is vacuous —
@@ -529,7 +533,7 @@ reader of the merged document cannot open it: the counts above are this lane's r
 not an artifact shipped beside the claims. And the row numbering is deliberately **not** restated here,
 because a number written into this document goes stale the next time a check is registered — the first
 two drafts of this section each carried a row count and each was falsified by a later run in the same
-session. What IS re-measurable without the register is the gates themselves, which is why V5 item 1 asks
+session, and a third cited "row 3" and "row 4" of a register the reader cannot open. What IS re-measurable without the register is the gates themselves, which is why V5 item 1 asks
 for the wiring check's exit code to be re-established at the head that moves it.
 
 Three lane-tool invocations in the block below are *not* in the register — `worktree_report.py init`,
@@ -547,12 +551,14 @@ the affected suites so the report describes the tree you are actually shipping`)
 docs-only commit would re-trigger. The runs above therefore say *when* they were taken and not that
 they cover the shipping commit. Each run is labelled with the round it follows, and the label is
 **checkable rather than asserted**: `.worktree-report/state.json` records every run's
-`started_at`/`finished_at`, so a row can be placed between two commits. Row 3 is where that check
-bites — it lands between `77951e15cf` (the cycle-1 fixes) and `3053bd2827` (the cycle-2 fixes), so it is
-a cycle-1 run and covers nothing the cycle-2 round added; row 4 lands after `3ada51d627` (cycle-4) and
-was taken with the cycle-5 edits already in the working tree. A run labelled one round fresher than its
-timestamps allow is the defect this paragraph exists to prevent: the first draft of this section
-attributed that row to cycle 3, and the register said otherwise.
+`started_at`/`finished_at`, so **each run can be placed between two commits by its own timestamps
+rather than by a label this text asserts**. The run that finished at 18:13:17Z is the clearest case: it
+sits between `77951e15cf` (the cycle-1 fixes) and `3053bd2827` (the cycle-2 fixes), so it is a cycle-1
+run and covers nothing the cycle-2 round added — and an earlier draft of this section called it a
+cycle-3 run, which is the defect this paragraph exists to prevent. The run that finished at 18:33:28Z
+sits after `3ada51d627` (cycle-4) and was taken with the cycle-5 edits already in the working tree. The
+times are in the register, so the placement is checkable; no row index is quoted here, because the
+register is not in this PR.
 
 What makes the non-claim honest rather than convenient is a property of the suite:
 `record_wiring_check.py` reads `tortoise/` and only `tortoise/` (`PACKAGE` at
@@ -579,8 +585,8 @@ make the register read as though the lint had been green all along.
 uv run python tools/worktree_report.py init --issue 12894
 uv run python tools/gh_write_preflight.py --repo .          # GH-WRITE-OK(origin)
 
-# the DB-free gate, invoked once after each batch of fixes. Every instance exited 0;
-# the register holds each one with its timestamp, which is what §9's placement rests on.
+# the DB-free gate, invoked repeatedly across the fix batches (not after every one). Every
+# instance exited 0; the register holds each with its timestamp, which §9's placement rests on.
 uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'
 
 # the docs lint, FIRST as the bare invocation — a non-run, kept as a red row:
