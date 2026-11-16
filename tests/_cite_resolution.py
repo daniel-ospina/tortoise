@@ -36,7 +36,7 @@ names a symbol; it is NOT a mechanical substitution here, because (a) ~100 of th
 capstone bundle's cites name a LINE OF CODE rather than a binding (`"stats":
 _capture_stats_with_step_witness(...)`, a `proj.link_source_to_event(` call, a range
 across a dict literal) and have no symbol to name, and (b) several anchors resolve to
-MORE THAN ONE line (`subject_binding_available,` is at `sdk.py:10334` and `:41823`),
+MORE THAN ONE line (`subject_binding_available,` is at `sdk.py:10353` and `:41859`),
 so a symbol-only resolution would bind the wrong line silently — the exact failure
 `#10214` fixed for the README's pair cites. This module is the half that can be built
 without weakening any pin; the symbol form remains the target for the cites that can

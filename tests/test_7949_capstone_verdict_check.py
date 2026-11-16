@@ -2225,8 +2225,9 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         f"{_locate_hint(sources['sdk'], 'def _extract_session_v2(', 'def', p_def)}")
     assert "self._extract_session_v2(" in sources["sdk"][p_call - 1], (
         f"the probe cites the call at sdk.py:{p_call}, which is "
-        f"{sources['sdk'][p_call - 1].strip()!r} — the line moved and the cite "
-        "did not")
+        f"{sources['sdk'][p_call - 1].strip()!r} — the line moved and the cite did "
+        f"not: `self._extract_session_v2(` "
+        f"{_locate_hint(sources['sdk'], 'self._extract_session_v2(', 'line', p_call)}")
 
 
 def test_the_readme_stamps_the_shipped_log_at_the_logs_own_head():

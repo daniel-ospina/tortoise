@@ -7346,17 +7346,17 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     # ⛔ THE NEIGHBOUR ARM MUST NOT REFUSE ANOTHER FILE'S CITE, and both of these were
     # measured RED before `_neighbour_number_strays` existed. They are the natural
     # prose of a maintainer explaining the block's mechanism — and `03-test-design.md`
-    # is the bundle's cite-heavy document (`sdk.py:10064`/`:10117`, `capstone_run.py`),
+    # is the bundle's cite-heavy document (`sdk.py:10353`/`:10406`, `capstone_run.py`),
     # so its neighbours WILL name other modules with line numbers. Both numbers are
-    # re-derived at this head (`grep -n subject_binding_available tortoise/sdk.py`) —
-    # an earlier revision carried `9867`/`9920`, which is that pair minus 71: a
-    # carried OFFSET, the exact rot this PR exists to remove, caught by the same
-    # review that re-derived the document's copy of the pair.
+    # re-derived at this head (`grep -n 'subject_binding_available,' tortoise/sdk.py`
+    # -> 10353, 41859) — an earlier revision carried `9867`/`9920`, that anchor's lines
+    # at a stale head plus a carried OFFSET, the exact rot this PR exists to remove,
+    # caught by the same review that re-derived the document's copy of the pair.
     ("`surfaces:` blocks are spliced by `tools/ci_selection.py::register_tests` (its "
      "`entry_lines` loop, `:4906`) and the entry line moves under them.", []),
     ("The `corpus` block in `capstone_run.py` is frozen; its literal sits at `:1186`.",
      []),
-    ("`sdk.py`'s `extraction_mode` literal sits at `sdk.py:16323` — another row's cite.",
+    ("`sdk.py`'s `extraction_mode` literal sits at `sdk.py:16948` — another row's cite.",
      []),
     # …and the forms it MUST still catch, so the "another file" exemption cannot become
     # a bypass: a bare cite with NO other file named, and the history-trimmed number.
