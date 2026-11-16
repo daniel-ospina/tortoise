@@ -277,12 +277,15 @@ Run on a **freshly-written** graph (arm C, `measure.py --skip-operator`):
 ```
 
 ```bash
-# the capture, reproduced
-SUMMARY_OUT=last-run-arm-c-reconcile.json TORTOISE_DB_URI="$LANE_URI" \
-  python measure.py --skip-operator
-org=$(python3 -c "import json;print(json.load(open('last-run-arm-c-reconcile.json'))['org'])")
-gid=$(python3 -c "import json;print(json.load(open('last-run-arm-c-reconcile.json'))['graph_id'])")
-python -m tortoise record-reconcile --db "$LANE_URI" \
+# the capture, reproduced — from the repo ROOT, for the two reasons arms A/B give
+# above (`uv run`: the driver imports are lazy; `$PWD`: it is the captured `events_base`).
+export EVENTS_BASE="$PWD/.evidence-events"
+SUMMARY_OUT=docs/evidence/12943-cache-leg/last-run-arm-c-reconcile.json \
+  TORTOISE_DB_URI="$LANE_URI" \
+  uv run python docs/evidence/12943-cache-leg/measure.py --skip-operator
+org=$(python3 -c "import json;print(json.load(open('docs/evidence/12943-cache-leg/last-run-arm-c-reconcile.json'))['org'])")
+gid=$(python3 -c "import json;print(json.load(open('docs/evidence/12943-cache-leg/last-run-arm-c-reconcile.json'))['graph_id'])")
+uv run python -m tortoise record-reconcile --db "$LANE_URI" \
   --record-dsn "$TEST_RECORD_DB_URI" --org "$org" --graph "$gid" \
   --cache-graph "org_${org}_${gid}" --json
 ```

@@ -233,15 +233,21 @@ def main() -> int:
     sdk._bind_record_tenant(org, graph_id)
     print(f"tenant           org={org} graph={graph_id}")
     print(f"cache graph      {ns}")
-    print(f"TORTOISE_DB_URI  {os.environ.get('TORTOISE_DB_URI', '<unset>')!r}"
+    # ⛔ FINGERPRINTED like the record DSN below, and for the same reason: STDOUT is
+    # where a lane pastes its run into a PR or a report, so a raw
+    # `docker://:<password>@host:port/db` here is a credential in the transcript even
+    # though the committed CAPTURE is clean.
+    _wp = os.environ.get("TORTOISE_DB_URI")
+    print(f"TORTOISE_DB_URI  {_fingerprint(_wp) if _wp else '<unset>'}"
           f"  (write path)")
+    _cc = os.environ.get("CACHE_COUNT_URI")
     print(f"CACHE_COUNT_URI  "
-          f"{os.environ.get('CACHE_COUNT_URI', '<defaults to TORTOISE_DB_URI>')}")
+          f"{_fingerprint(_cc) if _cc else '<defaults to TORTOISE_DB_URI>'}")
     print(f"record DSN       {_fingerprint(os.environ['TORTOISE_RECORD_DSN'])}"
           f"  (write path)")
     print(f"events base      {base}")
-    print(f"cache count URI  {os.environ.get('CACHE_COUNT_URI')
-                             or os.environ.get('TORTOISE_DB_URI') or '<none>'}")
+    _ccu = os.environ.get("CACHE_COUNT_URI") or os.environ.get("TORTOISE_DB_URI")
+    print(f"cache count URI  {_fingerprint(_ccu) if _ccu else '<none>'}")
 
     results = {}
     try:
@@ -309,7 +315,8 @@ def main() -> int:
     result = {
         "org": org, "graph_id": graph_id, "cache_graph": ns,
         # Which shape this run measured — the README's table keys on it.
-        # ⛔ REDACTED, like the record DSN twelve lines below. The raw value is
+        # ⛔ REDACTED, like the record DSN twelve lines below, AND like the stdout
+        # block above. The raw value is
         # `docker://:<password>@host:port/db`, and a capture is a COMMITTED file:
         # today's lane has an empty password, but any lane whose cache is
         # password-protected would write that password into the PR. What the arm

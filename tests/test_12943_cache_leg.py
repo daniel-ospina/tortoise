@@ -284,7 +284,7 @@ def test_a_shared_cache_is_not_counted(monkeypatch, tmp_path):
     when `TORTOISE_DB_URI` names nothing. This arm is the half that runs everywhere,
     so it proves the predicate only; `_delta(before) == {}` is sound but weak on its
     own (no construction happens between the two reads), which is why the skip-gated
-    test above is the one that pins the CONSTRUCTION.
+    test below is the one that pins the CONSTRUCTION.
     """
     _arm_record(monkeypatch)
     before = _counts()
