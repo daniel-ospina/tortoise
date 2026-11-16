@@ -141,6 +141,23 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # fold the assertion onto a shared server graph. The delenv IS the point;
     # the fixture-param monkeypatch auto-restores (no lane leak).
     "test_destructive_wipe_guard.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #12943 the cache leg: the SHAPE UNDER TEST is a deployment with the record
+    # armed and NO shared cache (`TORTOISE_RECORD_DSN` set, `TORTOISE_DB_URI`
+    # empty) — the shape measured at 2 objects / 3 points in Postgres and 0 / 0
+    # in FalkorDB. The delenv IS the fixture: under `TORTOISE_TEST_MODE=1` the
+    # docker-lane redirect rewrites an explicit-path construction onto the
+    # ambient server, and `cache_leg` deliberately exempts that (correctly — a
+    # redirected cache IS shared), so without the delenv the split-shape tests
+    # would silently assert against the coherent lane and pass for the wrong
+    # reason. The convergence legs keep the ambient URI on purpose: they compare
+    # the two stores against it.
+    "test_12943_cache_leg.py": [
+        # the split-shape fixture: a deployment with NO shared cache
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+        # the redirect-exemption arm (DELIBERATE_URI): it forces the shared lane
+        # to prove the exemption does not over-count
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+    ],
     # #9664 capstone connector (the ChatGPT onboarding journey): the test drives
     # the REAL HTTP app + tenancy resolver + record seam against a local SQLite
     # db (`TORTOISE_DB_PATH` to a tmp_path), so it forces the EMBEDDED lane — the

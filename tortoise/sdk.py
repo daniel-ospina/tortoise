@@ -11966,6 +11966,14 @@ class TortoiseSDK:
         if self._db_uri is None and self._db_path:
             self._probe_embedded_busy(self._db_path)
             _mark_embedded_opened(self._db_path)
+            # #12943: the cache leg's own legibility. THIS is the one constructor
+            # every write door passes (SDK direct, the hosted REST lane's
+            # `_data_sdk`/`_make_sdk`, the MCP lane's `mcp_auth._get_org_sdk`), so
+            # the check lives here rather than at three call sites that can drift.
+            # Deliberately NOT a raise: #7722's embedded fallback and a declared
+            # single-tenant self-host are both coherent and must keep building.
+            from .cache_leg import note_local_cache
+            note_local_cache(cache_path=self._db_path)
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
