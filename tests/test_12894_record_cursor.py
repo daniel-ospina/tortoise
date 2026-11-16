@@ -831,9 +831,12 @@ def test_every_allocator_remedy_chain_terminates_allocatable() -> None:
     PATH: each arrow's source state is the previous arrow's target, and the last
     target must be `active` — the only mode `ALLOCATION_SQL` will allocate in.
 
-    Non-vacuity: restoring either pre-fix wording reds here — the first on the
-    absent `halt`/arrow needles, the second on the missing `halted → seeded`
-    arrow (and on the forbidding sentence, which only the first contains).
+    Non-vacuity, measured by restoring each pre-fix wording alone:
+      · `duplicate_position` → "never names 'halt'";
+      · `cursor_not_active` (as of `e641ad3aa4`) → "never names 're-seed'",
+        because that text said "run the seed" and so failed the `re-seed`
+        NEEDLE before any arrow was examined — the arrows do not carry that
+        case, the needles do.
     """
     chains = {
         # the counter is BEHIND the table: it is `active`, and every repair verb
@@ -863,13 +866,38 @@ def test_every_allocator_remedy_chain_terminates_allocatable() -> None:
             f"the {state!r} remedy names its transitions out of order ({where}) "
             f"— each step's source state is the previous step's target, so a "
             f"scrambled chain cannot run: {remedy}")
-        assert arrows[-1].endswith(ra.MODE_ACTIVE), (
-            f"the {state!r} remedy does not end at {ra.MODE_ACTIVE!r}, which is "
-            f"the only mode `ALLOCATION_SQL` allocates in: {remedy}")
+        # ⛔ THE CHAIN MUST END AT `active`, AND THAT MUST BE READ FROM THE
+        # TEXT, NOT FROM THE LITERAL WE JUST BUILT (re-review round 3, P2).
+        # `arrows[-1].endswith(ra.MODE_ACTIVE)` is TRUE BY CONSTRUCTION —
+        # `arrows[-1]` is the local f-string ending in `… → active` — so it
+        # passed on every possible wording, which is the same vacuous-assertion
+        # class this test exists to remove, re-introduced one function later.
+        # The last transition FOUND IN THE REMEDY is what actually tells the
+        # operator where the chain ends.
+        found = re.findall(r"(\w+) → (\w+)", remedy)
+        assert found, (
+            f"the {state!r} remedy states no transition at all, so the operator "
+            f"is never told which mode they are in or which one to reach: "
+            f"{remedy}")
+        assert found[-1][1] == ra.MODE_ACTIVE, (
+            f"the {state!r} remedy's LAST stated transition ends at "
+            f"{found[-1][1]!r}, not {ra.MODE_ACTIVE!r} — the only mode "
+            f"`ALLOCATION_SQL` allocates in, so the chain stops short and the "
+            f"next allocation raises `CursorNotActive`: {remedy}")
         assert "Do NOT re-arm:" not in remedy, (
             f"the {state!r} remedy forbids `arm` outright, and `arm` is the "
             f"ONLY writer back to an allocating counter — every route out is "
             f"closed: {remedy}")
+    # ⛔ AND COMPLETENESS, or this test reads as covering remedies it has never
+    # seen (re-review round 3, P2): `chains` is a hand-listed dict, and nothing
+    # else in the suite iterates `_ALLOCATOR_REMEDY`'s TEXT —
+    # `test_the_door_speaks_the_counters_vocabulary` only checks the reverse
+    # direction (every remedy key is a real counter). So a THIRD remedy added
+    # later would ship an unverified chain while this test still reported green.
+    assert set(chains) == set(rw._ALLOCATOR_REMEDY), (
+        "every remedy needs an entry here or its printed chain is unverified: "
+        f"untested={sorted(set(rw._ALLOCATOR_REMEDY) - set(chains))} "
+        f"stale={sorted(set(chains) - set(rw._ALLOCATOR_REMEDY))}")
 
 
 def test_the_door_speaks_the_counters_vocabulary() -> None:

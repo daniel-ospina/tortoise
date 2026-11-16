@@ -2339,12 +2339,27 @@ _ALLOCATOR_REMEDY = {
         # interleaved a `seeded → active` ahead of the halted chain's
         # `halted → seeded`, which makes the message's arrows read out of order
         # by any prefix-order check and invites the reader to run them that way.
+        # ⛔ THE `seeded` BRANCH MUST NOT SAY "never armed" (re-review round 3,
+        # P2): `REOPEN_SQL` moves `halted → seeded` and KEEPS `seq`, so a
+        # reopened cursor WAS armed and its numbers WERE consumed — the very
+        # state this PR's live test constructs as `(4, 'seeded')`. The sibling
+        # refusal in `record_projection` forbids this wording verbatim ("⛔ NOT
+        # 'never armed'"); two operator-facing messages giving opposite advice
+        # for one state is the class being removed here.
+        # ⛔ AND IT MUST KEEP THE RE-SEED. `arm` sets only `mode`, so a `seeded`
+        # counter that is BEHIND the table (a restore, or a write made before
+        # arming) is armed into the colliding state — the next allocation then
+        # issues an ordinal the table already holds, i.e. this very
+        # `duplicate_position`. The seed is monotone `GREATEST`, so naming it
+        # costs nothing when the counter is already right.
         "the counter has no row for this graph, or its mode is not 'active'. "
         "With no row, run the seed and then `arm` — that arms it. A `halted` "
         "cursor was stopped by a defect, and `seed` does NOT change the mode, so "
         "it takes `reopen` (`halted → seeded`), re-seed, then `arm` "
-        "(`seeded → active`). A `seeded` cursor was never armed, so `arm` alone "
-        "finishes it"),
+        "(`seeded → active`). A `seeded` cursor is not armed: re-seed it "
+        "(monotone `GREATEST`, so it is free when the counter is already right, "
+        "and it is required when a restore or a pre-arm write left the counter "
+        "behind) and then `arm`"),
     "duplicate_position": (
         "the counter issued a position the record already holds — the counter is "
         "BEHIND the table (a restore that bulk-loaded `journal_event` without the "
