@@ -477,11 +477,15 @@ three things that would make the ruling true of the running system are V5 items 
 
 The dispatch brief asked for this claim to be checked rather than trusted, so:
 
-The cap-archives live on **`origin`** under `refs/wip/`, but a **local** `refs/wip/` namespace does not
-carry them: this clone holds 297 `refs/wip/*` refs and **zero** matching 12894
-(`git for-each-ref --format='%(refname)' refs/wip/ | wc -l` → 297; `… | grep -c 12894` → 0;
-`git for-each-ref 'refs/wip/*12894*'` → no output), so a reader cannot reproduce the mapping from the
-local namespace at all. Only `ls-remote` speaks about `origin`, which is why that is the form quoted:
+The cap-archives live on **`origin`** under `refs/wip/`. That is the only place this section asserts
+anything about them, because the **local** archive namespaces are not stable enough to describe: three
+drafts of this paragraph measured them three different ways in one session (`refs/wip/` holding 322 or
+297 refs; a local `refs/wip/*12894*` match present or absent; `refs/wip-local/issue-12894-allocator-spike`
+existing or not), and `refs/wip-remote/*` was empty in every reading taken here. The namespace is
+maintained by a rescue tool that keeps writing and pruning, so a count or a local ref name in this
+document is a measurement of one clone at one instant, not a fact about the repository. **The refs below
+are therefore verified on `origin`, from a command that speaks about the remote and not about any
+clone:**
 
 ```text
 $ git ls-remote origin 'refs/wip/*12894*'
@@ -490,20 +494,12 @@ ec0bc91f6d8650105b4eb0f1a40c342c59451f14 refs/wip/feat-12894-allocator-spike
 703613fa0ca66b33813e8ab1c6da93e9603ba97a refs/wip/issue-12894-allocator-spike
 ```
 
-Both say **"not for merge"** in their commit subject, which also carries the archive timestamps
+Everything else here is read from those two objects, so it holds wherever they are fetched from, and it
+is the part that matters: the commits, their subjects, and which ref carries the substantive one. Both
+say **"not for merge"** in their commit subject, which also carries the archive timestamps
 (`2026-11-16T06:29:21Z`, `2026-11-16T10:08:08Z`) — **transcribed from those subjects, not from the
 listing above**: the subjects record when the archive ran, and the `issue-` commit's own date is
-`10:08:19`, eleven seconds later — the subject's timestamp is the archive run, the commit date is when
-the archive commit itself was written. The archive tool is agent-infra's `scripts/bg-rescue-wip.sh`,
-materialised here as the gitignored `scripts/` pointer; it writes a local `refs/wip-local/<slug>` and
-mirrors the remote copy back as `refs/wip-remote/<slug>`. In this clone **both** of those namespaces
-carry the `issue-` archive (`refs/wip-local/issue-12894-allocator-spike` = `7d4e802fdf`,
-`refs/wip-remote/issue-12894-allocator-spike` = `5351f89298`), and **neither** carries a `feat-` one
-(`git rev-parse --verify refs/wip-local/feat-12894-allocator-spike` → `fatal: Needed a single
-revision`). Two earlier drafts of this paragraph were wrong in opposite directions — one named local
-refs that do not resolve here, the other asserted the namespaces were empty — and a bare
-`git for-each-ref` prints **three** fields (`<sha>\t<type>\t<refname>`), not four. Counts and shas also
-move, because the archive tool keeps writing: the commands are what reproduce, not the numbers.
+`10:08:19`, eleven seconds later, because the commit date is when the archive commit itself was written.
 
 Relative to the `#12959` branch head (`acc9cbc035` — the PR's `headRefOid`, squash-merged onto `main` as
 `792269c931`, which is the form the document names elsewhere), **only the `issue-` ref** carries a substantive
