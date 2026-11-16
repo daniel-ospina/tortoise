@@ -101,6 +101,15 @@ What this suite pins (each row names the mutation that reds it):
   and at the exotic-key refusal that
   groups class names
   (``{type(k).__name__ for k in _exotic_keys}`` -> ``RuntimeError: name-boom``).
+* The SELF-SUCCESSOR GATE in ``supersede_point`` is a caller read too: it now
+  compares BASE CONTENT when both operands are genuinely ``str``, because
+  ``str.__eq__`` answers ``NotImplemented`` for a subclass overriding
+  ``__eq__``. Mutation: restore a bare ``old_id == new_id`` ->
+  ``test_the_POINT_arms_self_successor_gate_does_not_dispatch_to_the_caller``
+  reds and a ``CORRECTS`` self-edge is written (measured:
+  ``supersede(<live Point>, SubLyingEq(<same id>))`` -> ACCEPTED, row
+  ``['superseded', True, None]``). The ENTITY arm carries the same bound
+  (cycle 7); a genuine successor still lands, pinned in the same case.
 
 Runnable (docker lane):
 
@@ -1415,6 +1424,90 @@ def test_the_self_successor_gate_does_not_dispatch_to_the_caller(sdk):
     with pytest.raises(ValueError) as exc:
         sdk.supersede(node, node)
     assert "must differ" in str(exc.value), str(exc.value)
+
+
+class _StrSubLyingEq(str):
+    """A GENUINE ``str`` subclass that answers ``__eq__`` with a LIE.
+
+    ``str.__eq__`` returns ``NotImplemented`` for a subclass that overrides
+    ``__eq__``, so the subclass's answer is the one a bare ``==`` lands on.
+    """
+
+    def __eq__(self, other):
+        return False
+
+    def __ne__(self, other):
+        return True
+
+    __hash__ = str.__hash__
+
+
+class _StrSubRaisingEq(str):
+    """A GENUINE ``str`` subclass whose ``__eq__`` raises."""
+
+    def __eq__(self, other):
+        raise RuntimeError("eq-boom")
+
+    __hash__ = str.__hash__
+
+
+def _corrects_self(s, node_id: str) -> list:
+    """The ``CORRECTS`` edges INTO ``node_id``, as ``[from_id]`` rows."""
+    return [list(r) for r in s._get_proj().g.query(
+        "MATCH (a:Point)-[:CORRECTS]->(b:Point {id:$id}) RETURN a.id",
+        params={"id": node_id}).result_set]
+
+
+def test_the_POINT_arms_self_successor_gate_does_not_dispatch_to_the_caller(sdk):
+    """``supersede_point``'s ``old_id == new_id`` must compare BASE CONTENT.
+
+    Measured on this fix's eighth cut (#12914 review P2, cycle 9): a GENUINE
+    ``str`` subclass whose ``__eq__`` answers False walked
+    ``supersede(<live Point>, SubLyingEq(<the same id>))`` past the self-successor
+    gate — ``str.__eq__`` answers ``NotImplemented`` for a subclass that
+    overrides ``__eq__``, so the CALLER's answer is the one that lands — and the
+    write stored the row as its OWN successor (row
+    ``['superseded', True, None]`` with a ``CORRECTS`` edge ``<id> -> <id>``),
+    the exact state the gate exists to refuse. This is the POINT arm of the root
+    the ENTITY arm was bounded for in cycle 7; both arms now compare base content
+    and run the gate only when BOTH operands are genuinely ``str``.
+
+    Mutation: replace the ``issubclass(type(...), str)`` pair with a bare
+    ``old_id == new_id`` -> the lying-``__eq__`` case is ACCEPTED and the
+    ``CORRECTS`` self-edge is written.
+    """
+    for successor in (_StrSubLyingEq, _StrSubRaisingEq):
+        node = _make(sdk, "Point", f"point-arm-{successor.__name__.lower()}")
+        before = _row(sdk, "Point", node)
+
+        with pytest.raises(ValueError) as exc:
+            sdk.supersede(node, successor(node))
+        assert "must differ" in str(exc.value), (
+            f"{successor.__name__}: the self-successor refusal must land, not "
+            f"{str(exc.value)!r}")
+        assert _row(sdk, "Point", node) == before, (
+            f"{successor.__name__}: a refused self-supersession moved the row: "
+            f"{before} -> {_row(sdk, 'Point', node)}")
+        assert not _corrects_self(sdk, node), (
+            f"{successor.__name__}: a refused self-supersession wrote a "
+            f"CORRECTS self-edge: {_corrects_self(sdk, node)}")
+
+        # The gate lives in ``supersede_point``, so the DIRECT door is pinned too.
+        with pytest.raises(ValueError) as exc:
+            sdk.supersede_point(node, successor(node))
+        assert "must differ" in str(exc.value), str(exc.value)
+
+    # The genuine self-successor refusal is unchanged, and a DIFFERENT successor
+    # still lands (the bound did not become a blanket refusal).
+    node = _make(sdk, "Point", "point-arm-plain")
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(node, node)
+    assert "must differ" in str(exc.value), str(exc.value)
+
+    other = _make(sdk, "Point", "point-arm-successor")
+    sdk.supersede(node, other)
+    assert [other] in _corrects_self(sdk, node), (
+        f"a genuine successor must still be recorded: {_corrects_self(sdk, node)}")
 
 
 class _PlainStrSubclassName(str):

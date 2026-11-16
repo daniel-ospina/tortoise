@@ -23125,7 +23125,28 @@ class TortoiseSDK:
         # statement, not be terminal, and differ from the old point. A missing /
         # self / terminal successor would terminalize the old point with no valid
         # replacement (phantom PointSuperseded).
-        if old_id == new_id:
+        #
+        # ⛔ THE COMPARISON IS A CALLER READ TOO (#12914 review P2, cycle 9): `==`
+        # on this pair dispatches to the caller — ``str.__eq__`` answers
+        # ``NotImplemented`` for a GENUINE ``str`` SUBCLASS that overrides
+        # ``__eq__``, so the subclass's answer is the one that lands. Measured: a
+        # str subclass whose ``__eq__`` returns False walked
+        # ``supersede(<live Point>, SubLyingEq(<the same id>))`` past this gate,
+        # and the write stored the row as its OWN successor — row
+        # ``['superseded', True, None]`` with a ``CORRECTS`` edge
+        # ``<id> -> <id>`` — the exact state this gate exists to refuse. Two
+        # "words" exist only when BOTH operands are genuinely ``str``, which is
+        # also the only pair the gate can decide WITHOUT running caller code, so
+        # that pair is compared in BASE CONTENT (the bound ``_supersede_entity``
+        # carries on the entity arm, cycle 7). Every other pair keeps exactly the
+        # comparison it had, so no non-``str`` id changes behaviour here.
+        _old_is_str = issubclass(type(old_id), str)
+        _new_is_str = issubclass(type(new_id), str)
+        if _old_is_str and _new_is_str:
+            _same_successor = str.__str__(old_id) == str.__str__(new_id)
+        else:
+            _same_successor = old_id == new_id
+        if _same_successor:
             raise ValueError("supersede_point: old_id and new_id must differ")
         # #2498: the SAME shared guard for the successor — a terminal (or
         # operator) target would terminalize the old point with no valid
