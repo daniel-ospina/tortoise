@@ -7348,8 +7348,8 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     # prose of a maintainer explaining the block's mechanism — and `03-test-design.md`
     # is the bundle's cite-heavy document (`sdk.py:10353`/`:10406`, `capstone_run.py`),
     # so its neighbours WILL name other modules with line numbers. Both numbers are
-    # re-derived at this head (`grep -n 'subject_binding_available,' tortoise/sdk.py`
-    # -> 10353, 41859) — an earlier revision carried `9867`/`9920`, that anchor's lines
+    # re-derived at this head (`grep -n subject_binding_available tortoise/sdk.py`
+    # -> 10353/10406 in `_decorate_fallback_hits`) — an earlier revision carried `9867`/`9920`
     # at a stale head plus a carried OFFSET, the exact rot this PR exists to remove,
     # caught by the same review that re-derived the document's copy of the pair.
     ("`surfaces:` blocks are spliced by `tools/ci_selection.py::register_tests` (its "
