@@ -62,8 +62,8 @@ ENV_FLAG = "TORTOISE_VALUE_GATE"
 #: ⛔ **THE TWO SWITCHES READ OPPOSITE WAYS WHEN UNSET, AND THAT IS DELIBERATE**
 #: (`#11445`, restated by `#12926`) — the sibling in :mod:`tortoise.embed_gate` is
 #: **OFF** unless enabled, while this one is **ON** unless disabled. (⚠️ Its flag read is
-#: named nowhere in this file on purpose: `tests/test_embed_gate_5008.py` pins the set of
-#: files that name it to the submission seam and the gate's own module.) The two gate one
+#: named nowhere in this file on purpose: `tests/test_embed_gate_5008.py` pins, within
+#: `tortoise/` only, gate module + seam (spelling) and `gate_visibility` (qualified name).) The two gate one
 #: rule set
 #: (`embed_gate.RULE_SET is RULES`) at two points answering two questions, and the
 #: asymmetry follows the COST of being wrong: a DISCARD that fires wrongly leaves
