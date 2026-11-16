@@ -266,6 +266,28 @@ def test_SDK_off_mode_with_a_COMPLETE_cache_is_byte_identical(monkeypatch):
     assert sdk.get_point("p-1", served_out={}) == {}
 
 
+def test_SDK_a_RECORD_answered_absence_is_never_marked_not_hot(monkeypatch):
+    """The mirror of the off-mode test: an armed absence is a REAL absence.
+
+    `record` mode on a cache that declares itself PARTIAL and the record
+    answering "no row" is the strongest absence there is — the truth store was
+    asked and held nothing. Reading the cache's declaration on top of that would
+    invent an impairment out of a correctness guarantee, which is the same class
+    of error as reporting not-hot as empty, in the other direction.
+    """
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
+    monkeypatch.setenv("TORTOISE_RESIDENCY", "1")
+    monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[])))
+    served: dict = {}
+    sdk = _sdk_class()(None, coverage="partial", hot_keys=["other"])
+
+    props = sdk.get_point("p-1", served_out=served)
+
+    assert props == {}, f"an armed absence must stay an absence — got {props!r}"
+    assert served.get("servedFrom") == "record"
+    assert RESIDENCY_FIELD not in served
+
+
 # ── 3. the hosted door — the 404 must carry the verdict ────────────────────
 
 

@@ -27072,14 +27072,18 @@ class TortoiseSDK:
                 tenant=tenant, point_id=id, cache_answer=_cache_answer,
                 mode=mode)
         served_out.update(answer.as_wire())
-        marker = point_residency(proj.g, found=answer.found, key=id)
-        if marker is None and answer.not_hot:
-            # Armed, and the record could not be asked: this is the `not-hot`
-            # #7952 requires, whichever of the five reasons got us here.
-            marker = RESIDENCY_NOT_HOT
-        if marker:
-            served_out[RESIDENCY_FIELD] = marker
-            return {**(answer.props or {}), RESIDENCY_FIELD: marker}
+        # ⛔ THE SEAM DECIDES HERE, NOT THE DECLARATION. In an armed mode the
+        # record was (or could have been) asked, so `answer.not_hot` already
+        # encodes the ONE distinction that matters (§17.2) and the cache's
+        # declaration must NOT be consulted on top of it: a record-mode miss on a
+        # cache that declares itself PARTIAL is still a genuine ABSENCE — the
+        # truth store was asked and held no such row — and marking it `not-hot`
+        # would invent an impairment out of a correctness guarantee.
+        # `point_residency` is for the OFF arm above, where no store that could
+        # see the node was consulted at all.
+        if answer.not_hot:
+            served_out[RESIDENCY_FIELD] = RESIDENCY_NOT_HOT
+            return {**(answer.props or {}), RESIDENCY_FIELD: RESIDENCY_NOT_HOT}
         return dict(answer.props) if answer.props else {}
     # ── Chain Integrity ───────────────────────────────────────────
 
