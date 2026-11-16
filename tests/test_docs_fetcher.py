@@ -456,7 +456,7 @@ def test_ingest_reingest_zero_new_nodes(sdk, tmp_path, monkeypatch):
 
     org_root = GitHubDocsIndexer.org_root(TEAM_A)
     assert str(org_root) == os.path.join(base, TEAM_A)
-    first = sdk.index_directory(
+    first = sdk.index_sources_from_directory(
         str(org_root), file_type="doc", extract_metadata=False,
         corpus_name="acme-docs")
     assert first["indexed"] == 2
@@ -474,7 +474,7 @@ def test_ingest_reingest_zero_new_nodes(sdk, tmp_path, monkeypatch):
     idx2 = _indexer(t2, monkeypatch)
     stats2 = _run(idx2.walk_repo(TEAM_A, "acme/repo1"))
     assert stats2["blobs_fetched"] == 0
-    second = sdk.index_directory(
+    second = sdk.index_sources_from_directory(
         str(org_root), file_type="doc", extract_metadata=False,
         corpus_name="acme-docs")
     assert second["indexed"] == 0

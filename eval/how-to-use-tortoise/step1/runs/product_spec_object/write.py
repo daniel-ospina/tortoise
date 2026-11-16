@@ -49,7 +49,7 @@ def step(name, fn, *args, **kwargs):
 # --------------------------------------------------------------- provenance
 src = step(
     "source: plan spec v2 (dated 2026-09-30)",
-    sdk.create_source,
+    sdk.register_source,
     SPEC_URL,
     "spec",
     tier="high",

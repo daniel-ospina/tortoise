@@ -1207,6 +1207,7 @@ class TestStdioEntrypointToolRegistration:
 
             # Issue #993 target (1): tools/list is the LIVE surface, so the floor
             # tracks it. #11609 batch 1 archived four no-destination tools, moving
+
             # the advertised count 72 -> 68; #11609 batch 2 then retired twelve
             # write doors into six containers (net -8), moving it 68 -> 60. The
             # floor moves with each: a floor left at the old number would red on a

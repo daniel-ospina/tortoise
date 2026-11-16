@@ -17,7 +17,7 @@ sdk = TortoiseSDK()
 # ---------------------------------------------------------------- 1. Source
 # The transcript itself is the primary record of what was said in the room.
 SRC_URL = "transcript://meetings/2026-09-14-pricing"
-source = sdk.create_source(
+source = sdk.register_source(
     SRC_URL,
     "meetingTranscript",
     tier="T1",

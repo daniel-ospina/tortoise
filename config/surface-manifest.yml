@@ -23,6 +23,20 @@
 # deliberate, reviewable act in the approving PR — so a re-cut over a grown surface
 # cannot be green by construction.
 #
+#
+# LOWERED 72 → 67 (tools) and 150 → 124 (SDK methods) on 2026-11-13 by the
+# SOURCES/MINE/SESSION batch of #4282 Phase 2 (#11609 lane C), to the live counts that
+# batch produced. LOWERING, not raising, is what the pin needs here, and the reason is
+# the pin's own: slack above the live surface is a false PASS waiting to happen — a
+# re-added retired name (`tortoise_create_source`, `checkpoint`, `assess_source`, …)
+# would land UNDER a 72/150 ceiling and `surface-guard` step 7 would stay green over a
+# surface that grew back. The same lowering was done after each earlier batch
+# (#10906 82 → 76, #10914 76 → 72); batch 1 (#11609's four no-destination
+# removals) moved the advertised set 72 → 68 but left the pin at 72, which is the
+# slack this removes. 124 is also the PLATEAU the three Phase-2 lanes converge on —
+# each replaces members with fewer containers than it retires, so a peer lane lands at
+# or below it; a lane that would exceed it has ADDED surface and must say so.
+#
 # RAISED 149 → 150 on 2026-10-26 by PR #10053 (#4282 Phase 2.2 — the four merges as
 # dispatchers). The three NEW public methods are `link_entities`, `update_knowledge`
 # and `delete_knowledge`, and every one of them is a row of the owner's 40
@@ -76,7 +90,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 58f904ccf7938105d08371bdc325c99ef03a0267
+cut_at_commit: 8bb02fdbf2fd1a349dac05fc78b91793f4b509f0
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -308,12 +322,12 @@ response_fields:
     ruling 2026-09-26: withheld as the answer, disclosed as a sourced FYI). Omitted for current/unknown, so its
     absence means `no drift` rather than `drift we failed to name`'
   unchanged_when_off: yes — nested in the same flag-gated `provenance` block; absent when the flag is off
-- response: tortoise_session_capture
+- response: tortoise_mine_knowledge_from_session
   field: capture_redactions
   emitted_when: always — the count of credential-shaped spans redacted from this capture's stored turn text (0 when
     nothing matched)
   unchanged_when_off: n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911)
-- response: tortoise_session_capture
+- response: tortoise_mine_knowledge_from_session
   field: stats.step_witness
   emitted_when: 'always on the v2 capture path — the eight per-stage witness blocks (#9116), copied from the extractor''s
     own return (reader/story/map/vet/classify_later/search/merge/commit), each carrying that stage''s counts. Recorded
@@ -899,32 +913,47 @@ approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
-  tools: 60
-  sdk_public_methods: 119
-  retired: 37
+  tools: 59
+  sdk_public_methods: 118
+  retired: 44
   keyword_distribution:
     fetch: 14
-    create: 16
+    create: 14
     update: 5
     delete: 4
     list: 7
-    find: 3
+    find: 4
     trace: 2
     check: 5
     link: 2
     operate: 2
 high_water_counts:
-  tools: 72
-  sdk_public_methods: 150
+  tools: 67
+  sdk_public_methods: 124
 retired:
 - name: tortoise_annotate_operator
   use_instead: tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., directness=...)
   sdk_method: annotate_operator
   http_policy: true
   approval: null
+- name: tortoise_assess_source
+  use_instead: tortoise_manage_source_trust(url, score=..., assessor=..., rationale=...)
+  sdk_method: assess_source
+  http_policy: true
+  approval: null
 - name: tortoise_audit
   use_instead: tortoise_graph_overview(section="audit", point_kinds=...)
   sdk_method: audit
+  http_policy: true
+  approval: null
+- name: tortoise_checkpoint
+  use_instead: tortoise_mine_knowledge_from_session(items=..., agent_name=..., threshold=...)
+  sdk_method: checkpoint
+  http_policy: true
+  approval: null
+- name: tortoise_create_source
+  use_instead: tortoise_register_source(url, sourceKind, tier=...)
+  sdk_method: create_source
   http_policy: true
   approval: null
 - name: tortoise_dream
@@ -977,13 +1006,18 @@ retired:
   sdk_method: health
   http_policy: true
   approval: null
+- name: tortoise_index_files
+  use_instead: tortoise_index_sources_from_directory(directory, file_type=..., progress_file=...)
+  sdk_method: index_directory
+  http_policy: false
+  approval: null
 - name: tortoise_index_sessions
-  use_instead: tortoise_index_files(directory)
+  use_instead: tortoise_index_sources_from_directory(directory, file_type="agent_session")
   sdk_method: index_sessions
   http_policy: false
   approval: null
 - name: tortoise_ingest_corpus
-  use_instead: tortoise_index_files(directory)
+  use_instead: tortoise_index_sources_from_directory(directory, file_type="doc")
   sdk_method: ingest_corpus
   http_policy: false
   approval: null
@@ -1006,6 +1040,12 @@ retired:
   use_instead: tortoise_graph_overview(section="tags")
   sdk_method: list_tags
   http_policy: true
+  approval: null
+- name: tortoise_mine_conversations
+  use_instead: tortoise_mine_knowledge_from_directory(directory=..., extract_entities=...) for a corpus — the single-transcript
+    arm is tortoise_mine_knowledge_from_session(conversation=<transcript>, source_id=...)
+  sdk_method: mine_corpus
+  http_policy: false
   approval: null
 - name: tortoise_mitigate_operator
   use_instead: tortoise_adjust_relationship(id, reason=..., strength=..., credibility=...)
@@ -1053,9 +1093,20 @@ retired:
   sdk_method: retract_point
   http_policy: true
   approval: null
+- name: tortoise_session_capture
+  use_instead: tortoise_mine_knowledge_from_session(conversation=..., harness=..., session_id=..., machine_id=...,
+    model=...)
+  sdk_method: null
+  http_policy: true
+  approval: null
 - name: tortoise_set_point_baseline
   use_instead: tortoise_refresh_confidence(scope="baseline", point_id=..., alpha=..., beta=...)
   sdk_method: set_point_baseline
+  http_policy: true
+  approval: null
+- name: tortoise_set_source_tier
+  use_instead: tortoise_manage_source_trust(url, tier="T0"-"T4")
+  sdk_method: set_source_tier
   http_policy: true
   approval: null
 - name: tortoise_stale
@@ -1292,10 +1343,10 @@ rows:
     omit query, set kind → all Points of kind.'
   dependency: declares TortoiseSDK.tortoise_fts_query (resolves)
   lifecycle: active
-  used_by: agents, eval-harness, tooling, docs
+  used_by: never called, eval-harness, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by eval-harness, tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1327,36 +1378,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_index_files
-  served_from: tortoise/mcp_server.py:51acabcbff29d4ef
-  served_attributes: 056016f648fa419a
-  family: memory
-  family_rank: 1
-  served: stdio-only
-  sdk_method: index_directory
-  group_source: defaulted
-  keyword: create
-  keyword_rank: 2
-  cluster: deprecated-index
-  canonical: true
-  job: 'Index a corpus directory of .md files as Sources + Events (D10: a document is a Source) (the unified index
-    path — replaces tortoise_index_sessions + tortoise_ingest_corpus file semantics for local corpora). Returns
-    the honest summary (file_count, indexed, updated, skipped, failed, aborted, ignored, errors[], by_kind). Idempotent
-    — re-runs converge to skipped. On a shared graph, give each corpus a unique corpus_name (default = directory
-    basename) to avoid cross-corpus url collisions. EXCLUDED from tenant HTTP — walks server filesystem with user-supplied
-    path.'
-  dependency: declares TortoiseSDK.index_directory (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_index_files
 - name: tortoise_create_point
   served_from: tortoise/mcp_server.py:9860ad2503ad1b45
   served_attributes: edb6c4d045fc0522
@@ -1407,31 +1428,6 @@ rows:
   canonical: null
   job: Audit graph calibration state. Returns per-point guidance.
   dependency: declares TortoiseSDK.calibrate_summary (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_set_source_tier
-  served_from: tortoise/mcp_server.py:a693ab8865e44562
-  served_attributes: 149fed3f3da9c0c6
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: set_source_tier
-  group_source: defaulted
-  keyword: update
-  keyword_rank: 3
-  cluster: null
-  canonical: null
-  job: Set (or change) a Source's credibility tier (T0-T4). Non-destructive — never overwrites sourceKind type strings.
-  dependency: declares TortoiseSDK.set_source_tier (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -1627,32 +1623,6 @@ rows:
     the repo (repo= given). Fail-closed: empty graph -> no_prior_knowledge; populated graph + unindexed repo ->
     repo_not_indexed.'
   dependency: declares TortoiseSDK.issue_insight (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_assess_source
-  served_from: tortoise/mcp_server.py:1312ac9046d1e886
-  served_attributes: 000b4f1bb370dd2e
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: assess_source
-  group_source: defaulted
-  keyword: check
-  keyword_rank: 8
-  cluster: null
-  canonical: null
-  job: Record an agent's assessment of a Source (0-1 score + rationale). Creates a pointKind='assessment' Statement
-    Point; latest per (url, assessor) wins; weighted by assessor reputation.
-  dependency: declares TortoiseSDK.assess_source (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -2006,10 +1976,10 @@ rows:
     topics requires entity_id; stale takes days (default 30) and limit (default 50).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -2193,10 +2163,10 @@ rows:
   job: Check Gate 0→4 chain integrity (orphans, dangling refs).
   dependency: declares TortoiseSDK.check_structure (resolves)
   lifecycle: active
-  used_by: agents, eval-harness, tooling, docs
+  used_by: never called, eval-harness, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by eval-harness, tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2290,41 +2260,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_session_capture
-  served_from: tortoise/mcp_server.py:bd6dbf27d57b404c
-  served_attributes: a1b8417f6b1ea4c9
-  family: sessions
-  family_rank: 4
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: null
-  canonical: null
-  job: 'File an agent session into the graph (epic #909 capture path): turns become episodic Points, the conversation
-    is LLM-extracted into epistemic Points, and the Session links to subject/project entities. #1927: session_recording
-    is default-ON (ToS-covered) with an optional off-switch — returns 409 when the team disabled capture; 402 at
-    quota; a missing LLM provider key is NOT a refusal — the capture is STORED and only extraction is skipped (extraction_mode
-    "no-provider"); 422 for an invalid harness. session_id is the idempotency key (re-filing the same id mints zero
-    new nodes). Only call this when the team has session recording enabled (the dashboard ''Memory sources > Agent
-    sessions'' toggle); if the call fails, tell the user it wasn''t filed and do NOT retry. Consent: this tool runs
-    server-side and cannot read the caller''s TORTOISE_CAPTURE, so calling it IS the agreement to record the session
-    (#3662, Option 1 — connecting the agent is the agreement); tell the user you are filing the session before you
-    call, so they can decline. Requires hosted mode — stdio/self-hosted returns an honest error (no local fallback
-    that bypasses the capture pipeline).'
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_graph_set_recording
   served_from: tortoise/mcp_server.py:eec0371362f0b761
   served_attributes: 153b4547ee465158
@@ -2398,6 +2333,41 @@ rows:
   recommendation: keep
   basis: observed
   reason: not called over MCP, but used by tooling — removing it would break that
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
+  cluster_canonical: null
+- name: tortoise_mine_knowledge_from_session
+  served_from: tortoise/mcp_server.py:5dd5beab2d78e0a7
+  served_attributes: 591a47d3388cd6a9
+  family: sessions
+  family_rank: 4
+  served: http
+  sdk_method: mine_knowledge_from_session
+  group_source: mapped
+  keyword: find
+  keyword_rank: 6
+  cluster: null
+  canonical: null
+  job: 'Mine ONE session (#4282 row 16). Dispatch is BY ARGUMENT: `conversation=` files an agent session (turns
+    become episodic Points, LLM extraction produces epistemic Points; the backend is the target graph''s configuration)
+    — same door and gates as the retired session-capture shim, whose `machine_id=`/`model=` attribution claims are
+    forwarded too; `conversation=` as a raw transcript STRING (with `source_id=`, stdio/CLI only) mines one transcript
+    through the retired conversations-mining door''s single-transcript arm; `items=` files an already-distilled
+    batch ({wing, room, content}) with two-tier dedup. Passing two arms is refused. Absorbs both retired capture
+    doors — the session arm AND the checkpoint batch arm — plus that single-transcript arm. CONSENT (#3662, Option
+    1): this tool runs server-side and cannot read the caller''s TORTOISE_CAPTURE, so calling it with `conversation=`
+    IS the agreement to record the session — tell the user you are filing it BEFORE you call, so they can decline.
+    session_id is the idempotency key; a team that disabled capture gets 409, so do not retry.'
+  dependency: declares TortoiseSDK.mine_knowledge_from_session (resolves)
+  lifecycle: active
+  used_by: never called
+  recommendation: review
+  basis: observed
+  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
+    that needs your judgement — I am not calling it fat on `never called` alone
   recommended_family: null
   proposed: false
   exemption: false
@@ -2478,6 +2448,36 @@ rows:
   recommendation: keep
   basis: observed
   reason: not called over MCP, but used by tooling — removing it would break that
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
+  cluster_canonical: null
+- name: tortoise_check_connection
+  served_from: tortoise/mcp_server.py:542ddf011a20fe69
+  served_attributes: 7f73effeff30bd74
+  family: onboarding
+  family_rank: 6
+  served: http
+  sdk_method: check_connection
+  group_source: mapped
+  keyword: check
+  keyword_rank: 8
+  cluster: null
+  canonical: null
+  job: 'What does this credential reach? (#4282 row 40 — programmatic, returns a result, NOT a wizard). Omit key_id:
+    connectivity, the resolved graph + namespace, and this caller''s own account. Pass key_id: one credential''s
+    declared reach (graph, scopes, delegation depth, revocation, expiry). Read-only. A key belonging to another
+    account and a key that does not exist give the SAME answer, so this cannot be used to probe another tenant''s
+    key ids.'
+  dependency: declares TortoiseSDK.check_connection (resolves)
+  lifecycle: active
+  used_by: never called
+  recommendation: review
+  basis: observed
+  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
+    that needs your judgement — I am not calling it fat on `never called` alone
   recommended_family: null
   proposed: false
   exemption: false
@@ -2598,32 +2598,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_checkpoint
-  served_from: tortoise/mcp_server.py:050659dec8fcbd52
-  served_attributes: 9b5a55e0b5d62fcd
-  family: journal
-  family_rank: 7
-  served: http
-  sdk_method: checkpoint
-  group_source: mapped
-  keyword: operate
-  keyword_rank: 10
-  cluster: null
-  canonical: null
-  job: 'Session batch save — two-tier dedup (content hash + embedding similarity). Returns {filed: N, duplicates:
-    M}.'
-  dependency: declares TortoiseSDK.checkpoint (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_diary_read
   served_from: tortoise/mcp_server.py:4f586bf77a5bcd8c
   served_attributes: fd3a38a2d5978fbf
@@ -2677,26 +2651,90 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_create_entity
   cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
-- name: tortoise_create_source
-  served_from: tortoise/mcp_server.py:b5bb9db2ccfe230b
-  served_attributes: aeb2aaa1691a5367
+- name: tortoise_index_sources_from_directory
+  served_from: tortoise/mcp_server.py:4501d8ae1df4913c
+  served_attributes: 5efd82012e8dcbd5
   family: sources
   family_rank: 8
-  served: http
-  sdk_method: create_source
+  served: stdio-only
+  sdk_method: index_sources_from_directory
   group_source: mapped
   keyword: create
   keyword_rank: 2
   cluster: null
   canonical: null
-  job: Create a Source node for provenance (document, web, db, etc.). Sources track content origin — url is the
-    permalink key. tier (T0-T4 / legacy alias) stores the credibility tier; sourceDate is the evidence-age clock.
-  dependency: declares TortoiseSDK.create_source (resolves)
+  job: 'Register a directory''s files as sources — NOTHING is extracted (#4282 row 15). The three older per-kind
+    indexing doors redirect here: `file_type=''agent_session''` files a session transcript and `file_type=''doc''`
+    a document corpus. `extract_metadata` defaults PER ARM to the absorbed door''s own value (`true` for `agent_session`
+    only) and `llm_model` is forwarded on the arms that had it. `file_type`: auto | agent_session | meeting | doc.
+    Batched and resumable (progress_file). Returns the honest summary (file_count, indexed, updated, skipped, failed,
+    aborted, ignored, errors[], by_kind); idempotent — re-runs converge to skipped. On a shared graph, give each
+    corpus a unique corpus_name (default = directory basename) to avoid cross-corpus url collisions. EXCLUDED from
+    tenant HTTP — walks the server filesystem with a caller-supplied path.'
+  dependency: declares TortoiseSDK.index_sources_from_directory (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
+  used_by: never called
+  recommendation: review
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
+    that needs your judgement — I am not calling it fat on `never called` alone
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
+  cluster_canonical: null
+- name: tortoise_manage_source_trust
+  served_from: tortoise/mcp_server.py:d490e954b1b64639
+  served_attributes: 6334d34b6a02e696
+  family: sources
+  family_rank: 8
+  served: http
+  sdk_method: manage_source_trust
+  group_source: mapped
+  keyword: update
+  keyword_rank: 3
+  cluster: null
+  canonical: null
+  job: 'Set how far a source is trusted (#4282 row 18). Dispatch is BY ARGUMENT: `tier=` (T0-T4) sets the credibility
+    tier; `score=` with `assessor=` and `rationale=` records an assessment (a reputation-weighted Statement Point).
+    Passing both is refused — they are different writes. The one trust door — both former arms (set a tier, or record
+    a scored assessment) live here. Reads: tortoise_graph_overview(section=''sources'').'
+  dependency: declares TortoiseSDK.manage_source_trust (resolves)
+  lifecycle: active
+  used_by: never called
+  recommendation: review
+  basis: observed
+  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
+    that needs your judgement — I am not calling it fat on `never called` alone
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
+  cluster_canonical: null
+- name: tortoise_register_source
+  served_from: tortoise/mcp_server.py:d498db87f99dbfa0
+  served_attributes: aeb2aaa1691a5367
+  family: sources
+  family_rank: 8
+  served: http
+  sdk_method: register_source
+  group_source: mapped
+  keyword: operate
+  keyword_rank: 10
+  cluster: null
+  canonical: null
+  job: 'Declare a source exists — the URL is its identity (#4282 row 14). The one declaring door: the retired per-kind
+    entry points redirect here. `tier` (T0-T4) overrides the tier the source KIND derives; `sourceDate` is the evidence-age
+    clock. An existing Source (URL collision) is never re-kinded.'
+  dependency: declares TortoiseSDK.register_source (resolves)
+  lifecycle: active
+  used_by: never called
+  recommendation: review
+  basis: observed
+  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
+    that needs your judgement — I am not calling it fat on `never called` alone
   recommended_family: null
   proposed: false
   exemption: false
@@ -2756,27 +2794,28 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_mine_conversations
-  served_from: tortoise/mcp_server.py:597a7ee208784fb4
-  served_attributes: 9885413e99690d9c
+- name: tortoise_mine_knowledge_from_directory
+  served_from: tortoise/mcp_server.py:0dd6cce26c617513
+  served_attributes: 3186ee192406be7d
   family: mining
   family_rank: 11
   served: stdio-only
-  sdk_method: mine_corpus
+  sdk_method: mine_knowledge_from_directory
   group_source: mapped
   keyword: find
   keyword_rank: 6
   cluster: null
   canonical: null
-  job: Mine agent conversations (single transcript or corpus batch) into the graph — extraction, entity reification,
-    content dedup, temporal wiring, W-3 batch gate. Batch per-file failures reported non-fatally in 'errors'. WRITES
-    to the graph; corpus mode walks the server filesystem — stdio/CLI only (excluded from tenant HTTP).
-  dependency: declares TortoiseSDK.mine_corpus (resolves)
+  job: 'Mine a FOLDER of files, each by its own content type (#4282 row 17) — the batch form of tortoise_mine_knowledge_from_session,
+    not a kind of indexing: this call EXTRACTS, tortoise_index_sources_from_directory does not. It absorbs the retired
+    conversations-mining door. EXCLUDED from tenant HTTP — walks the server filesystem.'
+  dependency: declares TortoiseSDK.mine_knowledge_from_directory (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
+  used_by: never called
+  recommendation: review
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
+    that needs your judgement — I am not calling it fat on `never called` alone
   recommended_family: null
   proposed: false
   exemption: false
@@ -2821,7 +2860,7 @@ rows:
   job: Public SDK method TortoiseSDK.annotate_operator.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_annotate_operator (retired)'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -2921,29 +2960,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:assess_source
-  method: assess_source
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.assess_source.
-  dependency: 'reached by 1 registered tool(s): tortoise_assess_source'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:audit
   method: audit
   approved: false
@@ -2959,7 +2975,7 @@ rows:
   job: Public SDK method TortoiseSDK.audit.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_audit (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -2982,7 +2998,7 @@ rows:
   job: Public SDK method TortoiseSDK.belief_timeline.
   dependency: 'reached by 1 registered tool(s): tortoise_belief_timeline'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3013,6 +3029,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:check_connection
+  method: check_connection
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.check_connection.
+  dependency: 'reached by 1 registered tool(s): tortoise_check_connection'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: keep
+  reason: reached by 1 registered tool(s)
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
 - name: sdk:check_structure
   method: check_structure
   approved: false
@@ -3028,30 +3067,7 @@ rows:
   job: Public SDK method TortoiseSDK.check_structure.
   dependency: 'reached by 1 registered tool(s): tortoise_check_structure'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:checkpoint
-  method: checkpoint
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.checkpoint.
-  dependency: 'reached by 1 registered tool(s): tortoise_checkpoint'
-  lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3075,7 +3091,7 @@ rows:
   dependency: 'reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling,
     tenant-rest'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest'
   recommended_family: null
@@ -3098,7 +3114,7 @@ rows:
   job: Public SDK method TortoiseSDK.compute_confidence.
   dependency: 'reached by 1 registered tool(s): tortoise_compute_confidence'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3167,7 +3183,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_direct_edge.
   dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine, other-tooling'
   recommended_family: null
@@ -3213,7 +3229,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_edge.
   dependency: 'reached by 1 registered tool(s): tortoise_create_edge'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3305,7 +3321,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_operator.
   dependency: 'reached by 1 registered tool(s): tortoise_create_operator'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3328,30 +3344,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_point.
   dependency: 'reached by 1 registered tool(s): tortoise_create_point'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:create_source
-  method: create_source
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.create_source.
-  dependency: 'reached by 1 registered tool(s): tortoise_create_source'
-  lifecycle: active
-  used_by: tooling, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3397,7 +3390,7 @@ rows:
   job: Public SDK method TortoiseSDK.delete.
   dependency: 'reached by 1 registered tool(s): tortoise_delete'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3420,7 +3413,7 @@ rows:
   job: Public SDK method TortoiseSDK.delete_entity.
   dependency: 'reached by 1 registered tool(s): tortoise_delete_entity'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3466,7 +3459,7 @@ rows:
   job: Public SDK method TortoiseSDK.delete_point.
   dependency: 'reached by no registered MCP tool; caller categories: documentation, engine, other-tooling'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: documentation, engine, other-tooling'
   recommended_family: null
@@ -3512,7 +3505,7 @@ rows:
   job: Public SDK method TortoiseSDK.diary_read.
   dependency: 'reached by 1 registered tool(s): tortoise_diary_read'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3535,7 +3528,7 @@ rows:
   job: Public SDK method TortoiseSDK.diary_write.
   dependency: 'reached by 1 registered tool(s): tortoise_diary_write'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3558,7 +3551,7 @@ rows:
   job: Public SDK method TortoiseSDK.dream.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_dream (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -3763,16 +3756,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_organisation_account.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
+  reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: no-caller-found
+  class: internal
 - name: sdk:get_owned_entities
   method: get_owned_entities
   approved: false
@@ -3835,7 +3828,7 @@ rows:
   job: Public SDK method TortoiseSDK.get_session.
   dependency: 'reached by 1 registered tool(s): tortoise_get_session'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3935,9 +3928,9 @@ rows:
   exemption: false
   approval: null
   class: no-caller-found
-- name: sdk:index_directory
-  method: index_directory
-  approved: false
+- name: sdk:index_sources_from_directory
+  method: index_sources_from_directory
+  approved: true
   family: null
   family_rank: null
   served: sdk
@@ -3947,35 +3940,12 @@ rows:
   keyword_rank: null
   cluster: null
   canonical: null
-  job: Public SDK method TortoiseSDK.index_directory.
-  dependency: 'reached by 1 registered tool(s): tortoise_index_files'
+  job: Public SDK method TortoiseSDK.index_sources_from_directory.
+  dependency: 'reached by 1 registered tool(s): tortoise_index_sources_from_directory'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-- name: sdk:index_sessions
-  method: index_sessions
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.index_sessions.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_index_sessions (retired)'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3996,7 +3966,7 @@ rows:
   job: Public SDK method TortoiseSDK.ingest.
   dependency: 'reached by 1 registered tool(s): tortoise_ingest'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4042,7 +4012,7 @@ rows:
   job: Public SDK method TortoiseSDK.invalidate_point.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_invalidate (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -4203,7 +4173,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_batch.
   dependency: 'reached by 1 registered tool(s): tortoise_list_batch'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4341,7 +4311,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_pointkinds.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_pointkinds (retired)'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -4364,7 +4334,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_sources.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_sources (retired)'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -4418,6 +4388,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:manage_source_trust
+  method: manage_source_trust
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.manage_source_trust.
+  dependency: 'reached by 1 registered tool(s): tortoise_manage_source_trust'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: keep
+  reason: reached by 1 registered tool(s)
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
 - name: sdk:membership_create
   method: membership_create
   approved: false
@@ -4441,9 +4434,9 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:mine_corpus
-  method: mine_corpus
-  approved: false
+- name: sdk:mine_knowledge_from_directory
+  method: mine_knowledge_from_directory
+  approved: true
   family: null
   family_rank: null
   served: sdk
@@ -4453,8 +4446,31 @@ rows:
   keyword_rank: null
   cluster: null
   canonical: null
-  job: Public SDK method TortoiseSDK.mine_corpus.
-  dependency: 'reached by 1 registered tool(s): tortoise_mine_conversations'
+  job: Public SDK method TortoiseSDK.mine_knowledge_from_directory.
+  dependency: 'reached by 1 registered tool(s): tortoise_mine_knowledge_from_directory'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: keep
+  reason: reached by 1 registered tool(s)
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
+- name: sdk:mine_knowledge_from_session
+  method: mine_knowledge_from_session
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.mine_knowledge_from_session.
+  dependency: 'reached by 1 registered tool(s): tortoise_mine_knowledge_from_session'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
@@ -4479,7 +4495,7 @@ rows:
   job: Public SDK method TortoiseSDK.mitigate_operator.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_mitigate_operator (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -4617,7 +4633,7 @@ rows:
   job: Public SDK method TortoiseSDK.provenance.
   dependency: 'reached by 1 registered tool(s): tortoise_provenance'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4733,7 +4749,7 @@ rows:
   job: Public SDK method TortoiseSDK.recall_subgraph.
   dependency: 'reached by no registered MCP tool; caller categories: mcp-handler'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: mcp-handler'
   recommended_family: null
@@ -4782,6 +4798,29 @@ rows:
   used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s) and 1 retired name(s)
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
+- name: sdk:register_source
+  method: register_source
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.register_source.
+  dependency: 'reached by 1 registered tool(s): tortoise_register_source'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: keep
+  reason: reached by 1 registered tool(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4971,29 +5010,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:set_source_tier
-  method: set_source_tier
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.set_source_tier.
-  dependency: 'reached by 1 registered tool(s): tortoise_set_source_tier'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
 - name: sdk:signup_token_lookup
   method: signup_token_lookup
   approved: false
@@ -5101,7 +5117,7 @@ rows:
   job: Public SDK method TortoiseSDK.status.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_status (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -5124,7 +5140,7 @@ rows:
   job: Public SDK method TortoiseSDK.suggest_entry_points.
   dependency: 'reached by 1 registered tool(s): tortoise_suggest_entry_points'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5147,7 +5163,7 @@ rows:
   job: Public SDK method TortoiseSDK.summarize_structure.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_summarize_structure (retired)'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -5193,7 +5209,7 @@ rows:
   job: Public SDK method TortoiseSDK.supersede_point.
   dependency: 'reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine, eval-harness, other-tooling'
   recommended_family: null
@@ -5239,7 +5255,7 @@ rows:
   job: Public SDK method TortoiseSDK.taxonomy.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_taxonomy (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -5308,7 +5324,7 @@ rows:
   job: Public SDK method TortoiseSDK.tortoise_fts_query.
   dependency: 'reached by 1 registered tool(s): tortoise_search'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5378,7 +5394,7 @@ rows:
   dependency: 'reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling,
     tenant-rest'
   lifecycle: active
-  used_by: eval-harness, tooling, skill-docs, docs
+  used_by: eval-harness, tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest'
   recommended_family: null
@@ -5471,7 +5487,7 @@ rows:
   job: Public SDK method TortoiseSDK.validate_domain.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_validate_domain (retired)'
   lifecycle: active
-  used_by: tooling, skill-docs, docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null

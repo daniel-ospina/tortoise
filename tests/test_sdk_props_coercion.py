@@ -457,7 +457,7 @@ class TestEntityPropsPersisted:
     def test_create_source_persists_arbitrary_props(self, sdk):
         # tier is a first-class kwarg (#398): legacy alias 'gold' maps to T0 on
         # credibilityTier; other arbitrary props still persist verbatim.
-        src = sdk.create_source(
+        src = sdk.register_source(
             "https://example.com/doc", "report",
             tier="gold", team="infra",
         )

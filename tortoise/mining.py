@@ -1129,7 +1129,8 @@ def mine_corpus(
 
     Convenience wrapper over :func:`mine_corpus_with_sdk` — creates an
     isolated embedded graph next to the corpus directory. Callers that want
-    to mine into an existing org graph use ``TortoiseSDK.mine_corpus``.
+    to mine into an existing org graph use
+    ``TortoiseSDK.mine_knowledge_from_directory``.
     ``event_log_path`` routes mining events to the given JSONL log (default:
     the SDK's configured event log, or a fallback next to the DB path).
     """

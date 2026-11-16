@@ -3431,6 +3431,17 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     # epic #900 T7 (#1043): the index path creates Sources + Events (a document
     # is a Source — D10) + references edges — node/edge-creating, quota-gated (S8 pin, I25)
     "tortoise_index_files",
+    # #4282 Phase 2 (#11609 lane C): the containers that REPLACED the seven
+    # members above. Each new name wraps `_quota_gated` in its handler body, and
+    # this inventory is what the introspective completeness test cross-checks, so
+    # a container whose gate was dropped in a later edit reds instead of silently
+    # un-metering a write path. `check_connection` is absent on purpose: it is
+    # read-only (`risk="read"`), and gating a read would meter nothing.
+    "tortoise_register_source",          # replaces tortoise_create_source
+    "tortoise_manage_source_trust",      # replaces tortoise_assess_source + tortoise_set_source_tier
+    "tortoise_index_sources_from_directory",   # replaces tortoise_index_files
+    "tortoise_mine_knowledge_from_session",    # replaces tortoise_checkpoint
+    "tortoise_mine_knowledge_from_directory",  # replaces tortoise_mine_conversations
 })
 
 
@@ -4136,12 +4147,23 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 def _http_excluded_error() -> dict:
     """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
 
-    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding eight
-    tool bodies (four live, four retired-but-served), each of which returns it
+    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding ten
+    tool bodies (four live, six retired-but-served), each of which returns it
     verbatim, so the dispatch used to be recorded ``status="ok"``. The wire
     payload is unchanged (`_SafeError` is a ``dict`` subclass); the seam matches
     it by value. Its ``error`` is a MAPPING, so the seam's text arm cannot see
     it — the exact-dict arm is what classifies it.
+
+    `#12948`: the population moved from seven (four live, three retired) to
+    nine (four live, five retired), then to TEN when the sibling WRITE/MUTATE
+    lane landed its own retired-but-still-answering door. The six
+    SOURCES/MINE/SESSION containers
+    replaced the public `tortoise_index_files` / `tortoise_index_sessions` /
+    `tortoise_ingest_corpus` / `tortoise_mine_conversations` doors, which keep
+    answering from the retired table and therefore keep returning this funnel.
+    The pin that measures it is
+    `tests/test_mcp_refusal_telemetry_9084.py::test_the_funnel_docstring_states_the_population_it_actually_feeds`,
+    which counts the call sites rather than trusting this sentence.
     """
     return _SafeError({
         "jsonrpc": "2.0",
@@ -6136,7 +6158,7 @@ def tortoise_checkpoint(items: Any,
         return _SafeError({"error": f"checkpoint items exceed the batch cap "
                                     f"({MAX_CHECKPOINT_ITEMS})",
                            "code": ERR_QUOTA})
-    return _safe(_quota_gated(_get_org_sdk().checkpoint, "points",
+    return _safe(_quota_gated(_get_org_sdk()._checkpoint, "points",
                           abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)), items,
                  agent_name=agent_name, threshold=threshold)
 
@@ -6861,7 +6883,7 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
         return _http_excluded_error()
     if not os.path.isdir(directory):
         return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."})
-    return _safe(_get_org_sdk().index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
+    return _safe(_get_org_sdk()._index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
 
 def tortoise_index_files(directory: str, corpus_name: str | None = None,
                         extract_metadata: bool = False) -> dict:
@@ -6881,7 +6903,7 @@ def tortoise_index_files(directory: str, corpus_name: str | None = None,
     if not os.path.isdir(directory):
         return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
                                     f"path to a directory containing .md files."})
-    return _safe(_quota_gated(_get_org_sdk().index_directory, "points"),
+    return _safe(_quota_gated(_get_org_sdk()._index_directory, "points"),
                  directory, corpus_name=corpus_name,
                  extract_metadata=extract_metadata)
 
@@ -6932,7 +6954,7 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
     # caller passed them there (kwarg wins; avoids TypeError on splat).
     props.pop("tier", None)
     props.pop("sourceDate", None)
-    return _safe(_quota_gated(_get_org_sdk().create_source, "points"), url, sourceKind,
+    return _safe(_quota_gated(_get_org_sdk()._create_source, "points"), url, sourceKind,
                  tier=tier, sourceDate=sourceDate, **props)
 
 
@@ -6963,7 +6985,7 @@ def tortoise_assess_source(url: str, assessor: str, score: float,
     (compute_reputation at write time). Feeds the source's reliability factor
     (clamped [0.1, 2.0]).
     """
-    return _safe(_quota_gated(_get_org_sdk().assess_source, "points"),
+    return _safe(_quota_gated(_get_org_sdk()._assess_source, "points"),
                  url, assessor, score, rationale)
 
 
@@ -6976,7 +6998,259 @@ def tortoise_set_source_tier(url: str, tier: str) -> dict:
     Dirty-marks the inheritance gate + clears the reliability cache so EP and
     reliability reads reflect the new tier promptly.
     """
-    return _safe(_get_org_sdk().set_source_tier, url, tier)
+    return _safe(_get_org_sdk()._set_source_tier, url, tier)
+
+
+# ── #4282 Phase 2 — the SOURCES / MINE / SESSION containers ──────
+# One tool per OWNER-APPROVED target row (`tortoise/__all__.py`;
+# `docs/product/beta-sdk-surface.md` rows 14-18 and 40). Each dispatches on the
+# discriminator `docs/product/bridge-table.md` Part A records for it — by
+# ARGUMENT (`tier=` vs `score=`, `items=` vs `conversation=`, `file_type=`) —
+# never on a fresh invented one. The members they absorb are RETIRED in the
+# same release (#3883): their names still answer through the warning shim with
+# their ORIGINAL bodies, which is why the functions above are untouched.
+#
+# The containers are thin on purpose. The SDK method owns the dispatch and its
+# refusals (one implementation of "which write did you mean"), so the MCP layer
+# cannot drift from it; the layer here adds only what no SDK may assume: the
+# transport exclusion for filesystem walks, the quota gate, and _safe's
+# structured-error mapping.
+
+def tortoise_register_source(url: str, sourceKind: str, tier: str | None = None,
+                             sourceDate: str | None = None, props: Any = None) -> dict:
+    """Declare a source exists — row 14. **The URL is its identity.**
+
+    Absorbs `tortoise_create_source` (retired, still answering). `tier` (T0-T4)
+    overrides the tier the source KIND would derive; `sourceDate` is the
+    evidence-age clock. A URL collision never re-kinds the existing Source.
+    """
+    props = _parse(props) or {}
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
+    # tier/sourceDate are first-class kwargs (#398) — pop from props if a legacy
+    # caller passed them there (kwarg wins; avoids TypeError on splat).
+    props.pop("tier", None)
+    props.pop("sourceDate", None)
+    return _safe(_quota_gated(_get_org_sdk().register_source, "points"), url, sourceKind,
+                 tier=tier, sourceDate=sourceDate, **props)
+
+
+def tortoise_manage_source_trust(url: str,
+                                 tier: str | None = None,
+                                 assessor: str | None = None,
+                                 score: float | None = None,
+                                 rationale: str | None = None) -> dict:
+    """Set how far a source is trusted — row 18. Dispatch is BY ARGUMENT.
+
+    `tier=` sets the credibility tier (T0-T4). `score=` + `assessor=` +
+    `rationale=` records an assessment (a reputation-weighted Statement Point).
+    Supplying both is refused: they are different writes, not two spellings of
+    one. Reads are `tortoise_graph_overview(section="sources")` — the tier is a
+    property of the source, so reading it is not a trust write.
+
+    Absorbs `tortoise_assess_source` and `tortoise_set_source_tier` (retired,
+    still answering).
+    """
+    return _safe(_quota_gated(_get_org_sdk().manage_source_trust, "points"), url,
+                 tier=tier, assessor=assessor, score=score, rationale=rationale)
+
+
+def tortoise_index_sources_from_directory(directory: str,
+                                          file_type: str = "auto",
+                                          corpus_name: str | None = None,
+                                          extract_metadata: bool | None = None,
+                                          llm_model: str | None = None,
+                                          progress_file: str | None = None) -> dict:
+    """Register a directory's files as sources — row 15. **Nothing is extracted.**
+
+    `file_type` is the discriminator: `auto` (detect per file) | `agent_session`
+    | `meeting` | `doc`. Batched and resumable (`progress_file`). Absorbs
+    `tortoise_index_files` (retired, still answering) and the two tools already
+    retired into it — `tortoise_index_sessions` (`file_type="agent_session"`) and
+    `tortoise_ingest_corpus` (`file_type="doc"`).
+
+    ⛔ The absorbed doors did NOT share one default for `extract_metadata`, and
+    collapsing them onto one would silently change what a migrating caller gets
+    (#12948 review P2-3): `tortoise_index_sessions` extracted metadata by DEFAULT
+    (and took `llm_model`), while `tortoise_index_files` / `tortoise_ingest_corpus`
+    did not. So the default is resolved PER ARM — `None` means "the absorbed door's
+    own default": `True` for `agent_session` (the one arm a door defaulted ON),
+    `False` for every other arm including `meeting`, where no retired door ever
+    extracted by default. `llm_model` is forwarded on the arms that had it. Pass an
+    explicit value to override either.
+
+    #329: EXCLUDED from tenant HTTP — walks the server filesystem with a
+    caller-supplied path. Stdio/CLI only; node-creating, so quota-gated.
+    """
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
+    if not os.path.isdir(directory):
+        return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
+                                    f"path to a directory containing .md files."})
+    # `tortoise_index_sessions`' own default (metadata extraction ON) applies to
+    # the session-shaped arm it absorbed. `meeting` does NOT get it: no retired
+    # door ever defaulted extraction ON for meetings, so flipping it there would
+    # be this container inventing a default and calling it parity.
+    metadata_arm = file_type == "agent_session"
+    if extract_metadata is None:
+        extract_metadata = metadata_arm
+    # `tortoise_index_sessions` always FORWARDED `llm_model` (None when the caller
+    # did not set it); the corpus doors passed no model at all and so took the
+    # SDK's default. Mirroring that keeps each arm's behaviour, not just its flag.
+    extra: dict[str, Any] = {}
+    if llm_model is not None or metadata_arm:
+        extra["llm_model"] = llm_model
+    return _safe(_quota_gated(_get_org_sdk().index_sources_from_directory, "points"),
+                 directory, file_type=file_type, corpus_name=corpus_name,
+                 extract_metadata=extract_metadata, progress_file=progress_file,
+                 **extra)
+
+
+def tortoise_mine_knowledge_from_session(conversation: Any = None,
+                                         session_id: str | None = None,
+                                         harness: str | None = None,
+                                         machine_id: str | None = None,
+                                         model: str | None = None,
+                                         source_id: str | None = None,
+                                         extract_entities: bool = True,
+                                         content_dedup: bool = True,
+                                         session_date: str | None = None,
+                                         participants: Any = None,
+                                         items: Any = None,
+                                         agent_name: str = "checkpoint",
+                                         threshold: float = 0.95) -> dict:
+    """Mine ONE session — row 16. Dispatch is BY ARGUMENT.
+
+    `conversation=` files an agent session (turns → episodic Points, LLM
+    extraction → epistemic Points). **The backend is the target graph's
+    configuration**, so this arm goes through the SAME door as
+    `tortoise_session_capture`, with its gates: 429 capacity, 409 duplicate /
+    recording-off, 400 turn cap, 422 empty transcript, 402 quota. The server's
+    turn cap is the gate's, not a caller knob — that is why `max_turns` is on
+    the SDK method and not here. `machine_id`/`model` are the capture's
+    attribution claims and are FORWARDED: dropping them let a migrating
+    `tortoise_session_capture` caller lose its attribution silently (#12948
+    review P2-2; the base door sanitized and stamped both).
+
+    ⛔ `conversation=` ALSO takes a RAW TRANSCRIPT STRING (with `source_id=`),
+    which is the other mode the retired `tortoise_mine_conversations` had: a
+    single transcript mined by `mine_conversation`, not the turn-list capture
+    pipeline. `content_dedup`/`session_date`/`participants`/`extract_entities`
+    are that arm's own knobs. A door that absorbed `tortoise_mine_conversations`
+    but could only mine a FOLDER would send every single-transcript caller to a
+    name that cannot perform their call (#12948 review P2-1).
+
+    `items=` files an already-distilled batch ({wing, room, content}) with
+    two-tier dedup; `agent_name` and `threshold` are the batch's own knobs.
+    Supplying two arms at once is refused — extraction and batch-filing are
+    different pipelines.
+
+    Absorbs `tortoise_checkpoint`, `tortoise_session_capture` and the
+    single-transcript arm of `tortoise_mine_conversations` (all retired, still
+    answering).
+    """
+    if items is not None and conversation is not None:
+        return _SafeError({"error": "pass conversation= (a transcript to extract from) "
+                                    "OR items= (a distilled batch to file) — they are "
+                                    "different pipelines", "code": ERR_INVALID})
+    if source_id is not None and not isinstance(conversation, str):
+        # `source_id` addresses the RAW-TRANSCRIPT arm only; on the capture arm it
+        # would be accepted and ignored, which is the silent-drop shape this
+        # container exists to avoid.
+        return _SafeError({"error": "source_id= belongs to the raw-transcript arm: pass "
+                                    "conversation= as a transcript STRING, or drop "
+                                    "source_id= (the capture arm keys on session_id=)",
+                           "code": ERR_INVALID})
+    if items is not None:
+        items = _parse(items)
+        # #329 batch cap: one call must not create unbounded nodes
+        from tortoise.quota import MAX_CHECKPOINT_ITEMS
+        if isinstance(items, list) and len(items) > MAX_CHECKPOINT_ITEMS:
+            return _SafeError({"error": f"items exceed the batch cap "
+                                        f"({MAX_CHECKPOINT_ITEMS})",
+                               "code": ERR_QUOTA})
+        return _safe(_quota_gated(_get_org_sdk().mine_knowledge_from_session,
+                                  "points",
+                                  abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)),
+            items=items, agent_name=agent_name, threshold=threshold)
+    if conversation is not None:
+        if isinstance(conversation, str):
+            # The RAW-TRANSCRIPT arm of the retired `tortoise_mine_conversations`
+            # (`transcript=` + `source_id=`). Delegated to that retired body rather
+            # than re-implemented: it IS the pipeline, and a copy would be a second
+            # implementation of the same write to keep in sync.
+            #
+            # ⛔ Transport: the retired door was excluded from tenant HTTP as a
+            # WHOLE (its corpus mode walks the server filesystem with a
+            # caller-supplied path), so its transcript arm never answered over HTTP.
+            # This arm keeps that posture instead of silently widening the HTTP
+            # surface — and refuses with a message about THIS ARM, because the
+            # retired body's blanket refusal would tell an HTTP caller the whole
+            # container is unavailable, including the capture/`items=` arms that do
+            # work here (#12948 review round 2).
+            if _transport_mode.get() == "http":
+                return _SafeError({"error": "the raw-transcript arm (conversation= as a "
+                                            "transcript STRING with source_id=) is stdio/CLI "
+                                            "only — it keeps the retired conversations-"
+                                            "mining door's tenant-HTTP exclusion. The "
+                                            "capture arm (conversation= as a turn list) and "
+                                            "items= ARE available over HTTP.",
+                                   "code": ERR_INVALID})
+            if not source_id:
+                return _SafeError({"error": "conversation= given as a transcript string "
+                                            "needs source_id= — the source the transcript "
+                                            "came from. (Pass conversation= as a turn list "
+                                            "for the capture arm.)",
+                                   "code": ERR_INVALID})
+            return tortoise_mine_conversations(
+                transcript=conversation, source_id=source_id,
+                extract_entities=extract_entities, content_dedup=content_dedup,
+                session_date=session_date, participants=participants)
+        return tortoise_session_capture(conversation, harness=harness,
+                                        session_id=session_id,
+                                        machine_id=machine_id, model=model)
+    return _SafeError({"error": "nothing to mine — pass conversation= for one session "
+                                "transcript (a turn list, or a raw transcript string "
+                                "with source_id=), or items= for a distilled batch",
+                       "code": ERR_INVALID})
+
+
+def tortoise_mine_knowledge_from_directory(directory: str,
+                                           extract_entities: bool = True) -> dict:
+    """Mine a FOLDER of files — row 17. Each file is mined by its own type.
+
+    Absorbs `tortoise_mine_conversations` (retired, still answering). It is the
+    BATCH FORM of `tortoise_mine_knowledge_from_session`, not an indexing mode:
+    this call extracts, `tortoise_index_sources_from_directory` does not.
+
+    #329: EXCLUDED from tenant HTTP — walks the server filesystem. Stdio/CLI only.
+    """
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
+    if not os.path.isdir(directory):
+        return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
+                                    f"path to a directory of conversation files."})
+    return _safe(_quota_gated(_get_org_sdk().mine_knowledge_from_directory, "points"),
+                 directory, extract_entities=extract_entities)
+
+
+def tortoise_check_connection(key_id: str | None = None) -> dict:
+    """What does this credential reach? — row 40. Read-only, and NOT a wizard.
+
+    Omit `key_id` for this connection: connectivity, the resolved graph +
+    namespace, and this caller's own account (one read, from the same
+    `get_organisation_account` the plan gates use). Pass `key_id` to inspect a
+    single credential's declared reach (graph, scopes, delegation depth,
+    revocation, expiry).
+
+    ⛔ The isolation promise is the KEY half, enforced by the answer shape: a key
+    belonging to another account and a key that does not exist return the SAME
+    `key_error`, so this call cannot be used as an existence oracle across
+    tenants. Replaced the dropped `run_onboarding` (#3540).
+    """
+    return _safe(_get_org_sdk().check_connection, key_id)
+
 
 def tortoise_get_entity(id: str | None = None, type: str | None = None,
                         limit: int = 20) -> Any:
@@ -8066,7 +8340,7 @@ def tortoise_mine_conversations(transcript: str | None = None,
         return _http_excluded_error()
     sdk = _get_org_sdk()
     if corpus_dir is not None:
-        return _safe(sdk.mine_corpus, corpus_dir,
+        return _safe(sdk._mine_corpus, corpus_dir,
                      extract_entities=extract_entities)
     if not transcript or not source_id:
         return _SafeError({"error": "transcript= and source_id= are required "

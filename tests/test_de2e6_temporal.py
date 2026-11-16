@@ -380,7 +380,7 @@ class TestDe2e6ReviewFixes:
             "date: 2026-07-01\n"  # YAML → datetime.date
             "---\n\n"
             "Alice: We decided to revert to port 16380 because the port 16379 decision was wrong.\n")
-        res = sdk.mine_corpus(str(corpus), extract_entities=False)
+        res = sdk.mine_knowledge_from_directory(str(corpus), extract_entities=False)
         assert res.get("temporal_error") is None, res
         pts = _decision_points(sdk)
         d2 = [p for p in pts if p[1].startswith("We decided to revert")]
