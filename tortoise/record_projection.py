@@ -911,8 +911,9 @@ class JournalPositionCollision(RecordProjectionError):
     a replay, and this guard simply never fires — delete it then, and no caller's
     behaviour changes.
 
-    The message names the position and BOTH records by `event_type`, payload
-    digest and payload size. It does not name a journal, because the row carries
+    The message names the position and BOTH SIDES — two records, or one record
+    and its earlier derivation — by `event_type`, payload digest and payload
+    size. It does not name a journal, because the row carries
     no journal identity to name — that absence is precisely what `#12894`
     decides. It also quotes no payload text: the record's own failure lines
     withhold content, and a payload can carry the tenant's own words.
@@ -6243,13 +6244,15 @@ def _affected_rows(cursor: Any) -> int | None:
 def _payload_digest(payload: Any) -> tuple[str, int]:
     """``(sha256:<12 hex>, payload bytes)`` of a payload's CANONICAL json.
 
-    The collision message names its two records by this instead of quoting them:
-    the record's own failure lines withhold content (`_CONTENT_COLUMNS`), and a
+    The collision message names its two PAYLOADS by this instead of quoting
+    them: the record's own failure lines withhold content (`_CONTENT_COLUMNS`), and a
     payload can carry the tenant's own words. Canonical form is
     ``sort_keys``/compact so the SAME content hashes the same whichever side of
     the comparison it came from — which is what lets a reader see at a glance
-    that the two digests differ because the RECORDS differ, not because one side
-    was re-serialised.
+    that the two digests differ because the PAYLOADS differ, not because one side
+    was re-serialised. ⛔ They may be two records, or ONE record's payload before
+    and after a derivation change: the digest says which bytes differed, never
+    which cause, so do not read it as naming two records.
 
     Unparseable/unserialisable input still yields a digest string rather than
     raising: this function only ever runs on a collision path, and turning a
@@ -6484,9 +6487,13 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
 
     ⚠️ A cursor that cannot report ``rowcount``, or a conflict query that
     somehow returns no row, also returns silently: the guard may only fire on
-    POSITIVE evidence the position's content differs from this write's. Its job is to
-    make an existing silent failure loud, never to become a new silent one or a
-    new false alarm.
+    POSITIVE evidence that the position holds content this write would not
+    produce. Its job is to make an existing silent failure loud, never to become
+    a new silent one. ⛔ Such a refusal is not an ALARM that is wrong, but its
+    CAUSE the row cannot name: a payload DERIVATION change since that row was
+    written makes an old row differ from what this tree would write for the SAME
+    record — one record, two derivations — and that case is documented in the
+    class's RESIDUAL block rather than treated as unreachable here.
 
     ⛔ THE READ IS TENANT-SCOPED. The conflict query runs after
     :func:`scope_connection` set the tenant GUC on this same connection, so RLS

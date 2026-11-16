@@ -2147,9 +2147,11 @@ def record_record_write_failure(reason: str) -> None:
       record, and what the record cannot do is file it under that position — so
       the fix is not on this deployment at all. The population is any journal
       instance whose numbering resumes below the tenant's position high-water
-      mark: a second durable journal under one tenant (two corpus roots, two
+      mark — a second durable journal under one tenant (two corpus roots, two
       SDKs with different ``event_log_path``), a journal RESTORE, a rotation, or
-      a truncation. ``replay`` heals every other failure; it cannot heal this
+      a truncation — AND any journal whose payload DERIVATION changed since that
+      row was written, which reuses the same journal's own numbering and needs no
+      second instance at all. ``replay`` heals every other failure; it cannot heal this
       one, because the append-only row that owns the position carries that
       other content, and the key carries no journal identity — that is ``#12894``'s
       schema decision. A genuine REPLAY (same position, same content) never

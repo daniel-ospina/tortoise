@@ -504,7 +504,7 @@ class RecordWrite:
     #: reason — that tuple is what the PRE-write verdict can return — and a
     #: consumer switching on this field must accept it. Nothing is lost (the
     #: journal holds the record); what is refused is indexing it under a position
-    #: that names another event, which the record cannot fix while its key
+    #: that holds content this write would not produce, which the record cannot fix while its key
     #: carries no journal identity (#12894).
     #:
     #: ⛔ ``no_tenant_carried`` IS A SEPARATE TOKEN ON PURPOSE (#10021 review P3).
@@ -2475,7 +2475,7 @@ def write_live_record(record: Mapping[str, Any], *,
     Different content ⇒ `JournalPositionCollision`, reported HERE as the
     ``journal_collision`` refusal — the same counter, the same WARNING, the same
     ``RecordWrite`` shape every other refusal uses — with a message naming the
-    position and both records by digest.
+    position and both payloads by digest.
 
     The REPAIR is journal IDENTITY in the key (a column identifying the
     journal, or a per-tenant ordinal allocator), not a number this door can

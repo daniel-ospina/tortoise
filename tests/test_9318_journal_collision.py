@@ -219,11 +219,16 @@ def test_an_absorbed_position_with_the_same_content_stays_a_silent_no_op() -> No
 def test_an_absorbed_position_with_different_content_raises_and_names_both() -> None:
     """THE COLLISION: same position, different content ⇒ refuse, naming both.
 
-    The message must identify BOTH records without quoting their CONTENT: the
-    record's own failure lines withhold payload text (`_CONTENT_COLUMNS`), and a
-    payload can carry the tenant's words. An ID is not content — the failure
-    lines already print ids, and the id is the one thing that tells an operator
-    which two records met — so the identity is named and the title is not.
+    THIS SCENARIO has two DIFFERENT records (A and B), but the message contract
+    is not "two records": the class forbids asserting a cause, because the other
+    reachable case is ONE record whose payload was re-derived since that row was
+    written. So the message must identify BOTH SIDES without quoting their
+    CONTENT: the record's own failure lines withhold payload text
+    (`_CONTENT_COLUMNS`), and a payload can carry the tenant's words. An ID is
+    not content — the failure lines already print ids — but an id is a
+    COORDINATE the record shares with its neighbours, so it does not by itself
+    tell one record from two (see the class docstring); what the message owes the
+    operator is the identity it CAN name, with the title withheld.
     """
     conn = Absorbed(stored=("ObjectRegistered", _payload_of(RECORD_A)))
 
@@ -236,7 +241,7 @@ def test_an_absorbed_position_with_different_content_raises_and_names_both() -> 
     assert "sha256:" in message
     # Two DIFFERENT digests: the payloads differ, so the digests disagree.
     assert excinfo.value.payload_digest != excinfo.value.stored_payload_digest
-    # …the two records are NAMED by identity, …
+    # …here both sides are NAMED by identity (this scenario has two records), …
     assert excinfo.value.identity_state == "disagrees"
     assert "obj-a" in message and "obj-b" in message
     # …and neither payload's CONTENT (a document title) appears.
