@@ -10520,7 +10520,19 @@ def _durations_rows_claiming_unmeasured_on_ci(text: str):
 # on, not an incidental property.
 _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     r"\bflat\s+(?:2\.0s?(?:\s+default)?|default|reading|weight)\b"
-    r"[^.;]{0,40}?\b(?:UNDERSTATES|UNDERSTATE|OVERSTATES|OVERSTATE)\b",
+    r"[^.;]{0,40}?\b(?:UNDERSTATES|UNDERSTATE|OVERSTATES|OVERSTATE)\b"
+    # …and the FUTURE-SWEEP construction, which names the owed sweep without ever
+    # writing UNDER/OVERSTATE — so the tense arm above cannot see it. Four rows
+    # shipped this way at the 2026-11-16 refresh (`flat default until a CI sweep
+    # measures this file`, `KNOWN UNDER-ESTIMATE UNTIL THE REFRESHER`, `until the
+    # refresh lands`, `until the first post-merge sweep`), which is what made the
+    # widening's own `[]` a false clean (#12962 cycle 4). Scoped to the words that
+    # name a sweep still TO COME: the healed wording names the LANDED sweep
+    # (`until the 2026-11-16 sweep replaced the row`) and matches none of these.
+    r"|\buntil\s+(?:the\s+)?(?:refresher|first\s+post-merge)"
+    r"|\buntil\s+the\s+refresh\s+lands"
+    r"|\buntil\s+a\s+(?:push-to-main\s+|CI\s+)?sweep\s+"
+    r"(?:includes|measures|covers|collects)",
     re.IGNORECASE)
 
 
@@ -10809,6 +10821,36 @@ def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
         " re-based it." + basis)
     assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
         healed, quad) == []
+
+    # ── The FUTURE-SWEEP construction (#12962 cycle 4) ────────────────────────
+    # These name the sweep still owed without ever writing UNDER/OVERSTATE, so the
+    # tense arm alone cannot see them; four rows shipped this way at the 2026-11-16
+    # refresh, under a widening whose own docstring already promised this arm.
+    owing = (
+        "  test_a.py: 55.5  # #9076: flat default until a CI sweep measures this"
+        " file" + basis + "\n"
+        "  test_b.py: 31.3  # ⚠️ KNOWN UNDER-ESTIMATE UNTIL THE REFRESHER." + basis + "\n"
+        "  test_c.py: 24.7  # until the refresh lands a fast shard is"
+        " under-weighted" + basis + "\n"
+        "  test_d.py: 18.8  # flat default until the first post-merge sweep —"
+        " nothing else" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        owing, quad) == [("test_a.py", 55.5), ("test_b.py", 31.3),
+                         ("test_c.py", 24.7), ("test_d.py", 18.8)]
+    # …and the healed wording — which names the LANDED sweep — stays silent. This
+    # is the arm that keeps the widening from biting every corrected row on the
+    # committed map, so it is pinned rather than assumed.
+    landed_sweep = (
+        "  test_a.py: 55.5  # it opened as the flat default; the 2026-11-16 sweep"
+        " replaced it" + basis + "\n"
+        "  test_b.py: 31.3  # A KNOWN UNDER-ESTIMATE, and it survived the"
+        " 2026-11-16 sweep" + basis + "\n"
+        "  test_c.py: 24.7  # until the 2026-11-16 sweep landed, a fast shard was"
+        " under-weighted by ~6.4x" + basis + "\n"
+        "  test_d.py: 18.8  # the flat 2.0 OVERSTATED it until this sweep replaced"
+        " the row" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        landed_sweep, quad) == []
 
 
 _DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")
