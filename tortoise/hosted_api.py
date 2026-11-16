@@ -3467,19 +3467,6 @@ async def _lifespan(app):
 
 app = FastAPI(title="Tortoise Hosted API", version=tortoise.__version__, lifespan=_lifespan)
 
-# ── #12926: state the two embedding switches the process actually resolved ──
-# Module scope, not `_lifespan`: this is the process boot (`uvicorn
-# tortoise.hosted_api:app`), a lifespan may legally run more than once in a
-# process, and a boot record that repeated per lifespan would read as a state
-# change. The two switches read OPPOSITE ways when unset (`value_gate` ON,
-# `embed_gate` OFF — both modules record that, and changing either is a reopen of
-# `#11445`), so an unstated EMBED switch silently keeps a vector on every row;
-# the line makes the OFF direction visible instead of silent. A RECORD, never a
-# refusal: the pre-merge refusal is `tools/embed_switch_gate.py`.
-from tortoise.gate_visibility import report_effective_switches as _report_gates  # noqa: E402
-
-_report_gates()
-
 # ── #2048: the residual body-buffering class ──────────────────────────────
 # The endpoints that declare `body: XxxRequest` / `body: dict` buffer the WHOLE
 # wire body inside FastAPI's `get_request_handler` BEFORE any dependency or
@@ -49779,3 +49766,16 @@ def _session_list_conds(actor_filter: str | None) -> tuple[list[str], dict]:
         conds.insert(0, "s.actor_user_id = $uid")
         params["uid"] = actor_filter
     return conds, params
+
+# ── #12926: state the two embedding switches the process actually resolved ──
+# Module scope, not `_lifespan`: this is the process boot (`uvicorn
+# tortoise.hosted_api:app`), a lifespan may legally run more than once in a
+# process, and a boot record that repeated per lifespan would read as a state
+# change. The two switches read OPPOSITE ways when unset (`value_gate` ON,
+# `embed_gate` OFF — both modules record that, and changing either is a reopen of
+# `#11445`), so an unstated EMBED switch silently keeps a vector on every row;
+# the line makes the OFF direction visible instead of silent. A RECORD, never a
+# refusal: the pre-merge refusal is `tools/embed_switch_gate.py`.
+from tortoise.gate_visibility import report_effective_switches as _report_gates  # noqa: E402
+
+_report_gates()
