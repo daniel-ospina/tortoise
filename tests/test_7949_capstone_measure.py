@@ -4539,8 +4539,10 @@ def _bundle_sweep(docs, sources) -> dict:
                 shown = source_lines[source][start - 1].strip()
                 # ⛔ TOLERANT label: `_bundle_sweep` is also driven over SYNTHETIC
                 # documents by the tests (its docstring promises it asserts nothing),
-                # and a temp-path source is not under `_REPO` — `relative_to` raised
-                # ValueError out of the failure path instead of returning a failure.
+                # and a temp-path source is not under `_REPO` — a bare `relative_to`
+                # would raise ValueError out of the failure path, turning a reportable
+                # miss into a traceback. (That is the hazard this guard closes; no
+                # shipped caller ever took it, since the guard has been here throughout.)
                 _src_path = sources[source]
                 source_label = (
                     _src_path.relative_to(_REPO) if _src_path.is_relative_to(_REPO)
@@ -4693,8 +4695,16 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
             # this table at #11837, #12462, #12545, #12569 and #12989. The row
             # already carries the anchor, so `_cite_resolution` answers the only
             # question left: WHERE IS IT NOW. One message, both lines, one edit.
+            # ⛔ THE ROW'S OWN KIND IS HONOURED, not defaulted to `exact` (#13033
+            # review P2). Every tuple row in this table spells `("exact", …)` today, so
+            # discarding `anchor[0]` read as harmless — but `_cite_resolution` now
+            # publishes `ANCHOR_KINDS = ("line", "def", "exact")`, and a row written
+            # `("line", …)` or `("def", …)` was silently graded under a DIFFERENT
+            # comparison than the row claims. A pin whose kind is ignored is a pin
+            # asserting something its author did not write.
             kind, token = (
-                ("exact", anchor[1]) if isinstance(anchor, tuple) else ("line", anchor)
+                (anchor[0], anchor[1]) if isinstance(anchor, tuple)
+                else ("line", anchor)
             )
             if f":{number}" not in line and f"-{number}" not in line:
                 failures.append(
@@ -6539,7 +6549,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ⛔ AND THE SAME TREATMENT FOR THE TWO OTHER HITS D5 STATES TWICE (#12462 review
         # cycle 3): `:1400` occurs as the current-tense `Projection` cite AND as the historical
         # "D6" cite, so a row that merely finds the number passes on the twin when the
-        # current-tense one is re-pointed wrongly (measured: 413 passed). `:10064`/`:10117`
+        # current-tense one is re-pointed wrongly (measured: 413 passed). `:10353`/`:10406`
         # are stated twice, both "at this head", so a partial move leaves one stale.
         "`EXTRACTOR-V4-ARCHITECTURE.md:1400` is a **`Projection`** row here",
         "`sdk.py:10353`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` on `main`'s numbering) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which resolve at NO head this row names: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
@@ -7591,10 +7601,26 @@ def _drop_block_entries(text: str, section: str) -> str:
     return "".join(out)
 
 
-#: a LINE FINDING is `<source>:<digits> (cited by <doc>)`; a BLOCK/DOCUMENT finding
-#: names the sentence or the block and carries no such cite. The arm table below
-#: needs that split, because `pytest.raises(AssertionError)` cannot tell them apart.
-_ROW_FINDING = re.compile(r"- [\w./]+:\d+ \(cited by ")
+#: A TABLE-ROW finding is one a `_pin_row_failures` row emitted, and it names the
+#: SOURCE LINE the row pins; a BLOCK/DOCUMENT finding names the sentence or the block
+#: and carries no such cite. The arm table below needs that split, because
+#: `pytest.raises(AssertionError)` cannot tell them apart.
+#:
+#: ⛔ THIS PATTERN HAS TWO PRODUCERS AND MUST MATCH BOTH (#13033 review P1). It used to
+#: match the literal `(cited by <doc>)` tail; when that tail moved to `_cite_failure`
+#: (`<doc> cites <source>:<n> …`) and to the bare-continuation arm (`<doc>: the sentence
+#: containing … does not cite :<n>`), the pattern matched NEITHER — so `_block_findings`
+#: returned every finding, the baseline below false-REDded the moment a row went stale
+#: (with the wrong diagnosis) and the table's `assert findings` became satisfiable by a
+#: row alone. A pattern keyed on prose rots silently; this one is keyed on the two
+#: shapes those arms actually emit, and `test_the_line_and_block_findings_are_told_apart`
+#: holds both halves so the next re-wording cannot take the guard quiet again.
+#: `_bundle_sweep`'s `- <cite> (<label>): <source>:<n> reads …` shape is deliberately NOT
+#: matched here — it was a BLOCK finding before this split existed and stays one.
+_ROW_FINDING = re.compile(
+    r"- \S+ cites [\w./]+:\d+"
+    r"|- \S+: the sentence containing .* does not cite :\d+"
+)
 
 
 def _block_findings(message: str) -> list[str]:
@@ -7621,6 +7647,45 @@ def _block_findings(message: str) -> list[str]:
     return [ln.strip()[2:] for ln in message.splitlines()
             if ln.strip().startswith("- ")
             and not _ROW_FINDING.match(ln.strip())]
+
+
+def test_the_line_and_block_findings_are_told_apart():
+    """`_ROW_FINDING` matches what the row arms ACTUALLY emit (#13033 review P1).
+
+    The split is load-bearing: `_block_findings` is the evidence that
+    `test_each_block_arm_reds_on_the_mutation_it_guards` reads. A pattern keyed on the
+    producers' PROSE silently stops matching when the prose moves — and it did, for the
+    whole period between `_cite_failure` taking over the row message and this test:
+    every row finding was classified a block finding, so the baseline false-REDded the
+    moment a table row went stale (blaming the block arms) and the table's
+    `assert findings` became satisfiable by a row alone.
+    """
+    row_shapes = (
+        # `_cite_failure`'s resolved miss (the commonest: a stale number)
+        "- 04-plan.md cites tortoise/sdk.py:14606 (the sentence containing 'p'), "
+        "and that line reads 'x'",
+        # the bare-continuation arm: the number is absent from the sentence entirely
+        "- 03-test-design.md: the sentence containing 'the A-corpus capture' does "
+        "not cite :10353 — a bare continuation is invisible to _BUNDLE_CITE",
+    )
+    for shape in row_shapes:
+        assert _ROW_FINDING.match(shape), (
+            f"a TABLE-ROW shape is no longer recognised as a row finding: {shape!r} — "
+            "`_block_findings` would report it as a block/document finding, which "
+            "false-reds the baseline and leaves the arm table satisfiable by a row")
+        assert not _block_findings(shape), (
+            f"`_block_findings` returned a row finding as a block finding: {shape!r}")
+    block_shapes = (
+        "- config/ci-surfaces.yml's `carve_out:` block holds NO capstone entry",
+        # `_bundle_sweep`'s own shape — a BLOCK finding before this split and after
+        "- README.md:427 (the meta fold): tortoise/sdk.py:19326 reads 'x', so the "
+        "cite does not hold what it names",
+    )
+    for shape in block_shapes:
+        assert not _ROW_FINDING.match(shape), (
+            f"a BLOCK/DOCUMENT shape is being read as a row finding: {shape!r}")
+        assert _block_findings(shape) == [shape[2:]], (
+            f"a block finding was dropped by `_block_findings`: {shape!r}")
 
 
 def test_the_arm_table_is_not_satisfied_by_an_unrelated_red():
@@ -14084,7 +14149,7 @@ _CITE_QUALIFIER_PATTERN = (
     # optional `(?:-\d+)?` tail the helper reported BOTH of them as UNQUALIFIED — a
     # false BLOCK of a conformant edit whose own message told the author to add the base
     # they had already added (measured by a fresh-context review at `f885a51663`).
-    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:18058-18072`
+    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:18637-18661`
     # (`A2`'s mint seam) is printed UNQUALIFIED in the record, and that is not a false
     # block — the range arm below reads the range OUT OF THE RECORD and asserts both of its
     # endpoints against `tortoise/sdk.py`, so this cite is pinned by derivation instead of
@@ -14951,7 +15016,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — §2 carries NINE FILE-QUALIFIED
         # cites and only THREE are held (main's enumeration, re-measured on this tree at this
         # merge: 9 found, matching this list exactly). Held: `identity_hold.py:125` and
-        # `tortoise/value_gate.py:89` (`_cite` loop below) and `sdk.py:18058-18072` (the count-3
+        # `tortoise/value_gate.py:89` (`_cite` loop below) and `sdk.py:18637-18661` (the count-3
         # range arm) — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
         # `:9617`, `:11731-11732`, and the `research-brief.md` / `02-research-brief.md` cites.
         # ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's SCOPE paragraph

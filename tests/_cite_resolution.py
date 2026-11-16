@@ -10,16 +10,20 @@ a literal**, so every commit above it invalidates it:
 
 Each repair was a lane that grepped `sdk.py`, matched a symbol to a line, and typed
 the answer into a document and (often) into the pin beside it. The repair is not the
-problem — the problem is that the pin reported **`sdk.py:19326 reads '# #4716 Part 1:
-rewrite payload endpoint refs…'`**, which says what is WRONG but not what is RIGHT,
-so a fixer had to re-derive by hand what the test already knew how to compute.
+problem — the problem is that the pin reported what the cited line READS and nothing
+else — `sdk.py:19326 reads 'str(ev.get("eventKind", "core:occurrence"))…'` — which
+says what is WRONG but not what is RIGHT, so a fixer had to re-derive by hand what
+the test already knew how to compute.
 
 WHAT THIS DOES, AND WHAT IT DOES NOT. The pin already carries the ANCHOR — the code
 fragment the cite claims is on that line. This resolves the anchor against the source
-and puts the live line in the failure message:
+and puts the live line in the failure message. The shape below is for a STALE cite
+(this one is not: the README's own `sdk.py` cite is `19485` at this head, the meta
+fold, which is why it is green):
 
-    README.md:340 cites sdk.py:19326, and that line reads '# #4716 Part 1: …'.
-    'the meta fold that calls the #9116 seam' is at sdk.py:19449 — re-point the cite.
+    README.md:340 cites sdk.py:19326, and that line reads 'str(ev.get("eventKind",
+    "core:occurrence"))…'. The thing it names '"stats": _capture_stats_with_step_witness'
+    is at sdk.py:19485 — re-point the cite to that line (do not delete it).
 
 So a drift stays RED (the doc's number is still checked, exactly as before: the
 assertion is NOT weakened to "the file exists") and the repair becomes mechanical:
@@ -76,6 +80,15 @@ def cite_holds(source_lines, number: int, anchors, kind: str = "line") -> bool:
     """
     if kind not in ANCHOR_KINDS:
         raise ValueError(f"unknown anchor kind {kind!r}; one of {ANCHOR_KINDS}")
+    if not anchors:
+        raise ValueError(
+            "a cite needs at least one anchor — an empty tuple would satisfy the "
+            "`all(...)` below VACUOUSLY and pass every cite it was handed")
+    blank = [a for a in anchors if not a.strip()]
+    if blank:
+        raise ValueError(
+            f"anchor(s) {blank!r} are empty or whitespace — `'' in text` is true on "
+            "EVERY line, so a blank anchor would pass every cite it was handed")
     if not 1 <= number <= len(source_lines):
         return False
     text = source_lines[number - 1]
@@ -138,7 +151,15 @@ def cite_failure(doc_label: str, source_label: str, number: int, source_lines,
                 f"counts a different revision, or it names the wrong file")
     got = source_lines[number - 1].strip()
     hints = [f"`{a}` {locate_hint(source_lines, a, kind, number)}" for a in anchors]
-    resolved = any(anchor_lines(source_lines, a, kind) for a in anchors)
+    # ⛔ The re-point instruction is only TRUE when EVERY anchor resolves SOMEWHERE
+    # (#13033 review P2). It used to be `any(...)`, which appended "re-point the cite to
+    # that line" to a pair cite whose SECOND anchor appears NOWHERE — contradicting, in
+    # one message, the "re-verify the PASSAGE rather than re-pointing the number" tail
+    # that the same message had just printed for that anchor. `all` is the minimal
+    # correct gate; the residual it does not close is a pair whose two anchors resolve
+    # on DIFFERENT lines (no single line satisfies both), which no caller constructs —
+    # `_pin_row_failures` passes a one-element tuple — so it is named here, not guessed at.
+    resolved = all(anchor_lines(source_lines, a, kind) for a in anchors)
     # ⛔ The re-point instruction is only TRUE when the anchor resolves SOMEWHERE.
     # Appending it to the `appears NOWHERE` case told a fixer to re-point a number at
     # a line that does not exist, immediately after telling them not to — the message
