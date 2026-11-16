@@ -138,6 +138,18 @@ def _base_env(home: Path) -> dict:
     # seam's module-dir resolution. Measured inert here (`PATH`'s hit wins the
     # candidate order), but blanking it would test a different path than a real
     # install takes.
+    #
+    # `TORTOISE_IMPORT_RECEIPT_DIR` IS blanked, and it is the one relocating
+    # switch that is NOT inert (#13048 review): `volunteerStatusPath()` resolves
+    # it BEFORE `$HOME`, and its value is absolute, so a box that exports it
+    # moves the status record OUTSIDE the fixture's `HOME` redirect — the shipped
+    # seam would then read the operator's real `volunteer-status.json` and, on a
+    # healthy turn, `clearVolunteerDegradation()` would WRITE `degradation: null`
+    # over it. The `volunteer: OK (` line the installed-artifact row requires is
+    # only true of a clean/absent record, so the same leak is also a false red
+    # attributed to this diff. Empty is falsy for `volunteerStatusPath`'s
+    # `.trim()` and for `recordInstallInert`'s check, so the SHIPPED default
+    # (`$HOME/.tortoise/…`) stays the path under test rather than being skipped.
     return {
         **os.environ,
         "TORTOISE_DB_PATH": str(home.parent / "seams.db"),
@@ -155,6 +167,8 @@ def _base_env(home: Path) -> dict:
         "TORTOISE_VOLUNTEER_DISABLE": "",
         "TORTOISE_COMMAND": "",
         "TORTOISE_SRC_DIR": "",
+        # The status-record relocation — see this function's header.
+        "TORTOISE_IMPORT_RECEIPT_DIR": "",
     }
 
 
