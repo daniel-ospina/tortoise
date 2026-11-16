@@ -317,7 +317,13 @@ class TestVerdictMapping:
 
     def test_keep_refused_while_batch_quarantined(self, sdk, tmp_path):
         cid, _prior, batch_id = _make_candidate(sdk, tmp_path)
-        sdk.quarantine_batch(batch_id, reason="W-3 test quarantine")
+        # #12901 wave 1 retired the `sdk.quarantine_batch` door (a zero-caller thin
+        # delegate). The CAPABILITY is unchanged — `tortoise.mining.quarantine_batch`
+        # is the implementation that always held it, and calling it directly is what
+        # the delegate did.
+        from tortoise.mining import quarantine_batch as _quarantine_batch
+
+        _quarantine_batch(sdk._get_proj(), batch_id, reason="W-3 test quarantine")
         layer = VerdictLayer(sdk)
         with pytest.raises(ValueError, match="quarantined"):
             layer.decide(cid, VERDICT_KEEP)

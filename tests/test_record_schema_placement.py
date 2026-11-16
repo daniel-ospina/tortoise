@@ -2063,10 +2063,16 @@ def test_the_two_schema_readers_agree_on_every_record_table():
     real = table_columns()
     # ⚠️ `session_narrative` is deliberately outside this file's `MIGRATIONS`
     # (the `creates`-conditional tenth table), so this parse cannot speak about
-    # it; and `embedding_vec` is a `public.vector(384)` column this file's
-    # deliberately narrow type vocabulary does not model. Neither is the axis
-    # this pin exists for.
-    assert set(real) - set(independent) <= {"session_narrative"}, (
+    # it; `record_cursor` (#12894) is outside it for a stronger reason — it is NOT
+    # a node table at all: it carries no graph property mapped to a column (it is
+    # the ORDINAL COUNTER, keyed `(org_id, graph_id)`), so there is no placement
+    # for this checker to decide and an entry for it would be an empty map that
+    # asserts nothing; and `embedding_vec` is a `public.vector(384)` column this
+    # file's deliberately narrow type vocabulary does not model. None of the three
+    # is the axis this pin exists for — the readers must agree on every table the
+    # parse CAN speak about, and a table it cannot speak about must be NAMED here
+    # rather than silently widening the tolerated difference.
+    assert set(real) - set(independent) <= {"session_narrative", "record_cursor"}, (
         sorted(set(real) - set(independent)))
     for table in sorted(independent):
         missing = independent[table] - real[table]

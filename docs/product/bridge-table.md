@@ -117,11 +117,11 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 | 56 | `tortoise_list_sources` | `tool_registry.py:397` | `list_sources` | yes | `graph_overview` |
 | 57 | `tortoise_list_tags` | `tool_registry.py:446` | `list_tags` | yes | `graph_overview` |
 | 58 | `tortoise_list_topics` | `tool_registry.py:1083` | `list_topics` | yes | `list_knowledge` |
-| 59 | `tortoise_manage_sources` | `tool_registry.py:1497` | **none declared** | no | `manage_sources` |
+| 59 | `tortoise_manage_sources` | `tool_registry.py:1499` | **none declared** | no | `manage_sources` |
 | 60 | `tortoise_mine_conversations` | `tool_registry.py:535` | `mine_corpus` | no | `mine_knowledge_from_directory` |
 | 61 | `tortoise_mitigate_operator` | `tool_registry.py:740` | `mitigate_operator` | no | `adjust_relationship` |
-| 62 | `tortoise_onboarding_github_index` | `tool_registry.py:1538` | **none declared** | no | `manage_sources` |
-| 63 | `tortoise_onboarding_session_recording` | `tool_registry.py:1529` | **none declared** | no | `manage_sources` |
+| 62 | `tortoise_onboarding_github_index` | `tool_registry.py:1540` | **none declared** | no | `manage_sources` |
+| 63 | `tortoise_onboarding_session_recording` | `tool_registry.py:1531` | **none declared** | no | `manage_sources` |
 | 64 | `tortoise_operator_action` | `tool_registry.py:1401` | **none declared** | no | `adjust_relationship` |
 | 65 | `tortoise_org_create` | `tool_registry.py:1160` | `org_create` | no | `tenancy:create_memory_graph` |
 | 66 | `tortoise_overview` | `tool_registry.py:1448` | **none declared** | yes | `graph_overview` |

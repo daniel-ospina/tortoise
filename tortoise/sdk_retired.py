@@ -13,8 +13,10 @@ users there is no telemetry to harvest and no caller to protect.
 
 WHY THIS IS A SMALL HAND-KEPT MAP, NOT A READ OF THE MIGRATION TABLE
 --------------------------------------------------------------------
-``tools/sdk_rename_table.py`` is the migration map: all 124 current names and their
-approved destinations, most of whose renames have **not** landed yet. Two reasons this
+``tools/sdk_rename_table.py`` is the migration map: every name on the LIVE surface (120
+at this head — re-derive with ``tools/sdk_surface.py --check``; the numeral is not typed
+here because it moves with every wave) and its approved destination, most of whose
+renames have **not** landed yet. Two reasons this
 map is separate and deliberately tiny:
 
   * a product module must not import a build tool, and that table reads two product docs
@@ -50,10 +52,14 @@ names no replacement), so it is pinned differently, in the direction that was mi
 before #4282 phase 2.3: the gate requires each entry to name a method that has really
 left the surface, to be accounted for in the inventory, and to keep the recorded-
 universe count whole — so a departure cannot go unrecorded the way these two did. And
-for the 26-name surplus block it holds the RECORDED DESTINATION too:
-:data:`SURPLUS_DELETION_DESTINATIONS` is transcribed from the inventory's own column and
-every reason below is pinned to it, because a hand-typed destination is how TEN of them
-drifted off the record (#10226 review, 2026-11-10).
+for the recorded-destination cells it holds the RECORDED DESTINATION too:
+:data:`SURPLUS_DELETION_DESTINATIONS` (the 26-name `#4282` block) and
+:data:`WAVE1_DELETION_DESTINATIONS` (the `#12901` wave-1 block) are both transcribed from
+the inventory's own column and every reason below is pinned to them, because a hand-typed
+destination is how TEN of them
+drifted off the record (#10226 review, 2026-11-10) — and how one wave-1 destination
+(`quarantine_batch` → a LIVE `update_knowledge`) sat outside the pin entirely until
+2026-11-16.
 """
 
 from __future__ import annotations
@@ -153,11 +159,12 @@ SURPLUS_DELETION_DESTINATIONS: dict[str, tuple[str, ...]] = {
     "traverse": ("explore_connections",),
 }
 
-#: The surplus names whose recorded destination HAS a `def` on `TortoiseSDK` today but which
-#: must stay UNHINTED, with the reason. A hint exists to be FOLLOWED (#3836 (c)), so a live
-#: destination should always produce one; this cell is the exception, and it is a DECLARATION
-#: rather than an omission — `tests/test_sdk_retirement.py` reds both on a live destination
-#: that is neither hinted nor declared here, and on an entry here that has stopped being live.
+#: The recorded destinations in BOTH deletion cells that HAVE a `def` on `TortoiseSDK`
+#: today but which must stay UNHINTED, with the reason. A hint exists to be FOLLOWED
+#: (#3836 (c)), so a live destination should always produce one; this cell is the
+#: exception, and it is a DECLARATION rather than an omission —
+#: `tests/test_sdk_retirement.py` reds on a live destination in either cell that is
+#: neither hinted nor declared here, and on an entry here that has stopped being live.
 UNHINTED_LIVE_DESTINATIONS: dict[str, str] = {
     "create_or_update_point": (
         "two records name two different destinations, so a hint would pick a winner nobody "
@@ -166,6 +173,34 @@ UNHINTED_LIVE_DESTINATIONS: dict[str, str] = {
         "the 40 numbered targets, so an ordinal for it cannot be recorded. Reconciling the "
         "two records is #4282 phase 2 work; until then this departure names nothing."
     ),
+    "quarantine_batch": (
+        "two records name two different destinations, so a hint would pick a winner nobody "
+        "recorded: the canonical inventory's column says `update_knowledge` (quarantine is "
+        "a FIELD on the partial update, not a verb), while the beta `w11_lifecycle` region "
+        "the approval quotes names TWO targets, `update_knowledge` and `list_knowledge`, and "
+        "the derived-ordinal arm refuses to choose between them. The capability is not lost "
+        "either way — `tortoise.mining.quarantine_batch` survives and is what the delegate "
+        "called — so until the records are reconciled this departure names nothing."
+    ),
+}
+
+#: The #12901 wave-1 names' recorded destination, transcribed from the inventory's own
+#: column exactly as :data:`SURPLUS_DELETION_DESTINATIONS` is, and pinned to it in both
+#: directions by `tests/test_sdk_retirement.py`.
+#:
+#: ⛔ WHY IT IS A CELL AND NOT PROSE. The surplus block learned this the expensive way: a
+#: hand-typed destination in a reason is a copy of a machine record, and the copy rots. The
+#: wave-1 reasons below carried their destinations in prose only, OUTSIDE the pin, so the
+#: gate that keeps `UNHINTED_LIVE_DESTINATIONS` honest could not see them — measured
+#: 2026-11-16, a fresh-context reviewer: `quarantine_batch` records the LIVE
+#: `update_knowledge` and no arm could have noticed. This cell is the population that arm
+#: now reads (the 26-name `#4282` block stays CLOSED — its own counter is untouched).
+WAVE1_DELETION_DESTINATIONS: dict[str, tuple[str, ...]] = {
+    "backfill_v25": (),
+    "calibration_passed": ("check_confidence",),
+    "list_relations": ("graph_overview",),
+    "membership_get": (),
+    "quarantine_batch": ("update_knowledge",),
 }
 
 #: removed public name -> why it is gone, and what a caller does instead (prose only).
@@ -207,7 +242,9 @@ REMOVED_SDK_METHODS: dict[str, str] = {
     #   * `create_or_update_point` → `create_entity` — LIVE, but deliberately UNHINTED: the
     #     owner's ledger row for that name points at `create_point`, so two records disagree.
     #     :data:`UNHINTED_LIVE_DESTINATIONS` carries that reason, and the pin holds the cell to
-    #     exactly the set it declares.
+    #     exactly the set it declares — which is now THREE names, the third being
+    #     `quarantine_batch` → `update_knowledge` from the `#12901` wave-1 cell below (it is
+    #     outside this 26-name block, so it does not move the counters here).
     #
     # The other twelve recorded destinations are the Phase-2 targets
     # `mine_knowledge_from_session`, `check_confidence`, `explore_connections`,
@@ -350,6 +387,106 @@ REMOVED_SDK_METHODS: dict[str, str] = {
     "org_delete": (
         "#4282 (2026-10-27): DELETED. Account closure is a console operation in the "
         "approved tenancy block; **no** recorded destination."
+    ),
+    # ── #12901 wave 1 (2026-11-15) — the retirement wave ─────────────────
+    #
+    # The MEMBERSHIP RULE for this block, so a later reader can re-derive it rather
+    # than trust it: a name qualifies only when it is (a) NOT on `tortoise/__all__.py`
+    # (the owner's approved list), (b) bound by NO entry in
+    # `tortoise/tool_registry.py` — live OR retired, since a retired tool still answers
+    # through the #3883 shim — and (c) called by NO production code in `tortoise/`.
+    # (c) is the one that does the work, and it is MEASURED, not asserted: a receiver-
+    # aware AST walk over `tortoise/`, `tests/` and `tools/` for `sdk.<name>` /
+    # `self.<name>` / a bare attribute reference (`asyncio.to_thread(sdk.<name>, …)`
+    # is such a reference, and a `(`-anchored grep misses it) / `getattr(sdk, "<name>")`.
+    # ⛔ AND THE SCAN MUST MATCH EVERY RECEIVER SHAPE. Measured the hard way: a scan keyed
+    # on `sdk.`/`self.` MISSED `TortoiseSDK().calibration_passed()` — its receiver is a
+    # CONSTRUCTOR CALL, not a name — i.e. it missed the one production caller in this
+    # block. Match on the ATTRIBUTE, then judge the receiver, or a real caller hides.
+    #
+    # WHY (c) IS A CONDITION AND NOT A COURTESY. The owner's #3836 (c) ruling retires a
+    # name by FAILING and naming its replacement — no alias layer, no warning shim — and
+    # its stated reason is that with zero users there is no caller to protect. A
+    # deprecation window is what protects callers (PEP 387: an incompatible change only
+    # after a documented deprecation; SemVer 2.0.0 rule 8: a MAJOR bump). So the ruling is
+    # only legitimate over names that HAVE no EXTERNAL caller. That is the gate.
+    #
+    # ⚠️ ONE REFINEMENT, and it is the repo's own precedent rather than an exception made
+    # here: an INTERNAL caller does not disqualify a name if the body can go PRIVATE and
+    # that caller re-points at it. That is exactly the `capture_session` -> 
+    # `_capture_session` shape already recorded above, and it is the shape
+    # `calibration_passed` took (one caller in `tortoise/gates.py`, re-pointed at
+    # `_calibration_marker_recorded`). What the ruling forbids is leaving a caller BROKEN;
+    # it does not forbid closing a door whose only key-holder is our own code.
+    #
+    # DEFERRED, with the reason, so the next wave does not re-derive it: `recall_gaps` and
+    # `recall_subgraph` have zero production callers BUT are invoked dynamically by name
+    # from `tests/test_time_aware_sdk_2520.py`'s `_RE_OWNING_LANES` (a string tuple, so a
+    # receiver-based scan cannot see it), and both wrap live `ranking` machinery
+    # (`GapsRanker`, `SubgraphExpander`). `test_guard` has zero production callers but the
+    # beta ledger's `r6_test_guard` region rules it **Kept and relocated** — it guards the
+    # production-wipe incident, so the CODE must survive and move to test infrastructure
+    # rather than be deleted. It needs its own wave.
+    "backfill_v25": (
+        "#12901 wave 1 (2026-11-15): DELETED. A one-shot ONTOLOGY v2.5 migration "
+        "(status/pointKind backfill) written against a schema several versions old, "
+        "with zero callers in `tortoise/`, `tests/` or `tools/`. The beta ledger's "
+        "`w8_backfill` region rules the class `One-shot migrations. Run once, then "
+        "dead code carrying a public promise.`, and the rename table's own disposition "
+        "is ARCHIVE -> DISCARDED. **No** recorded destination: nothing migrates to it, "
+        "and it migrates to nothing."
+    ),
+    "list_relations": (
+        "#12901 wave 1 (2026-11-15): DELETED. It listed the pack-declared relation "
+        "declarations and had no caller ON THE SDK — the same-named methods elsewhere "
+        "(`pack_registry.list_relations`, reached as `registry.list_relations()`) are "
+        "DIFFERENT objects and survive untouched. Recorded destination `graph_overview` — "
+        "the CANONICAL `r6_canon` region (row R6) — which has no `def` today, so no hint is "
+        "emitted, because a hint must name something a caller can actually call. The beta "
+        "tables never recorded a target for this name, so the canonical row is the whole of "
+        "the destination record. "
+        "`TortoiseSDK._resolve_traversal_path` still reads the registry call."
+    ),
+    "quarantine_batch": (
+        "#12901 wave 1 (2026-11-15): DELETED. A thin delegate to "
+        "`tortoise.mining.quarantine_batch`, which STAYS — batch lifecycle state lives "
+        "on :Batch marker nodes, so the capability was never the delegate. It had no "
+        "PRODUCTION caller; its only call sites were tests, and they were re-pointed at "
+        "`tortoise.mining.quarantine_batch`, which is exactly what the delegate called. "
+        "Recorded destination `update_knowledge` (quarantine is a FIELD on the partial "
+        "update, not a verb) — the beta `w11_lifecycle` region's column. The recorded "
+        "destination lives in "
+        "`WAVE1_DELETION_DESTINATIONS` (NOT in `SURPLUS_DELETION_DESTINATIONS`, which is "
+        "the CLOSED #4282 block). It is "
+        "UNHINTED even though `update_knowledge` is live: the approving region names "
+        "TWO targets (`update_knowledge` and `list_knowledge`), so the derived-ordinal "
+        "arm refuses to pick a winner between them, and a hint would record a judgement "
+        "no source makes. That divergence is DECLARED in "
+        "`UNHINTED_LIVE_DESTINATIONS`, and the pin reds on a divergence that is neither "
+        "hinted nor declared."
+    ),
+    "calibration_passed": (
+        "#12901 wave 1 (2026-11-15): DELETED FROM THE PUBLIC SURFACE. The Gate B "
+        "calibration-milestone reader. ⚠️ It had ONE production caller — "
+        "`tortoise/gates.py`'s CLI read `TortoiseSDK().calibration_passed()` inside a "
+        "try/except — so this is NOT a zero-caller deletion and the departure is the "
+        "`capture_session` -> `_capture_session` shape instead: the body went PRIVATE as "
+        "`_calibration_marker_recorded`, gates.py reads that, and the unapproved PUBLIC "
+        "door closes with the capability intact. (A bare `sdk.<name>` scan MISSES this "
+        "caller — its receiver is a constructor call, not a name.) Recorded destination "
+        "`check_confidence` — the beta `r3` region's column — which has no `def` today, so "
+        "no hint is emitted. `_CALIBRATION_MARKER_KEY` deliberately STAYS on the class: the "
+        "projection's config-reset preservation reads it too."
+    ),
+    "membership_get": (
+        "#12901 wave 1 (2026-11-15): DELETED. It read one membership row by id and had "
+        "no PRODUCTION caller — the only call sites were two tests "
+        "(`test_membership_get_returns_membership` / `..._returns_none_for_missing`), "
+        "which were DELETED with it because the empty branch they exercised went too. "
+        "The console reads memberships through the approved "
+        "`list_members` surface instead. The beta `n1_console` region rules this class "
+        "`Console plumbing` and puts no tenancy administration on the SDK, so there is "
+        "**no** recorded destination to name."
     ),
 }
 

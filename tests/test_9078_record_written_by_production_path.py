@@ -350,6 +350,45 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # never had it is a no-op.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261110000001_record_point_retire_as_of_11827.sql", None),
+    # #12894 stage C — `public.record_cursor`, the ordinal ALLOCATOR. It must be
+    # re-applied for the same reason the tenancy file is: a container migrated by
+    # an older tree carries `journal_event` and takes the shortcut, so the armed
+    # leg would write into a database with no counter table (`42P01`) while this
+    # suite read green. LAST, because it GRANTs to `tortoise_record_app` and
+    # `RAISE EXCEPTION`s when that role is absent — the order is the dependency.
+    #
+    # ⛔ AND IT IS `creates`-GUARDED, not `None`. With `None` this file re-applied
+    # on EVERY `_ensure_record_schema` call — i.e. once per record-suite module
+    # fixture — and its `DROP POLICY` / `CREATE POLICY` / `GRANT` take an ACCESS
+    # EXCLUSIVE lock on `public.record_cursor`. MEASURED: running this suite and
+    # `tests/test_12894_record_cursor_live.py` in ONE pytest invocation (which is
+    # what the `test-record-postgres` job does) ended in
+    # `ERROR test_9318_journal_collision::test_a_genuine_replay_… - DeadlockDetected`
+    # raised HERE, at the re-apply loop — the DDL waiting on a live allocator
+    # transaction that held the counter row. The table's own presence is the
+    # right probe (unlike the tenancy file's roles, which no relation can show):
+    # present ⇒ this tree's schema is already there ⇒ nothing to apply, no lock
+    # taken. Re-apply safety itself is proven by the PGlite drill and by the
+    # reviewer's double-apply, which do not depend on this list.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261116000001_record_cursor_allocator.sql", "public.record_cursor"),
+    # #12894 stage C — the byte meter's EXECUTE grant, split OUT of the allocator
+    # file above so that a RE-APPLY can reach it. `creates=None` is correct and
+    # is the whole reason for the split: this file creates no relation, so the
+    # existence probe has nothing to ask (a `creates` here would be a lie about a
+    # table), and the `None` arm RE-APPLIES IT ON EVERY `_ensure_record_schema`
+    # call — which is required, because the grant is exactly what the entry above
+    # can no longer deliver: the allocator file is `creates`-guarded (skipped
+    # forever once `record_cursor` exists) and normally applies BEFORE the
+    # metering migration exists. ⛔ `GRANT EXECUTE ON FUNCTION` takes NO lock on
+    # `public.record_cursor` — the lock that made the entry above conditional
+    # (#12399) — so the re-apply is safe in a live allocator transaction; and it
+    # is idempotent (granting an already-granted privilege is a no-op). Measured
+    # before the split: `has_function_privilege('tortoise_record_app', …, '
+    # 'EXECUTE')` stayed false, the meter returned `None` (TOTAL by contract) and
+    # the org was charged 0 bytes on the required `test-record-postgres` leg.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261116000002_record_cursor_meter_grant.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
@@ -1004,7 +1043,8 @@ def test_the_live_door_rule_fires_when_the_ordinal_is_dropped(wiring):
     module, _, _ = wiring
     source = (
         "from tortoise import record_writer\n"
-        "def write_live_record(record, *, durable=False, seq=None):\n"
+        "def write_live_record(record, *, durable=False, seq=None, "
+        "allocate=False):\n"
         "    return record_writer.write_records([record], org_id='o', "
         "graph_id='g', %s)\n"
     )
@@ -1017,6 +1057,57 @@ def test_the_live_door_rule_fires_when_the_ordinal_is_dropped(wiring):
         "read the same door both ways")
     problems = module.live_door_writes_the_journals_position(source % good)
     assert problems == [], (good, problems)
+
+    # RE-DERIVED for #12894: there is a SECOND honest source of a position — the
+    # record's own allocator — and the gate must accept it exactly when the same
+    # call binds `allocate=`. Accepting the expression ALONE would let a body
+    # that never receives `allocate` write `position=True` and invent a number.
+    #
+
+    # ⛔ AND THE WATERMARK IS PART OF THAT ARM (#12894 review cycle 1, P1).
+    # `replay_plan` REFUSES `allocate=True` with a caller watermark, and every
+    # production site has a `seq` from `log.append`, so a body that forwards it
+    # beside `allocate=allocate` refuses EVERY write on a cut-over door. The
+    # gate blessed that body before this arm existed — a FALSE PASS on the one
+    # check whose job is to stop an invented ordinal.
+    allocator = ("position=True if allocate else seq is not None, "
+                 "first_seq=1 if allocate else seq if seq is not None else 1, "
+                 "allocate=allocate")
+    assert module.live_door_writes_the_journals_position(
+        source % allocator) == [], (
+        "the gate rejects the allocator arm — the honest #12894 spelling")
+
+    forwarding = ("position=True if allocate else seq is not None, "
+                  "first_seq=seq if seq is not None else 1, allocate=allocate")
+    forwarded = module.live_door_writes_the_journals_position(
+        source % forwarding)
+    assert forwarded and "first_seq" in forwarded[0], (
+        "the gate accepts `first_seq=<the journal's ordinal>` beside "
+        f"`allocate=`, which `replay_plan` refuses at every cut-over door: "
+        f"{forwarded}")
+    # ⛔ AND THE ARM IS "AN `allocate=` KEYWORD IS PRESENT", NOT "ITS VALUE IS
+    # NAMED `allocate`" (review cycle 3, P1). Recognising the NAME let four
+    # ordinary spellings fall through to the derived arm and be blessed as WIRED
+    # while `replay_plan` refuses the same call — measured, `[]` for each:
+    # `allocate=True`, `allocate=use_cursor`, `allocate=self._a`,
+    # `allocate=bool(allocate)`. A rule that has to recognise the spelling of a
+    # VALUE is defeated by any edit to that expression, and the refusal it misses
+    # is "every write at cut-over fails". All four must RED, on the ORDINAL pair.
+    for spelling in ("allocate=True", "allocate=use_cursor",
+                     "allocate=self._a", "allocate=bool(allocate)"):
+        fired = module.live_door_writes_the_journals_position(
+            source % ("position=seq is not None, "
+                      "first_seq=seq if seq is not None else 1, " + spelling))
+        assert fired, (
+            f"the gate blessed the ORDINAL pair beside `{spelling}` — "
+            "`replay_plan` refuses an allocating call with a caller watermark, "
+            "so this body writes nothing at cut-over")
+    unbound = ("position=True if allocate else seq is not None, "
+               "first_seq=seq if seq is not None else 1")
+    fired = module.live_door_writes_the_journals_position(source % unbound)
+    assert fired and "position=" in fired[0], (
+        "the gate accepts an allocator-shaped `position=` from a call that "
+        f"never binds `allocate=` — an invented number: {fired}")
 
     for spelling, why, names in (
         ("position=False, first_seq=seq", "the pre-#9190 deferral", "position="),
