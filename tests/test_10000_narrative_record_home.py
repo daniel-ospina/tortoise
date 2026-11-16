@@ -96,7 +96,7 @@ def test_the_update_door_refuses_it_too(sdk):
     obj = sdk.create_object("probe-update-door")
     object_id = obj.get("id") or obj.get("objectId")
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(object_id, story_arc=PROSE, sessionId=SESSION)
+        sdk.update_knowledge(object_id, story_arc=PROSE, sessionId=SESSION)
     assert "cannot be written through update_entity" in str(exc.value), (
         "the UPDATE door's own refusal must fire — a paired narrative is still "
         "unfileable through an update, which writes caller props onto the node")

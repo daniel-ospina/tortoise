@@ -728,8 +728,18 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "link_entities": (UNCHANGED, "unchanged4"),
     "update_knowledge": (UNCHANGED, "unchanged4"),
     "delete_knowledge": (UNCHANGED, "unchanged4"),
-    # W10
-    "file_decision": ("write_question", "w10_file_decision"),
+    # W10/W11 — three more canonical names are PUBLIC methods as well as targets
+    # (#11609 Phase 2): `write_question`, `record_decision` and `supersede_knowledge`
+    # gained their `def` while the four doors they absorb
+    # (`file_decision`, `file_human_approval`, `supersede`, `update_entity`) were
+    # retired. Same rule as the W9/W11/W12 trio above: a name that IS its own
+    # destination carries UNCHANGED, because the group default would otherwise
+    # redirect a row onto a sibling. The two former map KEYS (`file_decision`,
+    # `supersede`) leave this map with the `def` they keyed — their footnotes stay
+    # in CITES as the history of the split.
+    "write_question": (UNCHANGED, "unchanged4"),
+    "record_decision": (UNCHANGED, "unchanged4"),
+    "supersede_knowledge": (UNCHANGED, "unchanged4"),
     # W5 — the journal reconciliation. Each member's destination is its OWN, taken from
     # the canonical menu's absorption row; see the `w5_*` citations above.
     "diary_write": ("create_entity", "w5_diary_write"),
@@ -739,7 +749,6 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "update": ("update_knowledge", "w11_canon"),
     "retract_point": ("update_knowledge", "w11_retract"),
     "invalidate_point": ("update_knowledge", "w11_retract"),
-    "supersede": ("supersede_knowledge", "w11_supersede"),
     "supersede_point": ("supersede_knowledge", "w11_supersede"),
     # W11 — the four rows beta filed under "### Removed" as *reachable* without a
     # destination NAMED. The fold is now named in beta: lifecycle

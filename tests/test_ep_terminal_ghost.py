@@ -823,7 +823,7 @@ def test_outdated_prop_rejected_on_all_write_surfaces(sdk, tmp_path):
 
     # _update_entity surface (routes through _sanitize_props label-loop)
     with pytest.raises(ValueError, match="outdated"):
-        sdk.update_entity(a, outdated=True)
+        sdk.update_knowledge(a, outdated=True)
 
     # MCP boundary parity: server-managed list rejects with ERR_INVALID shape
     from tortoise import mcp_server

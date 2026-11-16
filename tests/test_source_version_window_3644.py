@@ -462,7 +462,7 @@ def test_the_window_start_cannot_be_forged_through_the_entity_surface(src):
     sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
     minted = _props(sdk, _URL)["validFrom"]
     with pytest.raises(ValueError, match="server-managed"):
-        sdk.update_entity(_URL, validFrom="2020-01-01T00:00:00+00:00")
+        sdk.update_knowledge(_URL, validFrom="2020-01-01T00:00:00+00:00")
     assert _props(sdk, _URL)["validFrom"] == minted, (
         "the forged window start landed on the node")
 
@@ -572,7 +572,7 @@ def test_the_entity_surface_refuses_window_and_transition_keys(src):
     sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
     for key in _WINDOW_KEYS:
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.update_entity(_URL, **{key: "2020-01-01T00:00:00+00:00"})
+            sdk.update_knowledge(_URL, **{key: "2020-01-01T00:00:00+00:00"})
 
 
 def test_the_mcp_boundary_keeps_only_the_transition_keys():
