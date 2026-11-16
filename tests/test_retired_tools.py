@@ -73,6 +73,9 @@ class TestDeclaration:
         declared surface change". Note that `beta-sdk-surface.md` says of itself, in its
         own header: "This document is a PROPOSAL, and it is NOT the authority for the
         MCP target" — where it and `canonical-mcp-tools.md` differ, canonical governs.
+        #11609 batch 2 then moved it 125 → 124 (SIX approved containers implemented, SEVEN
+        live names retired), and the phase rule is that every batch ends BELOW where it
+        started, which is what makes this pin move DOWN and never up.
         #12521 (`8e4e335b05`) gave it its `def`, approved by daniel-ospina on 2026-11-14
         and recorded at `#10015` comment `6863608333`; `docs/product/beta-sdk-surface.md`
         read *"40 methods against **125** today"* at that move (it now reads **111**, moved
@@ -80,9 +83,10 @@ class TestDeclaration:
         `config/surface-manifest.yml`'s `counts.sdk_public_methods` was `125`, so this
         assertion was then the one place still pinned to the pre-delivery number.
 
-        THREE moves then took it DOWN, and the two #11609 waves are disjoint (wave 1's
-        membership rule excluded any name a `tool_registry` entry bound, live or retired;
-        the four doors #11609 Phase 2 re-keys were live MCP tools at that time):
+
+        TWO waves then moved it DOWN, and they are disjoint (wave 1's membership rule
+        excluded any name a `tool_registry` entry bound, live or retired; the four doors
+        #11609 Phase 2 re-keys were live MCP tools at that time):
 
         * #12901 (2026-11-15) 125 → 120 — five OFF-SURFACE methods retired (archived
           under `archive/sdk-methods/b2-sdk-retirement-wave-1/` and recorded in
@@ -142,16 +146,16 @@ class TestDeclaration:
             for n in dir(TortoiseSDK)
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
-        assert len(public) == 111, f"SDK surface changed: {len(public)} != 111"
-        # 125 → 111 across TWO 2026-11 waves, all DOWN — the direction #4282 requires:
-        #   #12901 wave 1  retired 5 off-surface methods with no production caller  (−5)
-        #   #11609 Phase 2 landed 6 approved READ/QUERY containers (+6) and
-        #                  re-privatised the 14 read methods they cover      (−14)
-        #   #11609 Phase 2 retired 4 public names into the WRITE/MUTATE containers (−4)
-        #                  and added the 3 that absorbed them                (+3)
-        # 125 + 6 − 14 − 5 − 4 + 3 = 111. `high_water_counts` in
-        # `config/surface-manifest.yml` is re-cut, never hand-edited, and the guard still
-        # refuses growth above the baseline.
+
+        # 110 is the number `config/surface-manifest.yml` derives
+        # (`counts.sdk_public_methods`, re-cut at this head) and the one
+        # `tools/surface-guard.py` pins as the frozen baseline. Measured, not
+        # typed: `uv run python tools/sdk_surface.py --check` reads 110.
+        # The composition of all four #4282 Phase 2 waves: 125 -> 120 (#12901
+        # wave 1) -> 111 (this PR's READ/QUERY wave, 119 + 6 containers - 14
+        # re-privatised doors) -> 110 (the SOURCES/MINE/SESSION lane, +6
+        # approved / -7 retired, which composes on top of the 111).
+        assert len(public) == 110, f"SDK surface changed: {len(public)} != 110"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK

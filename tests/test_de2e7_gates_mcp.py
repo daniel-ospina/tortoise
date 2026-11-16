@@ -80,18 +80,25 @@ class TestDe2e7:
     def test_phase4_tools_registered(self):
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
         names = {t.name for t in TOOL_REGISTRY}
+
         # #4282 Phase 2: `tortoise_promote_point` retired into the
         # `tortoise_refresh_confidence` container (scope='promote', point_id=...)
         # — the capability is what this pin follows, not the surface shape.
-        # #11609 Phase 2 retired `tortoise_list_dedup_candidates` and
-        # `tortoise_belief_timeline` into the containers named here, by the same
-        # idiom; the pin moves with the doors rather than being dropped (the SDK
-        # methods `promote_point` and `belief_timeline` themselves are still live
-        # and are driven below through their #3883 shims).
-        phase4 = {"tortoise_mine_conversations", "tortoise_approve_merge",
-                  "tortoise_review_link_candidates", "tortoise_check_confidence",
-                  "tortoise_refresh_confidence"}
+        # #11609 Phase 2 retired the other two #787 doors the same way:
+        # `tortoise_list_dedup_candidates` → `tortoise_review_link_candidates`
+        # (`kind='dedup'`) and `tortoise_belief_timeline` → `tortoise_check_confidence`
+        # (`topic=`). Both still ANSWER through their #3883 shims, so the capability pin
+        # follows the containers; it does not assert names the approved target removes.
+        phase4 = {"tortoise_review_link_candidates",
+                  "tortoise_approve_merge", "tortoise_refresh_confidence",
+                  "tortoise_check_confidence"}
         assert phase4 <= names, phase4 - names
+        # #11609 lane C: `tortoise_mine_conversations` is retired into the SESSION
+        # container, so it is SERVED but no longer ADVERTISED (#3883 keeps the old
+        # name answering). Pin both halves — the shim and its destination.
+        retired_names = {t.name for t in RETIRED_TOOL_REGISTRY}
+        assert "tortoise_mine_conversations" in retired_names, "the retired shim left the registry"
+        assert "tortoise_mine_knowledge_from_session" in names, "Missing #787 container" 
         by_name = {t.name: t for t in TOOL_REGISTRY}
         assert "scope='promote'" in by_name["tortoise_refresh_confidence"].description
         assert by_name["tortoise_review_link_candidates"].sdk_method == "review_link_candidates"

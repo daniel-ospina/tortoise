@@ -62,35 +62,31 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # approved 40 did NOT grow — the owner's approval (`#10015` comment `6863608333`) is for
 # delivering a name that was already approved and unshipped, which is the same move PR
 # #10053 made for three rows ("what grew is the IMPLEMENTATION of three names the owner
-# already approved"). `high_water_counts.sdk_public_methods` stayed at 150 at that head —
-# that move did not touch the growth pin (it has since been lowered to 111; see the
-# three-move chain below), and this literal tracks the
+# already approved"). `high_water_counts.sdk_public_methods` stays at 124 in
+# `config/surface-manifest.yml` — the growth pin did not move, and this literal tracks the
 # frozen row set, which must move whenever a row is added.
 #
-# 125 → 111 across THREE moves, none of them growth — every one moves DOWN toward the
-# owner's target of 40, the direction #4282 requires. The two #11609 waves are DISJOINT
-# (wave 1's membership rule excluded any name a `tool_registry` entry bound, and the
-# doors Phase 2 re-keys were live MCP tools at that time):
-#   #12901 wave 1 — five off-surface methods with no production caller were deleted
-#                   (`backfill_v25`, `list_relations`, `quarantine_batch`,
-#                   `calibration_passed`, `membership_get`), frozen into
-#                   `archive/sdk-methods/b2-sdk-retirement-wave-1/` and recorded in
-#                   `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`.          −5
-#   #11609 Phase 2 — the READ/QUERY container family landed SIX approved methods
-#                   (`graph_overview`, `search_knowledge`, `list_knowledge`,
-#                   `check_confidence`, `explore_connections`,
-#                   `review_link_candidates`) and RE-PRIVATISED the 14 read methods they
-#                   cover.                                        +6 − 14
-#   #11609 Phase 2 — the WRITE/MUTATE container family landed SIX approved containers
-#                   (`update_knowledge`, `supersede_knowledge`, `adjust_relationship`,
-#                   `refresh_confidence`, `write_question`, `record_decision`) and
-#                   RETIRED four public names into them (`supersede`, `update_entity`,
-#                   `file_decision`, `file_human_approval`), a net −1.   −4 + 3
-# 125 + 6 − 14 − 5 − 4 + 3 = 111. The frozen baseline moved with it
-# (`config/surface-manifest.yml` `counts` + `high_water_counts`), re-cut rather than
-# hand-edited — and the pin is LOWERED to 111, because slack in a growth pin is the thing
-# the pin exists to stop.
-DECLARED_COUNT = 111
+
+# 125 -> 119 in TWO disjoint waves. #12901 (2026-11-15): five OFF-SURFACE methods
+# (`backfill_v25`, `list_relations`, `quarantine_batch`, `calibration_passed`,
+# `membership_get`) were deleted from the public surface, frozen into
+# `archive/sdk-methods/b2-sdk-retirement-wave-1/` and recorded in
+# `tortoise/sdk_retired.py::REMOVED_SDK_METHODS` — 125 -> 120. Then #4282 Phase 2
+# (#11609 lane B / #12915) retired FOUR public names into their approved containers —
+# `supersede` -> `supersede_knowledge`, `update_entity` -> `update_knowledge`,
+# `file_decision` -> `write_question`, `file_human_approval` -> `record_decision` — and
+# added THREE (`supersede_knowledge`, `write_question`, `record_decision`;
+# `update_knowledge` already existed), a net -1: 120 -> 119. Then the two sibling lanes of
+# the same epic composed: this PR's READ/QUERY wave re-privatised fourteen read doors and
+# landed six containers (119 + 6 - 14 = 111), and the SOURCES/MINE/SESSION lane retired
+# seven and landed six (+6 - 7 = -1, so 111 -> 110). Both are the CHEAP
+# direction for this pin, and `high_water_counts` stays 150. 110 is what
+# `config/surface-manifest.yml` derives and `tools/surface-guard.py` pins as the frozen
+# baseline — so this literal and the re-cut baseline move in the same PR, as the
+# paragraph above requires. The waves are disjoint by construction: wave 1's membership
+# rule excluded any name a `tool_registry` entry bound, and the four doors Phase 2
+# re-keys were live MCP tools at that time.
+DECLARED_COUNT = 110
 
 
 def _declaration() -> dict:

@@ -1289,6 +1289,7 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     """
     doc = _manifest()
     # The pin is set ONE BELOW the live count so the run must red: the property
+
     # under test is "growth past the pin reds", not any particular number — so it is
     # READ from the live count instead of being re-typed on every surface move. The count
     # moved five times: #4282's container (81 -> 77), #4282 Phase 3.2's `run_onboarding`
@@ -4860,12 +4861,19 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # live, since it carries the #8482 wrap-envelope repair). The pin moves with every
     # landed container batch until the approved 27 is reached. #4282 Phase 3.2 (main) then
     # removes the five `run_onboarding` tools — a disjoint name set — so the merged
+
     # surface is 72, not either side's own figure.
-    # #11609 Phase 2, READ/QUERY wave: 68 -> 64 (nine members retired into five new
-    # containers). Its WRITE/MUTATE wave then retired fourteen doors into six containers
-    # (64 - 14 + 6): 64 -> 56. The retired names still ANSWER (#3883), so the SERVED
-    # surface is unchanged; this pin is the ADVERTISED one.
-    assert live["mcp"] == manifest["counts"]["tools"] == 56
+    # #11609 lane B (#4282 Phase 2): 68 -> 60 — fourteen WRITE/MUTATE doors retired into
+    # six approved containers (68 − 14 + 6). The retired names still ANSWER (#3883), so
+    # the SERVED surface is unchanged; this pin is the ADVERTISED one.
+    # #11609 lane C composes with lane B on this tree: 60 -> 59 (six SOURCES/MINE/SESSION
+    # containers in, seven advertised members retired into them; the 68 the branch started
+    # from is lane B's pre-wave number, so the merged arithmetic is 68 + 6 + 6 - 7 - 14).
+    # #11609 Phase 2 READ/QUERY (this PR, MERGED): 59 -> 55 — nine READ doors retired into
+    # five arriving containers (the sixth, `graph_overview`, was already live via #10914),
+    # so 59 - 9 + 5 = 55. The retired names keep their #3883 shims, which is why the SERVED
+    # population rises to 108 while the ADVERTISED one falls.
+    assert live["mcp"] == manifest["counts"]["tools"] == 55
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
@@ -4878,22 +4886,23 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # The approved 40 did not grow — the approval (`#10015` comment `6863608333`) delivers a
     # name that was already approved and unshipped, the same move PR #10053 made for three
     # rows — so `high_water_counts` (150) does not move; only the frozen ROW SET does.
-    # THREE moves took it 125 -> 111, all DOWN. #12901 (2026-11-15) retired five off-surface
-    # methods with no production caller (125 -> 120; none an approved row). #11609 Phase 2's
-    # READ/QUERY wave then landed SIX read containers (+6) while re-privatising the
-    # FOURTEEN member methods behind them (−14): 120 -> 112. Its WRITE/MUTATE wave took
-    # 112 -> 111, a NEGATIVE net by the batch's own rule that a container may not add
-    # surface without retiring at least as much of what it absorbs: THREE approved rows
-    # gained their `def` (`supersede_knowledge`, `write_question`, `record_decision`;
-    # `update_knowledge` already had one) and FOUR doors were retired
+
+    # 125 -> 119 in two DISJOINT retirement waves. #12901 (2026-11-15) retired five
+    # off-surface methods with no production caller (125 -> 120; none an approved row).
+    # #11609 lane B then took 120 -> 119, a NEGATIVE net by the batch's own rule that a
+    # container may not add surface without retiring at least as much of what it absorbs:
+    # THREE approved rows gained their `def` (`supersede_knowledge`, `write_question`,
+    # `record_decision`; `update_knowledge` already had one) and FOUR doors were retired
     # (`supersede` -> `supersede_knowledge`, `update_entity` -> `update_knowledge`,
     # `file_decision` -> `write_question`, `file_human_approval` -> `record_decision`).
     # ⛔ `adjust_relationship` and `refresh_confidence` are NOT implemented rows: they are
-    # approved targets still ABSENT from the live class (see the 17 the declaration gate
-    # prints), so naming them as delivered here was false. The approved 40 did not grow, and
-    # the pin beside it in the manifest is LOWERED for the reason that block states — slack
-    # in a growth pin is the thing the pin exists to stop.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 111
+    # approved targets still ABSENT from the live class (see the 11 the declaration gate
+    # prints), so naming them as delivered here was false.
+    # #11609 Phase 2 READ/QUERY (this PR, MERGED): 118 -> 110 — the six READ containers
+    # arrive (+6) and fourteen doors are re-privatised (-14). Measured on the merged tree:
+    # AST 110 / reflection 110 / frozen 110, and `sdk_surface_declaration.py check` prints
+    # 82 live-off-surface + 11 approved-but-absent against the approved 40.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 110
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

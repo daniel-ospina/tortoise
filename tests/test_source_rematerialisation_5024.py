@@ -104,14 +104,14 @@ def test_an_identical_recheck_journals_nothing(src):
     re-check must not be a version.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="doc", contentHash="h-0",
+    sdk.register_source(_URL, "document", title="doc", contentHash="h-0",
                       summary="s-0")
     before = _props(sdk, _URL)
     n_before = len(_records(events))
 
     # The SAME bytes, re-checked five times.
     for _ in range(5):
-        sdk.create_source(_URL, "document", title="doc", contentHash="h-0",
+        sdk.register_source(_URL, "document", title="doc", contentHash="h-0",
                           summary="s-0")
 
     assert len(_records(events)) == n_before, (
@@ -124,9 +124,9 @@ def test_an_identical_recheck_journals_nothing(src):
 def test_a_noop_recheck_does_not_bump_the_version(src):
     """The version ordinal is the cheap witness that nothing happened."""
     events, sdk = src
-    sdk.create_source(_URL, "document", title="doc", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="doc", contentHash="h-0")
     v = _props(sdk, _URL)["version"]
-    sdk.create_source(_URL, "document", title="doc", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="doc", contentHash="h-0")
     assert _props(sdk, _URL)["version"] == v
     assert len(_of_type(events, "SourceVersioned")) == 0
 
@@ -140,9 +140,9 @@ def test_a_changed_hash_journals_a_transition_carrying_the_previous_hash(src):
     record sequence never named which hash a version superseded.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
-    sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
-    sdk.create_source(_URL, "document", title="v2", contentHash="h-2")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v1", contentHash="h-1")
+    sdk.register_source(_URL, "document", title="v2", contentHash="h-2")
 
     transitions = _of_type(events, "SourceVersioned")
     assert len(transitions) == 2, (
@@ -170,7 +170,7 @@ def test_a_rebuild_reproduces_the_source_field_for_field(src):
     """
     events, sdk = src
     for i in range(6):
-        sdk.create_source(_URL, "document", title=f"v{i}",
+        sdk.register_source(_URL, "document", title=f"v{i}",
                           contentHash=f"h-{i}", summary=f"s-{i}")
     live = _props(sdk, _URL)
 
@@ -196,7 +196,7 @@ def test_the_prior_version_is_recoverable_from_the_journal_alone(src):
     """The version HISTORY is a journal fact — read it back without the graph."""
     events, sdk = src
     for i in range(4):
-        sdk.create_source(_URL, "document", title=f"v{i}",
+        sdk.register_source(_URL, "document", title=f"v{i}",
                           contentHash=f"h-{i}")
     sdk.close()  # the graph is not consulted below
 
@@ -215,8 +215,8 @@ def test_the_prior_version_is_recoverable_from_the_journal_alone(src):
 def test_a_rebuild_after_a_transition_keeps_the_new_hash_not_the_old_one(src):
     """The fold must APPLY, not merely tolerate: a wrong branch leaves h-0."""
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
-    sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v1", contentHash="h-1")
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     p = _props(sdk, _URL)
     assert (p["contentHash"], p["version"]) == ("h-1", 2), (
@@ -235,11 +235,11 @@ def test_the_transition_carries_the_callers_extras_into_the_rebuild(src):
     `SourceCreated`.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0",
                       summary="first")
-    sdk.create_source(_URL, "document", title="v1", contentHash="h-1",
+    sdk.register_source(_URL, "document", title="v1", contentHash="h-1",
                       summary="second")
-    sdk.create_source(_URL, "document", title="v2", contentHash="h-2",
+    sdk.register_source(_URL, "document", title="v2", contentHash="h-2",
                       summary="third")
     live = _props(sdk, _URL)["summary"]
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -258,10 +258,10 @@ def test_a_same_hash_write_that_changes_an_extra_is_still_journalled(src):
     defect class this lane exists to remove.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0",
                       summary="before")
     n = len(_records(events))
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0",
                       summary="after")
     assert len(_records(events)) == n + 1, (
         "a same-hash write that changed an extra was silently dropped")
@@ -285,10 +285,10 @@ def test_a_hashless_retitle_that_changes_nothing_is_repeat_safe(src):
     recorded — see `test_a_hashless_write_that_changes_an_extra_is_still_recorded`.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
     n = len(_records(events))
     before = _props(sdk, _URL)
-    sdk.create_source(_URL, "document", title="v1")   # no contentHash
+    sdk.register_source(_URL, "document", title="v1")   # no contentHash
     assert len(_records(events)) == n, (
         "a hashless retitle the writer drops still appended a record — the "
         "journal grows on every re-check (P1-B)")
@@ -310,8 +310,8 @@ def test_a_stub_completion_still_emits_a_create(src):
     prior version that never existed.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="stub")   # no hash
-    sdk.create_source(_URL, "document", title="real", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="stub")   # no hash
+    sdk.register_source(_URL, "document", title="real", contentHash="h-0")
     assert len(_of_type(events, "SourceCreated")) == 2
     assert _of_type(events, "SourceVersioned") == []
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -371,8 +371,8 @@ def test_a_legacy_record_without_timestamps_falls_back_to_the_clock(src):
 def test_the_transition_keys_never_become_node_properties(src):
     """A payload key that lands on only one side is the #330/#3312 class."""
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
-    sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v1", contentHash="h-1")
     live = _props(sdk, _URL)
     assert "previousContentHash" not in live, (
         "`previousContentHash` is transition PAYLOAD metadata and must never "
@@ -387,8 +387,8 @@ def test_the_unknown_type_warning_does_not_fire_for_the_transition(src, caplog):
     """The type is IN the projection vocabulary (the #2901 one-copy rule)."""
     import logging
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
-    sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v1", contentHash="h-1")
     with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert not [r for r in caplog.records
@@ -408,10 +408,10 @@ def test_a_url_variant_transition_replays_onto_the_canonical_node(src):
     SECOND node — a divergence minted by the fold.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
     # The same source, spelled with a redundant default port.
     variant = _URL.replace("https://example.test/", "https://example.test:443/")
-    sdk.create_source(variant, "document", title="v1", contentHash="h-1")
+    sdk.register_source(variant, "document", title="v1", contentHash="h-1")
 
     live = _props(sdk, _URL)
     n = sdk._get_proj().g.query(
@@ -449,10 +449,10 @@ def test_a_same_hash_write_that_adds_a_FALSY_extra_is_still_journalled(src):
     polarity. This is the regression pin.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
     for extra in ({"summary": ""}, {"topics": []}):
         n = len(_records(events))
-        sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+        sdk.register_source(_URL, "document", title="v0", contentHash="h-0",
                           **extra)
         assert len(_records(events)) == n + 1, (
             f"a same-hash write adding a falsy extra {extra} was silently "
@@ -472,8 +472,8 @@ def test_a_transition_carrying_source_path_replays_it(src):
     transition was written LIVE by `_upsert_source` and dropped on replay.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
-    sdk.create_source(_URL, "document", title="v1", contentHash="h-1",
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v1", contentHash="h-1",
                       source_path="corpus/notes/a.md")
     live = _props(sdk, _URL)
     assert live["sourcePath"] == "corpus/notes/a.md"
@@ -500,10 +500,10 @@ def test_a_same_hash_write_that_FLIPS_A_TYPE_is_still_journalled(src):
     """
     events, sdk = src
     for key in ("flag_extra", "is_episodic"):
-        sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+        sdk.register_source(_URL, "document", title="v0", contentHash="h-0",
                           **{key: True})
         n = len(_records(events))
-        sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+        sdk.register_source(_URL, "document", title="v0", contentHash="h-0",
                           **{key: 1})
         assert len(_records(events)) == n + 1, (
             f"a same-hash write flipping {key} from bool to int was treated as "
@@ -524,10 +524,10 @@ def test_a_same_hash_write_with_an_identical_type_is_still_a_no_op(src):
     events, sdk = src
     payload = {"is_episodic": True, "summary": "s", "topics": ["a", "b"],
                "sourceDate": "2026-01-01"}
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0", **payload)
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0", **payload)
     n = len(_records(events))
     for _ in range(3):
-        sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+        sdk.register_source(_URL, "document", title="v0", contentHash="h-0",
                           **payload)
     assert len(_records(events)) == n, (
         "type-aware comparison broke repeat-safety for an identical re-check")
@@ -548,20 +548,20 @@ def test_a_hashless_recheck_of_a_stub_journals_nothing(src):
     hash is still recorded (it is the transition out of the stub).
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="stub")           # no hash
+    sdk.register_source(_URL, "document", title="stub")           # no hash
     assert len(_records(events)) == 1
     before = _props(sdk, _URL)
     assert before["contentHash"] == "" and before["version"] == 1
 
     for _ in range(5):                                          # identical re-checks
-        sdk.create_source(_URL, "document", title="stub")
+        sdk.register_source(_URL, "document", title="stub")
     assert len(_records(events)) == 1, (
         f"a hashless re-check appended {len(_records(events)) - 1} record(s) — "
         f"the create arm pre-empted the no-op test (unbounded journal growth)")
     assert _props(sdk, _URL) == before
 
     # A stub completed by a REAL hash still records — the #1032 contract.
-    sdk.create_source(_URL, "document", title="real", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="real", contentHash="h-0")
     assert len(_records(events)) == 2
     assert _props(sdk, _URL)["contentHash"] == "h-0"
 
@@ -582,9 +582,9 @@ def test_a_hashless_write_that_changes_an_extra_is_still_recorded(src):
     the record would trade log growth for a lost write.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="stub")           # no hash
+    sdk.register_source(_URL, "document", title="stub")           # no hash
     n = len(_records(events))
-    sdk.create_source(_URL, "document", title="stub", summary="new")
+    sdk.register_source(_URL, "document", title="stub", summary="new")
     assert len(_records(events)) == n + 1, (
         "a hashless write that changed an extra was suppressed")
     live = _props(sdk, _URL)
@@ -615,7 +615,7 @@ def test_a_competing_write_cannot_suppress_the_transition(src, monkeypatch):
     """
     events, sdk = src
     base = {"title": "v0", "contentHash": "h-0", "summary": "s"}
-    sdk.create_source(_URL, "document", **base)
+    sdk.register_source(_URL, "document", **base)
 
     import tortoise.sdk as sdkmod
     orig = sdkmod.TortoiseSDK._create_entity
@@ -625,14 +625,14 @@ def test_a_competing_write_cannot_suppress_the_transition(src, monkeypatch):
         seen["n"] += 1
         if seen["n"] == 1:
             # the competing writer: lands between the pre-read and the MERGE
-            sdk.create_source(_URL, "document", title="v0",
+            sdk.register_source(_URL, "document", title="v0",
                               contentHash="h-1", summary="s")
         return orig(self, label, id_val, props, event_type, **kw)
 
     monkeypatch.setattr(sdkmod.TortoiseSDK, "_create_entity", _inject)
     # A's payload is byte-identical to the stale snapshot, so the OLD no-op
     # test proved "unchanged" and suppressed its own real h-1 -> h-0 write.
-    sdk.create_source(_URL, "document", **base)
+    sdk.register_source(_URL, "document", **base)
 
     transitions = [(t["previousContentHash"], t["contentHash"])
                    for t in _of_type(events, "SourceVersioned")]
@@ -663,16 +663,16 @@ def test_a_url_variant_recheck_is_repeat_safe(src):
     `urlAliases` stable after the first — did not move.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
     variant = _URL.replace("https://example.test/", "https://example.test:443/")
     n = len(_records(events))
-    sdk.create_source(variant, "document", title="v0", contentHash="h-0")
+    sdk.register_source(variant, "document", title="v0", contentHash="h-0")
     after_first = len(_records(events))
     assert after_first == n + 1, (
         "the FIRST variant write adds the spelling to `urlAliases` — a real "
         "change that MUST be recorded or the rebuilt node loses the alias")
     for _ in range(3):
-        sdk.create_source(variant, "document", title="v0", contentHash="h-0")
+        sdk.register_source(variant, "document", title="v0", contentHash="h-0")
     assert len(_records(events)) == after_first, (
         f"an identical URL-variant re-check appended "
         f"{len(_records(events)) - after_first} record(s) — the journal grows "
@@ -687,10 +687,10 @@ def test_a_same_hash_retitle_is_repeat_safe(src):
     """P1-B — the writer PRESERVES `title` on a same-hash write, so nothing
     changed and nothing may be recorded (measured `2 -> 3 -> 4` before)."""
     events, sdk = src
-    sdk.create_source(_URL, "document", title="A", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="A", contentHash="h-0")
     n = len(_records(events))
     for _ in range(3):
-        sdk.create_source(_URL, "document", title="B", contentHash="h-0")
+        sdk.register_source(_URL, "document", title="B", contentHash="h-0")
     assert len(_records(events)) == n, (
         "a same-hash retitle the writer preserves still appended a record "
         "(P1-B)")
@@ -717,13 +717,13 @@ def test_a_writer_dropped_key_recheck_is_repeat_safe(src):
     no guard intercepts and which the writer's own predicate still drops.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
     n = len(_records(events))
     with pytest.raises(ValueError, match="raw payload"):
-        sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+        sdk.register_source(_URL, "document", title="v0", contentHash="h-0",
                           content="body")
     for _ in range(3):
-        sdk.create_source(_URL, "document", title="v0", contentHash="h-0",
+        sdk.register_source(_URL, "document", title="v0", contentHash="h-0",
                           meta={"a": 1})
     assert len(_records(events)) == n, (
         f"a re-check carrying a writer-dropped key (or a refused raw-payload "
@@ -751,9 +751,9 @@ def test_a_falsy_non_none_hash_write_is_not_suppressed(src):
     would suppress the record and the rebuild would revert to the old hash.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
     n = len(_records(events))
-    sdk.create_source(_URL, "document", title="v0", contentHash="")
+    sdk.register_source(_URL, "document", title="v0", contentHash="")
     assert len(_records(events)) == n + 1, (
         "a `contentHash=''` write changed the node but appended no record")
     live = _props(sdk, _URL)
@@ -781,7 +781,7 @@ def test_a_failed_pre_read_cannot_downgrade_a_transition_to_a_create(
     query only; the fix never issues it.
     """
     events, sdk = src
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
 
     g = sdk._get_proj().g
     orig_query = type(g).query
@@ -792,7 +792,7 @@ def test_a_failed_pre_read_cannot_downgrade_a_transition_to_a_create(
         return orig_query(self, query, *a, **kw)
 
     monkeypatch.setattr(type(g), "query", _boom)
-    sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
+    sdk.register_source(_URL, "document", title="v1", contentHash="h-1")
 
     assert len(_of_type(events, "SourceCreated")) == 1, (
         "a failed pre-read downgraded the transition to SourceCreated (P2-B)")
@@ -822,7 +822,7 @@ def test_a_journal_less_sdk_does_not_pre_read_the_source(tmp_path, monkeypatch):
             return orig_query(self, query, *a, **kw)
 
         monkeypatch.setattr(type(g), "query", _rec)
-        sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+        sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
         offenders = [q for q in seen if _PRE_READ_SQL in q]
         assert not offenders, (
             f"a journal-less SDK issued the pre-write read {len(offenders)} "
@@ -910,7 +910,7 @@ def test_a_concurrent_write_to_another_url_cannot_swap_the_pre_state(
     """
     events, sdk = src
     other = "https://example.test/doc/other"
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
 
     import tortoise.sdk as sdkmod
     orig = sdkmod.TortoiseSDK._create_entity
@@ -923,11 +923,11 @@ def test_a_concurrent_write_to_another_url_cannot_swap_the_pre_state(
             # The other thread's write to a DIFFERENT url lands here — after
             # A's MERGE captured its pre-state, before A reads it.
             state["injected"] = True
-            sdk.create_source(other, "document", title="B", contentHash="h-1")
+            sdk.register_source(other, "document", title="B", contentHash="h-1")
         return out
 
     monkeypatch.setattr(sdkmod.TortoiseSDK, "_create_entity", _inject)
-    sdk.create_source(_URL, "document", title="v1", contentHash="h-1")
+    sdk.register_source(_URL, "document", title="v1", contentHash="h-1")
 
     transitions = [(t["previousContentHash"], t["contentHash"])
                    for t in _of_type(events, "SourceVersioned")
@@ -968,7 +968,7 @@ def test_a_node_without_aliases_records_the_alias_the_writer_adds(src):
         params={"u": _URL, "cu": _URL})
     n = len(_records(events))
 
-    sdk.create_source(_URL, "document", title="v0", contentHash="h-0")
+    sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
 
     live = _props(sdk, _URL)
     assert live["urlAliases"] == [_URL], (

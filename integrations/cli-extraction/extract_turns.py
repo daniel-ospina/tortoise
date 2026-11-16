@@ -1132,10 +1132,10 @@ try:
                            f'{domain!r} (ids {_bad[:3]}) — SDK signature drift, or '
                            'the source URL is being reused with a different domain')
 
-    sdk.set_source_tier(source, 'T2')      # EP-compatibility is required, not optional
+    sdk.manage_source_trust(url=source, tier='T2')      # EP-compatibility is required, not optional
     _rel = sdk.get_source_reliability(source)
     if not isinstance(_rel, dict) or _rel.get('reliability') is None:
-        raise RuntimeError('read-back failed: source still untiered after set_source_tier')
+        raise RuntimeError('read-back failed: source still untiered after manage_source_trust')
 
     ep = sdk.compute_confidence(anchors=made)
     # Both EP flags are REQUIRED and must be real bools. Without this, an

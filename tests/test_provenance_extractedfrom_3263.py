@@ -261,7 +261,7 @@ def _seed_hashed_source(sdk, url: str, content_hash: str) -> None:
     fixture statement would need a lane and would not survive the rebuilds these
     pins run.
     """
-    sdk.create_source(url, "document", contentHash=content_hash)
+    sdk.register_source(url, "document", contentHash=content_hash)
 
 
 def test_dedup_hit_accumulates_the_second_source(prov):

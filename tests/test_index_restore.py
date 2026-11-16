@@ -152,7 +152,7 @@ def test_s13_rebuild_drops_session_meeting_edges_doc_survives(tmp_path):
     corpus = _all_three_corpus(tmp_path)
     sdk = _sdk(tmp_path, events=events)
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["indexed"] == 3
         g = sdk._get_proj().g
         assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
@@ -190,7 +190,7 @@ def test_s13_rebuild_drops_session_meeting_edges_doc_survives(tmp_path):
         assert _required_sweep(g) == 0
         # re-index restores the dropped session/meeting edges (repair
         # carve-out → updated) — the re-index repair oracle
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["updated"] == 2 and r2["skipped"] == 1, r2
         assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
                        ).result_set[0][0] == 3
@@ -207,7 +207,7 @@ def test_s13_post_rebuild_version_equality_and_sweep(tmp_path):
     corpus = _all_three_corpus(tmp_path)
     sdk = _sdk(tmp_path, events=str(events_dir / "events.jsonl"))
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         pre = {u: g.query("MATCH (s:Source {url:$u}) RETURN s.version",
                           params={"u": u}).result_set[0][0]
@@ -217,7 +217,7 @@ def test_s13_post_rebuild_version_equality_and_sweep(tmp_path):
         proj.rebuild_all(str(events_dir), confirm_destructive=True)
         # re-index repair oracle restores edges; versions land at the
         # converged values (the hash-diff-gated bump replays journaled states)
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         post = {u: g.query("MATCH (s:Source {url:$u}) RETURN s.version",
                            params={"u": u}).result_set[0][0]
                 for u in pre}
@@ -250,7 +250,7 @@ def test_s15_torn_tail_journal_rebuilds_to_crash_free_state(tmp_path):
     corpus = _all_three_corpus(tmp_path)
     sdk = _sdk(tmp_path, events=log_path)
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         n_sources = g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0]
         # simulate the SIGKILL mid-append: a torn trailing line. #3316: the
@@ -284,7 +284,7 @@ def test_s15_mid_file_malformed_raises_actionable(tmp_path):
     corpus = _all_three_corpus(tmp_path)
     sdk = _sdk(tmp_path, events=log_path)
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         # corrupt a MID-FILE line (not the last)
         lines = Path(log_path).read_text().splitlines()
         lines[1] = "{not-json"
@@ -313,7 +313,7 @@ def test_s15_restore_drill_end_to_end(tmp_path):
     db = _db(tmp_path)
     sdk = _sdk(tmp_path, events=log_path)
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["indexed"] == 3
     finally:
         sdk.close()
@@ -336,7 +336,7 @@ def test_s15_restore_drill_end_to_end(tmp_path):
             "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
             "RETURN count(s)").result_set[0][0] == 1
         # re-index restores edges → convergence
-        r2 = sdk2.index_directory(str(backup / "corpus"), extract_metadata=False)
+        r2 = sdk2.index_sources_from_directory(str(backup / "corpus"), extract_metadata=False)
         assert r2["updated"] >= 2, r2
         assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
                        ).result_set[0][0] == 3
@@ -386,7 +386,7 @@ def test_t12_unknown_record_types_fail_closed_r8(tmp_path):
     corpus = _all_three_corpus(tmp_path)
     sdk = _sdk(tmp_path, events=log_path)
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         # append an UNKNOWN record type (a future binary's kind) → R8.
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps({"type": "FutureRecordKind2027",
@@ -435,7 +435,7 @@ def test_t12_instantiates_edges_rebuild_drop_and_restore(tmp_path):
         "prs: [repo#2]\n---\nBody with issue references")
     sdk = _sdk(tmp_path, events=str(events_dir / "events.jsonl"))
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["indexed"] == 1
         g = sdk._get_proj().g
         n_live = g.query(
@@ -457,7 +457,7 @@ def test_t12_instantiates_edges_rebuild_drop_and_restore(tmp_path):
             "rebuild must replay the journaled about_entities names, not drop "
             "them (#3590)")
         # re-index is idempotent on them (the session upsert re-wires, no dupes)
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert g.query(
             "MATCH (e:Event {eventId:'session_r9'})-[:aboutObject]->(o:Object) "
             "RETURN count(o)").result_set[0][0] == n_live

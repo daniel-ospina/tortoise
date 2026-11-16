@@ -68,7 +68,7 @@ def test_document_created_url_variant_does_not_mint_a_second_source(sdk_factory)
     variant of an already-registered source produced TWO nodes.
     """
     sdk = sdk_factory()
-    sdk.create_source("https://example.com/a/b", "document")
+    sdk.register_source("https://example.com/a/b", "document")
     sdk._get_proj().apply(
         {
             "type": "DocumentCreated",
@@ -101,7 +101,7 @@ def test_document_created_then_source_still_one_node(sdk_factory):
             "document_kind": "report",
         }
     )
-    sdk.create_source("https://example.com/a/b", "document")
+    sdk.register_source("https://example.com/a/b", "document")
     rows = (
         sdk._get_proj()
         .g.query(
@@ -280,7 +280,7 @@ def test_document_id_that_canonicalises_onto_a_web_source(sdk_factory):
     reachable from a public door.
     """
     sdk = sdk_factory()
-    sdk.create_source("https://example.com/a", "web", title="A page")
+    sdk.register_source("https://example.com/a", "web", title="A page")
     sdk._get_proj().apply(
         {
             "type": "DocumentCreated",

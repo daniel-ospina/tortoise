@@ -710,10 +710,19 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "check_structure": ("graph_overview", "r6_aliases"),
     # W1
     "create_entity": (UNCHANGED, "unchanged4"),
+    # #4282 Phase 2 — the six SOURCES / MINE / SESSION targets landed (#11609), so
+    # each is a PUBLIC method as well as a target. The disposition is UNCHANGED for
+    # the same reason `link_entities`/`update_knowledge`/`delete_knowledge` are: the
+    # method IS its own destination, and the map has to say so explicitly or the row
+    # would inherit its GROUP's target (e.g. `manage_source_trust` would otherwise
+    # be routed to W8's target and read as a rename of itself).
+    "register_source": (UNCHANGED, "unchanged4"),
+    "manage_source_trust": (UNCHANGED, "unchanged4"),
+    "index_sources_from_directory": (UNCHANGED, "unchanged4"),
+    "mine_knowledge_from_session": (UNCHANGED, "unchanged4"),
+    "mine_knowledge_from_directory": (UNCHANGED, "unchanged4"),
+    "check_connection": (UNCHANGED, "unchanged4"),
     # W4
-    "mine_corpus": ("mine_knowledge_from_directory", "w4_mine"),
-    "index_directory": ("index_sources_from_directory", "w4_canon"),
-    "index_sessions": ("index_sources_from_directory", "w4_index_sessions"),
     "reconcile_sessions": (DISCARDED, "w8_backfill"),
     # W8 — the beta row splits the group: the setter and the assessment fold into
     # `manage_source_trust`, the *read* goes to `list_sources` (which the beta doc
@@ -745,10 +754,11 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     # W5 — the journal reconciliation. Each member's destination is its OWN, taken from
     # the canonical menu's absorption row; see the `w5_*` citations above.
     "diary_write": ("create_entity", "w5_diary_write"),
-    "checkpoint": ("mine_knowledge_from_session", "w5_checkpoint"),
-    # `diary_read` retired into `list_knowledge(kind='diary')` in #11609 Phase 2 — see
-    # `tortoise/sdk_retired.py`; it has no row here for the same reason as the other
-    # retired names above.
+    # BOTH former keys leave this map with the wave that retired them: `diary_read`
+    # into `list_knowledge(kind='diary')` (#11609 Phase 2 read half, this PR) and
+    # `checkpoint` into `mine_knowledge_from_session` (#11609 Phase 2
+    # SOURCES/MINE/SESSION lane, #12948). A retired name carries its hint in
+    # `tortoise/sdk_retired.py` instead of a row here, like every retired name above.
     # W11
     "update": ("update_knowledge", "w11_canon"),
     "retract_point": ("update_knowledge", "w11_retract"),

@@ -358,7 +358,7 @@ def test_a_document_target_survives_a_rotated_journal(wired) -> None:
     """
     sdk, proj, events, journal = wired
     url = "https://example.test/docs/late-report"
-    sdk.create_source(url, sourceKind="document")
+    sdk.register_source(url, sourceKind="document")
     sdk.create_event("late-doc", "event", aboutDocument=url)
     before = _counts(proj)
     assert before["aboutDocument"] == 1, f"live did not wire the document: {before}"
@@ -930,7 +930,7 @@ def test_a_title_held_by_THREE_document_Sources_wires_them_ALL(wired) -> None:
     sdk, proj, events, journal = wired
     urls = set()
     for i in range(3):
-        row = sdk.create_source(f"https://example.test/same/{i}", "document",
+        row = sdk.register_source(f"https://example.test/same/{i}", "document",
                                 title="Same Title", documentKind="report")
         urls.add(row.get("url") or _nid(row))
     assert len(urls) == 3, f"the carriers collapsed: {urls}"
@@ -1147,7 +1147,7 @@ def test_a_hard_deleted_SOURCE_target_is_not_a_LOST_about_link(
 
     sdk, proj, events, _journal = wired
     url = "https://example.test/docs/gone"
-    sdk.create_source(url, sourceKind="document")
+    sdk.register_source(url, sourceKind="document")
     sdk.create_event("d", "event", aboutDocument=url)
     assert _counts(proj)["aboutDocument"] == 1, (
         "live did not wire the document link")
@@ -1482,7 +1482,7 @@ def test_the_name_path_aboutdocument_arm_reaches_the_kind_guarded_resolver(
 
     sdk, proj, events, journal = wired
     url = "https://example.test/docs/5265-reach"
-    sdk.create_source(url, "document", title="Reach Doc 5265",
+    sdk.register_source(url, "document", title="Reach Doc 5265",
                       documentKind="report")
     sdk.create_event("reach-5265", "event", aboutDocument="Reach Doc 5265")
     assert _counts(proj)["aboutDocument"] == 1, (

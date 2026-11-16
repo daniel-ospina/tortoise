@@ -198,15 +198,67 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
     happened, for the failure message to splice in — the message must not claim
     a kill that was suppressed.
 
-    The group, not the child: the hook's three `nohup … session drain …
-    >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:846`, `:854`) are
-    fire-and-forget by design — they are meant to outlive the hook — so a bound
-    that reaps only bash leaves them running past the test that spawned them.
-    ⛔ That is `nohup`-detached and outliving; the install-probe beacon is NOT
-    an example of it. That one is a plain `_run_probe >/dev/null 2>&1 &`
-    (`:786`) whose outcome is the payload, so bash `wait`s it in the foreground
-    (`:801`) and it cannot outlive the hook at all — the script says so itself
-    at `:767`.  Both failures are absorbed on purpose —
+    The group, not the child, on the TIMEOUT path — and only there, because
+    that is the only path on which this function runs at all: `_run_hook`
+    calls it from `except subprocess.TimeoutExpired`, and on the SUCCESS path
+    it deliberately kills nothing (a drain is *meant* to outlive the hook —
+    see that docstring).  The children it exists for:
+
+    - A hook killed after it has dispatched one of its three `nohup … session
+      drain … >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:840`–`:846`,
+      `:848`–`:854`) leaves that drain in the group.  `nohup` ignores SIGHUP
+      but changes neither the drain's process group nor its reachability by
+      SIGKILL, so a bound that reaps only bash leaks it.  That window is
+      narrow: those arms are the script's LAST statements (`:855-856` are
+      their closing `fi`s), so it is the instant between dispatch and exit —
+      a completeness argument.
+    - A hook that stalls before the `wait` (`:801`) can leave a live child in
+      the group.  While bash is blocked inside the foreground `_run_digest`
+      (`:793`) — which must return before `:801` can run — the child that arm
+      spawned is still live (`:689`, or the `-c` arm at `:691`-`:697` ending in
+      `main(["context"])`).  That child is the one that can outlive this bound
+      WITH NUMBERS behind it.  `session_context()`
+      (`tortoise/__main__.py:5823`-`5830`) passes no deadline of its own; what
+      bounds it is the store.  On the embedded lane that is a 10 s socket
+      timeout, fail-closed by default and with no ``off`` opt-out
+      (`tortoise/projection/__init__.py:411`, `:620`-`:626`), plus one retry
+      (`:477`) and a 2 s connect bound with a sub-second backoff (`:410`,
+      `:478`-`:479`) — over the four reads the digest issues
+      (`tortoise/sdk.py:40754`-`40776`) that is ≈ 4 × 2 × 10 s ≈ 80 s typical
+      and a little more at worst, either way PAST this 60 s bound, which is the
+      case `session-start.sh:756`-`:757` names.
+      The `TORTOISE_DB_URI` arm of the same call differs on both counts: zero
+      retries (`tortoise/projection/__init__.py:246`, `:293`) and a
+      `TORTOISE_DB_SOCKET_TIMEOUT` an operator
+      CAN switch off (`:126`-`:127`) — where it outlives the bound, the extent
+      is the operator's: a finite value is capped at the knob's own 600 s
+      ceiling (`_DB_TIMEOUT_MAX_PER_LANE_S`, `:436`; above it the knob fails
+      loud rather than clamping, `:174`-`:178`), and unbounded only under that
+      documented `none`/`off`/`0` opt-out.
+      The BACKGROUNDED install-probe beacon (`session-start.sh:786`) is the
+      other: not `nohup`-detached (`:767` says it does not join that
+      fire-and-forget shape), but backgrounded.  Its network leg is bounded
+      (`urlopen(req, timeout=15)`, `tortoise/__main__.py:9724`) — a per-socket
+      timeout, not a wall-clock deadline, and neither DNS resolution nor the
+      CLI import ahead of it is covered — so it has usually exited by then, and
+      bash has already reaped it.  If `session-start.sh:801` is never reached
+      the status bash recorded is simply never READ — reaping and reading are
+      two acts, and the zombie is gone either way.
+      None of them is guaranteed to be there: `_run_digest` spawns NOTHING
+      when both its arms miss (`:687`-`:698` has no `else`, and a stall in the
+      `-d` test at `:690` is already inside the function with no child yet),
+      and the beacon does not exist at all unless `_probe_reachable` passed
+      (`:781`).  Nor is the group limited to them: `_record_hook_run` — called
+      after `:801`, at `:809` — has two command substitutions (`:519`, `:520`,
+      the second exec'ing `date`) and a `mkdir` (`:521`), so that window
+      carries its own short-lived children.
+
+    So what this function actually provides is the thing a bash-only
+    `proc.kill()` cannot: every member of the group is sent SIGKILL — and
+    where that is not what happened, the returned phrase says so instead of
+    claiming a kill that was suppressed.
+
+    Both failures are absorbed on purpose —
     ``ProcessLookupError`` when the group is already gone, ``PermissionError``
     on macOS when only zombies remain — because a cleanup error must never
     replace the assertion it is cleaning up after.

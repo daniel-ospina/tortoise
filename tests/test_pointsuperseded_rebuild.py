@@ -773,7 +773,7 @@ def test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source
     succ = sdk.create_point("statement", "X'", status="live")["id"]
     proj = sdk._get_proj()
     # journaled provenance :Source — no documentKind (not a document)
-    sdk.create_source("https://x/5265-prov", "github")
+    sdk.register_source("https://x/5265-prov", "github")
     # the pre-#5206 shape, minted raw because today's guarded producers refuse it
     proj.g.query(
         "MATCH (x:Point {id:$x}), (s:Source {url:'https://x/5265-prov'}) "

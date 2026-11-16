@@ -228,8 +228,9 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools then).
 > **This branch's `graph_overview` container then moved the live surface from 76 to 72 at that
 > head**, so 72 was the figure there until #11609 batch 1 moved the live surface 72 → 68;
-> **#11609 lane B's six WRITE/MUTATE containers then took it 68 → 60**, and **this PR's (#12951)
-> five READ/QUERY containers took it 60 → 56 — which is the live advertised count at this head**
+> **#11609 lane B's six WRITE/MUTATE containers then took it 68 → 60**, **#12948's
+> SOURCES/MINE/SESSION containers then took it 60 → 59**, and **this PR's (#12951)
+> READ/QUERY containers took it 59 → 55 — which is the live advertised count at this head**
 > (`uv run python tools/surface_manifest.py check` is the live count).
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
@@ -286,6 +287,7 @@ Any deletion PR must use **26 / 111**.
 status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
 
 **Amended 2026-11-03** (execution record, #4282): the **first container batch has landed**, so the
+
 surface was **72 advertised tools** at that head, carrying the 23 retired-forward entries
 recorded above — the 18 above plus five more. `tortoise_graph_overview` (row 6) absorbs
 `tortoise_overview`, `tortoise_summarize_structure`,
@@ -294,6 +296,7 @@ recorded above — the 18 above plus five more. `tortoise_graph_overview` (row 6
 **Amended 2026-11-13** (execution record, #11609 batch 1): the four remaining no-destination tools
 (`tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`, `tortoise_pack_install`) were
 REMOVED and their code ARCHIVED under `archive/mcp-tools/b1-removed-no-destination/`, per the owner
+
 ruling quoted below — that head held **68 advertised tools** and the 23 retired-forward entries
 recorded above. Nothing was retired-forward into a replacement: a name with no destination gets no
 shim.
@@ -341,22 +344,46 @@ still answers them by name — and `invalidate_point` / `retract_point` / `promo
 `set_point_baseline` / `annotate_operator` / `mitigate_operator` STAY on the SDK surface, because
 each carries a state or an approving row this batch cannot retire without deleting a capability or
 inventing a destination (see `docs/product/bridge-table.md` §D2c).
+ruling quoted below, so the surface moved **72 → 68 advertised tools**, carrying the same 23
+retired-forward entries it had at the previous head. Nothing was retired-forward into a replacement: a name with no destination gets no shim.
 
-**Merged 2026-11-16 — the two waves are DISJOINT, so both land.** They retire different doors: the
-READ/QUERY wave's nine and the WRITE/MUTATE wave's fourteen share no name, which is why neither
-wave's removals are dropped here. Composed, they took the live surface 68 → 56, and that is where it
-is: the surface is now **56 advertised tools**
-(68 − 9 + 5 − 14 + 6 = 56) with **46** retired-forward entries (23 + 9 + 14) over a served
-population of **102** rows (56 live + 46 retired-forward: the WRITE wave's 91 − 14 + 14 + 6 = 97
-step, then the READ wave's 97 − 9 + 9 + 5 = 102). The 102 is what `surface-order.yml` totals, and
-it is the number both waves' arithmetic has to agree with — not either wave's own partial sum.
+**Amended 2026-11-14** (execution record, #11609 batch 2 — the SOURCES/MINE/SESSION containers):
+rows 14–18 and row 40 landed as `tortoise_register_source`, `tortoise_manage_source_trust`,
+`tortoise_index_sources_from_directory`, `tortoise_mine_knowledge_from_session`,
+`tortoise_mine_knowledge_from_directory` and `tortoise_check_connection`, and **seven** advertised
+members retired INTO them — `tortoise_create_source`, `tortoise_assess_source`,
+`tortoise_set_source_tier`, `tortoise_index_files`, `tortoise_checkpoint`, `tortoise_session_capture`
+and `tortoise_mine_conversations`. Six in, seven out, so the surface at that head was 67 advertised
+tools with 30 retired-forward entries — every one of the seven still ANSWERS
+on its retired name (#3883), which is why the advertised count falls while the served count does
+not, and **none of them is archived** — a name with a destination keeps its shim.
+
+**Composed at this head — ALL THREE waves.** The records above describe waves that are now on the
+SAME tree, so they COMPOSE rather than replace one another, and no single wave's number is the
+answer (each was measured on its own base). They retire DISJOINT door sets — the READ/QUERY
+wave's nine, the WRITE/MUTATE wave's fourteen and the SOURCES/MINE/SESSION wave's seven share no
+name — so the composed surface is:
+
+- the surface is now **55 advertised tools** with **53** retired-forward entries: the three waves
+  compose on ONE tree and the last of them took the live surface 59 → 55 — each wave was measured
+  on its own base, so
+  (68 − 9 + 5 − 14 + 6 − 7 + 6 = 55, and 23 + 9 + 14 + 7 = 53) over a SERVED population of
+  **108** rows (55 live + 53 shims), which is what `config/surface-order.yml` totals and what
+  `surface_manifest.py check` re-derives;
+- **110 public SDK methods** (measured at `origin/main` @ `d741bd4`: **118**; this PR's wave adds the
+  six READ containers and re-privatises fourteen doors, so 118 + 6 − 14 = **110**, AST /
+  reflection / frozen all 110). Neither wave's own SDK figure survives the merge: the WRITE/MUTATE
+  and SOURCES/MINE/SESSION halves are already inside the 118.
+
+Every number here is MEASURED off the merged registry, not added by hand — `tools/bridge_table.py`,
+`tools/surface_manifest.py` and `tests/test_tool_risk_tiers.py` read the same three.
 
 Three consequences for readers of the paragraph below, which is left as written because it records
 the 2026-10-27 ruling, not the current state:
 
 1. The count there (**18**) and its `18 of 18 verified` are that day's measurement. The population is
-   **46** now (23 + the READ/QUERY wave's nine + the WRITE/MUTATE wave's fourteen), and every
-   pointer still names a call that resolves.
+   **53** now (23 + the #12948 wave's seven + the WRITE/MUTATE wave's fourteen + this PR's nine
+   READ/QUERY members), and every pointer still names a call that resolves.
 2. `tortoise_health` no longer redirects to `tortoise_overview`: that name is itself retired, and
    `RETIRED_USE_INSTEAD` resolves ONE hop (aliases are not transitive — the same limit GitHub's own
    `DeprecatedToolAliases` records). The pointer is `tortoise_graph_overview(section="health")`, and
@@ -535,7 +562,7 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 2. **Publish the bridge table** (MCP `type=`/`mode=` → SDK method).
 3. Implement the MCP list with the **SDK frozen** (method names + capabilities unchanged)
    so the handlers are written once.
-4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **111** public
+4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **110** public
    methods — a number DERIVED from the class, never typed; it moved 147 → 150 at #4282
    phase 2.2 because `link_entities`, `update_knowledge` and `delete_knowledge` were
    approved rows with no `def` yet, 150 → 124 on 2026-10-27 when the surplus methods
