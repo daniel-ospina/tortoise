@@ -11704,17 +11704,32 @@ def test_12549_the_export_attribute_is_a_MOMENT_not_a_file_property(
     # ⛔ `set -a` (allexport) is NOT a file-level shortcut: it confers the export
     # attribute on each assignment while it is in force, so a later `export -n` still
     # takes the flag OUT of the environment. A file-wide "everything exported" published
-    # this as `ON` (fresh review, P2-2).
+    # this as `ON` (fresh review, P2-2), and it ALSO armed an assignment written BEFORE
+    # `set -a`, which bash leaves unexported (fresh review, P2-2 again — the ordering).
+    for spelling, script, want in (
+        ("set -a; export -n", "set -a\nexport TORTOISE_EMBED_GATE=1\n"
+                              "export -n TORTOISE_EMBED_GATE\n", "OFF"),
+        ("set -a then assign", "set -a\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        ("assign then set -a", "TORTOISE_EMBED_GATE=1\nset -a\n", "OFF"),
+        ("set -a; set +a", "set -a\nset +a\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        ("set -a re-confers", "set -a\nexport TORTOISE_EMBED_GATE=1\n"
+                              "export -n TORTOISE_EMBED_GATE\n"
+                              "TORTOISE_EMBED_GATE=1\n", "ON"),
+    ):
+        (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
+                                                encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["deployment"]["files"]["entrypoint.sh"] == want, (spelling, shipped)
+    # ⛔ `-f` OUTRANKS `-n`: `export -nf FLAG` asks bash to remove the export attribute
+    # from a FUNCTION, so the VARIABLE stays exported. Reading `n` first published a
+    # DISARM — and a `unset_declarations` entry — for a line that changed nothing
+    # (fresh review, P2-5).
     (tmp_path / "entrypoint.sh").write_text(
-        "#!/bin/bash\nset -a\nexport TORTOISE_EMBED_GATE=1\n"
-        "export -n TORTOISE_EMBED_GATE\n", encoding="utf-8")
-    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
-    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
-    # …and `set -a` plus a plain assignment IS an arm (each assignment re-confers it).
-    (tmp_path / "entrypoint.sh").write_text(
-        "#!/bin/bash\nset -a\nTORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n"
+        "export -nf TORTOISE_EMBED_GATE\n", encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped
+    assert not shipped["unset_declarations"], shipped
     # ⛔ `export -n` RETAINS the variable's value (`help export`: it removes only the
     # attribute), so a later bare `export FLAG` RE-PUBLISHES it. Clearing the value here
     # published a false OFF (fresh review, P2-3).

@@ -2436,11 +2436,11 @@ DECLARED_CHANNEL_BOUNDS: tuple[dict[str, str], ...] = (
         "reader": "line reader: shell export",
         "cannot_see": ("shell INDIRECTION — a value computed at run time "
                        "(`export FLAG=$(…)`, a sourced file, `[ -n \"$X\" ] && "
-                       "export FLAG=1`), and the `declare -x` / `typeset -x` "
-                       "spellings of the export attribute — a textually visible "
-                       "spelling this reader does not match, so it lands in no bucket "
-                       "at all (tracked as `#12952`; the `export NAME=value` spelling "
-                       "IS read)"),
+                       "export FLAG=1`), and the `declare`/`typeset`/`readonly` "
+                       "spellings of an assignment — `declare -x FLAG=0`, "
+                       "`declare FLAG=0` and `readonly FLAG=0` all leave this reader "
+                       "with no decision, so a later truthy `export` stands (tracked as "
+                       "`#12952`; the `export NAME=value` spelling IS read)"),
         "why": ("a shell's value is decided by EXECUTION, not by text, and "
                 "ShellCheck checks syntax and never evaluates values — there is no "
                 "resolver for this grammar short of running the script. Phase 1 "
@@ -2887,7 +2887,11 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
         # ⛔ An EMPTY project is a RESOLVED, measured answer: `services: {}` declares
         # nothing, so this file arms nothing. It is NOT `UNRESOLVED` — the resolver
         # succeeded and there is nothing to be uncertain about. (A compose file with no
-        # `services` key at all is refused by compose itself and stays `UNRESOLVED`.)
+        # `services` key at all is NOT refused by compose: MEASURED, a file holding only
+        # `name: x` exits 0 with `{"name": "x", "services": {}}` — so the sentence this
+        # replaces ("refused by compose itself") was false, and the empty branch is
+        # reachable from an input a build file could spoof. The verdict is still right
+        # for a file that genuinely declares no service; the justification is not.)
         #
         # ⚠️ But "declares nothing" must not be said about a file whose EVERY service
         # is profile-gated — that file spells the flag out. The all-profiles pass runs
@@ -3359,6 +3363,9 @@ def _compose_build_refs() -> dict[str, list[str]]:
 _SHELL_EXPORT_ARG = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:=|$)")
 _SHELL_ASSIGN = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=")
 _SHELL_ALLEXPORT = re.compile(r"^\s*set\s+-[a-zA-Z]*a[a-zA-Z]*\s*$")
+#: `set +a` ENDS allexport — the same option, unset. Matched separately because a
+#: file-global flag would keep every later assignment "exported" after the mode is off.
+_SHELL_ALLEXPORT_OFF = re.compile(r"^\s*set\s+\+[a-zA-Z]*a[a-zA-Z]*\s*$")
 
 #: `unset NAME`, `unset -v NAME`, the multi-name form, and an OPTION CLUSTER. `unset` is
 #: a shell BUILTIN, so it is matched CASE-SENSITIVELY — `UNSET` is a different
@@ -3549,21 +3556,38 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
        the attribute exactly as bash does.
     """
     lines = text.splitlines()
-    allexport = any(_SHELL_ALLEXPORT.match(line) for line in lines)
-    exported = allexport
+    allexport = False
+    exported = False
     current: str | None = None
     states: list[dict] = []
     for line in lines:
         states.append({"exported": exported, "publish": None, "unexport": False})
+        # ⛔ `set -a`/`set +a` are ORDERED, not a file-wide flag: allexport marks the
+        # variables *created or modified AFTERWARDS* (bash(1)), so an assignment BEFORE
+        # `set -a` is a plain shell variable, and `set +a` ends the mode. A file-global
+        # flag published `FLAG=1` followed by `set -a` as an ARM (fresh review, P2-2).
+        if _SHELL_ALLEXPORT.match(line):
+            allexport = True
+            continue
+        if _SHELL_ALLEXPORT_OFF.match(line):
+            allexport = False
+            continue
         parsed = _shell_export_args(line)
         if parsed is not None:
             names, assigned, options = parsed
             if flag not in names:
                 continue
+            if "f" in options:
+                # ⛔ `-f` selects FUNCTIONS and OUTRANKS `-n`: `export -nf F` asks bash to
+                # remove the export attribute from a FUNCTION, so the VARIABLE stays
+                # exported. Testing `n` first published a DISARM (and a
+                # `unset_declarations` entry) for a line that changed nothing (fresh
+                # review, P2-5) — a cause the run did not measure.
+                continue
             if "n" in options:
                 exported = False
                 states[-1]["unexport"] = True      # the value is RETAINED
-            elif "f" not in options:
+            else:
                 if flag in assigned:
                     # `export FLAG=v` also SETS the variable: the value a later bare
                     # `export FLAG` publishes is this one.
@@ -3579,9 +3603,12 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
         value = _assigned_value(line, flag)
         if value is not None:
             current = value
-            # `set -a`: an assignment RE-CONFERS the attribute, so it re-arms here.
+            # `set -a`: an assignment RE-CONFERS the attribute, so THIS line is already
+            # exported — and the state recorded above (taken before the line ran) must
+            # say so, or the assignment reads as a plain shell variable.
             if exported or allexport:
                 exported = True
+                states[-1]["exported"] = True
     return states
 
 
