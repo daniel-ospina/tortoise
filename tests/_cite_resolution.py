@@ -99,9 +99,9 @@ def locate_hint(source_lines, anchor: str, kind: str = "line",
     """
     found = anchor_lines(source_lines, anchor, kind)
     if not found:
-        return (f"appears NOWHERE in this file — the symbol was renamed, moved to "
-                f"another module, or deleted, so re-verify the PASSAGE rather than "
-                f"re-pointing the number")
+        return ("appears NOWHERE in this file — the symbol was renamed, moved to "
+                "another module, or deleted, so re-verify the PASSAGE rather than "
+                "re-pointing the number")
     if len(found) == 1:
         return f"is at line {found[0]}"
     if cited is not None:

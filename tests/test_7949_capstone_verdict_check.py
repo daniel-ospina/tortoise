@@ -30,8 +30,8 @@ _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from tools import capstone_verdict_check as cvc  # noqa: E402
 from tests._cite_resolution import locate_hint as _locate_hint  # noqa: E402
+from tools import capstone_verdict_check as cvc  # noqa: E402
 
 LOG = _REPO / "docs/evidence/7949-capstone/capstone.log"
 PROBE = _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"
