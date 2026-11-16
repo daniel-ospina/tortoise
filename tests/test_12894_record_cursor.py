@@ -205,28 +205,54 @@ def test_case_two_is_unrepresentable_in_the_seed_sql() -> None:
     # both were measured on this file: `if floor < row_max:` (identical
     # semantics, operator flipped) was GREEN — case 2 enforced by Python with the
     # SQL guard unreachable — and adding a COMMENT above the statement that merely
-    # NAMED `row_max > floor` was RED. So the pin is over the CODE STRUCTURE, the
-    # way `tools/record_wiring_check.py` judges the door: no `Compare` node with
-    # `row_max` as an operand may exist before the seed statement, in any
-    # operator spelling, and a comment is not a node.
+    # NAMED `row_max > floor` was RED.
+    # ⛔ AND A COMPARE-OPERAND TEST WAS STILL TOO NARROW (measured, review cycle
+    # 3). Two pre-flights enforced case 2 in Python before the statement and left
+    # the previous pin GREEN, because neither put `row_max` where the walk looked:
+    # `peak = _journal_max(cursor, …)` / `if peak > floor: raise` (an ALIAS, so
+    # the name differs) and `if (row_max - floor) > 0: raise` (`Compare.left` is
+    # a `BinOp`, not a `Name`). So the rule is not "which names appear inside a
+    # comparison" but "can the value that DECIDES CASE 2 be read before the
+    # statement at all": no `Name` naming `row_max`, and no call to the reader
+    # that produces it (`_journal_max`), may appear before the execute line. That
+    # is agnostic about an alias and about how a comparison is spelled, and it is
+    # AST-only, so a comment is never a node.
+    #
+    # ⛔ ITS BOUND, stated rather than implied: a pre-flight that reads the journal
+    # through some OTHER route (`cursor.fetchone()` and its own integer
+    # comparison) would name neither and would pass. This defends the realistic
+    # edit — moving the threshold check up using the value the function already
+    # computes — not an adversarial rewrite of `seed()`.
     tree = ast.parse(source)
     seed_fn = next(n for n in ast.walk(tree)
                    if isinstance(n, ast.FunctionDef) and n.name == "seed")
     execute_line = next(
         i for i, line in enumerate(source.splitlines(), start=1)
-        if "cursor.execute(SEED_SQL" in line)
+        if "cursor.execute(SEED_SQL" in line
+    )
+    #: The value that decides case 2, and the ONE reader that produces it.
+    decides_case_two = frozenset({"row_max", "_journal_max"})
+
+    def _name_of(func: ast.expr) -> str | None:
+        if isinstance(func, (ast.Name, ast.Attribute)):
+            return getattr(func, "id", getattr(func, "attr", None))
+        return None
+
     early = sorted(
+        # `ast.arguments` carries no `lineno`; a node without one cannot be
+        # before the statement, so it defaults to the boundary and drops out.
         node.lineno for node in ast.walk(seed_fn)
-        if isinstance(node, ast.Compare)
-        and node.lineno < execute_line
-        and any(isinstance(side, ast.Name) and side.id == "row_max"
-                for side in [node.left, *node.comparators])
+        if getattr(node, "lineno", execute_line) < execute_line
+        and ((isinstance(node, ast.Name) and node.id in decides_case_two)
+             or (isinstance(node, ast.Call)
+                 and _name_of(node.func) in decides_case_two))
     )
     assert not early, (
-        f"a `row_max` comparison runs at line(s) {early}, BEFORE the seed "
-        f"statement at line {execute_line} — case 2 would be enforced by Python "
-        f"rather than by the SQL's own `WHERE row_max <= enumerated_floor` "
-        f"guard, which would make that guard unreachable and untested")
+        f"the value that decides case 2 is read at line(s) {early}, BEFORE the "
+        f"seed statement at line {execute_line} \u2014 case 2 would be enforced by "
+        f"Python rather than by the SQL's own `WHERE row_max <= "
+        f"enumerated_floor` guard, which would make that guard unreachable and "
+        f"untested")
 
 
 def test_the_seed_sets_the_tenant_scope_itself() -> None:
