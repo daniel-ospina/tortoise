@@ -235,9 +235,12 @@ def _no_ambient_store(monkeypatch, tmp_path):
     # asks `_credential_paths()` instead of restating today's two paths: a literal
     # list is exactly the fail-open that grew once already (#5200 added the
     # `TORTOISE_MCP_API_KEY` alias). A third name would answer ambiently, the store
-    # branch would never be reached, this module would send a REAL fleet key to the
-    # test daemon — and every pin here would stay green, because the store pin
-    # checks `path.is_file()` and never whether a store was READ.
+    # branch would never be reached, and this module would send a REAL fleet key to
+    # the test daemon. The STORE pin would stay green in that state — it checks
+    # `path.is_file()` and never whether a store was READ — while the ENDPOINT pin
+    # below is what reds, on the third name exactly as it does on the alias today
+    # (see the paragraph above). That asymmetry is why the NAMES must come from the
+    # code rather than from a list here.
     from tortoise.mcp_client import _ENV_KEY_NAMES
 
     for name in _ENV_KEY_NAMES:
