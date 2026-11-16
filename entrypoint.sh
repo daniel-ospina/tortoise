@@ -373,6 +373,19 @@ export TORTOISE_INGEST_BASE_DIR="${TORTOISE_INGEST_BASE_DIR:-/data/ingest}"
 # {TORTOISE_EVENT_LOG_BASE_DIR}/{graph}/events.jsonl.
 export TORTOISE_EVENT_LOG_BASE_DIR="${TORTOISE_EVENT_LOG_BASE_DIR:-/data/events}"
 
+# ── #12926: the two embedding switches, as BOOT defaults ──────────────────
+# This entrypoint is executed by the image and its exports ARE the process
+# environment for a hosted boot, so it is a deployment channel in its own right:
+# `fly.toml`'s `[env]` and `docker-compose.yml`'s `environment:` arrive first and
+# win (`:-`), and a bare `docker run` of the image gets these. Stated here rather
+# than left to absence because the two code defaults are OPPOSITE when unset
+# (value gate ON, embed gate OFF — `#11445`, recorded in both gate modules), so
+# an omission silently turns half the rule off. Same value as `.env.example`.
+# Changing either default is a reopen of `#11445`, not a fix; a channel that
+# omits either is refused pre-merge by `tools/embed_switch_gate.py`.
+export TORTOISE_VALUE_GATE="${TORTOISE_VALUE_GATE:-1}"
+export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-1}"
+
 # Fast-fail if the pre-downloaded model cache is missing (code-review P3, #160)
 # — the build-time bake in Dockerfile.hosted is the ONLY source; a missing
 # cache means a broken image, not a retryable condition. #1349: the bake is

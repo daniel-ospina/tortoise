@@ -134,6 +134,16 @@ ENV SENTENCE_TRANSFORMERS_HOME=/app/model
 # baked into the image at build time (code-review P2, #160). Fail fast with
 # a clean error if the cache is missing, instead of hanging on the network.
 ENV HF_HUB_OFFLINE=1
+# ── #12926: the two embedding switches, in the IMAGE's own environment ────
+# The image is a deployment channel of its own: an image run directly takes its
+# environment from here, and `fly.toml`'s `[env]` / `docker-compose.yml`'s
+# `environment:` are overrides on top. THIS file builds the image Fly deploys to
+# the `tortoise-y4mjjq` app (deploy-hosted.yml); ghcr's `tortoise-selfhost` image
+# is built from `Dockerfile.selfhost`. Both default to `.env.example`'s values;
+# the code defaults are OPPOSITE when unset (#11445), so a shipped surface must
+# STATE them — `tools/embed_switch_gate.py` refuses a channel that omits one.
+ENV TORTOISE_VALUE_GATE=1
+ENV TORTOISE_EMBED_GATE=1
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
