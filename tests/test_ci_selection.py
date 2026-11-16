@@ -10505,8 +10505,22 @@ def _durations_rows_claiming_unmeasured_on_ci(text: str):
 # review named; the guard found the other five). The PAST tense is a true history
 # and must stay silent: "the flat 2.0 UNDERSTATED it until this sweep replaced the
 # row" is what the fix says.
+#
+# ⛔ WIDENED at the 2026-11-16 refresh (#12962). The literal `flat 2.0 … UNDERSTATES`
+# spelling was the ONLY form the arm read, so ten rows that named the same claim in
+# another spelling shipped GREEN: an inserted adverb (`the flat 2.0 still UNDERSTATES`,
+# `the flat 2.0 may UNDERSTATE` — note the BARE `understate`, not the `-S` form) and
+# the three noun spellings the map also uses (`the flat default`, `the flat reading`,
+# `the flat weight`). A guard that reads one spelling of a claim cannot say the claim
+# is absent — `[]` from a spelling-bound arm is a false clean, and it is why the same
+# defect regenerated on two successive refreshes. The tense boundary is now explicit:
+# `UNDERSTATE(S)` / `OVERSTATE(S)` are present/future and bite; the PAST forms
+# (`UNDERSTATED`, `OVERSTATED`) end in a word character after `UNDERSTATE`, so they
+# cannot satisfy the closing `\b` and stay silent — that is the polarity the fix relies
+# on, not an incidental property.
 _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
-    r"\bflat\s+2\.0s?(?:\s+default)?\s+(?:UNDERSTATES|overstates)\b",
+    r"\bflat\s+(?:2\.0s?(?:\s+default)?|default|reading|weight)\b"
+    r"[^.;]{0,40}?\b(?:UNDERSTATES|UNDERSTATE|OVERSTATES|OVERSTATE)\b",
     re.IGNORECASE)
 
 
@@ -10762,6 +10776,39 @@ def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
         stale, durations) == [("test_a.py", 39.0), ("test_b.py", 0.9)]
     assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
         legitimate, durations) == []
+
+    # ── The spellings that shipped PAST this arm (#12962 repair) ───────────────
+    # Each names the same present-tense claim as `stale` above and none of them
+    # matched the literal `flat 2.0 … UNDERSTATES` form: an inserted adverb, and the
+    # `flat default` / `flat reading` / `flat weight` nouns the map actually uses.
+    # Ten rows carried one of these while their own tail cited the landed sweep.
+    widened = (
+        "  test_a.py: 27.3  # weight-dominated by a single case and the flat default"
+        " UNDERSTATES it on the slow leg until the refresher re-bases it." + basis + "\n"
+        "  test_b.py: 0.5  # The flat 2.0 may understate it until a sweep replaces"
+        " the row." + basis + "\n"
+        "  test_c.py: 25.1  # it sits above the flat weight, so the flat reading"
+        " UNDERSTATES it until a sweep replaces this row" + basis + "\n"
+        "  test_d.py: 12.7  # the flat 2.0 still UNDERSTATES it until a sweep"
+        " re-bases it." + basis)
+    quad = {f"test_{c}.py": 1.0 for c in "abcd"}
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        widened, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5),
+                           ("test_c.py", 25.1), ("test_d.py", 12.7)]
+    # …and the PAST tense of every one of those spellings stays silent, because the
+    # fix IS the past tense — a widening that bit the healed wording would red every
+    # corrected row on the committed map and leave no legal way to write the note.
+    healed = (
+        "  test_a.py: 27.3  # the flat default UNDERSTATED it until this sweep"
+        " replaced the row." + basis + "\n"
+        "  test_b.py: 0.5  # The flat 2.0 OVERSTATED it until this sweep replaced"
+        " the row." + basis + "\n"
+        "  test_c.py: 25.1  # so the flat reading UNDERSTATED it until this sweep"
+        " replaced the row" + basis + "\n"
+        "  test_d.py: 12.7  # the flat weight OVERSTATED it until this sweep"
+        " re-based it." + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        healed, quad) == []
 
 
 _DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")
