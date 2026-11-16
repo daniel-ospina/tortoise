@@ -39,11 +39,9 @@ from typing import ClassVar
 
 import pytest
 
+from tests.test_record_serve import TENANT, _FakeConn, _opener, _row
 from tortoise import record_serve as rs
 from tortoise.residency import RESIDENCY_FIELD, RESIDENCY_NOT_HOT
-
-from tests.test_record_serve import TENANT, _FakeConn, _opener, _row
-
 
 # ── the two stores, faked ──────────────────────────────────────────────────
 
