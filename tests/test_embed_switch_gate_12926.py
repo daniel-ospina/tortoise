@@ -2443,6 +2443,13 @@ def test_a_control_flow_retraction_retracts_but_a_function_body_one_does_not():
         # the ALLMAN spelling: the body brace is on the line AFTER its header
         "arm_gates()\n{\n  export TORTOISE_VALUE_GATE=1\n}\n",
         "function arm_gates\n{\n  export TORTOISE_VALUE_GATE=1\n}\n",
+        # ⛔ A BLANK line between the header and its brace must not clear the remembered header
+        # (review P1 at `5260e1f7`, measured): an empty statement reset `pending_fn_header`, so the
+        # lone `{` read as a group OPENER — and a group is CREDITED — reporting `ok … =1 =1`
+        # (exit 0) over a process that `env -i … bash script /usr/bin/env` shows receives neither.
+        "arm_gates()\n\n{\n  export TORTOISE_VALUE_GATE=1\n}\n",
+        "function arm_gates()\n\n{\n  export TORTOISE_VALUE_GATE=1\n}\n",
+        "function arm_gates\n\n\n{\n  export TORTOISE_VALUE_GATE=1\n}\n",
     ],
 )
 def test_an_ALLMAN_brace_function_body_is_refused(body):

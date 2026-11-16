@@ -280,8 +280,13 @@ def _strip_statement_prefix(raw: str, view: str) -> tuple[str, str]:
 #: `if`/`then`/`fi` in the language (review at `69ee7b1395`). Closers are `fi`/`done`/`esac` and a
 #: closing brace/paren only; openers are a block keyword that STARTS A STATEMENT — at line start,
 #: after a `;`/`&&`/`||`/`|` separator, or after the `then`/`else`/`elif`/`do` that begins the next
-#: statement of an enclosing block (an INDENTED `  if false; then` is the shape that was missed) —
-#: plus a `{`/`(` tail. ⛔ The `then` form is not decoration (review P1, measured): without it the
+#: statement of an enclosing block (an INDENTED `  if false; then` is the shape that was missed).
+#: ⛔ A function BODY brace and a subshell `(` are NOT arms here (review P3 at `5260e1f7`, measured):
+#: this pattern only ever runs on the STRUCTURAL view, where `f()`'s parens are blanked, so neither an
+#: arm for `(` nor one for `{` could fire / be told apart from a GROUP (which is credited, not
+#: opened). `_SHELL_FN_BRACE`/`_SHELL_FN_HEADER` own the body brace, `_SPAN_SUBSHELL` owns the paren,
+#: and `_SHELL_GROUP_CLOSE`/`_SHELL_GROUP_FORK` own the group; this pattern owns the block KEYWORDS.
+#: ⛔ The `then` form is not decoration (review P1, measured): without it the
 #: SECOND `if` on `if false; then if false; then echo x; fi` was invisible, so that line opened one
 #: block and closed one and the depth returned to 0 while bash was still one level deep — both
 #: exports of a never-running outer branch were credited STATED and the gate exited 0.
@@ -1582,7 +1587,17 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # ⛔ read from RAW, not the stripped text: `_strip_statement_prefix` removes a leading
             # `{`, so a lone body brace's stripped text is EMPTY and cannot identify it.
             allman_body = pending_fn_header and raw.strip().startswith("{")
-            pending_fn_header = _SHELL_FN_HEADER.match(content_raw.strip()) is not None
+            # ⛔ The remembered header must SURVIVE a BLANK line, and be CONSUMED by its body's
+            # brace (review P1 at `5260e1f7`, measured). Updating it on EVERY statement cleared it
+            # on the empty statement a blank line produces, so `arm_gates()` / <blank> / `{` /
+            # `export …` / `}` read the brace as a group OPENER — and a group is CREDITED by design
+            # — reporting `ok … =1 =1` (exit 0) while `env -i … bash script /usr/bin/env` printed
+            # neither switch. Consuming it here also keeps `pending_fn_header` from reaching the
+            # branch AFTER the body, where a following lone `{` is a real group.
+            if allman_body:
+                pending_fn_header = False
+            elif content_raw.strip():
+                pending_fn_header = _SHELL_FN_HEADER.match(content_raw.strip()) is not None
             # ⛔ A group OPENER is detected on the RAW statement — the prefix strip removes the
             # leading `{`, and an Allman function BODY's brace is the same character, which
             # `allman_body` is what tells apart. The frame is pushed BEFORE the crediting block so
