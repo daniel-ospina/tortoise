@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import ast
 import importlib.util as _ilu
-import inspect as _inspect
 import io
 import itertools
 import json
@@ -7688,8 +7687,10 @@ def _drop_block_entries(text: str, section: str) -> str:
 #: and carries no such cite. The arm table below needs that split, because
 #: `pytest.raises(AssertionError)` cannot tell them apart.
 #:
-#: ⛔ `_pin_row_failures` EMITS THREE LINE-FINDING SHAPES, and the pattern must match
-#: all three (#13033 review P1, P2). It used to match the literal `(cited by <doc>)`
+#: ⛔ `_pin_row_failures` EMITS FOUR LINE-FINDING SHAPES, and the pattern must match
+#: all four (#13033 review P1, P2 — the fourth is the unregistered-source-key finding,
+#: which a fix in round 6 ADDED without teaching this pattern about it, reproducing the
+#: very misclassification it was fixing). It used to match the literal `(cited by <doc>)`
 #: tail; when that tail moved to `_cite_failure` (`<doc> cites <source>:<n> …`), to the
 #: bare-continuation arm (`<doc>: the sentence containing … does not cite :<n>`), and
 #: to the scoping-phrase arm (`<doc>: the scoping phrase … occurs <n> time(s)`), the
@@ -7699,6 +7700,10 @@ def _drop_block_entries(text: str, section: str) -> str:
 #:   * the source-label class MUST admit `-`: `ci_surfaces` labels as
 #:     `config/ci-surfaces.yml` (a real `_EPIC_CITE_SOURCES` path), and a `[\w./]`
 #:     class silently classified that row's findings as block findings;
+#:   * the unregistered-source-key arm (`<doc>: this row's SOURCE key '…' is not in the
+#:     source map, so the cite at :<n> cannot be resolved`) is a `_pin_row_failures`
+#:     finding and must be matched, or `_block_findings` reports a ROW problem as a
+#:     BLOCK one — false-redding the baseline with the wrong diagnosis;
 #:   * the scoping-phrase arm MUST be qualified to `— this pin needs`, because a BLOCK
 #:     producer emits the SAME shape (`_section_entries`: `<doc>: the scoping phrase
 #:     '…' occurs <n> time(s) — this claim needs exactly one line`). Unqualified, that
@@ -7715,6 +7720,7 @@ _ROW_FINDING = re.compile(
     r"- \S+ cites [\w./-]+:\d+"
     r"|- \S+: the sentence containing .* does not cite :\d+"
     r"|- \S+: the scoping phrase .* occurs \d+ time\(s\) — this pin needs"
+    r"|- \S+: this row's SOURCE key .* is not in the source map"
 )
 
 
@@ -7801,7 +7807,22 @@ def test_the_line_and_block_findings_are_told_apart(tmp_path):
         {"ci_surfaces": ["# not the carve-out", "  carve_out:"]},
         default_source="ci_surfaces")
 
+    # 5. the UNREGISTERED SOURCE KEY on the `_cite_failure` path — the branch whose
+    #    `sources[source_key]` used to raise `KeyError` (round-6 P2). The sentence DOES
+    #    carry the number, so this is not the bare-continuation branch.
+    (tmp_path / "u.md").write_text(
+        "`mystery.py:2` is where the seam sits.\n", encoding="utf-8")
+    unregistered = _pin_row_failures(
+        [("doc.md", "is where the seam sits", ((2, "target = 1"),))],
+        {"doc.md": (tmp_path / "u.md")},
+        {},                      # the row names a source nothing maps
+        default_source="mystery")
+    assert unregistered and "SOURCE key" in unregistered[0], (
+        f"a row keyed outside the source map must be a FINDING, not a KeyError; "
+        f"got {unregistered!r}")
+
     rows = {"cite_failure/miss": missed, "bare continuation": bare,
+            "unregistered source key": unregistered,
             "scoping phrase": ambiguous, "hyphenated label": hyphenated}
     for name, findings in rows.items():
         assert findings, f"the {name} arm produced NO finding — the fixture is inert"
@@ -7815,31 +7836,33 @@ def test_the_line_and_block_findings_are_told_apart(tmp_path):
             assert not _block_findings(line), (
                 f"`_block_findings` returned the {name} arm's row finding: {line!r}")
 
-    # ⛔ THE OTHER DIRECTION: a BLOCK/DOCUMENT finding must stay one. `_bundle_missing`
-    # returns the fragment; `_bundle_sweep` composes it into the finding's line.
-    # ⛔ AND THE COMPOSED PREFIX IS PINNED TO THE PRODUCER (#13033 review round 6, P3):
-    # an earlier cut copied the `- <cite> (<label>): …` lead-in out of the producer's
-    # prose by hand, so re-wording it would have turned the real block finding into a
-    # row match while this test stayed green. The `inspect` arm below reds if
-    # `_bundle_sweep` stops emitting the text this fixture composes with — a driving
-    # call is not available (the sweep only reads cites inside a recognised row scope,
-    # and a synthetic document is reported `unmatched`, not `failures`).
-    lead_in = (", so the cite does not hold what it names — and the tree already "
-               "says where that is: ")
-    # the producer splits that literal across adjacent f-strings, so join them first
-    _sweep_src = re.sub(r'"\s*\n\s*f?"', "", _inspect.getsource(_bundle_sweep))
-    assert lead_in in _sweep_src, (
-        "`_bundle_sweep` no longer composes its block finding with the lead-in this "
-        "fixture uses — the block half of this test has gone prose-coupled again, so "
-        "re-drive it from the producer before trusting the assertion below")
-    fragment = _bundle_missing("line", ("target = 1",), ["# nothing here"], 1, None)
-    assert fragment, "the block fixture is inert — `_bundle_missing` returned no miss"
-    block = "- README.md:427 (the meta fold): seam.py:1 reads 'x'" + lead_in \
-            + "; ".join(fragment)
-    assert not _ROW_FINDING.match(block), (
-        f"a BLOCK/DOCUMENT finding is being read as a row finding: {block!r}")
-    assert _block_findings(block) == [block[2:]], (
-        f"a block finding was dropped by `_block_findings`: {block!r}")
+    # ⛔ THE OTHER DIRECTION: a BLOCK/DOCUMENT finding must stay one — and the finding is
+    # the REAL producer's, composed by the shipped `_bundle_sweep` over a synthetic
+    # `#7949` row (#13033 review round 6/7). An earlier cut copied the
+    # `- <cite> (<label>): …` lead-in out of the producer's prose by hand, so re-wording
+    # it would have turned the real block finding into a row match while this test
+    # stayed green; an `inspect` proxy replaced it and was itself a wrong claim, because
+    # a driving call IS available (the twin leg at `test_the_index_sweep_keeps_to_the_row
+    # _that_names_this_bundle` drives it exactly this way).
+    _sdk = ["x"] * 9
+    _sdk[2] = "totally different = 1"       # line 3 does NOT carry the rule's anchor
+    with tempfile.TemporaryDirectory() as _tmp:
+        _root = Path(_tmp)
+        _doc = _root / "00_index.md"
+        _doc.write_text(
+            "| **`#7949` / `#9080` capstone — the closing rule** — the meta fold "
+            "`sdk.py:3` | y |\n", encoding="utf-8")
+        _src = _root / "sdk.py"
+        _src.write_text("\n".join(_sdk) + "\n", encoding="utf-8")
+        _swept = _bundle_sweep((("docs/00_index.md", _doc),), {"sdk": _src})
+    assert _swept["failures"], (
+        "the block fixture is inert — the shipped sweep produced no failure for a cite "
+        f"whose line does not carry the rule's anchor: {_swept}")
+    for block in (f"- {f}" for f in _swept["failures"]):
+        assert not _ROW_FINDING.match(block), (
+            f"a BLOCK/DOCUMENT finding is being read as a row finding: {block!r}")
+        assert _block_findings(block) == [block[2:]], (
+            f"a block finding was dropped by `_block_findings`: {block!r}")
 
 
 def test_a_past_the_end_cite_is_a_finding_not_a_traceback(tmp_path):
