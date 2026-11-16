@@ -4416,8 +4416,8 @@ text, so do not grep the 9090 listener for a counter name.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
-   `write_failed`), and this needs no auth. ⚠️ **THREE readings are not in this
-   grep.** (a) The `no_durable_journal` decline — logged at **DEBUG**, under a
+   `write_failed` / `journal_collision`), and this needs no auth. ⚠️ **FOUR
+   readings are not in this grep.** (a) The `no_durable_journal` decline — logged at **DEBUG**, under a
    *different* prefix (`the record write was declined (no_durable_journal)`,
    `record_writer.py`), because it is the healthy M2 path and not a failure.
    (b) The once-per-window `position_unproven` WARN — `no layer-1 position row
@@ -4455,6 +4455,13 @@ text, so do not grep the 9090 listener for a counter name.
    (`the record write did not happen (no_tenant)`) IS in the grep, but that is
    the growth, not the fault; read the faults with the `grep -E` in the ⚠️
    `no_tenant` bound below, which matches all four.
+   (d) The **`journal_collision`** WARN — message *the record write was REFUSED
+   (journal_collision)*, emitted from `record_writer.py` — is a **different**
+   prefix again, so the `did not happen` grep returns nothing for it even though
+   it is a real refusal on the same channel. It matters most of the four: it is
+   the ONE refusal whose remedy is **not** a replay (#12894), so a reader who
+   concludes "no non-write happened" from that grep's silence misses precisely
+   the case this section's replay advice would mislead them on.
    ⛔ **`no_journal` and `seam_unimportable` ARE in it**, so do not dismiss them
    as "the SDK, not the seam": `tortoise/sdk.py::_record_write_failure` emits the
    **identical** prefix (`the record write did not happen (%s)`) — an armed
@@ -4675,10 +4682,10 @@ why the two recipes above are the verification and the deploy status is not.
    unbound capture produces carries the env-pair diagnosis and **no** request
    identity and no record type — and `no_tenant` has a second emission, for a
    malformed CARRIED tenant, that echoes only that pair — so the log cannot tell
-   two requests apart. (Of the four `record_writer` reasons, `circuit_open` is the
-   only one that carries the record type; `malformed_dsn` and `write_failed` carry
-   the exception text instead, and the SDK's `no_journal` line names the record
-   type inside its exception text.)
+   two requests apart. (Of the five `record_writer` reasons, only `malformed_dsn`
+   and `no_tenant` carry no record type: `circuit_open`, `write_failed` and
+   `journal_collision` all name it, and the SDK's `no_journal` line names the
+   record type inside its exception text.)
    A bar that required per-request attribution would be unexecutable and would
    red a healthy deployment by default. The route is never
    `TORTOISE_RECORD_SINGLE_TENANT`, which the #9192 cross-tenant note below

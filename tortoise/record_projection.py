@@ -965,8 +965,17 @@ class JournalPositionCollision(RecordProjectionError):
     payload, apart only in `ts`/`event_id`): the position row is still dropped
     and layer 1 still under-records that journal. It is stated rather than
     repaired because no comparison of the durable content can recover a field
-    the durable row does not carry; `#12894`'s journal IDENTITY in the key is
-    what removes it, exactly as for the residual above.
+    the durable row does not carry. ⛔ Three of those stripped fields —
+    `event_id`, `initiated_by`, `projection_version` — really are absent from
+    the row, so no comparison can reach them. `ts` is the exception and the
+    wording must not overstate it: `ts` IS carried, bound into `recorded_at`
+    (`COALESCE(%s::timestamptz, now())`), so a `recorded_at` comparison could
+    see a `ts`-only difference — it is simply not what this verdict compares,
+    because `recorded_at` falls back to `now()` when `ts` is absent, and
+    comparing it would then report a COLLISION for two replays of one record
+    that omit `ts`. That is the false positive this class must never produce, so
+    the comparison stays on content; `#12894`'s journal IDENTITY in the key is
+    what removes the residual, exactly as for the residual above.
     `test_an_ENVELOPE_only_difference_is_invisible_to_the_verdict` pins the
     boundary so it is measured rather than implied, and reds when the key
     carries the journal.
