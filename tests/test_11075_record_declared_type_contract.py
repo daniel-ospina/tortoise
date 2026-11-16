@@ -864,13 +864,51 @@ NOT_BOUND_BY_A_PYTHON_VALUE: frozenset[str] = frozenset({
 })
 
 
+#: Columns written by a SECOND writer of record columns: the ordinal ALLOCATOR
+#: (#12894). It is not part of the journal→record fold (`replay_plan`'s corpus),
+#: so the enumeration above cannot judge it — but every one of its columns is
+#: bound by the allocator's ONE statement, whose parameters are
+#: `(text[] event_types, jsonb[] payloads, timestamptz[] recorded_at, n, org_id,
+#: graph_id, n, org_id, graph_id)`. Enumerating them here says exactly that, and
+#: `test_the_allocator_columns_are_in_its_statement` keeps the claim honest: the
+#: names below must still appear in `record_allocator.SEED_SQL`/`ALLOCATION_SQL`
+#: or in the table's DDL.
+WRITTEN_BY_THE_ALLOCATOR: frozenset[str] = frozenset({
+    "record_cursor.org_id",       # INSERT/UPDATE predicate + inserted value
+    "record_cursor.graph_id",     # INSERT/UPDATE predicate + inserted value
+    "record_cursor.seq",          # `seq + %s` / `GREATEST(...)`, returned
+    "record_cursor.mode",         # database literal per transition ('seeded' …)
+    "record_cursor.updated_at",   # `now()` in every writer
+})
+
+
+def test_the_allocator_columns_are_in_its_statement():
+    """The enumeration above is not a free pass: every column it names for the
+    allocator must actually be written by the allocator's SQL or created by the
+    migration, and the allocator must not have grown a column nobody accounted
+    for."""
+    from tortoise import record_allocator as ra
+
+    migrations = "\n".join(
+        (REPO_ROOT / "supabase" / "migrations" / name).read_text(encoding="utf-8")
+        for name in rp.RECORD_MIGRATIONS)
+    for entry in WRITTEN_BY_THE_ALLOCATOR:
+        table, column = entry.split(".", 1)
+        assert table == ra.RECORD_CURSOR_TABLE
+        assert column in ra.SEED_SQL or column in ra.ALLOCATION_SQL or (
+            f"{column} " in migrations and "record_cursor" in migrations), (
+            f"{entry} is named as the allocator's but nothing writes it")
+
+
 def test_the_enumeration_accounts_for_every_declared_column():
     """Closure. Every declared column is judged, an expression, or named above."""
     declared = rp.column_types()
     judged, expressions = _enumeration()
     judged_keys = {f"{t}.{c}" for t, c, _v in judged}
     expression_keys = {f"{t}.{c}" for t, c in expressions}
-    accounted = judged_keys | expression_keys | set(NOT_BOUND_BY_A_PYTHON_VALUE)
+    accounted = (judged_keys | expression_keys
+                 | set(NOT_BOUND_BY_A_PYTHON_VALUE)
+                 | set(WRITTEN_BY_THE_ALLOCATOR))
     every = {f"{table}.{column}"
              for table, columns in declared.items() for column in columns}
 
@@ -882,7 +920,8 @@ def test_the_enumeration_accounts_for_every_declared_column():
         + "\nAdd the record that carries it to the corpus, or name it in "
         "NOT_BOUND_BY_A_PYTHON_VALUE with the reason."
     )
-    stale = sorted(set(NOT_BOUND_BY_A_PYTHON_VALUE) - every)
+    stale = sorted((set(NOT_BOUND_BY_A_PYTHON_VALUE)
+                    | set(WRITTEN_BY_THE_ALLOCATOR)) - every)
     assert stale == [], f"named as not-bound but declared nowhere: {stale}"
     overlapping = sorted(set(NOT_BOUND_BY_A_PYTHON_VALUE)
                          & (judged_keys | expression_keys))

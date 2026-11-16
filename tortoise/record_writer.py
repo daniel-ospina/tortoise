@@ -1546,6 +1546,7 @@ class RecordWriter:
         first_seq: int = 1,
         conn: Any | None = None,
         position: bool = True,
+        allocate: bool = False,
     ) -> RecordWrite:
         """Apply `records` to the record, on a transaction the CALLER owns.
 
@@ -1566,6 +1567,16 @@ class RecordWriter:
             ordinal passes ``False``; a guessed ``seq`` still collides with a
             later replay's numbering in silence, and the four ontology layers
             are written either way.
+        :param allocate: **the record issues the positions** (#12894). The
+            plan's layer mutations run first and ONE statement then increments
+            `public.record_cursor` and inserts the rows carrying the numbers it
+            issued, so this call's `first_seq`/`last_seq` are the ALLOCATED
+            positions — not the caller's watermark — and the byte meter reads
+            the rows it actually wrote. `first_seq` must be left at 1 (the plan
+            refuses a caller watermark that would be silently dropped) and the
+            graph's cursor must exist in mode `active`
+            (:mod:`tortoise.record_allocator`); a `seeded`/`halted`/absent
+            cursor raises `CursorNotActive` rather than inventing a number.
 
         :raises RecordWriteError: the record was ARMED and the write did not
             happen (malformed DSN, unreachable record, totality refusal, or a
@@ -1598,6 +1609,13 @@ class RecordWriter:
             return RecordWrite(outcome=RecordWriteOutcome.APPLIED,
                                first_seq=first_seq, last_seq=first_seq - 1)
 
+        if allocate and not position:
+            # Refused BEFORE a connection: an allocated number exists to be
+            # CARRIED by a position row, so the two flags cannot both be set.
+            raise RecordWriteError(
+                "allocate=True and position=False are contradictory: the "
+                "allocated number is carried by the journal_event row")
+
         opened: Any | None = None
         target = conn
         if target is None:
@@ -1619,7 +1637,7 @@ class RecordWriter:
         try:
             report = record_projection.replay(
                 records, target, org_id=org_id, graph_id=graph_id,
-                start_seq=first_seq, position=position,
+                start_seq=first_seq, position=position, allocate=allocate,
             )
         except Exception as exc:
             # Totality (an undeclared/refused record type raises before the
@@ -1685,6 +1703,18 @@ class RecordWriter:
                 f"({type(exc).__name__}: {_bounded_cause(exc)})"
             ) from exc
 
+        # ⛔ THE ALLOCATED NUMBER IS THE WATERMARK (#12894). When the record
+        # issues the positions, `first_seq`/`last_seq` MUST come from what the
+        # counter handed back — deriving them from the caller's `first_seq` is
+        # how an allocated number reached neither `RecordWrite.last_seq` nor the
+        # byte meter: the meter then matched ZERO rows and charged 0, silently,
+        # under a contract that says it never fails a write. Measured by
+        # `tests/test_12894_record_cursor_live.py::
+        # test_the_allocated_number_reaches_the_watermark_and_the_byte_meter`.
+        watermark_first = report.first_seq if allocate else first_seq
+        watermark_last = (report.last_seq if allocate
+                          else first_seq + len(records) - 1)
+
         # #12762: MEASURE what this write actually stored, for the org that
         # wrote it. Deliberately AFTER the projection succeeded: the reading is
         # of rows that now exist. ⛔ MEASURED, NOT RECORDED: this seam does not
@@ -1695,7 +1725,7 @@ class RecordWriter:
             target,
             org_id=org_id,
             graph_id=graph_id,
-            first_seq=first_seq,
+            first_seq=watermark_first,
             n_records=len(records),
             position=position,
         )
@@ -1704,8 +1734,8 @@ class RecordWriter:
             outcome=RecordWriteOutcome.APPLIED,
             events=report.events,
             statements=report.statements,
-            first_seq=first_seq,
-            last_seq=first_seq + len(records) - 1,
+            first_seq=watermark_first,
+            last_seq=watermark_last,
             connection=opened,
             written_bytes=written.row_bytes if written is not None else 0,
             written_rows=written.rows if written is not None else 0,
@@ -1814,6 +1844,7 @@ def write_records(
     first_seq: int = 1,
     conn: Any | None = None,
     position: bool = True,
+    allocate: bool = False,
     writer: RecordWriter | None = None,
 ) -> RecordWrite:
     """One-call form of :meth:`RecordWriter.write` — the chokepoint's entry point.
@@ -1823,10 +1854,13 @@ def write_records(
     resolved per call either way, so a late arming is seen by both spellings —
     and this function exists so a caller with no seam object to hold does not
     have to invent one.
+
+    ``allocate`` is passed through unchanged: #12894's allocator is a property
+    of the WRITE, not of this convenience wrapper.
     """
     return (writer or RecordWriter()).write(
         records, org_id=org_id, graph_id=graph_id, first_seq=first_seq,
-        conn=conn, position=position,
+        conn=conn, position=position, allocate=allocate,
     )
 
 
@@ -2322,6 +2356,7 @@ def write_live_record(record: Mapping[str, Any], *,
                       durable: bool = True,
                       seq: int | None = None,
                       tenant: tuple[str, str] | None = None,
+                      allocate: bool = False,
                       ) -> RecordWrite | None:
     """The LIVE door: one journal record that has ALREADY been appended.
 
@@ -2508,6 +2543,22 @@ def write_live_record(record: Mapping[str, Any], *,
     a lane that mixed the two could split one request's rows across two tenants
     (#9346).
 
+    ``allocate`` hands the POSITION to the record (#12894): the plan allocates
+    from `public.record_cursor` and the resulting number is what this call
+    reports as `first_seq`/`last_seq` and what the byte meter reads. With
+    ``allocate=True`` the ``seq`` argument is IGNORED — there is one allocator
+    per coordinate, and a caller-supplied number alongside an allocated one is
+    two answers to one question — and the "no position was proven" arm below
+    does not apply, because a position WAS issued (by the counter, not by the
+    journal). The graph's cursor must be in mode ``active``. ⛔ A `seeded` /
+    `halted` / absent cursor, or a duplicate position, comes back as
+    ``outcome=REFUSED`` ``refusal="write_failed"`` and is counted — this door
+    DOES NOT RAISE, by its own contract (the journal append has already
+    committed, so a record failure must not fail a write that persisted). That
+    is a REFUSAL of a mis-armed deployment rather than a lost row to be healed
+    by replay, and the difference is visible in ``refusal`` and in
+    `record_allocator.metrics()`.
+
     ``OVERRIDES:`` the module's decision 3 (`Armed but unreachable ⇒ the write
     FAILS (RecordWriteError)`) does not apply to this door, and that is a
     deliberate departure rather than an oversight. Decision 3 governs
@@ -2530,7 +2581,7 @@ def write_live_record(record: Mapping[str, Any], *,
     assert tenant is not None  # the verdict only clears with a resolved pair
     org_id, graph_id = tenant
     connection: Any | None = None
-    if seq is None:
+    if seq is None and not allocate:
         # A DURABLE journal whose append could not prove the record's position
         # (see `seq` above): layer 1 gets no row for this record, which is a
         # NAMED skip and never a silent one (#9307 review F1).
@@ -2540,9 +2591,12 @@ def write_live_record(record: Mapping[str, Any], *,
         # a durable journal could not PROVE the record's position (see `seq`): a
         # row needs a number, and inventing one collides with a later replay's
         # numbering. Counted and warned above, so the skip is observable.
+        # ⛔ With `allocate=True` the number comes from the RECORD's counter
+        # instead (#12894), so `seq` is neither needed nor consulted.
         write = write_records([record], org_id=org_id, graph_id=graph_id,
-                              position=seq is not None,
-                              first_seq=seq if seq is not None else 1)
+                              position=True if allocate else seq is not None,
+                              first_seq=seq if seq is not None else 1,
+                              allocate=allocate)
         _close_live_breaker()
         connection = write.connection
         if connection is not None:
@@ -2562,12 +2616,15 @@ def write_live_record(record: Mapping[str, Any], *,
             # merely a missing increment — which `postgres_bytes.reconcile`
             # reports as `unmetered_bytes`, the safe direction.
             _record_written_bytes(org_id, write)
-        if seq is None:
+        if seq is None and not allocate:
             # No position was consumed, so the watermark must not report one
             # as if it had been (a caller advancing `last_seq + 1` must neither
             # rewind nor skip): the seam was handed the default `first_seq=1`
             # for a row-less write, and `first_seq - 1` is this class's own
             # spelling for "nothing consumed".
+            # ⛔ NOT with `allocate=True`: there the counter issued the number
+            # and `write.last_seq` IS it — overwriting it here would discard
+            # the one fact the allocation exists to produce.
             return replace(write, last_seq=write.first_seq - 1)
         return write
     except Exception as exc:

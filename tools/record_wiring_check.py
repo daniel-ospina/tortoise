@@ -21,15 +21,24 @@ WHAT IT ASSERTS (exit 0 only when all three hold)
    derived from `record_projection.RECORD_MUTATIONS` — the ONE declaration of
    journal→record — never from a hand-written list here. A second list is the
    second declaration that goes stale.
-3. **The live caller writes the journal's OWN position — never an invented
-   one.** `EventLog.append` reports the record's position (#9190, landed on main
-   in `b3b4c2fb1`), and layer 1 (`public.journal_event`, exposed as
-   `public.record_event_stream`) is written from it. So the live door must carry
-   the ordinal through (`seq=`) and pass `position=seq is not None`, EVERY
-   production call to that door must actually PASS an ordinal (a body that uses
-   a `seq` nobody supplies certifies nothing — `seq` defaults to `None`, which
-   is the silent `position=False` this gate exists to catch), while every OTHER
-   production call to a `position`-taking entry point must still pass the
+3. **The live caller writes a position it did not INVENT.** Two honest sources,
+   and only two:
+
+   a. **the journal's own ordinal** (`#9190`) — `EventLog.append` reports the
+      record's position, the live door carries it (`seq=`), and the flag is
+      `position=seq is not None`; or
+   b. **the record's own allocator** (`#12894`) — when the door is called with
+      `allocate=True`, the plan increments `public.record_cursor` and inserts
+      the row carrying the number it issued, so a position row is written from a
+      number that EXISTS (`position=True if allocate else seq is not None`).
+      ⛔ (b) is accepted ONLY when the same call also binds `allocate=`; a
+      `position=True` that merely mentions an `allocate` nobody passes is an
+      invented number, i.e. exactly the defect this gate exists to catch.
+
+   EVERY production call to that door must still PASS an ordinal (a body that
+   uses a `seq` nobody supplies certifies nothing — `seq` defaults to `None`,
+   which is the silent `position=False` this gate exists to catch), while every
+   OTHER production call to a `position`-taking entry point must still pass the
    literal `position=False` — a number IT invents collides with a later replay's
    numbering on `(org_id, graph_id, seq)` in silence.
 
@@ -428,15 +437,18 @@ def live_door_writes_the_journals_position(
     for call in calls:
         bound = {kw.arg: kw.value for kw in call.keywords if kw.arg}
         value = bound.get("position")
-        if not _is_position_from_ordinal(value):
+        if not _is_position_from_ordinal(value, bound=bound):
             problems.append(
                 f"{_LIVE_DOOR}() calls {_call_name(call)}(…) with "
                 f"position={ast.unparse(value) if value is not None else '<unset>'}"
-                " — the live path must WRITE layer 1 from the journal's own "
-                "position (#9190), so bind `position=seq is not None`. A literal "
-                "`False` is the pre-#9190 deferral (layer 1 stays empty on every "
-                "live write); a literal `True` invents a number for a log that "
-                "reported none and collides with a later replay's numbering"
+                " — the live path must WRITE layer 1 from a number that "
+                "EXISTS: the journal's own position (#9190), so bind "
+                "`position=seq is not None`, or the record's allocator "
+                "(#12894), so bind `position=True if allocate else seq is not "
+                "None` AND `allocate=allocate`. A literal `False` is the "
+                "pre-#9190 deferral (layer 1 stays empty on every live write); a "
+                "literal `True` invents a number that collides with a later "
+                "replay's numbering"
             )
         first_seq = bound.get("first_seq")
         if not _references_ordinal(first_seq):
@@ -450,9 +462,31 @@ def live_door_writes_the_journals_position(
     return problems
 
 
-def _is_position_from_ordinal(value: ast.expr | None) -> bool:
-    """Is this `position=` bound to `seq is not None` (the #9190 form)?"""
-    return isinstance(value, ast.Compare) and ast.unparse(value) == "seq is not None"
+#: `position=` spellings that write layer 1 from a number that EXISTS.
+#: `seq is not None` — the journal's own ordinal (#9190). The allocator arm
+#: (#12894) is checked separately because it is only honest when the SAME call
+#: binds `allocate=`: `position=True if allocate else …` with no `allocate`
+#: argument is an invented number wearing the arm's clothes.
+_POSITION_FROM_ORDINAL = "seq is not None"
+_POSITION_FROM_ALLOCATOR = "True if allocate else seq is not None"
+
+
+def _is_position_from_ordinal(value: ast.expr | None,
+                              *, bound: dict[str, ast.expr] | None = None) -> bool:
+    """Is this `position=` bound to a position the caller did not invent?
+
+    See :data:`_POSITION_FROM_ORDINAL` / :data:`_POSITION_FROM_ALLOCATOR`. The
+    allocator form requires `allocate=` to be bound to the door's own parameter,
+    so the arm cannot be claimed by a body that never receives it."""
+    if value is None:
+        return False
+    text = ast.unparse(value)
+    if text == _POSITION_FROM_ORDINAL:
+        return True
+    if text != _POSITION_FROM_ALLOCATOR:
+        return False
+    allocate = (bound or {}).get("allocate")
+    return isinstance(allocate, ast.Name) and allocate.id == "allocate"
 
 
 #: The `first_seq=` forms that genuinely USE the append's ordinal. An

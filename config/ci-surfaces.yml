@@ -2254,6 +2254,17 @@ surfaces:
   # input that falls through to it (`record_writer.py`, `log.py`, the wiring
   # tool) and this one is load-bearing for the `__main__.py` diff. Pinned by
   # `tests/test_ci_selection.py::test_9078_guard_runs_on_a_main_only_diff`.
+  # #12894 stage C: the ordinal allocator. DB-FREE here (the falsifiers that need
+  # a server are in the `_live` sibling below); `core` because BOTH subjects are
+  # new files with no `SOURCE_PATTERNS` entry — `tortoise/record_allocator.py` and
+  # the migration that creates `public.record_cursor` — so a diff to the
+  # allocation, the seed or the counter's policy falls to the `core` fallback
+  # (`--changed-files tortoise/record_allocator.py` -> `['core']`, measured).
+  # Unregistered until #12894's review, which `ci_selection.py --integrity`
+  # reported as MANIFEST DRIFT: the file collected NOWHERE, so a lane could break
+  # the seed and merge with every pin in it never run.
+  - test_12894_record_cursor.py
+  - test_12894_record_cursor_live.py
   - test_9078_record_written_by_production_path.py
   # #9192: DUAL-REGISTERED with `core` (below), for exactly the #2969 reason
   # above. `tortoise/mcp_auth.py` IS a `SOURCE_PATTERNS["api"]` entry, so a

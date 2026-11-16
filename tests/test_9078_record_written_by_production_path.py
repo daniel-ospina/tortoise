@@ -350,6 +350,16 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # never had it is a no-op.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261110000001_record_point_retire_as_of_11827.sql", None),
+    # #12894 stage C — `public.record_cursor`, the ordinal ALLOCATOR. It must be
+    # re-applied for the same reason the tenancy file is: a container migrated by
+    # an older tree carries `journal_event` and takes the shortcut, so the armed
+    # leg would write into a database with no counter table (`42P01`) while this
+    # suite read green. LAST, because it GRANTs to `tortoise_record_app` and
+    # `RAISE EXCEPTION`s when that role is absent — the order is the dependency.
+    # Re-apply safe: CREATE TABLE IF NOT EXISTS, DROP POLICY IF EXISTS before
+    # every CREATE POLICY.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261116000001_record_cursor_allocator.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
@@ -1004,7 +1014,8 @@ def test_the_live_door_rule_fires_when_the_ordinal_is_dropped(wiring):
     module, _, _ = wiring
     source = (
         "from tortoise import record_writer\n"
-        "def write_live_record(record, *, durable=False, seq=None):\n"
+        "def write_live_record(record, *, durable=False, seq=None, "
+        "allocate=False):\n"
         "    return record_writer.write_records([record], org_id='o', "
         "graph_id='g', %s)\n"
     )
@@ -1017,6 +1028,22 @@ def test_the_live_door_rule_fires_when_the_ordinal_is_dropped(wiring):
         "read the same door both ways")
     problems = module.live_door_writes_the_journals_position(source % good)
     assert problems == [], (good, problems)
+
+    # RE-DERIVED for #12894: there is a SECOND honest source of a position — the
+    # record's own allocator — and the gate must accept it exactly when the same
+    # call binds `allocate=`. Accepting the expression ALONE would let a body
+    # that never receives `allocate` write `position=True` and invent a number.
+    allocator = ("position=True if allocate else seq is not None, "
+                 "first_seq=seq if seq is not None else 1, allocate=allocate")
+    assert module.live_door_writes_the_journals_position(
+        source % allocator) == [], (
+        "the gate rejects the allocator arm — the honest #12894 spelling")
+    unbound = ("position=True if allocate else seq is not None, "
+               "first_seq=seq if seq is not None else 1")
+    fired = module.live_door_writes_the_journals_position(source % unbound)
+    assert fired and "position=" in fired[0], (
+        "the gate accepts an allocator-shaped `position=` from a call that "
+        f"never binds `allocate=` — an invented number: {fired}")
 
     for spelling, why, names in (
         ("position=False, first_seq=seq", "the pre-#9190 deferral", "position="),

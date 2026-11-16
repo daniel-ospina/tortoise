@@ -637,7 +637,14 @@ def test_the_migration_covers_every_record_table() -> None:
     module's own tuple, so the NEXT record table (#9555's) cannot arrive
     unexplained.
     """
-    text = _migration_text(TENANCY_MIGRATION.name)
+    # ⛔ RE-DERIVED (#12894): the census used to read the TENANCY file alone, so
+    # a table whose grants and policy live in its OWN migration was invisible —
+    # and `record_cursor` (the ordinal allocator) is exactly that shape: it must
+    # be re-applyable independently of the tenancy file, and the tenancy file is
+    # append-only history. The union of the record migrations is the same
+    # registry the rest of the record reads (`_record_migration_text`), so a NEW
+    # table cannot arrive unexplained by being declared in a new file.
+    text = _record_migration_text()
 
     # #9600 review cycle 1 (P2): this half used to test
     # `f"ON public.{t}" not in text` — and EVERY table also carries
@@ -655,14 +662,45 @@ def test_the_migration_covers_every_record_table() -> None:
     # narrow grant in BOTH directions (present here, absent the wider one) means
     # a "make the grants uniform" tidy-up reddens rather than silently widening
     # the boundary.
-    _APPEND_ONLY = "journal_event"
-    _WRITE_PRIVS = "SELECT, INSERT, UPDATE, DELETE"
-    _NARROW_PRIVS = "SELECT, INSERT"
+    # #12894 RE-DERIVED THE CLASSES. There are now THREE grant shapes, each with
+    # a mechanical reason, so the census states the REASON per table instead of
+    # a binary "append-only or everything":
+    #
+    #   `journal_event`  SELECT, INSERT            — append-only by trigger, and
+    #                                                the trigger's one escape is
+    #                                                a GUC any role may set, so a
+    #                                                DELETE grant hands the
+    #                                                boundary role the erasure
+    #                                                path it is bounded by.
+    #   `record_cursor`  SELECT, INSERT, UPDATE    — the ALLOCATOR: an allocator
+    #                                                that cannot UPDATE cannot
+    #                                                allocate. DELETE stays
+    #                                                withheld: the counter is
+    #                                                never erased per row, it goes
+    #                                                with the graph via the FK.
+    #   everything else  SELECT, INSERT, UPDATE, DELETE
+    _WRITE_PRIVS = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"})
+    _NARROW = {
+        "journal_event": frozenset({"SELECT", "INSERT"}),
+        "record_cursor": frozenset({"SELECT", "INSERT", "UPDATE"}),
+    }
+    granted: dict[str, set[str]] = {t: set() for t in rp.THE_RECORD_TABLES}
+    for privileges, table, grantees in re.findall(
+            r"GRANT\s+([A-Za-z][A-Za-z,\s]*?)\s+ON\s+(?:TABLE\s+)?"
+            r"(?:public\s*\.\s*)?\"?(\w+)\"?\s+TO\s+([^;]+);",
+            text, re.IGNORECASE):
+        if "tortoise_record_app" not in grantees or table not in granted:
+            continue
+        granted[table] |= {word.strip().upper()
+                           for word in privileges.split(",") if word.strip()}
+
     missing_grants = [
         t for t in rp.THE_RECORD_TABLES
-        if not re.search(
-            rf"GRANT\s+{_NARROW_PRIVS if t == _APPEND_ONLY else _WRITE_PRIVS}"
-            rf"\s+ON\s+public\.{re.escape(t)}\s+TO\s+tortoise_record_app\s*;", text)
+        if not _NARROW.get(t, _WRITE_PRIVS) <= granted[t]
+    ]
+    over_granted = [
+        t for t, allowed in _NARROW.items()
+        if "DELETE" in granted[t] or not granted[t] <= allowed
     ]
     missing_policies = [
         t for t in rp.THE_RECORD_TABLES
@@ -670,17 +708,17 @@ def test_the_migration_covers_every_record_table() -> None:
     ]
 
     assert not missing_grants, (
-        f"the tenancy migration grants the app role no privilege on {missing_grants}"
+        f"the record migrations grant the app role no privilege on "
+        f"{missing_grants} (granted: "
+        f"{ {t: sorted(granted[t]) for t in missing_grants} })"
     )
-    assert not re.search(
-        rf"GRANT\s+{_WRITE_PRIVS}\s+ON\s+public\.{_APPEND_ONLY}\s+"
-        rf"TO\s+tortoise_record_app\s*;", text), (
-        f"{_APPEND_ONLY} is granted UPDATE/DELETE — the append-only trigger's "
-        "one escape is a GUC any role may set, so that grant hands the boundary "
-        "role the erasure path it is supposed to be bounded by"
+    assert not over_granted, (
+        f"{over_granted} carry a privilege their class withholds — for "
+        "`journal_event` that is the append-only trigger's erasure path, for "
+        "`record_cursor` it is DELETE on the counter"
     )
     assert not missing_policies, (
-        f"the tenancy migration adds no tenant policy for {missing_policies} — "
+        f"the record migrations add no tenant policy for {missing_policies} — "
         "those tables' RLS state is unexplained by the recorded decision"
     )
 
@@ -739,7 +777,7 @@ def test_every_app_policy_binds_reads_and_writes_to_the_same_guc() -> None:
     and write halves of the boundary from drifting into different definitions
     of "this tenant".
     """
-    text = _migration_text(TENANCY_MIGRATION.name)
+    text = _record_migration_text()
     # One block per policy, up to its terminating `;` — a clause-level regex
     # cannot be used here because the predicate itself contains parentheses
     # (`current_setting(...)`).
@@ -750,14 +788,33 @@ def test_every_app_policy_binds_reads_and_writes_to_the_same_guc() -> None:
     )
     predicate = f"org_id = current_setting('{rp.TENANT_GUC}', true)"
 
-    assert len(blocks) == len(rp.THE_RECORD_TABLES), (
-        f"{len(blocks)} app policies for {len(rp.THE_RECORD_TABLES)} record tables"
-    )
+    # ⛔ PER TABLE, NOT A COUNT (#12894). The source is now the UNION of the
+    # record migrations, and a table may legitimately be policied in more than
+    # one of them (`session_narrative` is: its creation file and the tenancy
+    # file both declare it), so `len(blocks) == len(THE_RECORD_TABLES)` counted
+    # DECLARATIONS, not tables — it was 12 for 11 tables on the tree this was
+    # re-derived on. What must be true is that every table HAS a policy and every
+    # policy binds both halves to the same predicate.
+    by_table: dict[str, list[tuple[str, str]]] = {}
     for name, table, body in blocks:
-        assert f"USING ({predicate})" in body, f"{name} ({table}): USING is not the tenant predicate"
-        assert f"WITH CHECK ({predicate})" in body, (
-            f"{name} ({table}): WITH CHECK is missing or uses a different predicate"
-        )
+        by_table.setdefault(table, []).append((name, body))
+
+    uncovered = [t for t in rp.THE_RECORD_TABLES if t not in by_table]
+    assert not uncovered, (
+        f"no `*_app_tenant` policy for {uncovered} — those tables' RLS state is "
+        "unexplained by the recorded decision"
+    )
+    assert set(by_table) == set(rp.THE_RECORD_TABLES), (
+        f"a policy exists for {sorted(set(by_table) - set(rp.THE_RECORD_TABLES))}"
+        " which is not a record table"
+    )
+    for table, entries in by_table.items():
+        for name, body in entries:
+            assert f"USING ({predicate})" in body, (
+                f"{name} ({table}): USING is not the tenant predicate")
+            assert f"WITH CHECK ({predicate})" in body, (
+                f"{name} ({table}): WITH CHECK is missing or uses a different "
+                f"predicate")
 
 
 def test_the_app_role_is_non_bypass_and_reasserted_on_every_apply() -> None:
