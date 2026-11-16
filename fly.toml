@@ -386,6 +386,20 @@ kill_timeout = 30
   # and disclosed on the capture receipt, never fatal (#5612).
   # NOT a durability claim — see docs/durability-posture.md.
   TORTOISE_EVENT_LOG_BASE_DIR = "/data/events"
+  # ── #12926: the two embedding switches, STATED in the channel that deploys ──
+  # The hosted lane's environment is this `[env]` table (`check-fly-machine-env.py`
+  # reads the RUNNING machine's `config.env` against it), so an omitted switch is
+  # an OFF switch: `embed_gate_enabled()` is off when unset while `value_gate`
+  # defaults ON — opposite directions, recorded in both gate modules (`#11445`).
+  # Changing either default is a reopen of `#11445`, not a fix here.
+  # ⚠️ Declared bound: a Fly SECRET of the same name SHADOWS `[env]` and is
+  # invisible to every offline reader, so these two are not marked
+  # `fly-toml-env` in `.github/scripts/fly-managed-secrets.txt` (which is what
+  # would make a shadowing secret fail the drift gate) — that is a separate
+  # decision, following `TORTOISE_EVENT_LOG_BASE_DIR`'s undeclared precedent.
+  # What DOES refuse an omission is `tools/embed_switch_gate.py` (python-ci.yml).
+  TORTOISE_VALUE_GATE = "1"
+  TORTOISE_EMBED_GATE = "1"
   # Hosted backups (#305) — set via fly secrets (deploy workflow syncs from GitHub)
   TORTOISE_BACKUP_KEY = ""
   R2_ACCOUNT_ID = ""

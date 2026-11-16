@@ -28,6 +28,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -175,10 +176,61 @@ def _custom_python3(bindir: Path, *, stdout: str = "", stderr: str = "",
     return shim
 
 
+#: The bound on ONE run of the shipped hook.
+#:
+#: 60 s is the hook's OWN bound, not a test-harness convenience: the install
+#: snippet in ``session-start.sh`` sets the Claude Code SessionStart `timeout`
+#: to 60 so a hung relay cannot stall a session.  For headroom, use the envelope
+#: that same header documents — a project bound of 15 s API wait + 3.40 s
+#: measured cold start, ~18.4 s — so 60 s is ~3.3x it.  ⛔ Do NOT quote
+#: 60/0.25 = 240x: 0.25 s is the MOCKED path this file drives, not the shipped
+#: hook's cost, and a ratio of that shape was retracted once already because
+#: the hook's own header says "no SessionStart measurement ever backed that
+#: figure".  A hook that cannot finish inside 60 s is outside its shipped
+#: contract, and this harness must say THAT, attributably, at 60 s, instead of
+#: letting it surface later as an unnamed per-test timeout.
+_HOOK_TIMEOUT_S = 60.0
+
+
+def _kill_hook_tree(proc: subprocess.Popen) -> str:
+    """SIGKILL the hook's whole process GROUP (`start_new_session` makes its
+    pid the group id), then reap it.  Returns a phrase describing what actually
+    happened, for the failure message to splice in — the message must not claim
+    a kill that was suppressed.
+
+    The group, not the child: the hook's three `nohup … session drain …
+    >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:846`, `:854`) are
+    fire-and-forget by design — they are meant to outlive the hook — so a bound
+    that reaps only bash leaves them running past the test that spawned them.
+    ⛔ That is `nohup`-detached and outliving; the install-probe beacon is NOT
+    an example of it. That one is a plain `_run_probe >/dev/null 2>&1 &`
+    (`:786`) whose outcome is the payload, so bash `wait`s it in the foreground
+    (`:801`) and it cannot outlive the hook at all — the script says so itself
+    at `:767`.  Both failures are absorbed on purpose —
+    ``ProcessLookupError`` when the group is already gone, ``PermissionError``
+    on macOS when only zombies remain — because a cleanup error must never
+    replace the assertion it is cleaning up after.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+        killed = "its whole process group was SIGKILLed"
+    except ProcessLookupError:
+        killed = "its process group was already gone"
+    except PermissionError:
+        killed = ("the SIGKILL on its process group was refused (EPERM) — "
+                  "anything it left behind may still be running")
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        killed += ", but the hook itself could not be reaped within 10 s"
+    return killed
+
+
 def _run_hook(home: Path, *, path: str, src: Path | None = None,
               hook: Path | None = None,
               cwd: Path | None = None,
-              extra_env: dict[str, str] | None = None
+              extra_env: dict[str, str] | None = None,
+              timeout: float = _HOOK_TIMEOUT_S,
               ) -> subprocess.CompletedProcess:
     """Drive the REAL shipped hook with a hermetic env.
 
@@ -189,17 +241,85 @@ def _run_hook(home: Path, *, path: str, src: Path | None = None,
     influenced surface.  ``extra_env`` lets a test supply ``PYTHONPATH`` so the
     installed-package fallback can import ``tortoise`` even when no module dir
     resolves (#5838's both-causes case).
+
+    The child's streams are FILES, not pipes, and the wait is on the DIRECT
+    CHILD only, with the hook's own 60 s bound enforced here and reported HERE.
+    Two properties follow, and they are what this shape is for:
+
+    1. The harness's wall time is the HOOK's wall time.  A pipe-based capture
+       (`subprocess.run(..., capture_output=True)`, what this used to be)
+       returns on EOF on the pipes, so ANY process left holding them — today's
+       hook redirects both streams on all four of its `&` dispatches, so it
+       does not, but a seam that forgets to is one edit away — would silently
+       become the thing the test waits for.  A file descriptor cannot be
+       waited on, so the class is gone rather than argued about
+       (`test_the_hook_runner_returns_on_the_hook_not_on_what_it_left_`
+       `behind`).
+    2. A hang is NAMED.  Before this, a hook that did not return produced no
+       assertion, no output and no cause: `test_a_capture_failure_breadcrumb_
+       reaches_the_agent` redded shard `test (c)` on main 792269c931 as
+       `Failed: Timeout (>300.0s) from pytest-timeout` with the stack inside
+       this function's `communicate()`, while passing 3/3 on that same head and
+       3/3 on main, with the hook itself measuring 0.25 s.  The mechanism of
+       that one red is NOT established (see #12993): the old `timeout=120`
+       should have raised at 120 s, so the 300 s per-test alarm firing with the
+       stack still in `communicate` is not explained by a slow child, and the
+       one hypothesis it first suggested — background children holding the
+       pipes — was measured and REFUTED (a 20 s backgrounded `session drain`
+       behind the real hook: pipe capture returns in 0.24 s).  What this change
+       can promise is the part the log could not give: 60 s, the hook's name,
+       and the hook's own output.
+
+    ⛔ The SUCCESS path deliberately does NOT kill the process group: the
+    hook's `nohup … session drain` child is *supposed* to outlive the hook, and
+    killing it would make the harness unrepresentative.  Two consequences,
+    stated so they are not discovered as surprises: a child the hook leaves
+    behind survives the test (one orphan per call, bounded by the child's own
+    work), and bytes such a child writes to the hook's stdout AFTER bash exits
+    are not captured — under the "forgot the redirection" seam above, a test
+    asserting `stdout == ""` could pass on a race rather than red.  No current
+    dispatch writes after exit (all four redirect both streams).
     """
     (home / "tmp").mkdir(parents=True, exist_ok=True)
+    #: A dedicated sub-directory, NOT the home root: it keeps the harness's own
+    #: files identifiable, so a test that ever wants to enumerate the hook's
+    #: state tree can exclude them by NAME.  (Nothing enumerates `home` today —
+    #: no `iterdir`/`glob`/`rglob` in this file — so this is a choice for the
+    #: next test, not a claim about the current ones, and putting the files in
+    #: `home` itself would have been the wrong way round.)
+    io_dir = home / ".hook-io"
+    io_dir.mkdir(parents=True, exist_ok=True)
+    out_path = io_dir / "stdout"
+    err_path = io_dir / "stderr"
     env = {"HOME": str(home), "PATH": path, "TMPDIR": str(home / "tmp")}
     if src is not None:
         env["TORTOISE_SRC_DIR"] = str(src)
     if extra_env:
         env.update(extra_env)
-    return subprocess.run(
-        ["/bin/bash", str(hook or SESSION_START)], input="",
-        capture_output=True, text=True, env=env, timeout=120,
-        cwd=str(cwd) if cwd is not None else None)
+    argv = ["/bin/bash", str(hook or SESSION_START)]
+    killed = ""
+    with open(out_path, "wb") as out, open(err_path, "wb") as err:
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env,
+            cwd=str(cwd) if cwd is not None else None,
+            # Its OWN session, so a timeout can reach whatever the hook left
+            # behind (see `_kill_hook_tree`).
+            start_new_session=True)
+        try:
+            returncode: int | None = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            killed = _kill_hook_tree(proc)
+            returncode = None
+    stdout = out_path.read_text(encoding="utf-8", errors="replace")
+    stderr = err_path.read_text(encoding="utf-8", errors="replace")
+    if returncode is None:
+        raise AssertionError(
+            f"the shipped hook {argv[-1]} did not finish within {timeout:g}s "
+            f"(its own SessionStart bound is 60 s, ~3.3x the ~18.4 s envelope "
+            f"the hook documents), so this is a hung hook or a runner too slow "
+            f"to run it — NOT an assertion about the payload: {killed}. "
+            f"stdout={stdout!r} stderr={stderr!r}")
+    return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
 
 def _fields(stdout: str) -> dict[str, str]:
@@ -1782,3 +1902,101 @@ def test_the_vendor_phrasing_constraint_is_recorded_in_the_code(tmp_path):
                        ("capture_breadcrumb.py", module)):
         assert re.search(r"prompt-injection", text), name
         assert re.search(r"imperative", text, re.IGNORECASE), name
+
+
+# ── the harness's own contract (#12993) ──────────────────────────────────
+
+def test_the_hook_runner_returns_on_the_hook_not_on_what_it_left_behind(
+        tmp_path):
+    """A HARNESS property, not a reproduction of the #12993 red.
+
+    ``_run_hook`` must return when the HOOK returns.  It used to capture with
+    pipes (`subprocess.run(..., capture_output=True)`), which returns on EOF on
+    those pipes — so any process left holding them becomes the thing the test
+    waits for, and the wait is unobservable from the assertions.
+
+    ⛔ The shipped hook does NOT do that today: all four of its `&` dispatches
+    (`_run_probe`, the three `session drain` arms in
+    `tortoise/claude-hooks/session-start.sh`) redirect both streams to
+    /dev/null.  Measured, so this test is not claiming otherwise: with a mock
+    `tortoise` whose `session drain` sleeps 20 s, the OLD pipe capture returns
+    in **0.24 s**.  That measurement is why this test is framed as a harness
+    property — it pins that one forgotten redirection in a future seam cannot
+    silently become the test's wall clock, which is the only claim the evidence
+    supports.
+
+    Mutation: capture with pipes — `subprocess.run(argv, capture_output=True,
+    timeout=…)` instead of `stdout=`/`stderr=` files — and the runner waits
+    this fake hook's full 30 s background `sleep`, so `elapsed` REDs while the
+    payload assertion still passes."""
+    home = tmp_path / "home"
+    home.mkdir()
+    hook = tmp_path / "a-hook-that-leaves-a-child-behind.sh"
+    hook.write_text(
+        "#!/bin/bash\n"
+        "# The payload the harness must return, then a child holding the\n"
+        "# descriptor it inherited — the shape the real hook avoids today.\n"
+        "( sleep 30 ) &\n"
+        'echo "code:     capture-failure"\n'
+        "exit 0\n",
+        encoding="utf-8")
+    hook.chmod(0o755)
+
+    started = time.monotonic()
+    proc = _run_hook(home, path="/usr/bin:/bin", hook=hook)
+    elapsed = time.monotonic() - started
+
+    assert proc.returncode == 0, proc.stderr
+    assert "code:     capture-failure" in proc.stdout, proc.stdout
+    assert elapsed < 15, (
+        f"the runner took {elapsed:.1f}s for a hook that exited immediately and "
+        f"left a 30 s child behind: it is waiting on the CHILD's inherited "
+        f"streams, not on the hook — the failure mode that has no assertion "
+        f"behind it (#12993)")
+
+
+def test_a_hook_that_never_returns_is_reported_by_name_at_the_bound(tmp_path):
+    """The other half of the contract: when the hook does not return, the
+    failure names the hook, the bound and the hook's own output — and the
+    timeout path actually runs (no call site passes `timeout=`, so without this
+    test neither `_kill_hook_tree` nor the AssertionError branch executes in
+    the suite).
+
+    A 300 s anonymous per-test timeout is what shard `test (c)` produced on
+    main 792269c931; a reader of that log could not tell a hung hook from a
+    slow runner.  This pins the diagnosable form.
+
+    Mutation: drop the `except subprocess.TimeoutExpired` arm (let
+    `proc.wait` raise), return silently instead of raising, or drop EITHER
+    `os.killpg(...)` or `start_new_session=True` — each REDs.  The last two are
+    why the assertion is on the EXACT success phrase and why the elapsed bound
+    sits below the reap timeout: a kill that does nothing still answers
+    `already gone` (the group id was reaped) and appends `could not be
+    reaped`, so a loose `"SIGKILLed" in message or "reaped" in message` would
+    PASS while the hook's children leaked (measured by review round 2: both
+    mutants were green before this tightening)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    hook = tmp_path / "a-hook-that-hangs.sh"
+    hook.write_text("#!/bin/bash\nsleep 60\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    started = time.monotonic()
+    with pytest.raises(AssertionError) as caught:
+        _run_hook(home, path="/usr/bin:/bin", hook=hook, timeout=2)
+    elapsed = time.monotonic() - started
+
+    message = str(caught.value)
+    assert str(hook) in message, message
+    assert "did not finish within 2s" in message, message
+    # EXACT phrase: the failure suffix ("could not be reaped within 10 s") is
+    # the OTHER outcome, so a substring test on "reaped" passes when the kill
+    # did nothing at all.
+    assert "its whole process group was SIGKILLed" in message, message
+    # Below the 10 s reap timeout: a kill that misses the group pays that reap
+    # in full, so this bound (2 s timeout + reap) still fires early enough to
+    # name the leak rather than accepting it.
+    assert elapsed < 8, (
+        f"the bound took {elapsed:.1f}s to fire for a 2 s bound: the harness is "
+        f"waiting on something other than the hook, or the group kill missed "
+        f"its children and paid the reap timeout")

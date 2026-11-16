@@ -306,7 +306,7 @@ def test_unhandled_handler_logs_a_disconnect_below_error_and_captures_nothing(
     # ⛔ WHAT THIS PIN DOES **NOT** CLAIM (review round 7, P2 — measured): that
     # this line is the production per-abort signal. It is not. The hosted runtime
     # applies uvicorn's `LOGGING_CONFIG`, which configures ONLY the `uvicorn*`
-    # loggers and leaves root at WARNING (`Dockerfile.hosted:153` passes no
+    # loggers and leaves root at WARNING (`Dockerfile.hosted:163` passes no
     # `--log-level`; nothing in `tortoise/` or `entrypoint.sh` sets a level for
     # `tortoise.*`), so `tortoise.api` is effectively WARNING in production and a
     # `.debug()` record is dropped there. The production per-abort signal is
