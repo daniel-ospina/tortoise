@@ -12239,12 +12239,15 @@ def test_no_durations_row_calls_an_unchanged_weight_one_it_does_not_hold():
 #: BOTH arms and the refresh corrected it DOWNWARD against that very sentence. That
 #: is the third spelling in a row that this class has shipped in, so the arm reads
 #: the verb window too: `the WEIGHT is <verb …> to N`. The window is the SENTENCE
-#: (the documented bounds elsewhere in this family), and the copula must still be
-#: PRESENT — `the WEIGHT WAS rounded UP to 3.0` is history and stays silent.
+#: (`[^.;]*?`, no character budget) — cycle 8 fixed an undocumented 120-character
+#: budget here that contradicted this sentence and would have returned `[]` over a
+#: long-but-single-sentence claim, the same invisible-bound defect cycle 5 removed
+#: one arm over. The copula must still be PRESENT — `the WEIGHT WAS rounded UP to
+#: 3.0` is history and stays silent.
 _WEIGHT_IS_CLAIM_RE = re.compile(
     r"\bthe\s+weight\s+is\s+(?P<w1>\d+(?:\.\d+)?)"
     r"|\bDeclared\s+(?P<w2>\d+(?:\.\d+)?)\s*s\b"
-    r"|\bthe\s+weight\s+is\b[^.;]{0,120}?\bto\s+(?P<w3>\d+(?:\.\d+)?)",
+    r"|\bthe\s+weight\s+is\b[^.;]*?\bto\s+(?P<w3>\d+(?:\.\d+)?)",
     re.IGNORECASE)
 
 
@@ -12296,9 +12299,17 @@ def test_the_declared_weight_claim_check_is_not_vacuous():
         # digit follows the verb, not the copula, so `the weight is <N>` misses it.
         "  test_c.py: 0.2  # The WEIGHT is rounded UP to 3.0 on the neighbouring"
         " rows' rule (never correct a weight downward without a CI junit reading).\n"
+        # ⛔ the SENTENCE bound, pinned (#12962 cycle 8): a long single-sentence claim
+        # must still be read. A character budget here would return `[]` over a real
+        # claim, which is the invisible-bound defect this family already paid for once.
+        "  test_f.py: 0.2  # The WEIGHT is, following the neighbouring rows'"
+        " long-standing convention about never correcting a weight downward without a"
+        " CI junit reading that covers the whole file and not merely one collected case"
+        " in it, rounded UP to 3.0.\n"
         "surfaces: []\n")
     assert _durations_rows_declaring_a_weight_they_do_not_hold(stale) == [
-        ("test_a.py", 0.9, 1.4), ("test_b.py", 7.0, 0.9), ("test_c.py", 3.0, 0.2)]
+        ("test_a.py", 0.9, 1.4), ("test_b.py", 7.0, 0.9), ("test_c.py", 3.0, 0.2),
+        ("test_f.py", 3.0, 0.2)]
     legitimate = (
         "durations:\n"
         "  test_a.py: 1.4  # The weight WAS 0.9 from the 2026-11-02 sweep.\n"
