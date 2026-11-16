@@ -796,6 +796,80 @@ def test_a_post_cutover_replay_cannot_add_a_second_position_for_one_record(
         f"vs the door's {written}")
 
 
+def test_a_seeded_graph_is_not_cut_over_and_still_replays_enumerated(
+        schema, tenant, app):
+    """FINDING (fresh-context review, P2): `seeded` is NOT a cut-over, and keying
+    the enumerated-replay refusal on ROW EXISTENCE made it one — leaving such a
+    graph with no writable path at all.
+
+    THE DEAD END, as measured. `seeded` is the mode `seed()` writes and the mode
+    `reopen()` restores a `halted` graph to, and it means *nobody allocates*: the
+    allocation statement carries `AND mode = 'active'`, so `allocate=True`
+    raises `CursorNotActive` on a `seeded` graph. Before this fix the enumerated
+    arm refused it too (any `record_cursor` ROW was treated as cut over), so
+    NOTHING could write a position for that graph — and the refusal recommended
+    two remedies the same change blocked.
+
+    ⛔ THIS IS THE PLAN'S OWN PREDICATE, not a convenience: §A7.5.5 step (0)
+    says *"a row in mode 'allocating' or 'halted' is cut over; a row in
+    'seeded' is NOT"*, and §A7.7's `halted → seeded` transition exists for *"a
+    graph whose counter is to be **discarded** and rebuilt from the journal"* —
+    a discarded counter is exactly the enumerated replay this guard would have
+    refused, so refusing it made the documented rollback a one-way door.
+
+    Non-vacuity: pre-fix this test reds at the `replay` call with
+    `RecordProjectionError` and writes no position row.
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2])
+    seeded = ra.seed(app, org_id=org, graph_id=graph, enumerated_floor=2)
+    app.commit()
+    assert (seeded.seq, seeded.mode) == (2, ra.MODE_SEEDED), (
+        f"the seed did not leave the graph SEEDED at its floor: {seeded}")
+
+    # `allocate=True` cannot run here — that is the other half of the dead end.
+    with pytest.raises(ra.CursorNotActive):
+        rp.replay([RECORD], app, org_id=org, graph_id=graph, allocate=True)
+    app.rollback()
+
+    # …so the enumerated arm is the ONLY one, and it must work.
+    report = rp.replay([RECORD], app, org_id=org, graph_id=graph, start_seq=3)
+    app.commit()
+    assert report.events == 1
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3], (
+        "a `seeded` graph — NOT cut over by the plan's own predicate — refused "
+        f"the only writable arm it has: {[r[0] for r in _journal_rows(schema, org, graph)]}")
+    assert _counter(schema, org, graph) == (2, ra.MODE_SEEDED), (
+        "the enumerated replay moved the counter, which only a seed or an "
+        f"allocation may do: {_counter(schema, org, graph)}")
+
+
+def test_a_halted_graph_IS_cut_over_and_refuses_the_enumerated_arm(
+        schema, tenant, app):
+    """The other side of the same predicate: `halted` IS cut over, so exempting
+    `seeded` must not exempt it.
+
+    A `halted` graph's numbers were CONSUMED. Enumerating over them stores the
+    same record at a second position — the `#9190` defect — and re-arming it is
+    how the same ordinal gets issued twice. So the refusal stays, and the rows
+    stay untouched.
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2, 3])
+    _seed_and_arm(app, org, graph, 3)
+    ra.halt(app, org_id=org, graph_id=graph)
+    app.commit()
+    assert _counter(schema, org, graph) == (3, ra.MODE_HALTED)
+
+    with pytest.raises(rp.RecordProjectionError) as refused:
+        rp.replay([RECORD], app, org_id=org, graph_id=graph, start_seq=9)
+    app.rollback()
+    assert "ENUMERATED replay is REFUSED" in str(refused.value)
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3], (
+        "a `halted` graph's CONSUMED numbers were enumerated over: "
+        f"{[r[0] for r in _journal_rows(schema, org, graph)]}")
+
+
 def test_the_allocated_position_cannot_be_absorbed_at_all(schema, tenant, app):
     """THE ALLOCATED PATH'S ADVANTAGE OVER THE DERIVED ONE, asserted rather than
     claimed — and the reason this lane deletes its own suppression counter.

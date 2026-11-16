@@ -39,6 +39,10 @@ no global `statement_timeout`     `test_the_allocator_imposes_no_global_statemen
 enumerated replay after cutover    `test_a_post_cutover_enumerated_replay_is_refused_not_duplicated`
   ⇒ same record at a 2nd position  (+ live `test_a_post_cutover_replay_cannot_`
                                      `add_a_second_position_for_one_record`)
+`seeded` treated as cut over      `test_a_post_cutover_enumerated_replay_is_refused_not_duplicated`
+  ⇒ a graph with NO writable path   (cases 3/3b: `seeded` allowed, `halted` not)
+the door's token is not the       `test_the_door_speaks_the_counters_vocabulary`
+  counter's name (P3)              `position_collision` vs `duplicate_position`
 ==================================================================================
 """
 
@@ -52,6 +56,7 @@ import pytest
 
 from tortoise import record_allocator as ra
 from tortoise import record_projection as rp
+from tortoise import record_writer as rw
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS = REPO_ROOT / "supabase" / "migrations"
@@ -586,6 +591,34 @@ def test_a_post_cutover_enumerated_replay_is_refused_not_duplicated() -> None:
         "a failed counter read still wrote a position row: "
         f"{unreadable.executed!r}")
 
+    # 3. SEEDED IS NOT CUT OVER, and keying on ROW EXISTENCE made it one
+    #    (fresh-context review, P2). The plan's own predicate (§A7.5.5 step (0))
+    #    is *"a row in mode 'allocating' or 'halted' is cut over; a row in
+    #    'seeded' is NOT"*. It matters because `seeded` is what `seed()` writes
+    #    and what `reopen()` restores a `halted` graph to, and it means "nobody
+    #    allocates" — `ALLOCATION_SQL` matches no row under `AND mode = 'active'`,
+    #    so `allocate=True` refuses `CursorNotActive`. Refusing the enumerated
+    #    arm as well left such a graph with NO writable path at all, which
+    #    defeats the plan's `halted → seeded` transition — the state for a graph
+    #    whose counter is DISCARDED and rebuilt FROM THE JOURNAL, i.e. exactly
+    #    this enumerated replay. Pre-fix this case raised; post-fix it writes.
+    seeded = _CounterConn((0, ra.MODE_SEEDED))
+    report = rp.replay(records, seeded, org_id="o", graph_id="g", start_seq=1)
+    assert report.events == 1
+    assert len(seeded.journal_statements()) == 1, (
+        "a `seeded` graph — not cut over by the plan's own predicate — refused "
+        f"the only writable arm it has: {seeded.executed!r}")
+
+    # 3b. HALTED *IS* cut over and is deliberately NOT exempted: its numbers were
+    #     consumed, and enumerating over them stores the same record at a second
+    #     position — the #9190 defect this guard exists to prevent.
+    halted = _CounterConn((5, ra.MODE_HALTED))
+    with pytest.raises(rp.RecordProjectionError):
+        rp.replay(records, halted, org_id="o", graph_id="g", start_seq=9)
+    assert halted.journal_statements() == [], (
+        "a `halted` graph's CONSUMED numbers were enumerated over: "
+        f"{halted.executed!r}")
+
 
 def test_allocate_and_position_false_is_refused() -> None:
     """An allocated number exists to be CARRIED by a position row. Both flags set
@@ -681,6 +714,45 @@ def test_a_duplicate_position_is_not_retryable() -> None:
         ra.raise_named(_fake_error("23505"), where="the position allocation")
     assert ra.metrics()["duplicate_position"] == 1
     assert ra.metrics()["serialization_failure"] == 0
+
+
+def test_the_door_speaks_the_counters_vocabulary() -> None:
+    """The door's log token IS the allocator's counter name, or the operator
+    cannot join the two (fresh-context review, P3).
+
+    THE DEFECT. `_allocator_refusal_cause` returned `position_collision` for a
+    `PositionCollision` while `record_allocator.metrics()` counted
+    `duplicate_position`, so the WARNING's token matched no key on the surface
+    the door's own docstring tells the operator to consult — and the remedy was
+    reached through `.get(state, <generic fallback>)`, which is a silent miss
+    rather than the gate the docstring claimed. Pre-fix `position_collision` is
+    absent from `metrics()` and BOTH assertions below red.
+
+    ⛔ The lookup stays DEFENSIVE (`.get`) at runtime on purpose: it runs inside
+    the door's failure path, where a `KeyError` would replace the failure being
+    reported. So the invariant is pinned HERE, not enforced by a raise.
+    """
+    counted = set(ra.metrics())
+    for state in rw._ALLOCATOR_REMEDY:
+        assert state in counted, (
+            f"the door can print a remedy for {state!r}, which is not a counter "
+            f"the allocator keeps ({sorted(counted)}) — the token the operator "
+            f"reads in the WARNING cannot be joined to metrics()")
+    for expected, exc in (
+        ("cursor_not_active", ra.CursorNotActive("x")),
+        ("duplicate_position", ra.PositionCollision("x")),
+    ):
+        got = rw._allocator_refusal_cause(exc)
+        assert got == expected, (
+            f"{type(exc).__name__} classifies as {got!r}, not {expected!r} — the "
+            f"door's vocabulary has drifted from the allocator's counters")
+        assert got in counted, (
+            f"the door reports {got!r} for {type(exc).__name__}, which is not a "
+            f"counter the allocator keeps ({sorted(counted)}) — the operator is "
+            f"sent to a token metrics() cannot answer")
+        assert got in rw._ALLOCATOR_REMEDY, (
+            f"{got!r} has no remedy in _ALLOCATOR_REMEDY, so the WARNING falls "
+            f"back to the generic text the docstring says cannot happen")
 
 
 def test_the_allocator_refuses_a_non_read_committed_dsn() -> None:

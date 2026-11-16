@@ -7102,11 +7102,29 @@ def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
     of the same kind, not a new exception class and not a crash.
 
     ⛔ NARROW BY CONSTRUCTION, and this is what keeps the whole existing suite
-    green: the refusal fires ONLY when the graph has a `record_cursor` row. A
-    graph with no row — every graph before cutover — replays exactly as it does
-    today. `position=False` never reaches here (it writes no position row, so
-    there is no second position to create), and neither does `allocate=True`
-    (the counter issues the number; that arm is the remedy this refusal names).
+    green: the refusal fires ONLY when the graph is CUT OVER, which is the
+    plan's own predicate (§A7.5.5 step (0): *"a row in mode 'allocating' or
+    'halted' is cut over; a row in 'seeded' is NOT"*). A graph with no row —
+    every graph before the cutover — replays exactly as it does today, and so
+    does a `seeded` one. `position=False` never reaches here (it writes no
+    position row, so there is no second position to create), and neither does
+    `allocate=True` (the counter issues the number; that arm is the remedy this
+    refusal names).
+
+    ⛔ KEYING ON ROW EXISTENCE MADE `seeded` A DEAD END (fresh-context review,
+    P2). `seeded` is the state `seed()` creates and the state `reopen()` returns
+    a `halted` graph to, and it means *nobody allocates* — so `ALLOCATION_SQL`'s
+    `AND mode = 'active'` matches no row and `allocate=True` refuses
+    `CursorNotActive`. Refusing the enumerated path too left such a graph with NO
+    writable path at all, and the refusal named two remedies this same change
+    blocks: measured, `seed()` → `(seq=0, mode='seeded')`, then an enumerated
+    `replay` → refused, then `execute_allocation` → `CursorNotActive`, zero
+    journal rows either way. That defeats the plan's own `halted → seeded`
+    transition (§A7.7), whose stated purpose is *"a graph whose counter is to be
+    **discarded** and rebuilt from the journal"* — a discarded counter means the
+    journal's ordinal is authoritative again, which is exactly the enumerated
+    replay this guard would have refused. The `mode` was read and then used only
+    in the message; it is now the DECISION.
 
     ⛔ AND AN ARM THAT CANNOT ASK MUST NOT GO QUIET. One statement — no `seq`
     row and no refusal; a read that FAILS is a refusal that names the migration
@@ -7140,6 +7158,16 @@ def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
         return
     seq, mode = ((row["seq"], row["mode"]) if isinstance(row, Mapping)
                  else (row[0], row[1]))
+    if mode == MODE_SEEDED:
+        # ⛔ NOT CUT OVER, by the plan's own predicate (see the docstring).
+        # `seeded` means nobody allocates yet, so the journal's ordinal is still
+        # authoritative here and there is no allocated number to duplicate — and
+        # `allocate=True` CANNOT run for this graph (`ALLOCATION_SQL` requires
+        # `mode = 'active'`), so refusing this arm as well would leave the graph
+        # with no writable path at all. `halted` is deliberately NOT included:
+        # its numbers were consumed, and re-arming it is how the same ordinal
+        # gets issued twice.
+        return
     raise RecordProjectionError(
         f"an ENUMERATED replay is REFUSED for a graph whose positions are "
         f"ISSUED: public.{RECORD_CURSOR_TABLE} holds (seq={seq!r}, "
@@ -7293,9 +7321,10 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     cursor = scope_connection(conn, org_id)
     # ⛔ AN ENUMERATED REPLAY ASKS FIRST WHETHER THE COUNTER HAS ALREADY ISSUED
     # THIS GRAPH'S POSITIONS (#9190). `position=False` writes no position row and
-    # `allocate=True` IS the allocator's arm, so neither is asked; everything pre-
-    # cutover replays unchanged (no cursor row ⇒ no refusal). See
-    # :func:`_refuse_an_enumerated_replay` for the duplication it closes.
+    # `allocate=True` IS the allocator's arm, so neither is asked; everything not
+    # CUT OVER replays unchanged (no cursor row, or a `seeded` one — the plan's
+    # predicate). See :func:`_refuse_an_enumerated_replay` for the duplication it
+    # closes and for why `seeded` is not a cutover.
     if position and not allocate and records:
         _refuse_an_enumerated_replay(cursor, org_id, graph_id)
     total = len(plan)

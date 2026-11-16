@@ -2332,7 +2332,7 @@ _ALLOCATOR_REMEDY = {
         "the seed and then `arm` (a `seeded` cursor means the cut-over was never "
         "armed; a `halted` one means a defect stopped it and `reopen` is the "
         "resume)"),
-    "position_collision": (
+    "duplicate_position": (
         "the counter issued a position the record already holds — the counter is "
         "BEHIND the table (a restore that bulk-loaded `journal_event` without the "
         "counter). Do NOT re-arm: investigate, then re-seed and reopen"),
@@ -2347,13 +2347,20 @@ def _allocator_refusal_cause(exc: BaseException | None,
     :func:`_journal_collision_cause` is: a message match would fire on a record
     whose payload happens to contain the words. The return value is the metric
     name the allocator counted, which is also the key into
-    :data:`_ALLOCATOR_REMEDY` — one vocabulary, so a new refusal cannot be
-    counted without a remedy being written for it.
+    :data:`_ALLOCATOR_REMEDY` — one vocabulary, pinned by
+    ``tests/test_12894_record_cursor.py::test_the_door_speaks_the_counters_vocabulary``:
+    a refusal cannot enter `kinds` below without naming a token
+    `record_allocator.metrics()` really keeps and `_ALLOCATOR_REMEDY` really
+    answers. The lookup at the call site stays a defensive ``.get`` with a
+    fallback rather than a strict index, because it runs in the door's failure
+    path where a ``KeyError`` would replace the failure being reported — so the
+    invariant is a test, not a raise (fresh-context review, P3: the token WAS
+    `position_collision` while the counter was `duplicate_position`).
     """
     from . import record_allocator as ra
 
     kinds = {ra.CursorNotActive: "cursor_not_active",
-             ra.PositionCollision: "position_collision"}
+             ra.PositionCollision: "duplicate_position"}
     seen = 0
     while exc is not None and seen <= depth:
         for kind, metric in kinds.items():
