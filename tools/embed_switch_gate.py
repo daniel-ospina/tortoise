@@ -173,7 +173,9 @@ could read green over an unrefused omission. Three constraints shaped the wiring
 of this tree rather than a preference: the step is SEPARATE (that job's own pin refuses a shell
 operator on its ``--integrity`` command, ``#2656``/``#5373``, and rightly); ``python-ci.yml`` keeps
 its LINE COUNT, because it is cited by line number in ~20 pinned places, so the two lines the step
-adds are reclaimed from that job's own header comment — reworded, no claim dropped; and the switch
+adds are reclaimed from that job's own header comment — reworded, with its "needs ``pyyaml``
+only" claim REPLACED rather than kept (this step also needs the ``docker`` CLI, and the job's own
+comment now says so); and the switch
 names come from the gates' own modules, which import on a bare interpreter, because that job
 installs only ``pyyaml`` and nothing here may need the installed package.
 
@@ -434,10 +436,13 @@ _SHELL_GROUP_CLOSE = re.compile(r"^\s*\}(?![)}])")
 #: first, so only one frame was popped and the outer, piped group's credits survived — gate
 #: `ok … =1 =1`, exit 0, over a process bash leaves empty. Each closer pops its OWN frame, and the
 #: fork is read from that closer's TAIL: the inner group closes first, the outer one owns the pipe.
-#: The lookbehind mirrors `_SHELL_GROUP_OPEN`'s: brace EXPANSION (`{logs,cache}`) and a
-#: parameter expansion's tail (`${X}`) end with a `}` that closes nothing, and counting it
-#: popped a real group's frame early — the same phantom in the other direction.
-_SHELL_GROUP_BRACE = re.compile(r"(?<![\w${,])\}(?![})])")
+#: The boundary is what makes an EXPANSION brace not group structure (review P1, measured at
+#: `7d046141`): `${X:-}` / `${X#*=}` end with a `}` that closes nothing, and counting it popped a
+#: real group's frame early — `group_open` hit 0 before the group's own closer, the loop broke, the
+#: FORK was never consulted and a subshell's exports were credited (`ok … =1 =1`, exit 0); the
+#: mirror was a false refusal. So a closer must sit at a statement start or after whitespace or a
+#: separator — bash never ends an expansion there.
+_SHELL_GROUP_BRACE = re.compile(r"(?:(?<=[\s;&|])|^)\}(?![})])")
 
 #: A brace GROUP's OPENER: a `{` at a WORD start that is followed by a COMMAND (or ends the
 #: statement), counted on the STRUCTURAL VIEW. Four spellings must NOT count, and each of them was
@@ -458,7 +463,6 @@ _SHELL_GROUP_OPEN = re.compile(r"(?<![\w${])\{(?=[\s$({!\\]|$)")
 #: order `2>&1` matched `2>` and left `&1` looking like a command WORD, so a
 #: redirect-only `exec` still terminated the file.
 _REDIRECT_OPERATOR = re.compile(r"(?:[0-9]*(?:&>>?|>&|<&|>>?\|?|<<<?-?|<>?))")
-
 #: ⛔ A redirection token, stripped from between a group closer and the operator that follows it
 #: (review P2, measured BOTH ways). The first pattern spelled the redirect as
 #: `[0-9]*>>?[0-9]*\s*`, which consumed the fd digit of `N>&M` and left the `&` to be read as the
@@ -541,7 +545,15 @@ def _function_body_braces(raw: str, view: str) -> int:
 #: refused. The repo's own `entrypoint.sh` carries nine such one-liners, so an honest `=1` file
 #: was one appended export from a red. A brace closer may also carry a redirect (`} >&2`).
 _SHELL_CLOSERS = re.compile(
-    r"(?:^|[;&|])\s*(?:fi|done|esac)\b|^\s*\}\s*(?:[0-9]*>&[0-9]+)?\s*$|^\s*\)\s*$"
+    # ⛔ A brace closer may carry ANY redirection, not only `N>&M` (review P1, measured at
+    # `7d046141`): `} 2>/dev/null`, `} >/dev/null` and `} >>/tmp/log 2>&1` matched no closer at
+    # all, so a FUNCTION BODY never closed, `depth`/`fn_body` stayed up, and every later top-level
+    # `export` was REFUSED ("mentions … but does not state a value") — a false refusal that blamed
+    # the value and flipped on the redirect's spelling. A `}` followed by an OPERATOR (`| tee`,
+    # `&`) is still NOT a block closer: that is a group's closer, owned by the frame model.
+    r"(?:^|[;&|])\s*(?:fi|done|esac)\b"
+    r"|^\s*\}\s*(?:(?:[0-9]*&>>?|[0-9]*(?:>&|<&|>>?\|?)|<>?)\s*(?:[0-9-]+|[^\s|&;<>]+)\s*)*$"
+    r"|^\s*\)\s*$"
 )
 #: A heredoc opener: `<<WORD`, `<<-WORD`, and every QUOTING spelling of that word (`<<'WORD'`,
 #: `<<"WORD"`, `<<\WORD`, `<<$'WORD'`). Its BODY is data, not shell (review P1, measured):

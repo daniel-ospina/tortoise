@@ -3203,3 +3203,76 @@ def test_a_real_exec_or_exit_still_terminates_the_file(prefix):
     stated, ambiguous = gate._shell_assignments(script)
     assert stated == {}, f"nothing after {prefix!r} runs, so nothing is stated: {stated}"
     assert set(SWITCHES) <= ambiguous, ambiguous
+
+
+@pytest.mark.parametrize(
+    ("label", "line"),
+    [
+        # ⛔ EXPANSION braces are not group structure (review P1 at `7d046141`, measured): a
+        # parameter expansion's `}` popped the real group's frame early, so `group_open` hit 0
+        # before the group's own closer, the loop broke, the FORK was never consulted, and a
+        # subshell's exports were credited — `ok … =1 =1`, exit 0, over an empty environment.
+        ("a parameter default", "${TORTOISE_DB_URI:-}"),
+        ("a parameter assign-default", "${X:=}"),
+        ("a parameter prefix-strip", "${X#*=}"),
+        # …and a brace EXPANSION's `{` pushed a phantom frame, with the same effect the other way.
+        ("a find-style exec word", "find /tmp -maxdepth 1 -name '*.tmp' -exec rm {} +"),
+        ("a range expansion", "echo {1..5}"),
+    ],
+)
+def test_an_EXPANSION_brace_does_not_disturb_the_group_model(label, line):
+    """Review P1 at `7d046141` (measured, both directions) — the brace BOUNDARY is the test.
+
+    The model matched `{`/`}` as bare characters, so an expansion's brace counted as structure. A
+    measured verdict flipped on it: a piped group whose body merely MENTIONS `${TORTOISE_DB_URI:-}`
+    was CREDITED although bash exports nothing from a subshell, and the same file with that one
+    line deleted was refused — so the expansion was the whole cause. The mirror: `find … -exec rm
+    {} +` pushed a phantom opener, so a later function body's `}` was spent closing it and an
+    honest file was refused.
+
+    A group opener must be followed by WHITESPACE (a brace expansion never is) and a group closer
+    must sit at a statement start or after whitespace/separator (bash never ends an expansion so).
+
+    Mutation-proved: reverting either boundary reds this row — the body then either credits a
+    piped group or leaks the depth into the following statement.
+    """
+    script = (
+        "{\n  export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\n"
+        f"  echo {line}\n}} | tee /tmp/x\nexec \"$@\"\n"
+    )
+    stated, _ambiguous = gate._shell_assignments(script)
+    assert stated == {}, f"{label}: a piped group exports nothing, whatever it mentions: {stated}"
+
+    # …and the same body UNPIPED is credited, so the boundary is not a widening.
+    unpiped = script.replace("} | tee /tmp/x", "}")
+    stated, _ambiguous = gate._shell_assignments(unpiped)
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"{label}: an unforked group runs in the current shell: {stated}"
+    )
+
+
+def test_a_function_body_closer_may_carry_ANY_redirect():
+    """Review P1 at `7d046141` (measured) — `_SHELL_CLOSERS` knew only `N>&M` after a `}`.
+
+    A function body redirected at its closer (`} 2>/dev/null`, `} >/dev/null`, `} >>/tmp/log 2>&1`)
+    matched NO closer, so the body never closed, `depth`/`fn_body` stayed up, and every later
+    top-level `export` was REFUSED with "mentions … but does not state a value this gate can read" —
+    a false refusal whose message blamed the VALUE, and which flipped on the redirect's spelling.
+
+    Mutation-proved: restoring the old `(?:[0-9]*>&[0-9]+)?` arm reds all but the bare row.
+    """
+    for redirect in ("2>/dev/null", ">/dev/null", ">>/tmp/log 2>&1", "2>&1", ""):
+        stated, _ambiguous = gate._shell_assignments(
+            "cleanup() {\n  rm -f /tmp/x\n}"
+            + (f" {redirect}" if redirect else "")
+            + "\nexport TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\nexec \"$@\"\n"
+        )
+        assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+            f"a `}}` carrying `{redirect or 'nothing'}` still closes the body: {stated}"
+        )
+
+    # …and a `}` followed by an OPERATOR is still a GROUP's closer, not a block closer.
+    piped, _ambiguous = gate._shell_assignments(
+        "{ export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; } | tee /tmp/x\n"
+    )
+    assert piped == {}, f"`}} | tee` must stay a fork, not a body close: {piped}"
