@@ -659,9 +659,18 @@ import { pathToFileURL } from "node:url";
 const seam = await import(pathToFileURL(process.env.SEAM_PATH).href);
 const handlers = {};
 const pi = { on: (event, fn) => { handlers[event] = fn; } };
+// #13039 indicator 2: the `volunteer:` health line goes to `console.log` (the
+// channel `tortoise-capture.ts` uses), so stdout is captured rather than mixed
+// into the JSON this driver reports — and the captured lines ARE the grade.
+const health = [];
+console.log = (...args) => { health.push(args.join(" ")); };
 seam.default(pi, { env: process.env, breadcrumbDir: process.env.CRUMB_DIR });
 
 const ctx = { sessionManager: { getSessionId: () => process.env.SESSION_ID } };
+// Pi AWAITS `session_start`; the seam defers its line with `setImmediate`, so
+// the driver yields one tick to collect it.
+handlers.session_start({}, ctx);
+await new Promise((resolve) => setImmediate(resolve));
 const first = await handlers.before_agent_start(
   { messageType: "user", prompt: "How is CI deploy triggered?" }, ctx);
 const second = await handlers.before_agent_start(
@@ -670,6 +679,7 @@ const custom = await handlers.before_agent_start(
   { messageType: "custom", message: { content: "x" } }, ctx);
 process.stdout.write(JSON.stringify({
   events: Object.keys(handlers),
+  health,
   first: first ?? null,
   second: second ?? null,
   custom: custom ?? null,
@@ -750,6 +760,12 @@ import { pathToFileURL } from "node:url";
 const seam = await import(pathToFileURL(process.env.SEAM_PATH).href);
 const handlers = {};
 const pi = { on: (event, fn) => { handlers[event] = fn; } };
+// #13039: the seam prints `volunteer: …` health lines to `console.log` (the
+// channel `tortoise-capture.ts` uses). Captured, not silenced — the lines ARE
+// the grade on the degraded row, and mixing them into stdout would break the
+// JSON below.
+const health = [];
+console.log = (...args) => { health.push(args.join(" ")); };
 // PATH is empty and no `tortoise` command is configured, so the seam has NO CLI
 // candidate and must take the HOSTED transport — the leg this row grades.
 seam.default(pi, {
@@ -767,6 +783,7 @@ const first = await handlers.before_agent_start(
 const second = await handlers.before_agent_start(
   { messageType: "user", prompt: "second hosted turn" }, ctx);
 process.stdout.write(JSON.stringify({
+  health,
   first: first ?? null,
   second: second ?? null,
 }));
@@ -847,7 +864,16 @@ def test_the_installed_extension_injects_the_real_reflex_block(home, tmp_path):
     assert _install(home).ok
     out = _run_driver(home, tmp_path, display=False)
 
-    assert out["events"] == ["before_agent_start"]
+    # ⛔ TWO registrations: the per-turn injection surface, plus the #13039
+    # health line. Asserted as an exact list, so a THIRD handler — another way
+    # to slow or break a turn — cannot appear unnoticed.
+    assert out["events"] == ["session_start", "before_agent_start"]
+    # #13039 indicator 2, graded on the INSTALLED artifact: one `volunteer:`
+    # line per session start, and on this healthy box it is OK — a DEGRADED or
+    # INERT line here would mean the line is not measuring the seam.
+    assert len(out["health"]) == 1, out["health"]
+    assert out["health"][0].startswith("[tortoise-volunteer] volunteer: OK ("), (
+        out["health"][0])
     message = out["first"]["message"]
     assert message["customType"] == "tortoise-volunteer"
     assert message["display"] is False, "silent by default (W4 posture)"
@@ -880,6 +906,77 @@ def test_the_visible_surface_renders_the_surfaced_marker(home, tmp_path):
 
 
 # ── 3. the extension's own behavioural suite ─────────────────────────────
+
+
+def test_the_installed_seam_DISCLOSES_a_degraded_hosted_turn(home, tmp_path):
+    """#13039, graded on the INSTALLED artifact over the REAL transport.
+
+    The measured defect was a hosted `200` carrying an empty block +
+    `degraded_reason: "timeout"`: the client discarded the reason, so the turn
+    injected nothing and the model proceeded as if the graph were empty. The
+    `node --test` rows pin the seam's own logic; this row pins the whole path a
+    user actually has — the installed extension, a real HTTP endpoint answering
+    the degraded shape, the disclosure in the injected message, and the per-box
+    `volunteer:` state left behind for the next session's health line.
+    """
+    from tests.test_platform_seams import _RecordingStub, _stub_server
+
+    node = _node()
+    if not _node_supports_ts(node):
+        if os.environ.get("CI"):
+            pytest.fail("node >= 22.18 is required to load the .ts extension")
+        pytest.skip("node < 22.18 does not enable TypeScript type stripping")
+
+    assert _install(home).ok
+    installed = _ext_dir(home) / VOLUNTEER_EXTENSION.name
+    assert installed.is_file(), "the read seam must be installed before it is graded"
+
+    # The server's own degraded contract (`volunteer.degraded_response`): 200, an
+    # empty block, and the reason. This is the shape the issue measured 4/4.
+    stub = type("PiDegradedStub", (_RecordingStub,), {
+        "body": {"pointers": [], "why": [], "surfaced": [], "block": "",
+                 "degraded_reason": "timeout"},
+        "hits": []})
+    with _stub_server(stub) as url:
+        cfg = home / "degraded-config.json"
+        cfg.write_text(json.dumps({"apiKey": "tt_key", "apiUrl": url,
+                                   "volunteer": {}}))
+        (home / "package.json").write_text('{"type": "module"}\n', encoding="utf-8")
+        driver = tmp_path / "degraded-driver.mjs"
+        driver.write_text(_HOSTED_DRIVER)
+        env = {
+            **_base_env(home),
+            "SEAM_PATH": str(installed),
+            "SEAM_HOME": str(home),
+            "SEAM_CONFIG": str(cfg),
+            "CRUMB_DIR": str(tmp_path / "crumbs"),
+        }
+        proc = subprocess.run([node, str(driver)], env=env, cwd=str(tmp_path),
+                              capture_output=True, text=True, timeout=300)
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert len(stub.hits) == 2, f"both turns must reach the endpoint: {proc.stderr}"
+    out = json.loads(proc.stdout)
+    for turn in ("first", "second"):
+        message = out[turn]["message"]
+        assert message["customType"] == "tortoise-volunteer"
+        assert message["display"] is False, "silent surface stays silent (W4 posture)"
+        assert "Tortoise memory unavailable this turn" in message["content"], (
+            message["content"])
+        assert "degraded_reason=timeout" in message["content"], message["content"]
+        assert "NOT evidence that the graph holds nothing relevant" in message["content"], (
+            "the disclosure must name the inference the silent version invited")
+    # ⛔ BOTH turns disclose: the digest guard is for re-mentioned graph CONTENT,
+    # and a run of degradations is exactly the shape that must keep talking.
+    assert out["first"]["message"]["content"] == out["second"]["message"]["content"]
+    # …and the run reached the box log as a `volunteer: DEGRADED` health line
+    # when it STARTED (indicator 2's transition half, on the real seam).
+    assert any("volunteer: DEGRADED (degraded_reason=timeout, 1 consecutive turn" in line
+               for line in out["health"]), out["health"]
+    # …and the box is left with the evidence the next `session_start` reports.
+    status = json.loads((home / ".tortoise" / "volunteer-status.json").read_text())
+    assert status["degradation"]["reason"] == "timeout", status
+    assert status["degradation"]["count"] == 2, status
 
 
 def test_the_read_seam_suite_runs():

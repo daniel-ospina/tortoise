@@ -1,4 +1,4 @@
-// tortoise-hook-version: 23
+// tortoise-hook-version: 24
 // Tortoise volunteering-memory seam for Pi — the per-turn READ half
 // (epic #2080, issue #2119).
 //
@@ -90,6 +90,44 @@
 // (`describeError`) and one suite row drives a thrown `ENOTFOUND` through it and
 // asserts the cause reaches the trace, so the sentence cannot drift again
 // silently.
+//
+// A DEGRADED INJECTION MUST BE VISIBLE (#13039)
+// --------------------------------------------
+// Fail-open has TWO halves and this file used to carry only one. `POST
+// /v1/context` is deliberately exempt from the transport wait bound
+// (`hosted_api._TRANSPORT_WAIT_BOUND_EXEMPT`) so it can answer `200` with an
+// empty block + `degraded_reason` (`timeout` | `assembly_error` |
+// `breaker_open`) instead of erroring — the right decision. But the client
+// DISCARDED `degraded_reason`, so a degraded turn was byte-identical to "the
+// graph holds nothing relevant", to the model AND to the operator. Measured
+// 2026-11-16 on the hosted production graph: 4/4 sequential turns degraded, and
+// every one of them looked like routine silence (issue #13039).
+//
+// So the seam now does three things, one per indicator of that issue:
+//
+//   1. CARRIES the reason. `parseReflexJson` (CLI leg) and `runReflexHosted`
+//      (hosted leg) both read it into `ReflexResult.degradedReason`, and the
+//      turn injects a DISCLOSURE (`buildDegradedInjection`) — rendered on the
+//      transcript when `display` is true, and carried silently into the model's
+//      context when it is false. A healthy empty block still discloses NOTHING:
+//      routine silence stays silent, which is the distinction the issue exists
+//      to create.
+//   2. RECORDS it. A degraded turn bumps a per-box streak in
+//      `~/.tortoise/volunteer-status.json` (the same state family as the
+//      `install-inert` breadcrumb below), and `session_start` prints ONE
+//      `volunteer:` health line — mirroring `tortoise-capture.ts`'s `capture:`
+//      line — so "no injection" (INERT), "degraded injection" (DEGRADED) and
+//      "nothing to report" (OK) are distinguishable on the box without reading
+//      server logs.
+//   3. Is PINNED by rows in `tortoise-volunteer.test.ts`: a `degraded_reason`
+//      response produces a disclosure on BOTH transports, and a clean-empty one
+//      produces none.
+//
+// ⛔ The reason is SERVER-SUPPLIED TEXT that reaches the model's context, so it
+// is not passed through verbatim: the vocabulary is closed
+// (`volunteer.DEGRADED_REASONS`), a known value is disclosed as itself, and
+// anything else is disclosed as `unknown` (with the raw value traced, never
+// injected). The same rule the reflex's own envelope exists for.
 //
 // W4 USER-EXPOSURE GATE
 // ----------------------
@@ -249,10 +287,56 @@ export interface VolunteerConfig {
   display: boolean;
 }
 
-/** One reflex result: the injectable block, and what the reflex disclosed. */
+/** One reflex result: the injectable block, what the reflex disclosed, and —
+ *  when the served reflex could not complete the read — WHY (#13039).
+ *
+ *  `degradedReason` is OPTIONAL so a `reflexImpl` stub written before this field
+ *  existed keeps compiling, and `null`/absent/`""` all mean "no degradation".
+ *  A non-empty value is the CLOSED vocabulary below or `"unknown"`, never raw
+ *  server text (see `readDegradedReason`). */
 export interface ReflexResult {
   block: string;
   surfaced: string[];
+  degradedReason?: string | null;
+  /** The reason EXACTLY as the server sent it, when it was out of vocabulary —
+   *  for the diagnostic trace only. It is never injected (see
+   *  `readDegradedReason`). Absent when the reason was known. */
+  degradedRaw?: string | null;
+}
+
+/** The reflex's documented degradation vocabulary (`volunteer.DEGRADED_REASONS`:
+ *  `timeout` | `assembly_error` | `breaker_open`). Pinned against the producer
+ *  by `tortoise-volunteer.test.ts`, so a vocabulary move reddens here instead of
+ *  silently turning a real reason into `unknown`. */
+export const DEGRADED_REASONS = ["timeout", "assembly_error", "breaker_open"] as const;
+/** What an out-of-vocabulary reason is disclosed as. Never the raw value. */
+export const DEGRADED_UNKNOWN = "unknown";
+
+/**
+ * Read `degraded_reason` off a reflex response body, as a DISCLOSABLE token.
+ *
+ * ⛔ THE RAW VALUE IS NOT PASSED THROUGH (#13039). It is server-supplied text
+ * that would ride into the model's context inside the injected message, so a
+ * hostile or buggy body must not be able to put prose there. The vocabulary is
+ * closed — the producer declares exactly three values (`volunteer.py`'s
+ * `DEGRADED_REASONS`) — so:
+ *
+ *   * a KNOWN value is returned as itself;
+ *   * any other non-empty string, and any non-string value that is not
+ *     `null`/absent, is `"unknown"` (the caller traces the raw value);
+ *   * `null`, `undefined`, `""` and `false` mean "no degradation": a
+ *     clean-empty response is NOT a degradation (`volunteer.empty_response`),
+ *     and treating it as one would disclose on every healthy quiet turn.
+ */
+export function readDegradedReason(body: unknown): { reason: string; raw: string } | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const value = (body as Record<string, unknown>).degraded_reason;
+  // Absent / explicit null / empty string: the healthy shape. `false` is not a
+  // reason either (it is what a caller sends when it computes "not degraded").
+  if (value === undefined || value === null || value === "" || value === false) return null;
+  const raw = typeof value === "string" ? value : String(value);
+  const known = (DEGRADED_REASONS as readonly string[]).includes(raw);
+  return { reason: known ? raw : DEGRADED_UNKNOWN, raw };
 }
 
 export interface VolunteerDeps {
@@ -272,6 +356,17 @@ export interface VolunteerDeps {
    *  is configured — and that is how a 402 could write an `install-inert`
    *  breadcrumb for a working install without any test noticing (#11584). */
   fetchImpl?: typeof fetch;
+  /** #13039: the per-box status record the `volunteer:` health line reads.
+   *  Defaults to `volunteerStatusPath(env, home)`, which lands under the
+   *  injected `home` — so an ordinary hermetic row never touches the operator's
+   *  `~/.tortoise`. Injected explicitly by a row that wants the path itself. */
+  statusPath?: string;
+  /** #13039: where the `volunteer: …` health line goes. Defaults to
+   *  `console.log` (the channel `tortoise-capture.ts` uses). A test asserts the
+   *  line through this seam instead of patching a global. */
+  logImpl?: (line: string) => void;
+  /** Clock seam, so a status record's timestamps are pinnable. */
+  now?: () => number;
 }
 
 function truthy(value: unknown): boolean {
@@ -766,6 +861,7 @@ export function parseReflexJson(stdout: string): ReflexResult | null {
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;
   const body = data as Record<string, unknown>;
   if (body.status === "error") return null;
+  const degraded = readDegradedReason(body);
   const block = textOf(body.block);
   const surfaced = Array.isArray(body.surfaced)
     ? body.surfaced
@@ -779,7 +875,7 @@ export function parseReflexJson(stdout: string): ReflexResult | null {
         })
         .filter((label) => label !== "")
     : [];
-  return { block, surfaced };
+  return { block, surfaced, degradedReason: degraded ? degraded.reason : null, degradedRaw: degraded && degraded.reason === DEGRADED_UNKNOWN ? degraded.raw : null };
 }
 
 /** One thrown value as a single line, `code`/`name`/`message` only.
@@ -871,6 +967,11 @@ export async function runReflexHosted(
     if (!body || typeof body !== "object") {
       return { result: null, timedOut: false, refused: "unparseable response body" };
     }
+    // #13039: the 200-with-empty-block shape is the SERVER'S OWN degradation
+    // signal (`degraded_reason`), and it is the whole reason this endpoint is
+    // exempt from the transport wait bound. Dropping it here is what made a
+    // degraded turn indistinguishable from an empty graph.
+    const degraded = readDegradedReason(body);
     const block = textOf(body.block) || textOf(body.context);
     const surfaced = Array.isArray(body.surfaced)
       ? body.surfaced
@@ -881,7 +982,17 @@ export async function runReflexHosted(
           )
           .filter((label) => label !== "")
       : [];
-    return { result: { block, surfaced }, timedOut: false, refused: "" };
+    return {
+      result: {
+        block,
+        surfaced,
+        degradedReason: degraded ? degraded.reason : null,
+        degradedRaw:
+          degraded && degraded.reason === DEGRADED_UNKNOWN ? degraded.raw : null,
+      },
+      timedOut: false,
+      refused: "",
+    };
   } catch (error) {
     // Same distinction as the CLI leg: our OWN abort means the endpoint did not
     // answer in budget (slow, not absent), which is not an inert install.
@@ -1021,6 +1132,227 @@ export function recordInstallInert(
   }
 }
 
+// ── The seam's own health (#13039 indicator 2) ──────────────────────────────
+//
+// `tortoise-capture.ts` prints one `capture: …` line per `session_start`, built
+// from a durable per-box record, so an operator can tell a healthy box from a
+// blocked or inert one without reading server logs. This is the read half's
+// counterpart — the seam that had NO on-box state at all, which is why a
+// degraded turn (the measured 4/4 shape in #13039) left nothing behind.
+//
+// The record is deliberately tiny and is written ONLY on a transition (a
+// degradation that starts, changes reason or advances; and the clear back to
+// healthy), never on a healthy turn.
+
+/** The per-box status record, beside the `capture-errors/` slot the inert
+ *  breadcrumb uses — one relocated root (`TORTOISE_IMPORT_RECEIPT_DIR`, or
+ *  `~/.tortoise`) moves both. */
+export const STATUS_FILE = "volunteer-status.json";
+
+/** One run of consecutive degraded turns. */
+export interface VolunteerDegradation {
+  /** The disclosed token — the closed vocabulary, or `unknown`. */
+  reason: string;
+  /** How many CONSECUTIVE degraded turns this run has reached. */
+  count: number;
+  /** ISO instant of the run's FIRST turn. */
+  since: string;
+  /** ISO instant of the run's most recent turn. */
+  last_at: string;
+}
+
+export interface VolunteerStatus {
+  version: number;
+  degradation: VolunteerDegradation | null;
+}
+
+/** Where the status record lives. Same base as `recordInstallInert`. */
+export function volunteerStatusPath(
+  env: Env = typeof process === "undefined" ? {} : process.env,
+  home: string = homedir(),
+): string {
+  const receiptDir = String(env.TORTOISE_IMPORT_RECEIPT_DIR ?? "").trim()
+    ? String(env.TORTOISE_IMPORT_RECEIPT_DIR).trim()
+    : join(home || "/nonexistent", ".tortoise", "import-receipts");
+  return join(receiptDir, "..", STATUS_FILE);
+}
+
+/**
+ * Read the status record, distinguishing ABSENT from UNREADABLE.
+ *
+ * ⛔ An unreadable record is NOT a clean one — the same rule `capture:
+ * UNREADABLE` follows, and for the same reason: a transient `EACCES`/`EMFILE`
+ * read as "nothing recorded" would print `volunteer: OK` over a degradation the
+ * box actually observed, which is a false pass on the surface this line exists
+ * to be. A record we can read but cannot UNDERSTAND is unreadable too: it holds
+ * a verdict this process cannot extract, so silence about it would not be
+ * evidence of health.
+ */
+export function readVolunteerStatus(
+  statusPath: string,
+): { status: VolunteerStatus } | { unreadable: string } {
+  let raw: string;
+  try {
+    raw = readFileSync(statusPath, "utf-8");
+  } catch (error) {
+    const code = (error as { code?: unknown } | undefined)?.code;
+    if (code === "ENOENT") return { status: { version: 1, degradation: null } };
+    return { unreadable: `cannot read ${statusPath}` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { unreadable: `cannot parse ${statusPath}` };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { unreadable: `cannot parse ${statusPath}` };
+  }
+  const record = parsed as Record<string, unknown>;
+  const rawDeg = record.degradation;
+  if (rawDeg === undefined || rawDeg === null) {
+    return { status: { version: 1, degradation: null } };
+  }
+  if (typeof rawDeg !== "object" || Array.isArray(rawDeg)) {
+    return { unreadable: `cannot parse ${statusPath}` };
+  }
+  const deg = rawDeg as Record<string, unknown>;
+  const reason = typeof deg.reason === "string" ? deg.reason : "";
+  const count = typeof deg.count === "number" && Number.isFinite(deg.count) ? deg.count : 0;
+  const since = typeof deg.since === "string" ? deg.since : "";
+  const lastAt = typeof deg.last_at === "string" ? deg.last_at : "";
+  if (!reason || count < 1) return { unreadable: `cannot parse ${statusPath}` };
+  return { status: { version: 1, degradation: { reason, count, since, last_at: lastAt } } };
+}
+
+function writeVolunteerStatus(statusPath: string, status: VolunteerStatus): boolean {
+  try {
+    mkdirSync(join(statusPath, ".."), { recursive: true });
+    writeFileSync(statusPath, `${JSON.stringify(status, null, 2)}\n`, { mode: 0o600 });
+    return true;
+  } catch {
+    // Local bookkeeping must never fail a turn — the disclosure the model and
+    // the transcript already received is the primary record of this turn.
+    return false;
+  }
+}
+
+/**
+ * Advance the degradation streak for one degraded turn — the DURABLE half of
+ * the disclosure.
+ *
+ * A run that repeats the same reason keeps one record and counts up; a
+ * different reason starts a NEW run (the counter is about one failure mode, not
+ * "some failure happened"). Best-effort: an unwritable status path never raises
+ * into a turn.
+ */
+export function recordVolunteerDegradation(
+  statusPath: string,
+  reason: string,
+  now: () => number = Date.now,
+): VolunteerDegradation | undefined {
+  const at = new Date(now()).toISOString();
+  const read = readVolunteerStatus(statusPath);
+  // An UNREADABLE record still gets overwritten: this is the write path, and
+  // refusing to write because the last reader could not parse would leave the
+  // box permanently unreadable. The streak restarts rather than being invented.
+  const prior = "status" in read ? read.status.degradation : null;
+  const next: VolunteerDegradation =
+    prior && prior.reason === reason
+      ? { reason, count: prior.count + 1, since: prior.since || at, last_at: at }
+      : { reason, count: 1, since: at, last_at: at };
+  writeVolunteerStatus(statusPath, { version: 1, degradation: next });
+  return next;
+}
+
+/**
+ * Clear the recorded run because this turn was HEALTHY — a block injected, or a
+ * clean-empty response.
+ *
+ * Writes only when there is something to clear, so a healthy box pays no write
+ * per turn. Returns the run that was cleared (so the caller can report the
+ * RECOVERY once), or `undefined` when nothing was recorded.
+ */
+export function clearVolunteerDegradation(
+  statusPath: string,
+): VolunteerDegradation | undefined {
+  const read = readVolunteerStatus(statusPath);
+  if (!("status" in read)) {
+    // Repair an unparseable record once we have positive evidence of health.
+    writeVolunteerStatus(statusPath, { version: 1, degradation: null });
+    return undefined;
+  }
+  const prior = read.status.degradation;
+  if (!prior) return undefined;
+  writeVolunteerStatus(statusPath, { version: 1, degradation: null });
+  return prior;
+}
+
+export interface VolunteerHealth {
+  state: "unreadable" | "inert" | "degraded" | "ok";
+  line: string;
+}
+
+/**
+ * The one `volunteer: …` line (#13039 indicator 2), mirroring `capture: …`.
+ *
+ * Five facts are separable on this line, and separating them is the point:
+ *
+ *   * `UNREADABLE` — the status record exists but cannot be read/parsed, so an
+ *     `OK` would be a claim with no evidence behind it.
+ *   * `INERT` — nothing can run at all (no CLI resolved AND no hosted key). This
+ *     is the "no injection, ever" case, and it is the ONE class the install
+ *     fixes; the `install-inert` breadcrumb carries the long form.
+ *   * `DEGRADED` — the seam RAN and the reflex reported a degradation. Names the
+ *     reason, the length of the run and when it was last seen, so a run of them
+ *     is observable on the box instead of only in server logs.
+ *   * `OK` — nothing recorded and a transport resolved: "no injection this turn"
+ *     here means routine silence, not a silent failure.
+ *
+ * Precedence is `UNREADABLE` > `INERT` > `DEGRADED` > `OK`. `INERT` outranks a
+ * recorded degradation because it is FRESH evidence from THIS process (the
+ * record may describe a different configuration), and because it subsumes: an
+ * install that cannot run injects nothing at all.
+ */
+export function volunteerHealthLine(
+  cfg: VolunteerConfig,
+  candidates: string[],
+  statusPath: string,
+  opts: { stubReflex?: boolean } = {},
+): VolunteerHealth {
+  const read = readVolunteerStatus(statusPath);
+  if (!("status" in read)) {
+    return { state: "unreadable", line: `volunteer: UNREADABLE (${read.unreadable})` };
+  }
+  if (!opts.stubReflex && !cfg.command && candidates.length === 0 && !cfg.apiKey) {
+    return {
+      state: "inert",
+      line:
+        "volunteer: INERT (no tortoise reflex resolved and no hosted key configured — " +
+        "nothing is injected on any turn; re-run 'tortoise install pi')",
+    };
+  }
+  const degradation = read.status.degradation;
+  if (degradation) {
+    const turns = degradation.count === 1 ? "turn" : "turns";
+    return {
+      state: "degraded",
+      line:
+        `volunteer: DEGRADED (degraded_reason=${degradation.reason}, ` +
+        `${degradation.count} consecutive ${turns} since ${degradation.since}, ` +
+        `last ${degradation.last_at || "unknown"})`,
+    };
+  }
+  const transport = opts.stubReflex
+    ? "stub reflex"
+    : candidates.length
+      ? `reflex ${candidates[0]}`
+      : cfg.command
+        ? `command ${cfg.command}`
+        : `hosted ${cfg.apiUrl}`;
+  return { state: "ok", line: `volunteer: OK (no degradation recorded; ${transport})` };
+}
+
 /**
  * Assemble the injection.
  *
@@ -1069,6 +1401,50 @@ export function buildInjection(
   return { customType: CUSTOM_TYPE, content: `${body}\n\n${marker}`, display: true };
 }
 
+/**
+ * The DISCLOSURE for a degraded turn (#13039) — the other half of failing open.
+ *
+ * A degraded response is `200` + an empty (or partial) block + a
+ * `degraded_reason`. Injected as-is it is INDISTINGUISHABLE from "the graph
+ * holds nothing relevant", which is exactly the defect: the agent then proceeds
+ * as if memory were empty. So the turn carries one line saying which it was.
+ *
+ * Three properties, each load-bearing:
+ *
+ *   * `display` controls RENDERING only — the message enters the model's context
+ *     either way (that is what Pi's `custom_message` does, the same fact
+ *     `buildInjection` documents). Indicator 1 of the issue asks for exactly
+ *     this split: rendered when the surface is visible, carried into the context
+ *     when it is silent.
+ *   * A non-empty `block` is PREPENDED, never dropped: graph content the server
+ *     did send under degradation is still the model's best evidence, and the
+ *     notice then says the block is partial. ``before_agent_start`` carries ONE
+ *     `message`, so the two travel together or one of them is lost.
+ *   * It never claims what the reason means about the INSTALL. A degradation is
+ *     a fact about this turn's read (`timeout`, `assembly_error`,
+ *     `breaker_open`); it is not evidence the seam needs reinstalling — that is
+ *     `inert`, and the two must not be confused in the text the model reads.
+ *
+ * The reason is a closed-vocabulary token (`readDegradedReason`), so this string
+ * cannot carry server prose.
+ */
+export function buildDegradedInjection(
+  reason: string,
+  block: string,
+  display: boolean,
+): { customType: string; content: string; display: boolean } {
+  const token = (DEGRADED_REASONS as readonly string[]).includes(reason)
+    ? reason
+    : DEGRADED_UNKNOWN;
+  const body = block.trim().slice(0, MAX_INJECT_CHARS);
+  const notice = body
+    ? `Tortoise memory degraded this turn (degraded_reason=${token}) — the block above is ` +
+      "best-effort, not a complete read of the graph."
+    : `Tortoise memory unavailable this turn (degraded_reason=${token}) — the read seam ` +
+      "degraded, so an empty memory here is NOT evidence that the graph holds nothing relevant.";
+  return { customType: CUSTOM_TYPE, content: body ? `${body}\n\n${notice}` : notice, display };
+}
+
 /** The run's session id, from the context Pi hands a handler. */
 export function sessionKeyOf(ctx: unknown): string {
   const manager = (ctx as { sessionManager?: { getSessionId?: unknown } } | undefined)
@@ -1090,6 +1466,14 @@ export function sessionKeyOf(ctx: unknown): string {
  *  reinstall something that works. */
 export type ReflexVerdict =
   | { status: "block"; result: ReflexResult }
+  /** The reflex RAN and answered with `degraded_reason` set (#13039): the
+   *  served read could not complete, and the response says so. This is the ONE
+   *  class that is neither silence nor content — it must reach the model as a
+   *  disclosure, and it is a fact about THIS turn, not evidence about the
+   *  install (so it neither latches nor breadcrumbs). `result.block` may be
+   *  empty (the contract's degraded shape) or partial; `result.degradedReason`
+   *  always carries the disclosed token. */
+  | { status: "degraded"; reason: string; result: ReflexResult }
   | { status: "empty" }
   | { status: "timeout"; detail: string }
   /** The reflex or the hosted endpoint was REACHED and refused us (an HTTP
@@ -1167,6 +1551,12 @@ export async function resolveBlock(
       lastError = `${command}: unparseable --json contract`;
       continue;
     }
+    // #13039: a response that says it DEGRADED is neither content nor
+    // silence. It is checked BEFORE the block test, because the contract's
+    // degraded shape is an empty block — the exact shape that used to fall
+    // through to `empty` and inject nothing, silently.
+    const reason = parsed.degradedReason ?? "";
+    if (reason) return { status: "degraded", reason, result: parsed };
     return parsed.block.trim() ? { status: "block", result: parsed } : { status: "empty" };
   }
   if (chain.length) {
@@ -1218,6 +1608,12 @@ export async function resolveBlock(
       status: "refused",
       detail: `POST ${cfg.apiUrl}/v1/context returned no block`,
     };
+  }
+  const hostedReason = hosted.result.degradedReason ?? "";
+  if (hostedReason) {
+    // #13039: the server's `degraded_reason` on a 200 is the signal this whole
+    // issue is about. Same precedence as the CLI leg — BEFORE the block test.
+    return { status: "degraded", reason: hostedReason, result: hosted.result };
   }
   return hosted.result.block.trim()
     ? { status: "block", result: hosted.result }
@@ -1276,6 +1672,39 @@ export default function tortoiseVolunteer(
   const configPath = deps.configPath ?? CONFIG_PATH;
   const home = deps.home ?? homedir();
   const cfg = readVolunteerConfig(env, configPath);
+  // #13039 indicator 2: the per-box record the `volunteer:` health line reads,
+  // and the sink that line is written to. Both are seams for the same reason
+  // `breadcrumbDir` is — a test must never write the operator's state or
+  // assert the operator's console.
+  const statusPath = deps.statusPath ?? volunteerStatusPath(env, home);
+  const now = deps.now ?? Date.now;
+  const logLine =
+    deps.logImpl ??
+    ((line: string): void => {
+      // Pi surfaces extension stdout in its session log — the same channel and
+      // the same `[tortoise-<half>] <line>` shape `tortoise-capture.ts` uses,
+      // so one grep finds both halves of the seam.
+      try {
+        console.log(`[tortoise-volunteer] ${line}`);
+      } catch {
+        // A health line must never be the thing that breaks a turn.
+      }
+    });
+  /** Print the seam's own state once (`volunteer: …`). Never throws. */
+  const logHealth = (): void => {
+    try {
+      logLine(
+        volunteerHealthLine(cfg, reflexCandidates(env, home), statusPath, {
+          // A `reflexImpl` stub IS the transport (tests pin the seam, not the
+          // CLI), so the line must not call a stubbed seam inert — the same
+          // reason `resolveBlock` is never consulted on that path.
+          stubReflex: deps.reflexImpl !== undefined,
+        }).line,
+      );
+    } catch {
+      // The health line is a diagnostic; it may never break a session.
+    }
+  };
   const dedupe = createDedupe();
   // #2120 continuity: the reflex's re-mention suppression reads the block this
   // seam injected LAST TURN, never the session id (#11584 review, P1). See
@@ -1356,8 +1785,29 @@ export default function tortoiseVolunteer(
       trace(`refused: ${verdict.detail}`, env);
       return null;
     }
+    // #13039: neither silence nor content. A degraded result carries the
+    // disclosed reason and falls through to the HANDLER, which turns it into a
+    // disclosure — ONE branch for both the resolver and a `reflexImpl` stub, so
+    // a stub can drive the degraded rows without a second code path.
     return verdict.result;
   };
+
+  // #13039 indicator 2: ONE `volunteer: …` health line per session start,
+  // mirroring `tortoise-capture.ts`'s `capture: …` line — the same moment, the
+  // same channel, so an operator reads both halves of the seam the same way.
+  //
+  // ⛔ NOT ON THE AWAITED TICK: Pi AWAITS this handler
+  // (`await emit("session_start")`), and the line walks PATH to answer
+  // `INERT` vs `OK` (`reflexCandidates` → one `statSync` per PATH entry).
+  // `setImmediate` is what keeps a diagnostic off the startup path — the same
+  // reason `tortoise-capture.ts` defers its own `logHealth()`.
+  //
+  // ⛔ AND IT REPORTS THE SEAM, NOT A TURN. With no turn there is no reflex
+  // result, so the line names (a) whether anything can run at all and (b) the
+  // last recorded degradation run — never an invented "healthy" claim.
+  pi.on("session_start", () => {
+    setImmediate(() => logHealth());
+  });
 
   pi.on("before_agent_start", async (event: unknown, ctx: unknown) => {
     try {
@@ -1376,6 +1826,49 @@ export default function tortoiseVolunteer(
       const sessionKey = sessionKeyOf(ctx);
       const result = await reflex(prompt, sessionKey);
       if (!result) return undefined;
+      const degradedReason = result.degradedReason ?? "";
+      if (degradedReason) {
+        // ⛔ NOT DEDUPED, DELIBERATELY (#13039). `dedupe` is the re-mention
+        // guard for GRAPH CONTENT: the reflex re-surfacing a pointer the model
+        // already saw. A degradation is a fact about THIS TURN, and the
+        // measured shape is a run of identical ones (4/4 in the issue) — so
+        // applying the digest would disclose ONCE and then go silent for the
+        // rest of the session, which is the defect this branch removes.
+        const disclosure = buildDegradedInjection(
+          degradedReason,
+          result.block,
+          cfg.display,
+        );
+        // The durable half (indicator 2): one record per box, and a health line
+        // when the run STARTS, so the box log carries the beginning of an
+        // outage and not just its absence on the next session's start.
+        const streak = recordVolunteerDegradation(statusPath, degradedReason, now);
+        trace(
+          `degraded: degraded_reason=${degradedReason}` +
+            (result.degradedRaw
+              ? ` (out-of-vocabulary value ${JSON.stringify(result.degradedRaw)}, disclosed as "${degradedReason}")`
+              : "") +
+            ` — disclosed ${cfg.display ? "and rendered" : "into the context, silently"}`,
+          env,
+        );
+        if (streak && streak.count === 1) logHealth();
+        // A partial block was still seen by the model, so it is the truth the
+        // next turn's re-mention suppression should carry — same rule as a
+        // healthy injection.
+        if (result.block.trim()) continuity.remember(sessionKey || HARNESS, result.block);
+        return { message: disclosure };
+      }
+      // Positive evidence of health clears a recorded run, and reports the
+      // recovery ONCE — a `DEGRADED` line that never clears is the growing
+      // backlog shape `capture:` refuses to print.
+      const recovered = clearVolunteerDegradation(statusPath);
+      if (recovered) {
+        logLine(
+          `volunteer: RECOVERED (the ${recovered.count}-turn ${recovered.reason} run has ` +
+            "ended; this turn's read completed)",
+        );
+        logHealth();
+      }
       const message = buildInjection(result.block, result.surfaced, cfg.display);
       if (!message) return undefined;
       if (!dedupe(sessionKey || HARNESS, message.content)) return undefined;
