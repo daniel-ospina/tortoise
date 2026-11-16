@@ -11858,6 +11858,35 @@ def test_12549_an_uninterpolate_probe_with_NO_MODEL_holds_the_blank(
     monkeypatch.setattr(probe, "_run_config_resolver", real)
 
 
+def test_12549_the_LIST_spelling_of_environment_is_measured_too(tmp_path, monkeypatch):
+    """`environment: [- FLAG=${MISSING}]` must not become a MEASURED `OFF`.
+
+    ⛔ MEASURED REGRESSION against `main` (`#12902` review, P1): the primary model
+    normalises `environment:` to a MAPPING, but `config --no-interpolate` KEEPS the LIST
+    form the author wrote — so a dict-only reader left the service out of
+    `declarations` and `_compose_blank_is_interpolated` answered "no `$`" about a
+    declaration it had never seen. A gate the resolver could not resolve was published
+    as a measured disarm, with a fabricated "OVERRIDES an inherited value", while the
+    MAP spelling of the identical declaration correctly held `UNMEASURED`.
+
+    ⛔ And the control matters as much as the fix: a LIST-form literal `""` is still a
+    measured `OFF`. Holding every list-form blank would trade a false PASS for a false
+    HOLD on the spelling half this repo's own compose files use.
+    """
+    head = "services:\n  app:\n    image: alpine\n    environment:\n"
+    for body, expected in (
+            ("      - TORTOISE_EMBED_GATE=${MISSING_VAR}\n", "UNMEASURED"),
+            ("      - TORTOISE_EMBED_GATE=${MISSING_VAR:+1}\n", "UNMEASURED"),
+            ("      - TORTOISE_EMBED_GATE=\n", "OFF"),
+    ):
+        (tmp_path / "docker-compose.yml").write_text(head + body, encoding="utf-8")
+        monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["deployment"]["files"] == {"docker-compose.yml": expected}, (
+            f"LIST spelling {body.strip()!r} read "
+            f"{shipped['deployment']['files']}, expected {expected}")
+
+
 def test_12549_a_PROFILED_blank_is_NOT_published_as_a_disarm(tmp_path, monkeypatch):
     """The mirror half: the all-profiles pass never consulted the unset warning.
 

@@ -2609,10 +2609,17 @@ def _run_config_resolver(argv: list[str], *, extra_env: dict[str, str] | None = 
     """Run one config resolver; ``{"ok", "stdout", "stderr", "reason", "argv"}``.
 
     ⛔ ``extra_env`` is the ONLY way a caller may add to the resolver's environment, and
-    it exists for ONE question: *does this key's resolved value lean on a variable the
-    file left unset?* (`_compose_unset_dependent_scopes`). It is added to
+    it is APPLIED here rather than merely accepted (`#12902` review, P2, MEASURED: the
+    body passed `_resolver_env()` only, so a caller that believed it had bound a
+    variable got an answer from the scrubbed environment reported as if bound — a
+    published cause the run did not measure, at the code layer). It is added to
     `_resolver_env`'s allowlist, never to the ambient environment — the discipline that
     keeps a lane's own exported flag out of a shipped default (`#10996`).
+
+    ⛔ NO CALLER PASSES IT TODAY: the per-key unset probe that used it
+    (`_compose_unset_dependent_scopes`) was replaced by `--no-interpolate`
+    (`_compose_blank_declarations`). The parameter is kept only because it is applied
+    correctly now; delete it with its next reader if that stays true.
 
     ⛔ **Three-valued by construction.** A resolver that cannot run (no binary, a
     timeout, a non-zero exit) is `ok: False` WITH the reason from its own stderr —
@@ -2624,11 +2631,14 @@ def _run_config_resolver(argv: list[str], *, extra_env: dict[str, str] | None = 
     progress chatter before its error, and every earlier failure in this module has
     been blamed on the wrong line of a multi-line message.
     """
+    env = _resolver_env()
+    if extra_env:
+        env.update(extra_env)
     try:
         # Fixed argv, no shell (`shell=False` is the default): nothing here is
         # caller-supplied text, so there is no injection surface to guard.
         proc = subprocess.run(
-            argv, cwd=str(REPO_ROOT), env=_resolver_env(), capture_output=True,
+            argv, cwd=str(REPO_ROOT), env=env, capture_output=True,
             text=True, timeout=RESOLVER_TIMEOUT_S, check=False)
     except FileNotFoundError:
         return {"ok": False, "stdout": "", "stderr": "", "argv": argv,
@@ -2732,8 +2742,24 @@ def _compose_blank_declarations(argv: list[str], flag: str) -> dict[str, str] | 
         if not isinstance(service, dict):
             continue
         env = service.get("environment") or {}
-        if isinstance(env, dict) and isinstance(env.get(flag), str):
-            declarations[name] = env[flag]
+        # ⛔ BOTH SPELLINGS of `environment:` (`#12902` review, P1, MEASURED): the
+        # primary model normalises to a MAPPING, but `config --no-interpolate` KEEPS
+        # the LIST form the author wrote — `[TORTOISE_EMBED_GATE=${MISSING_VAR}]`.
+        # Reading the dict form only left the service absent from `declarations`, and
+        # `_compose_blank_is_interpolated` then answered "no `$`" about a declaration it
+        # never saw: a gate the resolver could not resolve was published as a MEASURED
+        # `OFF` with a fabricated "OVERRIDES an inherited value" — a REGRESSION against
+        # `main`, which held these files UNMEASURED, and a false PASS on the blocking
+        # axis.
+        for entry in ([env] if isinstance(env, dict) else
+                      env if isinstance(env, list) else []):
+            if isinstance(env, dict):
+                key, value = flag, env.get(flag)
+            else:
+                key, _, value = str(entry).partition("=")
+                key = key.strip()
+            if key == flag and isinstance(value, str):
+                declarations[name] = value
     return declarations
 
 
@@ -2745,6 +2771,12 @@ def _compose_blank_is_interpolated(declarations: dict[str, str] | None,
     tell" is held UNRESOLVED, never collapsed into a measured `OFF`.
     """
     if declarations is None:
+        return True
+    # ⛔ A blank scope with NO declaration read is not a literal — it is UNANSWERED.
+    # The blank arrived from a shape this pass did not read (`env_file:` resolves to
+    # `environment: null` in the uninterpolated model), and answering `False` turns
+    # "I could not read it" into a measured disarm (`#12902` review, P1).
+    if name not in declarations:
         return True
     return "$" in (declarations.get(name) or "")
 
@@ -2832,8 +2864,17 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
                  "build_refs": [], "entrypoints": [], "warnings": []}
     if not run["ok"]:
         return out
+    # ⛔ An EMPTY stdout is not a model (`#12902` review, P2, MEASURED): with
+    # `or "{}"` it parsed into `services == {}` and the file was published as a
+    # MEASURED `NOT_ARMED`. An empty project is a legitimate answer, but it is the one
+    # that still carries a model (`{"name": …, "services": {}}`), so "printed nothing"
+    # and "declares nothing" are distinguishable and must not be collapsed.
+    if not (run["stdout"] or "").strip():
+        out["reason"] = (f"`{COMPOSE_RESOLVER}` exited 0 but printed no model, so this "
+                        "file could not be measured")
+        return out
     try:
-        model = json.loads(run["stdout"] or "{}")
+        model = json.loads(run["stdout"])
     except json.JSONDecodeError as exc:
         out["reason"] = f"`{COMPOSE_RESOLVER}` printed a model this walk cannot read ({exc})"
         return out
@@ -2999,14 +3040,25 @@ def _compose_profiled_scopes(path: Path, flag: str, is_truthy, *, primary_servic
             "would be invisible here")
         return
     try:
-        model = json.loads(supp["stdout"] or "{}")
+        # ⛔ NOT `or "{}"` (`#12902` review, P2, MEASURED): a model-less success made
+        # `services == {}`, so the loop below did nothing and NO warning was emitted —
+        # and because this pass exists only to BLOCK an arm, skipping it silently
+        # published `ARMED` over a deployment whose profile-gated service runs the gate
+        # off. A FALSE ARM, and the refuse/non-JSON arms already warn; this one did not.
+        model = json.loads(supp["stdout"])
     except json.JSONDecodeError:
         out["warnings"].append(
             f"`{COMPOSE_RESOLVER_ALL_PROFILES}` printed a model this walk cannot read, "
             "so profile-gated services were NOT read")
         return
     services = (model.get("services") or {}) if isinstance(model, dict) else {}
-    if not isinstance(services, dict):
+    # ⛔ An answer with NO MODEL is not an answer here either: the default-set resolve
+    # produced services, so a supplementary model with none contradicts the file, and
+    # this pass may only BLOCK — it must never be skipped into an arm.
+    if not isinstance(services, dict) or not services:
+        out["warnings"].append(
+            f"`{COMPOSE_RESOLVER_ALL_PROFILES}` answered with NO model, so "
+            "profile-gated services were NOT read")
         return
     # ⛔ THE MIRROR of the primary arm, and it was the part this pass never asked: a
     # `FLAG: "${MISSING}"` inside a `profiles:`-gated service resolves to a blank, and
