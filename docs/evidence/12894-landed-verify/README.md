@@ -281,8 +281,10 @@ counting.
 Under the allocator this class **narrows but does not vanish** (plan `§A7.6`/D-28): the allocator never
 recounts, so it survives a seal; the *seed* and the *replay floor* do not. On today's running path —
 enumeration, because V2 — a seal on a graph with **no** `record_cursor` row is exactly the D-28 live
-trigger: the next append returns 1 again and collides with rows 1..N, and that collision is now **loud**
-(guard, §4.1) unless the two records share `event_type` and `recorded_at`. On a **cut-over** graph the
+trigger: the next append returns 1 again and collides with row 1, and each following append walks into
+rows 2..N the same way. That collision is now **loud** (guard, §4.1) unless the two records share
+`event_type` and `recorded_at` **and the write carries a `ts`** — a `ts`-less pair is loud instead, read
+as `capture_state="unknown"` (§4.1's fourth row). On a **cut-over** graph the
 same seal cannot reach that collision at all, because the enumerated-replay refusal pre-empts the insert
 (§4.5) — the write is refused before a row is written. Either way the journal's segment manifest is
 *designed* to make the reader count across segments (which is why the plan calls the trigger "one flip
@@ -452,7 +454,7 @@ had to be established by a call-site census rather than by the repo's own instru
 | the record allocates the ordinal (`record_cursor`, row-locked, transactional, allocation order = commit order) | **BUILT** — `record_allocator.py` (663 lines), `ALLOCATION_SQL` in `record_projection.py:6926`, two migrations |
 | the journal record CARRIES the ordinal | **BUILT on the class, not on the path** — the allocated number reaches `RecordWrite.last_seq` and the byte meter (`record_writer.py:1722-1742`); **no live caller enters the arm** |
 | replay READS the number instead of computing it | **BUILT for the refusal half** — an enumerated replay is REFUSED for a graph with a cursor row (`record_projection.py:7340-7510`); there is no carried-`seq` *read* yet, because nothing writes a `seq` onto the export line |
-| the duplicate position is a defect, not an absorption | **BUILT — loud for a DIFFERENT record, and still silent for one admitted pair**: `23505` → `PositionCollision` on the allocated insert; replay's `DO NOTHING` is interrogated by the `#9318` guard, which returns silently when `event_type` **and** `recorded_at` agree (`record_projection.py:6847-6848`) — so two different records sharing a capture instant are still absorbed (§4.1) |
+| the duplicate position is a defect, not an absorption | **BUILT — loud for a DIFFERENT record, and still silent for one admitted pair**: `23505` → `PositionCollision` on the allocated insert; replay's `DO NOTHING` is interrogated by the `#9318` guard, which returns silently only when `event_type` **and** `recorded_at` agree **and the write carries a `ts`** (`record_projection.py:6847-6848`; a `ts`-less pair falls through to `capture_state="unknown"` and is loud, `:6849-6853`) — so two different records sharing a capture instant are still absorbed (§4.1) |
 | the seed / cutover for existing graphs | **BUILT, UNREACHABLE** (no verb, no RPC, no runbook); zero-row case correct; **2b lifted contrary to plan** |
 | the live writer allocates (§A7.7 6.3) | **NOT DONE** |
 | the creation hook (§A7.7 6.6) | **ABSENT** |
@@ -475,8 +477,8 @@ The dispatch brief asked for this claim to be checked rather than trusted, so:
 
 The cap-archives live on **`origin`** under `refs/wip/`, and the same refs are visible locally — this
 worktree holds **322** `refs/wip/*` refs, and `git for-each-ref 'refs/wip/*12894*'` names the same two
-refs at the same shas (it prints four fields — sha, type, object, ref — where the listing below has two),
-so a reader can reproduce the mapping with either command. The one
+refs at the same shas (its default format is three fields — sha, type, refname — where the listing below
+has two), so a reader can reproduce the mapping with either command. The one
 quoted here is `git ls-remote`, because that is what was run and because it is the only form that
 speaks about `origin` rather than about this clone:
 
@@ -499,7 +501,8 @@ the remote copy back as `refs/wip-remote/<slug>`; in this clone those local refs
 of this paragraph named two refs that do not resolve here, which a reader would have discovered by
 following it.
 
-Relative to the merged `#12959` head (`acc9cbc035`), **only the `issue-` ref** carries a substantive
+Relative to the `#12959` branch head (`acc9cbc035` — the PR's `headRefOid`, squash-merged onto `main` as
+`792269c931`, which is the form the document names elsewhere), **only the `issue-` ref** carries a substantive
 commit — `e2a9eadb87` (`acc9cbc035..refs/wip/issue-12894-allocator-spike` = `703613fa0c`, `7d4e802fdf`,
 `e2a9eadb87`, `5351f89298`); `acc9cbc035..refs/wip/feat-12894-allocator-spike` holds the `wip:` archive
 commit only. The substantive commit's two halves are **not** in the same state:
@@ -519,7 +522,7 @@ commit only. The substantive commit's two halves are **not** in the same state:
 ⚠️ `git diff --stat origin/main <wip-ref>` is **not a usable reading here** (a three-dot diff re-inverts
 the whole squash-merged PR; a two-dot diff shows reverts of every `main` commit since the branch base).
 The honest comparison is `git log acc9cbc035..<wip-ref>` plus a path-scoped two-dot diff — `acc9cbc035`
-is `#12959`'s head as verified above, and it resolves locally; `refs/pull/12959/head` is the same commit
+is `#12959`'s PR head (squash-merged as `792269c931`) and it resolves locally; `refs/pull/12959/head` is the same commit
 but exists only after `git fetch origin 'refs/pull/*:refs/pull/*'`, so naming it would hand the reader a
 `fatal: ambiguous argument` in a fresh clone.
 
@@ -561,8 +564,8 @@ docs-only commit would re-trigger. The runs above therefore say *when* they were
 they cover the shipping commit, and **no round label is asserted for them**: `.worktree-report/state.json`
 carries each run's `started_at`/`finished_at` (its `label` is a slug of the command, not a round), so each
 run is placed between two commits by its own timestamps. The run that finished at 18:13:17Z is the clearest case: it
-sits between `77951e15cf` (the cycle-1 fixes) and `3053bd2827` (the cycle-2 fixes), so it is a cycle-1
-run and covers nothing the cycle-2 round added — and an earlier draft of this section called it a
+sits between `77951e15cf` (the cycle-1 fixes) and `3053bd2827` (the cycle-2 fixes), so it falls in the
+cycle-1 window and covers nothing the cycle-2 round added — and an earlier draft of this section called it a
 cycle-3 run, which is the defect this paragraph exists to prevent. The run that finished at 18:33:28Z
 sits after `3ada51d627` (cycle-4) and was taken with the cycle-5 edits already in the working tree. The
 times are in the register, so the placement is checkable; no row index is quoted here, because the
