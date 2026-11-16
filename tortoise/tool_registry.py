@@ -1593,8 +1593,12 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "tortoise_index_sessions (`file_type='agent_session'`) and "
                     "tortoise_ingest_corpus (`file_type='doc'`). `file_type`: auto | "
                     "agent_session | meeting | doc. Batched and resumable "
-                    "(progress_file). EXCLUDED from tenant HTTP — walks the server "
-                    "filesystem with a caller-supplied path.",
+                    "(progress_file). Returns the honest summary (file_count, indexed, "
+                    "updated, skipped, failed, aborted, ignored, errors[], by_kind); "
+                    "idempotent — re-runs converge to skipped. On a shared graph, give "
+                    "each corpus a unique corpus_name (default = directory basename) to "
+                    "avoid cross-corpus url collisions. EXCLUDED from tenant HTTP — "
+                    "walks the server filesystem with a caller-supplied path.",
         risk="destructive",
         http_policy=False,
         sdk_method="index_sources_from_directory",

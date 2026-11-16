@@ -3410,6 +3410,17 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     # epic #900 T7 (#1043): the index path creates Sources + Events (a document
     # is a Source — D10) + references edges — node/edge-creating, quota-gated (S8 pin, I25)
     "tortoise_index_files",
+    # #4282 Phase 2 (#11609 lane C): the containers that REPLACED the seven
+    # members above. Each new name wraps `_quota_gated` in its handler body, and
+    # this inventory is what the introspective completeness test cross-checks, so
+    # a container whose gate was dropped in a later edit reds instead of silently
+    # un-metering a write path. `check_connection` is absent on purpose: it is
+    # read-only (`risk="read"`), and gating a read would meter nothing.
+    "tortoise_register_source",          # replaces tortoise_create_source
+    "tortoise_manage_source_trust",      # replaces tortoise_assess_source + tortoise_set_source_tier
+    "tortoise_index_sources_from_directory",   # replaces tortoise_index_files
+    "tortoise_mine_knowledge_from_session",    # replaces tortoise_checkpoint
+    "tortoise_mine_knowledge_from_directory",  # replaces tortoise_mine_conversations
 })
 
 
