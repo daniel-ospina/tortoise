@@ -226,7 +226,7 @@ def test_the_two_named_tools_declare_a_shape_fastmcp_accepts():
         if expected is typing.Any:
             # ⛔ `_annotation_kind` answers `None` for BOTH `-> Any` and "no annotation
             # at all", so `assert sdk_kind == None` also passed once the container lost
-            # its annotation entirely (-\u003e the door's own envelope would be derived from
+            # its annotation entirely (-> the door's own envelope would be derived from
             # nothing). Pin the CONTAINER's shape on the raw annotation (#12951 fix-round
             # review P3); `from __future__ import annotations` makes it the string "Any".
             assert raw in (typing.Any, "Any"), (
