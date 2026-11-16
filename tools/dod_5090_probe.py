@@ -59,9 +59,20 @@ deployed process's environment and were outside the walk, so "every existing
 deployment file is armed" named a population that excluded them. They are walked
 now — and, like the image build files, they are DISCOVERED from the manifests
 rather than listed (see `DEPLOYMENT_SURFACES`), which is the part that keeps the
-NEXT channel from being missed the same way. On this tree all five deployment
-files are still silent, so the stricter walk CONFIRMS row 1's `PARTIAL` instead
-of moving it.
+NEXT channel from being missed the same way. On the tree that change landed in
+all five deployment files were still silent, so the stricter walk CONFIRMED row
+1's `PARTIAL` instead of moving it — and `#11445`/`#12926` then ARMED those same
+five (`docker-compose.yml`, `fly.toml`, `Dockerfile.hosted`, `Dockerfile.selfhost`,
+`entrypoint.sh`), so row 1 reads `MET` on this tree. `.env.example` was armed by
+`#11445` too, but it is not one of the five: nothing deploys a template.
+
+⚠️ The image surfaces inside that population are graded PER LINE (`_assigned_value`),
+with no build-stage model — `tools/embed_switch_gate.py` is the stage-aware reader
+(`_dockerfile_env`), so on a MULTI-stage `Dockerfile` the two readers would disagree
+and this one would credit a builder-stage `ENV` the shipped image never receives.
+Both Dockerfiles here are single-stage, which is why they agree today; if a
+multi-stage build lands, grade these surfaces through that reader rather than
+re-deriving the stage rule here.
 
 ## §12.2a — the distinct-predicate count
 

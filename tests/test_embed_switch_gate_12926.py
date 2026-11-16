@@ -48,6 +48,10 @@ import embed_switch_gate as gate  # noqa: E402
 from tortoise import embed_gate, gate_visibility, value_gate  # noqa: E402
 
 SWITCHES = ("TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE")
+#: The names a daemon may call the boot report by: the function itself, or the alias each daemon
+#: imports it as. `tortoise/hosted_api.py` imports it AS `_report_gates` (`#12926` Visibility), so
+#: a pin that only knows the original name would call a live report "missing".
+BOOT_REPORTERS = ("report_effective_switches", "_report_gates")
 DOCKER = shutil.which("docker") is not None
 needs_docker = pytest.mark.skipif(
     not DOCKER, reason="`docker compose config` is the compose resolution; no docker CLI here"
@@ -487,7 +491,7 @@ def test_the_resolution_is_per_service(tmp_path):
 
 
 def test_the_dockerfile_reader_reads_both_forms_and_fails_closed():
-    stated, ambiguous = gate._dockerfile_env(
+    stated, ambiguous, shadowed = gate._dockerfile_env(
         "FROM x\n"
         "ENV TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=on\n"
         "ENV OTHER 2\n"
@@ -499,13 +503,12 @@ def test_the_dockerfile_reader_reads_both_forms_and_fails_closed():
     assert stated["OTHER"] == "2"
     assert stated["CONTINUED"] == "1" and stated["ALSO"] == "2"
     assert ambiguous == set()
-
-    # legacy `ENV K V` form, alone
-    stated, _ = gate._dockerfile_env("ENV TORTOISE_EMBED_GATE 0\n")
+    assert shadowed == {}, "a single-stage file has no builder stage to shadow anything"
+    stated, _, _ = gate._dockerfile_env("ENV TORTOISE_EMBED_GATE 0\n")
     assert stated == {"TORTOISE_EMBED_GATE": "0"}
 
     # a shape that MENTIONS the switch but states no value this reader reads → refused
-    stated, ambiguous = gate._dockerfile_env("ENV TORTOISE_VALUE_GATE\n")
+    stated, ambiguous, _ = gate._dockerfile_env("ENV TORTOISE_VALUE_GATE\n")
     assert stated == {} and ambiguous == {"TORTOISE_VALUE_GATE"}
     channel = gate.Channel("Dockerfile", "dockerfile", "Dockerfile ENV", stated=stated,
                            ambiguous=tuple(sorted(ambiguous)))
@@ -548,8 +551,10 @@ def test_an_interpolation_with_no_literal_fallback_is_refused():
         ('export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-}"\n', gate._shell_assignments),
         ("ENV TORTOISE_EMBED_GATE ${TORTOISE_EMBED_GATE:-}\n", gate._dockerfile_env),
     ):
-        stated, ambiguous = reader(text)
+        stated, ambiguous, *rest = reader(text)
+        shadowed = rest[0] if rest else {}
         assert stated == {}, (text, stated)
+        assert shadowed == {}, (text, shadowed)
         assert ambiguous == {"TORTOISE_EMBED_GATE"}, (text, ambiguous)
         channel = gate.Channel("entrypoint.sh", "entrypoint", "r", stated=stated,
                                ambiguous=tuple(sorted(ambiguous)))
@@ -598,12 +603,12 @@ def test_a_trailing_comment_is_not_part_of_the_value():
                            stated={"TORTOISE_VALUE_GATE": "", "TORTOISE_EMBED_GATE": "1"})
     assert "EMPTY value" in channel.problems()[0]
 
-    stated, ambiguous = gate._dockerfile_env("ENV HF_HUB_OFFLINE=1  # TORTOISE_EMBED_GATE=1\n")
+    stated, ambiguous, _ = gate._dockerfile_env("ENV HF_HUB_OFFLINE=1  # TORTOISE_EMBED_GATE=1\n")
     assert stated == {"HF_HUB_OFFLINE": "1"} and ambiguous == set(), (
         "a switch named in trailing text after an unrelated assignment is not a statement"
     )
     # ...and a switch named in a trailing comment with NO assignment is not credited either
-    stated, ambiguous = gate._dockerfile_env("ENV HF_HUB_OFFLINE=1  # TORTOISE_VALUE_GATE\n")
+    stated, ambiguous, _ = gate._dockerfile_env("ENV HF_HUB_OFFLINE=1  # TORTOISE_VALUE_GATE\n")
     assert stated == {"HF_HUB_OFFLINE": "1"} and ambiguous == set()
 
 
@@ -706,7 +711,7 @@ def test_a_later_ambiguous_assignment_supersedes_an_earlier_literal_dockerfile()
     real Docker) while the gate says STATED. `switch_problem` gives `stated` precedence over
     `ambiguous`, so the earlier literal has to be dropped rather than merely flagged.
     """
-    stated, ambiguous = gate._dockerfile_env(
+    stated, ambiguous, _shadowed = gate._dockerfile_env(
         "FROM python:3.12\n"
         "ENV TORTOISE_VALUE_GATE=1\n"
         "ENV TORTOISE_EMBED_GATE=1\n"
@@ -724,7 +729,7 @@ def test_a_later_ambiguous_assignment_supersedes_an_earlier_literal_dockerfile()
 
     # ...and the reverse order stays STATED: a literal AFTER the ambiguous line is the value
     # Docker actually resolves, so it must not be thrown away.
-    stated, ambiguous = gate._dockerfile_env(
+    stated, ambiguous, _shadowed = gate._dockerfile_env(
         "FROM python:3.12\n"
         "ENV TORTOISE_VALUE_GATE=1\n"
         "ENV TORTOISE_EMBED_GATE=${EMBED_FROM_BUILD_ARG}\n"
@@ -767,7 +772,7 @@ def test_only_the_final_build_stage_states_a_switch():
         "FROM python:3.12-slim\n"
         "CMD [\"python\", \"-c\", \"print(1)\"]\n"
     )
-    stated, ambiguous = gate._dockerfile_env(both)
+    stated, ambiguous, _shadowed = gate._dockerfile_env(both)
     assert stated == {}, (
         f"a builder-stage ENV was credited to the final image: {stated} — neither switch survives "
         "into the image that ships"
@@ -783,14 +788,117 @@ def test_only_the_final_build_stage_states_a_switch():
         "ENV TORTOISE_VALUE_GATE=1\n"
         "ENV TORTOISE_EMBED_GATE=1\n"
     )
-    stated, ambiguous = gate._dockerfile_env(final)
+    stated, ambiguous, _shadowed = gate._dockerfile_env(final)
     assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
     assert gate.Channel("Dockerfile", "dockerfile", "Dockerfile ENV",
                         stated=stated, ambiguous=ambiguous).problems() == []
 
     # a single-stage file is read whole (no boundary to honour)
-    stated, _ = gate._dockerfile_env(
+    stated, _, _ = gate._dockerfile_env(
         "FROM python:3.12\nENV TORTOISE_VALUE_GATE=1\nENV TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+
+
+def test_the_dockerfile_reader_credits_only_the_final_stage():
+    """Review P2 at `648842c31a` — the reader had no build-stage model (measured both ways).
+
+    A ``Dockerfile`` is a SEQUENCE of images and only the last one ships, so
+    ``FROM … AS builder`` + ``ENV TORTOISE_EMBED_GATE=1`` + ``FROM runtime`` used to read as
+    ``stated`` — a false PASS one ``FROM … AS`` away from any real deployment. It must be refused
+    and must NAME the stage (a silent drop would read exactly like a genuine omission). The
+    mirror is just as load-bearing: a final stage that DOES inherit (``FROM builder``) must still
+    be credited, or the gate would refuse a correct file.
+    """
+    stated, ambiguous, shadowed = gate._dockerfile_env(
+        "FROM python:3.12-slim AS builder\n"
+        "ENV TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1\n"
+        "RUN pip wheel .\n"
+        "FROM python:3.12-slim\n"
+        "COPY --from=builder /wheels /wheels\n"
+    )
+    assert stated == {}, f"a builder-stage ENV never reaches the shipped image: {stated}"
+    assert shadowed == {
+        "TORTOISE_VALUE_GATE": "builder",
+        "TORTOISE_EMBED_GATE": "builder",
+    }, shadowed
+    channel = gate.Channel("Dockerfile.hosted", "dockerfile", "Dockerfile ENV", stated=stated,
+                           ambiguous=tuple(sorted(ambiguous)), shadowed=shadowed)
+    problems = channel.problems()
+    assert len(problems) == len(SWITCHES), problems
+    for problem in problems:
+        assert "only in build stage 'builder'" in problem, problem
+        assert "does not inherit" in problem, problem
+
+    # ⛔ the INHERITED direction: a final stage built FROM the stage that states them is armed.
+    for final in ("FROM base AS final\n", "FROM base\n"):
+        stated, ambiguous, shadowed = gate._dockerfile_env(
+            "FROM python:3.12-slim AS base\n"
+            "ENV TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1\n" + final
+        )
+        assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (final, stated)
+        assert shadowed == {} and ambiguous == set(), (final, shadowed, ambiguous)
+
+    # Docker matches a stage name case-insensitively (measured: `FROM scratch AS Builder` +
+    # `FROM builder` builds). A stage INDEX is not a `FROM` form — `FROM 0` asks for the image
+    # `docker.io/library/0` and buildkit refuses it — so no numeric arm is modelled or tested.
+    stated, _, _ = gate._dockerfile_env(
+        "FROM x AS Builder\nENV TORTOISE_EMBED_GATE=1\nFROM builder\n"
+    )
+    assert stated == {"TORTOISE_EMBED_GATE": "1"}, stated
+
+    # ⚠️ precedence, as everywhere else: the SHIPPED stage's own statement wins over a sibling
+    # builder's differing one, and no `shadowed` verdict survives.
+    stated, _, shadowed = gate._dockerfile_env(
+        "FROM x AS docs\nENV TORTOISE_EMBED_GATE=0\nFROM y\nENV TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_EMBED_GATE": "1"} and shadowed == {}, (stated, shadowed)
+
+    # an unrelated `ENV` in the builder stage is not a switch and is not reported
+    _, ambiguous, shadowed = gate._dockerfile_env("FROM x AS b\nENV HF_HUB_OFFLINE=1\nFROM y\n")
+    assert shadowed == {} and ambiguous == set()
+
+
+def test_a_heredoc_body_is_data_not_instructions():
+    """Review P2 at `648842c31a` — a heredoc body must not be read as Dockerfile instructions.
+
+    `RUN cat <<EOF` is the documented way to write a multi-line script, so a body line that starts
+    with `FROM` is ordinary text. Read as an instruction it opened a phantom stage and made the
+    REAL shipped stage unreadable — measured: `FROM x` + `ENV K=1` + `RUN cat <<EOF` + `FROM
+    something` + `EOF` was REFUSED, naming a stage that does not exist. The same body can carry an
+    `ENV K=1` line that the image never receives; crediting that would be the mirror false PASS.
+    """
+    text = (
+        "FROM x\n"
+        "ENV TORTOISE_EMBED_GATE=1\n"
+        "RUN cat <<EOF > /tmp/notes\n"
+        "FROM something-else\n"
+        "ENV TORTOISE_VALUE_GATE=0\n"
+        "EOF\n"
+        "ENV TORTOISE_VALUE_GATE=1\n"
+    )
+    stated, ambiguous, shadowed = gate._dockerfile_env(text)
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert shadowed == {} and ambiguous == set(), (shadowed, ambiguous)
+
+    # the BODY's only arm is not credited: the shipped stage states the other switch alone
+    stated, _, _ = gate._dockerfile_env(
+        "FROM x\nENV TORTOISE_EMBED_GATE=1\nRUN <<EOF\nENV TORTOISE_VALUE_GATE=1\nEOF\n"
+    )
+    assert stated == {"TORTOISE_EMBED_GATE": "1"}, stated
+
+    # `<<-` strips leading TABS from its terminator; a quoted word is the same marker
+    for opener, terminator in (("<<-EOF", "\tEOF"), ("<<'EOF'", "EOF"), ('<<"EOF"', "EOF")):
+        stated, _, shadowed = gate._dockerfile_env(
+            f"FROM x\nENV TORTOISE_EMBED_GATE=1\nRUN {opener}\nFROM y\n{terminator}\n"
+        )
+        assert stated == {"TORTOISE_EMBED_GATE": "1"}, (opener, stated)
+        assert shadowed == {}, (opener, shadowed)
+
+    # ⛔ an opener with NO terminator later in the file is NOT a heredoc: ignoring it must not
+    # swallow the rest of the file (a quoted `<<` or a shell shift is not a body)
+    stated, _, _ = gate._dockerfile_env(
+        'FROM x\nENV TORTOISE_EMBED_GATE=1\nRUN echo "1 << 2"\nENV TORTOISE_VALUE_GATE=1\n'
     )
     assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
 
@@ -875,11 +983,33 @@ def test_the_startup_line_tracks_the_resolvers(monkeypatch):
 
 @pytest.mark.parametrize("module", ["tortoise/selfhost.py", "tortoise/hosted_api.py"])
 def test_both_daemons_report_at_boot(module):
-    """The line exists AND a daemon calls it — silence is what makes the OFF direction dangerous."""
+    """The line exists AND a daemon CALLS it — silence is what makes the OFF direction dangerous.
+
+    ⛔ Read from the AST, not from substrings (review P3 at `648842c31a`): the old check accepted
+    any occurrence of ``report_effective_switches()`` in the file text, so COMMENTING THE CALL OUT
+    — or deleting it and leaving a comment behind — satisfied the only wiring pin for the whole
+    Visibility half, and the boot line would silently stop being printed. A ``Call`` node to the
+    report (directly or through the ``_report_gates`` alias) is the fact this test is about;
+    comments and strings carry no such node.
+    """
+    import ast
+
     source = (REPO_ROOT / module).read_text(encoding="utf-8")
-    assert "report_effective_switches" in source, f"{module} never reports the two switches"
-    assert "report_effective_switches()" in source or "_report_gates()" in source, (
-        f"{module} imports the report but never fires it"
+    tree = ast.parse(source, filename=module)
+
+    def _reports_at_boot(statement: ast.stmt) -> bool:
+        """Whether ``statement`` IS a bare top-level call to the report (directly or aliased)."""
+        if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+            return False
+        function = statement.value.func
+        if isinstance(function, ast.Name):
+            return function.id in BOOT_REPORTERS
+        return isinstance(function, ast.Attribute) and function.attr in BOOT_REPORTERS
+
+    assert any(_reports_at_boot(statement) for statement in tree.body), (
+        f"{module} never FIRES the report at import (an import, a call inside an uncalled "
+        "function, and a commented-out call are all not a boot report): the two switches would go "
+        "unreported at boot, which is the silence this line exists to end"
     )
 
 

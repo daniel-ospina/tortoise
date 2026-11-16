@@ -22,7 +22,7 @@ from the resolved model:
 |---|---|
 | compose (per **service** — one service arming does not arm its neighbour) | ``docker compose -f <file> --profile '*' --env-file /dev/null config --format json`` |
 | Fly manifest | ``fly config show --local --config <file>`` when ``flyctl`` is available, else ``tomllib`` on the manifest's ``[env]`` table |
-| image build file (``Dockerfile*``) | a strict ``ENV`` reader (no external resolver exists) |
+| image build file (``Dockerfile*``) | a strict ``ENV`` reader with a build-**stage** model (no external resolver exists): the shipped image is the LAST stage, its ``ENV`` layered over its parent chain |
 | entrypoint script (``entrypoint*.sh``) | a strict ``export``/assignment reader (no external resolver exists) |
 
 ⚠️ **``fly config show`` is not credential-free, measured** (flyctl v0.5.10): ``fly config show
@@ -68,6 +68,13 @@ a statement. Two properties are deliberate: the model is SMALL, so an unmodelled
 and a CONDITIONAL arm (``if [ … ]; then export TORTOISE_EMBED_GATE=1; fi``) is refused, because a
 branch is not the shipped configuration stating a value — ``entrypoint.sh``'s own switch exports
 are top level. There is no widening for an honest shorthand: ``=0`` still passes by design.
+
+ONE shape is still outside that model and is declared here rather than left silent (review P3): the
+reader opens no **heredoc**, so an ``export K=V`` inside a ``cat <<EOF … EOF`` body is credited at
+whatever depth the body sits at — and a heredoc body is DATA (a document a program may print), not a
+statement the shell runs, so a file whose only arm is that shape reads ``ok`` while the process gets
+nothing. Closing it is the same move as above: track the terminator and route the body to
+``ambiguous``. The Dockerfile reader next door already does exactly that (``_heredoc_end``).
 
 ``.env.example`` is a template nothing deploys, so it is not a channel of this gate; the
 read-only instrument (``tools/dod_5090_probe.py``) is what scores it.
@@ -150,14 +157,16 @@ ENTRYPOINT_GLOB = "entrypoint*.sh"
 #: failure ("mentions it but the assignment shape was not read"), never a silent pass.
 _ENV_ASSIGNMENT = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>\"[^\"]*\"|'[^']*'|\S*)")
 _ENV_INSTRUCTION = re.compile(r"(?i)^\s*ENV\s+(?P<body>.+)$")
-#: A build-stage boundary. `ENV` is STAGE-SCOPED, so only the instructions after the last `FROM`
-#: reach the image that ships — crediting a builder stage would read a two-stage file as STATED
-#: while the final image says nothing (review P2).
-#: `FROM [--platform=…] <parent> [AS <name>]` — the stage boundary AND the inheritance edge: the
-#: parent names either an image reference or an earlier stage (`FROM build AS final`), which is
-#: what makes a builder stage's `ENV` reach the shipped image.
+#: A build-stage boundary. `ENV` is STAGE-SCOPED: only the FINAL stage (and the stages it inherits
+#: from) reach the image that ships — crediting a builder stage would read a two-stage file as
+#: STATED while the final image says nothing (review P2). The stage NAME is captured so
+#: `FROM builder` can inherit; Docker matches it case-insensitively (verified: `FROM scratch AS
+#: Builder` + `FROM builder` builds). ⛔ A stage INDEX is NOT a `FROM` form — `FROM 0` asks for the
+#: image `docker.io/library/0` and buildkit refuses it (measured) — indexes exist only on flags
+#: such as `COPY --from=0`, which this reader does not model.
 _FROM_INSTRUCTION = re.compile(
-    r"(?i)^\s*FROM\s+(?:--\S+\s+)*(?P<parent>\S+)(?:\s+AS\s+(?P<name>[\w.-]+))?\s*$")
+    r"(?i)^\s*FROM\s+(?:--\S+\s+)*(?P<image>\S+)(?:\s+AS\s+(?P<name>\S+))?"
+)
 #: The body of an `ENV` line that is NOTHING BUT `K=V` pairs (quotes honoured). Anything else is
 #: not tiled, so it is never parsed as a set of assignments.
 _ENV_PAIRS = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)\s*)+$")
@@ -278,6 +287,10 @@ class Channel:
     unreadable: str = ""
     #: Shapes that mention a switch but were not read as an assignment to it.
     ambiguous: tuple[str, ...] = ()
+    #: Switches stated ONLY in a build stage the shipped image does not inherit: switch -> stage.
+    #: A builder-stage `ENV` never reaches the process, so crediting it would be a false PASS
+    #: (review P2 at `648842c31a`).
+    shadowed: dict[str, str] = field(default_factory=dict)
     #: A channel-shaped entry that is NOT a deployment channel, with the reason (reported only).
     noted: str = ""
     #: True when the governor refuses the file on principle (a compose patch) rather than
@@ -289,9 +302,10 @@ class Channel:
 
         Three shapes, and the ORDER is the point: a readable assignment WINS over a prose
         mention (a file that states the switch in an `ENV` line and also names it in a log
-        message is fine), an empty value is a placeholder rather than an arm, and a mention with
-        no readable assignment is a **failure** — a shape this reader does not model must never
-        read as "not stated", which would be indistinguishable from a genuine omission.
+        message is fine), an empty value is a placeholder rather than an arm, a statement the
+        SHIPPED image never receives is its own refusal (it names the build stage), and a mention
+        with no readable assignment is a **failure** — a shape this reader does not model must
+        never read as "not stated", which would be indistinguishable from a genuine omission.
         """
         if self.unreadable:
             return ""  # reported once, as the channel-level failure
@@ -301,6 +315,12 @@ class Channel:
             return (
                 f"{self.channel} states {switch} as an EMPTY value ({self.resolver}) — an empty "
                 "placeholder arms nothing"
+            )
+        if switch in self.shadowed:
+            return (
+                f"{self.channel} states {switch} only in build stage "
+                f"{self.shadowed[switch]!r}, which the shipped image does not inherit — a "
+                f"builder-stage ENV never reaches the process ({self.resolver})"
             )
         if switch in self.ambiguous:
             return (
@@ -332,6 +352,7 @@ class Channel:
             "stated": dict(self.stated),
             "unreadable": self.unreadable,
             "refused": self.refused,
+            "shadowed": dict(self.shadowed),
             "noted": self.noted,
             "problems": self.problems(),
             "ok": self.ok,
@@ -367,45 +388,125 @@ def _logical_lines(text: str) -> list[str]:
     return lines
 
 
-def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str]]:
-    """``ENV`` assignments in an image build file: ``{key: value}`` (last wins) + ambiguous keys.
+#: A heredoc opener on an instruction line — `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`.
+_HEREDOC_OPEN = re.compile(r"<<(?P<dash>-?)\s*(?P<quote>[\"']?)(?P<word>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)")
+
+
+def _heredoc_end(lines: list[str], opener: int, after: int) -> int:
+    """``after``, or the index just past the heredoc body the line at ``opener`` opens.
+
+    A heredoc body is DATA: `RUN cat <<EOF` followed by a line starting with `FROM` does not begin
+    a build stage, and an `ENV …` line inside one is text a program may print, not a statement the
+    image receives. Stepping over the body is what keeps both readings from inverting (measured:
+    without this, the `FROM` example above made the SHIPPED stage unreadable and refused a correct
+    file, naming a stage that does not exist).
+
+    An opener with NO terminator later in the file is IGNORED rather than swallowing the rest of
+    the file: a `<<` that is not a heredoc (a quoted string, a shell shift) must not turn every
+    later instruction into body text.
+    """
+    pending = [
+        (match.group("word"), bool(match.group("dash")))
+        for match in _HEREDOC_OPEN.finditer(lines[opener])
+    ]
+    if not pending:
+        return after
+    cursor = after
+    while pending and cursor < len(lines):
+        word, dash = pending[0]
+        candidate = lines[cursor].lstrip("\t") if dash else lines[cursor]
+        if candidate.rstrip("\r") == word:
+            pending.pop(0)
+        cursor += 1
+    return after if pending else cursor
+
+
+def _parent_stage(index: int, base: str, names: list[str]) -> int | None:
+    """The EARLIER stage ``base`` names, or ``None`` when it is an external image.
+
+    ``FROM builder`` inherits that stage's ``ENV``; anything else is a registry image and inherits
+    nothing this file declares.
+    """
+    if not base:
+        return None
+    folded = base.lower()
+    for prior in range(index):
+        if names[prior] and names[prior].lower() == folded:
+            return prior
+    return None
+
+
+def _shipped_env(
+    names: list[str], bases: list[str], envs: list[dict[str, str]]
+) -> tuple[dict[str, str], set[int]]:
+    """The FINAL stage's effective ``ENV`` and the stage indexes it inherits from.
+
+    The last stage in the file is the image that ships (a `--target` build is this reader's
+    declared bound — no manifest in this tree names one). Its environment is its own ``ENV``
+    lines over its parent chain's, so a statement in an ANCESTOR build stage is credited and one
+    in a sibling builder stage is not.
+    """
+    inherited: set[int] = set()
+
+    def resolve(index: int) -> dict[str, str]:
+        effective: dict[str, str] = {}
+        parent = _parent_stage(index, bases[index], names)
+        if parent is not None and parent not in inherited:
+            inherited.add(parent)
+            effective.update(resolve(parent))
+        effective.update(envs[index])
+        return effective
+
+    final = len(envs) - 1
+    inherited.add(final)
+    return resolve(final), inherited
+
+
+def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str], dict[str, str]]:
+    """``ENV`` statements the SHIPPED image receives (last wins) + unreadable/ambiguous keys.
 
     Both Dockerfile forms are handled — ``ENV K=V K2=V2`` and the legacy ``ENV K V``. A line that
     names a switch in a shape neither form matches is reported as AMBIGUOUS rather than ignored,
     so a spelling this reader does not model fails the gate instead of passing it.
+
+    ⛔ **Build stages are modelled, not flattened (review P2 at `648842c31a`, measured).** A
+    ``Dockerfile`` is a SEQUENCE of images, and only the last one ships: a builder stage's
+    ``ENV TORTOISE_EMBED_GATE=1`` never reaches the process, so crediting it was a false PASS one
+    ``FROM … AS builder`` away. Three facts are separated here: what the final stage inherits (a
+    stage's own ``ENV`` over its parent chain — ``FROM builder`` inherits), what it loses (a
+    sibling/earlier stage's statement — reported as ``shadowed``, which REFUSES and names the
+    stage, because a silent drop would read exactly like a genuine omission), and what was never a
+    statement at all (``ambiguous``).
+
+    ⚠️ **A heredoc BODY is data** (see ``_heredoc_end``): `RUN cat <<EOF` followed by a line that
+    starts with ``FROM`` is text, and an ``ENV`` line inside the body is text too. Bounded, not
+    modelled: a stage selected only through `docker build --target` is outside this reader's
+    reading (no manifest in this tree names one), so the LAST stage is taken as the shipped one.
     """
-    stated: dict[str, str] = {}
+    names: list[str] = []
+    bases: list[str] = []
+    envs: list[dict[str, str]] = []
+    #: `ENV` before the first `FROM` is not a build stage at all (Docker rejects one there). It is
+    #: kept apart so it can never occupy the first stage's INDEX.
+    before_from: dict[str, str] = {}
     ambiguous: set[str] = set()
     lines = _logical_lines(text)
-    # ⛔ ONLY the final build stage reaches the runtime image (review P2) — PLUS the NAMED stages
-    # it inherits from: `FROM build AS final` carries `build`'s `ENV` forward, so reading only the
-    # text after the last `FROM` falsely refuses a legitimate multi-stage file (review at
-    # `69ee7b1395`). Nothing else before that chain ships, and a file with no `FROM` is read whole
-    # (no stage boundary to honour, and the caller discovered it as an image build file).
-    stages = [
-        (index, match)
-        for index, line in enumerate(lines)
-        if (match := _FROM_INSTRUCTION.match(line))
-    ]
-    if stages:
-        named = {
-            match.group("name").lower(): index
-            for index, match in stages
-            if match.group("name")
-        }
-        first = stages[-1][0]
-        seen: set[int] = set()
-        while first not in seen:
-            seen.add(first)
-            parent = (_FROM_INSTRUCTION.match(lines[first]).group("parent") or "").lower()
-            if parent not in named or named[parent] in seen:
-                break
-            first = named[parent]
-        lines = lines[first:]
-    for line in lines:
+    cursor = 0
+    while cursor < len(lines):
+        line = lines[cursor]
+        cursor += 1
+        boundary = _FROM_INSTRUCTION.match(line)
+        if boundary:
+            names.append(boundary.group("name") or "")
+            bases.append(boundary.group("image"))
+            envs.append({})
+            continue
         match = _ENV_INSTRUCTION.match(line)
         if not match:
+            # Any other instruction may OPEN a heredoc whose body is data, not instructions.
+            cursor = _heredoc_end(lines, cursor - 1, cursor)
             continue
+        stage = envs[-1] if envs else before_from
         body = _strip_inline_comment(match.group("body")).strip()
         if _ENV_PAIRS.match(body):
             for key, value in _ENV_ASSIGNMENT.findall(body):
@@ -415,23 +516,40 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str]]:
                     # by `ENV K=${X}` reports the stale `1` as STATED while the image resolves
                     # empty (review P2). `stated` outranks `ambiguous` in `switch_problem`.
                     ambiguous.add(key)
-                    stated.pop(key, None)
+                    stage.pop(key, None)
                     continue
-                stated[key] = _unquote(value)
+                stage[key] = _unquote(value)
             continue
         parts = body.split(None, 1)
         if len(parts) == 2 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", parts[0]):
             if parts[0] in SWITCHES and not _states_a_literal(parts[1]):
                 ambiguous.add(parts[0])
-                stated.pop(parts[0], None)
+                stage.pop(parts[0], None)
                 continue
-            stated[parts[0]] = _unquote(parts[1])
+            stage[parts[0]] = _unquote(parts[1])
             continue
         # ⛔ Nothing here TILES the body, so a switch mentioned anywhere in it (including in
         # trailing text after an unrelated `K=V`, which Docker folds into THAT value) is not a
         # statement this reader can credit (review round 6, P3).
         ambiguous.update(_mentioned_switches(body))
-    return stated, ambiguous
+
+    if not envs:
+        # No `FROM` at all: a fragment read on its own (the readers are also unit-tested that way),
+        # where what the text states IS what ships.
+        return before_from, ambiguous, {}
+
+    stated, inherited = _shipped_env(names, bases, envs)
+    shadowed: dict[str, str] = {}
+    for index, stage in enumerate(envs):
+        if index in inherited:
+            continue
+        label = names[index] or f"stage {index}"
+        for key in stage:
+            if key in SWITCHES and key not in stated:
+                shadowed.setdefault(key, label)
+    for key in shadowed:
+        ambiguous.discard(key)  # the precise verdict supersedes the generic mention
+    return stated, ambiguous, shadowed
 
 
 def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
@@ -809,7 +927,7 @@ def discover(root: Path) -> list[Channel]:
         if unreadable:
             channels.append(Channel(label, "dockerfile", "Dockerfile ENV", unreadable=unreadable))
             continue
-        stated, ambiguous = _dockerfile_env(text)
+        stated, ambiguous, shadowed = _dockerfile_env(text)
         channels.append(
             Channel(
                 label,
@@ -817,6 +935,7 @@ def discover(root: Path) -> list[Channel]:
                 "Dockerfile ENV",
                 stated=stated,
                 ambiguous=tuple(sorted(ambiguous)),
+                shadowed=shadowed,
             )
         )
 
