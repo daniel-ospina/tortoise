@@ -898,9 +898,17 @@ def test_the_allocator_columns_are_in_its_statement():
         # so "the allocator's SQL actually writes this" could never fail on its
         # account. The enumeration is about what the ALLOCATOR WRITES, so it is
         # checked against the allocator's own statements only.
-        assert column in ra.SEED_SQL or column in ra.ALLOCATION_SQL, (
+        # ⛔ WORD BOUNDARIES, not a substring (review cycle 2, P2). A plain
+        # `column in <sql>` is satisfied by a RENAME: rewriting `updated_at` to
+        # `updated_at_utc` in both statements left this GREEN while the column
+        # the registry names no longer existed. An identifier is what the
+        # statement writes, so match one.
+        written = re.search(rf"\b{re.escape(column)}\b", ra.SEED_SQL) or re.search(
+            rf"\b{re.escape(column)}\b", ra.ALLOCATION_SQL)
+        assert written, (
             f"{entry} is named as the allocator's, but neither `SEED_SQL` nor "
-            f"`ALLOCATION_SQL` writes it")
+            f"`ALLOCATION_SQL` writes that IDENTIFIER (a rename/removal must "
+            f"red here, not slip through a substring match)")
 
 
 def test_the_enumeration_accounts_for_every_declared_column():

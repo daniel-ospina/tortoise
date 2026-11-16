@@ -463,7 +463,7 @@ def live_door_writes_the_journals_position(
             # `seq` from `log.append`, so that is not a corner. Measured before
             # this rule: the gate returned `[]` for exactly that body (a false
             # PASS on the gate whose whole job is to stop an invented ordinal).
-            if ast.unparse(first_seq) != _ALLOCATOR_FIRST_SEQ:
+            if first_seq is None or ast.unparse(first_seq) != _ALLOCATOR_FIRST_SEQ:
                 problems.append(
                     f"{_LIVE_DOOR}() calls {_call_name(call)}(…) with "
                     f"allocate= and first_seq="
