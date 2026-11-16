@@ -276,7 +276,7 @@ def _calibration_marker_present(sdk) -> bool:
     return sdk._calibration_marker_recorded()
 
 
-def test_gate_b_cli_reads_the_private_marker_seam():
+def test_gate_b_cli_reads_the_private_marker_seam(monkeypatch, capsys):
     """`tortoise/gates.py` resolves Gate B through the private seam, not a dead name.
 
     ⛔ THIS IS THE REGRESSION THAT ACTUALLY HAPPENED. gates.py read
@@ -289,9 +289,30 @@ def test_gate_b_cli_reads_the_private_marker_seam():
     A receiver-keyed scan misses the caller too: its receiver is a CONSTRUCTOR CALL
     (``TortoiseSDK()``), not a name. So the wiring is pinned at the source.
 
+    Two things are pinned, and they are pinned by DIFFERENT instruments because they are
+    different claims:
+
+    * the SOURCE SHAPE — the seam is called, the retired accessor is not, EVERY store of
+      `calibration_passed` in `main()` is the seam call or a literal `False`, and the value
+      reaches `check_gates` as the bare name — from the AST, which cannot be satisfied by a
+      docstring, a comment, or a stale mention; and
+    * the BEHAVIOUR — the marker's value IS the verdict — by DRIVING the CLI with the seam
+      replaced and reading what it prints.
+
+    ⛔ NEITHER ALONE IS ENOUGH, and both claims were measured the hard way. A source census
+    of `ast.Assign` targets alone was defeated by five shapes (2026-11-16: `|= True`
+    fail-open, trailing `= False` fail-closed, AnnAssign, walrus, tuple targets). A drive
+    alone is defeated by a third SOURCE that agrees with the three inputs it observes —
+    measured the same day (`calibration_passed = calibration_passed or
+    os.environ.get("…") == "1"`: Gate B `passed` with the marker ABSENT and this test
+    green). So the census is TOTAL-STORES (every form, not just `ast.Assign`) with an
+    allow-list, the kwarg must be the bare name, and three drives hold the value to the
+    verdict. A source the allow-list rejects cannot exist; a value that does not reach the
+    verdict cannot pass the drive.
+
     FAILS IF gates.py goes back to a public accessor that no longer exists, if it stops
-    carrying the seam's value into the Gate B verdict, or if it invents a third read path
-    that fills `calibration_passed` from somewhere else.
+    carrying the seam's value into the Gate B verdict, or if anything OTHER than the seam
+    (and the `False` fallback) sources `calibration_passed`.
     """
     import ast
     import inspect
@@ -315,40 +336,149 @@ def test_gate_b_cli_reads_the_private_marker_seam():
         "gates.py calls the retired public accessor `calibration_passed()`, which no longer "
         "exists on TortoiseSDK (#12901 wave 1)"
     )
-    # ⛔ PRESENCE IS NOT FLOW. The two arms above only ask whether the seam is CALLED — a
-    # `gates.py` that calls it for effect and then fills the flag from somewhere else passes
-    # both, which is the "third read path" the docstring claims to reject (measured
-    # 2026-11-16 by a fresh-context reviewer). So the variable that carries Gate B's state
-    # into `check_gates` is pinned at its SOURCES: it may be the seam call or the `False`
-    # fallback, and nothing else.
-    assignments = [
-        n for n in ast.walk(tree)
+    # ⛔ PRESENCE IS NOT FLOW, AND NEITHER IS A SOURCE CENSUS OF `ast.Assign`. So BOTH are
+    # pinned, each by the instrument that can actually hold it:
+    #
+    #   the CENSUS — TOTAL stores of the name in `main()`, in every form (Assign, including
+    #     tuple/starred targets; AnnAssign; AugAssign; NamedExpr; `for`/`with` targets) — with
+    #     an allow-list of exactly two values. Five shapes defeated the `ast.Assign`-only
+    #     census this test used to carry, and one more defeated a drive with NO census at all,
+    #     all measured 2026-11-16:
+    #
+    #       `calibration_passed |= True`               → Gate B `passed`, marker EMPTY (false PASS)
+    #       trailing `calibration_passed = False`      → marker PRESENT, Gate B `open` — the old
+    #                                                    census allowed a Constant `False`
+    #                                                    ANYWHERE, so the fallback could be moved
+    #                                                    after the read
+    #       `calibration_passed: bool = True`          → AnnAssign: no `ast.Assign` at all
+    #       `if (calibration_passed := True)`          → NamedExpr, likewise invisible
+    #       `calibration_passed, _ = (True, 0)`        → Assign with a Tuple target, filtered out
+    #       `<name> = <name> or os.environ.get("…")`   → a THIRD SOURCE that agrees with every
+    #                                                    input a drive observes: green drive,
+    #                                                    Gate B `passed` with the marker absent
+    #
+    #   the DRIVE — three arms that make the marker's VALUE the verdict (below).
+    main_fn = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main"
+    )
+    SEAM = "_calibration_marker_recorded"
+    stores: list[tuple[str, ast.AST]] = []
+    for node in ast.walk(main_fn):
+        targets: list[ast.AST] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            targets = [node.target]
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [i.optional_vars for i in node.items if i.optional_vars]
+        if not targets:
+            continue
+        stored = {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+        if "calibration_passed" in stored:
+            stores.append((type(node).__name__, node))
+
+    assert stores, (
+        "no store of `calibration_passed` is visible in `gates.main()` — the census is "
+        "vacuous, so it pins nothing"
+    )
+    seam_stores = [
+        n for n in (s[1] for s in stores)
         if isinstance(n, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "calibration_passed" for t in n.targets)
+        and isinstance(n.value, ast.Call)
+        and getattr(n.value.func, "attr", None) == SEAM
     ]
-    assert any(
-        isinstance(n.value, ast.Call)
-        and getattr(n.value.func, "attr", None) == "_calibration_marker_recorded"
-        for n in assignments
-    ), (
+    assert seam_stores, (
         "gates.py never assigns `calibration_passed` FROM the private seam — naming the seam "
         "in a call does not carry its value into the Gate B verdict, so the marker read "
         "result is thrown away"
     )
-    other_sources = sorted(
-        ast.unparse(n.value)
-        for n in assignments
+    allowed = sorted(
+        f"{form}: {ast.unparse(node)}"
+        for form, node in stores
         if not (
-            (
-                isinstance(n.value, ast.Call)
-                and getattr(n.value.func, "attr", None) == "_calibration_marker_recorded"
+            node in seam_stores
+            or (
+                isinstance(node, (ast.Assign, ast.AnnAssign))
+                and isinstance(node.value, ast.Constant)
+                and node.value.value is False
             )
-            or (isinstance(n.value, ast.Constant) and n.value.value is False)
         )
     )
-    assert not other_sources, (
-        "gates.py fills `calibration_passed` from a THIRD read path — only the private seam "
-        f"and the `False` fallback may source it, found: {other_sources}"
+    assert not allowed, (
+        "gates.py sources `calibration_passed` from a THIRD read path — only the private "
+        f"seam call and a literal `False` fallback may source it, found: {allowed}"
+    )
+    # …and the value must REACH the verdict as the bare name: a kwarg like
+    # `calibration_passed=seam() or FORCE` keeps every store above legal while deciding the
+    # verdict somewhere else. Reviewed 2026-11-16: the drive alone could not see that.
+    gate_calls = [
+        n for n in ast.walk(main_fn)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "check_gates"
+    ]
+    assert len(gate_calls) == 1, (
+        f"`main()` must call `check_gates` exactly once, found {len(gate_calls)}"
+    )
+    kwarg = next(
+        (k for k in gate_calls[0].keywords if k.arg == "calibration_passed"), None
+    )
+    assert kwarg is not None and isinstance(kwarg.value, ast.Name) \
+        and kwarg.value.id == "calibration_passed", (
+        "`check_gates` is not handed the `calibration_passed` VARIABLE — the verdict is "
+        f"decided by an expression instead: {ast.unparse(gate_calls[0])}"
+    )
+    # ⛔ …and BEHAVIOUR, which no census can substitute for: the marker's VALUE must be the
+    # verdict. Replace the SDK seam, run the CLI, assert on the report it PRINTS.
+    def _gate_b_from_seam(seam):
+        """Run `gates.main()` with the SDK seam replaced; return (exit code, report)."""
+        import json
+
+        import tortoise.sdk
+        from tortoise import gates
+
+        class _SeamSDK:
+            def _calibration_marker_recorded(self):
+                if isinstance(seam, BaseException):
+                    raise seam
+                return seam
+
+        # Patching the MODULE attribute is enough: `main()` imports the class at call time.
+        monkeypatch.setattr(tortoise.sdk, "TortoiseSDK", _SeamSDK)
+        # Gate A closed and no other dependencies, so `blocked` is decided by Gate B alone.
+        monkeypatch.setattr(
+            gates,
+            "_default_gh_runner",
+            lambda: (lambda path: json.dumps(
+                {"body": "Depends on: #320", "state": "closed"})),
+        )
+        rc = gates.main(["1"])
+        return rc, json.loads(capsys.readouterr().out)
+
+    rc, report = _gate_b_from_seam(True)
+    assert report["gates"]["gate_b"] == "passed", (
+        "the seam returned True and the CLI still reported Gate B open — the marker's value "
+        f"does not reach the verdict: {report}"
+    )
+    assert rc == 0 and not report["blocked"], (
+        f"Gate B passed with Gate A closed, so the CLI must exit 0 unblocked: {report}"
+    )
+    rc, report = _gate_b_from_seam(False)
+    assert report["gates"]["gate_b"] == "open", (
+        f"the seam returned False and the CLI reported Gate B passed: {report}"
+    )
+    assert rc == 1 and report["blocked"], (
+        f"an absent marker must keep the CLI blocked: {report}"
+    )
+    # The regression itself: the seam RAISES (the deleted public accessor's AttributeError).
+    # The bare `except Exception` must fall back to OPEN — never crash, and never report
+    # `passed` on a read that failed.
+    rc, report = _gate_b_from_seam(AttributeError("_calibration_marker_recorded"))
+    assert report["gates"]["gate_b"] == "open", (
+        f"a raising seam must fall back to `open`, not pass: {report}"
+    )
+    assert rc == 1 and report["blocked"], (
+        f"a failed marker read must keep the CLI blocked: {report}"
     )
     # The seam must be reachable on the class the CLI constructs, or the except swallows it.
     # ⛔ Attribute access, not `getattr(..., "<name>")`: B009 (ruff, active on this repo's

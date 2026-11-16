@@ -66,8 +66,8 @@ The 150 → **124** move on 2026-10-27: the owner ruled that the surplus public 
 archived at tag `archive/4282-surplus-sdk-methods`. The 111 that DO have callers are untouched here;
 privatising them is the remaining half of the migration. Then 124 → **125** on 2026-11-14, when
 approved row 28 `get_organisation_account` gained its `def` (#10015) — an IMPLEMENTATION of an
-already-approved name, not an addition to the approved 40. Then 125 → **120** on 2026-11-15, when
-#12901 wave 1 retired five off-surface methods (`backfill_v25`, `calibration_passed`,
+already-approved name, not an addition to the approved 40. Then 125 → **120** on 2026-11-15, when the
+`#12901` wave 1 retired five off-surface methods (`backfill_v25`, `calibration_passed`,
 `list_relations`, `membership_get`, `quarantine_batch`) — none of them an approved row, so the
 declaration stays at 40. **120 is the count today**, and it is derived, not typed: `ast` over
 `tortoise/sdk.py` and `tools/sdk_surface.py --check` both read 120, and

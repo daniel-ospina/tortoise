@@ -465,32 +465,63 @@ def test_every_surplus_destination_is_the_one_the_record_records() -> None:
         )
 
 
-def test_a_surplus_reason_states_only_the_recorded_destination() -> None:
+def test_every_deletion_reason_states_only_its_recorded_destination() -> None:
     """The prose may neither miss the recorded destination nor invent a different one.
 
     The claim sentence is the only shape allowed to state a destination
     (`Recorded destination[s] `x``), so it is parsed and compared as a SET: a reason
     that names `create_entity` while the record says `write_knowledge_batch` reds even
     though it also mentions the right one somewhere else.
+
+    ⛔ BOTH CELLS, not just the surplus block. The `#12901` wave-1 reasons carried their
+    destinations in prose alone until 2026-11-16, so this pin — the one that keeps a
+    hand-typed destination from surviving next to the machine record — never read them
+    (measured by a fresh-context reviewer, who found the `quarantine_batch` claim outside
+    the pin that the docstring says covers it). The wave-1 reasons now state the same
+    claim sentence, and the non-vacuity assertion below holds the two cells to it: a
+    wave-1 name WITH a recorded destination must carry a claim, and one WITHOUT must not.
     """
-    from tortoise.sdk_retired import REMOVED_SDK_METHODS, SURPLUS_DELETION_DESTINATIONS
+    from tortoise.sdk_retired import (
+        REMOVED_SDK_METHODS,
+        SURPLUS_DELETION_DESTINATIONS,
+        WAVE1_DELETION_DESTINATIONS,
+    )
 
     wrong: dict[str, tuple] = {}
-    for name, dests in SURPLUS_DELETION_DESTINATIONS.items():
-        if name not in REMOVED_SDK_METHODS:
-            continue  # a RETIREMENT: pinned by test_every_retired_name_is_an_approved_rename
-        reason = REMOVED_SDK_METHODS[name]
-        claim = _DESTINATION_CLAIM.search(reason)
-        claimed = (
-            tuple(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", claim.group(1)))
-            if claim else ()
-        )
-        if claimed != dests:
-            wrong[name] = (claimed, dests, reason)
+    for cell_name, cell in (
+        ("SURPLUS_DELETION_DESTINATIONS", SURPLUS_DELETION_DESTINATIONS),
+        ("WAVE1_DELETION_DESTINATIONS", WAVE1_DELETION_DESTINATIONS),
+    ):
+        for name, dests in cell.items():
+            if name not in REMOVED_SDK_METHODS:
+                continue  # a RETIREMENT: pinned by test_every_retired_name_is_an_approved_rename
+            reason = REMOVED_SDK_METHODS[name]
+            claim = _DESTINATION_CLAIM.search(reason)
+            claimed = (
+                tuple(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", claim.group(1)))
+                if claim else ()
+            )
+            if claimed != dests:
+                wrong[name] = (cell_name, claimed, dests, reason)
     assert not wrong, (
-        "a surplus removal's stated destination is not its recorded one "
-        "(claimed, recorded, reason): "
-        f"{ {k: v[:2] for k, v in wrong.items()} }"
+        "a removal's stated destination is not its recorded one "
+        "(name: (cell, claimed, recorded, reason)): "
+        f"{ {k: v[:3] for k, v in wrong.items()} }"
+    )
+
+    # NON-VACUITY for the wave-1 cell: the loop above is only a pin if the reasons it
+    # reads actually STATE their claim. A reason that names its destination in some other
+    # phrasing parses as `()` and would only red when the cell is non-empty — so this arm
+    # says the two sides match exactly: claim present iff a destination is recorded.
+    claiming = {
+        name for name in WAVE1_DELETION_DESTINATIONS
+        if _DESTINATION_CLAIM.search(REMOVED_SDK_METHODS.get(name, ""))
+    }
+    recorded = {n for n, dests in WAVE1_DELETION_DESTINATIONS.items() if dests}
+    assert claiming == recorded, (
+        "the wave-1 claim pin does not read what it claims to read — a name whose reason "
+        "lacks the `Recorded destination `x`` sentence is outside the pin "
+        f"(claims, records a destination): {sorted(claiming)}, {sorted(recorded)}"
     )
 
 
