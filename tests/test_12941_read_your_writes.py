@@ -178,6 +178,45 @@ def test_MCP_off_mode_is_byte_identical_today(monkeypatch, mcp_harness):
         "off mode changed shape — the default must stay byte-identical")
 
 
+def test_MCP_off_plus_the_RESIDENCY_flag_still_marks_a_PARTIAL_cache(monkeypatch,
+                                                                     mcp_harness):
+    """The default is byte-identical ONLY while the marker is unarmed too.
+
+    `TORTOISE_RESIDENCY` is a SEPARATE flag from `TORTOISE_RECORD_SERVE` (#7952),
+    so the honest statement about the default is "off + unarmed is unchanged",
+    not "off is unchanged". Pinned at the DOOR as well as at the SDK layer
+    (`test_SDK_off_mode_marks_a_PARTIAL_cache_not_hot`), because the door is what
+    an agent reads and a docstring now says so: a cache that declares itself
+    PARTIAL and does not cover the id answers `{"residency": "not-hot"}` here
+    where pre-#12941 it answered `{}`. The record is never consulted either way.
+    """
+    from tortoise.mcp_server import tortoise_get_point
+
+    monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RESIDENCY", "1")
+    rs.reset_fallback_counts()
+    mcp_harness(None, coverage="partial", hot_keys=["other"])
+
+    out = tortoise_get_point("p-1")
+
+    assert out.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, (
+        "a partial cache must not be allowed to establish absence (#7952)")
+    assert rs.fallback_counts() == {}, (
+        "the seam must not be consulted with TORTOISE_RECORD_SERVE unset")
+
+
+def test_MCP_off_plus_the_RESIDENCY_flag_on_a_COMPLETE_cache_is_byte_identical(
+        monkeypatch, mcp_harness):
+    """The converse, so the marker cannot leak onto a complete cache."""
+    from tortoise.mcp_server import tortoise_get_point
+
+    monkeypatch.delenv(rs.RECORD_SERVE_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RESIDENCY", "1")
+    mcp_harness(None, coverage="complete")
+
+    assert tortoise_get_point("p-1") == {}
+
+
 def test_MCP_says_not_hot_when_the_record_could_not_be_asked(monkeypatch,
                                                              mcp_harness):
     """A cache-only empty answer is `not-hot`, never `{}` (#7952)."""
