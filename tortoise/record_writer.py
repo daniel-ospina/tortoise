@@ -505,11 +505,14 @@ class RecordWrite:
     #: ``LIVE_WRITE_REFUSALS`` for that reason — that tuple is what the PRE-write
     #: verdict can return — and a consumer switching on this field must accept it.
     #: ⛔ A same-capture re-derivation is NOT this token: it is DRIFT, it repairs
-    #: itself, and it reports `applied` with no counter (#12904 P0-1). Nothing is
-    #: lost (the
+    #: itself, and it reports `applied` with no counter (#12904 P0-1). ⚠️ NOR IS a
+    #: DIFFERENT record captured at the same instant — the split cannot tell it
+    #: from drift and admits it silently, which is the mirror residual named in
+    #: `record_projection.JournalPositionCollision`: do not read "a different
+    #: record" above as "every different record is caught". Nothing is lost (the
     #: journal holds the record); what is refused is indexing it under a position
-    #: that holds content this write would not produce, which the record cannot fix while its key
-    #: carries no journal identity (#12894).
+    #: that holds content this write would not produce, which the record cannot
+    #: fix while its key carries no journal identity (#12894).
     #:
     #: ⛔ ``no_tenant_carried`` IS A SEPARATE TOKEN ON PURPOSE (#10021 review P3).
     #: The live door splits the nil tenant from a MALFORMED CARRIED pair — one is
@@ -2478,7 +2481,10 @@ def write_live_record(record: Mapping[str, Any], *,
     Postgres's own jsonb equality and its own `timestamptz` comparison of
     `recorded_at`). Same content ⇒ a genuine replay ⇒ silent no-op, unchanged;
     same `event_type` and same `recorded_at` with only the payload different ⇒
-    the SAME record RE-DERIVED ⇒ also silent (#12904 P0-1); anything else ⇒
+    READ AS the same record RE-DERIVED ⇒ also silent (#12904 P0-1) — a reading
+    on two equal coordinates, not proof of one record (the mirror residual in
+    `record_projection.JournalPositionCollision` names the shape it admits);
+    anything else ⇒
     `JournalPositionCollision`, reported HERE as the
     ``journal_collision`` refusal — the same counter, the same WARNING, the same
     ``RecordWrite`` shape every other refusal uses — with a message naming the

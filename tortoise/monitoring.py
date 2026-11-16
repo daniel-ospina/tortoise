@@ -741,7 +741,10 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 #                             so the remedy is journal identity in the key
 #                             (#12894), not a replay. A same-capture payload
 #                             re-derivation is DRIFT and never reaches this
-#                             counter (#12904);
+#                             counter (#12904) — and neither does a DIFFERENT
+#                             record captured at the same instant, which that
+#                             same split admits silently (the mirror residual in
+#                             `record_projection.JournalPositionCollision`);
 #   ``circuit_open``          a connect to the record FAILED moments ago, so the
 #                             live door refused this write locally instead of
 #                             paying the connect timeout once per record

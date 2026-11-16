@@ -7644,7 +7644,11 @@ def _record_health() -> dict:
     #                         moved (#9318): a REPLAY DOES NOT HEAL IT — it
     #                         re-raises. The remedy is journal identity in the
     #                         key (#12894). A same-capture re-derivation is
-    #                         DRIFT and never reaches this counter (#12904).
+    #                         DRIFT and never reaches this counter (#12904) —
+    #                         and neither does a DIFFERENT record captured at the
+    #                         same instant, which that split admits silently (the
+    #                         mirror residual in
+    #                         `record_projection.JournalPositionCollision`).
     #   ``no_tenant``         armed with no tenant in scope; heal the tenant
     #                         resolution, then replay.
     #   ``malformed_dsn``     the value is configured but unusable — fix the

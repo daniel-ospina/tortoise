@@ -272,15 +272,23 @@ def test_an_absorbed_position_with_different_content_raises_and_names_both() -> 
 
 
 def test_a_re_derived_record_replays_SILENTLY() -> None:
-    """DRIFT is not a collision: the SAME record, re-derived (#12904 P0-1).
+    """DRIFT is not a collision: the same record, READ AS re-derived (#12904 P0-1).
+
+    ⚠️ "READ AS" — that phrase is the point of this leg, not decoration:
 
     The compared payload is a snapshot of a DERIVATION (`_journal_row` strips
     `ENVELOPE_KEYS`, an actively argued surface), so a change to that derivation
     makes an old row's content differ from what this tree would write for the
     SAME record at the SAME position. `recorded_at` is stamped at CAPTURE, so a
-    re-derivation preserves it — and identical type + identical capture is
-    POSITIVE evidence that the position holds this record. The verdict is
-    therefore a SILENT no-op: no exception, no counter, no log line.
+    re-derivation preserves it — and identical type + identical capture is the
+    DRIFT READING, which the verdict ADMITS. It is a reading, not evidence of
+    identity: it says only that two writes named one instant, and `ts` is a
+    per-record value the emission path supplies, not one the position derives —
+    which is why the mirror shape (two DIFFERENT records at one
+    capture instant) is admitted too — that leg is
+    `test_a_same_capture_instant_pair_is_ADMITTED_not_detected`, and the class
+    docstring's mirror residual names the cost. The verdict here is a SILENT
+    no-op: no exception, no counter, no log line.
 
     ⛔ THIS LEG REPLACES ONE THAT PINNED THE OPPOSITE (#12904 P0-1).
     `test_a_re_derived_record_is_not_reportable_as_two_records` asserted the
@@ -308,6 +316,59 @@ def test_a_re_derived_record_replays_SILENTLY() -> None:
     assert dict(monitoring.record_write_failure_counts()) == before, (
         "a re-derivation was COUNTED as a refusal — the record's own repair "
         "story is then version-pinned to the tree that wrote the row")
+
+
+def test_a_same_capture_instant_pair_is_ADMITTED_not_detected() -> None:
+    """THE DECLARED MIRROR RESIDUAL: a different record at one capture instant.
+
+    ⛔ THIS LEG PINS AN ADMISSION, NOT A DETECTION. Read this docstring before
+    "fixing" it to expect a refusal: the drift arm (#12904 P0-1) returns silently
+    on `same_type and same_capture`, and identical `recorded_at` is NOT evidence
+    of identity — it says only that two writes named one instant, and `ts` is a
+    per-record value the EMISSION path supplies (`_journal_row` binds
+    `record.get("ts")`; `_emit_event` accepts a `recorded_ts`, minting
+    `now_iso()` only when none is given), so nothing ties the instant to the
+    record's identity, and TWO DIFFERENT records captured at the same instant
+    are absorbed: `RECORD_A` against a probe
+    differing in `id` and `name`, `same_type` and `same_capture` both true.
+
+    `main` (post-#12904) REFUSED this pair (payload differs ⇒ collision), so this
+    is the one shape the drift split widens the silent window by. It is admitted
+    rather than closed HERE because closing it — refusing when
+    `_identity_evidence` answers `disagrees` — is a SEMANTICS change to #12904's
+    verdict, which belongs to that decision's owner; `#12894`'s journal identity
+    in the key retires it outright.
+
+    The leg is NOT vacuous: it asserts the guard HOLDS the refuting evidence and
+    discards it, so a tree that starts refusing reds here as a change to a
+    stated decision, and one that stops asking the collision question reds on
+    `conflict_reads`.
+    """
+    probe = dict(RECORD_A, id="obj-b", name="corpus B document")
+    assert probe != RECORD_A, "the two records must actually differ"
+    # The guard HOLDS the evidence it discards — measured on the payloads the
+    # absorbed row and this write would carry, so the leg cannot pass on a shape
+    # where the identities merely fail to contradict.
+    state, detail = rp._identity_evidence(_payload_of(probe),
+                                          _payload_of(RECORD_A))
+    assert state == "disagrees", (
+        f"the identity verdict no longer contradicts at equal capture "
+        f"({state}: {detail}) — this leg's premise moved, so re-measure the "
+        f"mirror residual rather than deleting the leg")
+    conn = Absorbed(stored=_stored("ObjectRegistered", _payload_of(RECORD_A),
+                                  same_capture=True))
+    before = dict(monitoring.record_write_failure_counts())
+
+    report = rp.replay([probe], conn, org_id=ORG, graph_id=GRAPH)
+
+    assert report.events == 1
+    assert conn.conflict_reads == 1, (
+        "the guard did not ask the collision question — this leg would then pass "
+        "by never exercising the code under test")
+    assert dict(monitoring.record_write_failure_counts()) == before, (
+        "an equal-capture pair was COUNTED — that is the drift arm refusing, "
+        "which re-opens #12904 P0-1; if the refusal is deliberate, the residual "
+        "in `JournalPositionCollision` and its owner decision move FIRST")
 
 
 def test_two_payloads_with_no_comparable_identity_say_so() -> None:
@@ -757,12 +818,20 @@ def test_the_position_statement_carries_no_schema_ask() -> None:
     guard would "simply never fire" after #12894 — backwards, because after the
     key change a conflict IS same-journal-same-seq, so a payload difference
     there is this record's own drift, which is exactly what this guard reports.
+    ⛔ AND THIS PIN CARRIES THE TWO READINGS TOO, not #12894 alone (review P2):
+    a red here means EITHER that the key gained journal identity (#12894, so the
+    pin is DELETED with the guard) OR that the payload derivation moved (so the
+    boundary must be RE-MEASURED). Naming one reading sends the next reader down
+    the wrong one — the event_id pin above already carries both.
     """
     statement = rp._journal_row(RECORD_A, 1, ORG, GRAPH)
     assert statement.sql == rp._JOURNAL_POSITION_INSERT_SQL, (
         "`_journal_row` no longer emits the statement the collision guard knows "
-        "how to read. If the KEY GAINED JOURNAL IDENTITY (#12894), the guard is "
-        "DELETED with it — do not re-point this pin at the new shape")
+        "how to read. TWO readings, and this pin does not choose between them: "
+        "if the KEY GAINED JOURNAL IDENTITY (#12894), the guard is DELETED with "
+        "it — do not re-point this pin at the new shape; if instead the PAYLOAD "
+        "DERIVATION MOVED (`ENVELOPE_KEYS` or a record type's field set "
+        "changed), the boundary must be RE-MEASURED")
     assert statement.sql.endswith(
         "ON CONFLICT (org_id, graph_id, seq) DO NOTHING")
     assert "RETURNING" not in statement.sql
