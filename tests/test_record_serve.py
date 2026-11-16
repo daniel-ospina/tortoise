@@ -174,7 +174,7 @@ def test_the_registry_serves_the_anchored_surface_and_nothing_else():
     assert set(rs.not_served_reads()) == {
         "anchored-neighbours", "anchored-ep-scalars", "auto-detect-by-id",
         "entity-accessor", "internal-accessor", "selfhost-endpoint",
-        "whole-graph",
+        "session-accessor", "whole-graph",
     }
 
 

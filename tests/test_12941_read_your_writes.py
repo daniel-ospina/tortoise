@@ -279,6 +279,50 @@ def test_MCP_attribution_shadows_a_stored_property_of_the_same_name(monkeypatch,
         "a stored property forged an attribution on an armed read")
 
 
+def test_MCP_the_OPERATOR_door_reads_its_own_writes(monkeypatch, mcp_harness):
+    """#12941 review P1-1: the operators are the issue's OWN measured population.
+
+    "5 operators were accepted by the record, 0 in the cache" — and
+    `tortoise_get_operator` read a Point by id with no seam, so an operator
+    written and then verified answered `{}` with no signal. It shares the ONE
+    caller-facing read now.
+    """
+    from tortoise.mcp_server import tortoise_get_operator
+
+    rs.reset_fallback_counts()
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    monkeypatch.setattr(rs, "open_record", _opener(
+        _FakeConn(rows=[_row(is_operator=True, point_kind="operator")])))
+    mcp_harness(None)
+
+    out = tortoise_get_operator("p-1")
+
+    assert out.get("id") == "p-1", (
+        f"an operator the record holds read back as absent — got {out!r}")
+    assert out.get("servedFrom") == "record"
+
+
+def test_MCP_the_OPERATOR_door_does_not_turn_an_impairment_into_a_domain_fact(
+        monkeypatch, mcp_harness):
+    """A `not-hot` answer must not become "Point … is not an operator".
+
+    The non-operator guard fires on "a dict with no `is_operator`", and a
+    not-hot dict has no properties at all — so an impairment would have been
+    reported as a fact about the graph.
+    """
+    from tortoise.mcp_server import tortoise_get_operator
+
+    rs.reset_fallback_counts()
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    monkeypatch.setattr(rs, "open_record", _opener(OSError("refused")))
+    mcp_harness(None)
+
+    out = tortoise_get_operator("p-1")
+
+    assert out.get("residency") == RESIDENCY_NOT_HOT, out
+    assert "error" not in out, f"an impairment was reported as a domain fact: {out!r}"
+
+
 # ── 2. the SDK door — the same two guarantees, opt-in ──────────────────────
 
 
@@ -373,9 +417,38 @@ def test_SDK_a_RECORD_answered_absence_is_never_marked_not_hot(monkeypatch):
 
     props = sdk.get_point("p-1", served_out=served)
 
+    # ⛔ #12941 review P2-1: the CACHE HANDLE was never opened. `record` mode
+    # exists to answer with the graph engine stopped, so an eager `_get_proj()`
+    # is not a cost question — on a stopped graph it is a hard failure before the
+    # record is ever asked, re-introducible with a fully green suite until this
+    # assertion existed (the reviewer proved that by mutation).
+    assert sdk._g.queries == [], (
+        "record mode opened the cache graph: "
+        f"{sdk._g.queries}")
     assert props == {}, f"an armed absence must stay an absence — got {props!r}"
     assert served.get("servedFrom") == "record"
     assert RESIDENCY_FIELD not in served
+
+
+def test_the_marker_speaks_the_DECLARATIONS_key_vocabulary(monkeypatch):
+    """#12941 review P2-2: `partial` enumerates `Point:<id>`, not `<id>`.
+
+    `cache_projection.declared_key` is the coordinate the WRITER puts in the
+    declaration; passing a bare id made `point_residency`'s `key` inert and
+    reported a node the declaration DOES cover as `not-hot` — a false
+    impairment, in the fail-safe direction but still wrong.
+    """
+    from tortoise.cache_projection import declared_key
+
+    monkeypatch.setenv("TORTOISE_RESIDENCY", "1")
+    coord = declared_key("Point", "p-1")
+    g = _FakeG(None, coverage="partial", hot_keys=[coord])
+
+    assert rs.point_residency(g, found=False, key="p-1") is None, (
+        "the declaration covers this node, so a miss is an in-store absence — "
+        "not an impairment")
+    # …and an UNCOVERED node is still a residency miss.
+    assert rs.point_residency(g, found=False, key="p-2") == RESIDENCY_NOT_HOT
 
 
 # ── 3. the hosted door — the 404 must carry the verdict ────────────────────

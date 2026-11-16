@@ -5184,6 +5184,37 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
     return tortoise_query(tag=tag, include_retracted=True, limit=_TAG_ALIAS_LIMIT)
 
 
+def _read_point_served(id: str) -> dict:
+    """The ONE caller-facing point-by-id read: the seam's verdict, applied.
+
+    Shared by `tortoise_get_point` and `tortoise_get_operator` so the two cannot
+    disagree about an absence (#12941 review P1-1: the operator door reads a
+    Point by id too, and the operators are the issue's OWN measured population —
+    "5 operators were accepted by the record … 0 in the cache").
+
+    Three shapes, and each is deliberate:
+
+    * found → the node's properties, plus the attribution merged AFTER them, so
+      a stored property of the same name cannot forge a fallback;
+    * absent with the record's authority behind it (`record-miss`, `record`) or
+      with no mode armed → `{}` — FALSY, because this tool's contract is
+      "properties, or empty dict" and a verifier written as `if out:` must not
+      read an absence as a success (#12941 review P0-1);
+    * `not-hot` → a dict carrying `residency` and the reason, never an empty one
+      (#7952: a store that cannot see the node must say so).
+    """
+    from tortoise.residency import RESIDENCY_FIELD
+
+    served: dict = {}
+    out = _safe(_get_org_sdk().get_point, id, served_out=served)
+    if not isinstance(out, dict) or isinstance(out, _SafeError):
+        return out
+    if not out:
+        marker = served.get(RESIDENCY_FIELD)
+        return {RESIDENCY_FIELD: marker, **served} if marker else {}
+    return {**out, **served}
+
+
 def tortoise_get_point(id: str) -> dict:
     """Get a single Point by ID. Returns all properties, or empty dict.
     Alias → get(id, type='point') (epic #888 W3).
@@ -5230,18 +5261,7 @@ def tortoise_get_point(id: str) -> dict:
     marker armed the dict is empty, so the response is the pre-#12941 shape
     exactly.
     """
-    served: dict = {}
-    out = _safe(_get_org_sdk().get_point, id, served_out=served)
-    if not isinstance(out, dict) or isinstance(out, _SafeError):
-        return out
-    if not out:
-        # No node. Return the not-hot verdict when the seam reached one, else the
-        # empty dict that means "not here" (#12941 review P0-1).
-        from tortoise.residency import RESIDENCY_FIELD
-
-        marker = served.get(RESIDENCY_FIELD)
-        return {RESIDENCY_FIELD: marker, **served} if marker else {}
-    return {**out, **served}
+    return _read_point_served(id)
 
 
 # ── Entity Resolution (GAP-01 #6987) ──────────────────────────
@@ -5685,12 +5705,23 @@ def tortoise_get_operator(id: str) -> dict:
     """Get an operator Point by ID. Returns all properties including annotation dimensions.
     Raises error if the Point is not an operator.
     Alias → get(id, type='operator') (epic #888 W3)."""
-    point = _safe(_get_org_sdk().get_point, id)
+    # #12941: this door reads a POINT by id, so it honours the record seam like
+    # `tortoise_get_point` does — an operator written and then verified must not
+    # read back ABSENT (the issue's own measured population: 5 operators in the
+    # record, 0 in the cache).
+    point = _read_point_served(id)
     # _safe reports ANY failure as an _SafeError — itself a dict subclass — so
     # the non-operator guard below would match a failed call and fabricate a
     # domain fact ('is not an operator'), discarding the real cause. Surface
     # the typed failure FIRST (#4576; same pattern as #3926).
     if isinstance(point, _SafeError):
+        return point
+    if isinstance(point, dict) and point.get("residency") == "not-hot" \
+            and "id" not in point:
+        # ⛔ `not-hot` is an IMPAIRMENT, not a domain fact. Without this arm the
+        # guard below would read a dict with no `is_operator` and answer "Point
+        # … is not an operator" — inventing a fact about the graph from a store
+        # that could not see it, which is the #4576 class in the other direction.
         return point
     if isinstance(point, dict) and point and not point.get("is_operator"):
         # ⛔ DELIBERATELY a plain dict, NOT `_SafeError` (#4576, pinned by

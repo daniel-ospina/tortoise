@@ -400,7 +400,12 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "(#9192/#10025/#10046 install the tenant ambiently through "
                "`mcp_auth._record_tenant_scope`), so since #12941 the route does "
                "honour this seam — through the accessor's opt-in caller-facing "
-               "form, never through a mid-write caller.",
+               "form, never through a mid-write caller. ⚠️ The OPERATOR route "
+               "(`tortoise_get_entity(id, type=\"operator\")` → "
+               "`tortoise_get_operator`, `tortoise_get_operator` itself) is the "
+               "same by-id read restricted to operator Points and goes through "
+               "that same form (#12941 review P1-1) — the operators are the "
+               "issue's own measured population.",
     ),
     "entity-accessor": AnchoredRead(
         name="entity-accessor",
@@ -441,9 +446,19 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
     "auto-detect-by-id": AnchoredRead(
         name="auto-detect-by-id",
         status=NOT_SERVED,
-        cypher="MATCH (n) WHERE n.id = $id OR n.eventId = $id OR n.url = $id "
-               "RETURN n LIMIT 1  (through `projection._resolve_entity`, "
-               "POINT PRIORITY over Point/Subject/Object/Source/Event)",
+        # ⚠️ NOT a query — words, deliberately, for the reason
+        # `anchored-neighbours` gives: the real shape is a UNION of
+        # label-scoped, INDEX-BACKED branches (`projection._RESOLVE_BRANCHES`,
+        # reached through `_resolve_entity`), one per (label, key property) —
+        # Point/Subject/Object/Source by `id`, Event by `eventId`, Source also by
+        # `url` — and `_get_auto_detect` then takes the FIRST branch's hit.
+        # Writing an all-label `MATCH (n) WHERE n.id = … OR n.eventId = …` here
+        # would both misdescribe it and mint a governed all-type pattern that
+        # #7948's census would have to carry as an exclusion (#12941 review
+        # P2-3).
+        cypher="a UNION of label-scoped, indexed id lookups (Point/Subject/"
+               "Object/Source by id, Event by eventId, Source also by url), "
+               "first hit wins — not a single MATCH",
         reason="the BARE by-id door — `tortoise_get_entity(<id>)` and "
                "`tortoise_get(<id>)` with no `type` (`mcp_server._get_auto_detect`) "
                "— resolves a node id across FIVE labels with Point priority and "
@@ -458,6 +473,22 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "claim this unit cannot show). The TYPED point form "
                "(`type=\"point\"`) is served — it lands on "
                "`tortoise_get_point`, see `internal-accessor`.",
+    ),
+    "session-accessor": AnchoredRead(
+        name="session-accessor",
+        status=NOT_SERVED,
+        cypher="MATCH (e:Event {eventKind:'AgentSession'}) … WHERE a session_id "
+               "matches  (through `TortoiseSDK.get_session`)",
+        reason="the MCP tool `tortoise_get_entity(id, type=\"session\")` → "
+               "`tortoise_get_session` reads an AgentSession `:Event` by "
+               "`session_id`, on the cache. A session's record rows ARE read "
+               "already — by the capture and detail doors, through "
+               "`record_read.session_turns` / `session_text` — so serving THIS "
+               "tool means deciding which reader owns a session, a placement "
+               "question rather than a missing capability. Enumerated rather than "
+               "left out because it is a caller-facing by-key read (#12941 "
+               "review P1-1), and an unlisted door reads as an absence the "
+               "registry never decided on.",
     ),
     "whole-graph": AnchoredRead(
         name="whole-graph",
@@ -1030,7 +1061,17 @@ def point_residency(g: Any, *, found: bool, key: str) -> str | None:
 
     if found or not residency_armed():
         return None
-    marker = mark_residency(read_declaration(g), hits=0, key=key)
+    # ⛔ THE DECLARATION'S KEY IS A LABEL-SCOPED COORDINATE, not a bare id
+    # (#12941 review P2-2). `cache_projection.declared_key` is what the WRITER
+    # puts in a `partial` declaration and what `residency.mark_residency`'s
+    # ``key=`` expects, so passing a bare id here made the argument inert: a
+    # declaration that DID enumerate ``Point:<id>`` reported `not-hot` for a
+    # miss on that very node — a false impairment. The coordinate is minted HERE
+    # so neither call site can get the vocabulary wrong.
+    from .cache_projection import declared_key
+
+    marker = mark_residency(read_declaration(g), hits=0,
+                            key=declared_key("Point", key))
     return RESIDENCY_NOT_HOT if marker == RESIDENCY_NOT_HOT else None
 
 

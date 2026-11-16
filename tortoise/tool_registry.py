@@ -467,7 +467,19 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_get_point",
         id="surface.get_point",
-        description="Get a single Point by ID. Returns all properties, or empty dict.",
+        # #12941: an ARMED deployment (`TORTOISE_RECORD_SERVE`) adds two things a
+        # client cannot infer from the pre-#12941 sentence: a found node names
+        # the store that answered (`servedFrom` / `fallbackReason`), and an
+        # answer no reachable store could SEE is a dict carrying
+        # `residency: "not-hot"` rather than an empty one (#7952). An established
+        # absence is still `{}`, so `if result:` stays a correct write check.
+        # ⚠️ The LIVE canonical tool is `tortoise_get_entity` (this name is its
+        # RETIRED alias); its description is the owner-approved surface text and
+        # is NOT edited here.
+        description=("Get a single Point by ID. Returns all properties, or empty dict "
+                     "(with TORTOISE_RECORD_SERVE armed: found answers name the store "
+                     "via servedFrom/fallbackReason, and an answer the store could not "
+                     "see carries residency=\"not-hot\" instead of being empty)."),
         risk="read",
         http_policy=True,
         sdk_method="get_point",
