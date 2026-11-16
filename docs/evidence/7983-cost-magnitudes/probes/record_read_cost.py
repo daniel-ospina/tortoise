@@ -156,6 +156,19 @@ MIGRATIONS = [
     # row-width figures this probe publishes are due a re-measurement against a
     # schema that carries them, and that is a measurement to re-run — not a list
     # entry to trim.
+    # #12894 stage C — `public.record_cursor`, the ordinal ALLOCATOR. ⛔ MISSING
+    # until this head: the entry above landed in `record_projection`'s registry
+    # without being carried into these three copies, so
+    # `tests/test_7950_capstone_probe.py`'s EQUALITY pin was RED (#12155 is the
+    # same defect one migration earlier). The probe's Postgres must carry the
+    # counter the armed write increments.
+    "20261116000001_record_cursor_allocator.sql",
+    # #12894 stage C — the byte meter's EXECUTE grant for `tortoise_record_app`,
+    # split out of the allocator file so a RE-APPLY can reach it (that file is
+    # `creates`-conditional in the record-suite re-apply and is therefore skipped
+    # forever once `record_cursor` exists). Listed here for the same reason every
+    # entry is: this list is `record_projection.RECORD_MIGRATIONS` in EQUALITY.
+    "20261116000002_record_cursor_meter_grant.sql",
     "20261109000001_record_embedding_vector.sql",
 ]
 

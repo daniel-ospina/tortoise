@@ -109,6 +109,14 @@ class FakeCursor:
             return (self._conn.guc_set, False)
         if self._conn.last_sql == rp._JOURNAL_CONFLICT_CONTENT_SQL:
             return self._conn.stored
+        # #9190: `replay()` asks, before it enumerates, whether this graph's
+        # positions have already been ISSUED by the allocator. These fakes model
+        # the PRE-CUTOVER shape — the counter table exists (this tree's
+        # migrations create it) and holds no row — which is every graph before
+        # `record_allocator.arm`. `test_12894_record_cursor.py` carries the
+        # cut-over fake, and the refusal it produces.
+        if self._conn.last_sql == rp.CURSOR_PRESENCE_SQL:
+            return None
         return (self._conn.guc_set,)
 
 

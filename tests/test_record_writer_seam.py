@@ -98,6 +98,14 @@ class FakeCursor:
         # both answers mirror what the reconnect would really see.
         if self._conn.last_sql == rp.TENANT_SCOPE_SQL:
             return (self._conn.guc_set, False)
+        # #9190: the replay asks whether this graph's positions are ISSUED before
+        # it enumerates them. This connection models the PRE-CUTOVER shape (the
+        # counter table exists and holds no row for the graph) — every graph
+        # before `record_allocator.arm`, and every graph the seam's own pins
+        # write to. The cut-over fake and its refusal live in
+        # `tests/test_12894_record_cursor.py`.
+        if self._conn.last_sql == rp.CURSOR_PRESENCE_SQL:
+            return None
         return (self._conn.guc_set,)
 
     def execute(self, sql: str, params: Any = None) -> None:
@@ -162,7 +170,16 @@ class FakeConnection:
         # also hide any hand-written statement that happened to mention
         # `current_setting`, which is the drift this equality exists to catch
         # (#9600 review cycle 5, P3).
-        return [r for r in self.executed if r[0] != rp.TENANT_SCOPE_SQL]
+        #
+        # ⛔ AND THE #9190 COUNTER READ IS THE SAME KIND OF STATEMENT: an
+        # ENUMERATED replay asks `CURSOR_PRESENCE_SQL` whether this graph's
+        # positions are already ISSUED before it numbers anything, so it sits
+        # between the read-back and the plan. It is prologue, not plan — the
+        # plan is still exactly `replay_plan`'s declaration — and its presence
+        # and position are asserted where the prologue is
+        # (`tests/test_9558_record_write_cost.py` pins the full order).
+        context = (rp.TENANT_SCOPE_SQL, rp.CURSOR_PRESENCE_SQL)
+        return [r for r in self.executed if r[0] not in context]
 
 
 def _plan(records: list[dict[str, Any]] | None = None, *,
@@ -175,11 +192,12 @@ def _plan(records: list[dict[str, Any]] | None = None, *,
 
 
 def _tenant_statement(org: str = ORG) -> tuple[str, list[Any]]:
-    """The seam's PROLOGUE — the first of its two statements outside the plan.
+    """The seam's PROLOGUE — the first of its statements outside the plan.
 
-    The second is ``TENANT_SCOPE_SQL`` (the read-back plus the role posture),
-    which ``FakeConnection.statements()`` filters out as a ``current_setting``
-    query while ``executed`` keeps it.
+    The others are ``TENANT_SCOPE_SQL`` (the read-back plus the role posture)
+    and, on an ENUMERATED replay, ``CURSOR_PRESENCE_SQL`` (#9190 — whether this
+    graph's positions are already ISSUED); ``FakeConnection.statements()``
+    filters both out as context while ``executed`` keeps them.
 
     Named rather than filtered out of the log, so "the seam adds exactly these
     statements of its own, and the first is the tenant" is the assertion instead
@@ -217,9 +235,11 @@ def test_the_seam_emits_exactly_the_record_plan() -> None:
 
     An extra statement here is a second fold; a missing one is a record the
     boundary silently drops. The assertion is equality over the WHOLE set — the
-    tenant prologue first (R6), then the plan, nothing else. (The seam's second
-    context statement, the ``TENANT_SCOPE_SQL`` verify, is absent from
-    ``statements()`` by the ``current_setting`` filter, not by omission.)
+    tenant prologue first (R6), then the plan, nothing else. (The seam's context
+    statements — the ``TENANT_SCOPE_SQL`` verify, and ``CURSOR_PRESENCE_SQL``,
+    the #9190 "are this graph's positions already ISSUED" read an ENUMERATED
+    replay makes before it numbers anything — are absent from ``statements()`` by
+    that identity filter, not by omission.)
     """
     conn = FakeConnection()
     result = _armed(conn).write(RECORDS, org_id=ORG, graph_id=GRAPH)
@@ -232,9 +252,10 @@ def test_the_seam_emits_exactly_the_record_plan() -> None:
     # independently of the number it is compared against. The tenant prologue
     # is not a record mutation, so it is subtracted — exactly one of it.
     assert conn.statements().count(_tenant_statement()) == 1
-    # The context statements are outside the plan: the tenant prologue AND its
-    # read-back (#9600 review cycle 1 — `replay()` verifies the GUC took effect).
-    _context = 2
+    # The context statements are outside the plan: the tenant prologue, its
+    # read-back (#9600 review cycle 1 — `replay()` verifies the GUC took effect),
+    # and the #9190 counter read an enumerated replay makes first.
+    _context = 3
     assert result.statements == (
         len(conn.executed) - len(conn.journal_positions) - _context)
     assert result.statements > 0
