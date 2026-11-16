@@ -3012,7 +3012,7 @@ def _argmax_row(doc: str, arm: str) -> str:
     raise AssertionError(f"no `{arm}` row in the arm table; rows={[r[0][:28] for r in rows]}")
 
 
-def test_the_two_flags_are_unset_on_every_deploy_surface():
+def test_the_two_flags_are_unset_on_every_deploy_surface(monkeypatch):
     """The FACT the wording rests on, measured from the tree instead of asserted.
 
     If a deploy surface ever starts setting these, the deployed configuration
@@ -3031,11 +3031,24 @@ def test_the_two_flags_are_unset_on_every_deploy_surface():
     # text-presence check called that a change and forced a document edit for a no-op; an
     # arm comparison still reds on the thing that matters — `=0` on the value gate, or any
     # statement arming VET or the seam.
+    #
+    # ⛔ THE BASELINE IS THE CODE DEFAULT, NOT THIS PROCESS'S ENVIRONMENT (review P2). The
+    # three resolvers read `os.environ`, so without the `delenv` below "the default arm" is
+    # whatever the CALLER's shell resolved, and the pin inverts in BOTH directions: with
+    # `TORTOISE_VALUE_GATE=0` exported (which `.env.example` invites — "set either to 0 to
+    # disable for a run") a `fly.toml` stating `= "0"` PASSED, i.e. the very statement this
+    # arm must refuse, while the SHIPPED `= "1"` falsely reddened. Measured the same way for
+    # `TORTOISE_VET=1` and `TORTOISE_S2_DECISION_SEAM=1`. The old text-presence form was
+    # environment-blind, so the arm form must be too — a pin about the DEPLOYED arm cannot
+    # depend on the checking process's env.
     import tomllib
 
     from tortoise import s2_decision_seam, value_gate
     from tortoise.env_truthy import is_truthy
     from tortoise.extractor_v2 import _vet_enabled
+
+    for _flag in ("TORTOISE_VET", "TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM"):
+        monkeypatch.delenv(_flag, raising=False)
 
     default_arms = {
         "TORTOISE_VET": _vet_enabled(),
