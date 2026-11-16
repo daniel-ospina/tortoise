@@ -1192,7 +1192,13 @@ class TestStdioEntrypointToolRegistration:
             # the advertised count 72 -> 68; the floor moves with it (a floor left
             # at the old number would red on a CORRECT removal, and one dropped too
             # far would stop noticing a registry that failed to register).
-            assert len(names) >= 68, f"expected >=68 tools, got {len(names)}"
+            # #11609 Phase 2 lane C (`#12948` review B1 finding 8): the six
+            # SOURCES/MINE/SESSION containers replaced seven public doors, so the
+            # advertised count moved 68 -> 67. Measured, not inferred from a green
+            # run — `_ENTRY_DECLARATIONS` minus `RETIRED_USE_INSTEAD` is 68 at the
+            # merge base `2dfbb5d4` and 67 at the PR head (91-23 vs 97-30). The
+            # floor is a FLOOR, so a later silent drop still reds on it.
+            assert len(names) >= 67, f"expected >=67 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
             # #3883: tortoise_health is RETIRED — the consolidator is advertised
             # and the retired name still answers, with a warning, off the list.

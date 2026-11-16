@@ -4096,12 +4096,21 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 def _http_excluded_error() -> dict:
     """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
 
-    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding seven
-    tool bodies (four live, three retired-but-served), each of which returns it
+    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding nine
+    tool bodies (four live, five retired-but-served), each of which returns it
     verbatim, so the dispatch used to be recorded ``status="ok"``. The wire
     payload is unchanged (`_SafeError` is a ``dict`` subclass); the seam matches
     it by value. Its ``error`` is a MAPPING, so the seam's text arm cannot see
     it — the exact-dict arm is what classifies it.
+
+    `#12948`: the population moved from seven (four live, three retired) to
+    nine (four live, five retired) — the six SOURCES/MINE/SESSION containers
+    replaced the public `tortoise_index_files` / `tortoise_index_sessions` /
+    `tortoise_ingest_corpus` / `tortoise_mine_conversations` doors, which keep
+    answering from the retired table and therefore keep returning this funnel.
+    The pin that measures it is
+    `tests/test_mcp_refusal_telemetry_9084.py::test_the_funnel_docstring_states_the_population_it_actually_feeds`,
+    which counts the call sites rather than trusting this sentence.
     """
     return _SafeError({
         "jsonrpc": "2.0",

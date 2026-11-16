@@ -386,8 +386,10 @@ REMOVED_SDK_METHODS: dict[str, str] = {
         "direction of this departure."
     ),
     "index_sessions": (
-        "#4282 Phase 2 (#11609): RETIRED from the public surface; it was a single "
-        "delegation to `index_directory`, now spelled "
+        "#4282 Phase 2 (#11609): RETIRED from the public surface; its body was a single "
+        "delegation to `ingest_corpus` (`eventKind='AgentSession'`) — the "
+        "`index_directory` successor its DEPRECATED docstring named was never the "
+        "mechanism — and the operation is now spelled "
         "`index_sources_from_directory(file_type='agent_session')`. NO HINT: beta's row "
         "for this name is in its *Removed* table (`Body is a single delegation to another "
         "public method, no added contract`), and the one region naming both it and a "

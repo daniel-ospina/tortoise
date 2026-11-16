@@ -452,9 +452,17 @@ _PINNED_CORE_VERBS = frozenset({
     "_journal_entity_event", "_write_session_and_turns", "_write_capture_turns",
     # public doors a lane plausibly writes through …
     "create_point", "create_object", "create_subject", "create_operator",
-    "create_direct_edge", "index_directory", "ingest_corpus", "update_point",
+    "create_direct_edge", "_index_directory", "ingest_corpus", "update_point",
     "supersede_point", "promote_point", "retract_point", "invalidate_point",
-    "delete_point", "mitigate_operator", "annotate_operator", "checkpoint",
+    "delete_point", "mitigate_operator", "annotate_operator", "_checkpoint",
+    # ⚠️ #12948 RENAMED two names this floor used to carry — `index_directory` and
+    # `checkpoint` are now the private carriers `_index_directory` / `_checkpoint`
+    # (their public doors were retired into the SOURCES/MINE/SESSION containers).
+    # Repointed rather than dropped, unlike the #4282 deletions noted below: the
+    # bodies still exist, so the floor can still demand them, and dropping them
+    # would quietly shrink the non-vacuity floor by the two carriers that write
+    # the largest record batches. The derivation is keyed on the `def` NAME, so a
+    # retired public alias is not in it while its private body is.
     "set_point_baseline", "compute_confidence",
     # … and the aliases the hand-picked list missed (#10380 review P1)
     # ⚠️ #4282 DELETED three names this floor used to carry — `record_calibration`,

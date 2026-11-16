@@ -80,7 +80,12 @@ class TestDe2e7:
     def test_phase4_tools_registered(self):
         from tortoise.tool_registry import TOOL_REGISTRY
         names = {t.name for t in TOOL_REGISTRY}
-        phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
+        # `#12948` (review B1 finding 8): `tortoise_mine_conversations` was RETIRED
+        # into `tortoise_mine_knowledge_from_directory` (Phase 2 lane C's MINE
+        # container), so the pin follows the LIVE name. It is the same door — the
+        # retired entry still answers through `RETIRED_USE_INSTEAD` — so this is a
+        # re-point, not a widening: the phase-4 population still has five members.
+        phase4 = {"tortoise_mine_knowledge_from_directory", "tortoise_list_dedup_candidates",
                   "tortoise_approve_merge", "tortoise_promote_point",
                   "tortoise_belief_timeline"}
         assert phase4 <= names, phase4 - names

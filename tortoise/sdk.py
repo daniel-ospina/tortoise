@@ -38311,8 +38311,8 @@ class TortoiseSDK:
                 elif src_url and not eff_tier:
                     item["suggestion"] = (
                         f"Source {src_url} is untiered — call "
-                        f"set_source_tier('{src_url}', 'T0'..'T4') or "
-                        f"create_source(url, kind, tier=...) "
+                        f"manage_source_trust('{src_url}', tier='T0'..'T4') or "
+                        f"register_source(url, kind, tier=...) "
                         f"(covers all points from this source)"
                     )
                 else:
@@ -48183,7 +48183,7 @@ class TortoiseSDK:
                         f"{_managed!r} is server-managed on a :Source and "
                         f"cannot be set through the generic entity surface "
                         f"(#3998/D30). Record a DELETION with "
-                        f"`create_source(..., raw_state=...)`, which validates "
+                        f"`register_source(..., raw_state=...)`, which validates "
                         f"the value (accepted: {sorted(WRITABLE_RAW_STATES)}). "
                         f"`offline`/`access_revoked` are CONDITIONS, observed "
                         f"live and never stored (raw_state's \"Option A\" "
@@ -53340,16 +53340,21 @@ class TortoiseSDK:
                    "rawState", "rawStateAt", "raw_state"):
             if _k in props:
                 # #1501: name the actual sanctioned keyword per key (is_episodic
-                # became a sanctioned create_source keyword in this change; #3998
+                # became a sanctioned keyword in this change; #3998
                 # adds raw_state for the absent-raw state, server-managed for the
                 # same reason — a props payload must not be able to CLEAR a
                 # recorded absence, which is the whole point of the state).
+                # #12948 review F3: the sentence named `create_source`, which this
+                # batch RETIRES (the body survives as the private `_create_source`) —
+                # so the refusal sent the caller into a bare `AttributeError`. It now
+                # names the live container, as the same sentence already does in
+                # `_refuse_document_kind_demotion` above and in `quota.py`.
                 sanctioned = ("source_path" if _k in ("sourcePath", "source_path")
                               else "raw_state" if _k in ("rawState", "rawStateAt", "raw_state")
                               else _k)
                 raise ValueError(
                     f"{_k!r} is a server-managed field and cannot be set via "
-                    f"props — use the sanctioned create_source({sanctioned}=) "
+                    f"props — use the sanctioned register_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
                 )
         # #5196 round 5, P1: the token has TWO spellings, and this is the second.
@@ -55000,14 +55005,14 @@ class TortoiseSDK:
         try:
             self._get_proj().g.query("MATCH (n) RETURN count(n) LIMIT 1")
             connected = True
-        except Exception as exc:  # noqa: BLE001 — a probe REPORTS, it never masks
+        except Exception as exc:  # a probe REPORTS, it never masks
             probe_error = type(exc).__name__
 
         account: dict | None = None
         account_error: str | None = None
         try:
             account = self.get_organisation_account()
-        except Exception as exc:  # noqa: BLE001 — the reason is the answer
+        except Exception as exc:  # the reason is the answer
             account_error = f"{type(exc).__name__}: {exc}"
 
         tenant = record_tenant_effective(self._record_tenant)
@@ -55043,7 +55048,7 @@ class TortoiseSDK:
                 "k.revoked_at, k.expires_at, k.name, k.delegation_depth",
                 params={"id": key_id},
             ).result_set
-        except Exception as exc:  # noqa: BLE001 — an unreadable registry is NOT "no key"
+        except Exception as exc:  # an unreadable registry is NOT "no key"
             out["key_error"] = (
                 f"the key registry could not be read ({type(exc).__name__}) — "
                 f"this is NOT an answer about the key"

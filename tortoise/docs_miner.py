@@ -564,8 +564,8 @@ def mine_docs(sdk, directory: str | Path, *,
               progress_file: str | None = None) -> dict:
     """Mine a markdown corpus into DRAFT statement Points (the #1724 pipeline).
 
-    Composes the Slice-1 corpus pass (``sdk.index_directory`` — Sources +
-    D10-folded Document Sources, hash-dedup'd) with the claim pass on top,
+    Composes the Slice-1 corpus pass (``sdk.index_sources_from_directory`` —
+    Sources + D10-folded Document Sources, hash-dedup'd) with the claim pass on top,
     exactly as ``mining.mine_corpus_with_sdk`` composes ``sdk.ingest_corpus``
     with the conversation miner. ``index_first=False`` skips the composition
     for a caller that just ran it.

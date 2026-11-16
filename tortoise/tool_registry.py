@@ -1021,7 +1021,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_ingest_corpus",
         id="surface.ingest_corpus",
-        description="DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter "
+        description="Batch document ingestion — walk directory, parse YAML frontmatter "
                     "from .md files, create/update document Sources "
                     "(D10: a document is a :Source). "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
@@ -1220,7 +1220,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_index_sessions",
         id="surface.index_sessions",
-        description="DEPRECATED — use tortoise_index_files. Index session .md files "
+        description="Index session .md files "
                     "as AgentSession Events. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
         risk="destructive",
@@ -1563,7 +1563,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_register_source",
         id="surface.register_source",
         description="Declare a source exists — the URL is its identity (#4282 row 14). "
-                    "Absorbs tortoise_create_source. `tier` (T0-T4) overrides the tier "
+                    "The one declaring door: the retired per-kind entry points "
+                    "redirect here. `tier` (T0-T4) overrides the tier "
                     "the source KIND derives; `sourceDate` is the evidence-age clock. "
                     "An existing Source (URL collision) is never re-kinded.",
         risk="write",
@@ -1578,8 +1579,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "ARGUMENT: `tier=` (T0-T4) sets the credibility tier; `score=` with "
                     "`assessor=` and `rationale=` records an assessment (a "
                     "reputation-weighted Statement Point). Passing both is refused — "
-                    "they are different writes. Absorbs tortoise_assess_source and "
-                    "tortoise_set_source_tier. Reads: "
+                    "they are different writes. The one trust door — both former arms "
+                    "(set a tier, or record a scored assessment) live here. Reads: "
                     "tortoise_graph_overview(section='sources').",
         risk="destructive",
         http_policy=True,
@@ -1589,9 +1590,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_index_sources_from_directory",
         id="surface.index_sources_from_directory",
         description="Register a directory's files as sources — NOTHING is extracted "
-                    "(#4282 row 15). Absorbs tortoise_index_files, plus "
-                    "tortoise_index_sessions (`file_type='agent_session'`) and "
-                    "tortoise_ingest_corpus (`file_type='doc'`). `file_type`: auto | "
+                    "(#4282 row 15). The three older per-kind indexing doors "
+                    "redirect here: `file_type='agent_session'` files a session "
+                    "transcript and `file_type='doc'` a document corpus. "
+                    "`file_type`: auto | "
                     "agent_session | meeting | doc. Batched and resumable "
                     "(progress_file). Returns the honest summary (file_count, indexed, "
                     "updated, skipped, failed, aborted, ignored, errors[], by_kind); "
@@ -1609,10 +1611,11 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Mine ONE session (#4282 row 16). Dispatch is BY ARGUMENT: "
                     "`conversation=` files an agent session (turns become episodic "
                     "Points, LLM extraction produces epistemic Points; the backend is "
-                    "the target graph's configuration) — same door and gates as "
-                    "tortoise_session_capture; `items=` files an already-distilled batch "
+                    "the target graph's configuration) — same door and gates as the "
+                    "retired session-capture shim; `items=` files an already-distilled batch "
                     "({wing, room, content}) with two-tier dedup. Passing both is "
-                    "refused. Absorbs tortoise_checkpoint and tortoise_session_capture. "
+                    "refused. Absorbs both retired capture doors — the session arm "
+                    "AND the checkpoint batch arm. "
                     "CONSENT (#3662, Option 1): this tool runs server-side and cannot "
                     "read the caller's TORTOISE_CAPTURE, so calling it with "
                     "`conversation=` IS the agreement to record the session — tell the "
@@ -1629,8 +1632,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Mine a FOLDER of files, each by its own content type (#4282 row "
                     "17) — the batch form of tortoise_mine_knowledge_from_session, not a "
                     "kind of indexing: this call EXTRACTS, "
-                    "tortoise_index_sources_from_directory does not. Absorbs "
-                    "tortoise_mine_conversations. EXCLUDED from tenant HTTP — walks the "
+                    "tortoise_index_sources_from_directory does not. It absorbs the "
+                    "retired conversations-mining door. EXCLUDED from tenant HTTP — walks the "
                     "server filesystem.",
         risk="destructive",
         http_policy=False,
@@ -2225,8 +2228,16 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # shape the alias's own `Migrate to:` text repudiates 1000 lines away. The
     # paged form is the only destination that can be walked to the whole population.
     "tortoise_query_points_by_tag": "tortoise_query(tag=..., offset=..., limit=...)",
-    "tortoise_index_sessions": "tortoise_index_files(directory)",
-    "tortoise_ingest_corpus": "tortoise_index_files(directory)",
+    # #12948 review F1: these two pointed at `tortoise_index_files`, which THIS batch
+    # also retires — so the pointer resolved to a retired name and dead-ended in two
+    # hops, the rule `TestEveryPointerResolvesInOneHop` states and neither test covered
+    # (both are parameterized over their own batch). They now name the live container
+    # directly, pinning the `file_type` discriminator the two doors differ on: a caller
+    # redirected without it would silently walk the wrong file class.
+    "tortoise_index_sessions":
+        'tortoise_index_sources_from_directory(directory, file_type="agent_session")',
+    "tortoise_ingest_corpus":
+        'tortoise_index_sources_from_directory(directory, file_type="doc")',
     # #3540 ruling B (owner, 2026-10-12): ONE consolidated source-management
     # operation replaces the two per-source switches, so the surface ends one
     # tool FEWER while the number of agent-settable sources grows (the

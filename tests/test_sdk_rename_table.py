@@ -1444,8 +1444,8 @@ def test_the_w8_read_clause_is_present_in_the_evidence() -> None:
     # asserted above). The canonical W8 row is the WRITE half's home: it must still
     # name the live target and record that the two writes moved into it, which is the
     # claim #11609 has to keep true.
-    from tools.sdk_rename_table import Region, _derive_region, _doc_text
     from tools import sdk_rename_table as gen
+    from tools.sdk_rename_table import Region, _derive_region, _doc_text
 
     doc_name, anchor = gen.CITES["w8"]
     region = _derive_region(_doc_text(doc_name), Region(anchor))

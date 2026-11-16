@@ -583,7 +583,13 @@ class TestSourceTierAPI:
             summary = sdk.calibrate_summary()
             item = next(i for i in summary if i["id"] == p["id"])
             assert item["calibrated"] is False
-            assert "set_source_tier" in item["suggestion"]
+            # #12948 review F3: this pinned `set_source_tier`, which the same PR RETIRED —
+            # so it asserted that the suggestion named a name the caller can no longer
+            # call, i.e. it held the "actionable" half of its own name in the negative.
+            # Retargeted, not loosened: the property is that the suggestion names the
+            # LIVE doors, one of which tiers and one of which registers the source.
+            assert "manage_source_trust" in item["suggestion"]
+            assert "register_source" in item["suggestion"]
             assert "untiered" in item["suggestion"]
 
     def test_calibrate_summary_registry_tiered_not_flagged(self):

@@ -1004,7 +1004,7 @@ class TestWriterScript(unittest.TestCase):
         self.assertNotIn("__LOG__", WRITER_SCRIPT)
 
     def test_uses_public_doors_not_private_handles(self):
-        for door in ("create_point", "set_source_tier", "get_source_reliability",
+        for door in ("create_point", "manage_source_trust", "get_source_reliability",
                      "compute_confidence", "sdk.query"):
             self.assertIn(door, WRITER_SCRIPT)
         self.assertNotIn("_get_proj", WRITER_SCRIPT)
@@ -1199,7 +1199,7 @@ class TestWriterValidation(unittest.TestCase):
                 return {"id": "p-array", "status": "live",
                         "extractedFrom": [kw.get("extractedFrom")],
                         "extractedFromAll": [kw.get("extractedFrom")]}
-            def set_source_tier(self, url, tier):
+            def manage_source_trust(self, url, tier=None, **kw):
                 pass
             def get_source_reliability(self, url):
                 return {"url": url, "reliability": 0.9}
@@ -1239,7 +1239,7 @@ class TestWriterValidation(unittest.TestCase):
             def create_point(self, kind, content, **kw):
                 seen_props.append(dict(kw))
                 return {"id": "p1", "status": "retracted"}
-            def set_source_tier(self, url, tier):
+            def manage_source_trust(self, url, tier=None, **kw):
                 pass
             def get_source_reliability(self, url):
                 return {"url": url, "reliability": 0.9}
@@ -1282,7 +1282,7 @@ class TestWriterValidation(unittest.TestCase):
                 def create_point(self, kind, content, **kw):
                     logging.getLogger(logger_name).warning("synthetic noise")
                     return {"id": "p1", "status": "live"}
-                def set_source_tier(self, url, tier):
+                def manage_source_trust(self, url, tier=None, **kw):
                     pass
                 def get_source_reliability(self, url):
                     return {"url": url, "reliability": 0.9}
@@ -1357,7 +1357,7 @@ class TestWriterValidation(unittest.TestCase):
                     return [{"id": "p1", "domain": domain, "status": "live"}]
                 def create_point(self, kind, content, **kw):
                     return {"id": "p1", "status": "live"}
-                def set_source_tier(self, url, tier):
+                def manage_source_trust(self, url, tier=None, **kw):
                     tiers.append(tier)
                 def get_source_reliability(self, url):
                     return reliability
@@ -1374,14 +1374,14 @@ class TestWriterValidation(unittest.TestCase):
             # (fake-SDK kwargs, the message the writer must raise)
             (dict(domain="other-domain", reliability=ok_rel, ep=ok_ep),
              "points under source missing domain"),
-            # a dict whose reliability is None: set_source_tier silently
+            # a dict whose reliability is None: manage_source_trust silently
             # no-opped. The `reliability=None` case below only exercises the
             # `not isinstance(_rel, dict)` half of the guard, so without this
             # one the realistic drift has no failing path (#9929 review P2).
             (dict(reliability={"url": "s://t", "reliability": None}, ep=ok_ep),
-             "source still untiered after set_source_tier"),
+             "source still untiered after manage_source_trust"),
             (dict(reliability=None, ep=ok_ep),
-             "source still untiered after set_source_tier"),
+             "source still untiered after manage_source_trust"),
             (dict(reliability=ok_rel,
                   ep={"converged": False, "iterations": 3,
                       "diagnostic": "max_iterations", "truncated": False}),
@@ -1412,14 +1412,14 @@ class TestWriterValidation(unittest.TestCase):
                 self.assertIn(message, str(cm.exception))
 
         # The tier the writer requests is a PUBLISHED value (README:
-        # `set_source_tier(source, "T2")`, "EP-compatibility is required, not
+        # `manage_source_trust(url=source, tier="T2")`, "EP-compatibility is required, not
         # optional"; T2 is the 0.75 credibility prior in
         # tortoise/source_credibility.py). Nothing pinned it: the fakes
         # discarded the argument and the read-back only requires
         # `reliability is not None`, so ANY tier satisfies it — changing 'T2'
         # to 'T4' left the whole lane suite green while every extracted source
         # was written at a different credibility than the README claims.
-        self.assertTrue(tiers, "no case reached set_source_tier")
+        self.assertTrue(tiers, "no case reached manage_source_trust")
         self.assertEqual(set(tiers), {"T2"})
 
 

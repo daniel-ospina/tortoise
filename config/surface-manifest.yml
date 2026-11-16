@@ -90,7 +90,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 2dfbb5d4552d177e336eede9c39dfadee18db78f
+cut_at_commit: bdda17dd22d060a667be44954a7ff6446474230f
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -990,12 +990,12 @@ retired:
   http_policy: false
   approval: null
 - name: tortoise_index_sessions
-  use_instead: tortoise_index_files(directory)
+  use_instead: tortoise_index_sources_from_directory(directory, file_type="agent_session")
   sdk_method: index_sessions
   http_policy: false
   approval: null
 - name: tortoise_ingest_corpus
-  use_instead: tortoise_index_files(directory)
+  use_instead: tortoise_index_sources_from_directory(directory, file_type="doc")
   sdk_method: ingest_corpus
   http_policy: false
   approval: null
@@ -2463,11 +2463,12 @@ rows:
   canonical: null
   job: 'Mine ONE session (#4282 row 16). Dispatch is BY ARGUMENT: `conversation=` files an agent session (turns
     become episodic Points, LLM extraction produces epistemic Points; the backend is the target graph''s configuration)
-    — same door and gates as tortoise_session_capture; `items=` files an already-distilled batch ({wing, room, content})
-    with two-tier dedup. Passing both is refused. Absorbs tortoise_checkpoint and tortoise_session_capture. CONSENT
-    (#3662, Option 1): this tool runs server-side and cannot read the caller''s TORTOISE_CAPTURE, so calling it
-    with `conversation=` IS the agreement to record the session — tell the user you are filing it BEFORE you call,
-    so they can decline. session_id is the idempotency key; a team that disabled capture gets 409, so do not retry.'
+    — same door and gates as the retired session-capture shim; `items=` files an already-distilled batch ({wing,
+    room, content}) with two-tier dedup. Passing both is refused. Absorbs both retired capture doors — the session
+    arm AND the checkpoint batch arm. CONSENT (#3662, Option 1): this tool runs server-side and cannot read the
+    caller''s TORTOISE_CAPTURE, so calling it with `conversation=` IS the agreement to record the session — tell
+    the user you are filing it BEFORE you call, so they can decline. session_id is the idempotency key; a team that
+    disabled capture gets 409, so do not retry.'
   dependency: declares TortoiseSDK.mine_knowledge_from_session (resolves)
   lifecycle: active
   used_by: never called
@@ -2766,13 +2767,13 @@ rows:
   keyword_rank: 2
   cluster: null
   canonical: null
-  job: 'Register a directory''s files as sources — NOTHING is extracted (#4282 row 15). Absorbs tortoise_index_files,
-    plus tortoise_index_sessions (`file_type=''agent_session''`) and tortoise_ingest_corpus (`file_type=''doc''`).
-    `file_type`: auto | agent_session | meeting | doc. Batched and resumable (progress_file). Returns the honest
-    summary (file_count, indexed, updated, skipped, failed, aborted, ignored, errors[], by_kind); idempotent — re-runs
-    converge to skipped. On a shared graph, give each corpus a unique corpus_name (default = directory basename)
-    to avoid cross-corpus url collisions. EXCLUDED from tenant HTTP — walks the server filesystem with a caller-supplied
-    path.'
+  job: 'Register a directory''s files as sources — NOTHING is extracted (#4282 row 15). The three older per-kind
+    indexing doors redirect here: `file_type=''agent_session''` files a session transcript and `file_type=''doc''`
+    a document corpus. `file_type`: auto | agent_session | meeting | doc. Batched and resumable (progress_file).
+    Returns the honest summary (file_count, indexed, updated, skipped, failed, aborted, ignored, errors[], by_kind);
+    idempotent — re-runs converge to skipped. On a shared graph, give each corpus a unique corpus_name (default
+    = directory basename) to avoid cross-corpus url collisions. EXCLUDED from tenant HTTP — walks the server filesystem
+    with a caller-supplied path.'
   dependency: declares TortoiseSDK.index_sources_from_directory (resolves)
   lifecycle: active
   used_by: never called
@@ -2800,8 +2801,8 @@ rows:
   canonical: null
   job: 'Set how far a source is trusted (#4282 row 18). Dispatch is BY ARGUMENT: `tier=` (T0-T4) sets the credibility
     tier; `score=` with `assessor=` and `rationale=` records an assessment (a reputation-weighted Statement Point).
-    Passing both is refused — they are different writes. Absorbs tortoise_assess_source and tortoise_set_source_tier.
-    Reads: tortoise_graph_overview(section=''sources'').'
+    Passing both is refused — they are different writes. The one trust door — both former arms (set a tier, or record
+    a scored assessment) live here. Reads: tortoise_graph_overview(section=''sources'').'
   dependency: declares TortoiseSDK.manage_source_trust (resolves)
   lifecycle: active
   used_by: never called
@@ -2827,9 +2828,9 @@ rows:
   keyword_rank: 10
   cluster: null
   canonical: null
-  job: Declare a source exists — the URL is its identity (#4282 row 14). Absorbs tortoise_create_source. `tier`
-    (T0-T4) overrides the tier the source KIND derives; `sourceDate` is the evidence-age clock. An existing Source
-    (URL collision) is never re-kinded.
+  job: 'Declare a source exists — the URL is its identity (#4282 row 14). The one declaring door: the retired per-kind
+    entry points redirect here. `tier` (T0-T4) overrides the tier the source KIND derives; `sourceDate` is the evidence-age
+    clock. An existing Source (URL collision) is never re-kinded.'
   dependency: declares TortoiseSDK.register_source (resolves)
   lifecycle: active
   used_by: never called
@@ -2935,8 +2936,8 @@ rows:
   cluster: null
   canonical: null
   job: 'Mine a FOLDER of files, each by its own content type (#4282 row 17) — the batch form of tortoise_mine_knowledge_from_session,
-    not a kind of indexing: this call EXTRACTS, tortoise_index_sources_from_directory does not. Absorbs tortoise_mine_conversations.
-    EXCLUDED from tenant HTTP — walks the server filesystem.'
+    not a kind of indexing: this call EXTRACTS, tortoise_index_sources_from_directory does not. It absorbs the retired
+    conversations-mining door. EXCLUDED from tenant HTTP — walks the server filesystem.'
   dependency: declares TortoiseSDK.mine_knowledge_from_directory (resolves)
   lifecycle: active
   used_by: never called

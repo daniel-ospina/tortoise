@@ -3569,6 +3569,18 @@ surfaces:
   # they need no arm of their own. `--integrity` also requires every test file
   # to be classified, which this entry satisfies.
   - test_9124_declared_live_doors.py
+  # #11609 Phase 2 lane C (the SOURCES/MINE/SESSION containers): the suite that
+  # pins the six new containers, the seven retirements, and the pointer
+  # transitivity the retirement must keep. REGISTERED on `core` alone for the
+  # same reason as the `#9124` entry directly above: every subject it observes
+  # (`tortoise/sdk.py`, `tortoise/mcp_server.py`, `tortoise/tool_registry.py`,
+  # `tortoise/projection/__init__.py`) is a SHARED_MODULE, and
+  # `ci_selection.py --changed-files <subject>` → `"full": true` for each, so no
+  # arm of its own can catch anything `core` does not. Omitting it entirely was
+  # the #12948 review's B1 finding 3: `ci_selection.py --integrity` rglobs every
+  # `tests/test_*.py` and redded `manifest-integrity` (a REQUIRED job), because
+  # an unclassified file runs in NO leg at all.
+  - test_11609_sources_containers.py
   # #9206 (§17.1 write-lane DECLARATION, the APPLY-FIRST lane): the SDK doors
   # whose cache write IS the commit point, driven on a REAL ARMED handle, plus
   # the census-driven record-completeness pins. REGISTERED on `core` alone, for

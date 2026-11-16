@@ -89,7 +89,7 @@ Pointer: the `<!-- research: v1 -->` comment on #12378. Decisions it supports:
   `entities.py:1958` (`name` is persisted *because* it is absent from `_EVENT_HANDLED`;
   meetings persist `title`);
 - the read is routable — every tool advertises `graph` unless it is listed in
-  `GRAPH_ARGUMENT_EXCLUDED` (`tool_registry.py:1761`, applied by `_with_graph_argument`),
+  `GRAPH_ARGUMENT_EXCLUDED` (`tool_registry.py:1745`, applied by `_with_graph_argument`),
   and `tortoise_get_entity` is not listed. ⛔ NOT `GROUP_BY_NAME` (`:1989`): that map
   labels a tool with its **curation group**, and `"tortoise_get_entity": "graph"`
   (`:2030`) means the events/entities/edges group, not that the tool takes a graph

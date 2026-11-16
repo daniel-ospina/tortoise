@@ -38,13 +38,14 @@ routing test can never acquire a database dependency by accident.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from tortoise import mcp_server as ms
 from tortoise.sdk import TortoiseSDK
 from tortoise.sdk_retired import (
     REMOVED_SDK_METHODS,
-    RETIRED_SDK_METHODS,
     retirement_hint,
 )
 from tortoise.tool_registry import (
@@ -432,6 +433,124 @@ class TestCheckConnection:
         assert out["probe_error"] == "ConnectionError"
         assert out["account"] is None
         assert out["account_error"].startswith("ConnectionError")
+
+
+class TestCheckConnectionKeyIsolation:
+    """The `key` half's ONE property: the answer cannot be used as an existence oracle.
+
+    The docstring leads with it — *"A key that belongs to another account and a key that
+    does not exist return the SAME `key_error` … if the two differed, this tool could be
+    used to test whether another tenant holds a given key id"* — and it was the row's
+    entire justification for existing, yet NOTHING exercised it: `TestCheckConnection`
+    above stops at the no-bound-tenant refusal (its fixture sets `_record_tenant = None`,
+    so every `key_id` case returns before the registry is read), leaving the registry
+    read, the `rows[0][0] != own_org` comparison and both single-reply arms uncovered.
+    Mutating the two replies APART left the whole file green (#12948 review F2) — a later
+    "clarify the error message" edit would have created the cross-tenant oracle with no
+    gate to notice.
+
+    These tests therefore bind a tenant and own the registry, so each arm is reached.
+    """
+
+    OWN_ORG = "org-own"
+    FOREIGN_ROW = ("org-other", "graph-x", ("read",), None, None, "ci", 0)
+    OWN_ROW = (OWN_ORG, "graph-own", ("read", "write"), None, 1893456000,
+               "laptop", 2)
+
+    @pytest.fixture
+    def bound(self, monkeypatch):
+        """A handle WITH a tenant bound — the only state that reaches the registry."""
+        s = object.__new__(TortoiseSDK)
+        s._db_uri = None
+        s._namespace = "ns"
+        s._graph_name = None
+        s._record_tenant = (self.OWN_ORG, "graph-own")
+        monkeypatch.setattr(TortoiseSDK, "_get_proj",
+                            lambda self: type("P", (), {"g": type("G", (), {
+                                "query": staticmethod(lambda *a, **k: type(
+                                    "R", (), {"result_set": [[0]]})())})()})())
+        monkeypatch.setattr(TortoiseSDK, "get_organisation_account",
+                            lambda self: {"id": "acct-1"})
+        monkeypatch.setattr("tortoise.record_writer.record_tenant_effective",
+                            lambda carried=None: (self.OWN_ORG, "graph-own"))
+        return s
+
+    def _registry(self, monkeypatch, *, rows=None, raises=None):
+        """Substitute the key registry, and record how it was asked."""
+        seen: dict = {}
+
+        class _Q:
+            def query(self, cypher, params=None):
+                seen["cypher"] = cypher
+                seen["params"] = params
+                if raises is not None:
+                    raise raises
+                return type("R", (), {"result_set": rows})()
+
+        monkeypatch.setattr(TortoiseSDK, "_get_registry", lambda self: _Q())
+        return seen
+
+    def test_an_absent_key_and_a_foreign_key_get_the_same_reply(
+            self, bound, monkeypatch):
+        """THE isolation property: two different facts, one indistinguishable answer.
+
+        Measured by making the two replies differ, not by reading them: the mutant in the
+        PR body's #3442 table splits them into "no such key exists anywhere" / "key
+        belongs to another account" and this test reds.
+        """
+        self._registry(monkeypatch, rows=[])
+        absent = bound.check_connection("key-1")
+        self._registry(monkeypatch, rows=[self.FOREIGN_ROW])
+        foreign = bound.check_connection("key-1")
+
+        assert absent["key"] is None, absent
+        assert foreign["key"] is None, (
+            "a foreign-org key returned a payload — the registry row leaked to the caller")
+        assert absent["key_error"] == foreign["key_error"], (
+            "an absent key and another account's key must be indistinguishable: "
+            f"{absent['key_error']!r} vs {foreign['key_error']!r}")
+        assert json.dumps(absent, sort_keys=True) == json.dumps(foreign, sort_keys=True), (
+            "the two replies must be byte-identical, not merely equal on the error text")
+
+    def test_an_own_key_returns_its_payload(self, bound, monkeypatch):
+        """The other polarity: the SAME row, own org, must resolve — or the refusal is
+        just a refusal that always fires and the test above proves nothing."""
+        self._registry(monkeypatch, rows=[self.OWN_ROW])
+        out = bound.check_connection("key-1")
+        assert out["key_error"] is None, out
+        assert out["key"] == {
+            "key_id": "key-1",
+            "name": "laptop",
+            "graph_id": "graph-own",
+            "scopes": ["read", "write"],
+            "delegation_depth": 2,
+            "revoked": False,
+            "expires_at": 1893456000,
+        }, out
+
+    def test_the_read_is_scoped_to_the_key_id_and_the_own_tenant(
+            self, bound, monkeypatch):
+        """The comparison is against the SDK's OWN tenant, never a caller-supplied id.
+
+        The `key_id` is the only caller input, and it reaches the read as a PARAMETER
+        (never interpolated into the Cypher), which is also what keeps a credential id
+        usable as a query argument.
+        """
+        seen = self._registry(monkeypatch, rows=[self.OWN_ROW])
+        bound.check_connection("key-1")
+        assert seen["params"] == {"id": "key-1"}, seen
+        assert "$id" in seen["cypher"], seen
+
+    def test_an_unreadable_registry_is_not_an_answer_about_the_key(
+            self, bound, monkeypatch):
+        """A registry that RAISES must not collapse into the "not found" reply — that
+        would report a reachable-looking "no such key" for a store nobody could read."""
+        self._registry(monkeypatch, raises=RuntimeError("registry down"))
+        out = bound.check_connection("key-1")
+        assert out["key"] is None
+        assert out["key_error"] != "not found in this account", out
+        assert "could not be read" in out["key_error"], out
+        assert "RuntimeError" in out["key_error"], out
 
 
 class TestMCPLayerRefusals:

@@ -257,7 +257,9 @@ class TestCurationGroups:
         retired shim keeps the same group, so the warning it serves stays coherent.
         """
         from tortoise.tool_registry import (
-            RETIRED_TOOL_REGISTRY, TOOL_REGISTRY, tools_by_group,
+            RETIRED_TOOL_REGISTRY,
+            TOOL_REGISTRY,
+            tools_by_group,
         )
         entry = next(t for t in TOOL_REGISTRY
                      if t.name == "tortoise_mine_knowledge_from_session")

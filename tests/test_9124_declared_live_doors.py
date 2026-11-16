@@ -250,7 +250,12 @@ _DECLARATION_DECORATORS = (*_LIVE_LANE_NAMES, *_APPLY_FIRST_LANE_NAMES)
 #: record and to be genuinely apply-first.
 _APPLY_FIRST_DOORS = {
     "approve_merge",         # SET reviewed flags, then PointRevised/… records
-    "assess_source",         # SET reliability, then the assessment record
+    # ⛔ #12948 renamed the public `assess_source` to `_assess_source` (the container
+    # `manage_source_trust` is the door now). The census keys on the FUNCTION name, so
+    # the entry moves with the rename — leaving `assess_source` here made the set name a
+    # function that no longer exists, which reds as a stale entry AND leaves the renamed
+    # body reaching the write handle with no lane (measured before this: reds 1 and 2).
+    "_assess_source",        # SET reliability, then the assessment record
     "compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
     "mitigate_operator",     # CREATE the mitigation, then its records
     "promote_point",         # CAS SET status='live', then PointPromoted
@@ -344,7 +349,10 @@ _NO_JOURNAL = {
     "_write_reliability_cache",
     "backfill_v25",
     "ingest",
-    "set_source_tier",
+    # ⛔ #12948 renamed the public `set_source_tier` to `_set_source_tier` (the container
+    # `manage_source_trust` is the door now), so the entry moves with the rename for the
+    # same measured reason as `_assess_source` above.
+    "_set_source_tier",
 }
 
 #: A statement the enumerator cannot PROVE read-only, in a function that appends

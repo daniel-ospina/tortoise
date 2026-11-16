@@ -206,7 +206,15 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   measurement, not to whatever a green run last produced.
     # Anything BELOW 63 is unexplained shrinkage and this arm reds on it; lowering the
     # floor again needs the same kind of recorded reason, never a green run.
-    assert len(names) >= 63, f"default surface shrank to {len(names)}"
+    #
+    #   #11609 Phase 2 lane C (`#12948` review B1 finding 8) — the six
+    #   SOURCES/MINE/SESSION containers replaced seven public doors, one of them an
+    #   `http_policy=True` member of THIS listing, so 63 - 1 = 62. Measured on the
+    #   registry, not on a green run: every live entry with `http_policy` true
+    #   (absent = true) is 63 at the merge base `2dfbb5d4` and 62 at the PR head.
+    #   The `get_http_allowed()` equality asserted directly below is the real
+    #   invariant; this floor only catches a listing that shrinks underneath BOTH.
+    assert len(names) >= 62, f"default surface shrank to {len(names)}"
     # The floor is a proxy for the real invariant, and a proxy cannot tell a
     # recorded consolidation from a silent drop. Pin the invariant itself: the
     # default HTTP listing serves EXACTLY the registry's `http_policy` population
