@@ -75,10 +75,18 @@ renumbered. No producer emits one **as of this change, because the three journal
 intakes now strip or refuse the name** (`sdk._RESERVED_ENVELOPE_PROPS`,
 `api._ENVELOPE_KEYS`, `backfill_copy_turns._SESSION_ENVELOPE`) — that premise was
 MEASURED FALSE before this change (`update_point(pid, seq=…)`, `EventAPI._emit`,
-and the session copy each put one on a line). Journals written earlier are
-append-only (R6) and can still hold one: the read is safe there only because it
-compares the number and refuses rather than renumbering, and the refusal names
-the ambiguity.
+and the session copy each put one on a line).
+
+⛔ For a JOURNAL ALREADY ON DISK this read is NON-SILENT BUT NOT RECOVERABLE.
+The journal is append-only (R6), so a line written before these intakes existed
+keeps its top-level `seq` for ever; the read refuses rather than renumbering
+(which is the right direction, and it names the ambiguity), but `replay_plan`
+raises while BUILDING the plan — no partial repair — and the producer-side strip
+only prevents FUTURE lines. **No journal-line migration ships**, so such a
+graph's record cannot be rebuilt from that journal until one does. The
+population is UNMEASURED: the evidence that the premise was false is a synthetic
+`update_point(pid, seq=…)` and the `:Session` copy, not a census of journals in
+the field.
 
 `tools/record_allocator_cli.py` is the operator door: `status`, `seed`, `arm`,
 `halt`, `reopen`. Before it, `record_allocator.seed()` had **no caller outside

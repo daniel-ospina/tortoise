@@ -7886,7 +7886,13 @@ def _carried_position(record: Mapping[str, Any], enumerated: int,
             f"`seq` is a CALLER PROPERTY and not a carried position, the batch "
             f"is not record-sourced: strip `seq` at the producer (it is a "
             f"reserved journal-envelope name) and re-run -- the two are "
-            f"indistinguishable here, because this reads a shape, not a claim"
+            f"indistinguishable here, because this reads a shape, not a claim. "
+            f"⛔ A STRIP AT THE PRODUCER ONLY PREVENTS FUTURE LINES: the journal "
+            f"is append-only, so a line ALREADY on disk keeps its `seq` for "
+            f"ever, and this raises while BUILDING the plan -- no partial "
+            f"repair. No journal-line migration ships today, so a graph whose "
+            f"journal already carries a top-level `seq` cannot have its record "
+            f"rebuilt from that journal until one does"
         )
     return carried_seq
 

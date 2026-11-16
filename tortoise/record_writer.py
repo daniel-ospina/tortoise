@@ -3019,9 +3019,11 @@ def write_live_record(record: Mapping[str, Any], *,
             # as the condition, so an operator on either arm can tell which case
             # they are in. `record_allocator_cli.py status` reports the row.
             "a replay heals the record UNLESS this graph has a `record_cursor` "
-            "row (cut over), in which case an enumerated replay is refused and "
-            "you need an ALLOCATING replay (`replay(allocate=True)`) or the "
-            "operator chain `halt` → `seed --journal` → `reopen` → `arm`"
+            "row (cut over), in which case an enumerated replay is refused — "
+            "and the remedy is the one the refusal below names for the row's "
+            "MODE, not a chain that assumes `active`: `replay(allocate=True)` "
+            "needs mode='active', `halt` is scoped to 'active', `reopen` to "
+            "'halted'. Run `record_allocator_cli.py status` for the mode"
             if not allocate else
             "repair it with an ALLOCATING replay (`replay(allocate=True)`), not "
             "a plain one, which a cut-over graph refuses",
