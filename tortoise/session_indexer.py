@@ -692,7 +692,9 @@ def main():
             from tortoise.sdk import TortoiseSDK
             sdk = TortoiseSDK()
             llm = None if args.no_llm else args.model
-            result = sdk.index_sessions(str(dir_path), extract_metadata=True, llm_model=llm)
+            result = sdk.index_sources_from_directory(
+                str(dir_path), file_type="agent_session",
+                extract_metadata=True, llm_model=llm)
             print(json.dumps(result, indent=2))
         else:
             files = sorted(dir_path.glob("*.md"))

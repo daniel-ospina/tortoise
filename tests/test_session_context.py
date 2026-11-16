@@ -80,10 +80,7 @@ class TestSessionContext:
     def test_with_events(self, sdk):
         """Events populate recent_events section."""
         # checkpoint emits EventRecorded → Event nodes
-        sdk.checkpoint(
-            [{"wing": "proj", "room": "decisions", "content": "decision X"}],
-            agent_name="test-agent",
-        )
+        sdk.mine_knowledge_from_session(items=[{"wing": "proj", "room": "decisions", "content": "decision X"}], agent_name="test-agent")
 
         result = sdk.session_context()
         assert result["no_prior_sessions"] is False

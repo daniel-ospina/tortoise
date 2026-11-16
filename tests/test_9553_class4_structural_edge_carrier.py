@@ -259,7 +259,7 @@ def test_bound_a_source_endpoint_is_declined_not_restored(env):
 
     sdk, events = env
     team = sdk.create_subject("Team Atlas")
-    sdk.create_source("https://docs9553.example/page", "document")
+    sdk.register_source("https://docs9553.example/page", "document")
 
     with collect_identity_skips() as skips:
         assert sdk.create_edge(

@@ -200,7 +200,7 @@ class TestDeleteSurvivesRebuild:
         sdk, events = env
         proj = sdk._get_proj()
         url = "https://example.test/delete-me-source"
-        sdk.create_source(url, "document")
+        sdk.register_source(url, "document")
         rows = _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.id", u=url)
         assert rows, "seed Source must exist live"
         sid = rows[0][0]
@@ -460,7 +460,7 @@ class TestIdentityIsKindPlusId:
         sdk, events = env
         proj = sdk._get_proj()
         url = "https://collide.test/3860-source-url"
-        sdk.create_source(url, "document")
+        sdk.register_source(url, "document")
         assert _ids(proj, "MATCH (s:Source {id:$i}) RETURN s.id", i=url)
 
         assert sdk._delete_entity(url) is True
@@ -488,7 +488,7 @@ class TestIdentityIsKindPlusId:
         sdk, events = env
         proj = sdk._get_proj()
         url = "https://collide.test/3860-dispatch"
-        sdk.create_source(url, "document")
+        sdk.register_source(url, "document")
         pid = sdk.create_point("statement", "collide-point", id=url)["id"]
         assert _point(proj, pid), "seed Point must exist live"
 

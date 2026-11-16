@@ -197,6 +197,15 @@ DESTINATION = {
     "tortoise_ingest": "sdk:write_knowledge_batch",
     "tortoise_session_capture": "mine_knowledge_from_session",
     "tortoise_mine_conversations": "mine_knowledge_from_directory",
+    # #4282 Phase 2 — the SIX containers that landed as approved rows 14-18 and 40.
+    # Like `tortoise_graph_overview` above, each is a REGISTRY tool, so the map owes
+    # it a row; its destination is its own target name.
+    "tortoise_register_source": "register_source",
+    "tortoise_manage_source_trust": "manage_source_trust",
+    "tortoise_index_sources_from_directory": "index_sources_from_directory",
+    "tortoise_mine_knowledge_from_session": "mine_knowledge_from_session",
+    "tortoise_mine_knowledge_from_directory": "mine_knowledge_from_directory",
+    "tortoise_check_connection": "check_connection",
     # ── Operators / relations ───────────────────────────────────────
     "tortoise_mitigate_operator": "adjust_relationship",
     "tortoise_operator_action": "adjust_relationship",

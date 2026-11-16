@@ -66,6 +66,7 @@ The 150 → **124** move on 2026-10-27: the owner ruled that the surplus public 
 archived at tag `archive/4282-surplus-sdk-methods`. The 111 that DO have callers are untouched here;
 privatising them is the remaining half of the migration. Then 124 → **125** on 2026-11-14, when
 approved row 28 `get_organisation_account` gained its `def` (#10015) — an IMPLEMENTATION of an
+
 already-approved name, not an addition to the approved 40. **TWO waves landed in one week and they
 are disjoint**, so the merged count is one subtraction from each side rather than either side's
 number:
@@ -243,12 +244,12 @@ Three rules, each of which caught a real error in this document.
 |---|---|---|---|---|
 | W1 | `create_entity` | #10 | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document` | keep — `create_point` and `create_event` are **retired to a failing name that names `create_entity`**; there is no SDK alias layer (#3836 (c) ruling). The eval harness calls them by name, so its call sites migrate in Phase 2 |
 | W2 | `write_knowledge` | — | `ingest` | keep — **SDK-only name.** The batch call: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so connections can address nodes created in the same call. Not to be called `ingest_bundle` (jargon) or `write_graph` (collides with `graph_overview` and the graph admin namespace) |
-| W3 | `register_source` | #11 | `create_source` | keep — **not foldable**: the URL is the node identity |
-| W4 | `index_files` | #12 | `index_directory`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health` | keep — **2 self-declared DEPRECATED** |
-| W5 | `capture_knowledge` | #13 | `checkpoint`, `diary_write`, `diary_read` | **superseded — see the amendment below the split table (owner ruling 2026-10-09)**; each member retires to its OWN destination, so they no longer share one |
+| W3 | `register_source` | #11 | `register_source` | keep — **not foldable**: the URL is the node identity. `create_source` was retired into this name in #4282 Phase 2 (`#11609`): same signature, same body, one surface name |
+| W4 | `index_files` | #12 | `index_sources_from_directory`, `mine_knowledge_from_directory`, `ingest_corpus`, `reconcile_sessions`, `session_index_health` | keep — **1 self-declared DEPRECATED** (`ingest_corpus`; measured over the five members this row lists). `index_directory`, `index_sessions` and `mine_corpus` were retired in #4282 Phase 2 (`#11609`): the first into `index_sources_from_directory` (itself renamed), the second into that same name with `file_type='agent_session'`, the third into `mine_knowledge_from_directory` — the beta row's own split, since mining is not a kind of indexing. The two legacy names remain reachable through their RETIRED MCP tools |
+| W5 | `capture_knowledge` | #13 | `mine_knowledge_from_session`, `diary_write`, `diary_read` | **superseded — see the amendment below the split table (owner ruling 2026-10-09)**; each member retires to its OWN destination, so they no longer share one. `checkpoint` was retired into `mine_knowledge_from_session` in #4282 Phase 2 (`#11609`) as that method's `items=` arm |
 | W6 | `capture_session_local` | — | — | **no live PUBLIC member** — `capture_session` was retired on 2026-10-27 (#4282, code archived at tag `archive/4282-surplus-sdk-methods`); the body survives as the private `TortoiseSDK._capture_session`, and the capability returns publicly under `mine_knowledge_from_session` |
 | W7 | `capture_session_hosted` | — | — | **no live member** — `commit_session` was deleted on 2026-10-27 (#4282, code archived at the same tag); the capability returns under `mine_knowledge_from_session` |
-| W8 | `manage_source_trust` | #14 | `assess_source`, `set_source_tier`, `get_source_reliability` | keep — **`get_source_reliability` writes** |
+| W8 | `manage_source_trust` | #14 | `manage_source_trust`, `get_source_reliability` | keep — **`get_source_reliability` writes**. `assess_source` and `set_source_tier` were retired into `manage_source_trust` in #4282 Phase 2 (`#11609`), which dispatches on the argument (`score=` vs `tier=`) |
 | W9 | `link_entities` | #15 | `link_entities`, `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split |
 | W10 | `record_decision` | #16 | `write_question`, `record_decision` | keep, collapse — `file_decision` and `file_human_approval` were retired on 2026-11-16 (#11609 Phase 2) into the two rows they now name |
 | W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `supersede_knowledge`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline` | keep, collapse — **the widest group; see Open items**. `update_entity` and `supersede` were retired on 2026-11-16 (#11609 Phase 2) into `update_knowledge` and `supersede_knowledge`; `quarantine_batch` left in `#12901` wave 1 |
@@ -265,12 +266,19 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 
 | # | Namespace | Members |
 |---|---|---|
-| N1 | `org` | `org_create`, `org_get`, `get_organisation_account` |
+| N1 | `org` | `org_create`, `org_get`, `get_organisation_account`, `check_connection` |
 | N2 | `graph` | `list_memory_graphs`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |
 | N3 | `membership` | `membership_create` |
 | N4 | `apikey` | `apikey_create`, `apikey_revoke`, `apikey_verify` |
 | N5 | `invitation` | `invitation_list`, `invitation_get_by_id`, `invitation_revoke`, `sweep_invite_ghost_memberships` |
 | N6 | `signup_token` | `signup_token_lookup`, `signup_token_recover`, `signup_token_revoke` |
+
+**`check_connection` is the one member of this block that is a BETA TARGET, not a console
+verb.** It is beta row 40 — the owner's replacement for the dropped `run_onboarding`
+(`canonical-mcp-tools.md`, settled 2026-09-22): *"What does this credential reach?"* — and
+it landed as a public method in #4282 Phase 2 (`#11609`). It reads the caller's own account
+and, given a `key_id`, that credential's declared reach; that is why it is grouped with the
+account/key verbs rather than with the memory surface.
 
 ### Archived
 

@@ -126,6 +126,7 @@ class TestTheRiskAxis:
         #   (47 read + 3 maintenance -> 46 read + 2 maintenance). The other two left the
         #   writing side: `tortoise_backfill_v25` (destructive) and `tortoise_pack_install`
         #   (admin).
+
         #   #4282 Phase 2, lane B (this change) — retires FOURTEEN doors into SIX
         #   containers. That does NOT shrink the SERVED census: a retired door stays SERVED as a shim
         #   (`RETIRED_TOOL_REGISTRY`), and `served()` is live + retired by definition. What
@@ -133,11 +134,14 @@ class TestTheRiskAxis:
         #   (68 - 14 retired + 6 containers) and retired 23 -> 37 (23 + 14), so
         #   91 -> 97 = 91 + 6 — exactly the six containers, which is the arithmetic a
         #   reader can check against the two registry lengths.
-        #   The READING population is unchanged at 48 (46 read + 2 maintenance): none of
-        #   the six containers reads — four are `destructive` and two are `write` — so
-        #   this batch redistributes the WRITING census only and leaves this one alone.
-        assert len(reading) == 48, sorted(reading)   # 46 read + 2 maintenance
-        assert len(served()) == 97, sorted(e.name for e in served())
+        #   The READING population is 48 after lane B (46 read + 2 maintenance): none of
+        #   lane B's six containers reads — four are `destructive` and two are `write` — so
+        #   that batch redistributed the WRITING census only.
+        #   #11609 lane C then added ONE reading-eligible container, `tortoise_check_connection`
+        #   (tier `read`), and five writing ones, so 48 -> 49 here and the served census
+        #   97 -> 103 (59 live + 44 retired; the seven doors it retires stay SERVED as shims).
+        assert len(reading) == 49, sorted(reading)   # 47 read + 2 maintenance
+        assert len(served()) == 103, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
@@ -195,6 +199,14 @@ class TestTheRiskAxis:
             # bulk re-ingest that rewrites an existing corpus' stored rows
             "tortoise_index_files", "tortoise_ingest_corpus",
             "tortoise_index_sessions", "tortoise_mine_conversations",
+            # #11609 lane C: the five containers the retired doors were absorbed
+            # into. Four inherit the destructive basis (each re-ingests / rewrites
+            # rows the call did not name); the fifth, `register_source`, is
+            # ADDITIVE and sits in the `write` pin below.
+            "tortoise_index_sources_from_directory",
+            "tortoise_mine_knowledge_from_directory",
+            "tortoise_mine_knowledge_from_session",
+            "tortoise_manage_source_trust",
         }, sorted(destructive)
 
     def test_the_admin_set_is_pinned_by_name(self):
@@ -241,11 +253,18 @@ class TestTheRiskAxis:
             "tortoise_ingest",
             "tortoise_onboarding_github_index",
             "tortoise_session_capture",
+
             # #11609 Phase 2 containers — additive in the same sense as the rows above:
             # `write_question` appends a question row (`create_point` family) and
             # `record_decision` appends a decision row (`file_decision`), and neither
             # rewrites a row the call did not name.
             "tortoise_write_question", "tortoise_record_decision",
+            # #11609 lane C (SOURCES/MINE/SESSION): `register_source` creates the source
+            # row the caller names and stores only the caller's own `credibilityTier` —
+            # it rewrites no row the call did not name, which is why it is the fifth
+            # container and the only one of those five that is ADDITIVE (the other four
+            # re-ingest a corpus and sit in the destructive pin above).
+            "tortoise_register_source",
         }, sorted(writes)
 
     def test_the_maintenance_tier_is_exactly_the_ruling(self):
@@ -386,6 +405,10 @@ class TestHintsCannotDrift:
             # clients read as `idempotentHint`.
             ("tortoise_create_point", True),
             ("tortoise_create_source", True),
+            # #11609 lane C: `create_source`'s absorbing container declares the same
+            # retry-safety as the door it replaces — a repeat call converges on the
+            # source row identified by (url, sourceKind) rather than minting a second.
+            ("tortoise_register_source", True),
             # ⛔ `tortoise_get_source_reliability` is pinned FALSE below, not omitted — it is a getter in
             # the write tier, and an earlier revision of this PR declared it
             # repeatable on "a repeat converges on the same value" — but the value
@@ -444,13 +467,20 @@ class TestHintsCannotDrift:
         # 45 -> 43: #11609 batch 1 removed two more writing tools, both ARCHIVED rather
         # than retired-forward (`tortoise_backfill_v25` (destructive) and
         # `tortoise_pack_install` (admin)).
+
         # 43 -> 49: #11609 Phase 2 +6 — the six containers are all writing-tier, and the
         # fourteen doors they absorb are NOT subtracted because a retired door stays
         # SERVED and keeps its tier: destructive 24 -> 28 (+4: `update_knowledge`,
         # `supersede_knowledge`, `adjust_relationship`, `refresh_confidence`), write
         # 15 -> 17 (+2: `write_question`, `record_decision`), admin unchanged at 4.
-        # 28 + 17 + 4 = 49, which is the measured `len(expected)`.
-        assert len(expected) == 49, sorted(expected)  # census, hard-coded
+        # 28 + 17 + 4 = 49, which is the measured `len(expected)` at that head.
+        # 49 -> 54 for lane C: its six containers are ONE read (`check_connection`) and
+        # FIVE writing — `register_source` (write), `manage_source_trust`,
+        # `index_sources_from_directory`, `mine_knowledge_from_session`,
+        # `mine_knowledge_from_directory` (destructive) — and the seven doors it retires are
+        # NOT subtracted, because a retired door stays SERVED and keeps its tier. Measured:
+        # destructive 28 -> 32, write 17 -> 18, admin 4. 32 + 18 + 4 = 54.
+        assert len(expected) == 54, sorted(expected)  # census, hard-coded
 
 
 class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
@@ -633,7 +663,12 @@ IDENTITY_UPSERT_OVERWRITERS = (
     "tortoise_create_subject",
     "tortoise_create_object",
     "tortoise_create_entity",
-    "tortoise_mine_conversations",
+    # ⛔ #11609 lane C RETIRED `tortoise_mine_conversations` into the mining
+    # containers, so the name is no longer in `_list_tools()` and cannot carry a
+    # client-facing hint assertion. The absorbing door that performs the same
+    # re-ingest-then-mine write is the live one, and it is the entry a client now
+    # sees, so it is what the hint must hold true for.
+    "tortoise_mine_knowledge_from_session",
 )
 
 

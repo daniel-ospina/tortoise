@@ -210,7 +210,7 @@ def test_the_other_two_refusing_labels_accept_a_paired_narrative(sdk, door, labe
     §9.1(b)/R7 exists to remove.
     """
     if door == "source":
-        created = sdk.create_source(f"https://example.test/{SESSION}",
+        created = sdk.register_source(f"https://example.test/{SESSION}",
                                     "webpage", story_arc=PROSE, sessionId=SESSION)
     else:
         created = sdk.create_document(f"probe-{SESSION}", documentKind="transcript",

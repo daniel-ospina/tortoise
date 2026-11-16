@@ -1649,7 +1649,7 @@ class TestNonSanitizedSeams:
             self, journaled_sdk):
         sdk, events = journaled_sdk
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.create_source("https://ex.invalid/a", "web",
+            sdk.register_source("https://ex.invalid/a", "web",
                               amountMinor=COMMITTED_MINOR)
         log = events / "events.jsonl"
         assert not log.exists() or "SourceCreated" not in log.read_text(), \
@@ -1678,7 +1678,7 @@ class TestNonSanitizedSeams:
         reader from reading the node-only assertion as "nothing is stored".
         """
         sdk, events = journaled_sdk
-        sdk.create_source("https://ex.invalid/b", "web",
+        sdk.register_source("https://ex.invalid/b", "web",
                           **money_props(COMMITTED_MINOR, "BRL",
                                         minor_unit_exponent=2))
         rows = sdk._get_proj().g.query(
