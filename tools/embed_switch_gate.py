@@ -53,19 +53,21 @@ is what *should* be shipped (presence, not policy — ``TORTOISE_*=0`` is a docu
 or anything about a **hand deploy**: the owner's ruling on ``#12926`` is *"a hand deploy is
 their problem, so let's not worry about it"*.
 
-⚠️ **AND THE SHELL READER HAS NO CONTROL-FLOW MODEL (review at `762f1c56d7`, P3 — measured).**
-``_shell_assignments`` is LINE-SHAPED: any indented ``export K=V`` counts as a statement. So a
-switch exported inside a function that is never called, inside a ``if false`` branch, or after a
-top-level ``exit`` is credited as ``STATED``, and this gate's own report then prints
-``ok  entrypoint.sh TORTOISE_VALUE_GATE=1`` for a value the process never receives — measured on
-synthetic entrypoints, all three shapes read ``OK``. ``entrypoint.sh`` carries ten top-level
-functions (plus one nested helper, ``_fragment_tell`` inside ``_redact_uri``), so "move the export
-into the helper" is an ordinary edit rather than a contrived one.
-That is NOT a widening of what an author may *honestly* ship (``=0`` passes by design), but it
-is this artifact stating a fact that is false, so it is recorded here rather than left silent.
-Closing it needs brace depth plus a top-level-``exit`` seen, routing a nested/post-exit
-assignment into the existing ``ambiguous`` verdict; until then, read ``ok … entrypoint.sh`` as
-"the token appears at a line that reads as a statement", not "the process receives it".
+⚠️ **The shell reader's control-flow model — the residual, and its closure (review at
+`762f1c56d7`, `8aa35e5d56`; measured).** ``_shell_assignments`` was LINE-SHAPED: any indented
+``export K=V`` counted as a statement, so a switch exported inside a function that is never called,
+inside an ``if false`` branch, or after a top-level ``exit`` was credited as ``STATED`` — and the
+report then printed ``ok entrypoint.sh TORTOISE_VALUE_GATE=1`` for a value the process never
+receives (``entrypoint.sh`` carries ten top-level functions, so "move the export into the helper"
+is an ordinary edit rather than a contrived one). It now tracks block depth (``if``/``then``/
+``while``/``until``/``for``/``case``/``select``/``do`` and ``{``/``(`` bodies, with their closers)
+plus a top-level ``exit``/``exec`` seen, and routes an assignment in any of those positions to the
+existing ``ambiguous`` verdict — the fail-closed one, whose message says the shape was not read as
+a statement. Two properties are deliberate: the model is SMALL, so an unmodelled form lands on
+``ambiguous`` rather than a pass (a false ``STATED`` is the direction that lets a config through);
+and a CONDITIONAL arm (``if [ … ]; then export TORTOISE_EMBED_GATE=1; fi``) is refused, because a
+branch is not the shipped configuration stating a value — ``entrypoint.sh``'s own switch exports
+are top level. There is no widening for an honest shorthand: ``=0`` still passes by design.
 
 ``.env.example`` is a template nothing deploys, so it is not a channel of this gate; the
 read-only instrument (``tools/dod_5090_probe.py``) is what scores it.
@@ -163,6 +165,19 @@ _ENV_PAIRS = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S
 #: optional group, `TORTOISE_EMBED_GATE=1` alone read `stated={'TORTOISE_EMBED_GATE': '1'}`.
 _SHELL_ASSIGNMENT = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
 _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*$")
+
+#: Shell keywords that open a block whose body may never run at top level (`if`/`then`,
+#: `while`/`until`/`for`/`case`/`select`/`do`, and `{`/`(` bodies — `name() {` is the brace), and
+#: the closers that end one. An assignment inside a block is a CONDITIONAL, not a statement the
+#: shipped configuration makes; a top-level `exit`/`exec` ends what the rest of the file can
+#: contribute (`exec` replaces the process). The model is deliberately small: an unmodelled form
+#: lands on `ambiguous`, never on a pass, because a false STATED is the direction that lets a
+#: config through.
+_SHELL_OPENERS = re.compile(
+    r"(^|[;&|]\s*)(?:if|then|else|elif|while|until|for|case|select|do)\b|\{\s*$|\(\s*$"
+)
+_SHELL_CLOSERS = re.compile(r"^\s*(?:fi|done|esac|then|else|elif)\b|^\s*\}\s*$|^\s*\)\s*$")
+_SHELL_TERMINATES = re.compile(r"^\s*(?:exit|exec)\b")
 
 #: A trailing `#` comment (idiomatic after a shell assignment) is NOT part of the value — leaving
 #: it in made `export K=""  # off for now` read as a non-empty statement and skip the EMPTY-value
@@ -384,29 +399,45 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str]]:
 
 
 def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
-    """Assignments an entrypoint script exports (last wins) + switch names seen ambiguously.
+    """Assignments an entrypoint script exports at TOP LEVEL (last wins) + ambiguous switch names.
 
-    Only top-level-shaped assignments are read; ``export K`` with no value states nothing (it
-    exports whatever the caller had, which is the absence this gate exists to refuse) and is
-    therefore not recorded as a value.
+    ``export K`` with no value states nothing (it exports whatever the caller had — the absence
+    this gate exists to refuse). An ``export`` inside a function body, a branch or a loop, or
+    after a top-level ``exit``/``exec``, is routed to ``ambiguous`` instead of being credited: it
+    is a conditional the gate does not evaluate, so it is not a statement the shipped
+    configuration makes (review at `762f1c56d7`/`8aa35e5d56`, closed here).
     """
     stated: dict[str, str] = {}
     ambiguous: set[str] = set()
+    depth = 0
+    terminated = False
     for line in _logical_lines(text):
+        if _SHELL_CLOSERS.match(line):
+            depth = max(0, depth - 1)
+            ambiguous.update(_mentioned_switches(line))
+            continue
+        conditional = depth > 0 or terminated
         match = _SHELL_ASSIGNMENT.match(line)
         if match:
             key, value = match.group("key"), _strip_inline_comment(match.group("value"))
-            if key in SWITCHES and not _states_a_literal(value):
+            if key in SWITCHES and (conditional or not _states_a_literal(value)):
                 # Same last-wins rule as the Dockerfile reader: an ambiguous assignment must
                 # drop an earlier literal, or the stale literal is reported as STATED while the
-                # script resolves empty (review P2).
+                # script resolves empty (review P2). A CONDITIONAL assignment is the same verdict
+                # for the same reason: inside a function body, a branch or a loop it may never
+                # run, and after a top-level `exit`/`exec` it cannot.
                 ambiguous.add(key)
                 stated.pop(key, None)
                 continue
-            stated[key] = _unquote(value)
+            if not conditional:
+                stated[key] = _unquote(value)
             continue
         if _SHELL_EXPORT_NAME.match(line):
             continue  # `export NAME` states no value; not an arm
+        if _SHELL_OPENERS.search(line):
+            depth += 1
+        if depth == 0 and _SHELL_TERMINATES.match(line):
+            terminated = True
         ambiguous.update(_mentioned_switches(line))
     return stated, ambiguous
 

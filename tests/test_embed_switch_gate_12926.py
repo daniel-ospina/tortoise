@@ -607,6 +607,30 @@ def test_a_trailing_comment_is_not_part_of_the_value():
     assert stated == {"HF_HUB_OFFLINE": "1"} and ambiguous == set()
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "setup() {\n  export TORTOISE_VALUE_GATE=1\n}\n",
+        "if false; then\n  export TORTOISE_VALUE_GATE=1\nfi\n",
+        "exit 0\nexport TORTOISE_VALUE_GATE=1\n",
+        "for f in a b; do\n  export TORTOISE_VALUE_GATE=1\ndone\n",
+    ],
+)
+def test_an_assignment_the_process_never_receives_is_refused(body):
+    """Review at `8aa35e5d56`, P3 — the residual recorded in the docstring, now CLOSED.
+
+    A function body, a branch, a loop body and anything after a top-level `exit`/`exec` are
+    assignments the process may never receive, so none may be credited as a statement the shipped
+    configuration makes. Each lands on the fail-closed `ambiguous` verdict instead — and a
+    top-level assignment in the SAME file still counts.
+    """
+    stated, ambiguous = gate._shell_assignments(body)
+    assert stated == {}, (body, stated)
+    assert ambiguous == {"TORTOISE_VALUE_GATE"}, (body, ambiguous)
+    stated, _ = gate._shell_assignments("export TORTOISE_EMBED_GATE=1\n" + body)
+    assert stated == {"TORTOISE_EMBED_GATE": "1"}
+
+
 def test_the_shell_reader_requires_export():
     """Review P2 at `648842c31a` — a bare assignment never reaches the process.
 
