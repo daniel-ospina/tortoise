@@ -168,6 +168,25 @@ def _payload_of(record: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in record.items() if k not in rp.ENVELOPE_KEYS}
 
 
+def _stored(event_type: Any, payload: Any, *, same_type: bool = True,
+            same_capture: bool = False) -> tuple[Any, Any, bool, bool]:
+    """The conflict query's four projected columns, as Postgres would return them.
+
+    ⛔ THE FAKE CANNOT EVALUATE THE SQL (review P2-5), so these legs pin the
+    guard's DECISION, not the predicate: the two DB acceptance legs are what
+    exercise the `WHERE`. Composing the row explicitly is also what keeps the
+    drift split (#12904 P0-1) visible in every test — `same_type` and
+    `same_capture` are the two facts the verdict turns on, so a leg that wants a
+    COLLISION has to say which of them differed, and one that wants DRIFT says
+    both match.
+
+    `same_capture=False` is the default because a second durable journal's record
+    brings its OWN capture time — that is what makes the position a collision
+    rather than a re-derivation of the record already there.
+    """
+    return (event_type, payload, same_type, same_capture)
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 1. THE GUARD'S ONE CALL SITE, WITH NO DATABASE
 # ════════════════════════════════════════════════════════════════════════════
@@ -230,7 +249,7 @@ def test_an_absorbed_position_with_different_content_raises_and_names_both() -> 
     tell one record from two (see the class docstring); what the message owes the
     operator is the identity it CAN name, with the title withheld.
     """
-    conn = Absorbed(stored=("ObjectRegistered", _payload_of(RECORD_A)))
+    conn = Absorbed(stored=_stored("ObjectRegistered", _payload_of(RECORD_A)))
 
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([RECORD_B], conn, org_id=ORG, graph_id=GRAPH)
@@ -252,33 +271,43 @@ def test_an_absorbed_position_with_different_content_raises_and_names_both() -> 
     assert excinfo.value.stored_event_type == "ObjectRegistered"
 
 
-def test_a_re_derived_record_is_not_reportable_as_two_records() -> None:
-    """The diagnosis must not assert a cause the verdict cannot know (#9318 R1).
+def test_a_re_derived_record_replays_SILENTLY() -> None:
+    """DRIFT is not a collision: the SAME record, re-derived (#12904 P0-1).
 
     The compared payload is a snapshot of a DERIVATION (`_journal_row` strips
-    `ENVELOPE_KEYS`), so a change to that derivation makes an old row's content
-    differ from what this tree would write for the SAME record at the SAME
-    position. The refusal is still right — the record may not absorb the
-    difference — but the MESSAGE must not send an operator hunting a second
-    journal that does not exist. It reports the shared identity instead, and
-    says so in a distinguishable way.
+    `ENVELOPE_KEYS`, an actively argued surface), so a change to that derivation
+    makes an old row's content differ from what this tree would write for the
+    SAME record at the SAME position. `recorded_at` is stamped at CAPTURE, so a
+    re-derivation preserves it — and identical type + identical capture is
+    POSITIVE evidence that the position holds this record. The verdict is
+    therefore a SILENT no-op: no exception, no counter, no log line.
+
+    ⛔ THIS LEG REPLACES ONE THAT PINNED THE OPPOSITE (#12904 P0-1).
+    `test_a_re_derived_record_is_not_reportable_as_two_records` asserted the
+    REFUSAL, with a message that named both causes; the refusal was the defect.
+    It made every position written before a payload-derivation change
+    un-replayable — the record's own repair story (`replay` heals the record)
+    silently version-pinned to the tree that wrote the row — which inverts the
+    schema's *"applying a position twice is a no-op"* and is worse than the
+    silence the guard replaced. Its companion (the message never names a single
+    cause) survives on the legs that still DO refuse.
     """
     re_derived = dict(_payload_of(RECORD_A))
     re_derived["name"] = "corpus A document (re-derived)"
-    conn = Absorbed(stored=("ObjectRegistered", re_derived))
+    # Same type, same `recorded_at`: the payload moved, the CAPTURE did not.
+    conn = Absorbed(stored=_stored("ObjectRegistered", re_derived,
+                                  same_capture=True))
+    before = dict(monitoring.record_write_failure_counts())
 
-    with pytest.raises(rp.JournalPositionCollision) as excinfo:
-        rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
+    report = rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
 
-    assert excinfo.value.identity_state == "agrees"
-    message = str(excinfo.value)
-    # BOTH causes, unconditionally — so neither can be wrong about the cause.
-    assert "a DIFFERENT record claimed this position" in message
-    assert "payload derivation changed since that row was written" in message
-    assert "no record id" in message, (
-        "the message must say WHY it cannot tell one record from two")
-    # …and, as ever, no payload content.
-    assert "corpus A document" not in message
+    assert report.events == 1
+    assert conn.conflict_reads == 1, (
+        "the guard did not ask the collision question — this leg would then pass "
+        "by never exercising the code under test")
+    assert dict(monitoring.record_write_failure_counts()) == before, (
+        "a re-derivation was COUNTED as a refusal — the record's own repair "
+        "story is then version-pinned to the tree that wrote the row")
 
 
 def test_two_payloads_with_no_comparable_identity_say_so() -> None:
@@ -290,7 +319,7 @@ def test_two_payloads_with_no_comparable_identity_say_so() -> None:
     # which NO identity is comparable on both sides.
     anonymous = {"type": "IngestStarted", "ts": "2026-11-15T00:00:00Z",
                  "run": 1}
-    conn = Absorbed(stored=("IngestStarted", {"run": 2}))
+    conn = Absorbed(stored=_stored("IngestStarted", {"run": 2}))
 
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([anonymous], conn, org_id=ORG, graph_id=GRAPH)
@@ -309,7 +338,8 @@ def test_a_shared_NODE_id_with_two_record_types_is_not_one_record() -> None:
     now; the message names both causes and the reading says only what the ids
     do, which here is that the write's payload carries no identity at all.
     """
-    conn = Absorbed(stored=("EntityMutated", _payload_of(RECORD_A)))
+    conn = Absorbed(stored=_stored("EntityMutated", _payload_of(RECORD_A),
+                                   same_type=False))
 
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
@@ -335,7 +365,7 @@ def test_a_NESTED_payload_identity_is_read() -> None:
     nested = {"type": "PointAdded", "ts": "2026-11-15T00:00:00Z",
               "point": {"id": "p1", "content": "a claim"}}
     stored_nested = {"point": {"id": "p1", "content": "a claim, re-derived"}}
-    conn = Absorbed(stored=("PointAdded", stored_nested))
+    conn = Absorbed(stored=_stored("PointAdded", stored_nested))
 
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([nested], conn, org_id=ORG, graph_id=GRAPH)
@@ -360,7 +390,7 @@ def test_the_SAME_type_at_a_shared_node_id_does_not_claim_one_record() -> None:
     """
     payload = {"type": "PointRevised", "id": "p1", "content": "v2"}
     stored = {"id": "p1", "content": "v2 (from the other journal)"}
-    conn = Absorbed(stored=("PointRevised", stored))
+    conn = Absorbed(stored=_stored("PointRevised", stored))
 
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([payload], conn, org_id=ORG, graph_id=GRAPH)
@@ -387,7 +417,7 @@ def test_an_agreeing_coarse_key_cannot_suppress_a_disagreeing_one() -> None:
     ours = {"type": "PointAdded",
             "point": {"id": "p-a", "session_id": "s1", "content": "a"}}
     stored = {"point": {"id": "p-b", "session_id": "s1", "content": "b"}}
-    conn = Absorbed(stored=("PointAdded", stored))
+    conn = Absorbed(stored=_stored("PointAdded", stored))
 
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([ours], conn, org_id=ORG, graph_id=GRAPH)
@@ -554,57 +584,95 @@ def test_the_identity_keys_are_ids_only_and_a_subset_of_the_writers() -> None:
     assert "event_id" in rp.ENVELOPE_KEYS
 
 
-def test_an_ENVELOPE_only_difference_is_invisible_to_the_verdict() -> None:
-    """⚠️ PINNED RESIDUAL, not a behaviour this guard repairs (#12904 review).
+def test_a_TS_only_difference_is_now_REFUSED() -> None:
+    """P0-2 (#12904): the shape this class used to absorb SILENTLY.
 
-    The verdict compares `event_type` plus the DURABLE `payload`, and
-    `_journal_row` builds that payload by filtering `ENVELOPE_KEYS` out of the
-    record — `ts` and `event_id` among them. So two records that differ ONLY in
-    those fields bind IDENTICAL parameters for the conflict query, its
-    `IS DISTINCT FROM` predicate matches no row, and the second is absorbed as
-    though it were a replay: silently. That is the reachable shape #9318 names
-    — two durable journals ingesting the SAME document (same type, same
-    payload, apart only in `ts`/`event_id`) still under-record that journal.
+    `_journal_row` strips `ENVELOPE_KEYS`, so two records that differ ONLY in
+    `ts`/`event_id` bind identical `event_type`/`payload` — the reachable #9318
+    shape, two durable journals ingesting the SAME document apart only in CAPTURE
+    TIME. Until the `recorded_at` arm existed, the predicate matched no row and
+    the second journal was absorbed as though it were a replay.
 
-    Stated, not repaired: no comparison of the durable content can recover a
-    field the durable row does not carry. Removing it needs journal IDENTITY in
-    the key (#12894), the schema decision this detector deliberately does not
-    take. This leg makes the boundary MEASURED rather than implied — when
-    #12894 lands, the two rows stop being treated as one and this test reds,
-    and it is then deleted with the detector rather than "fixed".
+    The two assertions below ARE the boundary: the durable content is
+    byte-identical (so no content comparison can see the difference) and the
+    capture time is the only thing left that distinguishes them. `event_id` is
+    still unrecoverable — that is the restated residual, pinned by the sibling
+    leg.
     """
     first = dict(RECORD_A, ts="2026-11-15T00:00:00Z", event_id="evt-first")
     second = dict(RECORD_A, ts="2026-11-16T09:30:00Z", event_id="evt-second")
     assert first != second, (
         "the two records must actually differ, or this leg is vacuous")
 
-    # The conflict query's bind parameters are
-    # `(org, graph, seq, event_type, payload)` — exactly `params[:5]`. Pin those,
-    # not a hand-built dict: a change to `_journal_row`'s filtering is what would
-    # move this boundary, and only the statement knows what it binds.
     row_first = rp._journal_row(first, 1, ORG, GRAPH)
     row_second = rp._journal_row(second, 1, ORG, GRAPH)
-    # ⛔ THE BIND SHAPE IS PINNED BY IDENTITY, NOT BY INDEX (#12904 review). The
-    # docstring above promises this leg REDS when #12894 lands — but `params[:5]`
-    # and `params[5]` cannot see the change that matters: a `journal_id`
-    # APPENDED to the key leaves `params[:5]` byte-identical and leaves
-    # `params[5]` (the `ts`/`recorded_at` bind) untouched, so both assertions below would stay
-    # green while `_refuse_a_journal_collision` compared a key no longer unique.
-    # The COUNT is what moves, so the count is the thing asserted.
+    assert row_first.params[:5] == row_second.params[:5], (
+        "the durable content of two ts-only-different records is no longer "
+        "identical, so this leg's premise has moved: it exists to prove the "
+        "CAPTURE arm is what catches the pair")
+    assert row_first.params[5] != row_second.params[5], (
+        "`ts` is the only field left once the envelope is stripped, so it is "
+        "what must carry the difference")
+
+    # The surviving row is journal A's, captured at A's time. The stub hands the
+    # guard the row Postgres WOULD return: `same_type` true, `same_capture` false.
+    conn = Absorbed(stored=_stored("ObjectRegistered", _payload_of(first),
+                                  same_capture=False))
+
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([second], conn, org_id=ORG, graph_id=GRAPH)
+
+    assert excinfo.value.capture_state == "differs"
+    message = str(excinfo.value)
+    assert "CAPTURED at different times" in message, (
+        "the refusal does not say WHICH discriminator fired — an operator is "
+        "left to guess between a second journal and a moved capture time")
+    # …and the diagnosis still names both possibilities rather than picking one.
+    assert "a DIFFERENT record claimed this position" in message
+    assert "no record id" in message
+    # …and, as ever, no payload content.
+    assert RECORD_A["name"] not in message
+
+
+def test_an_event_id_only_difference_is_still_invisible() -> None:
+    """RESIDUAL, restated (#12904 P0-2): only `event_id` is unrecoverable.
+
+    Two records differing ONLY in `event_id` bind identical content AND
+    identical capture, so no comparison of the durable row can separate them —
+    `event_id` is stripped by `ENVELOPE_KEYS` and the row has no column for it.
+    This is the residual that is LEFT after the `recorded_at` arm; `ts` is not in
+    it, because `ts` IS carried (`recorded_at`) and is now compared.
+
+    ⛔ THE TWO REDS THIS LEG MUST PRODUCE ARE DIFFERENT, and the messages say so
+    (review P2-6):
+      * "the key gained journal identity" — #12894 landed, this pin is retired
+        WITH the guard;
+      * "the payload derivation moved" — `ENVELOPE_KEYS` or a record type's field
+        set changed, so the boundary moved and this pin must be re-measured.
+    """
+    first = dict(RECORD_A, ts="2026-11-15T00:00:00Z", event_id="evt-first")
+    second = dict(RECORD_A, ts="2026-11-15T00:00:00Z", event_id="evt-second")
+    assert first != second, (
+        "the two records must actually differ, or this leg is vacuous")
+
+    row_first = rp._journal_row(first, 1, ORG, GRAPH)
+    row_second = rp._journal_row(second, 1, ORG, GRAPH)
+    # ⛔ THE BIND SHAPE IS PINNED BY ARITY, NOT BY INDEX (#12904 review). A
+    # `journal_id` APPENDED to the key leaves `params[:5]` byte-identical, so the
+    # COUNT is the thing that sees the key change.
     assert len(row_first.params) == 6, (
         f"`_journal_row` now binds {len(row_first.params)} parameters "
         f"({row_first.params}) where this boundary was measured at 6 "
-        f"(org, graph, seq, event_type, payload, ts). If the new one is journal "
-        f"identity (#12894), the envelope-only difference is no longer "
-        f"invisible — DELETE this pin with the detector rather than keeping it "
-        f"green over a guard that now sees the difference")
-    assert row_first.params[:5] == row_second.params[:5], (
-        "the durable content of two envelope-only-different records is no "
-        "longer identical — the guard can now SEE this difference, so this "
-        "pin's premise has moved and it should be deleted, not kept green")
-    assert row_first.params[5] != row_second.params[5], (
-        "the two records must differ SOMEWHERE — `ts` is the only field left "
-        "once the envelope is stripped, so it is what carried the difference")
+        f"(org, graph, seq, event_type, payload, ts). If the 7th is journal "
+        f"identity then the KEY GAINED JOURNAL IDENTITY (#12894) and this pin "
+        f"is DELETED with the detector, not kept green. If instead a payload "
+        f"field moved in or out of `ENVELOPE_KEYS`, the PAYLOAD DERIVATION "
+        f"MOVED and this boundary must be re-measured")
+    assert row_first.params == row_second.params, (
+        "the durable row content of two event_id-only-different records is no "
+        "longer identical — either the KEY GAINED JOURNAL IDENTITY (#12894, "
+        "delete this pin with the detector) or the PAYLOAD DERIVATION MOVED "
+        "(re-measure the boundary); `event_id` alone cannot cause this")
 
     # Same bound parameters ⇒ `IS DISTINCT FROM` matches no row ⇒ the stub
     # returns no stored row ⇒ silent no-op, no counter, no exception.
@@ -618,33 +686,37 @@ def test_an_ENVELOPE_only_difference_is_invisible_to_the_verdict() -> None:
     assert dict(monitoring.record_write_failure_counts()) == before
 
 
-def test_the_verdict_never_compares_recorded_at() -> None:
-    """The ONE thing this class must never do: compare the `recorded_at` bind.
+def test_the_capture_arm_cannot_fire_when_this_write_carries_no_ts() -> None:
+    """The `recorded_at` arm MUST be guarded (the review's false-red).
 
-    `ts` reaches the durable row (bound into `recorded_at` via
-    `COALESCE(%s::timestamptz, now())`), so adding `OR recorded_at IS DISTINCT
-    FROM %s::timestamptz` to the conflict predicate looks like a free way to see
-    a `ts`-only difference — and it would be a false-positive machine: when this
-    write carries no `ts`, `recorded_at` falls back to `now()`, so two replays of
-    ONE record would differ there and be refused as collisions. That is the one
-    failure mode the class docstring's residual argues against, and before this
-    pin NOTHING measured it (mutation: add the clause and bind
-    `statement.params[5]` -> 27 passed).
+    `ts` reaches the durable row (`COALESCE(%s::timestamptz, now())`), so a
+    comparison of it is how the `ts`-only difference became visible — but bound
+    UNCONDITIONALLY it is a false-positive machine: a write with no `ts` leaves
+    `recorded_at` to `now()`, so every replay of a `ts`-less record would find a
+    different `recorded_at` and be refused. Measured in a real database:
+    `now() IS DISTINCT FROM NULL::timestamptz` is TRUE.
 
-    Pinned on the SQL and its bind ARITY rather than on behaviour: a behavioural
-    leg can only reach the `ts`-less replay through the whole door, while the
-    clause is what has to be absent.
+    So the arm is CONDITIONAL on THIS write having a capture time, and this leg
+    pins both halves: the clause is guarded in the SQL, and the decision is
+    unreachable for a NULL bind. Pinned on the SQL as well as on behaviour
+    because a behavioural leg can only reach a `ts`-less replay through the whole
+    door — `test_a_ts_less_replay_is_silent_on_a_real_database` is that door.
     """
-    assert "recorded_at" not in rp._JOURNAL_CONFLICT_CONTENT_SQL, (
-        "the collision predicate compares `recorded_at` — a `ts`-less replay "
-        "falls back to `now()` there, so two replays of ONE record would be "
-        "refused as collisions (see the class's second RESIDUAL block)")
-    # The predicate binds exactly (org, graph, seq, event_type, payload) — the
-    # five the INSERT also binds before `recorded_at`.
-    assert rp._JOURNAL_CONFLICT_CONTENT_SQL.count("%s") == 5, (
-        "the collision predicate no longer binds the five content parameters "
-        "(org, graph, seq, event_type, payload) — a widened bind set is how a "
-        "`ts`/`recorded_at` comparison would arrive")
+    sql = rp._JOURNAL_CONFLICT_CONTENT_SQL
+    assert "recorded_at IS DISTINCT FROM" in sql, (
+        "the capture-time arm is GONE — the ts-only difference is invisible to "
+        "the verdict again, which is #12904 P0-2 re-opened")
+    assert "%s::timestamptz IS NOT NULL" in sql, (
+        "the capture-time arm is UNGUARDED — a `ts`-less replay falls back to "
+        "`now()` there, so two replays of ONE record would be refused as "
+        "collisions")
+    # A NULL bind can never read as the same capture: `recorded_at` is NOT NULL.
+    conn = Absorbed(stored=None)
+    ts_less = {k: v for k, v in RECORD_A.items() if k != "ts"}
+    assert rp._journal_row(ts_less, 1, ORG, GRAPH).params[5] is None
+    report = rp.replay([ts_less], conn, org_id=ORG, graph_id=GRAPH)
+    assert report.events == 1
+    assert conn.conflict_reads == 1
 
 
 def test_a_different_event_type_alone_is_a_collision() -> None:
@@ -655,7 +727,8 @@ def test_a_different_event_type_alone_is_a_collision() -> None:
     that true. Asserted through the guard, so a rewrite that compared only
     payloads reds here.
     """
-    conn = Absorbed(stored=("PointAdded", _payload_of(RECORD_A)))
+    conn = Absorbed(stored=_stored("PointAdded", _payload_of(RECORD_A),
+                                   same_type=False))
 
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
@@ -669,10 +742,20 @@ def test_the_position_statement_carries_no_schema_ask() -> None:
     The detector reads the cursor and asks a question; it does not widen the
     key, add a column, or move the row onto a new table. Reverting to a
     `RETURNING`/`DO UPDATE`/probe-in-the-VALUES spelling reds here and in the
-    `#9187` plan snapshot, so the retire path (`#12894` gives the key journal
-    identity, the guard is deleted) stays a deletion rather than a migration.
+    `#9187` plan snapshot.
+
+    ⛔ RETIREMENT IS A DELETION, ATOMIC WITH THE KEY CHANGE (#12904 P1-4):
+    **delete this guard with the key change; leaving it in place converts
+    legitimate old-journal replays into refusals.** An earlier wording said the
+    guard would "simply never fire" after #12894 — backwards, because after the
+    key change a conflict IS same-journal-same-seq, so a payload difference
+    there is this record's own drift, which is exactly what this guard reports.
     """
     statement = rp._journal_row(RECORD_A, 1, ORG, GRAPH)
+    assert statement.sql == rp._JOURNAL_POSITION_INSERT_SQL, (
+        "`_journal_row` no longer emits the statement the collision guard knows "
+        "how to read. If the KEY GAINED JOURNAL IDENTITY (#12894), the guard is "
+        "DELETED with it — do not re-point this pin at the new shape")
     assert statement.sql.endswith(
         "ON CONFLICT (org_id, graph_id, seq) DO NOTHING")
     assert "RETURNING" not in statement.sql
@@ -681,12 +764,66 @@ def test_the_position_statement_carries_no_schema_ask() -> None:
     assert "event_type IS DISTINCT FROM" in rp._JOURNAL_CONFLICT_CONTENT_SQL
     assert "payload IS DISTINCT FROM" in rp._JOURNAL_CONFLICT_CONTENT_SQL
     # ⛔ AND THE GUARD READS THIS PARAMETER ORDER. `_refuse_a_journal_collision`
-    # unpacks `statement.params[:5]` as `(org, graph, seq, type, payload)`; a
-    # reorder here would make its SELECT name a position that does not exist,
-    # which is a SILENT MISS — the one failure mode a guard may not have
-    # unobserved. Pinned where the order is defined, so the two cannot drift.
+    # unpacks the six binds as `(org, graph, seq, type, payload, ts)`; a reorder
+    # would make its SELECT name a position that does not exist, which is a
+    # SILENT MISS — the one failure mode a guard may not have unobserved. Pinned
+    # where the order is defined, so the two cannot drift.
     assert statement.params[:4] == (ORG, GRAPH, 1, "ObjectRegistered")
     assert json.loads(statement.params[4]) == _payload_of(RECORD_A)
+    assert statement.params[5] == RECORD_A["ts"]
+    assert len(statement.params) == rp._JOURNAL_POSITION_PARAM_COUNT
+
+
+def test_the_guard_bails_when_the_position_statement_is_reshaped() -> None:
+    """P1-3 (#12904): a reshaped statement must BAIL, never be re-bound.
+
+    The guard reads the position statement's binds POSITIONALLY. When #12894
+    adds journal identity to the key, the same code would read `journal_id` as
+    `seq` and `seq` as `event_type` — silently — and then fail on `%s::jsonb`
+    for EVERY ABSORBED position, i.e. it would turn the idempotent replay this
+    guard exists to protect into an error on every record.
+
+    Reproduced with the shape #12894 will produce: `journal_id` inserted as the
+    third bind. The assertion is that the refusal names the RESHAPE and its
+    remedy, before any unpacking — not a driver error from a mis-bound SELECT.
+    """
+    genuine = rp._journal_row(RECORD_A, 1, ORG, GRAPH)
+    # TWO shapes, because the guard has TWO ways to be fooled and each lands on a
+    # different half of the check:
+    #   * the statement RENAMED — the #12894 shape, `journal_id` in the key;
+    #   * the statement UNCHANGED but a bind APPENDED — the review's exact
+    #     scenario, where `params[:5]` stays byte-identical and only the ARITY
+    #     moves.
+    reshaped_sql = rp.Statement(
+        "INSERT INTO public.journal_event "
+        "(org_id, graph_id, journal_id, seq, event_type, payload, recorded_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())) "
+        "ON CONFLICT (org_id, graph_id, journal_id, seq) DO NOTHING",
+        (ORG, GRAPH, "journal-1", 1, "ObjectRegistered",
+         json.dumps(_payload_of(RECORD_A)), RECORD_A["ts"]),
+    )
+    appended_bind = rp.Statement(genuine.sql, genuine.params + ("journal-1",))
+
+    for label, statement in (("renamed", reshaped_sql),
+                             ("bind appended", appended_bind)):
+        conn = Absorbed(stored=_stored("PointAdded", _payload_of(RECORD_A),
+                                       same_type=False))
+        with pytest.raises(rp.RecordStatementError) as excinfo:
+            rp._refuse_a_journal_collision(conn.cursor(), statement, 1, 1)
+
+        message = str(excinfo.value)
+        assert "RESHAPED" in message, (
+            f"a {label} position statement did not bail — it was unpacked "
+            f"positionally, which is the silent re-bind #12904 P1-3 names: "
+            f"{message}")
+        assert "DELETE it with the key change" in message, (
+            "the bail does not name its remedy, so the next lane reads a "
+            "driver-shaped failure and patches around it — and the budget is "
+            "200 chars for this half, so the remedy must come BEFORE anything "
+            "that can be cut")
+        # …and it never reached the query: a bail that still asked would be a
+        # mis-bound SELECT, which is the failure this leg exists to prevent.
+        assert conn.conflict_reads == 0, label
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -914,3 +1051,122 @@ def test_a_genuine_replay_of_one_journal_stays_a_silent_no_op(
     assert monitoring.record_write_failure_counts().get("journal_collision") is None
     rows = _journal_rows(admin, tenant)
     assert [(seq_, payload["id"]) for seq_, _, payload in rows] == [(1, "obj-a")]
+
+
+def test_a_ts_less_replay_is_silent_on_a_real_database(
+        record_tenant, tmp_path: Path) -> None:
+    """THE GUARD ON THE `recorded_at` ARM, measured against Postgres (#12904).
+
+    The stub-based legs cannot discriminate the predicate — they answer with the
+    row the query WOULD return (review P2-5) — so the one case that decides
+    whether the new arm is guarded has to run on a real database. It is the case
+    the review's false-red warning names: a record carrying NO `ts`, written
+    twice.
+
+    `_journal_row` binds `COALESCE(%s::timestamptz, now())`, so the FIRST write
+    stamps a real `recorded_at`, while the second write binds NULL there. With an
+    UNGUARDED arm (`recorded_at IS DISTINCT FROM %s::timestamptz`) that NULL is
+    compared against the stamped value, `now() IS DISTINCT FROM NULL` is TRUE
+    (measured in PG), the predicate matches the row and the healthy replay is
+    refused as a collision. The `%s::timestamptz IS NOT NULL` guard is what makes
+    the arm conditional on there being a capture time to compare, and this leg is
+    what reds when it is removed.
+    """
+    _, tenant, _, _ = record_tenant
+    journal = EventLog(tmp_path / "corpus" / ".events.jsonl")
+    ts_less = {k: v for k, v in RECORD_B.items() if k != "ts"}
+    assert "ts" not in ts_less
+    seq = journal.append(ts_less)
+
+    first = rw.write_live_record(ts_less, seq=seq)
+    assert first is not None and first.applied, first
+    second = rw.write_live_record(ts_less, seq=seq)
+
+    assert second is not None
+    assert second.applied is True, (
+        f"a `ts`-less replay was refused as {second.refusal!r}: the capture-time "
+        f"arm compared the row's stamped `recorded_at` against the INSERT's "
+        f"`COALESCE(NULL, now())` — the false red #12904 P0-2 warned about")
+    assert second.refusal is None
+    assert monitoring.record_write_failure_counts().get("journal_collision") is None
+
+
+def test_a_re_derived_payload_is_silent_on_a_real_database(
+        record_tenant, tmp_path: Path) -> None:
+    """DRIFT, measured against Postgres: same record, same capture, new payload.
+
+    The stub legs can only say what the guard does with a row they hand it. This
+    one makes POSTGRES return that row: the surviving position row is written
+    from one payload, then the SAME record — same type, same `ts`, so the same
+    `recorded_at` — is written again with a payload this tree now derives
+    differently. That is precisely the re-derivation case that used to be
+    refused, so this leg is the DB-side proof that #12904 P0-1's polarity holds
+    where it matters.
+
+    ⚠️ The layer rows of the second write are re-derived and DISCARDED with the
+    absorbed position (the caller rolls the borrow back), which is why only the
+    position row is asserted here.
+    """
+    admin, tenant, _, _ = record_tenant
+    journal = EventLog(tmp_path / "corpus" / ".events.jsonl")
+    seq = journal.append(RECORD_A)
+
+    first = rw.write_live_record(RECORD_A, seq=seq)
+    assert first is not None and first.applied, first
+
+    # The SAME record (`type`, `ts` and therefore `recorded_at` all unchanged),
+    # with one field's value changed — a derivation that now emits something
+    # other than what that row holds.
+    re_derived = dict(RECORD_A, name="corpus A document (re-derived)")
+    second = rw.write_live_record(re_derived, seq=seq)
+
+    assert second is not None
+    assert second.applied is True, (
+        f"a re-derived record was refused as {second.refusal!r} — the record's "
+        f"own repair story is then version-pinned to the tree that wrote the row "
+        f"(#12904 P0-1)")
+    assert second.refusal is None
+    assert monitoring.record_write_failure_counts().get("journal_collision") is None
+    rows = _journal_rows(admin, tenant)
+    assert len(rows) == 1 and rows[0][2]["name"] == RECORD_A["name"], (
+        "the surviving position row must still hold the FIRST derivation — a "
+        "drift replay may not rewrite an append-only row")
+
+
+def test_two_journals_ingesting_one_document_differing_only_in_capture_time_are_refused(
+        record_tenant, tmp_path: Path) -> None:
+    """P0-2's acceptance leg on a real database: the ts-only collision (#9318).
+
+    Two durable journals, the SAME record appended to each — same type, same
+    payload, so nothing in the durable CONTENT differs — apart only in capture
+    time (`ts`, which lands in `recorded_at`). That is the reachable shape #9318
+    names, and before the `recorded_at` arm it was absorbed SILENTLY: the
+    predicate matched no row and the second journal's document was filed under
+    the first's position.
+
+    ⛔ On the pre-fix tree this leg reds with `applied=True` and one position row.
+    """
+    admin, tenant, _, _ = record_tenant
+    journal_a = EventLog(tmp_path / "corpus-a" / ".events.jsonl")
+    journal_b = EventLog(tmp_path / "corpus-b" / ".events.jsonl")
+    first = dict(RECORD_A, ts="2026-11-15T00:00:00Z", event_id="evt-first")
+    second = dict(RECORD_A, ts="2026-11-16T09:30:00Z", event_id="evt-second")
+    seq_a = journal_a.append(first)
+    seq_b = journal_b.append(second)
+    assert (seq_a, seq_b) == (1, 1)
+    # The premise: the durable CONTENT of the two is identical, so only the
+    # capture time can separate them.
+    assert _payload_of(first) == _payload_of(second)
+
+    write_a = rw.write_live_record(first, seq=seq_a)
+    assert write_a is not None and write_a.applied, write_a
+    write_b = rw.write_live_record(second, seq=seq_b)
+
+    assert write_b is not None
+    assert write_b.applied is False, (
+        "two journals ingesting one document, apart only in capture time, were "
+        "reported APPLIED — that is the silent absorption #9318 exists to make "
+        "loud, and it is exactly what the `recorded_at` arm closes")
+    assert write_b.refusal == "journal_collision"
+    rows = _journal_rows(admin, tenant)
+    assert len(rows) == 1

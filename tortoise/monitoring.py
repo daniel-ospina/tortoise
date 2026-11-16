@@ -733,12 +733,15 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 #                             filed under a guessed tenant (#9192);
 #   ``write_failed``          the record was unreachable or the projection
 #                             refused the record;
-#   ``journal_collision``     the position row holds content this write would
-#                             not produce (a different record, or this record's
-#                             payload re-derived) (#9318). ⛔ Unlike ``write_failed``
+#   ``journal_collision``     the position row holds a record this write does
+#                             NOT continue — a different record, or (when this
+#                             write carries no `ts` to compare) a payload whose
+#                             derivation moved (#9318). ⛔ Unlike ``write_failed``
 #                             a REPLAY CANNOT heal it — the replay re-raises —
 #                             so the remedy is journal identity in the key
-#                             (#12894), not a replay;
+#                             (#12894), not a replay. A same-capture payload
+#                             re-derivation is DRIFT and never reaches this
+#                             counter (#12904);
 #   ``circuit_open``          a connect to the record FAILED moments ago, so the
 #                             live door refused this write locally instead of
 #                             paying the connect timeout once per record
@@ -2139,19 +2142,21 @@ def record_record_write_failure(reason: str) -> None:
       neither set it names the graph-bound credential instead;
     * ``write_failed`` — the record was unreachable or the projection refused
       the record; ``replay`` heals it from the journal;
-    * ``journal_collision`` — the record WAS reached and refused to index this
-      record under a journal position whose content differs from what this write
-      would produce (a different record, or this record's payload re-derived
-      since that row was written) (#9318). Neither unreachable nor
+    * ``journal_collision`` — the record WAS reached and refused to file this
+      record under a journal position it does not CONTINUE (#9318): a different
+      record, or — when this write carries no ``ts`` for the capture time to be
+      compared — a payload whose DERIVATION moved. Neither unreachable nor
       misconfigured: the journal holds the
       record, and what the record cannot do is file it under that position — so
       the fix is not on this deployment at all. The population is any journal
       instance whose numbering resumes below the tenant's position high-water
       mark — a second durable journal under one tenant (two corpus roots, two
-      SDKs with different ``event_log_path``), a journal RESTORE, a rotation, or
-      a truncation — AND any journal whose payload DERIVATION changed since that
-      row was written, which reuses the same journal's own numbering and needs no
-      second instance at all. ``replay`` heals every other failure; it cannot heal this
+      SDKs with different ``event_log_path``), a journal RESTORE, a rotation, a
+      truncation — plus any POSITION TWO RECORDS REACHED at different capture
+      times. ⛔ A payload re-derivation alone is NOT in this population (#12904
+      P0-1): `recorded_at` is stamped at capture and survives a re-derivation,
+      so the same record re-derived at the same capture is DRIFT and replays
+      SILENTLY. ``replay`` heals every other failure; it cannot heal this
       one, because the append-only row that owns the position carries that
       other content, and the key carries no journal identity — that is ``#12894``'s
       schema decision. A genuine REPLAY (same position, same content) never
