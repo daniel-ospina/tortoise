@@ -326,7 +326,8 @@ refusal is keyed on the **row**, not on the mode: `_refuse_an_enumerated_replay`
 when there is no row (`:7424-7425`), and every mode arm below it ends in an unconditional
 `raise RecordProjectionError` (`:7499`) — `seeded` (`:7446`), `halted` (`:7464`) and **`active`**
 (`:7470`, the `else` arm) differ only in the remedy each names
-(`arm` / `reopen`+re-seed+`arm` / `reopen`+`arm`). So **on any graph that has a `record_cursor` row,
+(`arm` / `reopen`+re-seed+`arm` / `halt`+re-seed+`reopen`+`arm` — from `active`, `seed` and `reopen`
+both REFUSE, so the remedy must start with a `halt`, `:7493-7496`). So **on any graph that has a `record_cursor` row,
 every live write is refused as an enumerated replay** while `write_live_record` passes the carried
 `seq` with `position=True`.
 
@@ -490,9 +491,15 @@ The honest comparison is `git log refs/pull/12959/head..<wip-ref>` plus a path-s
 ## 9. Commands used (verbatim, with counts)
 
 **Which invocations are registered, and which are not.** Five suite runs went through the lane's report
-tool (`WORKTREE-REPORT.md`, "Suites run"): **rows 1, 3, 4 and 5 are the wiring check**, re-run after each
-round of fixes, and **row 2 is the docs-lint invocation** that exited `2` without running. Two lane-tool
-invocations in the block below are *not* in the register — `worktree_report.py init`, and
+tool (`WORKTREE-REPORT.md`, "Suites run"): **rows 1, 3, 4 and 5 are the wiring check**, re-run after the
+cycle-3, cycle-5 and cycle-6 fixes (**not** after cycle 4 — no row was taken for that round), and
+**row 2 is the docs-lint invocation** that exited `2` without running. ⚠️ **That register is not part of
+this PR and is not readable downstream:** `WORKTREE-REPORT.md` is gitignored (`.gitignore:158`) and lives
+only in the measurement worktree, so the counts above are this lane's record of what it ran rather than
+an artifact a reader of the merged document can open. What IS re-measurable is the wiring check itself,
+which is why V5 item 1 asks for its exit code to be re-established at the head that moves the gate.
+
+Two lane-tool invocations in the block below are *not* in the register — `worktree_report.py init`, and
 `gh_write_preflight.py`, whose probe creates, confirms and deletes a throwaway remote ref, so it is
 neither read-only nor registered. Every other measurement in this document is a read-only inspection
 (`rg`, `sed`, `grep`, `git log`/`git merge-base`/`git for-each-ref`, `gh issue|pr view`, and two
@@ -505,9 +512,12 @@ file and warns when the branch has moved past it (`⚠ head moved since the repo
 the affected suites so the report describes the tree you are actually shipping`), which every later
 docs-only commit would re-trigger. The runs above therefore say *when* they were taken — after the
 cycle-3, cycle-5 and cycle-6 fixes — and not that they cover the shipping commit. What makes that
-honest rather than convenient is a property of the suite: `record_wiring_check.py` reads the product
-tree (`tortoise/`, `tools/`, the migrations) and never this document, so the commits after the last
+honest rather than convenient is a property of the suite: `record_wiring_check.py` reads `tortoise/` and
+only `tortoise/` (`PACKAGE` at `tools/record_wiring_check.py:84`, the `rglob` at `:148`, the live door at
+`:378`/`:408`) and never this document, so the commits after the last
 registered run — all of them `docs/evidence/12894-landed-verify/README.md` — cannot change its verdict.
+That same restriction is V6-6's blind spot: a defect in `tools/` or in `supabase/migrations/` (the
+`ON DELETE CASCADE`) is outside what this instrument can see.
 The property does **not** extend to the docs lint, which is why its non-run stays a red.
 
 **One recorded suite did not run and is reported as red rather than omitted:** the docs-lint invocation
@@ -562,8 +572,9 @@ git merge-base --is-ancestor e2a9eadb87 703613fa0c && echo 'in issue-ref'
 git grep -c no_schema_ddl 703613fa0c -- tortoise/    # metering.py:3  sdk.py:3
 ```
 
-The report tool's log, with pass/fail per suite and the note above, is `WORKTREE-REPORT.md` at this
-worktree's root.
+The report tool's log, with pass/fail per suite and the note above, is `WORKTREE-REPORT.md` at the
+measurement worktree's root — gitignored, never committed, and not part of this PR (see the disclosure
+at the top of this section).
 
 ### Measured contradictions of a *documentation* claim (not of the product)
 
