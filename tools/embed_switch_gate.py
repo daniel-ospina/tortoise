@@ -767,6 +767,13 @@ _SHELL_ENV_IGNORE = re.compile(
     # exactly as `-i` does, and it was the one shape that still slipped through (measured)
     r"(?:^|\s)(?:-i|--ignore-environment|-)(?=\s|$)"
 )
+#: An `env` CALL that assigns a name (`env K=V cmd`), whatever the value. The reader does not model
+#: it as a STATEMENT — it credits top-level `export`/`ENV` only — so a switch named this way is
+#: recorded as AMBIGUOUS rather than absent, which is what makes the refusal say "mentions … but
+#: does not state a value this gate can read" instead of claiming the channel omits it.
+#: ⛔ Not to be confused with `_SHELL_ENV_EMPTIED`: that one CLEARS the switch (`K=`), this one only
+#: classifies the shape.
+_SHELL_ENV_ASSIGNED = re.compile(r"(?:^|\s)(?P<name>[A-Za-z_][A-Za-z0-9_]*)=")
 
 #: A trailing `#` comment (idiomatic after a shell assignment) is NOT part of the value — leaving
 #: it in made `export K=""  # off for now` read as a non-empty statement and skip the EMPTY-value
@@ -964,9 +971,10 @@ class Channel:
             return (
                 f"{self.channel} mentions {switch} but does not state a value this gate can read "
                 f"({self.resolver}) — the assignment is either CONDITIONAL (a branch, a function "
-                "body, a group, or a statement behind `&&`/`||`/`|`/`&`) or an interpolation with no "
-                "non-empty literal fallback; state it as an unconditional top-level literal "
-                "assignment"
+                "body, a group, a `coproc`, or a statement behind `&&`/`||`/`|`/`&`), stated only "
+                "through an `env K=V cmd` call (the reader credits top-level assignments, not env "
+                "calls), or an interpolation with no non-empty literal fallback; state it as an "
+                "unconditional top-level literal assignment"
             )
         return f"{self.channel} does not state {switch} ({self.resolver})"
 
@@ -1772,6 +1780,19 @@ _SHELL_STATEMENT = re.compile(r";;|;|&&|\|\|")
 #: lookbehind: `>|` is bash's CLOBBER redirect, not a pipe).
 _SHELL_FORK = re.compile(r"(?<!>)\|&?(?![&|])|(?<![&>|])&(?![&>])")
 
+#: ⛔ A `coproc` FORKS at its OPENER, and the opener carries no `|`/`&` (review P1, measured
+#: 2026-11-16). `_SHELL_GROUP_OPEN` matches the `{` after `coproc `, so the body was pushed as a
+#: brace GROUP — which the model credits BY DESIGN, because a group runs in the current shell. A
+#: coprocess does not: bash runs the body in a forked child, so an `export` inside it never reaches
+#: `exec "$@"`. Measured on a copy of this tree with `entrypoint.sh` replaced by
+#: `coproc { export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; }` / `wait` / `exec "$@"`:
+#: the gate printed `ok … =1 =1` and exited 0, while `env -i … bash entrypoint.sh /usr/bin/env`
+#: showed NO `TORTOISE_*` at all — a fail-OPEN, the direction that ships an unarmed process.
+#: `_group_is_forked` cannot see it: that reads the fork off the CLOSER's tail, and here the fork is
+#: at the OPENER. `coproc NAME {` is the same fork. Pinned in both directions by
+#: `test_a_coproc_body_is_never_credited_and_a_plain_group_still_is`.
+_SHELL_COPROC = re.compile(r"^coproc(?![A-Za-z0-9_])")
+
 
 def _shell_statements(line: str, structure: str) -> list[tuple[str, str, str]]:
     """Split one logical line into ``(raw, structural, separator)`` STATEMENT segments.
@@ -1971,6 +1992,9 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             elif content_raw.strip():
                 pending_fn_header = _SHELL_FN_HEADER.match(content_raw.strip()) is not None
             short_circuit = separator in ("&&", "||")
+            #: ⛔ A `coproc` body runs in a FORKED child (see `_SHELL_COPROC`), so a group it opens
+            #: may never affect this process — same fail-closed direction as `forked`.
+            coproc = _SHELL_COPROC.match(content_view.strip()) is not None
             forked = (
                 _SHELL_FORK.search(content_view) is not None
                 # ⛔ A carried PIPE means THIS statement is the pipeline's right-hand side, so it
@@ -1984,7 +2008,7 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # credited before `opened_fn` raised the depth — so a never-called helper stated BOTH
             # switches on one export line and the channel passed. Everything on the body's brace
             # line is inside the body, which may never run.
-            conditional = depth > 0 or terminated or short_circuit or forked or in_branch or allman_body
+            conditional = depth > 0 or terminated or short_circuit or forked or coproc or in_branch or allman_body
             # ⛔ GROUP OPENERS, COUNTED (review P2, measured): `{ { export …=1; }; } | tee` opens
             # TWO groups on one statement, and a one-frame-per-statement push desynced the stack —
             # the outer group's fork was applied to a frame that had already been popped, so it was
@@ -2086,6 +2110,16 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                     stripped |= set(SWITCHES)
                 for name in stripped & set(SWITCHES):
                     _retract(name)
+                # ⛔ A `K=V` stated through an `env` CALL is not read as STATED — the reader models
+                # top-level assignments — but it must not read as ABSENT either (review P3,
+                # measured): the `elif` above short-circuits the MENTION scan below, so
+                # `exec env TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1 "$@"` reported
+                # `does not state TORTOISE_VALUE_GATE`, pointing a reader at an omission that does
+                # not exist. The verdict is unchanged (both are refusals); the CLASS is what the
+                # message states, which is the `#12549` defect-1 rule the module docstring cites.
+                ambiguous.update(
+                    set(_SHELL_ENV_ASSIGNED.findall(env_call.group("args"))) & set(SWITCHES)
+                )
             else:
                 # A statement that states no switch is where a MENTION lives (prose, a help line,
                 # a `[[ … == *TORTOISE_* ]]` test): recorded, never credited. A segment that DID

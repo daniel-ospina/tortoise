@@ -3532,3 +3532,95 @@ def test_only_an_ASSIGNMENT_takes_a_switch_back_not_a_mention(label, line, credi
             f"{label}: an ASSIGNMENT of the name does take it back: {stated}"
         )
         assert "TORTOISE_EMBED_GATE" in ambiguous, ambiguous
+
+
+def test_a_coproc_body_is_never_credited_and_a_plain_group_still_is(tmp_path):
+    """Review P1 (measured 2026-11-16) — a `coproc` FORKS at its OPENER, so its body is a subshell.
+
+    `_SHELL_GROUP_OPEN` matches the `{` after `coproc `, so the body was pushed as a brace GROUP —
+    which the model credits BY DESIGN ("a group runs in the current shell"). A coprocess does not:
+    bash runs the body in a forked child, so nothing it exports reaches `exec "$@"`.
+    `_group_is_forked` cannot see it, because that reads the fork off the CLOSER's tail and here the
+    fork is at the OPENER.
+
+    Measured before the fix, on a copy of this tree with `entrypoint.sh` replaced by these rows:
+    the gate printed `ok … TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1` and exited 0, while
+    `env -i … bash entrypoint.sh /usr/bin/env` showed NO `TORTOISE_*` at all — a fail-OPEN, the
+    direction that ships an unarmed process.
+
+    Mutation-proved: dropping `coproc` from the `conditional` expression reds the three coproc rows
+    and leaves every plain-group row green, so this arm pins the coproc keyword and not groups.
+    """
+    coproc_scripts = {
+        "one_line": 'coproc { export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; }\nwait\n',
+        "named": 'coproc WORKER {\n  export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\n}\nwait\n',
+        "block": 'coproc {\n  export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\n}\nwait\n',
+    }
+    for label, body in coproc_scripts.items():
+        stated, ambiguous = gate._shell_assignments("#!/bin/bash\n" + body + 'exec "$@"\n')
+        assert stated == {}, f"{label}: a coproc body is a FORKED child, not a statement: {stated}"
+        assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= set(ambiguous), (label, ambiguous)
+
+    entrypoint = tmp_path / "entrypoint.sh"
+    entrypoint.write_text("#!/bin/bash\n" + coproc_scripts["block"] + 'exec "$@"\n')
+    _dockerfile(tmp_path)
+    _fly(tmp_path)
+    channels, failures = gate.evaluate(tmp_path)
+    shell = [c for c in channels if c.channel == "entrypoint.sh"]
+    assert shell and shell[0].stated == {}, shell
+    assert any("entrypoint.sh" in f for f in failures), failures
+
+    # The MIRROR, which is why the fix is scoped to the keyword and not to braces: a plain group
+    # runs in the CURRENT shell and bash really does export both (`env -i bash` prints them), so it
+    # must still be credited or the gate gains a false refusal.
+    for label, body in {
+        "plain_group": '{\n  export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\n}\n',
+        "prefixed_group": 'time {\n  export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\n}\n',
+    }.items():
+        stated, ambiguous = gate._shell_assignments("#!/bin/bash\n" + body + 'exec "$@"\n')
+        assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+            f"{label}: a group that runs in place IS the shipped configuration stating a value "
+            f"({stated} {ambiguous})"
+        )
+
+
+def test_a_switch_stated_only_through_an_env_CALL_is_AMBIGUOUS_not_absent():
+    """Review P3 (measured) — the third verdict must not collapse into "does not state".
+
+    The module docstring promises that a mention this reader cannot read is a FAILURE whose message
+    names the class, because "does not state" points a reader at an OMISSION that may not exist
+    (`#12549` defect 1). The `_SHELL_ENV_CALL` branch is an `elif` in the RETRACTION chain, so it
+    short-circuited the mention scan and `exec env TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1 "$@"`
+    — which genuinely arms the child process — was reported as
+    `entrypoint.sh does not state TORTOISE_VALUE_GATE`.
+
+    The verdict is unchanged (both branches refuse); what this pins is the WORDING, which is the
+    only thing that tells a reader whether to add a line or to reword one.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        '#!/bin/bash\nexec env TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1 "$@"\n'
+    )
+    assert stated == {}, stated
+    assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= set(ambiguous), ambiguous
+
+    channel = gate.Channel(
+        "entrypoint.sh",
+        "entrypoint",
+        "entrypoint: entrypoint assignments",
+        stated,
+        ambiguous=tuple(sorted(ambiguous)),
+    )
+    problems = channel.problems()
+    assert problems, "an env-stated switch is still a REFUSAL — the mismatch is the wording"
+    assert all("mentions" in p and "does not state a value this gate can read" in p for p in problems), problems
+    assert not any("does not state TORTOISE" in p for p in problems), (
+        f"the channel is not OMITTING the switch, it states it in a shape this reader does not "
+        f"model: {problems}"
+    )
+
+    # The retraction direction is unchanged: `env K=` still CLEARS the switch (P1, `_SHELL_ENV_EMPTIED`).
+    stated, ambiguous = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1\nexec env TORTOISE_VALUE_GATE= \"$@\"\n"
+    )
+    assert "TORTOISE_VALUE_GATE" not in stated, stated
+    assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
