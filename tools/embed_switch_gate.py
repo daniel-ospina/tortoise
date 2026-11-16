@@ -108,6 +108,27 @@ _ENV_INSTRUCTION = re.compile(r"(?i)^\s*ENV\s+(?P<body>.+)$")
 _SHELL_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
 _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*$")
 
+#: A value that is NOTHING BUT a variable interpolation, with its optional fallback captured.
+#: ``${X:-1}`` states a value (the fallback); ``${X:-}``, ``${X}`` and ``$X`` do not — they state
+#: whatever the caller's environment holds, which can be empty, and the gate would then read a
+#: channel as armed while the process resolves OFF (review P3). Neither reader resolves
+#: interpolation — there is no environment to resolve it against that would be the SHIPPED value —
+#: so a pure interpolation with no non-empty literal fallback is refused by name.
+_PURE_INTERPOLATION = re.compile(
+    r"^\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<op>:?[-+])(?P<fallback>[^}]*))?\}$"
+    r"|^\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)$"
+)
+
+
+def _states_a_literal(value: str) -> bool:
+    """Whether ``value`` states a value that does not depend on an unresolved interpolation."""
+    text = value.strip().strip("\"'").strip()
+    match = _PURE_INTERPOLATION.match(text)
+    if not match:
+        return True  # a literal (a partial interpolation like `a-${X}` is literal enough)
+    fallback = (match.group("fallback") or "").strip().strip("\"'").strip()
+    return bool(fallback)
+
 #: Env keys kept when the resolver shell is scrubbed. Deliberately an ALLOWLIST: a lane's
 #: exported `TORTOISE_EMBED_GATE` is not a shipped default, and `${…:-1}` inside a channel would
 #: otherwise resolve off the runner's environment instead of the file (`#10996`'s doctrine, the
@@ -162,8 +183,9 @@ class Channel:
             )
         if switch in self.ambiguous:
             return (
-                f"{self.channel} mentions {switch} but not as an assignment this gate can read "
-                f"({self.resolver}) — state it as a plain assignment"
+                f"{self.channel} mentions {switch} but does not state a value this gate can read "
+                f"({self.resolver}) — state it as a literal assignment (a ${{…}} with no non-empty "
+                "fallback can resolve empty)"
             )
         return f"{self.channel} does not state {switch} ({self.resolver})"
 
@@ -241,10 +263,16 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str]]:
         pairs = _ENV_ASSIGNMENT.findall(body)
         if pairs and _ENV_ASSIGNMENT.match(body):
             for key, value in pairs:
+                if key in SWITCHES and not _states_a_literal(value):
+                    ambiguous.add(key)  # an interpolation that can resolve empty (review P3)
+                    continue
                 stated[key] = value.strip("\"'")
             continue
         parts = body.split(None, 1)
         if len(parts) == 2 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", parts[0]):
+            if parts[0] in SWITCHES and not _states_a_literal(parts[1]):
+                ambiguous.add(parts[0])
+                continue
             stated[parts[0]] = parts[1].strip().strip("\"'")
             continue
         ambiguous.update(_mentioned_switches(body))
@@ -263,7 +291,11 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     for line in _logical_lines(text):
         match = _SHELL_ASSIGNMENT.match(line)
         if match:
-            stated[match.group("key")] = match.group("value").strip().strip("\"'")
+            key, value = match.group("key"), match.group("value")
+            if key in SWITCHES and not _states_a_literal(value):
+                ambiguous.add(key)  # `${X:-}` / `$X` — can resolve empty (review P3)
+                continue
+            stated[key] = value.strip().strip("\"'")
             continue
         if _SHELL_EXPORT_NAME.match(line):
             continue  # `export NAME` states no value; not an arm
@@ -442,9 +474,31 @@ def _fly_channel(path: Path, root: Path) -> Channel:
             "tomllib [env]",
             unreadable="the manifest has no `[env]` table, so there is no environment to read",
         )
-    stated = {k: str(v) for k, v in env.items() if k in SWITCHES}
-    ambiguous = {s for s in SWITCHES if s in env and s not in stated}
+    stated, ambiguous = _env_table_values(env)
     return Channel(label, "fly", "tomllib [env]", stated=stated, ambiguous=tuple(ambiguous))
+
+
+def _env_table_values(env: dict) -> tuple[dict[str, str], set[str]]:
+    """A resolved env TABLE's switch values, plus the keys whose value is not a scalar.
+
+    ⛔ The first version computed `ambiguous = {s for s in SWITCHES if s in env and s not in
+    stated}`, which is DEAD by construction — `stated` is built from the same keys (review P3).
+    The shape it was reaching for is a value that is not a scalar at all (a TOML table, a JSON
+    object/array): that states no string the gate can read, so it is reported rather than
+    silently recorded as its `str()` repr.
+    """
+    stated: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for key, value in env.items():
+        if key not in SWITCHES:
+            continue
+        if isinstance(value, bool):
+            stated[key] = "true" if value else "false"
+        elif isinstance(value, (str, int, float)):
+            stated[key] = str(value)
+        else:
+            ambiguous.add(key)
+    return stated, ambiguous
 
 
 def _fly_config_show(path: Path) -> tuple[dict[str, str], set[str]] | None:
@@ -469,9 +523,7 @@ def _fly_config_show(path: Path) -> tuple[dict[str, str], set[str]] | None:
     env = model.get("env")
     if not isinstance(env, dict):
         return None
-    stated = {k: str(v) for k, v in env.items() if k in SWITCHES}
-    ambiguous = {s for s in SWITCHES if s in env and s not in stated}
-    return stated, ambiguous
+    return _env_table_values(env)
 
 
 def _label(path: Path, root: Path) -> str:

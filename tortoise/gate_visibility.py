@@ -96,7 +96,10 @@ def startup_line() -> str:
         if report["source"] == "absent":
             origin = f"unset → code default {'ON' if report['code_default'] else 'OFF'}"
         elif report["source"] == "blank":
-            origin = f"stated {report['stated']!r} — blank reads as unset, so this value is the residual"
+            # ⛔ NOT "blank reads as the default". A blank value is OFF for BOTH switches by the
+            # truthy contract, which for the VALUE gate is the opposite of its absent default —
+            # so this branch must not borrow the default's name (review P3).
+            origin = f"stated {report['stated']!r} — blank reads as OFF, not as the unset default"
         else:
             origin = f"stated {report['stated']!r}"
         parts.append(f"{report['switch']}={value} ({origin})")

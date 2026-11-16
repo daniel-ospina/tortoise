@@ -3096,8 +3096,8 @@ jobs:
           path: ${{ runner.temp }}/pytest.log
           if-no-files-found: ignore
       - name: Validate docker-compose.yml (ports, headers, embedding switches #12926)
-        # `config -q` proves it PARSES; the gate refuses a channel that OMITS either switch —
-        # why, and what it resolves: tools/embed_switch_gate.py. 4 lines on purpose (#12926).
+        # parse check + the omits-a-switch refusal (tools/embed_switch_gate.py); always() so a red step cannot skip it
+        if: always()
         run: docker compose config -q && echo "compose config OK" && python3 tools/embed_switch_gate.py
       - name: Docs-consistency guard (embedded must never be "default" again)
         # #942 T1 enforcement: the flipped onboarding surfaces must not regress.
