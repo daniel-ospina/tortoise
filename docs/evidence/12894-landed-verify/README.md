@@ -497,11 +497,14 @@ The honest comparison is `git log refs/pull/12959/head..<wip-ref>` plus a path-s
 
 ## 9. Commands used (verbatim, with counts)
 
-**Which invocations are registered, and which are not.** Six suite runs went through the lane's report
+**Which invocations are registered, and which are not.** Nine suite runs went through the lane's report
 tool (`WORKTREE-REPORT.md`, "Suites run"): **row 1 and rows 3–6 are the wiring check** — row 1 while
 drafting, then four runs across the eight review rounds, **not** one per round (the fix batches for
-cycles 2, 3 and 4 were never followed by a run) — and **row 2 is the docs-lint invocation** that exited
-`2` without running. ⚠️ **That register is not part of this PR and is not readable downstream:**
+cycles 2, 3 and 4 were never followed by a run); **row 2 is the docs-lint invocation that exited `2`
+without running**; and **rows 7–9 are that lint re-attempted properly** — the CI's own
+`docs-markdownlint.sh` (0 issues), its `docs-link-check.sh` (0 errors), and
+`docs_lint_baseline.py check` over both reports, which returned `0 new, 0 known (baseline), 0 in
+generated files`, exit 0. ⚠️ **That register is not part of this PR and is not readable downstream:**
 `WORKTREE-REPORT.md` is gitignored (`.gitignore:158`) and lives only in the measurement worktree, so the
 counts above are this lane's record of what it ran rather than an artifact a reader of the merged
 document can open. What IS re-measurable is the wiring check itself, which is why V5 item 1 asks for its
@@ -539,10 +542,14 @@ the finding is: a defect in `tools/` or in `supabase/migrations/` — the `ON DE
 outside what this check can see, so its exit 0 says nothing about it.
 The property does **not** extend to the docs lint, which is why its non-run stays a red.
 
-**One recorded suite did not run and is reported as red rather than omitted:** the docs-lint invocation
-exited `2` because the harness needs three outputs this lane did not produce, so the document was never
-linted by that tool. The register carries that gap **twice** — as suite 2 (exit 2) and again as a
-`Could not do` note — and this section states it a third time rather than letting a red row speak alone:
+**One recorded suite did not run, and the gap is kept in the register rather than deleted:** the first
+docs-lint invocation exited `2` because the harness needs three outputs the lane had not produced, so
+the document was not linted by that tool at that point. The register carries the gap as suite 2 (exit
+`2`) and again as a `Could not do` note, and `check` still reports `1 FAILING SUITE` because of it.
+Rows 7–9 are the correction: run through the workflow's own scripts with its pinned versions, the lint
+reports **0 markdownlint issues, 0 link errors, and 0 new / 0 known baseline findings**. Both states are
+recorded — the failure that happened and the pass that closed it — because deleting the red row would
+make the register read as though the lint had been green all along.
 
 ```bash
 uv run python tools/worktree_report.py init --issue 12894
@@ -553,12 +560,21 @@ uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wir
 uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 4, exit 0 (re-run after the cycle-5 edits)
 uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 5, exit 0 (re-run after the cycle-6 edits)
 uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 6, exit 0 (re-run after the cycle-7 edits)
+# rows 7–9 — the docs lint, run the way the workflow runs it (pinned producers, real reports)
+bash .github/scripts/docs-markdownlint.sh --label 'Markdownlint (changed files)' \
+    --cli2 markdownlint-cli2@0.23.3 --files-from /tmp/md.nul --output /tmp/mdlint.txt   # 0 issues
+bash .github/scripts/docs-link-check.sh --label 'Link check (changed files)' \
+    --files-from /tmp/md.txt --output /tmp/lychee.json                                   # 0 errors
+uv run python tools/docs_lint_baseline.py check --markdownlint-output /tmp/mdlint.txt \
+    --markdownlint-expected-files 1 --lychee-output /tmp/lychee.json \
+    --baseline config/docs-lint-baseline.json    # 0 new, 0 known — exit 0
 uv run python tools/worktree_report.py check        # exit 3 — VALID EVIDENCE, 1 FAILING SUITE
 ```
 
-`check`'s `3` — not its `0` — is what makes that gap a recorded red instead of a silence, and the
-head-moved warning it prints alongside is the reason the paragraph above claims no per-run head
-coverage.
+`check`'s `3` — not its `0` — is what makes that gap a recorded red instead of a silence. It also
+prints the head-moved warning quoted above once the branch moves past the report's recorded head, which
+any commit after the last `run` does: that warning is why the paragraph above claims no per-run head
+coverage, and why the rows above are placed by the register's timestamps instead.
 
 The two evaluations the negative findings rest on, verbatim and re-runnable:
 
