@@ -4218,7 +4218,7 @@ _SHELL_LEADING_KEYWORD = re.compile(
 #: quoted pattern was not a pattern: the arm never matched, landed in no bucket, and the
 #: file published a definite `OFF` with an empty `indeterminate` bucket — the same false
 #: PASS as the quoted SUBJECT, on the pattern side (fresh review of `#12902`, P2).
-_SHELL_CASE_ALTERNATIVE = r'(?:[^ \t(){};&|)]+|\"[^\"]*\"|\'[^\']*\')'
+_SHELL_CASE_ALTERNATIVE = (r"(?:[^ \t(){};&|)'\"\\]|\\.|\"[^\"]*\"|'[^']*')+")
 _SHELL_CASE_SEPARATOR = r"[ \t]*\|[ \t]*"
 _SHELL_CASE_PATTERN_LIST = (r"\(?[ \t]*" + _SHELL_CASE_ALTERNATIVE +
                             r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*"
