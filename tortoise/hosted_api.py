@@ -7631,13 +7631,19 @@ def _record_health() -> dict:
         block["record_writes_applied"] = applied
         block["record_last_write_at"] = last_write_at
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
-    # this counter carries — SIX values, documented at
+    # this counter carries — SEVEN values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly
     # replay-healable, and naming four of them here sent operators to a replay
     # that could not exist for two:
     #
     #   ``write_failed``      the record was unreachable or the projection
     #                         refused the row — a REPLAY heals it.
+    #   ``journal_collision`` the position row holds content this write would
+    #                         not produce (a different record, or this record's
+    #                         payload re-derived since that row was written)
+    #                         (#9318): a REPLAY DOES NOT HEAL IT — it
+    #                         re-raises. The remedy is journal identity in the
+    #                         key (#12894).
     #   ``no_tenant``         armed with no tenant in scope; heal the tenant
     #                         resolution, then replay.
     #   ``malformed_dsn``     the value is configured but unusable — fix the
@@ -8065,7 +8071,7 @@ async def health():
     return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"])
             else "degraded",
             # ⛔ Its OWN key, not `degraded_reasons` — that name is taken by
-            # `record.degraded_reasons` (a documented six-value vocabulary,
+            # `record.degraded_reasons` (a documented seven-value vocabulary,
             # `docs/infra-runbook.md`, pinned by `test_record_searchkeys_10620`).
             # Two schemas under one name is how a consumer reads the wrong one.
             "refusals": refusals,

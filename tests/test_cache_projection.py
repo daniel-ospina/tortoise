@@ -1945,21 +1945,44 @@ def test_the_record_can_clear_the_carriers_it_can_set():
     — a stale current-reading word, or nothing at all — while the graph holds
     `superseded` (#9974).
 
-    ⛔ WHAT #12745 REMOVED IS THE `status='live'` VARIANT, NOT THE NULL-CARRIER
-    SHAPE. `update_entity(status='live', supersededBy=None, supersededAt=None)`
-    on a superseded row is REFUSED (`superseded` is terminal for an Object;
-    measured at this head: refused, journal delta 0) — and that is the only
-    UN-SUPERSEDE route it closes (the guard refuses every dead → non-terminal
-    WORD, not just `live`). The bare CLEAR still reaches this mapping: measured,
+    ⛔ #12745 GOT THE PREMISE WRONG, NOT THIS MAPPING (#12825 restored it).
+    `update_entity(status='live', supersededBy=None, supersededAt=None)` on a
+    superseded row is **ACCEPTED** — measured at #12882's head: the row goes
+    `('live', None, None)`, so no carrier survives for the cache to re-derive
+    the dead word from and a rebuild derives nothing (`cache_projection`'s NOT
+    MONOTONE bullet), i.e. graph and record AGREE. What the door still REFUSES
+    is the INCOHERENT half: `update_entity(status='live')` **alone** — measured
+    at this head: refused (`'superseded' is TERMINAL for a :Object`), journal
+    delta 0 — where the carriers stay set and the record keeps reading
+    `superseded` against a live graph. The guard refuses every dead →
+    non-terminal WORD, not just `live` — and the admitted shape is EXACTLY the
+    coherent one, so the three neighbours a reader is most likely to infer
+    wrongly are named here, each with the pin that decides it:
+
+        status='live' + ONE carrier cleared — REFUSED: the fold is
+            `superseded_by IS NOT NULL OR superseded_at IS NOT NULL`, so half a
+            clear is not an un-supersede (`test_10371_nonpoint_lifecycle_
+            guard.py::test_a_PARTIAL_carrier_clear_is_still_refused`).
+        status='live' + the SNAKE pair cleared — REFUSED: this door writes
+            `SET n += $props` literally, so `superseded_by=None` clears a shadow
+            property and leaves `supersededBy` set, and admitting it would
+            resurrect the row while the cache still derived `superseded`
+            (#12782; `…::test_the_snake_spelling_cannot_un_supersede_yet`).
+        a CARRIER-LESS `superseded -> live` — REFUSED: there is nothing to
+            withdraw, so it is not a withdrawal
+            (`…::test_a_carrier_less_supersession_is_not_un_superseded`).
+
+    The BARE CLEAR also still reaches this
+    mapping: measured,
     `update_entity(obj, supersededBy=None, supersededAt=None)` on a superseded
     row is ACCEPTED and journals
     `EntityMutated op=supersede state={'supersededBy': None, 'supersededAt': None}`
     — the same `type`/`label`/`op` and an identical `state` mapping as the event
-    below — while leaving the row terminal. So the
-    record can both EXPRESS the clear and RECEIVE it; what it cannot do is make
-    the row current, which is a DOOR decision (`tortoise/cache_projection.py`'s
-    NOT MONOTONE bullet carries the same bound). The assertions below are
-    unchanged: they exercise `mutations_for`, never the SDK.
+    below — while leaving the row terminal. So the record can both EXPRESS the
+    clear and RECEIVE it; what the bare clear cannot do is make the row current,
+    which is a DOOR decision (`tortoise/cache_projection.py`'s NOT MONOTONE
+    bullet carries the same bound). The assertions below are unchanged: they
+    exercise `mutations_for`, never the SDK.
     """
     from tortoise.record_projection import mutations_for
 
@@ -2709,7 +2732,7 @@ def test_a_terminal_pack_fold_latches_instead_of_being_resurrected():
     so the Object stays terminal and out of `recall_state`'s default view. The
     pre-fix record-side fold took the LAST writer by `seq` and wrote `active` —
     a terminal Object RESURRECTED on rebuild, the #2164/#3309 class the live
-    test `test_a_superseded_object_is_not_resurrected_by_a_connector_event`
+    test `test_a_superseded_object_is_never_resurrected_by_a_connector_event`
     exists to prevent (that one only covers the `superseded` carrier).
 
     Both temporal orders are asserted, because the reverse one shows the other
