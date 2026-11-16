@@ -71,7 +71,7 @@ Durable writes, in execution order:
 
 ### Which one is the commit point now
 
-**The JSONL append still is** — `sdk.py:16218` states it as an invariant (`#7951 §17.1`, *"THE APPEND IS
+**The JSONL append still is** — `sdk.py:16216` states it as an invariant (`#7951 §17.1`, *"THE APPEND IS
 THE COMMIT POINT"*), the cache write at `sdk.py:16287` is wrapped in `_live_write_scope`, and the §17.1
 guard makes that declaration load-bearing rather than documentary (`sdk.py:16281-16288`). The record
 write at step 5–10 runs **after** it and is deliberately fail-soft: `write_live_record` never raises
@@ -296,7 +296,9 @@ with **no journal append and no record row behind it** — outside the ordinal e
 `tortoise/metering.py` and `0 times` in `tortoise/record_writer.py` (measured).
 
 Provenance, stated because the fix exists only in an archived lane: the cap-archived ref
-`refs/wip/feat-12894-allocator-spike` carries commit `e2a9eadb87` whose message records this as a
+`refs/wip/issue-12894-allocator-spike` (`703613fa0c` — **not** its `feat-` sibling `ec0bc91f6d`, which
+does not carry it: measured with `git merge-base --is-ancestor e2a9eadb87 <ref>`) carries commit
+`e2a9eadb87`, whose message records this as a
 measured P1 (the D3 legs of `tests/test_9567_record_capstone.py` measuring the meter's `_ensure_indexes()`
 DDL as *"mutating cache statements with no journal append and no APPLIED record behind them"*), fixed
 there by `_get_registry(no_schema_ddl=True)`. `#12959`'s body records the opposite attribution for the
@@ -339,7 +341,9 @@ it. `§A7.7` step numbers are the plan's.
 5. **Reader-first window + journal identity in the key** (`§A7.7` 6.1 — *specified, partially done*).
    The refusal half exists (`_refuse_an_enumerated_replay`, `record_projection.py:7340`). Two things are
    missing: (a) the journal *export line* does not carry a `seq` field (no writer emits one — `rg` finds
-   no `"seq"` key in the emitted envelope, and `last_exported` **does not exist in the tree**); (b)
+   no `"seq"` key in the emitted envelope; `last_exported` exists **only in the plan document**, at
+   `docs/plans/2026-11-15-issue-12894-storage-shape.md:1256` and the six lines that follow, and in no
+   Python module); (b)
    `§A7.8` item 6's precondition — `event_id` in `journal_event` — is not done:
    `CREATE TABLE … journal_event (… PRIMARY KEY (org_id, graph_id, seq))` with no identity column
    (`supabase/migrations/20261012000001_record_event_stream.sql:81-90`). The plan says that widening
@@ -349,7 +353,7 @@ it. `§A7.7` step numbers are the plan's.
    replays into refusals"* (`record_projection.py:6760-6766`). `#9318` is open because its acceptance
    needs identity in the key; `#12904` only made the conflict loud.
 7. **The JSONL becomes an EXPORT rather than the commit point** (`§A7.7` 6.4/6.5, `§A7.5.8` —
-   *specified, unbuilt*). Today `sdk.py:16218-16220` still declares the append the commit point, and the
+   *specified, unbuilt*). Today `sdk.py:16215-16217` still declares the append the commit point, and the
    cache write is gated on it (`_live_write_scope`, `sdk.py:16287`). The plan's export must be
    **reproducible from the record** and *"today it is not"* (`§A7.5.8`).
    **On the review's "the drainer's hole premise was impossible":** that finding was resolved **in the
@@ -358,8 +362,8 @@ it. `§A7.7` step numbers are the plan's.
    the WRITER appends the line **and advances `last_exported` with it** … A halted rolled-back write is
    a hole in the RECORD, healed by a later replay's enumeration (§A7.5.10 row 4), not a hole in the
    export"* (`docs/plans/2026-11-15-issue-12894-storage-shape.md:1336`). There is no drainer in the code
-   to carry the defect (`last_exported` is absent from the tree), so nothing merged contradicts the
-   resolution — the step simply remains planned. `#12959`'s own body makes the same point in one line:
+   to carry the defect (`last_exported` appears only in the plan, never in a Python module), so nothing
+   merged contradicts the resolution — the step simply remains planned. `#12959`'s own body makes the same point in one line:
    the export drainer is *"not built: its premise is forbidden by the allocator's own lock"*.
 8. **M2 session capture off `durable=False`** (`§A7.7` 6.4 / `§A7.8` — *specified*). The decline exists
    because the lane has no position to hand the record; the flip removes the reason. Still declined at
@@ -369,7 +373,9 @@ it. `§A7.7` step numbers are the plan's.
    (D-27: it is a primary status store — the only carrier of `Object.status`/`Subject.status`), and the
    ruling that grounds this lane forbids it. Nothing in the landed code bounds `journal_event`
    (no retention/delete on that table — `record_allocator.py:17-21` states the prohibition, and the
-   migration grants `journal_event` **SELECT+INSERT only**, `20261116000001:41-43`).
+   app role holds `journal_event` **SELECT+INSERT only**: `GRANT SELECT, INSERT ON public.journal_event
+   TO tortoise_record_app` (`supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql:190`),
+   which `20261116000001:42-44` cites as the reason `record_cursor` withholds DELETE).
 10. **`§A7.7` step 1 — D-01's counts reconciled** (*specified, not done here*). This lane did not
     re-derive the 387/211/32 vs 442/38/288 vs 458/50 population.
 
@@ -386,7 +392,7 @@ The chain had four review rounds. Each named defect, and where it stands now:
 | 3 | **`23514` on an empty-graph seed** — a `CHECK (seq > 0)` on the cursor made the *emptiest* graph's own seed fail | **FIXED** | `seq bigint NOT NULL DEFAULT 0 CHECK (seq >= 0)` at `supabase/migrations/20261116000001_record_cursor_allocator.sql:61`, with the reasoning at `:24-32`; `journal_event` keeps `seq > 0` (`20261012000001:84`) because a *position* is always ≥ 1 |
 | 4 | **`42501` from `FORCE ROW LEVEL SECURITY` without the GUC** | **FIXED / not applicable as written** | the landed migration uses `ENABLE ROW LEVEL SECURITY` (`20261116000001:78`), **not** `FORCE` — so an owner-role connection is not subjected to the policy by this table. The seed sets *and verifies* the tenant GUC itself (`record_allocator.py:396-397`, `:637-650`), and `record_projection.scope_connection` does the same plus the role gate (`record_projection.py:7021-7024`). The refusal-vs-divergence distinction is pinned by `tests/test_12894_record_cursor_live.py::test_a_seed_without_the_guc_is_a_refusal_not_a_divergence` (`record_allocator.py:383-394`). ⚠️ The plan text still says `FORCE` (`§A7.5.5`, *"FORCE ROW LEVEL SECURITY on `record_cursor`"*), so plan and migration disagree — the *migration* is what runs, and it is the more forgiving of the two |
 | 5 | **the placeholder converter** — *"a statement mixing a literal `$1` with `%s` is refused by the converter"* | ⛔ **NOT FIXED — the claim is false, and the test that pins it passes for the wrong reason** | measured: `to_dollar_placeholders` (`record_projection.py:7806-7824`) refuses only on **arity** (`len(parts)-1 != len(params)`). `Statement("SELECT $1, %s", ("a",))` → `SELECT $1, $1`; `Statement("SELECT $1, %s, %s", ("a","b"))` → `SELECT $1, $1, $2`, both silently. The comment asserting the refusal is `record_allocator.py:199-202`; the test is `tests/test_12894_record_cursor.py:294-319`, and its case `Statement("SELECT $1, %s", ("a","b"))` raises **because there are two params for one placeholder**, not because a literal `$n` was detected — delete the literal and the same case still raises. No *landed* statement mixes the two (checked: the only `$<n>` occurrences in `record_projection.py` are inside comments/docstrings at `:266` and `:7570`), so this is a **false-passing gate**, not a live data defect — the shape it cannot see is one a future edit can introduce |
-| 6 | **`record_cursor` ships `ON DELETE CASCADE`** — a *recorded plan decision*, not a review finding, and the plan forbids it by name | ⛔ **MERGED CONTRARY TO THE PLAN** (already tracked as `#12987`) | migration: `FOREIGN KEY (org_id, graph_id) REFERENCES public.graphs (org_id, id) **ON DELETE CASCADE**` (`supabase/migrations/20261116000001_record_cursor_allocator.sql:70`). Plan `§A7.8` item 1 (`docs/plans/2026-11-15-issue-12894-storage-shape.md:1840`): *"⛔ **and NO `REFERENCES public.graphs … ON DELETE CASCADE`, deliberately, unlike every sibling record table** … `purge_org_record` deletes `public.organizations` and relies on that cascade, so a cascade FK here would **delete the counter with the purge** and let a re-armed graph restart at 1 — the exact outcome item 7 rules against"*. The migration's own header (`:34`) describes the FK and does not mention the cascade, so the divergence is not a comment/doc mismatch — it is in the DDL |
+| 6 | **`record_cursor` ships `ON DELETE CASCADE`** — a *recorded plan decision*, not a review finding, and the plan forbids it by name | ⛔ **MERGED CONTRARY TO THE PLAN** (already tracked as `#12987`) | migration: `FOREIGN KEY (org_id, graph_id) REFERENCES public.graphs (org_id, id) **ON DELETE CASCADE**` (`supabase/migrations/20261116000001_record_cursor_allocator.sql:70`). Plan `§A7.8` item 1 (`docs/plans/2026-11-15-issue-12894-storage-shape.md:1840`): *"⛔ **and NO `REFERENCES public.graphs … ON DELETE CASCADE`, deliberately, unlike every sibling record table** … `purge_org_record` deletes `public.organizations` and relies on that cascade, so a cascade FK here would **delete the counter with the purge** and let a re-armed graph restart at 1 — the exact outcome item 7 rules against"*. ⛔ **And the migration's own header (`:46-48`) ENDORSES the cascade** — *"DELETE stays withheld because the counter is never erased per-row; it goes with the graph via the FK's ON DELETE CASCADE, which is the tenant-erasure path"* — which is a direct contradiction of the plan's reasoning, not an oversight. So the finding is sharper than "unrecorded DDL": **two recorded reasonings disagree about the same constraint**, the plan's (a cascade lets a purge delete the counter, so a re-armed graph restarts at 1 — item 7 rules against it) and the migration's (the cascade *is* the tenant-erasure path, so withholding DELETE per-row is deliberate). `#12987`'s two options turn on exactly that question |
 
 ### One more thing that should not have been merged, in the sense that it reports success over a gap
 
@@ -432,8 +438,10 @@ ec0bc91f6d  refs/wip/feat-12894-allocator-spike   (archived 2026-11-16T06:29:21Z
 703613fa0c  refs/wip/issue-12894-allocator-spike  (archived 2026-11-16T10:08:08Z)
 ```
 
-Relative to the merged `#12959` head (`acc9cbc035`), they carry **one substantive commit** plus the `wip:`
-archive commits: `e2a9eadb87`, whose two halves are **not** in the same state:
+Relative to the merged `#12959` head (`acc9cbc035`), **only the `issue-` ref** carries a substantive
+commit — `e2a9eadb87` (`acc9cbc035..refs/wip/issue-12894-allocator-spike` = `703613fa0c`, `7d4e802fdf`,
+`e2a9eadb87`, `5351f89298`); `acc9cbc035..refs/wip/feat-12894-allocator-spike` holds the `wip:` archive
+commit only. The substantive commit's two halves are **not** in the same state:
 
 - **half 1 (the `seeded` exemption in the enumerated-replay guard) was REVERSED on `main`** by
   `f9f3e7e8b4` (*"the `seeded` exemption is WRONG — `reopen` keeps `seq`, so the row is the fact and the
