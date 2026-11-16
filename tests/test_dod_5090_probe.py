@@ -10595,7 +10595,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `259 + 1` and `258 + 2` at THIS tree, both equal to the `260` the pin re-derives
+    count: `266 + 1` and `265 + 2` at THIS tree, both equal to the `267` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
@@ -10654,6 +10654,30 @@ def test_the_census_doc_collects_what_the_file_collects():
         f"§6 states {wrong} where the file collects {actual} (every statement must "
         f"agree: {statements}): the row describes a measurement it no longer matches "
         f"— re-cut EVERY figure, or delete them and let this pin stand alone")
+
+    # ⛔ THIS PIN'S OWN DOCSTRING states the same figure too, and it was the ONE place a
+    # stale count survived review: the arms above read the DOC, never this string, so the
+    # docstring sat at `256 + 1` / `255 + 2` / `257` while the tree collected 260 (fresh
+    # review of PR `#12902`, P2). A docstring is a claim like any other and gets the same
+    # gate. The SPLITS are lane-bound on purpose — the docker lane reads one more pass and
+    # one fewer skip than the carve-out lane — so they are held to the invariant the
+    # docstring itself states rather than to either figure: each pair must ADD to the
+    # count this tree collects.
+    own = test_the_census_doc_collects_what_the_file_collects.__doc__ or ""
+    own_splits = [(int(a), int(b)) for a, b in
+                  re.findall(r"`(\d+) \+ (\d+)`", own)]
+    assert len(own_splits) == 2, (
+        f"this pin's docstring states the two lane splits as `N + M` and this arm found "
+        f"{len(own_splits)}: {own_splits} — a pattern that matches nothing is a DEAD ARM")
+    bad_splits = [f"{a} + {b}" for a, b in own_splits if a + b != actual]
+    assert not bad_splits, (
+        f"this pin's own docstring states the lane splits {bad_splits}, which do NOT add "
+        f"to the {actual} this tree collects — the docstring describes a tree that is "
+        f"not this one, the same rule §6's figures are held to")
+    own_total = [int(n) for n in re.findall(r"the `(\d+)` the pin re-derives", own)]
+    assert own_total == [actual], (
+        f"this pin's own docstring says it re-derives {own_total} where the file collects "
+        f"{actual}")
 
 
 def test_a_pass_through_tool_changes_NOTHING_when_the_affected_set_is_EMPTY():

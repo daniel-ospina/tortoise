@@ -5329,9 +5329,12 @@ def per_file_scope_note(deployment: dict) -> str:
     overrides_service = sum(
         1 for entry in (deployment.get("disarming_assignments") or ())
         if _disarmed_state(entry) == "DISAGREE")
-    unsets_service = sum(
-        1 for entry in (deployment.get("unset_declarations") or ())
-        if _disarmed_state(entry) == "DISAGREE")
+    # ⛔ NO per-service split for `unset_declarations`: unlike a disarming VALUE, which a
+    # per-service compose file can disagree about, an `unset` declaration is qualified by
+    # ORDER in the clause below and never claims a per-FILE last word — so a
+    # `unsets_service` count would be computed and never stated. It WAS computed and never
+    # used, which `lint` (F841) refused; removed rather than left as an unused pair to its
+    # `overrides_service` sibling (peer commit `447e4a4f2e`).
     disarm = ""
     if unsets or overrides:
         parts = []
