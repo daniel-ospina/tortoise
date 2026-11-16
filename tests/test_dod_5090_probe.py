@@ -10165,7 +10165,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `243 + 1` and `242 + 2` at THIS tree, both equal to the `244` the pin re-derives
+    count: `245 + 1` and `244 + 2` at THIS tree, both equal to the `246` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
@@ -11637,7 +11637,7 @@ def test_12549_an_EXPORTED_assignment_exports_its_name_too(tmp_path, monkeypatch
         "TORTOISE_EMBED_GATE=0\n", encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
-    # ⏔ `export -n FLAG` REMOVES the export attribute and `export -f FLAG` exports a
+    # ⛔ `export -n FLAG` REMOVES the export attribute and `export -f FLAG` exports a
     # FUNCTION (a different namespace), so neither may ADD the name — reading either as a
     # plain arm would be a NEW false arm, one option character over from defect 4.
     for revoke in ("export -n TORTOISE_EMBED_GATE", "export -f TORTOISE_EMBED_GATE"):
@@ -11648,6 +11648,61 @@ def test_12549_an_EXPORTED_assignment_exports_its_name_too(tmp_path, monkeypatch
         assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", (revoke, shipped)
         assert any("TORTOISE_EMBED_GATE=1" in hit
                    for hit in shipped["outside_runtime"]), (revoke, shipped)
+
+
+def test_12549_the_export_attribute_is_a_MOMENT_not_a_file_property(
+        tmp_path, monkeypatch):
+    """`unset` / `export -n` REVOKE the export attribute — a later plain assignment is a
+    shell variable again, and reading it as a decision is a FALSE ARM.
+
+    ⛔ MEASURED by the fresh review as a REGRESSION the defect-4 fix introduced: a
+    whole-file exported-name set kept the name across an `unset`, so
+
+        export TORTOISE_EMBED_GATE=0
+        unset TORTOISE_EMBED_GATE
+        TORTOISE_EMBED_GATE=1
+
+    read `ON` here while `bash -c '...; env'` has NO such variable at all — `main`
+    read it `OFF`. The state is now per line, and the revocation line is a DISARMING
+    declaration rather than a line that lands in no bucket.
+    """
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=1\n'
+        'ENTRYPOINT ["./entrypoint.sh"]\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+    revocations = {
+        "unset": "unset TORTOISE_EMBED_GATE",
+        # `help export`: "-n remove the export property from each NAME".
+        "export -n": "export -n TORTOISE_EMBED_GATE",
+    }
+    for spelling, revocation in revocations.items():
+        (tmp_path / "entrypoint.sh").write_text(
+            "#!/bin/bash\nexport TORTOISE_EMBED_GATE=0\n"
+            + revocation + "\nTORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", (spelling, shipped)
+        assert any("TORTOISE_EMBED_GATE=1" in hit
+                   for hit in shipped["outside_runtime"]), (spelling, shipped)
+        assert any(revocation in entry
+                   for entry in shipped["unset_declarations"]), (spelling, shipped)
+        # …and the arming IMAGE BUILD file does not paper over it.
+        assert shipped["deployment"]["on"] is False, (spelling, shipped["deployment"])
+    # …the POSITIVE control: the bare-export HOUSE IDIOM still arms the file, because the
+    # export publishes the value already assigned. Without this arm the per-line state
+    # would read every `FLAG=...` + `export FLAG` entrypoint as silence.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nTORTOISE_EMBED_GATE=1\nexport TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped
+    # …and a revocation FOLLOWED by a bare export publishes nothing: `export FLAG` after
+    # `unset FLAG` exports a variable that no longer exists.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nTORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE\n"
+        "export TORTOISE_EMBED_GATE\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
 
 
 def test_12549_a_blank_gate_key_is_not_blamed_on_an_UNRELATED_unset_variable(
@@ -11678,6 +11733,44 @@ def test_12549_a_blank_gate_key_is_not_blamed_on_an_UNRELATED_unset_variable(
     assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
     assert any("MISSING_VAR" in hit for hit in shipped["indeterminate"]), shipped[
         "indeterminate"]
+
+
+def test_12549_a_blank_declaration_is_judged_from_the_UNINTERPOLATED_model(
+        tmp_path, monkeypatch):
+    """A blank is `UNRESOLVED` iff THIS key INTERPOLATES — not iff the file warned.
+
+    ⏔ MEASURED by the fresh review as two separate defects, both fixed by asking the
+    resolver rather than its stderr:
+
+    1. `${MISSING:+1}` resolves to `""` with **no warning at all**, so a stderr-driven
+       test read it as a measured `\'\'` ("set to a non-truthy value") and an arming path
+       became invisible — the class this instrument exists to remove.
+    2. The warning is FILE-level, so the published reason named a variable the key never
+       references (a gate blank beside an unrelated `${MISSING_A}` blamed `MISSING_A`).
+
+    `--no-interpolate` answers *"does this declaration interpolate, and with which
+    names"* for the KEY, which is the question actually being asked.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${MISSING_PLUS:+1}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    # ⏔ THE FALSIFIER for #12549-P2-1: compose does not warn about `:+`, so a
+    # warning-driven test reads this `OFF` and an arming path disappears.
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    assert "non-truthy" not in " ".join(shipped["indeterminate"]), shipped["indeterminate"]
+
+    # ⏔ THE FALSIFIER for #12549-P2-2: the reason names only the variable THIS key
+    # interpolates — never a neighbour the file also left unset.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${MISSING_B}\"\n"
+        "      OTHER_KEY: \"${MISSING_A}\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    reason = " ".join(shipped["indeterminate"])
+    assert "MISSING_B" in reason and "MISSING_A" not in reason, reason
 
 
 def test_12549_a_PROFILED_blank_is_NOT_published_as_a_disarm(tmp_path, monkeypatch):
