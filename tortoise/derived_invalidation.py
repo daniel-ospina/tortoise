@@ -1102,10 +1102,10 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     if remaining:
         state = remaining.get("judgementState")
         cached = GOAL_STATE_CACHE.get(state) if state else None
-        sdk.update_entity(goal_id, goalState=cached)
+        sdk.update_knowledge(goal_id, goalState=cached)
         return {"checked": True, "goalState": cached,
                 "from": remaining.get("id"), "cleared": cached is None}
-    sdk.update_entity(goal_id, goalState=None)
+    sdk.update_knowledge(goal_id, goalState=None)
     return {"checked": True, "goalState": None, "from": None, "cleared": True}
 
 
@@ -1916,7 +1916,7 @@ def mark_definition_change(
 
     ⚠️ THAT RULE IS A DOOR RULE, NOT A GRAPH INVARIANT, and the difference is
     stated rather than implied: the stamp is an ordinary indicator property, so
-    `sdk.update_entity(indicator_id, definitionChangedAt=…)` (or a raw write) can
+    `sdk.update_knowledge(indicator_id, definitionChangedAt=…)` (or a raw write) can
     still move it backwards. What this door guarantees is that the SUPPORTED path
     cannot, and that the state it writes is always an orderable instant — the two
     things that made the pre-review version of this function able to store a
@@ -1983,7 +1983,7 @@ def mark_definition_change(
     props: dict[str, Any] = {DEFINITION_BOUNDARY_PROP: stamp}
     if definition is not None:
         props["definition"] = definition
-    sdk.update_entity(indicator_id, **props)
+    sdk.update_knowledge(indicator_id, **props)
     return {
         "indicatorId": indicator_id,
         DEFINITION_BOUNDARY_PROP: stamp,

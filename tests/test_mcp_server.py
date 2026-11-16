@@ -882,15 +882,25 @@ class TestEventsTools:
     """
 
     def test_tools_exist_and_registered(self):
-        from tortoise.mcp_server import tortoise_events_poll, tortoise_retract_point
-        from tortoise.tool_registry import TOOL_REGISTRY
+        from tortoise.mcp_server import tortoise_events_poll, tortoise_update_knowledge
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
-        assert callable(tortoise_events_poll) and callable(tortoise_retract_point)
+        # #4282 Phase 2: `tortoise_retract_point` retired into the
+        # `tortoise_update_knowledge` container — the retraction is that verb's
+        # temporal field (`invalid_at=`), not a separate door. The pin follows the
+        # CAPABILITY: the live row is the container, and the retired name must
+        # still RESOLVE (via the #3883 shim) rather than read as "tool not found".
+        assert callable(tortoise_events_poll) and callable(tortoise_update_knowledge)
         names = {t.name for t in TOOL_REGISTRY}
         assert "tortoise_events_poll" in names
-        assert "tortoise_retract_point" in names
+        assert "tortoise_update_knowledge" in names
+        retired = {t.name for t in RETIRED_TOOL_REGISTRY}
+        assert "tortoise_retract_point" in retired, (
+            "the retired name has no shim row, so a caller gets no migration hint")
+        assert "tortoise_retract_point" not in names
         ev = next(t for t in TOOL_REGISTRY if t.name == "tortoise_events_poll")
-        rt = next(t for t in TOOL_REGISTRY if t.name == "tortoise_retract_point")
+        rt = next(t for t in TOOL_REGISTRY
+                  if t.name == "tortoise_update_knowledge")
         assert ev.http_policy is True and rt.http_policy is True
         assert ev.annotations.readOnlyHint is True
         assert rt.annotations.destructiveHint is True
@@ -948,7 +958,12 @@ class TestEventsHttpSurface:
         from tortoise.mcp_auth import HTTP_ALLOWED
 
         assert "tortoise_events_poll" in HTTP_ALLOWED
-        assert "tortoise_retract_point" in HTTP_ALLOWED
+        # #4282 Phase 2: the retraction capability reaches HTTP through its
+        # container, and the RETIRED name is off the allow-list (it is not
+        # advertised there; the #3883 shim answers it on the transports that
+        # serve retired names at all).
+        assert "tortoise_update_knowledge" in HTTP_ALLOWED
+        assert "tortoise_retract_point" not in HTTP_ALLOWED
 
 
 class TestIngestPromotionPolicy:
@@ -1192,10 +1207,12 @@ class TestStdioEntrypointToolRegistration:
 
             # Issue #993 target (1): tools/list is the LIVE surface, so the floor
             # tracks it. #11609 batch 1 archived four no-destination tools, moving
-            # the advertised count 72 -> 68; the floor moves with it (a floor left
-            # at the old number would red on a CORRECT removal, and one dropped too
-            # far would stop noticing a registry that failed to register).
-            assert len(names) >= 68, f"expected >=68 tools, got {len(names)}"
+            # the advertised count 72 -> 68; #11609 batch 2 then retired twelve
+            # write doors into six containers (net -8), moving it 68 -> 60. The
+            # floor moves with each: a floor left at the old number would red on a
+            # CORRECT removal, and one dropped too far would stop noticing a
+            # registry that failed to register.
+            assert len(names) >= 60, f"expected >=60 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
             # #3883: tortoise_health is RETIRED — the consolidator is advertised
             # and the retired name still answers, with a warning, off the list.

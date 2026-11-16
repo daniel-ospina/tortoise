@@ -36,7 +36,7 @@ def _setup_approval(sdk):
     doc = sdk.create_document("customer-profile-cp-001", "artifact")
     c1 = sdk.create_point("statement", "CP-001 targets the SMB segment", status="live")  # #992: live — draft stripped by EP filter
     c2 = sdk.create_point("statement", "CP-001 addresses the onboarding pain", status="live")
-    result = sdk.file_human_approval(
+    result = sdk.record_decision(
         approver_id=subj["id"],
         artifact_id=doc["id"],
         point_ids=[c1["id"], c2["id"]],
@@ -134,7 +134,7 @@ class TestFileHumanApproval:
         # Give both claims a persisted prior, so the pre-run value is a number.
         for c in (c1, c2):
             sdk.set_point_baseline(c["id"], 2.0, 2.0)
-        result = sdk.file_human_approval(
+        result = sdk.record_decision(
             approver_id=subj["id"], artifact_id=doc["id"],
             point_ids=[c1["id"], c2["id"]],
         )
@@ -149,13 +149,13 @@ class TestFileHumanApproval:
         c1 = sdk.create_point("statement", "some claim")
 
         with pytest.raises(ValueError):
-            sdk.file_human_approval("ghost", doc["id"], [c1["id"]])
+            sdk.record_decision("ghost", doc["id"], [c1["id"]])
         with pytest.raises(ValueError):
-            sdk.file_human_approval(subj["id"], "ghost-artifact", [c1["id"]])
+            sdk.record_decision(subj["id"], "ghost-artifact", [c1["id"]])
         with pytest.raises(ValueError):
-            sdk.file_human_approval(subj["id"], doc["id"], [])
+            sdk.record_decision(subj["id"], doc["id"], [])
         with pytest.raises(ValueError):
-            sdk.file_human_approval(subj["id"], doc["id"], ["ghost-point"])
+            sdk.record_decision(subj["id"], doc["id"], ["ghost-point"])
 
     def test_revocation_via_supersede(self, sdk):
         """Approval decision Point can be superseded (revocation path)."""
@@ -210,11 +210,22 @@ class TestReputationExclusion:
 
 class TestToolRegistry:
     def test_human_approval_in_tool_registry(self):
-        """tortoise_file_human_approval is registered and maps to sdk method."""
-        from tortoise.tool_registry import TOOL_REGISTRY
+        """The approval write is registered, through its #11609 lane B container.
+
+        #4282 Phase 2: `tortoise_file_human_approval` retired into
+        `tortoise_record_decision` (the approved target name for this write,
+        beta-sdk-surface.md row 21), and the SDK method retired with it
+        (`record_decision`). The capability assertion follows the container — and the
+        retired name still ANSWERS through the #3883 shim, which is why SERVED did not
+        shrink.
+        """
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
         names = [t.name for t in TOOL_REGISTRY]
-        assert "tortoise_file_human_approval" in names
+        assert "tortoise_record_decision" in names
         td = next(t for t in TOOL_REGISTRY
-                  if t.name == "tortoise_file_human_approval")
-        assert td.sdk_method == "file_human_approval"
+                  if t.name == "tortoise_record_decision")
+        assert td.sdk_method == "record_decision"
         assert td.http_policy is True
+        retired = next(t for t in RETIRED_TOOL_REGISTRY
+                       if t.name == "tortoise_file_human_approval")
+        assert "tortoise_record_decision" in retired.retired_use_instead

@@ -3665,7 +3665,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         # ⚠️ MEASURED, and it corrects an earlier claim here (review round 7, P2):
         # at DEBUG this line is NOT emitted in the hosted deployment. uvicorn's
         # `LOGGING_CONFIG` configures only the `uvicorn*` loggers and leaves root
-        # at WARNING, `Dockerfile.hosted:153` passes no `--log-level`, and nothing
+        # at WARNING, `Dockerfile.hosted:163` passes no `--log-level`, and nothing
         # in `tortoise/` or `entrypoint.sh` sets a level for `tortoise.*` — so
         # `tortoise.api` is effectively WARNING there and `Logger.isEnabledFor`
         # drops the record (reproduced under the real `dictConfig`). The PRODUCTION
@@ -7752,12 +7752,12 @@ def _record_health() -> dict:
     #
     #   ``write_failed``      the record was unreachable or the projection
     #                         refused the row — a REPLAY heals it.
-    #   ``journal_collision`` the position row holds content this write would
-    #                         not produce (a different record, or this record's
-    #                         payload re-derived since that row was written)
-    #                         (#9318): a REPLAY DOES NOT HEAL IT — it
-    #                         re-raises. The remedy is journal identity in the
-    #                         key (#12894).
+    #   ``journal_collision`` the position row holds a record this write does not
+    #                         continue — a different record, or (with no `ts` to compare) a
+    #                         payload whose derivation moved (#9318): a REPLAY DOES NOT HEAL
+    #                         IT, it re-raises. Remedy = journal identity in the key (#12894).
+    #                         Same-capture drift is not this counter (#12904) — and neither,
+    #                         silently, is a DIFFERENT record there (`.JournalPositionCollision`).
     #   ``no_tenant``         armed with no tenant in scope; heal the tenant
     #                         resolution, then replay.
     #   ``malformed_dsn``     the value is configured but unusable — fix the
@@ -22917,7 +22917,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                     "(#3366)",
                     resolved_pid, _succ_state[0], _succ_state[1])
             else:
-                sdk.supersede_point(pr.existing_id, resolved_pid)
+                sdk.supersede_knowledge(pr.existing_id, resolved_pid)
         else:
             point_props = {}
             if pr.point.when:
@@ -49935,3 +49935,16 @@ def _session_list_conds(actor_filter: str | None) -> tuple[list[str], dict]:
         conds.insert(0, "s.actor_user_id = $uid")
         params["uid"] = actor_filter
     return conds, params
+
+# ── #12926: state the two embedding switches the process actually resolved ──
+# Module scope, not `_lifespan`: this is the process boot (`uvicorn
+# tortoise.hosted_api:app`), a lifespan may legally run more than once in a
+# process, and a boot record that repeated per lifespan would read as a state
+# change. The two switches read OPPOSITE ways when unset (`value_gate` ON,
+# `embed_gate` OFF — both modules record that, and changing either is a reopen of
+# `#11445`), so an unstated EMBED switch silently keeps a vector on every row;
+# the line makes the OFF direction visible instead of silent. A RECORD, never a
+# refusal: the pre-merge refusal is `tools/embed_switch_gate.py`.
+from tortoise.gate_visibility import report_effective_switches as _report_gates  # noqa: E402
+
+_report_gates()

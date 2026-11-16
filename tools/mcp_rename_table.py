@@ -292,6 +292,23 @@ def _citation_errors() -> list[str]:
     return errs
 
 
+def _cell(text: str) -> str:
+    """Escape a value for a GFM table cell.
+
+    A `RETIRED_USE_INSTEAD` pointer is a CALL SIGNATURE, and a signature can contain
+    a literal `|` (`scope="dirty"|"full"`, `action="mitigate"|"annotate"`). In a GFM
+    table an unescaped `|` ENDS the cell, so the row renders with one more column
+    than its header and the tail of the pointer is lost to a reader — markdownlint
+    MD056 reports exactly that. The pointer itself is contractual (it is what a
+    retired caller is told to call), so it is ESCAPED, never rewritten to avoid the
+    character.
+
+    Consumers that compare a rendered row back to the registry must unescape it:
+    `tests/test_mcp_rename_table.py`'s row parsers do, on both sides.
+    """
+    return text.replace("|", "\\|")
+
+
 def _redirect_target(expr: str) -> str | None:
     """The surviving tool name a `RETIRED_USE_INSTEAD` call names, or None.
 
@@ -471,7 +488,7 @@ def render(rows: list[dict]) -> str:
 
     for i, r in enumerate(rows, 1):
         src = f"`tool_registry.py:{r['lineno']}`" if r["lineno"] else "—"
-        instead = f"`{r['instead']}`" if r["instead"] else NO_REPLACEMENT
+        instead = f"`{_cell(r['instead'])}`" if r["instead"] else NO_REPLACEMENT
         out.append(
             f"| {i} | `{r['name']}` | {src} | {instead} | "
             f"`{r['destination']}` | {r['retirement']} |"
@@ -532,7 +549,8 @@ def render(rows: list[dict]) -> str:
         verdict = "AGREE" if a["agrees"] else "**DISAGREE**"
         rd = f"`{a['redirect_destination']}`" if a["redirect_destination"] else "—"
         out.append(
-            f"| `{a['name']}` | `{a['destination']}` | `{RETIRED_USE_INSTEAD[a['name']]}` | "
+            f"| `{a['name']}` | `{a['destination']}` | "
+            f"`{_cell(RETIRED_USE_INSTEAD[a['name']])}` | "
             f"{rd} | {verdict} |"
         )
     out += [
@@ -549,7 +567,7 @@ def render(rows: list[dict]) -> str:
         for a in conflict:
             out.append(
                 f"| `{a['name']}` | `{a['destination']}` | "
-                f"`{RETIRED_USE_INSTEAD[a['name']]}` | `{a['redirect_destination']}` |"
+                f"`{_cell(RETIRED_USE_INSTEAD[a['name']])}` | `{a['redirect_destination']}` |"
             )
         out += [
             "",

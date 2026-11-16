@@ -2358,7 +2358,7 @@ def test_ingest_v2_does_not_retype_a_stored_entity(tmp_path):
 
 def test_ingest_v2_supersession_end_to_end(tmp_path, monkeypatch):
     """E5 Task 4 (#1537): the v2 eval ingest materializes point-level
-    supersession records via the EXISTING canonical sdk.supersede() — a
+    supersession records via the EXISTING canonical sdk.supersede_knowledge() — a
     two-session question ("gym at 6pm" → "gym at 5pm") lands a CORRECTS
     edge old→new with the old point superseded, and re-ingest is idempotent
     (no raise, single edge, zero writes). The extractor's S3 is simulated as

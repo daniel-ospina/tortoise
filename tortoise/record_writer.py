@@ -494,18 +494,26 @@ class RecordWrite:
     #: reports the refusal and an operator reading the metric are naming one
     #: thing, and a second word list is a second thing to drift.
     #:
-    #: ⛔ ``journal_collision`` IS THE ONE CONFLICT-DECIDED TOKEN (#9318). Every other
-    #: value is decided before a socket is opened (`_live_write_verdict`) or by
-    #: a failed statement; this one is a VERDICT on a conflict: the position row
-    #: holds content this write would not produce (a different record, or this
-    #: record's payload re-derived since that row was written), which
+    #: ⛔ ``journal_collision`` IS THE ONE POST-WRITE CONFLICT TOKEN (#9318, #12904).
+    #: Every other value is decided before a socket is opened
+    #: (`_live_write_verdict`) or by a failed statement; this one is a VERDICT on
+    #: a conflict: the position row holds a record this write does NOT continue —
+    #: a different record, or (with no `ts` for the capture time to be compared) a
+    #: payload whose derivation moved — which
     #: `record_projection.JournalPositionCollision` detected by comparing the
-    #: surviving row's content. It is not in ``LIVE_WRITE_REFUSALS`` for that
-    #: reason — that tuple is what the PRE-write verdict can return — and a
-    #: consumer switching on this field must accept it. Nothing is lost (the
+    #: surviving row's content AND its `recorded_at`. It is not in
+    #: ``LIVE_WRITE_REFUSALS`` for that reason — that tuple is what the PRE-write
+    #: verdict can return — and a consumer switching on this field must accept it.
+    #: ⛔ A same-capture re-derivation is NOT this token: it is DRIFT, it repairs
+    #: itself, and it reports `applied` with no counter (#12904 P0-1). ⚠️ NOR IS a
+    #: DIFFERENT record captured at the same instant — the split cannot tell it
+    #: from drift and admits it silently, which is the mirror residual named in
+    #: `record_projection.JournalPositionCollision`: do not read "a different
+    #: record" above as "every different record is caught". Nothing is lost (the
     #: journal holds the record); what is refused is indexing it under a position
-    #: that holds content this write would not produce, which the record cannot fix while its key
-    #: carries no journal identity (#12894).
+    #: whose row this write does not CONTINUE (a different `event_type`, or a
+    #: different capture time), which the record cannot fix while its key carries
+    #: no journal identity (#12894).
     #:
     #: ⛔ ``no_tenant_carried`` IS A SEPARATE TOKEN ON PURPOSE (#10021 review P3).
     #: The live door splits the nil tenant from a MALFORMED CARRIED pair — one is
@@ -563,9 +571,9 @@ class RecordWrite:
             # misses, and NOTHING here has its own term: `write_failed` covers an
             # unreachable record AND a record that WAS reached and refused the
             # projection; `journal_collision` (#9318) is a record that WAS reached
-            # and refused to index it under a journal position holding content
-            # this write would not produce (a different record, OR this record's
-            # payload re-derived since that row was written); `malformed_dsn` is a SET-UP defect (a value IS set and
+            # and refused to file itself under a journal position it does not
+            # continue (a different record, OR — with no `ts` to compare — a
+            # payload whose derivation moved); `malformed_dsn` is a SET-UP defect (a value IS set and
             # is wrong, so not `unconfigured`, which is defined as no value at
             # all); `no_tenant` is a deployment/caller gap; `no_tenant_carried` is
             # the same gap one arm over (a CARRIED tenant pair that was unusable);
@@ -2587,10 +2595,17 @@ def write_live_record(record: Mapping[str, Any], *,
 
     ⛔ SINCE #9318 IT IS NO LONGER SILENT, and still not REPAIRED. The fold's
     statement loop asks the cursor's affected-row count, and when the position
-    row was absorbed it asks the database whether the surviving row's content
-    DIFFERS (`record_projection._refuse_a_journal_collision`, in Postgres's own
-    jsonb equality). Same content ⇒ a genuine replay ⇒ silent no-op, unchanged.
-    Different content ⇒ `JournalPositionCollision`, reported HERE as the
+    row was absorbed it asks the database whether the surviving row is a record
+    this write CONTINUES (`record_projection._refuse_a_journal_collision`, in
+    Postgres's own jsonb equality and its own `timestamptz` comparison of
+    `recorded_at`). Same content AND the same capture ⇒ a genuine replay ⇒
+    silent no-op, unchanged;
+    same `event_type` and same `recorded_at` with only the payload different ⇒
+    READ AS the same record RE-DERIVED ⇒ also silent (#12904 P0-1) — a reading
+    on two equal coordinates, not proof of one record (the mirror residual in
+    `record_projection.JournalPositionCollision` names the shape it admits);
+    anything else ⇒
+    `JournalPositionCollision`, reported HERE as the
     ``journal_collision`` refusal — the same counter, the same WARNING, the same
     ``RecordWrite`` shape every other refusal uses — with a message naming the
     position and both payloads by digest.
@@ -2600,7 +2615,9 @@ def write_live_record(record: Mapping[str, Any], *,
     derive — do NOT paper it over by declining position rows on the live path,
     which is the #9190 defect this door exists to close. That decision is
     `#12894`'s; when it lands, a collision cannot occur, every conflict is a
-    replay, and the detector never fires — retire it then.
+    replay, and the detector must be DELETED with that key change — leaving it
+    in place converts legitimate old-journal replays into refusals (#12904
+    P1-4).
 
     ``tenant`` is the ``(org_id, graph_id)`` the CALLER already resolved for
     this write — carried explicitly by a lane that cannot hold the ambient scope
@@ -2730,8 +2747,9 @@ def write_live_record(record: Mapping[str, Any], *,
         collision = _journal_collision_cause(exc)
         if collision is not None:
             # ⛔ A COLLISION, NOT A LOST WRITE (#9318). The row at this position
-            # holds content this write would not produce, so writing the layer
-            # rows under it would index them by that other content — refused
+            # is a record this write does not CONTINUE (a different
+            # `event_type`, or a different capture time), so writing the layer
+            # rows under it would index them by that other record — refused
             # rather than shipped. Nothing is lost: the journal holds the record
             # and the message names both sides. Now made LOUD on the SAME
             # refused-write channel every other arm uses (one counter, one
@@ -2742,10 +2760,10 @@ def write_live_record(record: Mapping[str, Any], *,
             _logger.warning(
                 "the record write was REFUSED (journal_collision) — the "
                 "journal holds the record but the record's position row is "
-                "occupied by content this write would not produce (a "
+                "occupied by a record this write does not continue (a "
                 "different record — a second journal, a restore, a rotation, "
-                "a rebuild numbering below the high-water mark — or this "
-                "record's payload re-derived since that row was written); a "
+                "a rebuild numbering below the high-water mark — or, with no "
+                "`ts` to compare, a payload whose derivation moved); a "
                 "replay cannot heal it while the key carries no journal "
                 "identity (#12894): record=%s %s: %s",
                 record.get("type"), _record_identity(record), collision,
