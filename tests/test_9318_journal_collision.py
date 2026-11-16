@@ -801,6 +801,14 @@ def test_the_capture_arm_cannot_fire_when_this_write_carries_no_ts() -> None:
     assert "AND recorded_at IS DISTINCT FROM" in sql, (
         "the capture arm is OR-ed in, not conjoined — `IS NOT NULL` is present "
         "but no longer guards the comparison")
+    # ⛔ AND THE PLACEHOLDER COUNT IS PINNED, not merely the clauses (#12904
+    # P2-5). This statement is executed with a 9-tuple, so dropping one `%s`
+    # mis-binds it — and every clause assertion ABOVE still passes, which is how
+    # the pin that used to live here (`count("%s") == 5` on `origin/main`) was
+    # lost when these arms were restated. Only the DB lane would red.
+    assert sql.count("%s") == 9, (
+        f"{sql.count('%s')} placeholders but the guard binds a 9-tuple — the "
+        f"statement mis-binds, and only the DB lane can see it")
     # A NULL bind can never read as the same capture: `recorded_at` is NOT NULL.
     conn = Absorbed(stored=None)
     ts_less = {k: v for k, v in RECORD_A.items() if k != "ts"}
@@ -815,8 +823,13 @@ def test_a_different_event_type_alone_is_a_collision() -> None:
 
     A stored row of a DIFFERENT type is a collision even if the payload were
     identical, and the SQL's `event_type IS DISTINCT FROM …` arm is what makes
-    that true. Asserted through the guard, so a rewrite that compared only
-    payloads reds here.
+    that true. This leg pins the VERDICT's shape through the guard's fakes, NOT
+    that SQL arm: the `Absorbed` cursor answers with `self._conn.stored`
+    unconditionally (its own docstring: "THE FAKE CANNOT EVALUATE THE SQL"), so a
+    rewrite that compared only payloads leaves this leg GREEN. The arm's
+    behavioural pin is a real database plus same payload AND same capture —
+    `test_a_different_event_type_at_the_SAME_payload_and_capture_is_refused`
+    (review P1: that pin did not exist, and an inert arm reddened nothing).
     """
     conn = Absorbed(stored=_stored("PointAdded", _payload_of(RECORD_A),
                                    same_type=False))
@@ -851,10 +864,17 @@ def test_a_different_event_type_at_the_SAME_capture_instant_is_still_a_collision
     # `ENVELOPE_KEYS` strips `type`, so both sides carry the SAME payload — a
     # clause saying "only the CAPTURE TIME differs" would be false here.
     message = str(excinfo.value)
-    assert "the record TYPE" in message, (
+    assert "only the record TYPE differs" in message, (
+        "the refusal did not name the TYPE as the sole difference for a "
+        "TYPE-only difference")
+    # ⛔ THIS NEGATIVE ASSERTION IS ONLY WORTH ANYTHING BECAUSE THE RENDERER
+    # TAKES A SINGULAR VERB (review P2). It used to emit "differ" for one and
+    # for two, so this string could NEVER appear and the line asserted nothing;
+    # a TYPE-only pair would now print "only the CAPTURE TIME differs" if the
+    # renderer blamed the capture time here, which is what this pins.
+    assert "only the CAPTURE TIME differs" not in message, (
         "the refusal named the capture time as the only difference for a "
         "TYPE-only difference")
-    assert "only the CAPTURE TIME differs" not in message
 
 
 def test_the_position_statement_carries_no_schema_ask() -> None:
@@ -870,7 +890,9 @@ def test_the_position_statement_carries_no_schema_ask() -> None:
     legitimate old-journal replays into refusals.** An earlier wording said the
     guard would "simply never fire" after #12894 — backwards, because after the
     key change a conflict IS same-journal-same-seq, so a payload difference
-    there is this record's own drift, which is exactly what this guard reports.
+    there is this record's own drift, which the drift arm absorbs SILENTLY; what
+    the guard would still REFUSE is the moved-capture-time and `ts`-less shapes —
+    legitimate replays of ONE journal, turned into refusals.
     ⛔ AND THIS PIN CARRIES THE TWO READINGS TOO, not #12894 alone (review P2):
     a red here means EITHER that the key gained journal identity (#12894, so the
     pin is DELETED with the guard) OR that the STATEMENT WAS RESHAPED — which is
@@ -1322,3 +1344,68 @@ def test_two_journals_ingesting_one_document_differing_only_in_capture_time_are_
     assert write_b.refusal == "journal_collision"
     rows = _journal_rows(admin, tenant)
     assert len(rows) == 1
+
+
+def test_a_different_event_type_at_the_SAME_payload_and_capture_is_refused(
+        record_tenant, tmp_path: Path) -> None:
+    """THE TYPE ARM's behavioural pin, on a real database (review P1).
+
+    ⛔ THIS IS THE ONLY SHAPE WHERE `event_type IS DISTINCT FROM %s::text` IS THE
+    DISJUNCT THAT SELECTS THE ROW, and until this leg existed that arm had ZERO
+    behavioural coverage: appending `AND FALSE` to it (literal text and the
+    9-placeholder count preserved) left the whole file green, DB legs included —
+    measured, 35 passed. Both stub legs named for the type arm drive the
+    `Absorbed` fake, whose cursor answers with `self._conn.stored` WITHOUT
+    evaluating the SQL (`THE FAKE CANNOT EVALUATE THE SQL`), so neither can
+    discriminate the arm at all. ⛔ Not because a capture-time difference would
+    answer first: the same-capture stub passes `same_capture=True` with an
+    identical payload, so the type arm IS the only disjunct there — the fake
+    simply never runs the `WHERE`.
+
+    The shape: two durable journals, the same capture instant, and a record whose
+    ONLY difference is `type` — which `ENVELOPE_KEYS` strips, so both sides bind
+    BYTE-IDENTICAL `payload` jsonb. `payload IS DISTINCT FROM` is FALSE,
+    `recorded_at IS DISTINCT FROM` is FALSE, and the type arm is the only thing
+    left between this pair and `fetchone() -> None`, which
+    `_refuse_a_journal_collision` reads as a genuine REPLAY and commits in
+    silence. That is the mis-index shape #9318 exists to stop.
+
+    ⛔ On a tree whose type arm is made inert, this leg reds `applied=True` with
+    one position row, and it is the ONLY leg that moves.
+    """
+    admin, tenant, _, _ = record_tenant
+    journal_a = EventLog(tmp_path / "corpus-a" / ".events.jsonl")
+    journal_b = EventLog(tmp_path / "corpus-b" / ".events.jsonl")
+    first = dict(RECORD_A, ts="2026-11-15T00:00:00Z", event_id="evt-first")
+    # ONLY `type` differs — same payload, same `ts`, hence the same `recorded_at`.
+    # ⛔ The type is a PATCH, not a node registration, on purpose: the plan is
+    # built BEFORE any statement executes, so a type whose projection RAISES at
+    # build time (`PointAdded` carries no `point` snapshot) never reaches the
+    # guard at all and would red for the wrong reason. `ObjectSuperseded` builds
+    # a plan from this same record shape.
+    second = dict(first, type="ObjectSuperseded", event_id="evt-second")
+    seq_a = journal_a.append(first)
+    seq_b = journal_b.append(second)
+    assert (seq_a, seq_b) == (1, 1)
+    # The premise, asserted rather than assumed: `type` is stripped from the
+    # durable payload, so the two writes carry IDENTICAL content. Without this
+    # the leg would silently become a payload-difference leg (the shape that
+    # already had coverage) and pin nothing about the type arm.
+    assert _payload_of(first) == _payload_of(second)
+
+    write_a = rw.write_live_record(first, seq=seq_a)
+    assert write_a is not None and write_a.applied, write_a
+    write_b = rw.write_live_record(second, seq=seq_b)
+
+    assert write_b is not None
+    assert write_b.applied is False, (
+        "a record of a DIFFERENT type at the SAME capture instant and an "
+        "IDENTICAL payload was reported APPLIED — the type arm did not select "
+        "the row, so the second journal's document is filed under the first's "
+        "position in silence, which is #9318")
+    assert write_b.refusal == "journal_collision"
+    rows = _journal_rows(admin, tenant)
+    assert len(rows) == 1
+    assert rows[0][1] == RECORD_A["type"], (
+        "the surviving position row must still hold the FIRST write's type — a "
+        "refused collision may not rewrite an append-only row")

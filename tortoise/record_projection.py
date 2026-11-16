@@ -917,8 +917,13 @@ class JournalPositionCollision(RecordProjectionError):
     claimed that once the key carries the journal "this guard simply never fires"
     — that is backwards (#12904 review P1-4). After `#12894` a conflict IS
     same-journal-same-seq, so a payload difference there is necessarily THIS
-    record's own DERIVATION DRIFT, which is exactly the case this guard now
-    reports: it would become a version pin on a schema that no longer needs one.
+    record's own DERIVATION DRIFT — which the drift arm absorbs SILENTLY
+    (reported to NOBODY: no exception, no counter, no log line), so the guard
+    does not speak to that case at all. What it would still REFUSE is everything
+    the drift split does not absorb: a capture time this record's OWN derivation
+    moved, and every difference a `ts`-less write cannot compare at all — i.e.
+    legitimate replays of ONE journal, turned into refusals by a guard the key
+    change has made unnecessary.
     And it could not even produce a coherent refusal —
     :func:`_refuse_a_journal_collision` reads the position statement's bind
     parameters POSITIONALLY, so the new key re-binds them (`journal_id` as
@@ -1043,11 +1048,14 @@ class JournalPositionCollision(RecordProjectionError):
     is stated in full, with its measurement, on `#9318`. `#12894`'s
     journal IDENTITY in the key removes it with the rest of the residual,
     because two journals can then no longer meet at one position at all.
-    ⛔ The remaining false-red subset, named rather than implied: a write with NO
-    `ts` whose payload derivation has changed at a position an earlier derivation
-    wrote. `COALESCE(..., now())` gives such a row a real `recorded_at` while
-    this write has none to compare against, so the difference cannot be
-    attributed to drift and is refused. Refusing is the deliberate direction:
+    ⛔ The remaining false-red subset, named rather than implied — and it has TWO
+    shapes, not one. (a) A write with NO `ts` whose payload derivation has changed
+    at a position an earlier derivation wrote: `COALESCE(..., now())` gives such a
+    row a real `recorded_at` while this write has none to compare against, so the
+    difference cannot be attributed to drift and is refused. (b) A record whose
+    derivation MOVED its own `ts`: that takes the `recorded_at` arm and is
+    REFUSED, although it is one record re-derived, because the capture time is the
+    only signature a second journal has (P0-2). Refusing is the deliberate direction:
     the alternative — treating an unexplained difference as drift — is the silent
     absorption this class was built to end. `#12894`'s journal IDENTITY in the
     key removes the whole residual, because two journals can then no longer meet
@@ -1151,10 +1159,13 @@ class JournalPositionCollision(RecordProjectionError):
                 differs.append("the record TYPE")
             if capture_state == "differs":
                 differs.append("the CAPTURE TIME")
+            # Singular takes a singular verb: the sentence an operator pastes
+            # into a ticket read "only the CAPTURE TIME differ" (review P2).
             content = (
                 "The surviving row's PAYLOAD is IDENTICAL to what this write "
                 "would produce; "
-                + ("only " + " and ".join(differs) + " differ"
+                + (("only " + differs[0] + " differs") if len(differs) == 1
+                   else ("only " + " and ".join(differs) + " differ")
                    if differs else "the difference is not in the payload")
             )
         super().__init__(
