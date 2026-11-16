@@ -11947,6 +11947,22 @@ def _live_operator_mechanism_pairs(proj, ids):
     return priced_out
 
 
+def _refusal_type_name(value) -> str:
+    """`type(value).__name__` for a caller-controlled operand in a REFUSAL message.
+
+    The NAME can raise too: a metaclass may define ``__name__`` as a property,
+    so a refusal that interpolates the class name directly escapes as the
+    caller's own exception class instead of the promised ``ValueError``
+    (measured: ``RuntimeError: name-boom`` from this door's impostor refusal,
+    #12914 review P3). Defensive for the same reason as ``_refusal_repr``
+    below, and shared so the two cannot drift.
+    """
+    try:
+        return type(value).__name__
+    except Exception:  # noqa: BLE001, RUF100 — a hostile metaclass is the point
+        return "unreadable (its metaclass raises)"
+
+
 def _refusal_repr(value) -> str:
     """`repr` for a caller-controlled operand in a REFUSAL message.
 
@@ -11962,7 +11978,7 @@ def _refusal_repr(value) -> str:
     try:
         return repr(value)
     except Exception:  # noqa: BLE001, RUF100 — a hostile `__repr__` is the point
-        return f"<{type(value).__name__}>"
+        return f"<{_refusal_type_name(value)}>"
 
 
 class TortoiseSDK:
@@ -22748,9 +22764,9 @@ class TortoiseSDK:
                 and not issubclass(type(old_id), str):
             raise ValueError(
                 f"supersede: {_refusal_repr(old_id)} is not a node id — it declares "
-                f"`__class__ = str` but is a {type(old_id).__name__}, so no "
-                f":Point, :Object or :Subject row can carry it and the graph "
-                f"cannot encode it (#12907). Pass the id string itself."
+                f"`__class__ = str` but its class is {_refusal_type_name(old_id)}, "
+                f"so no :Point, :Object or :Subject row can carry it and the "
+                f"graph cannot encode it (#12907). Pass the id string itself."
             )
         if label in ("Object", "Subject"):
             if not transfer_edges:

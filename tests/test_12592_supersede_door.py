@@ -81,7 +81,12 @@ What this suite pins (each row names the mutation that reds it):
   short-circuit) -> the third reds with ``TypeError: argument of type 'Imp' is
   not iterable``. A GENUINE non-``str`` id (`123`, `None`, `[]`, `object()`)
   keeps the documented ``No point <id>`` fall-through, pinned in the same cases,
-  so the bound cannot be widened into a blanket ``str``-only door.
+  so the bound cannot be widened into a blanket ``str``-only door. The refusal
+  interpolates the refused operand, so BOTH caller reads are defensive: a
+  raising ``__repr__`` (``_refusal_repr``) and a raising ``__name__`` on the
+  class (``_refusal_type_name``) each still answer ``ValueError``.
+  Mutation: spell either ``{old_id!r}`` / ``{type(old_id).__name__}`` -> the
+  impostor refusal escapes as the caller's own ``RuntimeError``.
 
 Runnable (docker lane):
 
@@ -1059,4 +1064,60 @@ def test_a_hostile_repr_cannot_replace_THIS_doors_new_refusals(sdk):
 
     assert _row(sdk, "Object", node) == before, (
         "a refused hostile-repr call moved the row: "
+        f"{before} -> {_row(sdk, 'Object', node)}")
+
+
+def _raise_name_boom():
+    raise RuntimeError("name-boom")
+
+
+class _BoomNameMeta(type):
+    """A metaclass whose ``__name__`` raises (#12914 review P3, measured).
+
+    The door's impostor bound ADMITS this class (``isinstance(x, str)`` is True
+    through the forged ``__class__``; ``issubclass(type(x), str)`` is False), so
+    the refusal reaches the one caller operand ``_refusal_repr`` cannot cover:
+    the CLASS NAME the message interpolates.
+    """
+
+    __name__ = property(lambda self: _raise_name_boom())
+
+
+class _ImpostorBoomName(_Impostor, metaclass=_BoomNameMeta):
+    """An impostor whose class name cannot be read."""
+
+
+class _ImpostorBoomBoth(_ImpostorBoomRepr, metaclass=_BoomNameMeta):
+    """Raises in BOTH caller reads: ``__repr__`` and the class name."""
+
+
+def test_an_impostor_whose_class_name_raises_still_answers_this_door(sdk):
+    """The refusal interpolates the class NAME — so that read must be safe too.
+
+    Measured on this fix's second cut: ``supersede(<impostor whose metaclass
+    raises in ``__name__``>, <id>)`` escaped as ``RuntimeError: name-boom`` from
+    the new door refusal, while the sibling arm
+    ``supersede(<live Object>, <same>)`` answered its ``no :Object`` ValueError.
+    Not fail-open (no write, row unchanged), but the door's contract is the
+    exception CLASS, and the name is a caller operand just as the ``repr`` is.
+
+    Mutation: spell the refusal ``{type(old_id).__name__}`` instead of
+    ``{_refusal_type_name(old_id)}`` -> ``RuntimeError: name-boom``.
+    """
+    node = _make(sdk, "Object", "impostor-boom-name")
+    before = _row(sdk, "Object", node)
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(_ImpostorBoomName(), node)
+    msg = str(exc.value)
+    assert "is not a node id" in msg, msg
+    assert "metaclass raises" in msg, (
+        f"the refusal must name the unreadable class instead of crashing: {msg!r}")
+    # Both reads hostile at once: the ``repr`` fallback calls the name helper,
+    # so the second guard must hold inside the first one's fallback too.
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(_ImpostorBoomBoth(), node)
+    assert "is not a node id" in str(exc.value), exc.value
+
+    assert _row(sdk, "Object", node) == before, (
+        "a refused boom-name impostor moved the row: "
         f"{before} -> {_row(sdk, 'Object', node)}")
