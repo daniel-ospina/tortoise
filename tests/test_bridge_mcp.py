@@ -19,6 +19,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+# Imported at COLLECTION, on purpose. `integrations.crm.twenty.bridge` captures
+# `Path.home()` / `expanduser("~")` into module constants at IMPORT time
+# (`CAL_STATE_FILE`, `CONFIG["review_queue_path"]`) — the capture-at-start class
+# `tortoise/mcp_client.py` deliberately avoids (#10605). `_no_ambient_store` below
+# redirects HOME per test, so a body-level import would freeze those constants into
+# a ONE-TEST pytest tmp dir that pytest then deletes, for every later test in the
+# same process. Collection-time import under the ambient HOME is the construction
+# `tests/test_8491_cal_attendee_grounding.py` already uses; the bridge's own
+# capture-at-start bug is filed as #12968 rather than carried here.
+import integrations.crm.twenty.bridge as bridge
+
 SAMPLE_FRONTMATTER = {
     "title": "Test Meeting",
     "date": "2026-08-07",
@@ -133,9 +144,7 @@ class TestBridgePush:
         monkeypatch.setenv("TORTOISE_MCP_URL", daemon_url)
         monkeypatch.setenv("TORTOISE_API_KEY", "")
 
-        from integrations.crm.twenty.bridge import push_to_tortoise
-
-        result = push_to_tortoise(SAMPLE_FRONTMATTER)
+        result = bridge.push_to_tortoise(SAMPLE_FRONTMATTER)
         assert result["status"] == "ok"
         types = [p["type"] for p in result["points"]]
         assert types == ["meeting", "decision", "commitment"]
@@ -146,9 +155,7 @@ class TestBridgePush:
         monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:1/mcp")
         monkeypatch.setenv("TORTOISE_API_KEY", "")
 
-        from integrations.crm.twenty.bridge import push_to_tortoise
-
-        result = push_to_tortoise(SAMPLE_FRONTMATTER)
+        result = bridge.push_to_tortoise(SAMPLE_FRONTMATTER)
         assert result == {"status": "skipped", "reason": "tortoise_unavailable"}
 
 
@@ -166,23 +173,19 @@ class TestPointIdExtraction:
         )
 
     def test_the_id_comes_from_the_payload_block_not_a_later_disclosure(self):
-        from integrations.crm.twenty.bridge import _point_id
-
         result = self._result(
             '{"id": "pt_1"}',
             "Graph: this write targeted the workspace default graph (default).",
         )
-        assert _point_id(result) == ("pt_1", None)
+        assert bridge._point_id(result) == ("pt_1", None)
 
     def test_a_non_dict_payload_stays_a_failure_and_never_raises(self):
         """A non-dict payload is `unparseable_result`. The trailing prose block
         must not turn it into an id, and must not raise out of the extractor."""
-        from integrations.crm.twenty.bridge import _point_id
-
         result = self._result(
             "[1, 2]", "Graph: this write targeted the workspace default graph."
         )
-        assert _point_id(result) == (None, "unparseable_result")
+        assert bridge._point_id(result) == (None, "unparseable_result")
 
 
 @pytest.fixture(autouse=True)
@@ -213,6 +216,18 @@ def _no_ambient_store(monkeypatch, tmp_path):
     # which is the other candidate in the same chain (#1708 D5).
     (tmp_path / "cwd").mkdir()
     monkeypatch.chdir(tmp_path / "cwd")
+    # …AND the ENV half, which isolating the stores does NOT cover. The tests below
+    # blank `TORTOISE_API_KEY` only; `resolve_connection()` reads BOTH names, in
+    # precedence order (`mcp_client._ENV_KEY_NAMES`), and `TORTOISE_MCP_API_KEY` is
+    # the fleet alias (#5200) that a CI cell exports. Left set, it ANSWERS — so the
+    # store branch is never reached, the pin below cannot fail loud on a leaked
+    # store, and this module sends a REAL fleet key to the test daemon (measured on
+    # a cell: `sources == ('TORTOISE_API_KEY', 'TORTOISE_MCP_API_KEY')`, no store
+    # read). This is the `delenv` half of the recorded idiom —
+    # `docs/plans/1708-key-mint-idempotency/plan.md` step 5 prescribes setenv(HOME)
+    # + delenv(TORTOISE_API_KEY) + chdir; the sibling fixtures copied the other two.
+    for name in ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
 
 
 class TestNoStoredCredentialDecidesTheEndpoint:
@@ -320,6 +335,10 @@ class TestNoEngineImports:
 
         src = (Path(__file__).resolve().parents[1]
                / "integrations/crm/twenty/bridge.py").read_text()
+        # The same non-vacuity guard as the gate above: an EMPTY source parses to a
+        # tree with no nodes, so `any(...)` would report "no mcp_client import" and
+        # fail for a reason that has nothing to do with the bridge.
+        assert src.strip(), "the bridge source read EMPTY — this is not a PASS"
         tree = ast.parse(src)
         assert any(
             isinstance(n, ast.ImportFrom) and n.module == "tortoise.mcp_client"
