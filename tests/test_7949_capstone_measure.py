@@ -4435,6 +4435,21 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
     bytes already in hand: one message, both lines, one edit.
     """
     stop = int(end) if end else start
+    # ⛔ A NUMBER PAST THE END IS A MISS, NOT A CRASH (#13033 review, measured): every
+    # branch below indexes `source_lines[start - 1]` (and the range arm indexes
+    # `stop - 1`), so a swept document citing a line this file does not have raised
+    # `IndexError` out of the sweep instead of producing the PAST THE END diagnostic
+    # `cite_failure` already owns. `end` is a claim too — a range that closes one line
+    # into the next block is a miss, not a license to crash.
+    if not 1 <= start <= len(source_lines):
+        return [f"is cited at :{start}, but this file has {len(source_lines)} lines — "
+                f"the number is PAST THE END (or before the first line), so it counts "
+                f"a different revision, or it names the wrong file"]
+    if end and not 1 <= stop <= len(source_lines):
+        return [f"cites a range ending at :{stop}, but this file has "
+                f"{len(source_lines)} lines — the END of the range is PAST THE END of "
+                f"it, so the range counts a different revision, or it names the wrong "
+                f"file"]
     if kind == "line":
         got = source_lines[start - 1]
         return [f"{a!r} {_locate_hint(source_lines, a, 'line', start)}"
@@ -4536,7 +4551,9 @@ def _bundle_sweep(docs, sources) -> dict:
             missing = _bundle_missing(kind, anchors, source_lines[source],
                                       start, end, end_spec)
             if missing:
-                shown = source_lines[source][start - 1].strip()
+                shown = (source_lines[source][start - 1].strip()
+                         if 1 <= start <= len(source_lines[source])
+                         else "<past the end of the file>")
                 # ⛔ TOLERANT label: `_bundle_sweep` is also driven over SYNTHETIC
                 # documents by the tests (its docstring promises it asserts nothing),
                 # and a temp-path source is not under `_REPO` — a bare `relative_to`
@@ -4707,12 +4724,24 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
                 else ("line", anchor)
             )
             if f":{number}" not in line and f"-{number}" not in line:
+                # ⛔ AN UNREGISTERED SOURCE KEY IS A ROW DEFECT, NOT A KeyError (#13033
+                # review, measured): this branch reaches `sources[source_key]` to resolve
+                # the anchor, which a row keyed outside the map turns into a crash out of
+                # the pin instead of the finding it is — `source_label` above still carries
+                # a `<key>.py` fallback for exactly that state, so the two halves disagreed
+                # about whether it can happen.
+                hint_source = sources.get(source_key)
+                where = (
+                    f"which {_locate_hint(hint_source, token, kind, int(number))}"
+                    if hint_source is not None
+                    else ("and this row's SOURCE key is not in the source map, so the "
+                          "cite cannot be resolved at all — fix the row's key")
+                )
                 failures.append(
                     f"{doc_label}: the sentence containing {phrase!r} does not "
                     f"cite :{number} — a bare continuation is invisible to "
                     f"_BUNDLE_CITE, so this pin is the only thing reading it. The "
-                    f"thing it names is `{token}`, which "
-                    f"{_locate_hint(sources[source_key], token, kind, int(number))}; "
+                    f"thing it names is `{token}`, {where}; "
                     f"the sentence must carry THAT number, not a stale one")
                 continue
             failure = _cite_failure(
@@ -7686,6 +7715,35 @@ def test_the_line_and_block_findings_are_told_apart():
             f"a BLOCK/DOCUMENT shape is being read as a row finding: {shape!r}")
         assert _block_findings(shape) == [shape[2:]], (
             f"a block finding was dropped by `_block_findings`: {shape!r}")
+
+
+def test_a_past_the_end_cite_is_a_finding_not_a_traceback(tmp_path):
+    """Both miss paths report the miss; neither indexes past its own file.
+
+    ⛔ MEASURED (#13033 review): a swept document citing a line its source does not
+    have raised `IndexError: list index out of range` out of `_bundle_missing` — every
+    branch indexes `source_lines[start - 1]`, and the range arm indexes `stop - 1` —
+    so the sweep died instead of printing the PAST THE END diagnostic `cite_failure`
+    already owns. `_pin_row_failures`' not-cite branch had the same shape one layer
+    up: it reached `sources[source_key]` to resolve the anchor, so a row keyed outside
+    the source map raised `KeyError`, i.e. the pin crashed where it should have said
+    which half of the row is wrong.
+    """
+    three = ["a = 1", "b = 2", "c = 3"]
+    for kind in ("line", "def"):
+        miss = _bundle_missing(kind, ("zzz",), three, 40, None)
+        assert miss and "PAST THE END" in miss[0], (kind, miss)
+    # a range END is a claim too, and it is indexed the same way
+    miss = _bundle_missing("span", ("a = 1",), three, 1, 99, ("exact", "zzz"))
+    assert miss and "PAST THE END" in miss[0], miss
+
+    doc = tmp_path / "doc.md"
+    doc.write_text("the row says :3 here\n", encoding="utf-8")
+    # A row whose SOURCE KEY is not in the map: a finding naming the key, not a KeyError.
+    failures = _pin_row_failures(
+        [("doc.md", "the row says", [("7", "a")], "unregistered")],
+        {"doc.md": doc}, {"src": three})
+    assert failures and "SOURCE key is not in the source map" in failures[0], failures
 
 
 def test_the_arm_table_is_not_satisfied_by_an_unrelated_red():
@@ -14318,7 +14376,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #11376 did not move these lines), the `:12929` `vet_enabled` live-cite, the
     bundle's `hasPart`/`hierarchies` split, and the four further LIVE cites a fresh
     review found still unwatched (`pack_hierarchy.py:431`, the
-    `probes/capstone_measure.py:275-283` window and the `sdk.py:17681` cite it carries
+    `probes/capstone_measure.py:275-283` window and the `sdk.py:19883` cite it carries
     INSIDE it, `identity_hold.py:125`, `value_gate.py:89`) — and, measured before
     this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
@@ -14648,7 +14706,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "cite — re-stale it and this record's only reproduction path points at a dead line")
     # ⛔ DIRECTION FLIPPED with the correction this arm forced. The comment at this line used to
     # read "nothing in this tree consumes `result[\"relations\"]`" — a claim that was FALSE from the
-    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:19077`), so the
+    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:19430`), so the
     # arm was pinning a falsehood into the live tree. It now asserts the corrected sentence AT THE
     # SAME LINE (the block's line count was held at 13 so every cite below keeps its number) and that
     # the retracted sentence is gone from the file entirely.
@@ -14670,7 +14728,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "\"nothing consumes it\" reading is what this arm replaced")
     assert "nothing in this tree consumes" not in "\n".join(ext), (
         "the retracted sentence is back in the live file — it was false while this record's own §5 "
-        "cited `sdk.py:19077` as the consumer, so no arm may require it again")
+        "cited `sdk.py:19430` as the consumer, so no arm may require it again")
 
     # A1's environment block: the reproduction that states A1's producer claim — the
     # bare-token grep whose four `create_operator` mentions ARE its evidence that the
