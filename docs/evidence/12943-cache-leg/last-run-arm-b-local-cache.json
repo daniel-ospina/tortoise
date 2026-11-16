@@ -1,9 +1,9 @@
 {
-  "org": "org1294328a1fbcb0e",
-  "graph_id": "g_1294328a1fbcb0e",
-  "cache_graph": "org_org1294328a1fbcb0e_g_1294328a1fbcb0e",
+  "org": "org129435b5a4693ba",
+  "graph_id": "g_129435b5a4693ba",
+  "cache_graph": "org_org129435b5a4693ba_g_129435b5a4693ba",
   "write_path_uri": null,
-  "cache_count_uri": "docker://:@127.0.0.1:16419/tortoise_test_matrix",
+  "cache_count_uri": "docker://127.0.0.1:16419/tortoise_test_matrix#66df3206",
   "cache_count_uri_source": "CACHE_COUNT_URI",
   "cache_count_uri_matches_write_target": false,
   "record_dsn_fingerprint": "postgresql://127.0.0.1:33943/record#0367bb5d",
@@ -33,10 +33,10 @@
       "cache_not_shared": 2
     },
     "record_writes_applied": "0 -> 6",
-    "record_last_write_at": "None -> '2026-11-16T02:46:41.145834+00:00'",
+    "record_last_write_at": "None -> '2026-11-16T03:21:53.641813+00:00'",
     "server_code": {
       "tracked": 19
     },
-    "uptime": "1.12 -> 10.22"
+    "uptime": "1.18 -> 10.49"
   }
 }

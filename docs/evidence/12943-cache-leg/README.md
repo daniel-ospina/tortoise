@@ -1,3 +1,14 @@
+---
+title: "#12943 — the cache leg, measured"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-16
+subjects.team: epistemic-team
+aboutSubjects: Tortoise cache leg (FalkorDB, derived store)
+aboutObjects: "#12943, #12949, #12941, STORAGE-ARCHITECTURE.md §17.1/§17.2, Postgres record, FalkorDB cache"
+---
+
 # #12943 — the cache leg, measured
 
 Every number here was produced by `measure.py` against a **throwaway** tenant
@@ -39,6 +50,7 @@ Both rows, copy-pasteable (fill the four DSNs/URIs from your own instances):
 export TEST_RECORD_DB_URI='postgresql://tortoise_record_app:…@127.0.0.1:33943/record'
 export OWNER_RECORD_DSN='postgresql://record:…@127.0.0.1:33943/record'
 export CACHE_COUNT_URI="$LANE_URI"          # e.g. docker://:pw@127.0.0.1:16419/db
+export EVENTS_BASE=.evidence-events         # the `events_base` in the captures
 
 # ARM A — shared cache: count and write on the SAME server
 SUMMARY_OUT=last-run-arm-a-shared-cache.json \
@@ -75,16 +87,23 @@ both-arms.json                      EVERY column the table below reads (all
 
 ## The measurement
 
-Same tenant, same writes, same record. The only difference is `TORTOISE_DB_URI`.
+Same writes, same record schema, **one throwaway tenant per arm** (`measure.py`
+mints a run-unique `org_<hex>` / `g_<hex>` pair per run, and
+`public.journal_event` is append-only, so a pair cannot be reused). The only
+*deliberate* difference between the arms is `TORTOISE_DB_URI`.
 
 | | record `object` / `point` / `journal_event` | cache `Object` / `Point` | `record_writes_applied` | `cache_leg_failures` |
 |---|---|---|---|---|
 | `TORTOISE_DB_URI` **set** | 2 / 3 / 6 | **2 / 3** | `0 → 6`, no failure | **`{}`** |
 | `TORTOISE_DB_URI` **empty** | 2 / 3 / 6 | **0 / 0** | `0 → 6`, no failure | **`{"cache_not_shared": 2}`** |
 
-Every capture also carries `record_dsn_fingerprint` (`scheme://host:port/db#8hex`,
-never the credential), `record_writes_applied_delta` and
-`record_write_failures_published`. The harness **assigns**
+Every capture also carries `record_dsn_fingerprint`
+(`scheme://host:port/db#8hex`), `record_writes_applied_delta` and
+`record_write_failures_published`. ⛔ **`write_path_uri` and `cache_count_uri` are
+fingerprinted the same way, never raw** — they are `docker://:<password>@…` values
+and a capture is a committed file, so a password-protected cache lane would
+otherwise write its credential into the PR; what the arm claims needs
+host/port/graph identity, never the credential. The harness **assigns**
 `TORTOISE_RECORD_DSN` / `TORTOISE_EVENT_LOG_BASE_DIR` rather than defaulting them,
 and **refuses to run** when an ambient value disagrees — because `setdefault`
 would let an operator's exported `TORTOISE_RECORD_DSN` win, so the SDK would

@@ -24,9 +24,10 @@ targets and the two arm shapes; this is the short version):
     uv run python docs/evidence/12943-cache-leg/measure.py
 
 ⚠️ Do NOT set ``TORTOISE_RECORD_DSN`` or ``TORTOISE_EVENT_LOG_BASE_DIR`` in the
-ambient environment: this harness ASSIGNS both (from ``TEST_RECORD_DSN``/
-``TEST_RECORD_DB_URI`` and ``EVENTS_BASE``) and REFUSES to run if an ambient
-value disagrees, because a silent override here measures the wrong database.
+ambient environment: this harness ASSIGNS both (from ``TEST_RECORD_DB_URI``,
+else an already-set ``TORTOISE_RECORD_DSN``, and from ``EVENTS_BASE``) and
+REFUSES to run if an ambient value disagrees, because a silent override here
+measures the wrong database.
 """
 from __future__ import annotations
 
@@ -42,13 +43,24 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 
+def _cache_count_uri() -> str:
+    """Where the cache is COUNTED (default: where the SDK writes).
+
+    One reader, because the capture and the client must never disagree about
+    which server the ``0 / 0`` came from.
+    """
+    return (os.environ.get("CACHE_COUNT_URI")
+            or os.environ.get("TORTOISE_DB_URI") or "").strip()
+
+
 def _record_dsn() -> str:
     """The APPLICATION role's DSN — what the live writer connects as.
 
     ``SUMMARY_OUT`` selects where the JSON capture is written (default
     ``last-run.json`` beside this script; the committed captures are
     ``last-run-arm-a-shared-cache.json`` and ``last-run-arm-b-local-cache.json``).
-    ``EVENTS_BASE`` selects the journal base dir (default ``.evidence-events/``);
+    ``EVENTS_BASE`` selects the journal base dir (default
+    ``/tmp/12943-events-<run>/``);
     each run APPENDS a run-unique ``org_<hex>/events.jsonl`` there, which is
     scratch — it is gitignored, and it is not part of the evidence.
 
@@ -142,8 +154,7 @@ def _falkor_client():
     # looking nowhere. `CACHE_COUNT_URI` (default `TORTOISE_DB_URI`) separates
     # the two questions: where the SDK writes, and where we look. Without it this
     # harness could not produce the second row of its own table (review cycle 2).
-    uri = (os.environ.get("CACHE_COUNT_URI")
-           or os.environ.get("TORTOISE_DB_URI") or "").strip()
+    uri = _cache_count_uri()
     parsed = urlparse(uri)
     if not parsed.hostname:
         raise SystemExit(
@@ -167,6 +178,8 @@ def main() -> int:
     graph_id = f"g_12943{run}"
     ns = f"org_{org}_{graph_id}"
 
+    # The SDK's own write target, captured before anything can mutate it.
+    write_uri = (os.environ.get("TORTOISE_DB_URI") or "").strip()
     dsn = _record_dsn()
     # ⛔ ASSIGN, NEVER `setdefault`. This whole harness exists because two
     # variables pick two stores and nothing compares them — and `setdefault`
@@ -296,13 +309,19 @@ def main() -> int:
     result = {
         "org": org, "graph_id": graph_id, "cache_graph": ns,
         # Which shape this run measured — the README's table keys on it.
-        "write_path_uri": os.environ.get("TORTOISE_DB_URI") or None,
+        # ⛔ REDACTED, like the record DSN twelve lines below. The raw value is
+        # `docker://:<password>@host:port/db`, and a capture is a COMMITTED file:
+        # today's lane has an empty password, but any lane whose cache is
+        # password-protected would write that password into the PR. What the arm
+        # claims needs host/port/db identity, never the credential — so this is
+        # the same `_fingerprint` the record side uses (review cycle 5).
+        "write_path_uri": (_fingerprint(write_uri) if write_uri else None),
         # The VALUE, not only the variable name (review cycle 3): arm A's whole
         # claim is that the cache count came from THE SERVER THE SDK WROTE TO,
         # and a source-name alone cannot show that. A `CACHE_COUNT_URI` naming a
         # different server makes arm A read 0/0 while looking identical to arm B.
-        "cache_count_uri": (os.environ.get("CACHE_COUNT_URI")
-                            or os.environ.get("TORTOISE_DB_URI") or None),
+        "cache_count_uri": (_fingerprint(_cache_count_uri())
+                            if _cache_count_uri() else None),
         "cache_count_uri_source": ("CACHE_COUNT_URI"
                                    if os.environ.get("CACHE_COUNT_URI")
                                    else "TORTOISE_DB_URI"),
