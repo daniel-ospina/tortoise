@@ -1101,7 +1101,13 @@ DERIVED_CLASSES = ("agent-reachable", "eval-only", "internal", "no-caller-found"
 # against it: "Every comparable we studied pins a smaller set" is a comparison, true only
 # while we advertise more than this — below it the sentence is false (Letta pins 18).
 LARGEST_COMPARABLE = 18
-AUTHORED_CONTROL_PLANE = frozenset({"apikey_revoke", "graph_delete"})
+AUTHORED_CONTROL_PLANE: frozenset[str] = frozenset()
+# ↑ EMPTY since #12901 wave 2. It held `apikey_revoke` and `graph_delete`, the two
+# control-plane mutators whose callers the derivation could not classify on their own;
+# both left the public surface in wave 2 (their bodies survive as `_apikey_revoke` /
+# `_graph_delete`), so the authored member that carried the judgement has no live row
+# left to mark. A future control-plane method whose callers misclassify adds its name
+# back here — the set is authored, so it cannot be regenerated into being.
 
 # §6.1 item 3. The catch-all clause is what makes this single-valued; the two
 # subpath carve-outs are what keep it from being two-valued.

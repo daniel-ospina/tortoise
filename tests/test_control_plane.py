@@ -43,7 +43,7 @@ class TestTeamCRUD:
         assert result["id"]
 
         # Verify in registry graph
-        team = sdk.org_get(result["id"])
+        team = sdk._org_get(result["id"])
         assert team is not None
         assert team["name"] == "acme-corp"
 
@@ -98,10 +98,10 @@ class TestTeamCRUD:
         assert result["api_key"].startswith("tt_")
 
     def test_team_get_returns_none_for_missing(self, sdk):
-        assert sdk.org_get("nonexistent-id") is None
+        assert sdk._org_get("nonexistent-id") is None
 
     def test_team_get_returns_team(self, sdk, team):
-        result = sdk.org_get(team["id"])
+        result = sdk._org_get(team["id"])
         assert result is not None
         assert result["name"] == "test-team"
         assert result["tier"] == "free"
@@ -143,18 +143,18 @@ class TestMembershipCRUD:
     """Membership create, read, update, delete."""
 
     def test_membership_create_with_valid_role(self, sdk, team):
-        m = sdk.membership_create(team["id"], "user-1", "admin")
+        m = sdk._membership_create(team["id"], "user-1", "admin")
         assert m["org_id"] == team["id"]
         assert m["user_id"] == "user-1"
         assert m["role"] == "admin"
 
     def test_membership_create_rejects_invalid_role(self, sdk, team):
         with pytest.raises(ControlPlaneError, match="Invalid role"):
-            sdk.membership_create(team["id"], "user-1", "superuser")
+            sdk._membership_create(team["id"], "user-1", "superuser")
 
     def test_membership_create_rejects_missing_team(self, sdk):
         with pytest.raises(ControlPlaneError, match="not found"):
-            sdk.membership_create("bad-id", "user-1", "admin")
+            sdk._membership_create("bad-id", "user-1", "admin")
 
     # #12901 wave 1 retired `membership_get` (off the approved surface, zero
     # production callers — the console reads members via the approved
@@ -176,10 +176,10 @@ class TestMembershipCRUD:
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.max_users = 2",
             params={"id": team["id"]})
-        sdk.membership_create(team["id"], "user-1", "owner")
-        sdk.membership_create(team["id"], "user-2", "admin")
+        sdk._membership_create(team["id"], "user-1", "owner")
+        sdk._membership_create(team["id"], "user-2", "admin")
         with pytest.raises(ControlPlaneError, match="max users"):
-            sdk.membership_create(team["id"], "user-3", "member")
+            sdk._membership_create(team["id"], "user-3", "member")
 
 
 
@@ -189,7 +189,7 @@ class TestAPIKeyCRUD:
     """API key create, list, revoke, verify."""
 
     def test_apikey_create_stores_hash_not_plaintext(self, sdk, team):
-        result = sdk.apikey_create(team["id"], "user-1")
+        result = sdk._apikey_create(team["id"], "user-1")
         assert "api_key" in result
         assert result["api_key"].startswith("tt_")
         assert result["key_prefix"]
@@ -208,38 +208,38 @@ class TestAPIKeyCRUD:
 
 
     def test_apikey_revoke_sets_revoked_at(self, sdk, team):
-        result = sdk.apikey_create(team["id"], "user-1")
-        revoke = sdk.apikey_revoke(result["id"])
+        result = sdk._apikey_create(team["id"], "user-1")
+        revoke = sdk._apikey_revoke(result["id"])
         assert revoke["revoked"] is True
         assert revoke.get("revoked_at") is not None
 
     def test_apikey_revoke_is_idempotent(self, sdk, team):
-        result = sdk.apikey_create(team["id"], "user-1")
-        sdk.apikey_revoke(result["id"])
-        revoke2 = sdk.apikey_revoke(result["id"])
+        result = sdk._apikey_create(team["id"], "user-1")
+        sdk._apikey_revoke(result["id"])
+        revoke2 = sdk._apikey_revoke(result["id"])
         assert revoke2.get("already") is True
 
     def test_apikey_verify_revoked_returns_none(self, sdk, team):
-        result = sdk.apikey_create(team["id"], "user-1")
+        result = sdk._apikey_create(team["id"], "user-1")
         plaintext = result["api_key"]
         # Verify works before revoke
-        valid = sdk.apikey_verify(plaintext)
+        valid = sdk._apikey_verify(plaintext)
         assert valid is not None
         assert valid["org_id"] == team["id"]
         # Revoke
-        sdk.apikey_revoke(result["id"])
+        sdk._apikey_revoke(result["id"])
         # Verify after revoke
-        invalid = sdk.apikey_verify(plaintext)
+        invalid = sdk._apikey_verify(plaintext)
         assert invalid is None
 
     def test_apikey_verify_valid_returns_team_context(self, sdk, team):
-        result = sdk.apikey_create(team["id"], "user-1")
-        valid = sdk.apikey_verify(result["api_key"])
+        result = sdk._apikey_create(team["id"], "user-1")
+        valid = sdk._apikey_verify(result["api_key"])
         assert valid is not None
         assert valid["org_id"] == team["id"]
 
     def test_apikey_verify_bad_key_returns_none(self, sdk):
-        assert sdk.apikey_verify("tt_badkey123") is None
+        assert sdk._apikey_verify("tt_badkey123") is None
 
     def test_apikey_verify_many_keys_prefix_lookup(self, sdk, team):
         """#687: Many keys on a team — the correct key still authenticates
@@ -252,20 +252,20 @@ class TestAPIKeyCRUD:
         """
         target_key = None
         for i in range(20):
-            result = sdk.apikey_create(team["id"], "user-1")
+            result = sdk._apikey_create(team["id"], "user-1")
             if i == 19:  # last key is our target
                 target_key = result["api_key"]
         assert target_key is not None
         # Verify the last-created key (would fail a naive early-match scan)
-        valid = sdk.apikey_verify(target_key)
+        valid = sdk._apikey_verify(target_key)
         assert valid is not None
         assert valid["org_id"] == team["id"]
         # A bad key with a plausible tt_ prefix is still rejected
-        assert sdk.apikey_verify("tt_" + "0" * 32) is None
+        assert sdk._apikey_verify("tt_" + "0" * 32) is None
 
     def test_apikey_create_rejects_missing_team(self, sdk):
         with pytest.raises(ControlPlaneError, match="not found"):
-            sdk.apikey_create("bad-id", "user-1")
+            sdk._apikey_create("bad-id", "user-1")
 
 
 
@@ -304,7 +304,7 @@ class TestAPIKeyC1Tenancy:
     def test_apikey_create_legacy_shape_unchanged(self, sdk, team):
         """Back-compat: no kwargs → no tenancy props on the node, list shows
         None-safe defaults (legacy class)."""
-        result = sdk.apikey_create(team["id"], "user-1")
+        result = sdk._apikey_create(team["id"], "user-1")
         reg = sdk._get_registry()
         rows = reg.query(
             "MATCH (k:APIKey {id:$id}) RETURN k.graph_id, k.scopes, "
@@ -317,7 +317,7 @@ class TestAPIKeyC1Tenancy:
 
     def test_apikey_create_scoped_graph_key_stores_props(self, sdk, team):
         """A C1-minted graph-bound key stores its tenancy props."""
-        result = sdk.apikey_create(
+        result = sdk._apikey_create(
             team["id"], "user-1",
             graph_id="g_abc123def4567890",
             scopes=["graphs:read", "graphs:write"],
@@ -337,7 +337,7 @@ class TestAPIKeyC1Tenancy:
         # #4282 deleted apikey_list; the props it projected are
         # asserted directly above, off the node the create door wrote.
         # Still authenticates (registry parity: hash path unchanged)
-        valid = sdk.apikey_verify(result["api_key"])
+        valid = sdk._apikey_verify(result["api_key"])
         assert valid is not None
         assert valid["org_id"] == team["id"]
 
@@ -363,14 +363,14 @@ class TestInvitationRevoke:
 
     def test_invitation_revoke_is_idempotent(self, sdk, team):
         inv_id = self._seed_invitation(sdk, team)
-        first = sdk.invitation_revoke(inv_id)
+        first = sdk._invitation_revoke(inv_id)
         assert first["revoked"] is True and "already" not in first, first
-        assert sdk.invitation_get_by_id(inv_id)["status"] == "revoked"
+        assert sdk._invitation_get_by_id(inv_id)["status"] == "revoked"
 
-        again = sdk.invitation_revoke(inv_id)
+        again = sdk._invitation_revoke(inv_id)
         assert again.get("already") is True, again
         assert again["invitation_id"] == inv_id
 
     def test_invitation_revoke_missing_is_not_an_error(self, sdk, team):
-        out = sdk.invitation_revoke("inv-does-not-exist")
+        out = sdk._invitation_revoke("inv-does-not-exist")
         assert out == {"revoked": False, "reason": "not found"}, out

@@ -563,7 +563,7 @@ class TestRegistryLegacyNode:
             params={"tid": org_id, "kh": hash_api_key(api_key),
                     "kp": api_key[:10]},
         )
-        out = sdk.apikey_verify(api_key)
+        out = sdk._apikey_verify(api_key)
         # C2 (#2111): apikey_verify now returns delegation_depth + scopes
         # (the MCP TeamResolutionMiddleware deleg gate reads them off the
         # same dict) — additive to the pre-C2 {org_id, key_id} contract;
@@ -793,7 +793,7 @@ class TestSupabaseLane:
     # ── #4550: the cap predicate excludes EXPIRED rows on this lane too ────
     # The recovery RPC's count and its victim scan used to be expiry-BLIND,
     # while every Python twin (quota._count_resource, the registry
-    # sdk.signup_token_recover, hosted_api.session_key both lanes) and the
+    # sdk._signup_token_recover, hosted_api.session_key both lanes) and the
     # sibling SQL helper public.api_key_slot_count exclude expired rows. At
     # cap that made an expired-but-unrevoked row push the org "over cap" and
     # the never-used-first victim scan then revoked a LIVE credential as
