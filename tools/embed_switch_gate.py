@@ -1190,6 +1190,32 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             short_circuit = separator in ("&&", "||")
             forked = _SHELL_FORK.search(view) is not None
             conditional = depth > 0 or terminated or short_circuit or forked
+            # ⛔ CREDITING and RETRACTING are not the same question, and folding `short_circuit`
+            # into the one flag answered both — measured fail-OPEN in the mirror direction
+            # (review P0 at `a0d5b9ae4908`):
+            #
+            #     export K=1 && unset K          -> stated={'K': '1'}   bash: K UNSET
+            #     export K=1 && export -n K      -> stated={'K': '1'}   bash: K UNSET
+            #     export K=1 && K=               -> stated={'K': '1'}   bash: K=""
+            #
+            # The retraction branches below are gated on `not conditional`, so once the RHS of a
+            # `&&` was declared conditional they did NOTHING AT ALL — not even `ambiguous.add` —
+            # and the earlier literal survived in `stated`, which `switch_problem` PREFERS over
+            # `ambiguous`. The gate then reported a value the process does not have.
+            #
+            # Which statements may retract is decided by whether they can affect the PARENT
+            # shell, which is a DIFFERENT question from whether they can state a value:
+            #   * `depth > 0` — a helper body may never run, and its local `unset` must not
+            #     retract a top-level export the process DOES receive (a false refusal, review P2);
+            #   * `terminated` — after a top-level `exit`/`exec` nothing runs;
+            #   * `forked`/`backgrounded` — a subshell cannot change the parent's environment, so
+            #     `export K=1; unset K | cat` leaves K SET and the literal must SURVIVE.
+            # A SHORT-CIRCUITED retraction is deliberately NOT in that list: it runs in the PARENT
+            # and may or may not execute, so whether the value survives is unknowable here — and
+            # "cannot be shown to hold" must fail CLOSED (`ambiguous`, i.e. refused), never report
+            # `STATED`. (`export K=1 && unset K` — the ordinary spelling — always removes it; the
+            # contrived `false && unset K` is exactly the shape this reader says it does not model.)
+            retracts = not (depth > 0 or terminated or forked)
             exports = _shell_exports(raw, view)
             if exports:
                 for key, raw_value in exports:
@@ -1210,7 +1236,7 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 unexport := _SHELL_EXPORT_UNEXPORT.match(raw)
             ):
                 for name in (unset or unexport).group("names").split():
-                    if name in SWITCHES and not conditional:
+                    if name in SWITCHES and retracts:
                         # ⛔ A NESTED `unset` neither credits nor retracts (review P2, measured).
                         # These branches ran before, and ignored, the `conditional` guard, so a
                         # helper's local `unset K` retracted a TOP-LEVEL `export K=1` the process
@@ -1221,8 +1247,10 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 unexported.group("key") in SWITCHES
             ):
                 # Same rule, same reason: only a TOP-LEVEL bare assignment is a statement about
-                # what the process gets.
-                if not conditional:
+                # what the process gets. `retracts` (not `conditional`), because a top-level
+                # `K=` really does clear it and a short-circuited one is unknowable — see the
+                # CREDIT/RETRACT note above.
+                if retracts:
                     ambiguous.add(unexported.group("key"))
                     stated.pop(unexported.group("key"), None)
             else:
