@@ -10545,11 +10545,53 @@ _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     # past-tense history — "the flat 2.0 UNDERSTATED it until the refresher replaced
     # the row", "it was the flat default until the first post-merge sweep gave it a
     # reading" — i.e. the blessed healed form redded `test-slow` on the next
-    # refresh, the opposite polarity to every other arm here. The lookahead is
-    # scoped to the same SENTENCE (`. `/`;` still terminate it, so a healed sentence
-    # is never joined to a later verb) and fires only when NO past-tense
-    # `landed`-marker follows. `UNTIL THE REFRESHER.` (nothing after) still bites,
-    # which is the shipped shape the bare arm was added for.
+    # refresh, the opposite polarity to every other arm here. `UNTIL THE REFRESHER.`
+    # (nothing after) still bites, which is the shipped shape the bare arm was added
+    # for.
+    #
+    # ⛔ THE TENSE BOUNDARY IS A SHORT PAST-VERB LIST, AND THAT IS ITS ACTUAL
+    # BOUNDARY — NOT "the past tense" (#12962 cycle 10, review P1 + three VGATE
+    # passes). The list was `replaced|re-bas\w*|gave|lifted|landed|resolved`, so a
+    # healed note that past-tenses the sweep with any OTHER verb still bites:
+    # measured, "It was the flat default until the refresher **corrected** the row"
+    # / **re-measured** / **fixed** all red, while `replaced` / `re-based` / `gave`
+    # stay silent. That over-block is REAL and is NOT fixed here.
+    #
+    # ⛔ FOUR DESIGNS WERE BUILT AND EACH WAS REFUTED BY MEASUREMENT. Recorded so the
+    # next lane does not re-derive this as an easy win:
+    #   (a) require a PRESENT/FUTURE predicate → FAILS OPEN. A bounded list of
+    #       present forms goes silent on the next synonym and on every modal, and it
+    #       silently DROPPED four genuine catches on `origin/main`'s map
+    #       (`test_rail_detach.py`, `test_measure_ask_distilled.py`,
+    #       `eval/ask/test_ask_corpus.py`, `test_code_freshness_9494.py`) — those
+    #       name the owed sweep and then a CITATION or a COMMA, not a verb.
+    #   (b) no past marker anywhere (`[a-z]+ed`) → FAILS OPEN. `[a-z]+ed` matches
+    #       `red`, `need`, `embed`, so a provenance word anywhere later in the
+    #       clause silenced a live claim.
+    #   (c) a `[^.;]*?` window over present forms → OVER-BLOCKS: the window crosses
+    #       commas and re-bites a healed sentence on a later present word.
+    #   (d) extend the past list to ~32 verbs → FAILS OPEN against THIS arm. The
+    #       extra verbs are the map's general prose vocabulary — `set` appears in 25
+    #       tails, `moved` in 20, `taken` in 19, `introduced`, `superseded`,
+    #       `corrected`, `adopted`, … — so any of them anywhere before the next
+    #       `.`/`;` silences a LIVE claim that the shipped six caught (measured: 13
+    #       of 14 probes regressed). A short list over-blocks healed notes; a long
+    #       list silences live ones. THERE IS NO LIST LENGTH THAT IS CORRECT.
+    #
+    # So the shipped boundary is left EXACTLY as it was, and this comment is the fix:
+    # it previously claimed "fires only when NO past-tense `landed`-marker follows",
+    # i.e. it described a general tense test the code does not implement. The honest
+    # consequences, both live and both accepted for this PR:
+    #   • OVER-BLOCK (the live bug): a healed note with an unlisted past verb reds
+    #     `test-slow`. Loud, and one word fixes the list — deliberately preferred
+    #     over a silent miss, because a silent miss ships an unread claim.
+    #   • FAIL-OPEN (unavoidable here): a future claim spelled after a modal with a
+    #     listed irregular (`until the refresher will set …`) reads as healed.
+    # ⛔ THE ROOT IS FILED, NOT WORKED AROUND: regex tense detection over free prose
+    # cannot be made complete in both directions, which is the same structural reason
+    # these row guards cannot reach block comments. Recorded on **#9442** (the home
+    # for ungated provenance prose) with the four refuted designs and their
+    # measurements, rather than a fifth regex.
     r"|\buntil\s+(?:the\s+)?(?:refresher|first\s+post-merge)"
     r"(?![^.;]*?\b(?:replaced|re-bas\w*|gave|lifted|landed|resolved)\b)"
     r"|\buntil\s+the\s+refresh\s+lands"
@@ -10577,11 +10619,17 @@ _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     # these arms cannot see. That is the ungated-provenance-prose class, recorded on
     # #9442 rather than claimed closed here. Its size is COUNTED, not asserted — at
     # 3d74516 the rows whose tail names `--refresh-durations` and carries no `until`
-    # (case-insensitive, as this regex compiles) numbered 111, of which 105 carry a
-    # landed `; was N` tail. Re-count rather than trusting the figures; two earlier
-    # revisions of this comment asserted 121/112 and then 112/106, and neither
-    # reproduces (the second counted `until` case-SENSITIVELY, which files the
-    # uppercase `UNTIL THE REFRESHER` row as unguarded — and this guard bites it).
+    # (case-insensitive, as this regex compiles) numbered 112, of which 110 carry a
+    # landed `; was N` tail; at this head the same count is 113 / 111. The count is
+    # pinned to a DEFINITION so the next reader can reproduce it rather than trust it
+    # (`rows = [l for l in text.splitlines() if _DURATIONS_ROW_RE.match(l)]`;
+    # `tail_names = [l for l in rows if "--refresh-durations" in m.group("tail")]`;
+    # `no_until = [l for l in tail_names if not re.search(r"\buntil\b", l, re.I)]`;
+    # `landed = [l for l in no_until if _MEASURED_BASIS_RE.search(l)]`), because three
+    # earlier revisions of this sentence asserted 121/112, 112/106 and then 111/105 and
+    # NONE reproduces — 111/105 matches no natural variant of the definition at all
+    # (measured 2026-11-16, #12962 cycle 10 review P2). A figure that cannot be
+    # re-derived is exactly the stale-prose rot the surrounding arms exist to stop.
     # ⛔ The WINDOW is `[^.;\n]` — `.`, `;` and the newline, NOT "the sentence" — and
     # the anchor eats its OWN period (#12962 cycles 7-8). Two revisions each inverted a
     # different polarity: `[^.;]` cannot span `tools/ci_timing.py`, so the arm was
@@ -10940,6 +10988,21 @@ def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
         " the row" + basis)
     assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
         landed_sweep, quad) == []
+
+    # …and the SAME construction in the PRESENT tense bites. Pinned because the
+    # boundary is the shipped six-verb list only in its `until the refresher` form:
+    # these spell the claim with a present predicate the list does not cover.
+    # no way to write the note and an arm that misses the present form reads nothing.
+    synonym_owing = (
+        "  test_a.py: 27.3  # it stays at the flat default until the refresher"
+        " corrects the row." + basis + "\n"
+        "  test_b.py: 0.5  # it stays at the flat default until the refresher"
+        " measures the file." + basis + "\n"
+        "  test_c.py: 25.1  # it is the flat default until the first post-merge"
+        " sweep gives it a reading." + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        synonym_owing, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5),
+                                 ("test_c.py", 25.1)]
 
     # ── The INSTRUMENT/VERB spellings (#12962 cycle 6) ────────────────────────
     # The map names the owed sweep by its TOOL or its VERB far more often than by the
