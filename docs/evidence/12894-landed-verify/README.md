@@ -476,12 +476,11 @@ three things that would make the ruling true of the running system are V5 items 
 
 The dispatch brief asked for this claim to be checked rather than trusted, so:
 
-The cap-archives live on **`origin`** under `refs/wip/`, and the same refs are visible locally — this
-worktree holds **322** `refs/wip/*` refs, and `git for-each-ref 'refs/wip/*12894*'` names the same two
-refs at the same shas (its default format is three fields — sha, type, refname — where the listing below
-has two), so a reader can reproduce the mapping with either command. The one
-quoted here is `git ls-remote`, because that is what was run and because it is the only form that
-speaks about `origin` rather than about this clone:
+The cap-archives live on **`origin`** under `refs/wip/`, but a **local** `refs/wip/` namespace does not
+carry them: this clone holds 297 `refs/wip/*` refs and **zero** matching 12894
+(`git for-each-ref --format='%(refname)' refs/wip/ | wc -l` → 297; `… | grep -c 12894` → 0;
+`git for-each-ref 'refs/wip/*12894*'` → no output), so a reader cannot reproduce the mapping from the
+local namespace at all. Only `ls-remote` speaks about `origin`, which is why that is the form quoted:
 
 ```text
 $ git ls-remote origin 'refs/wip/*12894*'
@@ -494,19 +493,22 @@ Both say **"not for merge"** in their commit subject, which also carries the arc
 (`2026-11-16T06:29:21Z`, `2026-11-16T10:08:08Z`) — **transcribed from those subjects, not from the
 listing above**: the subjects record when the archive ran, and the `issue-` commit's own date is
 `10:08:19`, eleven seconds later — the subject's timestamp is the archive run, the commit date is when
-the archive commit itself was written. The archive tool (agent-infra's `scripts/bg-rescue-wip.sh`,
-materialised here as the gitignored `scripts/` pointer) writes a local `refs/wip-local/<slug>` and mirrors
-the remote copy back as `refs/wip-remote/<slug>`; in this clone those local refs are
-`refs/wip-local/feat-12894-allocator-spike` (`ec0bc91f6d`) and the `refs/wip/` pair above, and neither
-`refs/wip-local/` nor `refs/wip-remote/` carries an `issue-12894-allocator-spike` ref — an earlier draft
-of this paragraph named two refs that do not resolve here, which a reader would have discovered by
-following it.
+the archive commit itself was written. The archive tool is agent-infra's `scripts/bg-rescue-wip.sh`,
+materialised here as the gitignored `scripts/` pointer; it writes a local `refs/wip-local/<slug>` and
+mirrors the remote copy back as `refs/wip-remote/<slug>`. In this clone **both** of those namespaces
+carry the `issue-` archive (`refs/wip-local/issue-12894-allocator-spike` = `7d4e802fdf`,
+`refs/wip-remote/issue-12894-allocator-spike` = `5351f89298`), and **neither** carries a `feat-` one
+(`git rev-parse --verify refs/wip-local/feat-12894-allocator-spike` → `fatal: Needed a single
+revision`). Two earlier drafts of this paragraph were wrong in opposite directions — one named local
+refs that do not resolve here, the other asserted the namespaces were empty — and a bare
+`git for-each-ref` prints **three** fields (`<sha>\t<type>\t<refname>`), not four. Counts and shas also
+move, because the archive tool keeps writing: the commands are what reproduce, not the numbers.
 
 Relative to the `#12959` branch head (`acc9cbc035` — the PR's `headRefOid`, squash-merged onto `main` as
 `792269c931`, which is the form the document names elsewhere), **only the `issue-` ref** carries a substantive
-commit — `e2a9eadb87` (`acc9cbc035..refs/wip/issue-12894-allocator-spike` = `703613fa0c`, `7d4e802fdf`,
-`e2a9eadb87`, `5351f89298`); `acc9cbc035..refs/wip/feat-12894-allocator-spike` holds the `wip:` archive
-commit only. The substantive commit's two halves are **not** in the same state:
+commit — `acc9cbc035..703613fa0c` = `703613fa0c`, `7d4e802fdf`, `e2a9eadb87`, `5351f89298`, whereas
+`acc9cbc035..ec0bc91f6d` holds the `wip:` archive commit only. (Both ranges are named by sha rather than
+by ref, because `refs/wip/<slug>` resolves on `origin` and **not** in this clone.) The substantive commit's two halves are **not** in the same state:
 
 - **half 1 (the `seeded` exemption in the enumerated-replay guard) was REVERSED on `main`** — landed
   as `792269c931` (the `#12959` squash; the branch commit carrying the reversal is `f9f3e7e8b4`, which
