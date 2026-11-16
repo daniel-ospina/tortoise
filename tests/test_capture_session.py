@@ -6768,6 +6768,51 @@ def test_mcp_failed_recapture_names_the_stored_harness(tmp_path, monkeypatch):
         "the caller's declared harness claimed the last-error key")
 
 
+def test_mcp_capture_renders_a_typed_detail_as_its_message(tmp_path, monkeypatch):
+    """#12992: a TYPED `detail` must reach the dashboard sub-line as its MESSAGE.
+
+    The capture door's refusals are dicts now (the points/cost 402's
+    `quota_refusal_payload`, the 429 in #12992, the 503's
+    `{error_code, message}`), and TWO consumers render one detail: this tool
+    surface and `hosted_api._record_capture_last_error`, which stringifies a
+    dict to `detail["message"]` precisely because "a Python repr would leak
+    structure". The helper's branch only runs on a NON-string detail, so the
+    tool passing `str(detail)` defeated it and the org-visible sub-line carried
+    `{'code': 'quota_exceeded', …}` while the same refusal through REST — which
+    passes `e.detail` untouched — painted the sentence.
+
+    RED mutation: restore `str(detail)` at the `_record_capture_last_error`
+    call in `tortoise_session_capture` → the stored value becomes the repr and
+    both assertions fail. GREEN: message on both surfaces, identically.
+    """
+    from tortoise.mcp_server import tortoise_session_capture
+
+    typed = {"code": "quota_exceeded",
+             "message": "Team points limit reached: 5 in use + 2 estimated "
+                        "for this capture exceeds 4. Upgrade your plan.",
+             "resource": "points", "used": 5, "limit": 4, "estimate": 2}
+
+    def _refuse(*_a, **_k):
+        raise _ha.HTTPException(status_code=402, detail=typed)
+
+    with _mcp_team_context(tmp_path, monkeypatch):
+        # the capture impl is imported INSIDE `tortoise_session_capture`, so the
+        # module attribute is the seam this test patches.
+        monkeypatch.setattr(_ha, "_capture_session_impl", _refuse)
+        result = tortoise_session_capture(
+            conversation=_CONV, harness="claude", session_id="s-12992-detail")
+        st = _ha._get_onboarding_state("team-1727-mcp")
+    assert result.get("status") == 402, result
+    assert result.get("error") == typed["message"], (
+        "the tool surface rendered a typed detail as something other than its "
+        f"message: {result.get('error')!r}")
+    stored = st.get("session_capture_last_error_claude")
+    assert stored == typed["message"], (
+        "the dashboard sub-line carries a Python repr instead of the message — "
+        f"the REST half of this same detail would show {typed['message']!r}, "
+        f"got {stored!r}")
+
+
 def test_mcp_capture_missing_max_sessions_fails_closed(tmp_path, monkeypatch):
     """#4010: the capture bridge carries `max_sessions` only when it is
     actually PRESENT, so a keyless limits dict reaches the sessions gate and

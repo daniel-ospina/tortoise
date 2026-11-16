@@ -9740,13 +9740,23 @@ def tortoise_session_capture(conversation: list[dict],
             # ``_stored_session_harness`` fails open to None, which restores
             # the fresh-session rule (the claim only ever introduces a harness
             # the server has not stamped).
+            #
+            # ⛔ THE RAW `detail`, NEVER `str(detail)` (#12992 review P1). The
+            # helper stringifies a TYPED detail to its message
+            # (`hosted_api._record_capture_last_error`); pre-stringifying here
+            # defeated that branch, so a dict detail — the points/cost 402's
+            # `quota_refusal_payload`, the 503's `{error_code, message}` — was
+            # written to the dashboard sub-line as a PYTHON REPR while the SAME
+            # refusal through REST (which passes `e.detail` untouched) painted
+            # the sentence. One detail, two renderings, and the org-visible one
+            # was the unreadable one.
             with contextlib.suppress(Exception):
                 _record_capture_last_error(
                     org_id,
                     _observed_capture_harness(
                         org, harness,
                         asyncio.run(_stored_session_harness(org, session_id))),
-                    str(detail))
+                    detail)
         # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
         # — the points-estimate gate, the cohort cost cap, or the
         # ``_check_org_limit(org, "sessions")`` limit — so carry the shared
