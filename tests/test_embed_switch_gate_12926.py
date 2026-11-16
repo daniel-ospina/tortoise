@@ -3678,3 +3678,83 @@ def test_a_switch_stated_only_through_an_env_CALL_is_AMBIGUOUS_not_absent():
     )
     assert "TORTOISE_VALUE_GATE" not in stated, stated
     assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
+
+
+@pytest.mark.parametrize(
+    ("label", "export_line", "credited"),
+    [
+        # ⛔ MEASURED, non-interactive bash, `/usr/bin/env | grep '^K='`:
+        #   export -n K=1  -> NOT EXPORTED   (bash assigns K, then un-exports it)
+        #   export -f K=1  -> "not a function" (no assignment at all)
+        #   export -pn K=1 / export -np K=1 -> NOT EXPORTED
+        #   export -p K=1  -> K=1            (still exports)
+        #   export -- K=1  -> K=1            (still exports)
+        ("dash_n", "export -n TORTOISE_VALUE_GATE=1", False),
+        ("dash_f", "export -f TORTOISE_VALUE_GATE=1", False),
+        ("combined_pn", "export -pn TORTOISE_VALUE_GATE=1", False),
+        ("combined_np", "export -np TORTOISE_VALUE_GATE=1", False),
+        ("dash_p", "export -p TORTOISE_VALUE_GATE=1", True),
+        ("end_of_options", "export -- TORTOISE_VALUE_GATE=1", True),
+    ],
+)
+def test_an_export_OPTION_word_can_suppress_the_export(label, export_line, credited):
+    """Review P2 (measured 2026-11-16) — the reader had no option parsing on `export`.
+
+    `_shell_exports` skipped a token with no `=` as "`export NAME` states no value" and then
+    credited the assignment AFTER it, so `export -n K=1` — which bash runs as "assign K, then
+    UN-EXPORT it" — was credited. The most damaging spelling is the retraction-shaped one:
+
+        export TORTOISE_VALUE_GATE=1
+        export TORTOISE_EMBED_GATE=1
+        export -n TORTOISE_VALUE_GATE=1
+
+    which the gate reported as `ok … TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1` (exit 0) while
+    `/usr/bin/env` in the exec'd process showed only `TORTOISE_EMBED_GATE=1`.
+
+    Mutation-proved: dropping the option arm reds the four refused rows and leaves the two
+    crediting rows green, so this pins the option words and not `export` itself.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n" + export_line + '\nexec "$@"\n'
+    )
+    if credited:
+        assert stated.get("TORTOISE_VALUE_GATE") == "1", (label, stated, ambiguous)
+        assert "TORTOISE_VALUE_GATE" not in ambiguous, (label, ambiguous)
+    else:
+        assert stated.get("TORTOISE_VALUE_GATE") != "1", (
+            f"{label}: bash does not export this assignment: {stated}"
+        )
+        assert "TORTOISE_VALUE_GATE" in ambiguous, (label, ambiguous)
+
+    # The retraction half: `export -n K=1` on an ALREADY-armed switch takes it back, exactly like
+    # the value-less `export -n K` the file already pinned.
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/bash\nexport TORTOISE_VALUE_GATE=1\nexport -n TORTOISE_VALUE_GATE=1\nexec \"$@\"\n"
+    )
+    assert "TORTOISE_VALUE_GATE" not in stated, stated
+    assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
+
+
+def test_a_NESTED_default_is_refused_and_the_bound_is_named():
+    """Review P2/MIRROR (measured 2026-11-16) — the nested-default direction, pinned as a BOUND.
+
+    ⛔ `"${X:-${Y}}"` is a FAIL-OPEN the fix at `31aab6cc14` closed: bash resolves it EMPTY when
+    both are unset, and empty reads OFF for `TORTOISE_VALUE_GATE`, so crediting it would run the
+    discard half off while the gate said `ok`. It must stay refused.
+
+    ⚠️ `"${X:-${Y:-1}}"` is the MIRROR and it is deliberately ALSO refused, which is a FALSE
+    BLOCK, not a fail-open: bash resolves it to `1`. The reader's expansion tokenizer stops at the
+    first `}`, so the nested fallback never reaches the recursive `_fallback_states_a_value` rule
+    that would credit it. That is the fail-closed direction (a refusal a reader can see and act
+    on) and it is a declared BOUND rather than a claim: this test pins it so the day the tokenizer
+    learns nesting, this row reds and the credit moves to the mirror arm deliberately.
+    """
+    for label, value in {
+        "refused_nested_empty": '"${X:-${Y}}"',
+        "refused_nested_default": '"${X:-${Y:-1}}"',
+    }.items():
+        stated, ambiguous = gate._shell_assignments(
+            f'#!/bin/bash\nexport TORTOISE_VALUE_GATE={value}\nexec "$@"\n'
+        )
+        assert "TORTOISE_VALUE_GATE" not in stated, (label, stated)
+        assert "TORTOISE_VALUE_GATE" in ambiguous, (label, ambiguous)

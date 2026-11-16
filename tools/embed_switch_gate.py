@@ -921,7 +921,16 @@ def _fallback_states_a_value(expansion: str) -> bool:
     # it is refused; the fail-CLOSED direction is the only one a reader with no resolver may take.
     if not fallback:
         return False
-    return not ("$" in fallback or "`" in fallback)
+    if "$" not in fallback and "`" not in fallback:
+        return True
+    # ⛔ A NESTED default is the same question one level down, not a blanket refusal (review P2,
+    # measured BOTH ways 2026-11-16). `bool(fallback)` + "no `$` anywhere" was right about
+    # `${X:-$FALLBACK}` (an unset variable) and wrong about `${X:-${Y:-1}}`, which bash resolves to
+    # `1` — refusing it is a false block of an honest entrypoint. Recursing answers both:
+    # `${X:-${Y:-1}}` -> `_states_a_literal("${Y:-1}")` -> `1` -> True, while
+    # `${X:-${Y}}` -> `_states_a_literal("${Y}")` -> no fallback -> False. Terminates because each
+    # level carries strictly fewer `$`.
+    return _states_a_literal(fallback)
 
 #: Env keys kept when the resolver shell is scrubbed. Deliberately an ALLOWLIST: a lane's
 #: exported `TORTOISE_EMBED_GATE` is not a shipped default, and `${…:-1}` inside a channel would
@@ -1774,6 +1783,21 @@ def _shell_exports(line: str, structure: str) -> list[tuple[str, str]]:
         return []  # the `export` is inside a span: text, not a statement
     pairs: list[tuple[str, str]] = []
     for token in _export_tokens(match.group("body")):
+        if token.startswith("-") and "=" not in token:
+            # ⛔ AN OPTION WORD CAN SUPPRESS THE EXPORT, and the reader used to skip it as "a token
+            # with no `=`" and then credit the assignment AFTER it (review P2, measured
+            # 2026-11-16). `export -n K=1` ASSIGNS K and then UN-EXPORTS it (`bash` prints
+            # `K=1` for `$K` and nothing from `/usr/bin/env`); `export -f K=1` refuses the
+            # assignment outright (`not a function`). The reader credited both, so a script that
+            # first armed the switch and then `export -n`'d it read `ok … TORTOISE_VALUE_GATE=1`
+            # while the process had no such variable at all — the fail-OPEN direction.
+            # Measured flag set, non-interactive bash: `-p` and `--` still export (`K=1`),
+            # `-n`, `-f`, `-pn` and `-np` do not. So crediting is allowed only when every option
+            # word is `--` or spelled entirely with `p`; anything else states nothing this reader
+            # can call STATED (and `_SHELL_EXPORT_UNEXPORT` handles the `-n` retraction).
+            if token == "--" or set(token[1:]) <= {"p"}:
+                continue
+            return []
         key, separator, value = token.partition("=")
         if not separator or not _SHELL_KEY.match(key):
             continue  # `export NAME` states no value; not an arm
@@ -2109,6 +2133,14 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 or (unexport := _SHELL_EXPORT_UNEXPORT.match(content_raw))
             ) and _statement_is_code(content_raw, content_view):
                 for name in _unquote_all((unset or unexport).group("names")):
+                    # ⛔ `unset` short-circuits the walrus above, so `unexport` is UNBOUND when it
+                    # matched — read the branch off `unset` instead of testing `unexport`.
+                    if not unset:
+                        # ⛔ The VALUED spelling is the same statement (review P2, measured): bash
+                        # runs `export -n K=1` as "assign K, then un-export it", so the process has
+                        # K set but NOT in its environment. `_SHELL_EXPORT_UNEXPORT` captures the
+                        # whole `K=1` word, so the name is read off the left of the `=`.
+                        name = name.partition("=")[0]
                     if name in SWITCHES and (retracts or nested_retracts):
                         # ⛔ A NESTED `unset` neither credits nor retracts (review P2, measured).
                         # These branches ran before, and ignored, the `conditional` guard, so a
