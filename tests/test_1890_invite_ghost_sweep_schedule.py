@@ -36,7 +36,12 @@ class _FakeSDK:
         self._raises = raises
         self.sweeps = 0
 
-    def sweep_invite_ghost_memberships(self) -> dict:
+    # ⛔ The PRIVATE seam, because that is the name the schedulers call. #12901 wave 2
+    # closed the public door (`sweep_invite_ghost_memberships` was console maintenance,
+    # never product surface) and kept the body as `_sweep_invite_ghost_memberships`; a fake
+    # that only defines the retired public name is a fake that silently tests nothing —
+    # which is exactly how these three rows red when the door closes.
+    def _sweep_invite_ghost_memberships(self) -> dict:
         self.calls.append("sweep_invite_ghost_memberships")
         self.sweeps += 1
         if self._raises is not None:
