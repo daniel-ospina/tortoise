@@ -1342,7 +1342,9 @@ class TestCapabilityModel:
         # while the key it deletes exists in the map AND in the AST scan.
         # `update_point` retired into the container, so deleting it became a
         # no-op and the assertion could never fire; `update_knowledge` is the
-        # live site (two of them, 5578 and 6819).
+        # live site (three of them: `tortoise_update_point` 5578,
+        # `tortoise_update` 6529, `tortoise_update_entity` 6832 — #12915 review F1
+        # added the middle one when the container's `props` arm was re-routed).
         assert "update_knowledge" in DECLARED_WRITE_SURFACE_MAP
         omitted = {k: v for k, v in DECLARED_WRITE_SURFACE_MAP.items()
                    if k != "update_knowledge"}

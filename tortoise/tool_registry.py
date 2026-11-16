@@ -1377,7 +1377,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "get a plain property update.",
         risk="destructive",
         http_policy=True,
-        sdk_method="update",
+        # #12915 review F1: this door routes through `sdk.update_knowledge` (the
+        # relay `_update_entity_any`, which the absorbed `tortoise_update_point` /
+        # `tortoise_update_entity` handlers already call), NOT `sdk.update` —
+        # `update` sends a Point to `update_point`, which journals no `restatus`
+        # record and refuses every non-promote transition by a fixed sentence.
+        # This door is what `tortoise_update_knowledge`'s `props` arm delegates to,
+        # so the container and the doors it absorbs cannot disagree about behaviour.
+        sdk_method="update_knowledge",
     ),
     ToolDefinition(
         name="tortoise_delete",
@@ -1502,7 +1509,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         http_policy=True,
         # #4282 Phase 2: this container BINDS NO SINGLE SDK METHOD — it dispatches
         # per arm to the handler it absorbed (`props` -> `tortoise_update` ->
-        # `sdk.update`; `annotation` -> `sdk.annotate_operator`; the temporal arms ->
+        # `sdk.update_knowledge`, the `_update_entity_any` relay; `annotation` ->
+        # `sdk.annotate_operator`; the temporal arms ->
         # `sdk.retract_point` / `sdk.invalidate_point`), which is the SAME shape its
         # two sibling containers ship with (`tortoise_adjust_relationship`,
         # `tortoise_refresh_confidence`) and the shape `tortoise_graph_overview`

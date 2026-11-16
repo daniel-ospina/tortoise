@@ -6507,13 +6507,26 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
 def tortoise_update(id: str, props: Any = None) -> dict:
     """Update a Point OR entity by id. Points get point-lifecycle semantics
     (draft→live promote via status — an already-live point is an idempotent
-    no-op, version increment for Point:Object, status validation); entities
-    get a plain property update."""
+    no-op, version increment for Point:Object, status validation, a journalled
+    `restatus` for a status write, and a named refusal for an undeclared
+    transition); entities get a plain property update.
+
+    ⛔ Route is `sdk.update_knowledge`, **not** `sdk.update` (#12915 review F1).
+    This door is the one `tortoise_update_knowledge`'s `props` arm delegates to,
+    and `sdk.update` sends a Point to `update_point`, which (a) appends NO
+    journal record for a status write — the `derived = replay(journal)` class,
+    so a rebuild loses the transition — and (b) refuses every non-promote
+    transition with one fixed sentence that names neither the target status nor
+    the transition. `update_knowledge`'s property arm is the same RELAY the
+    absorbed `tortoise_update_point` / `tortoise_update_entity` handlers below
+    already call (`_update_entity_any` → `_update_entity`), so all four doors
+    land on one writer and cannot disagree about behaviour.
+    """
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
-    return _safe(_quota_gated(_get_org_sdk().update, "points"),
+    return _safe(_quota_gated(_get_org_sdk().update_knowledge, "points"),
                  id, **(props or {}))
 
 
@@ -7380,6 +7393,23 @@ def tortoise_update_knowledge(id: str, props: Any = None,
             return _SafeError({"error": "update_knowledge: annotation= must be an "
                                         "object of the four epistemic dimensions",
                                "code": ERR_INVALID})
+        # ⛔ `dry_run` on THIS arm is REFUSED, never ignored (#12915 review F2).
+        # It used to be: the arm neither previewed nor refused, so it WROTE —
+        # while `_dry_run_tool_names()` lists this container (it declares a
+        # `dry_run` parameter) and `_arguments_say_preview` therefore recorded
+        # the call as a preview that "writes nothing". An agent asking for a
+        # preview got a real graph write plus a write-ack saying nothing had
+        # been written: a false PASS in the disclosure path (#10084), not a UX
+        # nit. The property arm refuses with the same shape — only the two
+        # temporal arms have a preview to return.
+        if dry_run:
+            return _SafeError({
+                "error": ("update_knowledge: dry_run applies to the retract and "
+                          "invalidate arms only — annotating a link has no "
+                          "preview, so this call would have WRITTEN the four "
+                          "dimensions while reporting a preview. Drop dry_run "
+                          "to record the annotation."),
+                "code": ERR_INVALID})
         try:
             return tortoise_annotate_operator(id, **annotation)
         except TypeError as exc:
@@ -7438,7 +7468,10 @@ def tortoise_update_knowledge(id: str, props: Any = None,
                                     "update has no preview.",
                            "code": ERR_INVALID})
     # The property arm: `tortoise_update` IS the Point/entity dispatcher, so this
-    # does not choose a type and cannot choose it wrongly.
+    # does not choose a type and cannot choose it wrongly. It routes through
+    # `sdk.update_knowledge` (#12915 review F1), the same relay the absorbed
+    # `tortoise_update_point` / `tortoise_update_entity` handlers call — so the
+    # Point arm journals its `restatus` and names a refused transition here too.
     return tortoise_update(id, props=props)
 
 

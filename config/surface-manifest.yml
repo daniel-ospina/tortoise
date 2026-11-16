@@ -1085,7 +1085,7 @@ retired:
   approval: null
 - name: tortoise_update
   use_instead: tortoise_update_knowledge(id, props=...)
-  sdk_method: update
+  sdk_method: update_knowledge
   http_policy: true
   approval: null
 - name: tortoise_update_entity
@@ -1444,7 +1444,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_update_knowledge
-  served_from: tortoise/mcp_server.py:b8f981ea3ed1080d
+  served_from: tortoise/mcp_server.py:b200106389f77cea
   served_attributes: c76eb7b793da477b
   family: memory
   family_rank: 1
@@ -5490,11 +5490,12 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.update.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_update (retired)'
+  dependency: 'reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling,
+    tenant-rest'
   lifecycle: active
   used_by: eval-harness, tooling, skill-docs, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
+  recommendation: review
+  reason: 'no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest'
   recommended_family: null
   proposed: false
   exemption: false
@@ -5513,12 +5514,12 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.update_knowledge.
-  dependency: 'reached by 0 registered tool(s) and 2 retired name(s): tortoise_update_entity (retired), tortoise_update_point
-    (retired)'
+  dependency: 'reached by 0 registered tool(s) and 3 retired name(s): tortoise_update (retired), tortoise_update_entity
+    (retired), tortoise_update_point (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 0 registered tool(s) and 2 retired name(s)
+  reason: reached by 0 registered tool(s) and 3 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false

@@ -276,7 +276,15 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "checkpoint": "tortoise_checkpoint",
     "diary_write": "tortoise_diary_write",
     "create_entity": "tortoise_create_entity",
-    "update": "tortoise_update",
+    # ⛔ `update` LEFT this map in #11609 lane B (#12915 review F1): no MCP handler
+    # quota-gates `sdk.update` any more. `tortoise_update` — the door the
+    # `tortoise_update_knowledge` container's `props` arm delegates to — routes
+    # through `sdk.update_knowledge` (the same `_update_entity_any` relay
+    # `tortoise_update_point` and `tortoise_update_entity` call), because `update`
+    # sends a Point to `update_point`, which journals no `restatus` record and
+    # refuses every non-promote transition by a fixed sentence. Keeping the key
+    # would red the inverse arm ("declared write methods with no wrap site") on a
+    # method nothing writes through.
     "annotate_operator": "tortoise_operator_action",
     "create_subject": "tortoise_create_subject",
     "create_object": "tortoise_create_object",
