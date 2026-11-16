@@ -12920,8 +12920,12 @@ def test_the_legacy_head_really_predates_the_flip():
     assert "os.environ.get(ENV_FLAG)" in source, (
         f"{head[:9]} does not read the flag the way the licence assumes")
     # …and the flip is what changed it, so the two heads genuinely differ.
-    assert 'os.environ.get(ENV_FLAG, "1")' in (_REPO / "tortoise/value_gate.py"
-                                               ).read_text()
+    # ⚠️ `#12926` moved the default into `resolve_enabled(raw)` (`value_gate_enabled()` now
+    # delegates), so the post-`#10996` spelling this arm proves is the resolver's, not the
+    # wrapper's. The CLAIM is unchanged — today's tree carries the default-ON the legacy head
+    # does not — and the arm follows the default to the one site that applies it.
+    assert 'is_truthy("1" if raw is None else raw)' in (
+        _REPO / "tortoise/value_gate.py").read_text()
 
 
 def test_the_arm_key_sets_are_the_producers():
@@ -15120,8 +15124,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert identity_hold[125 - 1].strip() == 'HOLD_ENDPOINT = "operator_endpoint"', (
         f"tortoise/identity_hold.py:125 reads {identity_hold[125 - 1].strip()!r}, not the "
         "HOLD's one declared kind")
-    assert value_gate[81 - 1].strip() == 'return is_truthy(os.environ.get(ENV_FLAG, "1"))', (
-        f"tortoise/value_gate.py:81 reads {value_gate[81 - 1].strip()!r}, not the default-ON "
+    # `#12926` moved the default to `resolve_enabled` — one site, shared with the startup
+    # diagnostic — and `git grep -n 'is_truthy("1"' tortoise/value_gate.py` is the re-derivation.
+    assert value_gate[89 - 1].strip() == 'return is_truthy("1" if raw is None else raw)', (
+        f"tortoise/value_gate.py:89 reads {value_gate[89 - 1].strip()!r}, not the default-ON "
         "the record cites")
     # ⛔ The RECORD side of all four, so a re-stale in the record reds too: every other cite
     # arm in this leg is two-directional (it pins the code line AND the record's citation of
@@ -15130,17 +15136,20 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # RANGE is asserted as the range its endpoints were just verified at, so the record cannot
     # name a different window than the one pinned above.
     for _cite in ("`pack_hierarchy.py:431`", "`probes/capstone_measure.py:275-283`",
-                  "`identity_hold.py:125`", "`tortoise/value_gate.py:81`"):
+                  "`identity_hold.py:125`", "`tortoise/value_gate.py:89`"):
         assert _cite in text, (
             f"the record must still cite {_cite} — the arm below pins the line it names, "
             "so deleting the citation would leave the pin asserting something no reader is "
             "sent to")
-    # ⛔ `value_gate.py:81` is stated TWICE — the prefixed cite in §2 and the BARE
+    # ⛔ The value-gate default is stated TWICE — the prefixed cite in §2 and the BARE
     # parenthetical in the §5 reproduction block (`# the default-ON itself
-    # (value_gate.py:81)`). The loop above watches the prefixed one only, so re-staling the
+    # (value_gate.py:89)`). The loop above watches the prefixed one only, so re-staling the
     # §5 copy shipped GREEN (measured) — the same asymmetry the `275-283` `sed` line had.
-    assert re.findall(r"(?<!tortoise/)value_gate\.py:81", text) == ["value_gate.py:81"], (
-        "the record states `value_gate.py:81` a second time in the §5 reproduction block, "
+    # ⚠️ The number was `81` until `#12926` moved the default out of `value_gate_enabled()`
+    # into `resolve_enabled(raw)`; both copies were re-derived together, which is what this
+    # arm exists to force.
+    assert re.findall(r"(?<!tortoise/)value_gate\.py:89", text) == ["value_gate.py:89"], (
+        "the record states `value_gate.py:89` a second time in the §5 reproduction block, "
         "bare — that copy must name the same line the §2 cite does")
 
     # A2's Object mint: the write seam that routes creation by kind, cited THREE
