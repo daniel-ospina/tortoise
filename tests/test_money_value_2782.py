@@ -693,7 +693,7 @@ class TestWriteBoundary:
 
     @pytest.mark.parametrize("label,update", ONE_SIDED_UPDATES,
                              ids=[s[0] for s in ONE_SIDED_UPDATES])
-    @pytest.mark.parametrize("door", ["update_entity", "update_point"])
+    @pytest.mark.parametrize("door", ["update_knowledge", "update_point"])
     def test_a_one_sided_update_cannot_strip_a_well_formed_value(
             self, journaled_sdk, door, label, update):
         """The gate grades the state the UPDATE LEAVES, never the bag.
@@ -709,7 +709,7 @@ class TestWriteBoundary:
         sdk, _events = journaled_sdk
         value = money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
                             verbatim="R$ 250.000,00")
-        if door == "update_entity":
+        if door == "update_knowledge":
             created = sdk.create_object("Tranche one-sided",
                                         "venture:tranche", **value)
         else:
@@ -843,7 +843,10 @@ class TestWriteBoundary:
 #: The two doors whose write is a bare ``SET n += $props`` — the only doors
 #: where a key present with ``None`` DELETES the property (#2782 review
 #: Finding 1). Both are updates, so both carry the update-shaped gate.
-UPDATE_DOORS = ("update_entity", "update_point")
+#: ⛔ #11609 Phase 2 retired `update_entity` into `update_knowledge`; the entity
+#: arm below is that container's, so the ENTITY half of every pin here is
+#: unchanged and the door name is the live one.
+UPDATE_DOORS = ("update_knowledge", "update_point")
 
 
 def _create_money_carrier(sdk, door: str, name: str = "Tranche U") -> str:
@@ -989,7 +992,7 @@ class TestUpdateDoorCannotDeleteOrMisScale:
         assert _whole_sum(sdk) == {"BRL": RELEASED_MINOR}
 
     @pytest.mark.parametrize("door,prop", [
-        ("update_entity", {"title": "Tranche U (renamed)"}),
+        ("update_knowledge", {"title": "Tranche U (renamed)"}),
         ("update_point", {"namespace": "finance"}),
     ])
     def test_a_non_money_update_on_a_money_node_is_untouched(
