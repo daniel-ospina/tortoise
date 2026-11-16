@@ -8742,17 +8742,26 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     before ``#12869`` and must keep accepting it (the review measured an
     ``AttributeError`` here, a regression this helper introduced).
 
-    ⛔ ``journals`` — "DROPPED" IS NOT TRUE OF THE RECORD. A non-persistable value
-    is dropped from the NODE, but at a door that appends a record the same value
-    is handed to the JSON encoder, which does NOT drop it: measured,
-    ``add_object(…, status=b'live')`` raised ``TypeError: Object of type bytes is
-    not JSON serializable`` out of ``EventLog.append`` — a bare traceback from the
-    very method this guard was added to, after ``_registration_id`` had already
-    stamped an id onto an adopted holder (a write with no record behind it, the
-    ``#3590`` live-without-durable class). ``bytes``/``bytearray``/``frozenset``
-    have no JSON form; ``dict`` does, and stays accepted. So a journaling door
-    refuses a status the encoder cannot carry, and says so instead of letting the
-    encoder be the thing that reports it.
+    ⛔ ``journals`` — "DROPPED" IS NOT TRUE OF THE RECORD, at ONE door. A
+    non-persistable value is dropped from the NODE, and at ``EventAPI.add_object``
+    the same value is handed to the JSON encoder, which does NOT drop it:
+    measured, ``add_object(…, status=b'live')`` raised ``TypeError: Object of type
+    bytes is not JSON serializable`` out of ``EventLog.append`` — a bare traceback
+    from the very method this guard was added to, after ``_registration_id`` had
+    stamped an id onto an adopted holder. ``bytes``/``bytearray``/``frozenset``
+    have no JSON form; ``dict`` does and stays accepted.
+
+    ⚠️ AND IT IS SCOPED TO THAT DOOR, because the mechanism is not general and
+    the first cut of this paragraph claimed it was (review round 3, P2).
+    ``create_entity`` does NOT raise: its journal leg is ``_journal_entity_event``,
+    which SWALLOWS the encoder failure and logs "the write is LIVE-ONLY and will
+    not survive a rebuild" (``#4240``). Measured: on ``main``,
+    ``create_object(status=b'live')`` with a journal is ACCEPTED, stores nothing,
+    and warns — and so is every OTHER unencodable prop on that lane (``tags=
+    frozenset(...)`` behaves identically at this head). Refusing there would
+    narrow ``status`` alone on a mechanism that is not ``status``-specific, with
+    no record to gain: the node never carries the value either way. So the
+    refusal is the door that RAISES, and ``#4240`` keeps the live-only lane.
 
     ⛔ ONE HELPER, THREE CALLERS (``create_entity(type='object')``,
     ``update_entity``'s Object arm, and ``EventAPI.add_object``). A rule stated
@@ -8788,21 +8797,15 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     if word is None:
         return                                      # the documented CLEAR
     if isinstance(word, str):
-        # ⛔ A `str` SUBCLASS that cannot be hashed is a word this guard cannot
-        # evaluate: `_np_status in _np_terminal` hashes it, so it raised
-        # `TypeError: unhashable type` out of the lifecycle guard — the residual
-        # of the very failure #12869 is about, one input class over (measured on
-        # a dead row, and on `origin/main` too). Refuse rather than crash.
-        try:
-            hash(word)
-        except TypeError:
-            raise ValueError(
-                f"{door} refused an UNREADABLE status for {target!r}: "
-                f"{word!r} is a `str` subclass whose `__hash__` is disabled, so "
-                f"the lifecycle guard cannot compare it with a declared word and "
-                f"would raise `TypeError` instead of answering (#12869). Pass "
-                f"`status` as a plain str."
-            ) from None
+        # ⛔ NO HASHABILITY PROBE HERE. An earlier round put one at this line and
+        # the review was right that it over-blocked: only `update_entity`'s
+        # dead-row path hashes the caller's word (`_np_status in _np_terminal`);
+        # a CREATE stores a `str` subclass by content, it round-trips from
+        # FalkorDB as a plain `str`, and `origin/main` measured ACCEPTED plus a
+        # normal later status write. The crash is therefore refused where it
+        # happens (the membership test), not at every door that shares this
+        # helper — refusing here rejected a write the writer performs, the
+        # `#7925` round-4 class this docstring opens by refusing.
         return                                      # a word
     # ⛔ ASKED BEFORE the landing scope below, and the ORDER is the whole point:
     # a value the NODE drops is exactly the value this check exists for, so
@@ -49385,6 +49388,16 @@ class TortoiseSDK:
                 # dead?" from a value that is not a word, and it will not guess.
                 # `None` cannot appear here (`collect` DROPS nulls) and would not
                 # be foreign if it did: an ABSENT status reads live (#9974 R1).
+                # ⛔ THIS REFUSAL APPLIES TO :Subject TOO, and that is a stated
+                # decision rather than an accident of the loop's shape (review
+                # round 3, P2 — it narrows a family the write-side guard leaves
+                # alone). The crash being removed is in THIS shared loop, so both
+                # families raised `TypeError` on an unhashable stored value; and
+                # an unreadable row is exactly as unreadable on one label as the
+                # other. `main` accepted a status write on such a Subject row —
+                # which is the fail-open direction this check exists to close, not
+                # a behaviour worth preserving. Pinned by
+                # `test_a_non_scalar_stored_STATUS_is_refused_for_a_SUBJECT_too`.
                 _np_foreign = [s for s in _np_stored
                                if s is not None and not isinstance(s, str)]
                 if _np_foreign:
@@ -49414,8 +49427,28 @@ class TortoiseSDK:
                 if all(s == _np_status for s in _np_stored):
                     continue            # entailed: no transition asked for
                 _np_dead = sorted(s for s in _np_stored if s in _np_terminal)
-                if not _np_dead or _np_status in _np_terminal:
-                    continue            # nothing dead, or dead->dead (legal here)
+                if not _np_dead:
+                    continue            # nothing dead
+                # ⛔ THE MEMBERSHIP TEST HASHES, so it is where a `str` SUBCLASS
+                # with `__hash__` disabled used to raise `TypeError: unhashable
+                # type` out of the guard — the very failure #12869 is about, one
+                # input class over (measured here and on `origin/main`). Refused
+                # AT THE HASH, not at every door: a create stores such a word by
+                # content and it round-trips as a plain `str`, so refusing it
+                # there was an over-block (review round 3, P2).
+                try:
+                    _np_asked_terminal = _np_status in _np_terminal
+                except TypeError:
+                    raise ValueError(
+                        f"update_entity refused an UNREADABLE status for "
+                        f"{id_val!r}: {_np_status!r} is a `str` subclass whose "
+                        f"`__hash__` is disabled, so this guard cannot compare "
+                        f"it with a declared word and would raise `TypeError` "
+                        f"instead of answering (#12869). Pass `status` as a "
+                        f"plain str."
+                    ) from None
+                if _np_asked_terminal:
+                    continue            # dead->dead (legal here)
                 # The carriers this row holds, keyed by the SAME declared
                 # properties the derivation reads (`DERIVED_FROM_RECORD`) —
                 # derived, never a literal pair, so a third declared source
@@ -50082,7 +50115,30 @@ class TortoiseSDK:
             # the caller actually NAMED — an unnamed one is ABSENT on the node
             # and reads LIVE, which is not a status to validate (hence the
             # read-only sentinel below: it decides nothing the fold writes).
-            _subj_status = props.get("status", "live")
+            # ⛔ PRESENCE MUST BE READ THE WAY THE WRITE IS APPLIED (#12869
+            # review round 3, P1). `props.get("status")` hashes the literal name,
+            # so a key that only RENDERS as `status` (a `str` subclass, the
+            # two-renderer contract above) passed this validation unread and was
+            # then written by the extra-props lane on `str(key)`. MEASURED: a
+            # `type='object'` create whose kind redirects onto the Subject layer
+            # (`core:organization`, see `_apply_kind_guard`) with
+            # `**{<str subclass, __str__ 'status'>: ['live']}` stored `['live']`
+            # on a `:Subject` row, after which every Subject status write on it is
+            # refused — the same unaddressable-row class this issue is about. The
+            # identical payload at a genuinely-Object door was already refused.
+            _subj_named = lifecycle_props_by_rendering(props, {"status"})
+            if _status_write_is_ambiguous(props):
+                raise ValueError(
+                    f"create_entity refused a CONFLICTING status write for "
+                    f"{name!r}: more than one key in this call renders as "
+                    f"`status`. A `str` subclass whose content and `__str__` "
+                    f"differ is filed under one name by the live write and the "
+                    f"other by the journal, so which word lands cannot be known "
+                    f"here — and reading the first one let a `None` key hide a "
+                    f"non-scalar behind it (#12869). Pass `status` ONCE, as a "
+                    f"plain str."
+                )
+            _subj_status = _subj_named["status"] if _subj_named else "live"
             if (not isinstance(_subj_status, str)
                     or _subj_status not in _SUBJECT_STATUS_VALUES):
                 raise ValueError(
@@ -50216,7 +50272,6 @@ class TortoiseSDK:
                     _refuse_non_string_object_status(
                         props, door="create_entity(type='object')",
                         target=name,
-                        journals=bool(self._event_log_path),
                         lands=lambda: not self._get_proj().g.query(
                             "MATCH (n:Object {id:$id}) RETURN count(n)",
                             params={"id": _obj_target},
