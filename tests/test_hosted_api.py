@@ -14748,10 +14748,23 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         A customer-facing refusal message is now routinely written as ONE shared
         constant so the raise site and the surface that reports it cannot drift
         (`_CAPTURE_CAPACITY_MESSAGE` is read by both `_reserve_capture_slot` and
-        `/health`'s capture block). A name resolves to no literal of its own, so
-        without this map such a message would fall into the documented
-        "non-literal" skip below and be INVISIBLE to every arm here — the guard
-        would stop reading the very prose it exists to check (#12992).
+        `/health`'s capture block). A name resolves to no literal of its own, and
+        what happens next depends on the SHAPE of the `detail=` node — so state both
+        instead of one consequence (#12992 review, P3: an earlier cut of this
+        docstring claimed the only outcome was INVISIBILITY, which is the wrong
+        omission mode for the dict shapes this map exists for):
+
+        * a **plain-str** detail that is a bare name — `detail=_SOME_MESSAGE` —
+          renders to `""` and the site falls into the documented "non-literal" skip
+          below: genuinely INVISIBLE, which is the case this map rescues;
+        * a **dict** detail — `detail={"code": _CODE, "message": _MSG, …}` — is not
+          skipped: `_prose` finds the `message` key, the unresolved `Name` renders to
+          `""`, and the whole-subtree fallback then yields the dict's KEYS. That is
+          non-empty, it contains "limit", so the site is IN-UNIVERSE and FAILS the
+          human-path question rather than vanishing — the false red this PR's
+          `MEMORY.md` entry records (measured: the capacity 429 was reported
+          uncompliant). Resolving the constant removes that false red; it is not what
+          keeps the site visible.
 
         ⛔ Resolution is PER MODULE, never one cross-module map: two modules may
         spell the same name differently, and a shared map would bind one
@@ -14807,9 +14820,22 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         uncompliant over-limit refusal, with its `detail` printed as its own
         keys).
 
-        ⛔ AND THE `message` READING MUST NOT BE ABLE TO MAKE A REFUSAL
-        INVISIBLE, which is why it is a PREFERENCE with a fallback and not a
-        substitution (measured, #12992 review P1). `_ingest_rate_limited`
+        ⛔ THE `message` READING MUST NOT BE ABLE TO MAKE A REFUSAL INVISIBLE
+        *BY RESOLVING TO NOTHING*, which is why it is a PREFERENCE with a fallback
+        and not a substitution (measured, #12992 review P1). ⛔ **The scope of that
+        guarantee is exactly "resolves to nothing", and saying more would be false**
+        (this PR's own review, P3): the fallback cannot rescue a dict whose LIMIT
+        vocabulary lives in `code` / `error_code` while its `message` is ordinary
+        prose — that site MOVES OUT OF THE UNIVERSE on the message reading. Measured
+        example in this very file: the `/v1/register` 429 used to enter on the `code`
+        value `over_request_rate_limit_ip`, and under the message-preferred reading
+        it is outside the universe and the row that cites it exempts nothing (the row
+        is kept, and says so). No site is LOST here today — the page's population is
+        41 rows at this head, every one compliant or category-exempt, with the
+        capacity 429 correctly out of it — so this is a stated RESIDUAL of the
+        reading, not a live gap: a refusal is invisible only if it never becomes
+        in-universe, which is the direction this guard cannot see. That is the
+        boundary the class's own note below records. `_ingest_rate_limited`
         (``hosted_api.py:10986``) builds ``"message": with_limit_contact(message)``
         — a CALL, so the message-only reading resolves to the empty string and
         the generic non-literal skip below swallowed the site ENTIRELY. It was
