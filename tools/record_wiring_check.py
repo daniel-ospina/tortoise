@@ -437,23 +437,35 @@ def live_door_writes_the_journals_position(
     for call in calls:
         bound = {kw.arg: kw.value for kw in call.keywords if kw.arg}
         value = bound.get("position")
-        if not _is_position_from_ordinal(value, bound=bound):
-            problems.append(
-                f"{_LIVE_DOOR}() calls {_call_name(call)}(…) with "
-                f"position={ast.unparse(value) if value is not None else '<unset>'}"
-                " — the live path must WRITE layer 1 from a number that "
-                "EXISTS: the journal's own position (#9190), so bind "
-                "`position=seq is not None`, or the record's allocator "
-                "(#12894), so bind `position=True if allocate else seq is not "
-                "None` AND `allocate=allocate`. A literal `False` is the "
-                "pre-#9190 deferral (layer 1 stays empty on every live write); a "
-                "literal `True` invents a number that collides with a later "
-                "replay's numbering"
-            )
         first_seq = bound.get("first_seq")
         allocate = bound.get("allocate")
         allocate_bound = (isinstance(allocate, ast.Name)
                           and allocate.id == "allocate")
+        if not _is_position_from_ordinal(value, bound=bound):
+            # ⛔ THE REMEDY IS PAIR-AWARE. Telling a caller whose body already
+            # binds `allocate=` to "bind `position=seq is not None`" would send it
+            # to the exact spelling the check just refused (measured: that
+            # message was emitted for `position=seq is not None` beside
+            # `allocate=allocate`).
+            remedy = (
+                "so bind `position=True if allocate else seq is not None` "
+                "(with `allocate=` bound, the plain ordinal form refuses the "
+                "`seq=None` population, because `replay_plan` refuses "
+                "`allocate=True` with `position=False`)"
+                if allocate_bound else
+                "so bind `position=seq is not None`, or the record's allocator "
+                "(#12894), so bind `position=True if allocate else seq is not "
+                "None` AND `allocate=allocate`"
+            )
+            problems.append(
+                f"{_LIVE_DOOR}() calls {_call_name(call)}(…) with "
+                f"position={ast.unparse(value) if value is not None else '<unset>'}"
+                " — the live path must WRITE layer 1 from a number that "
+                f"EXISTS: {remedy}. A literal `False` is the "
+                "pre-#9190 deferral (layer 1 stays empty on every live write); a "
+                "literal `True` invents a number that collides with a later "
+                "replay's numbering"
+            )
         if allocate_bound:
             # ⛔ THE ALLOCATOR ARM's WATERMARK (#12894 review cycle 1, P1). `seq`
             # must NOT be forwarded here: `replay_plan` REFUSES
@@ -499,16 +511,29 @@ def _is_position_from_ordinal(value: ast.expr | None,
 
     See :data:`_POSITION_FROM_ORDINAL` / :data:`_POSITION_FROM_ALLOCATOR`. The
     allocator form requires `allocate=` to be bound to the door's own parameter,
-    so the arm cannot be claimed by a body that never receives it."""
+    so the arm cannot be claimed by a body that never receives it.
+
+    ⛔ AND THE CONVERSE IS NOW ENFORCED TOO (#12894 review cycle 2, P2). When
+    `allocate=` IS bound, `position=` must be the ALLOCATOR form — accepting the
+    plain ordinal form there blessed a body this module exists to catch:
+    `position=seq is not None` beside `allocate=allocate` passes a
+    `position=False` the moment `log.append` could not prove a position, and
+    `replay_plan` refuses `allocate=True` with `position=False`
+    ("allocate=True writes the position rows … contradictory"), so EVERY write of
+    the documented `seq=None` population (#9252) would be refused as
+    `write_failed` with the WARNING "a replay heals the record" — the wrong
+    remedy for a population that is repeatable, not a bug. MEASURED: the gate
+    returned `[]` for exactly that body. The two arms are not interchangeable;
+    the binding has to be judged as a PAIR.
+    """
     if value is None:
         return False
     text = ast.unparse(value)
-    if text == _POSITION_FROM_ORDINAL:
-        return True
-    if text != _POSITION_FROM_ALLOCATOR:
-        return False
     allocate = (bound or {}).get("allocate")
-    return isinstance(allocate, ast.Name) and allocate.id == "allocate"
+    allocate_bound = isinstance(allocate, ast.Name) and allocate.id == "allocate"
+    if allocate_bound:
+        return text == _POSITION_FROM_ALLOCATOR
+    return text == _POSITION_FROM_ORDINAL
 
 
 #: The `first_seq=` forms that genuinely USE the append's ordinal. An

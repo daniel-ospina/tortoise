@@ -871,8 +871,12 @@ NOT_BOUND_BY_A_PYTHON_VALUE: frozenset[str] = frozenset({
 #: `(text[] event_types, jsonb[] payloads, timestamptz[] recorded_at, n, org_id,
 #: graph_id, n, org_id, graph_id)`. Enumerating them here says exactly that, and
 #: `test_the_allocator_columns_are_in_its_statement` keeps the claim honest: the
-#: names below must still appear in `record_allocator.SEED_SQL`/`ALLOCATION_SQL`
-#: or in the table's DDL.
+#: names below must appear in `record_allocator.SEED_SQL`/`ALLOCATION_SQL`.
+#: ⛔ NOT "or in the table's DDL" (#12894 review cycle 2, P2 — this line and the
+#: test's own docstring both used to say so, advertising an escape hatch the
+#: assertion had already deleted): the migration CREATES every column of this
+#: table, so that disjunct was TRUE for all of them and the test could not fail
+#: on its account. The enumeration is about what the ALLOCATOR WRITES.
 WRITTEN_BY_THE_ALLOCATOR: frozenset[str] = frozenset({
     "record_cursor.org_id",       # INSERT/UPDATE predicate + inserted value
     "record_cursor.graph_id",     # INSERT/UPDATE predicate + inserted value
@@ -884,9 +888,11 @@ WRITTEN_BY_THE_ALLOCATOR: frozenset[str] = frozenset({
 
 def test_the_allocator_columns_are_in_its_statement():
     """The enumeration above is not a free pass: every column it names for the
-    allocator must actually be written by the allocator's SQL or created by the
-    migration, and the allocator must not have grown a column nobody accounted
-    for."""
+    allocator must actually be written by the allocator's own SQL — `SEED_SQL`
+    or `ALLOCATION_SQL` — and the allocator must not have grown a column nobody
+    accounted for. "Created by the migration" is deliberately NOT a substitute
+    (see `WRITTEN_BY_THE_ALLOCATOR`): the migration creates every column of the
+    table, so that clause could never fail."""
     from tortoise import record_allocator as ra
 
     for entry in WRITTEN_BY_THE_ALLOCATOR:

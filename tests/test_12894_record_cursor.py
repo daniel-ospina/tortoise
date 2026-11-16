@@ -41,6 +41,7 @@ no global `statement_timeout`     `test_the_allocator_imposes_no_global_statemen
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -196,22 +197,34 @@ def test_case_two_is_unrepresentable_in_the_seed_sql() -> None:
     # `cursor.execute(SEED_SQL)` would be the enforcement the SQL is supposed to
     # own.
     #
-    # ⛔ AND `rindex` WAS THE SAME DEFECT ONE LAYER DOWN (measured). Asserting
-    # only that the LAST occurrence is after `execute_at` passes with the exact
+    # ⛔ AND THE SUBSTRING SCAN WAS THE SAME DEFECT ONE LAYER DOWN (measured).
+    # Two earlier spellings were vacuous or wrong: `X or True` could not fail;
+    # then `rindex("row_max > floor") > execute_at` passed with the exact
     # pre-flight this comment forbids, because the statement's own classifier
-    # STAYS the last occurrence either way: a `row_max > floor` branch planted
-    # immediately before `cursor.execute(SEED_SQL)` left the assertion GREEN, so
-    # it named a pin it did not have. What is asserted now is that NO comparison
-    # can run before the statement — and the scan is confined to the CODE,
-    # because the docstring's prose names `row_max > floor` while explaining case
-    # 2, and a whole-body scan fires on that instead.
-    doc_end = seed_body.index('"""', seed_body.index('"""') + 3)
-    code = seed_body[doc_end:]
-    code_execute_at = code.index("cursor.execute(SEED_SQL")
-    pre_flight = code.find("row_max >")
-    assert pre_flight == -1 or pre_flight > code_execute_at, (
-        f"a `row_max` comparison runs at offset {pre_flight}, BEFORE the seed "
-        f"statement at {code_execute_at} — case 2 would be enforced by Python "
+    # STAYS the last occurrence. A textual scan is wrong in BOTH directions, and
+    # both were measured on this file: `if floor < row_max:` (identical
+    # semantics, operator flipped) was GREEN — case 2 enforced by Python with the
+    # SQL guard unreachable — and adding a COMMENT above the statement that merely
+    # NAMED `row_max > floor` was RED. So the pin is over the CODE STRUCTURE, the
+    # way `tools/record_wiring_check.py` judges the door: no `Compare` node with
+    # `row_max` as an operand may exist before the seed statement, in any
+    # operator spelling, and a comment is not a node.
+    tree = ast.parse(source)
+    seed_fn = next(n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == "seed")
+    execute_line = next(
+        i for i, line in enumerate(source.splitlines(), start=1)
+        if "cursor.execute(SEED_SQL" in line)
+    early = sorted(
+        node.lineno for node in ast.walk(seed_fn)
+        if isinstance(node, ast.Compare)
+        and node.lineno < execute_line
+        and any(isinstance(side, ast.Name) and side.id == "row_max"
+                for side in [node.left, *node.comparators])
+    )
+    assert not early, (
+        f"a `row_max` comparison runs at line(s) {early}, BEFORE the seed "
+        f"statement at line {execute_line} — case 2 would be enforced by Python "
         f"rather than by the SQL's own `WHERE row_max <= enumerated_floor` "
         f"guard, which would make that guard unreachable and untested")
 
