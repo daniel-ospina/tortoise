@@ -405,7 +405,7 @@ falsifier a later review measured at this head (PR #12474, P2) — that the `UNM
 one ordering it does not cover, since a LATER resolvable assignment still decides the file while the
 unresolvable line stays REPORTED in `indeterminate` in both orders; shown RED by reverting its own fix,
 with the phrase pin normalising the docstring's whitespace so a reflow cannot red it)
-and four by the fresh review of `#12902` — a shape that assigns MULTIPLE names on ONE line, where the
+and ten by the fresh reviews of `#12902` — a shape that assigns MULTIPLE names on ONE line, where the
 flag is not the first: a shell `export OTHER=1 FLAG=0` (bash runs `0`; the value was read
 line-start-only, so the line appended NO decision and the earlier truthy one stood — a false ARM, and
 `export OTHER=1 FLAG=1` alone produced no decision either, so a genuinely armed entrypoint could read
@@ -415,10 +415,17 @@ shown RED against the unfixed blob and green after), and the self-referencing de
 `export FLAG=${FLAG:-1}` judged against the value the variable ALREADY holds (`bash -c 'export F=0;
 export F=${F:-1}; echo $F'` prints `0`, so the file is OFF while the pre-fix walker published `ON` —
 the open P1 of that review; RED against a mutant that ignores the tracked value, and its same-line
-arm RED against a mutant that tracks the value per LINE instead of per COMMAND), and three more that
+arm RED against a mutant that tracks the value per LINE instead of per COMMAND), three more that
 published a CLAIM the run did not make: a FALSE-ARM bound certified as `cannot_see` (`#12978`), a
 value-less compose entry described as "not an unset" when the deployment removes the image's `ENV`,
-and a REFUSED resolver named as having "answered"
+and a REFUSED resolver named as having "answered"; and three by the SECOND fresh review of `#12902` —
+the comment-blind splitter (a lone `&`/`|`, and a `;`, inside a `#` comment were executed as shell
+grammar, so `export FLAG=0   # CPU & memory` returned NO commands and the earlier truthy arm stood: a
+REGRESSION against `main`, which read `OFF`; RED against a mutant that drops the comment strip), the
+per-COMMAND export state (`unset FLAG; export FLAG=1` published `OFF` while bash has `1`, and one
+source line was counted as two no-value declarations; RED against a mutant that reads the line-final
+state), and a heredoc BODY scanned as commands (`cat <<EOF` then `export FLAG=1` arms nothing in bash
+and armed the file; the shape predates this PR, RED against a mutant that ignores the heredoc bodies)
 (`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 33 + 9 = 257`).
 The `33` are `#12549`'s channel-resolver falsifiers: both orderings of a per-service
 compose disagreement, a flow mapping, an anchor+merge key, a resolver that REFUSES

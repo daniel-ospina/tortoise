@@ -3677,6 +3677,59 @@ def _shell_unset_values(line: str) -> set[str]:
             if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", word.strip("'\""))}
 
 
+def _shell_strip_comment(line: str) -> str:
+    """``line`` with a trailing shell COMMENT removed, quote- and escape-aware.
+
+    ⛔ **A `#` comment is not shell syntax, and reading it as such destroyed a real
+    DISARM** (fresh review of #12902, P1). `_shell_commands` tracked quotes and
+    escapes but not comments, so an operator INSIDE a comment was executed as
+    grammar: `export FLAG=0   # CPU & memory` returned NO commands at all (the lone
+    `&` hit the subshell early-return, dropping the command before it), and
+    `export FLAG=0   # off; FLAG=1` split into two commands and scanned the commented
+    text as an assignment. Measured at the pre-fix head: `deployment["on"]` read
+    `True` for an entrypoint bash runs OFF, and `origin/main` read it `OFF` — so this
+    was a REGRESSION, not a carried bound.
+
+    bash's rule is the one implemented: a `#` starts a comment only at the START of a
+    word — the beginning of the line, or after blank space or an operator — and never
+    inside quotes. `echo a#b` keeps its `#` (bash prints `a#b`), `$#` and `${#name}`
+    are parameter syntax (the character before is `$` / `{`), and a backslash-escaped
+    `#` keeps its literal.
+    """
+    index = 0
+    length = len(line)
+    quote: str | None = None
+    escaped = False
+    previous = ""
+    while index < length:
+        char = line[index]
+        if escaped:
+            previous = char
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            index += 1
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            previous = char
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            previous = char
+            index += 1
+            continue
+        if char == "#" and previous in ("", " ", "\t", ";", "&", "|", "(", ")"):
+            return line[:index]
+        previous = char
+        index += 1
+    return line
+
+
 def _shell_commands(line: str) -> list[str]:
     """Split ONE shell line into the simple commands that run in the PARENT shell, in order.
 
@@ -3692,7 +3745,13 @@ def _shell_commands(line: str) -> list[str]:
     The command BEFORE the operator is therefore DROPPED and the rest of the line is not
     claimed: a real job/pipeline evaluation is the half a text reader cannot do, and
     dropping is the conservative half it can honestly take.
+
+    ⛔ **A COMMENT IS STRIPPED FIRST** (`_shell_strip_comment`): an operator in a
+    comment is prose, and treating it as grammar dropped a real disarm — see that
+    function. The comment is stripped BEFORE splitting, so no returned command carries
+    one and the callers' `_assigned_value` never reads commented-out text as a value.
     """
+    line = _shell_strip_comment(line)
     commands: list[str] = []
     current: list[str] = []
     quote: str | None = None
@@ -3742,6 +3801,105 @@ def _shell_commands(line: str) -> list[str]:
     return commands
 
 
+def _shell_heredoc_headers(line: str) -> list[tuple[str, bool]]:
+    """The heredoc delimiters a line OPENS, as ``(word, stripping_tabs)`` in order.
+
+    Quote-aware, because the quotes decide both what the delimiter IS and whether the
+    `<<` is a heredoc at all: `echo "a<<b"` opens nothing, while `cat <<'EOF'` opens a
+    heredoc whose delimiter is the unquoted `EOF` (the quotes stop EXPANSION in the
+    body; they are not part of the word). `<<<` is a HERE-STRING — it feeds one already
+    written argument and has no body — so it is skipped rather than queued, which would
+    otherwise swallow every line below it.
+    """
+    headers: list[tuple[str, bool]] = []
+    index = 0
+    length = len(line)
+    quote: str | None = None
+    escaped = False
+    while index < length:
+        char = line[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            index += 1
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            index += 1
+            continue
+        if char == "#" and (index == 0 or line[index - 1] in " \t;&|()"):
+            break                      # a comment: nothing after it opens a heredoc
+        if line[index:index + 3] == "<<<":
+            index += 3                 # here-string: one argument, NO body
+            continue
+        if line[index:index + 2] == "<<":
+            cursor = index + 2
+            dash = False
+            if cursor < length and line[cursor] == "-":
+                dash = True
+                cursor += 1
+            while cursor < length and line[cursor] in " \t":
+                cursor += 1
+            word_quote = None
+            if cursor < length and line[cursor] in "'\"":
+                word_quote = line[cursor]
+                cursor += 1
+            start = cursor
+            while cursor < length and (line[cursor].isalnum() or line[cursor] == "_"):
+                cursor += 1
+            word = line[start:cursor]
+            if word and word_quote is not None:
+                if cursor < length and line[cursor] == word_quote:
+                    cursor += 1
+                else:
+                    word = ""          # unterminated quote: not confidently a heredoc
+            if word:
+                headers.append((word, dash))
+                index = cursor
+                continue
+        index += 1
+    return headers
+
+
+def _shell_heredoc_bodies(lines: list[str]) -> set[int]:
+    """The 1-based line numbers that are a heredoc BODY, including its TERMINATOR.
+
+    ``lines`` (not the joined text) because the terminator is matched against a WHOLE
+    line, and the caller already has the split it scans.
+
+    ⛔ Why this exists: a body is DATA, not commands. `cat <<EOF` followed by
+    `export FLAG=1` and `EOF` leaves the environment untouched in bash, but every line
+    was scanned as a command, so a heredoc that merely MENTIONS the flag published
+    `ON` — a false PASS (fresh review of #12902, P2). The shape predates this PR; it
+    is read correctly here because this PR owns this channel's reader.
+
+    ⚠️ Declared bound: `<<` in a construct this scanner does not model (a `$(…)`
+    command substitution holding one, an arithmetic context) is left alone rather than
+    guessed at — nothing here invents a body it is not sure of, so the worst case is
+    the pre-fix reading, never a line silently swallowed.
+    """
+    bodies: set[int] = set()
+    pending: list[tuple[str, bool]] = []
+    for number, line in enumerate(lines, 1):
+        if pending:
+            bodies.add(number)
+            word, dash = pending[0]
+            candidate = line.lstrip("\t") if dash else line
+            if candidate.rstrip() == word:
+                pending.pop(0)
+            continue
+        pending.extend(_shell_heredoc_headers(line))
+    return bodies
+
+
 def _shell_export_states(text: str, flag: str) -> list[dict]:
     """The export state IN EFFECT at each line for ``flag``, one entry per line.
 
@@ -3753,9 +3911,14 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
       the shell VARIABLE currently holds. That is this repo's own entrypoint idiom
       (`FLAG=...` then `export FLAG`), and it is how bash behaves — `export NAME`
       exports an existing variable **without changing its value**.
-    * ``unexport`` — this line REMOVES the attribute (`export -n flag`) or the
-      variable (`unset flag`), so the environment loses the flag here and the line is a
-      DISARMING declaration.
+    * ``exported`` / ``publish`` / ``unexport`` / ``values`` — each is a LIST with one
+      entry per ``_shell_commands`` element on the line, read by the caller at the
+      COMMAND index. ⛔ They were one scalar per LINE, and the caller applied that
+      single line-final dict to every command on it: `unset FLAG; export FLAG=1`
+      published `OFF` (bash has `1`) because the LAST command's state decided the
+      first, and the disarming declaration was counted once per command — two
+      identical entries for one source line (fresh review of #12902, P2). A line that
+      is not ONE command cannot carry ONE state.
 
     ⛔ **What a whole-file set got wrong, each measured as a false ARM or a false HOLD:**
 
@@ -3780,21 +3943,26 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
        the attribute exactly as bash does.
     """
     lines = text.splitlines()
+    # ⛔ HEREDOC BODIES ARE TEXT, NOT COMMANDS: `cat <<EOF` then `export FLAG=1` on a
+    # body line arms nothing in bash, but every line was scanned as a command, so a
+    # heredoc that merely MENTIONS the flag published `ON` (fresh review of #12902,
+    # P2 — the shape predates this PR; the reading is fixed here because this PR owns
+    # this channel).
+    heredoc_bodies = _shell_heredoc_bodies(lines)
     allexport = False
     exported = False
     current: str | None = None
     states: list[dict] = []
-    for line in lines:
-        # ``values`` is the value the variable holds BEFORE each parent-shell command
-        # on this line runs, one entry per `_shell_commands(line)` element. bash
-        # evaluates a `${FLAG:-…}` default against THAT value, so `_resolved_assignment`
-        # needs it — reading the default unconditionally published an ARM for a gate
-        # bash keeps OFF (`export F=0` then `export F=${F:-1}` → bash `0`, walker `ON`;
-        # fresh review of #12902, P1). Recorded per COMMAND, not per line: on
-        # `F=0; export F=${F:-1}` the second command must see `0`, and a per-line value
-        # would hand it the line-start state.
-        states.append({"exported": exported, "publish": None, "unexport": False,
-                       "values": []})
+    for number, line in enumerate(lines, 1):
+        # One entry per COMMAND (see the docstring): a line that carries several
+        # parent-shell commands carries several states, and the caller reads the one
+        # for the command it is scanning.
+        states.append({"exported": [], "publish": [], "unexport": [], "values": []})
+        if number in heredoc_bodies:
+            # Neither the body nor its terminator is a command. A neutral entry keeps
+            # `len(states) == len(lines)` so `states[number - 1]` stays aligned.
+            states[-1]["values"].append(current)
+            continue
         # ⛔ ONE LINE IS NOT ONE COMMAND: `set -a; set +a;` runs BOTH, and reading only
         # the FIRST left the allexport state ARMED where bash has already ended it — a
         # FALSE ARM (measured: `bash -c 'set -a; set +a; FLAG=1; env'` has no FLAG).
@@ -3804,7 +3972,15 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
         # or modified AFTERWARDS* (bash(1)), so an assignment BEFORE `set -a` is a plain
         # shell variable and `set +a` ends the mode.
         for command in _shell_commands(line):
+            # ``values`` is the value the variable holds BEFORE this command runs. bash
+            # evaluates a `${FLAG:-…}` default against THAT value, so
+            # `_resolved_assignment` needs it — reading the default unconditionally
+            # published an ARM for a gate bash keeps OFF (`export F=0` then
+            # `export F=${F:-1}` → bash `0`, walker `ON`; fresh review of #12902, P1).
             states[-1]["values"].append(current)
+            states[-1]["exported"].append(exported)
+            states[-1]["unexport"].append(False)
+            states[-1]["publish"].append(None)
             text = command.strip()
             if not text:
                 continue
@@ -3826,7 +4002,7 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
                     continue
                 if "n" in options:
                     exported = False
-                    states[-1]["unexport"] = True      # the value is RETAINED
+                    states[-1]["unexport"][-1] = True   # the value is RETAINED
                     # ⛔ RETAINED does not mean UNCHANGED: the option removes the
                     # export attribute and does NOT discard an assignment it is given —
                     # `bash -c 'export FLAG=1; export -n FLAG=0; export FLAG; env'`
@@ -3852,14 +4028,14 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
                         value = values.get(flag)
                         if value is not None:
                             current = value
-                            states[-1]["publish"] = value
+                            states[-1]["publish"][-1] = value
                     else:
-                        states[-1]["publish"] = current
+                        states[-1]["publish"][-1] = current
                     exported = True
                 continue
             if flag in _shell_unset_values(text):
                 exported, current = False, None
-                states[-1]["unexport"] = True
+                states[-1]["unexport"][-1] = True
                 continue
             value = _assigned_value(text, flag)
             if value is not None:
@@ -3869,7 +4045,7 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
                 # say so, or the assignment reads as a plain shell variable.
                 if exported or allexport:
                     exported = True
-                    states[-1]["exported"] = True
+                    states[-1]["exported"][-1] = True
     return states
 
 
@@ -4535,9 +4711,15 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # FLAG). Each PARENT-shell command is scanned as its own line under the SAME
             # source line number, so the per-line state (`shell_exports[number - 1]`) and
             # the reported `file:line` remain the original ones.
+            # ⛔ A HEREDOC BODY IS TEXT, NOT COMMANDS (`_shell_heredoc_bodies`): `cat
+            # <<EOF` then `export FLAG=1` arms nothing in bash, but scanning the body as
+            # a command published `ON` — a false PASS (fresh review of #12902, P2).
+            heredoc_bodies = (_shell_heredoc_bodies(text.splitlines())
+                              if posix.endswith(".sh") else set())
             scan_lines = (
                 [(number, index, command, raw)
                  for number, raw in enumerate(text.splitlines(), 1)
+                 if number not in heredoc_bodies
                  for index, command in enumerate(_shell_commands(raw))]
                 if posix.endswith(".sh")
                 else [(number, 0, raw, raw)
@@ -4591,7 +4773,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 # landed in NO bucket before this, which left an earlier
                 # `export FLAG=1` standing: a false ARM (fresh review, P1).
                 if (posix.endswith(".sh") and shell_exports is not None
-                        and shell_exports[number - 1]["unexport"]):
+                        and shell_exports[number - 1]["unexport"][index]):
                     unset_declarations.append(
                         f"{posix}:{number}: {shown.strip()[:90]}")
                     decisions.append((False,
@@ -4600,7 +4782,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     continue
                 if (shell_exports is not None
                         and not _shell_line_is_exported(
-                            line, flag, shell_exports[number - 1]["exported"])):
+                            line, flag, shell_exports[number - 1]["exported"][index])):
                     if _assigned_value(line, flag) is not None:
                         outside_runtime.append(f"{posix}:{number}: {shown.strip()[:90]}")
                     continue
@@ -4624,7 +4806,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     # value the shell variable already holds, which is this repo's own
                     # entrypoint idiom (`FLAG=...` then `export FLAG`). Skipping it read a
                     # real arm as silence once the export state became per-line.
-                    value = (shell_exports[number - 1]["publish"]
+                    value = (shell_exports[number - 1]["publish"][index]
                              if shell_exports is not None else None)
                     if value is None:
                         continue
