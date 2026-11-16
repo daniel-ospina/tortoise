@@ -145,6 +145,14 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site —
 #: and that pin is what reds when a forward merge grows the module, which is the
 #: remedy this constant relies on rather than a hand sweep.
+#: #12947 moved it 24692 -> 24731, and this PR's forward merge of main moved it
+#: 24731 -> 24762 (measured: `grep -n 'proj.g.query(LIFETIME_MEMORY_QUERY)'
+#: tortoise/hosted_api.py`), re-deriving the notes, the scorecard and this constant
+#: TOGETHER — the constant is the third of the three, and the pin reds when it lags.
+#: The #13000 re-cut then merged main's `cde3e7743c` forward and this branch's own
+#: #12992 block sits above the site, so it was re-derived once more, 24762 -> 24903
+#: (measured: `grep -n 'proj.g.query(LIFETIME_MEMORY_QUERY)' tortoise/hosted_api.py`
+#: -> 24903): the tool that owns these figures wrote it, not a hand.
 DEFAULT_PIVOT = 24903
 
 _SCORECARD = "tortoise/activation_scorecard.py"
