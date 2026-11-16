@@ -10,7 +10,7 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 24686
+    uv run python tools/hosted_api_cite_census.py --pivot 24692
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
@@ -124,7 +124,11 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: had already been re-derived by hand; #11803 moved it 23466 -> 23477; #11977 moved
 #: it 23477 -> 23502 and re-derived neither this constant nor the notes, which is
 #: why the #11850 lane found the census red on main at `7e6baffc5d`; #12438's
-#: net +1 line moved it 24620 -> 24621, re-deriving none of the three). Two
+#: net +1 line moved it 24620 -> 24621, re-deriving none of the three; #12904's
+#: net +6 lines (`5cc36a42d4`) moved it 24621 -> 24686 through the #12462/#12764
+#: re-derivations, and then #10226's 1,759-line `sdk.py` deletion plus #12745 left
+#: it stale on main at 24686 while the site had moved on again — the #12863 red;
+#: the merge that repaired it moved 24686 -> 24692). Two
 #: distinct wrongnesses, with distinct start points — do not merge them:
 #:   • `pivot_is_the_lifetime_site(<old pivot>)` goes FALSE the moment the CALL
 #:     moves, because the note still cites the old line (#11803, #11977);
@@ -137,7 +141,7 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site —
 #: and that pin is what reds when a forward merge grows the module, which is the
 #: remedy this constant relies on rather than a hand sweep.
-DEFAULT_PIVOT = 24686
+DEFAULT_PIVOT = 24692
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
