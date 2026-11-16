@@ -4833,6 +4833,19 @@ _PROVEN_READS: set[tuple[str, str]] = {
     # which the register's own note calls the wrong remedy.
     ("tortoise/sdk.py", "TortoiseSDK.calibrate_summary"),
     ("tortoise/sdk.py", "TortoiseSDK._uncalibrated_ep_participants"),
+    # #12592: both reaches are the SAME shape — an `f"MATCH (n:{label} {{id:$id}})
+    # … RETURN …"` whose statement interpolates the caller's loop variable, so the
+    # resolver cannot flatten it and the census's over-report polarity counts it as
+    # a write. By hand, both are reads: `RETURN count(n) AS rows, collect(n.status)
+    # …` (the fan-out probe) and `RETURN n.id AS id, n.status AS st,
+    # n.supersededBy AS succ` (the guard's per-row read) — no
+    # SET/CREATE/MERGE/DELETE/REMOVE, no write procedure, and neither appends a
+    # record. Declaring a lane would be a WRITE declaration on a read (the same
+    # reasoning this register's first entries give). The WRITES these two guard go
+    # through `_update_entity`, whose lane declaration is the door's own; the
+    # read-side verdict blesses no undeclared write.
+    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity._rows"),
+    ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"),
 }
 
 #: WHAT WAS PROVEN, not only whose statement was — keyed like `_PROVEN_READS`,
@@ -4853,6 +4866,15 @@ _PROVEN_READ_STATEMENTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("tortoise/sdk.py", "TortoiseSDK.calibrate_summary"): ("query",),
     # one `g.query`, resolving to `MATCH (n:{label}) WHERE … RETURN n.id [LIMIT n]`
     ("tortoise/sdk.py", "TortoiseSDK._uncalibrated_ep_participants"): ("query",),
+    # one `g.query`, resolving to `MATCH (n:{label} {id:$id}) RETURN count(n) …`
+    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity._rows"): ("query",),
+    # ONE, not three: `_assert_supersession_names_a_successor` issues three
+    # `proj.g.query` calls and only the first is unresolved (the label loop's
+    # f-string). The other two are literal statements the resolver flattens into
+    # provable READS, so they never enter `writes` and pinning them here would
+    # make the extent lie. Measured with the module's own enumerator, not reasoned:
+    # `writes == [(48606, 'query', '<unresolved>')]`, `_is_unresolved_only` True.
+    ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"): ("query",),
 }
 
 
