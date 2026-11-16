@@ -628,8 +628,9 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
         "was deleted (which would exempt the row from this comparison instead of reding it) "
         f"or the two were reworded apart: {one_sided}"
     )
-    assert compared >= 40, (
-        f"only {compared} rows carry a comparable caller list (40 today) — this check "
+    assert compared >= COMPARABLE_CALLER_ROWS_FLOOR, (
+        f"only {compared} rows carry a comparable caller list "
+        f"({COMPARABLE_CALLER_ROWS_FLOOR} today) — this check "
         "has stopped reading the manifest's rows and would pass vacuously. The bound is "
         "the measured count, not one below it: a floor set one row short lets a single "
         "row leave the comparison unnoticed, which is the hole the one-sided arm above "
@@ -640,6 +641,21 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
         f"{mismatched}. Re-cut the row (or update both fields together) — the rendered "
         "table prints them as the same fact"
     )
+
+
+#: The number of manifest rows that carry a caller list in BOTH derived columns — the
+#: measured coverage of the cross-check below, not a round floor.
+#:
+#: History, because this number MOVES with the surface and each move needs a reason:
+#:   41 -> 38 on 2026-11-15 (#12901 wave 1): three of the five retired rows
+#:   (`calibration_passed`, `list_relations`, `quarantine_batch`) each carried both lists,
+#:   so they left the comparison with the row. ⚠️ Their `callers: engine` came from
+#:   `scan_callers`' DOCUMENTED receiver-blind false positive (`registry.list_relations()`
+#:   and `from .mining import quarantine_batch` are name collisions, not calls on the
+#:   SDK) — which is why the manifest classified them `internal` while a receiver-aware
+#:   AST walk finds NO production caller. The over-inclusion is deliberate there (never
+#:   MISS a caller), so the precise instrument decision was taken on the precise scan.
+COMPARABLE_CALLER_ROWS_FLOOR = 38
 
 
 def test_the_reason_dependency_cross_check_can_fail():
@@ -659,7 +675,9 @@ def test_the_reason_dependency_cross_check_can_fail():
                and "callers:" in str(r.get("reason", "")))
     row["reason"] = "no MCP tool binds it; callers: zzz_one, zzz_two"
     compared, mismatched, one_sided = _caller_lists(doc)
-    assert compared >= 40, f"the cross-check reads only {compared} rows on a doctored copy"
+    assert compared >= COMPARABLE_CALLER_ROWS_FLOOR, (
+        f"the cross-check reads only {compared} rows on a doctored copy"
+    )
     assert not one_sided, f"a two-sided row was reported as one-sided: {one_sided}"
     assert [name for name, _dep, _reason in mismatched] == [row["name"]], (
         f"a one-sided edit to `reason` did not red the cross-check: {mismatched}"
@@ -4843,21 +4861,29 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # rationale beside it. 150 → 124 on 2026-10-27: the owner ruled the surplus methods
     # nothing calls may be deleted (PR #10187), and the 26 with no caller left the class.
     # 124 → 125 on 2026-11-14 (#10015): row 28 `get_organisation_account` was IMPLEMENTED.
+    # 125 → 120 on 2026-11-15 (#12901 wave 1): the first five off-surface methods with no
+    # production caller were retired (archived + recorded in `REMOVED_SDK_METHODS`), so the
+    # LIVE set shrank without touching the approved 40 or `high_water_counts` (150).
     # The approved 40 did not grow — the approval (`#10015` comment `6863608333`) delivers a
     # name that was already approved and unshipped, the same move PR #10053 made for three
     # rows — so `high_water_counts` (150) does not move; only the frozen ROW SET does.
-    # 125 -> 124 (#11609 lane B): five approved targets implemented (`supersede_knowledge`,
-    # `write_question`, `record_decision`, `adjust_relationship`, `refresh_confidence`) and
-    # SIX stated renames retired (`supersede`, `supersede_point` -> `supersede_knowledge`;
-    # `update_point`, `update_entity` -> `update_knowledge`; `file_decision` ->
-    # `write_question`; `file_human_approval` -> `record_decision`). The net is NEGATIVE by
-    # the batch's own rule: a container may not add surface without retiring at least as
-    # much of what it absorbs.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 124
+    # 125 -> 119 in two DISJOINT retirement waves. #12901 (2026-11-15) retired five
+    # off-surface methods with no production caller (125 -> 120; none an approved row).
+    # #11609 lane B then took 120 -> 119, a NEGATIVE net by the batch's own rule that a
+    # container may not add surface without retiring at least as much of what it absorbs:
+    # THREE approved rows gained their `def` (`supersede_knowledge`, `write_question`,
+    # `record_decision`; `update_knowledge` already had one) and FOUR doors were retired
+    # (`supersede` -> `supersede_knowledge`, `update_entity` -> `update_knowledge`,
+    # `file_decision` -> `write_question`, `file_human_approval` -> `record_decision`).
+    # ⛔ `adjust_relationship` and `refresh_confidence` are NOT implemented rows: they are
+    # approved targets still ABSENT from the live class (see the 23 the declaration gate
+    # prints), so naming them as delivered here was false.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 119
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():
-    """That sentence's typed count has drifted once per rename: 150 → 149 → 147 → 150 → 124.
+    """That sentence's typed count has drifted once per rename: 150 → 149 → 147 → 150 → 124 →
+    125 → 120.
 
     #10053 review (P3): at that head it read 147 while the class and the manifest both
     said 150, so the doc that tells a reader where the canonical SDK list lives named a

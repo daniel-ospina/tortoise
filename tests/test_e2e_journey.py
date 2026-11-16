@@ -120,10 +120,17 @@ class TestE2E10Decoupling:
         user_id = "shared-user-1"
         ma = sdk.membership_create(team_a["id"], user_id, "owner")
         mb = sdk.membership_create(team_b["id"], user_id, "admin")  # SDK roles: owner|admin
-        # #4282 deleted membership_list; the M:N contract it projected is read
-        # here through membership_get, which survives.
-        assert sdk.membership_get(ma["id"])["user_id"] == user_id
-        assert sdk.membership_get(mb["id"])["user_id"] == user_id
+        # #4282 deleted membership_list; #12901 wave 1 then retired membership_get.
+        # The M:N contract is READ straight off the registry here rather than
+        # through a public door, which is what the assertions actually claim.
+        for mid, uid, role in ((ma["id"], user_id, "owner"),
+                               (mb["id"], user_id, "admin")):
+            rows = sdk._get_registry().query(
+                "MATCH (m:Membership {id:$id}) RETURN properties(m)",
+                params={"id": mid},
+            ).result_set
+            assert rows and rows[0][0]["user_id"] == uid
+            assert rows[0][0]["role"] == role
         assert ma["role"] == "owner" and mb["role"] == "admin"
         for team_id in (team_a["id"], team_b["id"]):
             n = sdk._get_registry().query(

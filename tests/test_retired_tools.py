@@ -47,7 +47,7 @@ class TestDeclaration:
             assert callable(handler), f"handler {spec.name}() was removed"
 
     def test_public_sdk_surface_is_unchanged(self):
-        """The SDK surface did not GROW: 124 public methods, as pinned today.
+        """The SDK surface did not GROW: 119 public methods, as pinned today.
 
         This used to read *"Only MCP tool NAMES are retired — every public SDK method
         stays"*, which #4282 phase 2 made false: `events_poll`/`restore_point_at`
@@ -55,8 +55,9 @@ class TestDeclaration:
         (#10053) implemented three approved-but-absent names, so the count
         moves by design and this test is the pin on where it lands. A retirement or
         an approved name gaining a `def` is an OWNER-APPROVED row in
-        `docs/product/beta-sdk-surface.md`, never this assertion. The 125 → 124 move is
-        #4282 **Phase 2**'s four-for-three name swap (see the inline derivation below).
+        `docs/product/beta-sdk-surface.md`, never this assertion. The 125 → 120 → 119 move is
+        #4282 **Phase 2**'s four-for-three name swap measured on a base that #12901 wave 1
+        had already taken to 120 (see the TWO-waves block below).
         The 150 → 124 move is
         #4282's owner-ruled deletion of the 26 surplus methods nothing called
         (2026-10-27, PR #10187); the 124 → 125 move is an owner-approved
@@ -72,10 +73,25 @@ class TestDeclaration:
         MCP target" — where it and `canonical-mcp-tools.md` differ, canonical governs.
         #12521 (`8e4e335b05`) gave it its `def`, approved by daniel-ospina on 2026-11-14
         and recorded at `#10015` comment `6863608333`; `docs/product/beta-sdk-surface.md`
-        already reads *"40 methods against **125** today"* and
-        `config/surface-manifest.yml`'s `counts.sdk_public_methods` is `124` at this head (it was
-        `125` when that sentence was written, before #4282 Phase 2), so
-        this assertion was the one place still pinned to the pre-delivery number.
+        read *"40 methods against **125** today"* at that move and
+        `config/surface-manifest.yml`'s `counts.sdk_public_methods` was `125`, so this
+        assertion was then the one place still pinned to the pre-delivery number.
+
+        TWO waves then moved it DOWN, and they are disjoint (wave 1's membership rule
+        excluded any name a `tool_registry` entry bound, live or retired; the four doors
+        #11609 Phase 2 re-keys were live MCP tools at that time):
+
+        * #12901 (2026-11-15) 125 -> 120 — five OFF-SURFACE methods retired (archived
+          under `archive/sdk-methods/b2-sdk-retirement-wave-1/` and recorded in
+          `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`). The approved 40 did not move.
+        * #11609 Phase 2 (2026-11-16) 120 -> 119 — FOUR public names retired into
+          containers (`supersede` -> `supersede_knowledge`, `update_entity` ->
+          `update_knowledge`, `file_decision` -> `write_question`, `file_human_approval` ->
+          `record_decision`) and THREE added (`supersede_knowledge`, `write_question`,
+          `record_decision`; `update_knowledge` already existed), a net -1.
+
+        `high_water_counts.sdk_public_methods` stays 150 — both moves are the cheap
+        direction, and the pin still refuses any UNAPPROVED growth above it.
         Re-derive it from `len(public)` at the head; never type a number ahead of the
         manifest.
 
@@ -118,15 +134,11 @@ class TestDeclaration:
             for n in dir(TortoiseSDK)
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
-        # #4282 Phase 2 (#11609 / #12915) moved it 125 -> 124: FOUR public names
-        # retired into containers — `supersede` -> `supersede_knowledge`,
-        # `update_entity` -> `update_knowledge`, `file_decision` -> `write_question`,
-        # `file_human_approval` -> `record_decision` — and THREE were added
-        # (`supersede_knowledge`, `write_question`, `record_decision`;
-        # `update_knowledge` already existed), so 125 - 4 + 3 = 124. That is the number
-        # `config/surface-manifest.yml` derives (`counts.sdk_public_methods`) and the one
-        # `tools/surface-guard.py` pins as the frozen baseline.
-        assert len(public) == 124, f"SDK surface changed: {len(public)} != 124"
+        # 119 is the number `config/surface-manifest.yml` derives
+        # (`counts.sdk_public_methods`, re-cut at this head) and the one
+        # `tools/surface-guard.py` pins as the frozen baseline. Measured, not
+        # typed: `uv run python tools/sdk_surface.py --check` reads 119.
+        assert len(public) == 119, f"SDK surface changed: {len(public)} != 119"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK

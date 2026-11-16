@@ -312,10 +312,12 @@ doors keep their rows and stay served while the six containers are added (91 −
 Only the ADVERTISED set moved, and its arithmetic is 68 − 14 + 6 = 60. The SDK half of the same
 batch is FOUR stated renames, not six: `supersede` → `supersede_knowledge`, `update_entity` →
 `update_knowledge`, `file_decision` → `write_question`, `file_human_approval` → `record_decision`
-(`update_knowledge` already existed, so it is +0), **125 → 124** public methods. ⛔ `update_point` and
-`supersede_point` are NOT retired and must not be read as retired: both are still public, because each
-carries a §17.1 write-lane declaration keyed by the door's name, and `sdk_retired.py` says so in its
-own block. Each retired name's body is
+(`update_knowledge` already existed, so it is +0), **120 → 119** public methods — the base had already
+moved 125 → 120 in #12901 wave 1, which retired five OFF-SURFACE methods this batch does not touch,
+and the two waves are disjoint (wave 1's rule excluded any name a `tool_registry` entry bound).
+⛔ `update_point` and `supersede_point` are NOT retired and must not be read as retired: both are
+still public, because each carries a §17.1 write-lane declaration keyed by the door's name, and
+`sdk_retired.py` says so in its own block. Each retired name's body is
 kept as the internal door its container calls, so no code was deleted. Two recorded consequences, not
 tidy-ups: `tortoise_refresh_confidence` is `http_policy=False` because it reaches whole-graph EP
 (#329) — so `promote`/`baseline` are no longer ADVERTISED over tenant HTTP MCP though the handler
@@ -507,14 +509,17 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 2. **Publish the bridge table** (MCP `type=`/`mode=` → SDK method).
 3. Implement the MCP list with the **SDK frozen** (method names + capabilities unchanged)
    so the handlers are written once.
-4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **124** public
+4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **119** public
    methods — a number DERIVED from the class, never typed; it moved 147 → 150 at #4282
    phase 2.2 because `link_entities`, `update_knowledge` and `delete_knowledge` were
    approved rows with no `def` yet, 150 → 124 on 2026-10-27 when the surplus methods
    nothing calls were deleted under the owner's ruling on this issue (26 methods, code
    archived at tag `archive/4282-surplus-sdk-methods`), and 124 → 125 on 2026-11-14 when
-   approved row 28 `get_organisation_account` was implemented on #10015 — in none of these
-   moves did the declared surface change, so the declaration stays at 40 — and
+   approved row 28 `get_organisation_account` was implemented on #10015, then 125 → 120 on
+   2026-11-15 when #12901 wave 1 retired five off-surface methods no production code called,
+   then 120 → 119 on 2026-11-16 when #11609 Phase 2 retired four public names into containers
+   and delivered three — in none of these moves did the declared surface change, so the
+   declaration stays at 40 — and
    `docs/product/canonical-sdk-methods.md` agrees; reconcile the per-name mapping when
    that pass starts). Renames there are mechanical for the
    MCP handlers; only a *capability* removal can force an MCP change — which the bridge
