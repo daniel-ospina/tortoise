@@ -639,9 +639,11 @@ def test_both_daemons_report_at_boot(module):
 def test_the_pre_merge_check_runs_in_ci():
     """A check nobody runs is the defect this issue is about, one level up.
 
-    Read from the PARSED workflow, not a substring offset: the gate must be invoked by the same
-    step `run:` that already validates the compose file (the step `#12926` extends), and a
-    mention in a comment is not an invocation.
+    Read from the PARSED workflow, not a substring offset, and asserted on the property that
+    actually decides the guarantee: the step must run in a leg ``ci-introduced-failure`` cannot
+    EXCUSE. A ``DEFERRABLE_LEGS`` member delegating a main-owned red would leave the required
+    aggregate green over an unrefused omission (review round 7), so the wiring job is compared
+    against the aggregate's OWN `DEFERRABLE_LEGS` value rather than named here.
     """
     yaml = pytest.importorskip("yaml")
     workflow = yaml.safe_load(
@@ -657,23 +659,23 @@ def test_the_pre_merge_check_runs_in_ci():
         "no step RUNS tools/embed_switch_gate.py — a comment that names the check is not an "
         "invocation, and nothing would refuse an omission"
     )
-    assert any("docker compose config" in run for _job, run in wired), (
-        "the gate belongs in the step that validates the compose file (the one #12926 extends); "
-        f"it runs in {[job for job, _run in wired]} instead"
+    jobs = {job for job, _run in wired}
+    deferrable: set[str] = set()
+    for job in (workflow.get("jobs") or {}).values():
+        for step in (job.get("steps") or []):
+            for line in str(step.get("run") or "").splitlines():
+                if "DEFERRABLE_LEGS=" in line:
+                    deferrable = set(
+                        line.split("DEFERRABLE_LEGS=", 1)[1].strip().strip('"').split()
+                    )
+    assert deferrable, (
+        "the aggregate's `DEFERRABLE_LEGS=` value was not found — this pin cannot tell an "
+        "excusable leg from a decisive one, so it must not pass"
     )
-    # ⛔ `if: always()` is load-bearing (review round 2, P2): `test-concurrency-falkor` is a
-    # `DEFERRABLE_LEGS` member, so an earlier failing step delegates the job to
-    # `ci-introduced-failure` — where a MAIN-owned red leaves the required aggregate green with
-    # this step never having run. Without the guard the check is skippable by a red neighbour.
-    steps_with_gate = [
-        step
-        for _job, job in (workflow.get("jobs") or {}).items()
-        for step in (job.get("steps") or [])
-        if "embed_switch_gate.py" in str(step.get("run") or "")
-    ]
-    assert all("always()" in str(step.get("if") or "") for step in steps_with_gate), (
-        "the gate's step must carry `if: always()` — a skipped step enforces nothing: "
-        + repr([step.get("if") for step in steps_with_gate])
+    assert not (jobs & deferrable), (
+        f"the gate runs in a DEFERRABLE leg ({sorted(jobs & deferrable)}): `ci-introduced-failure` "
+        "excuses such a leg when its failing ids are all main's, and a gate-step failure emits no "
+        "test-id — so the required aggregate could read green with the omission unrefused"
     )
 
 
