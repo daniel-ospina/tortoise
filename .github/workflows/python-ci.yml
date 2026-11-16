@@ -5067,6 +5067,18 @@ jobs:
           # FAILS on any skip — which is what makes them run rather than pass by
           # absence. Placed BEFORE the capstone for the reason every other entry
           # is: D10's policy drill re-applies the tenancy migration last.
+          #
+          # #12894: BOTH cursor files. The `_live` one needs the DSN; the
+          # DB-FREE one is listed here for the ONE thing it cannot have on any
+          # other lane — `_fake_error`'s tie between the SQLSTATEs this suite
+          # names and the DRIVER's own registry (`psycopg2.errors.lookup`).
+          # `psycopg2-binary` is the optional `[postgres]` extra, so on the fast
+          # pool that ORACLE is skipped by absence of the driver (the
+          # classification and counter assertions run regardless — the exact
+          # split is in `_fake_error`'s docstring); THIS job installs
+          # `.[test,postgres]`, so the oracle executes here. Without this line
+          # it would run in no CI lane at all, which is the `#9551` "the leg
+          # that would catch it never ran" defect one layer down.
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
             tests/test_9318_journal_collision.py \
@@ -5075,6 +5087,8 @@ jobs:
             tests/test_record_searchkeys_10620.py \
             tests/test_9881_rename_reaches_the_record.py \
             tests/test_11642_vector_move_live.py \
+            tests/test_12894_record_cursor_live.py \
+            tests/test_12894_record_cursor.py \
             tests/test_9558_record_write_cost.py \
             tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \

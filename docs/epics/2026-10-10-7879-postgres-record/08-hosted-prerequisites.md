@@ -84,11 +84,12 @@ excluded as prerequisites, and recorded as such:
 Measured on `8767b1c8b` (`origin/main`, 2026-10-21). Every claim below was read in the tree or run;
 the runs and their output are in **§G**.
 
-### A1. The record schema — **EXISTS, 10 tables + 3 views**, and it is the artifact §17.5 pins
+### A1. The record schema — **EXISTS, 11 tables + 3 views**, and it is the artifact §17.5 pins
 
-> **⚖️ Re-derived 2026-10-22 (#9555).** The `Measured on 8767b1c8b` stamp above scopes the
-> measurements; the census in this heading and the row set below were re-read at this head, which is
-> why the count is **10** and the tenth row (`session_narrative`) sits after `relation`. Both halves
+> **⚖️ Re-derived 2026-10-22 (#9555), re-cut 2026-11-16 (#12894).** The `Measured on 8767b1c8b` stamp
+> above scopes the measurements; the census in this heading and the row set below were re-read at
+> this head, which is why the count is **11** and the eleventh row (`record_cursor`) sits after
+> `session_narrative`. Both halves
 > are now pinned against the migrations on disk — `tests/test_record_schema_placement.py`,
 > `::test_the_prerequisites_a1_census_matches_the_record_migrations` — so neither the count nor a
 > missing row can go stale silently again (the same defect the `docs/00_index.md` pin catches one
@@ -106,6 +107,7 @@ the runs and their output are in **§G**.
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
 | `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` — `create_direct_edge` writes `IMPL`/`NAND` with it, and since #9553 the structural-edge lane writes every predicate it can mint through it, declining only a write whose ENDPOINT is a `:Source` (the canonical shape of `aboutDocument`/`aboutSource` — see below) — `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's own carrier**: `CONTAINS` (the capture's ENVELOPE directive, `record_projection._ENVELOPE_RELATIONS`), `extractedFrom` (the Point's PROPERTY, `record_projection._POINT_PROPERTY_RELATIONS` — declared for all four of the fold's point-materialisation types, because `apply()` re-derives it on its promote arms too and the record follows `apply()`, with the #5256 anchor in `relation.source_version`, written ON CREATE only, so the conflict path never touches the column), and the OPERATOR topology the descriptor carries — `IMPL`/`NAND`/`hasPart`, its reverse `INPUT`, and the canonical `mitigated_by` mirror (`record_projection._OPERATOR_RELATION_RECORDS`, endpoints resolved across the four epistemic labels) — all emitted after the Point's `node_identity`, because the endpoints are composite FKs into it. ✅ **Class 4 closed by #9553**: the edge lane's two mints now JOURNAL a flat `DirectEdgeCreated` (`{src, tgt, edge_type, source_label, target_label}` — labels are additive for the record and ignored by pass-2b, which resolves them itself), so every predicate the lane can mint lands a `relation` row when its endpoints are addressable (`RECORD_CARRIED_STRUCTURAL_RELS` is the whole lane write set, 23 predicates; PGlite leg in `supabase/tests/pglite/validate.mjs`). ⚠️ TWO qualifications, both measured: (a) a write whose endpoint resolves to a `:Source` is DECLINED at the mint and REPORTED through `projection._log_identity_skip` (`drops_record=True`, so it is COUNTED, not just logged) — `SOURCE_ENDPOINT_CANONICAL_RELS` names the two whose CANONICAL target is a `:Source` (`aboutDocument`, `aboutSource`), and that shape is a FOLD limitation (`EPISTEMIC_LABELS`/`p.id`), tracked in #9834; the predicates themselves are carried, and both ARE journaled between epistemic endpoints (measured); (b) after a SUPERSEDE the routes diverge — see the supersede paragraph in §R5's class-4 block, and #9836. `TAGGED` has no RECORD carrier (no record `tag` table for `relation.tgt_key`'s composite FK) although a JOURNAL rebuild restores it from the Point's `tags` property (measured) — and it is SILENT: `_sync_tags` reaches neither the lane nor this producer and warns nothing, so it is named here and in §R5 rather than warned at the write |
 | `session_narrative` | `supabase/migrations/20261023000001_record_session_narrative.sql:122` | — **NOT a node table** (no `node_identity` FK): §9.1's verbatim-narrative home, **#9555**/R7. Keyed `(org_id, graph_id, session_id)`, cascading from **`public.graphs`** — not from `public.session`, see R7's DECIDED block for why, and for what a live capture does and does not carry into it today (no journal carrier for `story_arc` yet ⇒ a `NULL` `narrative`) |
+| `record_cursor` | `supabase/migrations/20261116000001_record_cursor_allocator.sql:56` | — **NOT a node table**: the ORDINAL ALLOCATOR (#12894 stage C). Keyed `(org_id, graph_id)`, the counter the record issues journal positions from once the cutover is armed (`mode` ∈ {`seeded`, `active`, `halted`}), carrying the composite FK `(org_id, graph_id)` into `public.graphs` and a `USING` + `WITH CHECK` tenancy policy on `app.current_org_id`. `seq >= 0` **on purpose**: `GREATEST(MAX(journal_event.seq), floor)` is 0 for a brand-new graph, so `> 0` would make the easiest cutover raise `23514`; `journal_event` keeps `> 0` because a position is always at least 1. `GRANT SELECT, INSERT, UPDATE` to `tortoise_record_app` and **no DELETE** — the first record table whose grant WITHHOLDS DELETE (the other nine carry UPDATE **and** DELETE since `20261025000001`; `journal_event` is the other exception, SELECT+INSERT only), and the rationale is in the migration header |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
 **Supersede chains are in.** `point.status` is a PRIMARY column with the lifecycle journaled;
@@ -197,8 +199,8 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 ### A5. Embeddings — **durable today, not searchable, and that is not a defect**
 
-`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). ⛔ **THIS PARAGRAPH WAS TRUE UNTIL `#11642` AND IS KEPT AS THE MEASURED RECORD OF WHAT THE MOVE REPLACED — do not read it as the state of this head.** At the census point **no migration and no module used `pgvector`**. **At this head** the same census is: `grep -riE 'pgvector|vector\('` over all 83
-migrations returns **30** (it returned **0** at that pin; the denominator is 83 at this head — `#11827`'s `20261110000001_record_point_retire_as_of_11827.sql` added no vector, and neither does the 83rd, #12764's `20261114000001_per_org_postgres_bytes.sql`, which is the per-org byte meter's migration), all 30 in ONE file — `20261109000001_record_embedding_vector.sql` (the `CREATE EXTENSION`, the `record_embedding_vector` converter, three `vector(384)` GENERATED columns and three HNSW indexes) — and `git grep -il pgvector -- 'tortoise/*'` is **4**, in `record_projection.py`, `projection/__init__.py`, `record_vector.py` and `search_engine.py` (it was **0**). `#11642` implemented V1. The word itself
+`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). ⛔ **THIS PARAGRAPH WAS TRUE UNTIL `#11642` AND IS KEPT AS THE MEASURED RECORD OF WHAT THE MOVE REPLACED — do not read it as the state of this head.** At the census point **no migration and no module used `pgvector`**. **At this head** the same census is: `grep -riE 'pgvector|vector\('` over all 85
+migrations returns **30** (it returned **0** at that pin; the denominator is **85** at this head — `#11827`'s `20261110000001_record_point_retire_as_of_11827.sql` added no vector, and neither does the 83rd, #12764's `20261114000001_per_org_postgres_bytes.sql`, the per-org byte meter's migration, nor the 84th, #12894's `20261116000001_record_cursor_allocator.sql`, the ordinal allocator's counter, nor the 85th, #12894's `20261116000002_record_cursor_meter_grant.sql`, the byte meter's EXECUTE grant split out of the allocator file — so the count moved WITH each of them and never ahead of one), all 30 in ONE file — `20261109000001_record_embedding_vector.sql` (the `CREATE EXTENSION`, the `record_embedding_vector` converter, three `vector(384)` GENERATED columns and three HNSW indexes) — and `git grep -il pgvector -- 'tortoise/*'` is **4**, in `record_projection.py`, `projection/__init__.py`, `record_vector.py` and `search_engine.py` (it was **0**). `#11642` implemented V1. The word itself
 appears in prose only — e.g. this document, §12.1c's decided record, this epic's
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which was
 exactly right while §2.0 kept the cache fully populated, and **V1 is now DECIDED** (§12.1c/§14.3, 2026-11-07):
@@ -738,7 +740,7 @@ R1 keeps is the rotation hazard, not a pending arming.
 `8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
 `point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
 (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returned **0** (at this head, 83 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
+65 migrations returned **0** (at this head, 85 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
 tenant policy for that very table), 36 in `20261023000001_record_session_narrative.sql` and 19 in
 `20261024000001_record_session_narrative_carrier.sql` — the table this
 item's DECIDED block adds);
@@ -1220,9 +1222,13 @@ The block's `grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/ → 0
 pre-R6 reading. R6's tenancy boundary now ships the GUC, so the same grep returns
 **2 lines at `ff6379eb2`** — `tortoise/record_projection.py:227` (`TENANT_GUC =
 "app.current_org_id"`) and its docstring at `:3269`, the offsets `c5cbcbb4f` (R6's tenancy boundary)
-introduced — and **13 lines at this head** (#11642's `tortoise/record_vector.py` added the thirteenth:
+introduced — and **16 lines at this head** (#11642's `tortoise/record_vector.py` added the thirteenth:
 its module docstring names the GUC when it explains why the searcher can never invent a tenant — the
-tripwire doing its job): `54a3e7abe` (R9's backup role must BYPASS RLS) added three
+tripwire doing its job; and #12894 stage C's new `tortoise/record_allocator.py` added the last three,
+13 → 16 — its `seed()` and `read_cursor()` docstrings and a comment inside `execute_allocation` each
+name the GUC, because the counter's policy filters on it and the refusal they explain is an UPDATE
+that matches zero rows rather than an error, which is exactly the shape this tripwire exists to make
+visible): `54a3e7abe` (R9's backup role must BYPASS RLS) added three
 `tortoise/record_backup.py` mentions, #9555 (R7's narrative fetch) added three more —
 `tortoise/record_text.py` ×2 and `tortoise/__main__.py` ×1 — and #10017's copy added the ninth,
 in `tools/backfill_copy_turns.py`: the comment on its floor read that states why the read must go
