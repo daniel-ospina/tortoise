@@ -1,4 +1,4 @@
-// tortoise-hook-version: 23
+// tortoise-hook-version: 24
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -53,6 +53,13 @@
 // ("reinstall"), never as `modified-artifact` ("local edit"). Both halves of the
 // Pi seam move together — `contract_version_for("pi")` grades them as ONE
 // contract.
+// Generation 24 (#13039): the capture half's bytes move ONLY so the pair can
+// share one contract number — the behaviour change is entirely in
+// `tortoise-volunteer.ts` (the per-turn READ seam), which `contract_version_for
+// ("pi")` grades TOGETHER with this file and answers `None` for when the two
+// markers disagree. A marker-only edit still changes the sha256, so this is a
+// NEW generation, not a re-pin: an installed generation-23 pair must read STALE
+// ("reinstall") and pick up the read seam's degradation disclosure.
 // Generation 23 (#12603): the REFUSAL path reads the session back. The
 // unrecorded-outcome marker (#12379) had exactly one producer and it was
 // Python-CLI's `__main__._session_post._refused`; a 2xx receipt carries no
