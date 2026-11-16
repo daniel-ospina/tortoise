@@ -13,9 +13,9 @@ users there is no telemetry to harvest and no caller to protect.
 
 WHY THIS IS A SMALL HAND-KEPT MAP, NOT A READ OF THE MIGRATION TABLE
 --------------------------------------------------------------------
-``tools/sdk_rename_table.py`` is the migration map: every name on the LIVE surface (120
-at this head — re-derive with ``tools/sdk_surface.py --check``; the numeral is not typed
-here because it moves with every wave) and its approved destination, most of whose
+``tools/sdk_rename_table.py`` is the migration map: every name on the LIVE surface (112
+at this head — re-derive with ``tools/sdk_surface.py --check``; the numeral moves with
+every wave) and its approved destination, most of whose
 renames have **not** landed yet. Two reasons this
 map is separate and deliberately tiny:
 
@@ -198,6 +198,28 @@ UNHINTED_LIVE_DESTINATIONS: dict[str, str] = {
     # #11609 Phase 2: two more recorded destinations became LIVE when the read
     # containers landed, and neither can be awarded a hint by the approving-region
     # parser. Declared here rather than quietly skipped (#3836 (c)).
+    # #12901 wave 1: two REMOVED names whose recorded destination went LIVE with #11609
+    # Phase 2's containers. A removed name cannot emit a hint at all —
+    # `test_every_removal_is_recorded_and_documented` asserts none does, because a hint
+    # names an owner-approved replacement and these have none (they were recorded against
+    # the 40-method TARGET, not approved as its replacements). So the live destination is
+    # DECLARED here rather than left as an omission the census cannot see.
+    "calibration_passed": (
+        "Recorded destination `check_confidence` is LIVE since #11609 Phase 2, and this "
+        "name was REMOVED in #12901 wave 1 (its body went private as "
+        "`_calibration_marker_recorded()`), so it can carry no retirement hint: a hint "
+        "would name a replacement the owner never approved for it. The capability it "
+        "reads is reachable at `check_confidence`; the ledger row is the 40-method "
+        "target's, which is not an approval of the rename."
+    ),
+    "list_relations": (
+        "Recorded destination `graph_overview` is LIVE since #11609 Phase 2, and this "
+        "name was REMOVED in #12901 wave 1 with no approved replacement — its "
+        "`callers: engine` cell was a documented receiver-blind NAME COLLISION "
+        "(`registry.list_relations()`, a different object), not a call on the SDK, so no "
+        "approving region authorises a rename and a hint cannot be minted. The "
+        "declarations are served by `graph_overview`."
+    ),
     "retrieval_legs": (
         "Recorded destination `check_confidence` is LIVE since #11609 Phase 2, but no "
         "region of `docs/product/beta-sdk-surface.md` names `retrieval_legs` — the "

@@ -7246,7 +7246,7 @@ _GRAPH_SIZE_UNAVAILABLE = "graph_size not measured"
 
 
 def _bounded_graph_size(target, timeout: float) -> int:
-    """``sum(target.taxonomy().values())`` bounded by ``timeout`` (#3253).
+    """``sum(target.graph_overview(section="taxonomy").values())`` bounded by ``timeout`` (#3253).
 
     Runs the count on the DEDICATED ``GRAPH_SIZE_WORKER_NAME`` daemon worker
     and refuses to wait past ``timeout`` (see ``GRAPH_SIZE_TIMEOUT``). RAISES
@@ -7268,7 +7268,7 @@ def _bounded_graph_size(target, timeout: float) -> int:
         counts = future.result(timeout=timeout)
     except concurrent.futures.TimeoutError as exc:
         # ``concurrent.futures.TimeoutError`` IS ``builtins.TimeoutError`` on
-        # py3.12, so a ``TimeoutError`` raised INSIDE ``taxonomy()`` (e.g. a
+        # py3.12, so a ``TimeoutError`` raised INSIDE the container call (e.g. a
         # redis socket read timeout) is caught here too. ``future.done()``
         # separates the two: a callable that already finished raised its OWN
         # error and must keep it, not be relabelled as a budget overrun.
@@ -7309,8 +7309,8 @@ def _reset_graph_size_worker() -> None:
     Mirrors ``_reset_probe_worker()``: the escape hatch for tests and for ops
     recovery when a count is presumed wedged past any realistic budget. The
     old (possibly wedged) thread is a daemon — it is abandoned, never joined,
-    so a permanently stalled ``taxonomy()`` cannot pin the one slot for the
-    life of the process and force a restart (#3253 review P2).
+    so a permanently stalled ``graph_overview(section="taxonomy")`` cannot pin the one slot
+    for the life of the process and force a restart (#3253 review P2).
     """
     reset_daemon_worker(GRAPH_SIZE_WORKER_NAME)
 

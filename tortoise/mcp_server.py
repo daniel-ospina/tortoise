@@ -6493,8 +6493,14 @@ def _check_confidence_provenance(point_id: str) -> dict:
 
     ⛔ `require_calibration=False` is not a relaxed gate: this door THROWS THE
     POSTERIOR AWAY and answers with the chain only, and the #344 / #7478 gate
-    guards the EP posterior. Paying it here turned a pure read ("who decided
-    this?") into a `CalibrationError` on any graph with one uncalibrated
+    guards the EP posterior. ⚠️ It is NOT write-free either, and this docstring
+    used to call it "a pure read" — that was wrong: `check_confidence` reaches
+    `get_confidence`, whose lazy-consistency path dreams a DIRTY root
+    (`self.dream(dirty_only=True, …)`, `sdk.py::get_confidence`), a write that
+    PRE-DATES this shim and is unchanged by it. What this arm removes is the
+    CALIBRATION GATE, not a write surface it never had: paying it here turned a
+    chain-only answer ("who decided this?") into a `CalibrationError` on any
+    graph with one uncalibrated
     evidence point — measured on this head, `sdk.check_confidence(id,
     include_provenance=True)` raised while the chain resolved fine (#12951
     review, found by the test sweep). The gate still governs every caller that

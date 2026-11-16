@@ -1538,7 +1538,7 @@ def test_the_resolved_partition_never_emits_the_wildcard_group() -> None:
 # ─────────────────────────────────────────────────────────────────────
 def test_prose_counts_are_the_literals_the_doc_claims() -> None:
     text = DOC.read_text(encoding="utf-8")
-    # Digit-BOUNDED, not substring: `"17 public methods" in text` also passes when the
+    # Digit-BOUNDED, not substring: `"12 public methods" in text` also passes when the
     # render produces `112 public methods`, so the pin did not hold the number.
     for pattern in (
         r"(?<![\d])112 public methods",
@@ -1651,7 +1651,7 @@ def test_group_column_matches_the_canonical_inventory() -> None:
 
 
 def test_part_b_counts_match_the_rows_they_list() -> None:
-    """Part B's counts must equal the members it lists, and the total must be 117."""
+    """Part B's counts must equal the members it lists, and the total must be 112."""
     rows = []
     total = None
     for line in _section("Part B — destination counts").splitlines():

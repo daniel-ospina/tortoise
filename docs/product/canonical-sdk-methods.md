@@ -20,7 +20,7 @@ related:
 
 # Canonical SDK method surface — an inventory, not the target
 
-**Read this for coverage, not for names.** This document is two things: an **inventory of all 125
+**Read this for coverage, not for names.** This document is two things: an **inventory of all 112
 methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and,
 alongside that, an **earlier target sketch** (32 groups over 124 live members). The 26 names that left
 the surface on 2026-10-27 are recorded in *Removed from the surface* below rather than in a group.
@@ -43,8 +43,8 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **125** |
-| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **125** |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **112** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **112** |
 
 The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, then 149 → 147 on
 2026-10-25 (the plan-quota counter `graph_count` went internal as `_graph_count`; the
@@ -65,8 +65,15 @@ The last move is 150 → **124** on 2026-10-27: the owner ruled that the surplus
 archived at tag `archive/4282-surplus-sdk-methods`. The 111 that DO have callers are untouched here;
 privatising them is the remaining half of the migration. Then 124 → **125** on 2026-11-14, when
 approved row 28 `get_organisation_account` gained its `def` (#10015) — an IMPLEMENTATION of an
-already-approved name, not an addition to the approved 40. *Removed from the surface* below is the
-per-method record.
+already-approved name, not an addition to the approved 40. Then 125 → **120** on 2026-11-15, when the
+`#12901` wave 1 retired five off-surface methods (`backfill_v25`, `calibration_passed`,
+`list_relations`, `membership_get`, `quarantine_batch`) — none of them an approved row, so the
+declaration stays at 40. Then 120 → **112** in the same 2026-11-15 wave pair, when `#11609` Phase 2
+landed six READ/QUERY containers (+6) and re-privatised the fourteen read methods they cover (−14),
+so 125 + 6 − 14 − 5 = 112. **112 is the count today**, and it is derived, not typed: `ast` over
+`tortoise/sdk.py` and `tools/sdk_surface.py --check` both read 112, and
+`counts.sdk_public_methods` in `config/surface-manifest.yml` reads 112. *Removed from the surface*
+below is the per-method record.
 
 > A previous draft reported 152 and explained the two-method gap as the manifest excluding
 the eval lane. That was wrong, and how it arose is worth naming: the method count was
@@ -118,11 +125,42 @@ of these to the public surface is a **new** surface change and needs the owner a
 
 `test_guard` is **not** in this list and was **not** deleted: `beta-sdk-surface.md` rules it *"Kept
 and relocated … it guards the production-wipe incident, so the code must survive"*. ⚠️ **But it is
-still ON the public surface today** — it is one of the 125 (`config/sdk-surface.json`,
+still ON the public surface today** — it is one of the 112 (`config/sdk-surface.json`,
 `sdk.py::TortoiseSDK.test_guard`), and `tools/sdk_surface.py --check` counts it. The
 `beta-sdk-surface.md` ruling is about the approved 40-method TARGET, where it is relocated rather
 than deleted; on the live surface it remains a *removal candidate* (see the "Candidates for
 removal" row below), not something that has already left.
+
+### Removed from the surface — 2026-11-15 (#12901 wave 1)
+
+**These 5 methods are gone from `TortoiseSDK`.** Each was OFF the approved 40. **Four had no
+production caller anywhere under `tortoise/`.** The fifth, `calibration_passed`, had exactly
+one — `tortoise/gates.py`'s Gate B CLI — so its **body went private** as
+`_calibration_marker_recorded()` and that CLI reads the seam instead: the
+`capture_session` → `_capture_session` precedent already in `tortoise/sdk_retired.py`, where a
+surplus-but-referenced method goes private rather than out. The unapproved public door closes
+in every case; the capability survives in the one case that was still wired to something.
+
+⚠️ **A receiver-keyed scan does not see that caller**: `TortoiseSDK().calibration_passed()`
+has a CONSTRUCTOR CALL for a receiver, not a name, so a walk keyed on `sdk.<name>` /
+`self.<name>` reports zero callers and is wrong. Match the ATTRIBUTE, then judge the receiver.
+
+The remaining `callers: engine` cells the manifest recorded are **three, of two kinds**: two are
+`scan_callers`' DOCUMENTED receiver-blind name collisions (`registry.list_relations()`,
+`from .mining import quarantine_batch`) — different objects, not calls on the SDK — and the third
+was `calibration_passed`'s **real** caller in `tortoise/gates.py`, which is exactly why that one's
+body went private rather than simply out. Sweeping all three into the "collision" bucket is the
+error this paragraph exists to prevent. All code is
+archived under `archive/sdk-methods/b2-sdk-retirement-wave-1/` and every departure is recorded
+in `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`.
+
+| Removed method | What it did | The 40-method target it was recorded against |
+|---|---|---|
+| `backfill_v25` | One-shot ONTOLOGY v2.5 status/pointKind migration. | — |
+| `calibration_passed` | Read the Gate B calibration-milestone marker. **Body went PRIVATE** (`_calibration_marker_recorded()`), which `tortoise/gates.py` now calls. | `check_confidence` |
+| `list_relations` | List the pack-declared relation declarations. | `graph_overview` |
+| `membership_get` | Read one membership row by id. | — |
+| `quarantine_batch` | Quarantine a batch (thin delegate to `tortoise.mining`). | `update_knowledge` |
 
 ## Removed from the surface — 2026-11-15 (#11609 Phase 2)
 

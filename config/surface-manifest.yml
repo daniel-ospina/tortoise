@@ -53,15 +53,16 @@
 # not — that re-opens the slack. #10906 and #10914 compose because their retired name
 # sets are disjoint (77 − 5 = 72 advertised at #10914's head).
 #
-# LOWERED 72 → 64 and 150 → 117 on 2026-11-15 by PR #2148 (#11609 Phase 2, the READ/QUERY
+# LOWERED 72 → 64 and 150 → 112 on 2026-11-15 by PR #12951 (#11609 Phase 2, the READ/QUERY
 # container family). The ADVERTISED set on `main` was 68 at this base, so the tool arithmetic
 # is 68 − 9 + 5 = 64: NINE member doors retired into their containers (issue_insight,
 # list_topics, provenance, session_context, entity_profile, traverse, review_connections,
 # list_dedup_candidates, get_source_reliability) and FIVE container rows arrived
 # (search_knowledge, list_knowledge, check_confidence, explore_connections,
 # review_link_candidates — `tortoise_graph_overview` was already one of the 68). The SDK
-# side moved 125 → 117: SIX containers arrived (the five above plus `graph_overview`) and
-# FOURTEEN read methods were re-privatised behind them (125 + 6 − 14 = 117), so the
+# side moved 125 → 112: SIX containers arrived (the five above plus `graph_overview`) and
+# FOURTEEN read methods were re-privatised behind them (125 + 6 − 14 = 117), on top of the FIVE
+# `#12901` wave 1 had already retired from `main` (117 − 5 = 112), so the
 # owner's 40-name approved list did not change and the backlog did not grow.
 # ⛔ SIX of this family's list-returning doors are DELIBERATELY left live — retiring one
 # moves its #8482 failure repair off the advertised path, because a `-> Any` container has
@@ -69,7 +70,7 @@
 # `tortoise_check_structure`). They answer through their containers today.
 # Both numbers are LOWERED rather than left alone for the reason the 82 → 76 step names: a
 # pin that keeps slack stops being a growth pin — re-adding any retired name would pass
-# `surface-guard.py` green. ⛔ 64/117 IS DELIBERATE, NOT AN ANOMALY: if you read `tools: 64`
+# `surface-guard.py` green. ⛔ 64/112 IS DELIBERATE, NOT AN ANOMALY: if you read `tools: 64`
 # next to a live 64 and wonder whether to "restore" 72, do not — the nine retired names are
 # pinned by `tests/test_tool_registry.py` and the slack would hide their return.
 #
@@ -966,7 +967,7 @@ counts:
     operate: 4
 high_water_counts:
   tools: 64
-  sdk_public_methods: 117
+  sdk_public_methods: 112
 retired:
 - name: tortoise_audit
   use_instead: tortoise_graph_overview(section="audit", point_kinds=...)

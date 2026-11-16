@@ -46,7 +46,7 @@ account — the builder pays; an end-customer never has an organisation account 
 | Document | What it is |
 |---|---|
 | **`docs/product/canonical-mcp-tools.md`** | **The approved MCP list — 23 tools**, 9 READ / 14 WRITE. Merged as `8375c7921`. This is the **naming authority** for the SDK. |
-| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 112 (the 150 it was written against, minus the 26 surplus names `#4282` deleted, minus the 5 `#12901` wave 1 retired, plus the one `#10015` added), from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
+| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 112 (the 150 it was written against, minus the 26 surplus names `#4282` deleted, minus the 5 `#12901` wave 1 retired, minus the 14 `#11609` Phase 2 re-privatised behind its six containers, plus the six containers it landed, plus the one `#10015` added), from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
 | `docs/product/canonical-sdk-methods.md` | The full inventory of all 112 with descriptions (150 before `#4282` deleted the surplus set, 124 before `#10015` added one, 112 after `#11609` Phase 2 and `#12901` wave 1), plus an earlier 32-group sketch over 149 names. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
 
 **These documents are the vision.** This file is the bridge from them to implementation.
@@ -64,13 +64,15 @@ The freeze is on **tools and endpoints** — nothing is added, removed, renamed 
 either surface without explicit human approval. A **response field** that is off by default and
 leaves the response unchanged is **not** a gate failure, but must be recorded.
 
-## The reconciliation — MCP 91 → 27
+## The reconciliation — MCP 96 → 27
 
-> Every figure below is the MERGED surface (68 live + 23 retired shims), not either branch's own
+> Every figure below is the MERGED surface (64 live + 32 retired shims), not either branch's own
 > measurement: the vision started at **99**, the five `run_onboarding` deletions removed five
 > (#4282 Phase 3.2, 81 → 76 advertised), the `graph_overview` container added one served name
-> while retiring five (#4282, 76 → 72 advertised), and #11609 batch 1 archived four no-destination
-> tools (72 → 68 live, names gone rather than retired). 99 − 5 + 1 − 4 = **91**. The target remains **27**.
+> while retiring five (#4282, 76 → 72 advertised), #11609 batch 1 archived four no-destination
+> tools (72 → 68 live, names gone rather than retired), and #11609 Phase 2 retired nine member
+> doors (each now a retired shim: −9 live, +9 retired) and landed five container rows (+5 live),
+> so 68 live + 23 retired = 91 became 64 live + 32 retired = **96** served. 99 − 5 + 1 − 4 + 5 = **96**. The target remains **27**.
 
 **GENERATED — see `docs/product/bridge-table.md`**, produced by
 `uv run python tools/bridge_table.py`.
@@ -154,8 +156,10 @@ not complements.
 
 The starting figure in this heading is **historical**, the same way the MCP heading's is: the public
 SDK surface measured **150** when this heading was written — it now measures **112**: `#4282` deleted
-26 surplus names (150 -> 124) and `#10015` added `get_organisation_account` (124 -> 125; the 149 sketch
-predates one method; see the `canonical-sdk-methods.md` row above). The target — 40 — is unchanged.
+26 surplus names (150 -> 124), `#10015` added `get_organisation_account` (124 -> 125; the 149 sketch
+predates one method), `#12901` wave 1 retired five off-surface methods (125 -> 120), and `#11609`
+Phase 2 landed six containers while re-privatising the fourteen read methods they cover
+(120 -> 112; 150 − 26 − 5 − 14 + 6 + 1 = 112). The target — 40 — is unchanged.
 
 The ledger of the departing names — grouped, with the rationale for each group — is the
 **"Discarded — and why"** section of `docs/product/beta-sdk-surface.md`.

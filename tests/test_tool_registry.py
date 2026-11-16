@@ -121,7 +121,7 @@ class TestRegistryEquivalence:
         in that nine: each carries a `rest_spec` (`GET /v1/issue-insight`,
         `GET /v1/context`), and retiring the registry entry would delete its REST
         route with it — a public API removal, not a rename (the reason is spelled
-        out at `tortoise/tool_registry.py:2247-2259`). The membership above is
+        out at `tortoise/tool_registry.py:2255-2260`). The membership above is
         re-derived from `RETIRED_USE_INSTEAD`, not typed: `config/surface-order.yml`
         records the same nine.
         ⛔ SIX of the family's members are DELIBERATELY still live —

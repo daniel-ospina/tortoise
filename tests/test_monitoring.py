@@ -37,7 +37,7 @@ class FakeSDK:
         return proj
 
     # #11609: `taxonomy()` retired into the orientation container; this stub mirrors
-# the call `monitoring.metrics` actually makes (`graph_overview(section='taxonomy')`).
+    # the call `monitoring.metrics` actually makes (`graph_overview(section='taxonomy')`).
     def graph_overview(self, section=None, **kwargs):
         return {"Point": self._graph_size, "Event": 0}
 
