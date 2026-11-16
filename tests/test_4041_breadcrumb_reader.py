@@ -198,10 +198,15 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
     happened, for the failure message to splice in — the message must not claim
     a kill that was suppressed.
 
-    The group, not the child: the hook deliberately dispatches `nohup … &`
-    children (the install-probe beacon and the spool drain, both with their
-    streams on /dev/null), and a bound that reaps only bash leaves them running
-    past the test that spawned them.  Both failures are absorbed on purpose —
+    The group, not the child: the hook's three `nohup … session drain …
+    >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:846`, `:854`) are
+    fire-and-forget by design — they are meant to outlive the hook — so a bound
+    that reaps only bash leaves them running past the test that spawned them.
+    ⛔ That is `nohup`-detached and outliving; the install-probe beacon is NOT
+    an example of it. That one is a plain `_run_probe >/dev/null 2>&1 &`
+    (`:786`) whose outcome is the payload, so bash `wait`s it in the foreground
+    (`:801`) and it cannot outlive the hook at all — the script says so itself
+    at `:767`.  Both failures are absorbed on purpose —
     ``ProcessLookupError`` when the group is already gone, ``PermissionError``
     on macOS when only zombies remain — because a cleanup error must never
     replace the assertion it is cleaning up after.
