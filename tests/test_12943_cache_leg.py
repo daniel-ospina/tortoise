@@ -661,14 +661,30 @@ def test_no_cache_leg_failure_is_counted_when_the_cache_is_shared(monkeypatch):
     _arm_record(monkeypatch)
     before = _counts()
     from tortoise import hosted_api
+    from tortoise import sdk as sdk_module
 
-    sdk = hosted_api._make_sdk(graph_name="org_org1_g1")
     # ⛔ "THE HOOK RAN AND DECLINED", not just "nothing was counted" (review
-    # cycle 2). A zero delta cannot tell the predicate's `if cache_uri: return
-    # None` arm from a hook that was never reached, so it would stay green if the
-    # call were deleted or pushed back inside an `is None` branch. The SDK's own
-    # attribute is the evidence that the shared-cache arm is the live gate.
+    # cycle 2; review pass 6 found the first cut did NOT establish it). A
+    # delta-only assertion cannot tell the predicate's `if cache_uri: return
+    # None` arm from a hook that was never reached, so it stays green if the
+    # call is deleted or pushed back inside the constructor's `_db_uri is None`
+    # branch — the exact drift `tortoise/sdk.py`'s unconditional call exists to
+    # prevent (and that `sdk.py` names THIS test as the pin for). The SPY is
+    # what observes the call; it delegates to the real hook, so the delta below
+    # is still the real counter's.
+    calls: list[dict[str, object]] = []
+    real_note = sdk_module._note_local_cache
+    assert real_note is not None, "the hook must be importable, or this control is vacuous"
+
+    def _spy(**kwargs):
+        calls.append(kwargs)
+        return real_note(**kwargs)
+
+    monkeypatch.setattr(sdk_module, "_note_local_cache", _spy)
+    sdk = hosted_api._make_sdk(graph_name="org_org1_g1")
     assert sdk._db_uri, "the shared-cache construction must carry a URI"
+    assert len(calls) == 1, f"the constructor must call the hook exactly once, got {calls!r}"
+    assert calls[0]["cache_uri"] == sdk._db_uri, "the hook must be handed the SHARED uri"
     assert cache_leg.cache_leg_reason(cache_uri=sdk._db_uri) is None
     sdk.close()
     assert _delta(before) == {}
