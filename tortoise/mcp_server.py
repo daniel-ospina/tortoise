@@ -9755,8 +9755,8 @@ def tortoise_session_capture(conversation: list[dict],
             # ⚠️ THE 402 IS THE COUNTER-EXAMPLE HERE, not an instance (#12992
             # review P2): `quota_refusal_payload` returns a
             # `quota.RefusalPayload` — a `dict` SUBCLASS whose own `__str__`
-            # returns `message` (#4614, and `docs/00_index.md`'s SDK note says
-            # so) — so `str(detail)` already painted that one. The repr this
+            # returns `message` (#4614; `tortoise/quota.py:420-436` is the class
+            # and its `__str__`) — so `str(detail)` already painted that one. The repr this
             # line fixes is the plain-dict arms above.
             with contextlib.suppress(Exception):
                 _record_capture_last_error(
