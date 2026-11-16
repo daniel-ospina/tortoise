@@ -190,15 +190,30 @@ def test_case_two_is_unrepresentable_in_the_seed_sql() -> None:
     # True` can never fail, so it certified nothing while reading as the check
     # that case 2 is enforced by the SQL. It also had the polarity backwards:
     # `seed()` DOES carry `row_max > floor`, and that is correct — it names
-    # WHICH refusal the statement just produced (the count is 3, two of them in
-    # prose). The property that matters is ORDER: the comparison can only
-    # CLASSIFY a refusal that already happened, so it must run AFTER the
-    # statement — a Python check placed before `cursor.execute(SEED_SQL)` would
-    # be the enforcement the SQL is supposed to own.
-    assert seed_body.rindex("row_max > floor") > execute_at, (
-        "seed() compares row_max before the seed statement runs — case 2 would "
-        "be enforced by Python rather than by the SQL's own `WHERE row_max <= "
-        "enumerated_floor` guard")
+    # WHICH refusal the statement just produced. The property that matters is
+    # ORDER: the comparison can only CLASSIFY a refusal that already happened, so
+    # it must run AFTER the statement — a Python check placed before
+    # `cursor.execute(SEED_SQL)` would be the enforcement the SQL is supposed to
+    # own.
+    #
+    # ⛔ AND `rindex` WAS THE SAME DEFECT ONE LAYER DOWN (measured). Asserting
+    # only that the LAST occurrence is after `execute_at` passes with the exact
+    # pre-flight this comment forbids, because the statement's own classifier
+    # STAYS the last occurrence either way: a `row_max > floor` branch planted
+    # immediately before `cursor.execute(SEED_SQL)` left the assertion GREEN, so
+    # it named a pin it did not have. What is asserted now is that NO comparison
+    # can run before the statement — and the scan is confined to the CODE,
+    # because the docstring's prose names `row_max > floor` while explaining case
+    # 2, and a whole-body scan fires on that instead.
+    doc_end = seed_body.index('"""', seed_body.index('"""') + 3)
+    code = seed_body[doc_end:]
+    code_execute_at = code.index("cursor.execute(SEED_SQL")
+    pre_flight = code.find("row_max >")
+    assert pre_flight == -1 or pre_flight > code_execute_at, (
+        f"a `row_max` comparison runs at offset {pre_flight}, BEFORE the seed "
+        f"statement at {code_execute_at} — case 2 would be enforced by Python "
+        f"rather than by the SQL's own `WHERE row_max <= enumerated_floor` "
+        f"guard, which would make that guard unreachable and untested")
 
 
 def test_the_seed_sets_the_tenant_scope_itself() -> None:
