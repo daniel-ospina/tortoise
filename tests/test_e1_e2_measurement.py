@@ -3024,14 +3024,47 @@ def test_the_two_flags_are_unset_on_every_deploy_surface():
     defaults ON), so "unset everywhere" means production runs the mechanical
     predicate with the seam and classify-later off — not that nothing runs.
     """
-    for rel in ("fly.toml", ".github/scripts/fly-managed-secrets.txt"):
-        text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
-        for flag in ("TORTOISE_VET", "TORTOISE_VALUE_GATE",
-                     "TORTOISE_S2_DECISION_SEAM"):
-            assert flag not in text, (
-                f"{rel} now sets {flag}: the deployed configuration is no longer "
-                "the default arm, so the probe's arm table and E1-E2.md's note "
-                "must say which arm production actually runs")
+    # ⛔ #12926: this pins the ARM, not the TEXT. `#12926` made every deployment channel
+    # STATE both embedding switches, so `fly.toml` now carries `TORTOISE_VALUE_GATE = "1"` —
+    # the SAME arm this measurement scored (`#10996` made unset mean ON), so the deployed
+    # configuration still runs the default arm and the rows above still describe it. A
+    # text-presence check called that a change and forced a document edit for a no-op; an
+    # arm comparison still reds on the thing that matters — `=0` on the value gate, or any
+    # statement arming VET or the seam.
+    import tomllib
+
+    from tortoise import s2_decision_seam, value_gate
+    from tortoise.env_truthy import is_truthy
+    from tortoise.extractor_v2 import _vet_enabled
+
+    default_arms = {
+        "TORTOISE_VET": _vet_enabled(),
+        "TORTOISE_VALUE_GATE": value_gate.value_gate_enabled(),
+        "TORTOISE_S2_DECISION_SEAM": s2_decision_seam.seam_enabled(),
+    }
+    fly_env = tomllib.loads((_REPO_ROOT / "fly.toml").read_text(encoding="utf-8")).get("env") or {}
+    for flag, default_arm in default_arms.items():
+        if flag in fly_env:
+            stated = is_truthy(fly_env[flag])
+            assert stated is default_arm, (
+                f"fly.toml states {flag}={fly_env[flag]!r}, which is NOT the arm this"
+                f" measurement was scored on (default {default_arm}): the deployed"
+                " configuration is no longer the default arm, so the probe's arm table and"
+                " E1-E2.md's note must say which arm production actually runs")
+
+    # A Fly delivery ROUTE for one of these flags changes the arm just as surely as a value
+    # does (a secret or a workflow assignment is not visible in `[env]`). No statement of
+    # any of the three is declared, and `#12926` deliberately left the embedding switches
+    # out of this ledger for the same reason (`fly.toml`'s comment names that bound).
+    ledger = (_REPO_ROOT / ".github/scripts/fly-managed-secrets.txt").read_text(encoding="utf-8")
+    for line in ledger.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        name = stripped.split()[0]
+        assert name not in default_arms, (
+            f"{name} is declared in fly-managed-secrets.txt, so the deployed arm is supplied"
+            " by a route this measurement never exercised — say which arm production runs")
 
 
 def test_the_three_switches_resolve_from_their_own_defaults(monkeypatch):
