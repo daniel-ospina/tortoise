@@ -126,7 +126,7 @@ of these to the public surface is a **new** surface change and needs the owner a
 
 `test_guard` is **not** in this list and was **not** deleted: `beta-sdk-surface.md` rules it *"Kept
 and relocated … it guards the production-wipe incident, so the code must survive"*. ⚠️ **But it is
-still ON the public surface today** — it is one of the 125 (`config/sdk-surface.json`,
+still ON the public surface today** — it is one of the 124 (`config/sdk-surface.json`,
 `sdk.py::TortoiseSDK.test_guard`), and `tools/sdk_surface.py --check` counts it. The
 `beta-sdk-surface.md` ruling is about the approved 40-method TARGET, where it is relocated rather
 than deleted; on the live surface it remains a *removal candidate* (see the "Candidates for
