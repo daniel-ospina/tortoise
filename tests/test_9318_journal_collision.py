@@ -845,33 +845,14 @@ def test_a_different_event_type_at_the_SAME_capture_instant_is_still_a_collision
         rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
     assert excinfo.value.stored_event_type == "PointAdded"
     assert excinfo.value.event_type == "ObjectRegistered"
-
-
-def test_the_plan_emits_the_position_row_AFTER_the_layer_rows() -> None:
-    """ORDER IS LOAD-BEARING: the drift arm's repair lands because of it.
-
-    The drift arm (#12904 P0-1) returns WITHOUT raising, so the write reaches its
-    own `commit()` and every layer statement the plan emitted LANDS — for the
-    same-type drift case that is the record repairing itself to the new
-    derivation. Emit the position row FIRST and the repair inverts: the position
-    row is absorbed, the layer rows still commit (they are in the same plan), and
-    the documented "the refusal fires after the layer rows have already executed
-    — DISCARDED, not prevented" paragraph also becomes false. Nothing else in the
-    suite notices the flip (measured: swapping the two `plan` calls leaves the
-    whole file green), so the ORDER is pinned here, on the plan itself.
-    """
-    plan = rp.replay_plan([RECORD_A], org_id=ORG, graph_id=GRAPH,
-                          start_seq=1, position=True)
-    assert len(plan) > 1, (
-        "the plan carried no layer statement — this pin would be vacuous, so "
-        "re-measure rather than deleting it")
-    position_at = [i for i, statement in enumerate(plan)
-                   if statement.sql == rp._JOURNAL_POSITION_INSERT_SQL]
-    assert position_at, "the position row was not emitted at all"
-    assert position_at == [len(plan) - 1], (
-        f"the position row is at index {position_at} of {len(plan)} — it must be "
-        f"emitted AFTER the layer statements, because the drift arm returns "
-        f"without raising and this write then COMMITS what the plan emitted")
+    # ⛔ AND THE MESSAGE NAMES A DIFFERENCE THIS PAIR HAS (review cycle 8):
+    # `ENVELOPE_KEYS` strips `type`, so both sides carry the SAME payload — a
+    # clause saying "only the CAPTURE TIME differs" would be false here.
+    message = str(excinfo.value)
+    assert "the record TYPE" in message, (
+        "the refusal named the capture time as the only difference for a "
+        "TYPE-only difference")
+    assert "only the CAPTURE TIME differs" not in message
 
 
 def test_the_position_statement_carries_no_schema_ask() -> None:

@@ -876,7 +876,8 @@ class RefusedJournalOperation(RecordProjectionError):
 
 
 class JournalPositionCollision(RecordProjectionError):
-    """An absorbed journal position holds content this write would not produce (#9318).
+    """An absorbed journal position holds content this write would not produce, or one this
+    write captured at a different instant (#9318).
 
     `public.journal_event` is keyed `(org_id, graph_id, seq)`, and the schema
     calls that key *"the idempotency key: applying a position twice is a
@@ -897,11 +898,14 @@ class JournalPositionCollision(RecordProjectionError):
 
     ⛔ WHAT THIS IS NOT: a violation of idempotency. Re-applying the SAME
     position with the SAME content is a replay, stays a SILENT no-op, and never
-    raises this (`replay()` asks Postgres to compare the surviving row's
-    `event_type`/`payload` with what it was about to write, and only a
-    DIFFERENCE is a collision). A guard that turned every replay into an error
+    raises this. `replay()` asks Postgres to compare the surviving row's
+    `event_type`/`payload`/`recorded_at` with what it was about to write, and
+    that comparison is NECESSARY but not sufficient for a refusal: a difference
+    it can read as this record's own drift (same type, same capture, moved
+    payload) is silent, and a capture-time difference alone IS a refusal even
+    though the content matches. A guard that turned every replay into an error
     would be a worse defect than the one it fixes, which is why the comparison
-    is content, not merely "the key was taken".
+    is content AND capture, not merely "the key was taken".
 
     ⛔ AND IT RETIRES — BY DELETION, ATOMIC WITH THE KEY CHANGE. This is a
     DETECTOR, not the repair: the fix is journal IDENTITY in the key — a journal
@@ -1133,12 +1137,25 @@ class JournalPositionCollision(RecordProjectionError):
         # content can be BYTE-IDENTICAL: for a `ts`-only pair the two digests
         # printed above MATCH, so saying "the surviving row's content is not what
         # this write would produce" would be refuted by this very line.
-        content = (
-            "The surviving row's content is IDENTICAL to what this write would "
-            "produce; only the CAPTURE TIME differs"
-            if payload_digest == stored_payload_digest
-            else "The surviving row's content is not what this write would produce"
-        )
+        if payload_digest != stored_payload_digest:
+            content = ("The surviving row's content is not what this write would "
+                       "produce")
+        else:
+            # ⛔ PAYLOAD-IDENTICAL IS NOT "ONLY THE CAPTURE TIME" (review cycle 8).
+            # `ENVELOPE_KEYS` strips `type`, so two DIFFERENT record types bind
+            # the SAME payload — naming the capture time alone would be false for
+            # them, on the line that prints both types.
+            differs = []
+            if stored_event_type != event_type:
+                differs.append("the record TYPE")
+            if capture_state == "differs":
+                differs.append("the CAPTURE TIME")
+            content = (
+                "The surviving row's PAYLOAD is IDENTICAL to what this write "
+                "would produce; "
+                + ("only " + " and ".join(differs) + " differ"
+                   if differs else "the difference is not in the payload")
+            )
         super().__init__(
             f"journal position {seq} of ({org_id!r}, {graph_id!r}) already "
             f"holds {stored_event_type!r} ({stored_payload_digest}, "
@@ -6304,7 +6321,9 @@ def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
     ⛔ THE STATEMENT IS UNCHANGED BY #9318, and that is deliberate. The guard
     that tells a REPLAY from a COLLISION reads the cursor's affected-row count
     and, only when it is zero, asks the database whether the surviving row's
-    content differs (:func:`_refuse_a_journal_collision`). Rewriting this INSERT
+    content OR CAPTURE TIME differs — a content difference with the same type and
+    the same instant is drift and stays silent
+    (:func:`_refuse_a_journal_collision`). Rewriting this INSERT
     (a `RETURNING`, a `DO UPDATE`, a probe in the `VALUES` list) would change the
     plan every replay, seam and PGlite caller materializes — and the `#9187`
     snapshot pin (`tests/test_record_writer_seam.py`) exists to notice exactly
