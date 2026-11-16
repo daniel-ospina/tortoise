@@ -1175,6 +1175,58 @@ def test_the_live_door_takes_the_allocated_number_over_the_journals(
         "the position row is not the allocated number")
 
 
+def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
+        schema, tenant, app, monkeypatch, caplog):
+    """FINDING (#12894 review cycle 11, P2): the generic arm's sentence is chosen
+    by `allocate`, and NO leg pinned it — inverting the condition left the suite
+    green.
+
+    The arm catches every failure that is neither a `#9318` collision nor an
+    allocator refusal, which is the whole remainder of the allocated path — the
+    arm this change makes reachable in production and therefore the one an
+    operator reads most. It must name `replay(allocate=True)` there, because
+    `_refuse_an_enumerated_replay` refuses a plain replay on a cut-over graph.
+
+    Driven deterministically: `replay_plan` is made to raise, which reaches the
+    generic arm without inventing a schema state; the flag is then mirrored OFF
+    so the enumerated arm's original sentence is pinned too.
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2])
+    _seed_and_arm(app, org, graph, 2)
+    app.commit()
+    from tests.test_9078_record_written_by_production_path import _app_role_dsn
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV,
+                       _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
+
+    def _explode(*a, **k):
+        raise RuntimeError("the statement exploded")
+
+    monkeypatch.setattr(rp, "replay_plan", _explode)
+    for flag, armed in (("1", True), ("0", False)):
+        monkeypatch.setenv(rw.RECORD_ALLOCATE_ENV, flag)
+        caplog.clear()
+        write = rw.write_live_record(
+            RECORD, durable=True, seq=3, tenant=(org, graph), allocate=False)
+        assert write is not None and write.outcome is rw.RecordWriteOutcome.REFUSED
+        assert write.refusal == "write_failed", (
+            f"token moved out of the closed vocabulary: {write.refusal!r}")
+        text = "\n".join(record.getMessage() for record in caplog.records)
+        if armed:
+            assert "replay(allocate=True)" in text, (
+                "the ARMED arm advertised a remedy it refuses — a plain replay "
+                f"is refused on a cut-over graph: {text[-400:]!r}")
+            assert "a replay heals the record" not in text, (
+                f"the enumerated arm's sentence leaked onto the armed arm: "
+                f"{text[-400:]!r}")
+        else:
+            assert "a replay heals the record" in text, (
+                "the ENUMERATED arm lost its original remedy, which IS correct "
+                f"there: {text[-400:]!r}")
+    monkeypatch.delenv(rw.RECORD_ALLOCATE_ENV, raising=False)
+
+
 def test_a_mis_armed_counter_is_refused_with_a_remedy_that_applies(
         schema, tenant, app, monkeypatch, caplog):
     """FINDING (review cycle 3, P2): the live door reported every allocator

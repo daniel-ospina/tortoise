@@ -7824,9 +7824,22 @@ def _carried_position(record: Mapping[str, Any], enumerated: int,
     allocates the ordinal and the journal record CARRIES it, so a replay of that
     record must not renumber it. A record built from the record's own rows carries
     `seq` as a fact (`public.journal_event.seq` is a column); a record read off the
-    JSONL journal carries no `seq` (no writer emits one — that is `§A7.7` 6.3,
-    still planned) and keeps the enumeration, which is why this is a READ when
-    present rather than a required field.
+    JSONL journal carries no `seq` and keeps the enumeration, which is why this is
+    a READ when present rather than a required field.
+
+    ⛔ BUT "NO WRITER EMITS ONE" WAS FALSE, and this read was bitten by it (#12894
+    review cycle 11, P1 — measured). ``seq`` was NOT a reserved prop on the SDK or
+    `EventAPI` doors until this change, so `update_point(pid, seq=42)` could put one
+    on a line; and `tools/backfill_copy_turns.py` copies EVERY graph property onto
+    its event, so a `:Session` holding a ``seq`` prop reached here too and refused
+    the whole session's copy. The doors now RESERVE the name (so no producer can
+    mint one), and that tool's `_SESSION_ENVELOPE` strips it — but the shape test
+    below is still the weak point: it cannot tell a CARRIED POSITION from a
+    tenant property that merely shares the name. The sound fix is an explicit
+    "this batch is record-sourced" flag on `replay`/`replay_plan` rather than
+    inferring it from a key's presence; until then every producer that copies
+    graph properties onto a journal event must strip ``seq``, and the refusal
+    below says so.
 
     ⛔ A DISAGREEMENT IS A REFUSAL, NEVER A RENUMBERING. Silently preferring either
     side is the `#9190` defect with a new spelling: one number would be overwritten
@@ -7867,7 +7880,11 @@ def _carried_position(record: Mapping[str, Any], enumerated: int,
             f"record {index} carries journal position {carried_seq} but the "
             f"enumeration puts it at {enumerated}. The record and the read "
             f"disagree about the ordinal, so NEITHER is renumbered here -- "
-            f"repair the batch (or the caller's start_seq) and re-run"
+            f"repair the batch (or the caller's start_seq) and re-run. If this "
+            f"`seq` is a CALLER PROPERTY and not a carried position, the batch "
+            f"is not record-sourced: strip `seq` at the producer (it is a "
+            f"reserved journal-envelope name) and re-run -- the two are "
+            f"indistinguishable here, because this reads a shape, not a claim"
         )
     return carried_seq
 
