@@ -99,6 +99,37 @@ The OPENER is located in the structural view, so a ``<<`` inside a string, a com
 arithmetic span is not one (a ``<<<`` here-string is excluded by the pattern), while every real
 spelling — ``<<EOF``, ``<<'EOF'``, ``<<\\EOF``, ``<<-EOF`` — opens a body.
 
+⛔ **A brace GROUP is a statement — unless it is FORKED** (review P1, measured). ``{ export
+K=1; }`` runs in the CURRENT shell, so its export reaches the process and crediting it is
+correct; ``{ export K=1; } | tee`` (``|``, ``|&`` or ``&``) runs the whole group in a SUBSHELL, so
+NOTHING it exports survives. The fork bit was computed per statement SEGMENT, and the operator sits
+in a later segment than the exports, so each export saw no fork and was credited — measured: the
+report read ``ok entrypoint.sh … =1 =1``, exit 0, while ``env -i bash`` on the same script exported
+neither switch. Each open group now carries an UNDO LOG (``group_frames``): a plain closer keeps the
+group's changes and merges its log outward, a FORKED closer restores the pre-group state exactly —
+so ``{ unset K; } | tee`` cannot retract a top-level ``export K=1`` the process does keep. An
+UNBALANCED group (a ``{`` with no closer) keeps what it credited: the script is incomplete shell,
+so it does not run at all and the deployment fails loudly, which is not this gate's question.
+
+⛔ **A FUNCTION HEADER has three spellings, and all three remember their body** (review P1,
+measured): ``function NAME``, ``function NAME()``/``function NAME ()`` and ``NAME()``. The third
+was missing from ``_SHELL_FN_HEADER``, so ``function arm_gates()`` + an Allman ``{`` did not
+register a header — the lone brace read as a group OPENER and the never-running body's exports
+were credited. Fixed by adding the ``()`` arm; every spelling is pinned.
+
+⛔ **The carried guard operator is CONSUMED by the next CODE statement** (review P2, measured).
+The ``&&``/``||`` a line ends with applies to the next statement — that is what makes a multi-line
+``[ -n "$X" ] &&`` / ``  export K=1`` refused. It was never cleared, so ONE continuation disarmed
+every later statement in the file and an honest entrypoint was REFUSED with a message blaming the
+VALUE. A BLANK line does not consume it (bash continues the compound command there), which is
+pinned against bash in both directions.
+
+⛔ **A redefined build-stage name resolves to the MOST RECENT stage** (review P2, measured against
+a real ``docker build``): ``FROM scratch AS b`` … ``FROM scratch AS b`` … ``FROM b`` inherits the
+LAST ``b``, not the first. ``_parent_stage`` walked forward and graded the dead stage — ``ok … =1
+=1`` over an image whose ``Config.Env`` (``docker image inspect``) carries no ``TORTOISE_*``. The
+mirror ordering was a false refusal; both are pinned.
+
 ``.env.example`` is a template nothing deploys, so it is not a channel of this gate; the
 read-only instrument (``tools/dod_5090_probe.py``) is what scores it.
 
@@ -311,7 +342,31 @@ _SHELL_FN_BRACE = re.compile(r"\)\s*\{|\bfunction\s+[A-Za-z_][A-Za-z0-9_.-]*\s*\
 #: every pinned spelling (`arm() {`, `arm() { …; }`, `function arm {`) passed while ONE NEWLINE
 #: defeated all of them. The header is remembered and the following lone `{` is the body's brace.
 _SHELL_FN_HEADER = re.compile(
-    r"^(?:function\s+[A-Za-z_][A-Za-z0-9_.-]*|[A-Za-z_][A-Za-z0-9_.-]*\s*\(\s*\))$"
+    # ⛔ THREE legal header spellings, not two (review P1, measured): `function NAME`,
+    # `function NAME()` / `function NAME ()` and `NAME()`. The third was missing, so
+    # `function arm_gates()` + an Allman body brace did not register a header at all — the lone
+    # `{` then read as a group OPEN (no depth change, and a group is credited by design) and the
+    # never-running body's exports were reported `STATED` (exit 0) while `env -i bash` on the same
+    # script printed no `TORTOISE_*`. Pinned in both spellings by
+    # `test_a_function_header_spelling_with_parentheses_is_still_a_BODY`.
+    r"^(?:function\s+[A-Za-z_][A-Za-z0-9_.-]*\s*(?:\(\s*\))?|[A-Za-z_][A-Za-z0-9_.-]*\s*\(\s*\))$"
+)
+
+#: A brace GROUP's closer at statement start (the prefix strip has already removed the `{` of an
+#: opener). Distinct from `_SHELL_CLOSERS`, whose brace arm only matches a `}` that ENDS the
+#: statement — `} | tee` closes a group and carries a fork, and that is the shape this reader must
+#: see (review P1, measured).
+_SHELL_GROUP_CLOSE = re.compile(r"^\s*\}(?![)}])")
+
+#: ⛔ A FORKED GROUP — a group closer followed by a fork operator (review P1, measured).
+#: `{ export K=1; export K2=1; } | tee`, `… } & wait` and `… } |& tee` all run the group in a
+#: SUBSHELL, so nothing it exports reaches the process (`env -i bash` on each prints no
+#: `TORTOISE_*`) — yet the segment-splitting handed each export a `forked == False` because the
+#: `|`/`&` sits in a LATER segment than the exports do. A group is credited by design (it runs in
+#: the current shell), which is correct only for the UNFORKED shape; the forked one is undone by
+#: the group frame below. Pinned by `test_a_FORKED_group_body_is_never_credited`.
+_SHELL_GROUP_FORK = re.compile(
+    r"^\s*\}\s*(?:[0-9]*>>?[0-9]*\s*|[0-9]*>&[0-9]+\s*)*(?:\|&?|&)(?![&|>])"
 )
 
 
@@ -703,15 +758,23 @@ def _heredoc_end(lines: list[str], instruction: str, after: int) -> int:
 
 
 def _parent_stage(index: int, base: str, names: list[str]) -> int | None:
-    """The EARLIER stage ``base`` names, or ``None`` when it is an external image.
+    """The MOST RECENT earlier stage ``base`` names, or ``None`` when it is an external image.
 
     ``FROM builder`` inherits that stage's ``ENV``; anything else is a registry image and inherits
-    nothing this file declares.
+    nothing this file declares. A redefined name resolves to its LAST definition, which is what
+    Docker does (measured against a real build).
     """
     if not base:
         return None
     folded = base.lower()
-    for prior in range(index):
+    # ⛔ MOST RECENT, not oldest (review P2, measured against a real `docker build`, docker
+    # 29.1.3/buildkit): a Dockerfile may redefine a stage name, and Docker resolves `FROM <name>`
+    # to the LAST stage defined with that name. Walking FORWARD returned the first definition, so
+    # `FROM scratch AS b` + both `ENV` → `FROM scratch AS b` (no ENV) → `FROM b` credited the
+    # dead stage's values (`ok … =1 =1`) while `docker image inspect --format '{{json .Config.Env}}'`
+    # showed no `TORTOISE_*`; the mirror ordering was a false refusal. Pinned in both orderings by
+    # `test_a_redefined_stage_name_resolves_to_the_MOST_RECENT_stage`.
+    for prior in reversed(range(index)):
         if names[prior] and names[prior].lower() == folded:
             return prior
     return None
@@ -1450,17 +1513,49 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     #: fail-open the one-line pin was meant to close. The same applies to `||`, and to a trailing
     #: FORK operator (`|`), which `_SHELL_FORK` sees only on its own line.
     carried = ""
+    #: ⛔ UNDO LOGS for brace GROUPS, one dict per open group (review P1, measured). A group runs
+    #: in the CURRENT shell, so its exports are credited — until the closer shows a FORK, at which
+    #: point the whole group ran in a subshell and nothing it did reached the process. Each entry
+    #: is `key -> (was stated, prior value)`, recorded on the FIRST mutation of that key inside the
+    #: frame, so a forked closer restores exactly the pre-group state (an export the group retracts
+    #: comes back; an export the group makes is dropped) instead of guessing. A plain closer merges
+    #: its log outward, so an enclosing forked group still undoes it. Pinned by
+    #: `test_a_FORKED_group_body_is_never_credited` and its unforked mirror.
+    group_frames: list[dict[str, tuple[bool, str]]] = []
+
+    def _note_prior(key: str) -> None:
+        """Remember ``key``'s pre-group state the first time an open group touches it."""
+        if group_frames and key not in group_frames[-1]:
+            group_frames[-1][key] = (key in stated, stated.get(key, ""))
+
+    def _credit(key: str, value: str) -> None:
+        _note_prior(key)
+        stated[key] = value
+
+    def _retract(key: str) -> None:
+        _note_prior(key)
+        ambiguous.add(key)
+        stated.pop(key, None)
+
     code_lines = _shell_code_lines(text)
     for line, structure in zip(code_lines, _shell_structures(code_lines), strict=True):
         # ⛔ STRUCTURE, not the raw line: a closer inside a quote or a comment is DATA (review P1),
         # and quote state carried across lines covers a quoted string that spans a newline.
         segments = _shell_statements(line, structure)
         for index, (raw, view, separator) in enumerate(segments):
-            if index == 0:
+            # ⛔ The carried operator is CONSUMED by the next statement that is CODE (review P2,
+            # measured): it was never cleared, so a single line ending in `&&` made every later
+            # statement in the file short-circuited — an honest entrypoint
+            # (`[ -n "${STARTUP_LOG:-}" ] &&` / `echo …` / two plain exports) was REFUSED with a
+            # message blaming the VALUE, while `env -i bash` on it exports both switches. A BLANK
+            # line must not consume it (bash continues the compound command across blank lines),
+            # which is why the trailing-empty-segment arm falls back to the operator already held.
+            if index == 0 and raw.strip():
                 separator = separator or carried
+                carried = ""
             if index == len(segments) - 1 and not raw.strip():
                 # The trailing operator of this line is the final, empty segment's separator.
-                carried = separator
+                carried = separator or carried
             depth = max(0, depth - len(_SHELL_CLOSERS.findall(view)))
             # ⛔ `depth > 0 or terminated` is NOT the whole population of statements the process
             # may never receive, and the gaps were all measured fail-OPEN (review):
@@ -1488,6 +1583,13 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # `{`, so a lone body brace's stripped text is EMPTY and cannot identify it.
             allman_body = pending_fn_header and raw.strip().startswith("{")
             pending_fn_header = _SHELL_FN_HEADER.match(content_raw.strip()) is not None
+            # ⛔ A group OPENER is detected on the RAW statement — the prefix strip removes the
+            # leading `{`, and an Allman function BODY's brace is the same character, which
+            # `allman_body` is what tells apart. The frame is pushed BEFORE the crediting block so
+            # an export spelled on the opener's own statement (`{ export K=1`) lands inside it and
+            # is undone by a forked closer.
+            if raw.strip().startswith("{") and not allman_body and fn_body == 0:
+                group_frames.append({})
             short_circuit = separator in ("&&", "||")
             forked = _SHELL_FORK.search(content_view) is not None
             conditional = depth > 0 or terminated or short_circuit or forked
@@ -1535,11 +1637,10 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                         # assignment is the same verdict for the same reason: inside a function
                         # body, a branch or a loop it may never run, and after a top-level
                         # `exit`/`exec` it cannot.
-                        ambiguous.add(key)
-                        stated.pop(key, None)
+                        _retract(key)
                         continue
                     if not conditional:
-                        stated[key] = _unquote(value)
+                        _credit(key, _unquote(value))
             elif (
                 (unset := _SHELL_UNSET.match(content_raw))
                 or (unexport := _SHELL_EXPORT_UNEXPORT.match(content_raw))
@@ -1550,8 +1651,7 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                         # These branches ran before, and ignored, the `conditional` guard, so a
                         # helper's local `unset K` retracted a TOP-LEVEL `export K=1` the process
                         # does receive — a false refusal of an honest config.
-                        ambiguous.add(name)
-                        stated.pop(name, None)
+                        _retract(name)
             elif (unexported := _SHELL_UNEXPORTED.match(content_raw)) and (
                 unexported.group("key") in SWITCHES
             ) and _statement_is_code(content_raw, content_view):
@@ -1560,8 +1660,7 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 # `K=` really does clear it and a short-circuited one is unknowable — see the
                 # CREDIT/RETRACT note above.
                 if retracts:
-                    ambiguous.add(unexported.group("key"))
-                    stated.pop(unexported.group("key"), None)
+                    _retract(unexported.group("key"))
             elif (env_call := _SHELL_ENV_CALL.match(content_raw)) and (
                 retracts or nested_retracts
             ) and _statement_is_code(content_raw, content_view):
@@ -1572,8 +1671,7 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 if _SHELL_ENV_IGNORE.search(env_call.group("args")):
                     stripped |= set(SWITCHES)
                 for name in stripped & set(SWITCHES):
-                    ambiguous.add(name)
-                    stated.pop(name, None)
+                    _retract(name)
             else:
                 # A statement that states no switch is where a MENTION lives (prose, a help line,
                 # a `[[ … == *TORTOISE_* ]]` test): recorded, never credited. A segment that DID
@@ -1589,8 +1687,25 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                     and _statement_is_code(content_raw, content_view)
                 ):
                     for name in _mentioned_switches(builtin.group("rest")):
-                        ambiguous.add(name)
-                        stated.pop(name, None)
+                        _retract(name)
+            # ⛔ A GROUP CLOSER: apply its frame (review P1, measured). Only when no FUNCTION
+            # BODY is open — a body's `}` is the same character, and `fn_body` is what tells them
+            # apart (`opened_fn` is checked as well, for a body opened and closed on one line).
+            if group_frames and fn_body == 0 and _SHELL_GROUP_CLOSE.match(content_view):
+                frame = group_frames.pop()
+                if _SHELL_GROUP_FORK.match(content_view):
+                    # A FORKED group ran in a SUBSHELL: nothing it credited or retracted reached
+                    # the process, so every key it touched is put back exactly as it was.
+                    for name, (was_stated, prior) in frame.items():
+                        if was_stated:
+                            stated[name] = prior
+                        else:
+                            stated.pop(name, None)
+                elif group_frames:
+                    # An UNFORKED group runs in place: its changes stand, and its undo log is
+                    # merged outward so an enclosing forked group can still undo them.
+                    for name, entry in frame.items():
+                        group_frames[-1].setdefault(name, entry)
             opened_fn = _function_body_braces(raw, view) + (1 if allman_body else 0)
             # ⛔ OPENERS are scanned on the PREFIX-STRIPPED view (review P1, measured):
             # `{ if false; then export …; fi; }` credited BOTH switches although bash ran

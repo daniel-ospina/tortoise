@@ -28,6 +28,10 @@ Each test below is a falsifier for one claim the check makes:
 | `test_both_daemons_report_at_boot` | the wiring | the line exists but nothing calls it — the silence it exists to end |
 | `test_the_pre_merge_check_runs_in_ci` | the enforcement | the tool exists and CI never runs it |
 | `test_the_real_tree_states_both_switches` | this repository, resolved | a real channel regresses; also pins the population so a new channel is a visible change |
+| `test_a_function_header_spelling_with_parentheses_is_still_a_BODY` | a never-running helper body is not credited | ANY header spelling (`function NAME`, `function NAME()`, `NAME()`) stops remembering its Allman body |
+| `test_a_FORKED_group_body_is_never_credited` | a subshell cannot state a value | a group that is piped or backgrounded (single- and multi-line) is credited, or an unforked group stops being |
+| `test_a_redefined_stage_name_resolves_to_the_MOST_RECENT_stage` | the image channel's stage model agrees with Docker | a repeated `AS <name>` is resolved to the FIRST definition, so a dead stage's `ENV` grades the image |
+| `test_a_trailing_guard_operator_is_consumed_by_the_next_statement` | a guard applies to the next statement, not the rest of the file | `carried` leaks past the statement it guards, or stops guarding across a blank line |
 """
 
 from __future__ import annotations
@@ -2584,3 +2588,194 @@ def test_a_closer_inside_a_function_body_does_not_end_the_body():
     assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
         f"the helper is never called, so its `unset` cannot touch the shipped value: {stated}"
     )
+
+
+# ── the sixth review's four findings (measured, both directions) ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "arm_gates()",
+        "function arm_gates",
+        "function arm_gates()",  # review P1: the THIRD legal spelling — was credited
+        "function arm_gates ()",
+    ],
+)
+def test_a_function_header_spelling_with_parentheses_is_still_a_BODY(header):
+    """Review P1 (measured) — `function NAME()` is a header, and its Allman body never runs.
+
+    `_SHELL_FN_HEADER` had two arms (`function NAME`, `NAME()`), so the third legal spelling —
+    `function arm_gates()` / `function arm_gates ()` — matched NEITHER. The lone `{` on the next
+    line then read as a group OPENER, a group does not change the depth and IS credited by design,
+    and the never-running body's exports were reported `STATED`:
+
+        $ python -c "…_shell_assignments('function arm_gates()\\n{\\n  export …=1\\n…')"
+        ({'TORTOISE_VALUE_GATE': '1', 'TORTOISE_EMBED_GATE': '1'}, set())     ← before
+        $ env -i bash -c 'function arm_gates()…'                              ← the truth
+        (no TORTOISE_* in the environment)
+
+    End-to-end on a temp root: `ok entrypoint.sh … =1 =1`, exit 0, over a process that receives
+    neither switch. Mutation-proved: dropping the `\\(\\s*\\)` arm reds the two `function` rows and
+    leaves the POSIX ones green.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        f"{header}\n{{\n  export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\n}}\n"
+    )
+    assert stated == {}, f"the body of `{header}` is never called, so it states nothing: {stated}"
+    assert set(SWITCHES) <= ambiguous, ambiguous
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        # the three measured single-line forked spellings
+        "{ export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; } | tee -a /tmp/x\n",
+        "{ export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; } |& tee -a /tmp/x\n",
+        "{ export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; } & wait\n",
+        # …and the multi-line body, whose opener and closer are on DIFFERENT lines
+        "{\n  export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\n} | tee -a /tmp/x\n",
+    ],
+)
+def test_a_FORKED_group_body_is_never_credited(tmp_path, script):
+    """Review P1 (measured) — a forked GROUP runs in a subshell, so nothing it exports survives.
+
+    `forked` was computed per STATEMENT segment, and `|`/`&` are not statement separators — so in
+    `{ export A; export B; } | tee` the fork sits in a LATER segment than the exports, each export
+    saw `forked == False`, and both were credited. Measured against bash, the truth is the
+    opposite: `env -i bash` on each of these prints no `TORTOISE_*`. The report then read
+    `ok entrypoint.sh … =1 =1`, exit 0.
+
+    The fix is an UNDO LOG per open group: a plain group's exports are still credited (it runs in
+    the current shell — the mirror, below), and a forked closer restores the pre-group state.
+
+    Mutation-proved: dropping the `_SHELL_GROUP_FORK` arm reds all four rows; crediting nothing
+    from any group reds the unforked mirror.
+    """
+    entrypoint = tmp_path / "entrypoint.sh"
+    entrypoint.write_text("#!/bin/sh\n" + script + 'exec "$@"\n')
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\nENV TORTOISE_VALUE_GATE=1\nENV TORTOISE_EMBED_GATE=1\n")
+    _fly(tmp_path)
+
+    stated, _ambiguous = gate._shell_assignments(script)
+    assert stated == {}, f"a forked group's exports never reach the process: {stated}"
+
+    channels, failures = gate.evaluate(tmp_path)
+    shell = [c for c in channels if c.channel == "entrypoint.sh"]
+    assert shell and shell[0].stated == {}, shell
+    assert any("entrypoint.sh" in f for f in failures), failures
+
+
+def test_an_UNFORKED_group_body_is_still_credited_and_a_fork_cannot_retract():
+    """The mirror of the row above, BOTH directions — a group that runs in place is a statement.
+
+    `{ export K=1; }` executes in the CURRENT shell, so its export DOES reach the process
+    (`env -i bash` on it prints `K=1`) and refusing it would be a false refusal of an honest
+    entrypoint. Only the FORK changes the verdict.
+
+    ⛔ The second half is the retraction direction: `{ unset K; } | tee` runs in a subshell, so the
+    top-level `export K=1` before it is STILL what the process receives — the unset must be undone
+    with the rest of the frame, not left to retract an honest value.
+    """
+    plain, _ = gate._shell_assignments(
+        "{ export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; }\n"
+    )
+    assert plain == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"an unforked group runs in the current shell: {plain}"
+    )
+
+    retracted_by_a_fork, _ = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+        "{ unset TORTOISE_EMBED_GATE; } | tee -a /tmp/x\n"
+    )
+    assert retracted_by_a_fork == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"a `unset` inside a forked group cannot touch the parent's export: {retracted_by_a_fork}"
+    )
+
+
+def test_a_redefined_stage_name_resolves_to_the_MOST_RECENT_stage():
+    """Review P2 (measured against a real `docker build`) — `FROM b` means the LAST stage named b.
+
+    `_parent_stage` walked FORWARD and returned the FIRST stage with that name, but Docker resolves
+    a stage reference to the most RECENT definition. Measured here with docker 29.1.3/buildkit:
+
+        FROM scratch AS b
+        ENV TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1
+        FROM scratch AS b          # redefined, carries NO ENV
+        FROM b AS final
+        → docker image inspect … '{{json .Config.Env}}' → ["PATH=…"]      (no TORTOISE_*)
+
+    so the reader credited both switches (exit 0) over an image that has neither. The mirror
+    ordering (the SECOND `b` carries the `ENV`) was a false refusal. Mutation-proved: walking
+    forward reds the first row and the second.
+    """
+    dead_stage_first = (
+        "FROM scratch AS b\n"
+        "ENV TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1\n"
+        "FROM scratch AS b\n"
+        "FROM b AS final\n"
+    )
+    stated, _ambiguous, shadowed = gate._dockerfile_env(dead_stage_first)
+    assert stated == {}, f"the LATER `b` has no ENV, so the shipped image has neither: {stated}"
+    assert set(shadowed) == set(SWITCHES), shadowed
+
+    live_stage_second = (
+        "FROM scratch AS b\n"
+        "FROM scratch AS b\n"
+        "ENV TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1\n"
+        "FROM b AS final\n"
+    )
+    stated, _ambiguous, _shadowed = gate._dockerfile_env(live_stage_second)
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"the LAST `b` is what `FROM b` inherits: {stated}"
+    )
+
+
+def test_a_trailing_guard_operator_is_consumed_by_the_next_statement():
+    """Review P2 (measured) — `carried` was never cleared, so ONE `&&` disarmed the whole file.
+
+    The operator a PREVIOUS line ended with is carried to the next statement so a multi-line guard
+    (`[ -n "$X" ] &&` / `  export K=1`) is refused instead of credited. It was re-assigned only
+    when a line's LAST segment was blank, so a single continuation set it for every later
+    statement in the file:
+
+        [ -n "${STARTUP_LOG:-}" ] &&
+          echo "startup log enabled"
+        export TORTOISE_VALUE_GATE="${TORTOISE_VALUE_GATE:-1}"
+        export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-1}"
+
+    → REFUSED with a message blaming the VALUE ("does not state a value this gate can read"),
+    while `env -i bash` on the same script exports both. Measured.
+
+    The guard itself must still hold (second half), including across a BLANK line — bash continues
+    the compound command there, so a blank line does not consume the operator. Mutation-proved:
+    never clearing `carried` reds the first half; clearing it per line reds the blank-line row; not
+    carrying it at all reds the multi-line guard.
+    """
+    honest, _ = gate._shell_assignments(
+        '[ -n "${STARTUP_LOG:-}" ] &&\n'
+        '  echo "startup log enabled"\n'
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+    )
+    assert honest == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"the `&&` guards the `echo`, not the exports two statements later: {honest}"
+    )
+
+    guarded, ambiguous = gate._shell_assignments(
+        '[ -n "${X:-}" ] &&\n  export TORTOISE_VALUE_GATE=1 &&\n  export TORTOISE_EMBED_GATE=1\n'
+    )
+    assert guarded == {}, f"a multi-line guard is still not a statement about the value: {guarded}"
+    assert set(SWITCHES) <= ambiguous, ambiguous
+
+    across_a_blank_line, ambiguous = gate._shell_assignments(
+        '[ -n "${X:-}" ] &&\n\nexport TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n'
+    )
+    # ⛔ Measured against bash, which agrees: the blank line does NOT consume the operator — the
+    # FIRST non-blank statement after it is the guarded one (VALUE stays unset) and the next
+    # statement is a statement of its own (EMBED is exported).
+    assert across_a_blank_line == {"TORTOISE_EMBED_GATE": "1"}, (
+        f"a BLANK line does not end the compound command: the next CODE statement is guarded, the "
+        f"one after it is not — `env -i bash` prints V=[UNSET] E=[1]: {across_a_blank_line}"
+    )
+    assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
