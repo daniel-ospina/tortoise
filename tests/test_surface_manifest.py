@@ -655,7 +655,12 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 #:   SDK) — which is why the manifest classified them `internal` while a receiver-aware
 #:   AST walk finds NO production caller. The over-inclusion is deliberate there (never
 #:   MISS a caller), so the precise instrument decision was taken on the precise scan.
-COMPARABLE_CALLER_ROWS_FLOOR = 38
+#:   38 -> 40 on 2026-11-16 (this re-cut): the merged tree is main's wave-1 removals PLUS
+#:   #11609's fourteen absorbed doors and six containers, and two rows that the merge
+#:   re-keys carry both columns again. The number is re-derived from the MERGED manifest,
+#:   never carried from either side — 38 was main's own measured count and was two short
+#:   here, which is exactly the allowance this floor exists to forbid.
+COMPARABLE_CALLER_ROWS_FLOOR = 40
 
 
 def test_the_reason_dependency_cross_check_can_fail():
