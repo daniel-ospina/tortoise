@@ -116,7 +116,7 @@ class TestRetiredDocumentLabelClaims:
 
         ⛔ RE-POINTED, NOT RELAXED (#12915 review F5). `file_human_approval` is a
         RETIRED SDK name as of #4282 Phase 2: `TortoiseSDK.__getattr__` raises on
-        it, so the original `inspect.getdoc(TortoiseSDK.file_human_approval)` could
+        it, so the original `inspect.getdoc` on that retired name could
         only ever produce `""` — the pin was reading a name that no longer
         resolves, and would have passed vacuously the moment the negative
         assertion stopped matching the empty string. Its approved absorber is

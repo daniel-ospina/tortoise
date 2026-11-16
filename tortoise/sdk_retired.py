@@ -198,23 +198,16 @@ SURPLUS_DELETION_DESTINATIONS: dict[str, tuple[str, ...]] = {
 #: rather than an omission — `tests/test_sdk_retirement.py` reds both on a live destination
 #: that is neither hinted nor declared here, and on an entry here that has stopped being live.
 UNHINTED_LIVE_DESTINATIONS: dict[str, str] = {
-    # #11609 lane B (#4282 Phase 2): `adjust_relationship` now HAS a `def`, which makes
-    # `operator_action`'s recorded destination LIVE — and it must still be unhinted,
-    # because a REMOVED name may not carry a hint (a hint would assert a replacement
-    # the owner's retirement record does not name; `operator_action` was DELETED as a
-    # `**kwargs` funnel that silently dropped `credibility`, not renamed into
-    # anything). The MCP tool of that name is a different object: it survives, and it
-    # retires into `tortoise_adjust_relationship`, which is where a TOOL caller is
-    # sent. An SDK caller has no such door and gets no hint.
-    "operator_action": (
-        "removed, not renamed: the SDK method was DELETED as a `**kwargs` funnel that "
-        "accepted and silently ignored `credibility` (beta-sdk-surface.md's own note). "
-        "Its surviving writes are `mitigate_operator` and `annotate_operator`, and the "
-        "approved container `adjust_relationship` now wraps both — but the retirement "
-        "record names no replacement for THIS name, so it stays unhinted rather than "
-        "asserting one. The MCP tool `tortoise_operator_action` is a separate entry and "
-        "is retired forward into `tortoise_adjust_relationship`."
-    ),
+    # ⛔ #12915 review: an `operator_action` entry used to sit here, asserting that
+    # `adjust_relationship` "now HAS a `def`, which makes operator_action's recorded
+    # destination LIVE". That premise was FALSE — `adjust_relationship` is an MCP TOOL
+    # container (`tool_registry`'s own row says "handler-served: no declared SDK link")
+    # and has never been a `TortoiseSDK` method, so the destination is not live and the
+    # declaration was a stale excuse. `test_sdk_retirement.py` derived exactly that
+    # (`live_unhinted` = {create_or_update_point} vs the declared pair). The name is
+    # still accounted for where it belongs: `REMOVED_SDK_METHODS["operator_action"]`
+    # records the removal and names the surviving writes, and an SDK caller gets no
+    # hint because the retirement record names no replacement for THAT name.
     "create_or_update_point": (
         "two records name two different destinations, so a hint would pick a winner nobody "
         "recorded: the canonical inventory's column says `create_entity`, while the owner's "

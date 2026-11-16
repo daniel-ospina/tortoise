@@ -253,7 +253,11 @@ def test_the_rendered_list_agrees_with_the_manifest():
     # now-false sentence until an independent verifier regenerated it.
     for r in doc.get("retired") or []:
         assert f"`{r['name']}`" in text, f"{r['name']} missing from the retired section"
-        assert f"`{r['use_instead']}`" in text, f"{r['name']}'s replacement never renders"
+        # The renderer ESCAPES a literal `|` in a replacement signature
+        # (`scope="dirty"|"full"`), because an unescaped one ends the GFM cell and
+        # silently truncates the row. Compare the escaped form the renderer writes.
+        _escaped = str(r["use_instead"]).replace("|", "\\|")
+        assert f"`{_escaped}`" in text, f"{r['name']}'s replacement never renders"
     assert "Nothing warns a caller today" not in text, (
         "the legend claims nothing warns a caller, but retired names now warn (#3883)"
     )

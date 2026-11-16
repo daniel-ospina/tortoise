@@ -120,11 +120,11 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 | 57 | `tortoise_list_sources` | `tool_registry.py:397` | `list_sources` | yes | `graph_overview` |
 | 58 | `tortoise_list_tags` | `tool_registry.py:446` | `list_tags` | yes | `graph_overview` |
 | 59 | `tortoise_list_topics` | `tool_registry.py:1083` | `list_topics` | yes | `list_knowledge` |
-| 60 | `tortoise_manage_sources` | `tool_registry.py:1637` | **none declared** | no | `manage_sources` |
+| 60 | `tortoise_manage_sources` | `tool_registry.py:1641` | **none declared** | no | `manage_sources` |
 | 61 | `tortoise_mine_conversations` | `tool_registry.py:535` | `mine_corpus` | no | `mine_knowledge_from_directory` |
 | 62 | `tortoise_mitigate_operator` | `tool_registry.py:740` | `mitigate_operator` | no | `adjust_relationship` |
-| 63 | `tortoise_onboarding_github_index` | `tool_registry.py:1678` | **none declared** | no | `manage_sources` |
-| 64 | `tortoise_onboarding_session_recording` | `tool_registry.py:1669` | **none declared** | no | `manage_sources` |
+| 63 | `tortoise_onboarding_github_index` | `tool_registry.py:1682` | **none declared** | no | `manage_sources` |
+| 64 | `tortoise_onboarding_session_recording` | `tool_registry.py:1673` | **none declared** | no | `manage_sources` |
 | 65 | `tortoise_operator_action` | `tool_registry.py:1401` | **none declared** | no | `adjust_relationship` |
 | 66 | `tortoise_org_create` | `tool_registry.py:1160` | `org_create` | no | `tenancy:create_memory_graph` |
 | 67 | `tortoise_overview` | `tool_registry.py:1448` | **none declared** | yes | `graph_overview` |
@@ -134,8 +134,8 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 | 71 | `tortoise_query` | `tool_registry.py:297` | `paginated_query` | yes | `search_knowledge` |
 | 72 | `tortoise_query_points_by_tag` | `tool_registry.py:454` | `query_points_by_tag` | yes | `search_knowledge` |
 | 73 | `tortoise_recall` | `tool_registry.py:507` | `recall_state` | yes | `check_confidence` |
-| 74 | `tortoise_record_decision` | `tool_registry.py:1597` | `record_decision` | no | `record_decision` |
-| 75 | `tortoise_refresh_confidence` | `tool_registry.py:1555` | **none declared** | no | `refresh_confidence` |
+| 74 | `tortoise_record_decision` | `tool_registry.py:1601` | `record_decision` | no | `record_decision` |
+| 75 | `tortoise_refresh_confidence` | `tool_registry.py:1559` | **none declared** | no | `refresh_confidence` |
 | 76 | `tortoise_retract_point` | `tool_registry.py:866` | `retract_point` | no | `update_knowledge` |
 | 77 | `tortoise_review_connections` | `tool_registry.py:1109` | `review_connections` | yes | `review_link_candidates` |
 | 78 | `tortoise_search` | `tool_registry.py:484` | `tortoise_fts_query` | yes | `search_knowledge` |
@@ -157,7 +157,7 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 | 94 | `tortoise_update_knowledge` | `tool_registry.py:1490` | **none declared** | no | `update_knowledge` |
 | 95 | `tortoise_update_point` | `tool_registry.py:682` | `update_knowledge` | no | `update_knowledge` |
 | 96 | `tortoise_validate_domain` | `tool_registry.py:345` | `validate_domain` | yes | `graph_overview` |
-| 97 | `tortoise_write_question` | `tool_registry.py:1585` | `write_question` | no | `write_question` |
+| 97 | `tortoise_write_question` | `tool_registry.py:1589` | `write_question` | no | `write_question` |
 
 **37** of these are RETIRED names (#3883): off the advertised surface, but they
 still answer through the warning shim, and each one's `Destination` is the destination of

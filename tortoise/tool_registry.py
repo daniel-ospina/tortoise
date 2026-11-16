@@ -1534,11 +1534,15 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_adjust_relationship",
         id="surface.adjust_relationship",
         description="Adjust an existing epistemic link. Dispatches on the ADJUSTMENT: "
-                    "reason=/strength= → mitigate the edge (a graded dampener, strength "
-                    "0.10-0.50); bias/precision/consistency/directness → annotate its four "
-                    "epistemic dimensions; action=mitigate|annotate keeps the legacy "
-                    "spelling. Annotating a link is `update_knowledge` on it — this verb "
-                    "is the one for STRENGTH.",
+                    "reason=/strength=/credibility= → mitigate the edge (a graded dampener, "
+                    "strength 0.10-0.50); bias/precision/consistency/directness → annotate "
+                    "its four epistemic dimensions; action=mitigate|annotate keeps the "
+                    "legacy spelling. Annotating a link is `update_knowledge` on it — this "
+                    "verb is the one for STRENGTH. ⛔ The mitigation arm is idempotent only "
+                    "for a CURRENT mitigation; once it has been withdrawn "
+                    "(retracted/superseded/outdated/archived) a re-assertion mints a NEW "
+                    "mitigation Point and returns its id — so a refused retry does NOT "
+                    "converge by repeating the call.",
         risk="destructive",
         http_policy=True,
         # #4282 Phase 2, SPLIT (disclosed): the container ships now, its SDK `def` does
@@ -2273,11 +2277,13 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # the model" condition kept it out of an agent-callable list/enable/disable
     # operation; #4282 Phase 3.2 removed that tool from the MCP surface entirely,
     # leaving `POST /v1/onboarding/github/connect` as its only door.)
-    # NB: no `|` in these values. `RETIRED_USE_INSTEAD` is rendered into
-    # markdown table cells (docs/product/mcp-rename-table.md, Part A and Part B),
-    # where an unescaped pipe ends the cell — it produced a row with one cell too
-    # many and TRUNCATED the value when the table rendered (MD056). The word "or"
-    # says the same thing and cannot break a table.
+    # A `|` in these values is a CALL SIGNATURE, not a table delimiter: the pointer
+    # is contractual (`scope="dirty"|"full"`, `action="mitigate"|"annotate"`), so it
+    # is ESCAPED at RENDER time — `tools/mcp_rename_table._cell()` and
+    # `tools/surface_manifest.py` write `\|` — and NEVER rewritten to avoid the
+    # character. Rewriting the signature is how the value a caller needs got
+    # TRUNCATED (an unescaped pipe ends the GFM cell: MD056, one cell too many).
+    # Consumers unescape (`_parse_part_a` / `_parse_part_b`).
     "tortoise_onboarding_github_index":
         'tortoise_manage_sources(action="enable", source="github_issues")'
         ' (no per-repo scope: it indexes every connected repo)',

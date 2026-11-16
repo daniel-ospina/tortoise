@@ -65,7 +65,16 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # already approved"). `high_water_counts.sdk_public_methods` stays at 150 in
 # `config/surface-manifest.yml` — the growth pin did not move, and this literal tracks the
 # frozen row set, which must move whenever a row is added.
-DECLARED_COUNT = 125
+#
+# 125 → 124 (#4282 Phase 2, #11609 lane B / #12915): FOUR public names retired into
+# their approved containers — `supersede` → `supersede_knowledge`, `update_entity` →
+# `update_knowledge`, `file_decision` → `write_question`, `file_human_approval` →
+# `record_decision` — and THREE were added (`supersede_knowledge`, `write_question`,
+# `record_decision`; `update_knowledge` already existed). 125 − 4 + 3 = 124, which is
+# what `config/surface-manifest.yml` derives and `tools/surface-guard.py` pins as the
+# frozen baseline — so this literal and the re-cut baseline move in the same PR, as
+# the paragraph above requires.
+DECLARED_COUNT = 124
 
 
 def _declaration() -> dict:

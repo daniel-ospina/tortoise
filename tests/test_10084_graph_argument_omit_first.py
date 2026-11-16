@@ -216,18 +216,46 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     advertised = _advertised()
     advertising = sorted(set(advertised) - GRAPH_ARGUMENT_EXCLUDED)
     # This is a FLOOR, not a count: it exists so the loop below cannot pass by
-    # advertising `graph` on a handful of tools. It moved from `> 60` to `> 55` with
-    # #11609 batch 1, which ARCHIVED four no-destination tools. TWO of the four
-    # (`tortoise_analyze`, `tortoise_backfill_v25`) were in the measured population;
-    # the other two (`tortoise_packs_list`, `tortoise_pack_install`) were already
-    # members of `GRAPH_ARGUMENT_EXCLUDED`, and `_with_graph_argument` leaves an
-    # excluded tool untouched — so the population fell 66 → 64, not by four.
-    # No number is quoted as "this head" on purpose: the assertion message below is
-    # derived from `len(advertising)`, so the live count is always in the failure and
-    # never re-stales in a comment that a neighbouring edit cannot update.
-    assert len(advertising) > 55, (
-        f"the argument stopped being injected wholesale — only {len(advertising)} "
-        "tool(s) advertise `graph`")
+    # advertising `graph` on a handful of tools — i.e. by the SERVED list itself
+    # collapsing, which the per-tool loop cannot see. It used to be a sliding literal
+    # (`> 60`, then `> 55` after #11609 batch 1 archived four no-destination tools),
+    # and a literal re-stales on every landed consolidation: #4282 Phase 2 retired
+    # fourteen WRITE/MUTATE doors into six containers, and the advertised population
+    # moved 68 → 60 (13 of the 14 were `http_policy=True`; `tortoise_dream` was
+    # stdio-only, so it was never in this population, while all six containers are
+    # served). A literal would have to be tuned again on the next batch.
+    #
+    # ⛔ So the floor is DERIVED from the LIVE population, and it is kept ABSOLUTE —
+    # an equality against the registry cannot stand in for it (review finding, #12915):
+    # `advertised ⊆ TOOL_REGISTRY`, so a registry that FAILED TO REGISTER shrinks both
+    # sides together and the equality holds while the population collapses. The number
+    # below is therefore a floor, and it is DERIVED, with its arithmetic recorded:
+    #
+    #   this view is the HTTP-filtered one (`_reset_ip_rate_limits` imports
+    #   `tortoise.hosted_api`, which registers the HTTP tool transform on the shared
+    #   `mcp` singleton — measured 60 unfiltered -> 55 filtered), and of the six
+    #   `GRAPH_ARGUMENT_EXCLUDED` names only three are in the filtered view
+    #   (`tortoise_graph_set_recording`, `tortoise_list_graphs`, `tortoise_manage_sources`),
+    #   so 55 - 3 = 52 advertising tools.
+    #
+    #   The SIBLING derivation in tests/test_ask_eval_only.py gives the same population
+    #   from the other direction: 63 - 13 + 5 = 55 filtered (`#4282` Phase 2 retires 13
+    #   http doors and adds 5 advertised containers), and the UNFILTERED registry total
+    #   moves 68 - 13 + 5 = 60. Both are stated so the next batch can re-derive either.
+    assert len(advertising) >= 52, (
+        f"the advertising population collapsed to {len(advertising)} tool(s) — expected "
+        "at least 52 (55 HTTP-filtered live tools minus the 3 excluded names in that "
+        "view); a lower number means the registry lost entries, not that a pin moved")
+    # …and the served view must BE that population, name for name, so a name that is
+    # registered-but-unserved is caught too (the floor above cannot see a substitution).
+    from tortoise.tool_registry import TOOL_REGISTRY
+
+    http_population = {t.name for t in TOOL_REGISTRY if t.http_policy}
+    assert set(advertised) <= http_population, (
+        "the served list carries names the registry does not declare as http_policy — "
+        f"served-only={sorted(set(advertised) - http_population)}")
+    assert len(http_population) >= 55, (
+        f"the registry's http_policy population collapsed to {len(http_population)}")
     for name in advertising:
         schema = advertised[name]
         props = schema.get("properties") or {}

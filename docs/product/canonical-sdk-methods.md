@@ -206,8 +206,8 @@ Three rules, each of which caught a real error in this document.
 | W7 | `capture_session_hosted` | — | — | **no live member** — `commit_session` was deleted on 2026-10-27 (#4282, code archived at the same tag); the capability returns under `mine_knowledge_from_session` |
 | W8 | `manage_source_trust` | #14 | `assess_source`, `set_source_tier`, `get_source_reliability` | keep — **`get_source_reliability` writes** |
 | W9 | `link_entities` | #15 | `link_entities`, `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split |
-| W10 | `record_decision` | #16 | `file_decision`, `file_human_approval` | keep, collapse |
-| W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `quarantine_batch` | keep, collapse — **the widest group; see Open items** |
+| W10 | `record_decision` | #16 | `write_question`, `record_decision` | keep, collapse — `file_decision` and `file_human_approval` were retired on 2026-11-16 (#11609 Phase 2) into the two rows they now name |
+| W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `supersede_knowledge`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `quarantine_batch` | keep, collapse — **the widest group; see Open items**. `update_entity` and `supersede` were retired on 2026-11-16 (#11609 Phase 2) into `update_knowledge` and `supersede_knowledge` |
 | W12 | `delete_knowledge` | #18 | `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |
 | W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation` | keep — **`compute_confidence` mislabelled read** |
 | W14 | `approve_merge` | #20 | `approve_merge` | keep |

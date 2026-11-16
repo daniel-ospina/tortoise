@@ -260,7 +260,7 @@ not recorded here has no approval behind it, and the carve-out does not cover it
 | `tortoise_create_operator` | Create an operator connecting Points. op_type: IMPL, NAND, coherence, composedOf, decomposesInto, contains, wraps. semantics: the Layer-2 meaning (addresses, supports, refutes,… | create_operator | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_ingest` | Heterogeneous bulk write (epic #888 W4) — one call writes points + entities + sources + connections coherently (nodes first, then connections). Connections carrying 'operator' (… | ingest | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 | `tortoise_delete_entity` | Delete any entity by ID. DESTRUCTIVE — cannot be undone. dry_run=True previews the node(s) and every edge that would be removed and changes nothing. | delete_entity | never called, tooling, docs | **merge** | in group `delete` · never called · **proposed: move to `memory`** — `tortoise_delete` in the same group already does this job (its own description names what it consolidates), so this is one name too many — the caller keeps working either way · group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval |
-| `tortoise_adjust_relationship` | Adjust an existing epistemic link. Dispatches on the ADJUSTMENT: reason=/strength= → mitigate the edge (a graded dampener, strength 0.10-0.50); bias/precision/consistency/direct… | handler-served | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
+| `tortoise_adjust_relationship` | Adjust an existing epistemic link. Dispatches on the ADJUSTMENT: reason=/strength=/credibility= → mitigate the edge (a graded dampener, strength 0.10-0.50); bias/precision/consi… | handler-served | never called, tooling, docs | **keep** | never called — not called over MCP, but used by tooling — removing it would break that |
 
 ### reasoning — 9
 
@@ -344,7 +344,7 @@ retirement safe; a retired name that stopped resolving would be a silent removal
 |---|---|---|---|
 | `tortoise_annotate_operator` | `tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., directness=...)` | `annotate_operator` | http |
 | `tortoise_audit` | `tortoise_graph_overview(section="audit", point_kinds=...)` | `audit` | http |
-| `tortoise_dream` | `tortoise_refresh_confidence(scope="dirty"|"full", ...)` | `dream` | stdio-only |
+| `tortoise_dream` | `tortoise_refresh_confidence(scope="dirty"\|"full", ...)` | `dream` | stdio-only |
 | `tortoise_dream_health` | `tortoise_graph_overview(section="dream_health")` | `dream_health_check` | stdio-only |
 | `tortoise_file_decision` | `tortoise_write_question(options, evidence, choice)` | `write_question` | http |
 | `tortoise_file_human_approval` | `tortoise_record_decision(approver_id, artifact_id, point_ids, decision_content=...)` | `record_decision` | http |
@@ -363,7 +363,7 @@ retirement safe; a retired name that stopped resolving would be a silent removal
 | `tortoise_mitigate_operator` | `tortoise_adjust_relationship(id, reason=..., strength=..., credibility=...)` | `mitigate_operator` | http |
 | `tortoise_onboarding_github_index` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `—` | http |
 | `tortoise_onboarding_session_recording` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `—` | http |
-| `tortoise_operator_action` | `tortoise_adjust_relationship(id, action="mitigate"|"annotate", ...)` | `—` | http |
+| `tortoise_operator_action` | `tortoise_adjust_relationship(id, action="mitigate"\|"annotate", ...)` | `—` | http |
 | `tortoise_overview` | `tortoise_graph_overview(section=...)` | `—` | http |
 | `tortoise_paginated_query` | `tortoise_query(offset=..., limit=...)` | `paginated_query` | http |
 | `tortoise_promote_point` | `tortoise_refresh_confidence(scope="promote", point_id=...)` | `promote_point` | http |

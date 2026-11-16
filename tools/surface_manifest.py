@@ -3431,8 +3431,16 @@ def cmd_render(args: argparse.Namespace) -> int:
                 # live table marked this \u26a0 FALSE DECLARATION, and the retired
                 # table must not silently upgrade a false declaration to a fact.
                 declared = f"~~{declared}~~ (no such method)"
+            # A replacement is a CALL SIGNATURE and can contain a literal `|`
+            # (`scope="dirty"|"full"`). In a GFM table an unescaped `|` ENDS the
+            # cell, so the row renders with more columns than its header and the
+            # tail of the signature is lost to the reader (markdownlint MD056).
+            # ESCAPE it: the pointer is contractual, so it is never rewritten to
+            # dodge the character. `tests/test_surface_manifest.py` compares the
+            # escaped form back to the declaration.
+            use_instead = str(r.get("use_instead") or "").replace("|", "\\|")
             add(
-                f"| `{r.get('name')}` | `{r.get('use_instead')}` | "
+                f"| `{r.get('name')}` | `{use_instead}` | "
                 f"{declared if declared.startswith('~~') else '`' + str(declared) + '`'} | {was} |"
             )
         add("")

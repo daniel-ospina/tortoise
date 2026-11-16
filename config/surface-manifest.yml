@@ -1970,10 +1970,12 @@ rows:
   keyword_rank: 9
   cluster: null
   canonical: null
-  job: 'Adjust an existing epistemic link. Dispatches on the ADJUSTMENT: reason=/strength= → mitigate the edge (a
-    graded dampener, strength 0.10-0.50); bias/precision/consistency/directness → annotate its four epistemic dimensions;
-    action=mitigate|annotate keeps the legacy spelling. Annotating a link is `update_knowledge` on it — this verb
-    is the one for STRENGTH.'
+  job: 'Adjust an existing epistemic link. Dispatches on the ADJUSTMENT: reason=/strength=/credibility= → mitigate
+    the edge (a graded dampener, strength 0.10-0.50); bias/precision/consistency/directness → annotate its four
+    epistemic dimensions; action=mitigate|annotate keeps the legacy spelling. Annotating a link is `update_knowledge`
+    on it — this verb is the one for STRENGTH. ⛔ The mitigation arm is idempotent only for a CURRENT mitigation;
+    once it has been withdrawn (retracted/superseded/outdated/archived) a re-assertion mints a NEW mitigation Point
+    and returns its id — so a refused retry does NOT converge by repeating the call.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
