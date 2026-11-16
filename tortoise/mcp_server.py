@@ -5224,8 +5224,11 @@ def tortoise_get_point(id: str) -> dict:
     while an answer the store could not SEE returns a dict carrying
     `residency: "not-hot"`. That is deliberate — `not-hot` is never an empty
     answer (#7952), and a found node additionally names the store that answered
-    (`servedFrom` / `fallbackReason`). With the flag unset the response is
-    unchanged.
+    (`servedFrom` / `fallbackReason`). With `TORTOISE_RECORD_SERVE` unset the
+    seam is never consulted — but `TORTOISE_RESIDENCY` arms the marker
+    SEPARATELY, so on a cache that declares itself PARTIAL and does not cover
+    the id this door answers `{"residency": "not-hot"}` where pre-#12941 it
+    answered `{}` (#7952). Neither flag is set by default.
 
     #12941 — THIS DOOR HONOURS `TORTOISE_RECORD_SERVE`. The read runs through
     `TortoiseSDK.get_point(..., served_out=...)`, the opt-in caller-facing form
