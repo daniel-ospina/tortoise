@@ -511,8 +511,9 @@ class RecordWrite:
     #: `record_projection.JournalPositionCollision`: do not read "a different
     #: record" above as "every different record is caught". Nothing is lost (the
     #: journal holds the record); what is refused is indexing it under a position
-    #: that holds content this write would not produce, which the record cannot
-    #: fix while its key carries no journal identity (#12894).
+    #: whose row this write does not CONTINUE (a different `event_type`, or a
+    #: different capture time), which the record cannot fix while its key carries
+    #: no journal identity (#12894).
     #:
     #: ⛔ ``no_tenant_carried`` IS A SEPARATE TOKEN ON PURPOSE (#10021 review P3).
     #: The live door splits the nil tenant from a MALFORMED CARRIED pair — one is
@@ -2590,8 +2591,9 @@ def write_live_record(record: Mapping[str, Any], *,
         collision = _journal_collision_cause(exc)
         if collision is not None:
             # ⛔ A COLLISION, NOT A LOST WRITE (#9318). The row at this position
-            # holds content this write would not produce, so writing the layer
-            # rows under it would index them by that other content — refused
+            # is a record this write does not CONTINUE (a different
+            # `event_type`, or a different capture time), so writing the layer
+            # rows under it would index them by that other record — refused
             # rather than shipped. Nothing is lost: the journal holds the record
             # and the message names both sides. Now made LOUD on the SAME
             # refused-write channel every other arm uses (one counter, one

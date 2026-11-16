@@ -979,8 +979,9 @@ class JournalPositionCollision(RecordProjectionError):
     at the end of this section).
 
     ⛔ AND WHAT THE REFUSAL MAY STILL NOT DO: assert ONE cause. What reaches
-    this class is a different `event_type` at the row, or a different capture
-    time — and each admits more than one story: a second durable journal, a
+    this class is a different `event_type` at the row, a different capture time,
+    or a comparison this write cannot make for want of a `ts` — and each admits
+    more than one story: a second durable journal, a
     restore, a rotation or a rebuild numbering below the high-water mark on one
     reading; a derivation that moved a record's own `ts`, or a write with none
     to compare, on another. The message therefore states the possibilities ONCE
@@ -6705,6 +6706,8 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
             # driver-shaped failure to the next reader, which is the failure
             # this bail exists to prevent.
             "the journal position statement was RESHAPED ("
+            + ("the SQL moved, "
+               if statement.sql != _JOURNAL_POSITION_INSERT_SQL else "")
             + str(len(statement.params)) + " binds, expected "
             + str(_JOURNAL_POSITION_PARAM_COUNT)
             + "), so this guard cannot read its positional binds — DELETE it "

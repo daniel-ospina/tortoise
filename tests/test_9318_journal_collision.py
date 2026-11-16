@@ -16,8 +16,9 @@ WHAT THE FIX IS, AND WHAT IT IS NOT.
 * It is a **detector at ONE call site** — `record_projection.replay()`'s
   statement loop, which every layer-1 write already passes through (the live
   door, a full replay, the reconciler, the backfill tools). When the position
-  row was absorbed, the guard asks the DATABASE whether the surviving row's
-  content differs (`IS DISTINCT FROM`, in Postgres's own jsonb equality).
+  row was absorbed, the guard asks the DATABASE whether the surviving row is a
+  record this write CONTINUES — `event_type`, content (Postgres's own jsonb
+  `IS DISTINCT FROM`) and `recorded_at`, in one query it answers itself.
 * It is **not** a schema change. No column, no table, no allocator: journal
   identity in the key is the REPAIR, and it is `#12894`'s decision, deliberately
   not taken here (two designs of one ordinal is the duplication this lane
@@ -25,7 +26,8 @@ WHAT THE FIX IS, AND WHAT IT IS NOT.
   `tests/test_record_writer_seam.py::test_the_default_position_reproduces_the_previous_plan`
   remains a true pin.
 * It is **not** a violation of idempotency. A genuine replay — same position,
-  same content — stays a SILENT no-op: no exception, no counter, no log line.
+  same content AND the same capture time — stays a SILENT no-op: no exception,
+  no counter, no log line.
   That polarity is asserted in BOTH directions here, and the DB-free arms assert
   it too, because a guard that turned every replay into an error would be a
   worse defect than the one being fixed, and the DB legs skip where no Postgres
@@ -918,9 +920,16 @@ def test_the_guard_bails_when_the_position_statement_is_reshaped() -> None:
     remedy, before any unpacking — not a driver error from a mis-bound SELECT.
     """
     genuine = rp._journal_row(RECORD_A, 1, ORG, GRAPH)
-    # TWO shapes, because the guard has TWO ways to be fooled and each lands on a
-    # different half of the check:
-    #   * the statement RENAMED — the #12894 shape, `journal_id` in the key;
+    # THREE shapes, because the guard has TWO ways to be fooled and a case that
+    # only ever supplies SEVEN binds measures ONE of them (#9318 round 10): the
+    # arity half cannot be reached by a same-arity reshape, and the SQL half
+    # cannot be reached by anything whose bind count already differs.
+    #   * the statement RENAMED — the #12894 shape, `journal_id` in the key
+    #     (seven binds, so the ARITY half fires);
+    #   * the statement RETARGETED with its arity UNCHANGED — the same six binds,
+    #     a different `ON CONFLICT` clause, so ONLY the SQL-equality half can
+    #     catch it, and the message must say the SQL moved rather than report
+    #     "6 binds, expected 6";
     #   * the statement UNCHANGED but a bind APPENDED — the review's exact
     #     scenario, where `params[:5]` stays byte-identical and only the ARITY
     #     moves.
@@ -932,9 +941,17 @@ def test_the_guard_bails_when_the_position_statement_is_reshaped() -> None:
         (ORG, GRAPH, "journal-1", 1, "ObjectRegistered",
          json.dumps(_payload_of(RECORD_A)), RECORD_A["ts"]),
     )
+    retargeted_sql = rp.Statement(
+        genuine.sql.replace(
+            "ON CONFLICT (org_id, graph_id, seq) DO NOTHING",
+            "ON CONFLICT (org_id, graph_id, seq) DO UPDATE SET seq = EXCLUDED.seq",
+        ),
+        genuine.params,
+    )
     appended_bind = rp.Statement(genuine.sql, (*genuine.params, "journal-1"))
 
     for label, statement in (("renamed", reshaped_sql),
+                             ("retargeted, same arity", retargeted_sql),
                              ("bind appended", appended_bind)):
         conn = Absorbed(stored=_stored("PointAdded", _payload_of(RECORD_A),
                                        same_type=False))
