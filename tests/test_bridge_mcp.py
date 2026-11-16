@@ -240,19 +240,25 @@ class TestNoStoredCredentialDecidesTheEndpoint:
             "stores; if one is visible here, that fixture is gone or bypassed."
         )
 
-    def test_the_declared_daemon_url_is_the_one_the_client_resolves(
-        self, monkeypatch, daemon_url,
-    ):
-        """`TORTOISE_MCP_URL` must be what the client actually talks to."""
+    def test_the_declared_daemon_url_is_the_one_the_client_resolves(self, monkeypatch):
+        """`TORTOISE_MCP_URL` must be what the client actually talks to.
+
+        No `daemon_url` here ON PURPOSE: resolution is pure (env + stores, no
+        I/O), so a literal URL tests the identical property. Booting a server to
+        produce a string would only add a way for this precondition to red as
+        `daemon did not start` — an infrastructure failure wearing the name of a
+        credential-isolation one.
+        """
         from tortoise.mcp_client import resolve_connection
 
-        monkeypatch.setenv("TORTOISE_MCP_URL", daemon_url)
+        declared = "http://127.0.0.1:9/mcp"
+        monkeypatch.setenv("TORTOISE_MCP_URL", declared)
         monkeypatch.setenv("TORTOISE_API_KEY", "")
 
         connection = resolve_connection()
-        assert connection.url == daemon_url, (
+        assert connection.url == declared, (
             f"the client resolved {connection.url!r} instead of the declared "
-            f"{daemon_url!r} (sources read: {connection.sources})"
+            f"{declared!r} (sources read: {connection.sources})"
         )
         assert connection.declared is True
 
