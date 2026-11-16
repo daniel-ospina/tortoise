@@ -208,7 +208,10 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
       drain … >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:846`, `:854`)
       leaves that drain in the group.  `nohup` ignores SIGHUP but changes
       neither the drain's process group nor its reachability by SIGKILL, so a
-      bound that reaps only bash leaks it.
+      bound that reaps only bash leaks it.  That window is narrow: those arms
+      are the script's LAST statements (`:855-856` are their closing `fi`s), so
+      it is the instant between dispatch and exit — this bullet is a
+      completeness argument, and the beacon below is the operative one.
     - A hook that stalls before the `wait` (`:801`) leaves the BACKGROUNDED
       install-probe beacon (`:786`) unreaped.  It is not `nohup`-detached —
       `:767` says it does not join that fire-and-forget shape — but it is
