@@ -5196,12 +5196,16 @@ def _read_point_served(id: str) -> dict:
 
     * found → the node's properties, plus the attribution merged AFTER them, so
       a stored property of the same name cannot forge a fallback;
-    * absent with the record's authority behind it (`record-miss`, `record`) or
-      with no mode armed → `{}` — FALSY, because this tool's contract is
-      "properties, or empty dict" and a verifier written as `if out:` must not
-      read an absence as a success (#12941 review P0-1);
-    * `not-hot` → a dict carrying `residency` and the reason, never an empty one
-      (#7952: a store that cannot see the node must say so).
+    * absent with the record's authority behind it (`record-miss`, `record`) —
+      and, in an `off` deployment with the residency marker unarmed, an empty
+      answer that establishes nothing at all (the pre-#12941 shape) — → `{}`
+      — FALSY, because this tool's contract is "properties, or empty dict" and a
+      verifier written as `if out:` must not read an absence as a success
+      (#12941 review P0-1);
+    * `not-hot` → a dict carrying `residency`, never an empty one (#7952: a
+      store that cannot see the node must say so). In an ARMED mode the reason
+      rides beside it; on the `off` + `TORTOISE_RESIDENCY` arm `off` emits no
+      attribution, so there `residency` is the only key.
     """
     from tortoise.residency import RESIDENCY_FIELD
 

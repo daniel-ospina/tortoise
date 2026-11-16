@@ -488,8 +488,12 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "durable `:Session` node read by "
                "`TortoiseSDK._read_captured_session`, whose TURNS are already "
                "record-backed (see `reason`)",
-        reason="the MCP tool `tortoise_get_entity(id, type=\"session\")` → "
-               "`tortoise_get_session` reads a session down TWO lanes, and they "
+        reason="the MCP tool `tortoise_get_entity(id, type=\"session\")` "
+               "reaches `TortoiseSDK.get_session` DIRECTLY (`mcp_server`'s "
+               "`get(..., type='session')` branch calls the SDK method, NOT the "
+               "`tortoise_get_session` tool — that is a live SIBLING door on the "
+               "same read, so wiring it would not move this one) and reads a "
+               "session down TWO lanes, and they "
                "are NOT in the same state: (1) the indexed AgentSession `:Event` "
                "by `session_id`, from the cache; (2) the durable `:Session` "
                "projection (`_read_captured_session`), whose session ROW comes "
@@ -1055,11 +1059,14 @@ def residency_armed() -> bool:
     whole reason this predicate exists rather than each door asking
     ``residency.residency_enabled()`` late enough to have already paid for it.
 
-    ⛔ NOT a claim about the DOOR's handles: both call sites may open one for
-    their own read before this is reached — the `off` arm's fallback cache read,
-    `record` mode's SDK, and the SDK accessor's own ``_cache_handle()`` which it
-    passes in as ``g``. What the ordering buys is that the MARKER adds no read
-    of its own to an unarmed deployment; it does not make the door free.
+    ⛔ NOT a claim about the DOOR's handles: the `off` arm has already run its
+    pre-existing fallback cache read, and the SDK accessor opens
+    ``_cache_handle()`` itself to pass in as ``g`` — both before this predicate
+    is reached. What the ordering buys is that the MARKER adds no read of its
+    own to an unarmed deployment; it does not make the door free. (`record` and
+    `prefer` modes never reach this predicate at all: `point_residency` is
+    called only on the `off` arm, and `record` mode opens no cache handle —
+    that laziness is pinned by `test_12941_read_your_writes`.)
     """
     from .residency import residency_enabled
 

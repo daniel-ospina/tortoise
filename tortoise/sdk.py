@@ -26952,10 +26952,13 @@ class TortoiseSDK:
     def get_point(self, id: str, *, served_out: dict | None = None) -> dict:
         """Get a Point by ID. Returns dict of all properties, or ``{}`` if absent.
 
-        Two absent shapes: ``{}`` when the absence is ESTABLISHED (the record
-        was asked and holds no such row, or `off` mode is unarmed), and
-        ``{residency: "not-hot"}`` when nobody who could see the node was
-        consulted (#7952 — a cache miss is never reported as an empty answer).
+        Two absent SHAPES, which are not two verdicts: ``{}`` — returned BOTH
+        when the absence IS ESTABLISHED (the record was asked and holds no such
+        row) and when an ``off`` deployment with the marker unarmed can
+        establish nothing at all (the pre-#12941 shape, which says nothing
+        about whether the node exists) — and ``{residency: "not-hot"}`` when
+        nobody who could see the node was consulted and the marker is armed
+        (#7952 — a cache miss is never reported as an empty answer).
         ⛔ ONLY THE FIRST IS FALSY, and that is the whole of what ``if props:``
         can tell a caller: the marker shape is a TRUTHY dict carrying no node
         properties, and BOTH marker arms return it — the `off` +
@@ -26998,8 +27001,9 @@ class TortoiseSDK:
                         node was consulted). ``off`` fills only ``residency`` —
                         there is no fallback to explain, and an unarmed read
                         keeps the pre-#12941 response shape. The field is the
-                        same caller-owned-sink instrument ``query`` already uses
-                        (``read_status_out`` / ``leg_trace``, #3862/#8447), so
+                        same caller-owned-sink instrument ``tortoise_fts_query``
+                        already uses (``read_status_out`` / ``leg_trace``,
+                        #3862/#8447), so
                         this adds NO public SDK method and changes no existing
                         caller's behaviour.
 

@@ -471,14 +471,18 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # client cannot infer from the pre-#12941 sentence: a found node names
         # the store that answered (`servedFrom` / `fallbackReason`), and an
         # answer no reachable store could SEE is a dict carrying
-        # `residency: "not-hot"` rather than an empty one (#7952). ⛔ ONLY an
-        # ESTABLISHED absence is `{}` — so `if result:` separates an established
-        # absence from a found node and NOTHING MORE: the marker shape is a
-        # TRUTHY dict carrying no node properties, so a write-verification that
-        # stops at `if result:` reports a node this store could not see as a
-        # successful write. It must ALSO read `result.get("id")` or refuse the
-        # `residency` marker (`tortoise/sdk.py::get_point` carries the same rule
-        # for the SDK shape, and the two must not disagree).
+        # `residency: "not-hot"` rather than an empty one (#7952). ⛔ `{}` does
+        # NOT mean "we checked and it is not there": it is an ESTABLISHED
+        # absence when the record answered, and it is also what an `off`
+        # deployment with the marker unarmed returns — an empty answer that says
+        # NOTHING about whether the node exists (the pre-#12941 shape). So
+        # `if result:` separates an empty answer from a found node and NOTHING
+        # MORE: the marker shape is a TRUTHY dict carrying no node properties,
+        # so a write-verification that stops at `if result:` reports a node this
+        # store could not see as a successful write. It must ALSO read
+        # `result.get("id")` or refuse the `residency` marker
+        # (`tortoise/sdk.py::get_point` states the same rule for the SDK shape,
+        # and the two must not disagree).
         # ⚠️ The LIVE canonical tool is `tortoise_get_entity` (this name is its
         # RETIRED alias); its description is the owner-approved surface text and
         # is NOT edited here.
