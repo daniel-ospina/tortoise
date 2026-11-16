@@ -69,7 +69,7 @@ class TestDe2e3:
         assert res["dedup_deferred"] >= 1, res
         assert res["dedup_wired"] == 0, res
         # The mined decision point is a flagged candidate.
-        cands = sdk.list_dedup_candidates(candidate_type="content")
+        cands = sdk.review_link_candidates("dedup", candidate_type="content")
         assert cands, "candidate must be surfaced"
         c = cands[0]
         assert c["method"] == "hash"
@@ -85,7 +85,7 @@ class TestDe2e3:
         d1 = _decision(sdk, status="draft")
         res = _mine(sdk, tmp=str(tmp_path))
         assert res["dedup_wired"] >= 1, res
-        cand = sdk.list_dedup_candidates(candidate_type="content")[0]
+        cand = sdk.review_link_candidates("dedup", candidate_type="content")[0]
         # The "alreadyDecided" operator connects the pair (operator-mediated).
         rows = sdk._get_proj().g.query(
             "MATCH (op:Point {label:'alreadyDecided'})-[r:IMPL]->(t:Point) "
@@ -107,12 +107,12 @@ class TestDe2e3:
     def test_variant_b_reject(self, sdk, tmp_path):
         d1 = _decision(sdk, status="live")  # noqa: F841
         _mine(sdk, tmp=str(tmp_path))
-        cand = sdk.list_dedup_candidates(candidate_type="content")[0]
+        cand = sdk.review_link_candidates("dedup", candidate_type="content")[0]
         res = sdk.approve_merge(cand["id"], action="reject")
         assert res["action"] == "reject"
         assert sdk.get_point(cand["id"]).get("reviewed") is True
         assert sdk.get_point(cand["id"]).get("dedup_reviewed") == "reject"
-        remaining = sdk.list_dedup_candidates(candidate_type="content")
+        remaining = sdk.review_link_candidates("dedup", candidate_type="content")
         assert all(c["id"] != cand["id"] for c in remaining), (
             "rejected candidate must not be re-surfaced"
         )
@@ -122,7 +122,7 @@ class TestDe2e3:
         wires exactly ONE live→live IMPL."""
         d1 = _decision(sdk, status="live")
         _mine(sdk, tmp=str(tmp_path))
-        cand = sdk.list_dedup_candidates(candidate_type="content")[0]
+        cand = sdk.review_link_candidates("dedup", candidate_type="content")[0]
         res = sdk.approve_merge(cand["id"], action="merge")
         assert res["wired"] is False
         assert res["deferred_to_promotion"] is True
@@ -148,9 +148,9 @@ class TestDe2e3:
             "---\nsessionId: s-idem\n---\n\n" + TRANSCRIPT)
         r1 = sdk.mine_corpus(str(corpus), extract_entities=False)
         assert r1["dedup_hits"] >= 1, r1
-        before = len(sdk.list_dedup_candidates(candidate_type="content"))
+        before = len(sdk.review_link_candidates("dedup", candidate_type="content"))
         r2 = sdk.mine_corpus(str(corpus), extract_entities=False)  # noqa: F841
-        after = len(sdk.list_dedup_candidates(candidate_type="content"))
+        after = len(sdk.review_link_candidates("dedup", candidate_type="content"))
         assert after == before, f"re-run must not add candidates ({before}→{after})"
 
     def test_n11_pointkind_scope(self, sdk):
@@ -302,7 +302,7 @@ class TestDe2e3ReviewFixes:
         duplicate — no candidate, no alreadyDecided self-loop."""
         res = _mine(sdk, tmp=str(tmp_path))
         assert res["dedup_hits"] == 0, res
-        assert sdk.list_dedup_candidates(candidate_type="content") == []
+        assert sdk.review_link_candidates("dedup", candidate_type="content") == []
         rows = sdk._get_proj().g.query(
             "MATCH (op:Point {label:'alreadyDecided'}) RETURN count(op)"
         ).result_set
@@ -336,7 +336,7 @@ class TestDe2e3ReviewFixes:
         monkeypatch.setattr(sdk, "_semantic_dedup", fake_sd)
         res = _mine(sdk, tmp=str(tmp_path))
         assert res["dedup_hits"] >= 1, res
-        cands = sdk.list_dedup_candidates(candidate_type="content")
+        cands = sdk.review_link_candidates("dedup", candidate_type="content")
         assert cands and cands[0]["method"] == "embedding"
         assert cands[0]["similarity"] == 0.88
         assert cands[0]["candidate_type"] == "content"
@@ -348,7 +348,7 @@ class TestDe2e3ReviewFixes:
         d1 = _decision(sdk, status="draft")
         res = _mine(sdk, tmp=str(tmp_path))
         assert res["dedup_wired"] >= 1, res
-        cand = sdk.list_dedup_candidates(candidate_type="content")[0]
+        cand = sdk.review_link_candidates("dedup", candidate_type="content")[0]
         assert _already_decided_links(sdk, cand["id"], d1["id"]) == 1
         approved = sdk.approve_merge(cand["id"], action="merge")
         assert approved["wired"] is True
@@ -396,7 +396,7 @@ class TestDe2e3ReviewFixes:
         assert res["boundary_blocked"] == 1, res
         # The refusal is not a silent drop — the review queue still sees it.
         assert any(c["id"] == cand_id
-                   for c in sdk.list_dedup_candidates(candidate_type="content"))
+                   for c in sdk.review_link_candidates("dedup", candidate_type="content"))
 
     def test_5316_an_equivalent_pair_is_still_wired(self, sdk, monkeypatch):
         """Positive control: the same tier-2 hit DOES wire when the pair

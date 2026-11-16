@@ -926,7 +926,7 @@ class TestKindsAreMintable:
         ensure_tenant_packs(sdk, starter=["venture", NS])
         assert {p["namespace"] for p in get_tenant_packs(sdk)} == {
             "venture", NS}
-        verdict = sdk.validate_domain(NS)
+        verdict = sdk.graph_overview("validate_domain", domain=NS)
         assert verdict["ok"] is True, verdict
         assert verdict["violations"] == []
 
@@ -956,7 +956,7 @@ class TestKindsAreMintable:
         sdk.create_entity("event", "VM orphan",
                           eventKind=f"{NS}:valuationMark")
 
-        verdict = sdk.validate_domain(NS)
+        verdict = sdk.graph_overview("validate_domain", domain=NS)
         assert verdict["ok"] is False
         rules = {v["rule"] for v in verdict["violations"]}
         assert rules == {"undeclared_object_status", "orphaned_valuation_mark"}
@@ -983,7 +983,7 @@ class TestKindsAreMintable:
                                 eventKind=f"{NS}:valuationMark")
         sdk.create_operator("IMPL", vm2["node"]["id"], [position["id"]],
                             label="marks", semantics="related")
-        assert sdk.validate_domain(NS)["ok"] is True
+        assert sdk.graph_overview("validate_domain", domain=NS)["ok"] is True
 
     def test_an_unreadable_pack_is_named_in_the_callers_payload(
             self, monkeypatch):
@@ -1057,7 +1057,7 @@ class TestKindsAreMintable:
                                 "RETURN o.id").result_set[0][0]],
                             label="marks", semantics="related")
 
-        verdict = sdk.validate_domain(NS)
+        verdict = sdk.graph_overview("validate_domain", domain=NS)
         flagged = {v["ref"] for v in verdict["violations"]
                    if v["rule"] == "orphaned_valuation_mark"}
         assert flagged == {wrong_rel["node"]["id"], wrong_target["node"]["id"]}, (
@@ -1093,7 +1093,7 @@ class TestKindsAreMintable:
         assert "superseded" not in declared, (
             "the framework terminal vocabulary is written by the engine, not "
             "declared by the kind — declaring it would be a second definition")
-        assert sdk.validate_domain(NS)["ok"] is True
+        assert sdk.graph_overview("validate_domain", domain=NS)["ok"] is True
 
     @requires_db
     def test_a_bare_spelled_kind_is_not_blind_to_the_rule(self, sdk):
@@ -1124,7 +1124,7 @@ class TestKindsAreMintable:
         assert stored["Allocation Target AT-2"] == f"{NS}:allocationTarget", (
             stored)
 
-        verdict = sdk.validate_domain(NS)
+        verdict = sdk.graph_overview("validate_domain", domain=NS)
         flagged = {(v["rule"], v["kind"]) for v in verdict["violations"]}
         assert flagged == {
             ("undeclared_object_status", "mandate"),
@@ -1139,7 +1139,7 @@ class TestKindsAreMintable:
         sdk._get_proj().g.query(
             "MATCH (o:Object {name:'Allocation Target AT-2'}) "
             "SET o.status = 'proposed'")
-        assert sdk.validate_domain(NS)["ok"] is True
+        assert sdk.graph_overview("validate_domain", domain=NS)["ok"] is True
 
     @requires_db
     def test_a_pipeline_spelled_mark_is_seen_by_the_orphan_rule(self, sdk):
@@ -1185,7 +1185,7 @@ class TestKindsAreMintable:
         orphan_id = sdk._get_proj().g.query(
             "MATCH (e:Event {name:'VM pipeline-spelled orphan'}) RETURN e.id"
         ).result_set[0][0]
-        verdict = sdk.validate_domain(NS)
+        verdict = sdk.graph_overview("validate_domain", domain=NS)
         flagged = {v["ref"] for v in verdict["violations"]
                    if v["rule"] == "orphaned_valuation_mark"}
         assert flagged == {orphan_id}, verdict
@@ -1196,7 +1196,7 @@ class TestKindsAreMintable:
             "MATCH (e:Event {name:'VM pipeline-spelled orphan'}) "
             "MATCH (o:Object {name:'Beta Holdings (bare position kind)'}) "
             "CREATE (e)-[:aboutObject]->(o)")
-        assert sdk.validate_domain(NS)["ok"] is True
+        assert sdk.graph_overview("validate_domain", domain=NS)["ok"] is True
 
     def test_the_mark_contract_is_pinned_to_the_manifest(self):
         """``POSITION_KIND``/``MARK_RELATION`` used to be an UNPINNED second copy

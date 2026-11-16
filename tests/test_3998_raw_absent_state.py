@@ -204,7 +204,10 @@ def _raw(sdk, url: str = RAW_URL) -> dict:
     single-source assertion reads the same keys through `["raw"]`. The hop-shaped
     assertions that needed more than one row were removed with the reader.
     """
-    chain = sdk.provenance(_memory(sdk))
+    # The chain is not an EP surface: the posterior gate is opted out, exactly as
+    # `_check_confidence_provenance` (mcp_server) does the same for the live door.
+    chain = sdk.check_confidence(_memory(sdk), include_provenance=True,
+        require_calibration=False)['provenance']
     assert chain, "no provenance row — the read went silent"
     raw = chain.get("raw")
     assert raw, "no raw block on the chain — the read went silent"
@@ -579,7 +582,8 @@ def test_memory_and_provenance_are_readable_and_labelled(sdk, cause):
     pid = _memory(s)
     if cause == RAW_DELETED:
         s.create_source(RAW_URL, "conversation", raw_state=cause)
-        raw = s.provenance(pid)["raw"]
+        raw = s.check_confidence(pid, include_provenance=True,
+            require_calibration=False)['provenance']["raw"]
     else:
         with pytest.raises(ValueError, match="observed live"):
             s.create_source(RAW_URL, "conversation", raw_state=cause)
@@ -632,7 +636,8 @@ def test_the_three_causes_are_distinguishable_through_the_read_path(sdk):
     plain = _source_props(s)
     seen = {cause: raw_entry(plain, observed=cause) for cause in RAW_OBSERVED_STATES}
     s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
-    seen[RAW_DELETED] = s.provenance(pid)["raw"]
+    seen[RAW_DELETED] = s.check_confidence(pid, include_provenance=True,
+        require_calibration=False)['provenance']["raw"]
     assert len({r["raw_state"] for r in seen.values()}) == 3
     assert len({r["label"] for r in seen.values()}) == 3
     assert len({r["message"] for r in seen.values()}) == 3
@@ -1775,7 +1780,8 @@ def test_provenance_reads_do_not_raise_and_invent_no_raw_for_a_sourceless_point(
     plain = _source_props(s)
 
     s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
-    prov = s.provenance(pid)                     # must not raise
+    prov = s.check_confidence(pid, include_provenance=True,
+        require_calibration=False)['provenance']                     # must not raise
     assert prov["raw"]["raw_state"] == RAW_DELETED
     assert "error" not in prov
 
@@ -1789,4 +1795,5 @@ def test_provenance_reads_do_not_raise_and_invent_no_raw_for_a_sourceless_point(
 
     # A point with NO source at all: still no raise, and NO raw key invented.
     orphan = s.create_point("statement", "orphan claim")["id"]
-    assert "raw" not in s.provenance(orphan)
+    assert "raw" not in s.check_confidence(orphan, include_provenance=True,
+        require_calibration=False)['provenance']

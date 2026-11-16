@@ -361,7 +361,13 @@ NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
     "tortoise_taxonomy", "tortoise_list_pointkinds", "tortoise_list_tags",
     "tortoise_list_sources", "tortoise_list_namespaces", "tortoise_status",
     "tortoise_validate_domain", "tortoise_diary_read", "tortoise_search_sessions",
-    "tortoise_suggest_entry_points", "tortoise_expand_relationships", "tortoise_stale",
+    "tortoise_suggest_entry_points", "tortoise_expand_relationships",
+    # ⛔ NOT that reason: `tortoise_stale`'s member `stale_points` is STILL PUBLIC
+    # (`sdk_retired.py` says so explicitly, and the owner's narrow-alias row names the
+    # TOOL `stale`, not the method). Its binding is empty because the door answers
+    # through `graph_overview(section='stale')` — a discriminator dispatch, like the
+    # containers above (#12951 review P3).
+    "tortoise_stale",
     # …and the RETIRED names the #3883 shim still serves, for the same reason: a
     # retired name that still resolves is still checked here (#4170/#4035 precedent).
     "tortoise_list_topics", "tortoise_provenance", "tortoise_list_dedup_candidates",

@@ -404,6 +404,154 @@ CONTAINERS = (
 )
 
 
+# ── the six doors that stay live, and the envelope that is the reason ────────
+#
+# `tortoise/tool_registry.py`'s retirement block, this file's `TestApprovedNames`
+# docstring and the PR body all point at `TestWrapEnvelopeDoorsStayLive` as the
+# pin for the six doors this batch deliberately does NOT retire (#12951 review
+# P2: the citation named a class that did not exist, so the load-bearing
+# exception was pinned by nothing). This is that class.
+#
+# The exception is the #8482 failure repair: these six declare `-> list[dict]`,
+# and the array schema is what carries a `_safe` failure payload. Their
+# containers return `Any`, so retiring a door before the container declares an
+# envelope would move the repair off the advertised path. The pin therefore has
+# three halves — the door is LIVE, its declared envelope is a LIST, and its
+# handler reaches an SDK door that RESOLVES — and it is asserted for every one
+# of the six rather than for a representative.
+WRAP_ENVELOPE_DOORS = (
+    # tool name, the SDK door its handler reaches
+    ("tortoise_search_sessions", "search_knowledge"),
+    ("tortoise_suggest_entry_points", "search_knowledge"),
+    # `list_batches` is the one member whose SDK method did NOT retire (it is the
+    # still-public exact read that `list_knowledge(kind='batch')` delegates to), so
+    # this door reaches the method itself rather than the container.
+    ("tortoise_list_batches", "list_batches"),
+    ("tortoise_list_namespaces", "graph_overview"),
+    ("tortoise_diary_read", "list_knowledge"),
+    ("tortoise_expand_relationships", "explore_connections"),
+)
+
+
+def _handler_sdk_reach(fn) -> set[str]:
+    """Every `<sdk>.<method>` the handler hands to `_safe` (`_get_org_sdk().<m>`)."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    reached = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Call)):
+            continue
+        inner = node.value.func
+        inner_name = getattr(inner, "id", getattr(inner, "attr", ""))
+        if inner_name == "_get_org_sdk":
+            reached.add(node.attr)
+    return reached
+
+
+class TestWrapEnvelopeDoorsStayLive:
+    @pytest.mark.parametrize("tool,sdk_door", WRAP_ENVELOPE_DOORS)
+    def test_the_door_is_live_and_keeps_its_list_envelope(self, tool, sdk_door):
+        """Live in the registry, still `-> list[dict]`, and its reach RESOLVES."""
+        import inspect
+
+        from tortoise import mcp_server as ms
+
+        live = {t.name: t for t in TOOL_REGISTRY}
+        assert tool in live, (
+            f"{tool} is one of the six doors this batch keeps live (#8482 repair). "
+            "Retiring it before its container declares an envelope moves the "
+            "repair off the advertised path")
+        assert tool not in RETIRED_USE_INSTEAD, (
+            f"{tool} was retired forward — that is the exact move the six-door "
+            "exception forbids until the container declares `-> list[dict]`")
+        assert tool not in {t.name for t in RETIRED_TOOL_REGISTRY}, tool
+
+        fn = getattr(ms, tool)
+        # `eval_str=True`: `mcp_server` defers annotations (`from __future__ import
+        # annotations`), so the raw annotation is the STRING `'list[dict]'` and a
+        # string comparison would pass on `'list[dict] | None'` too.
+        annotation = inspect.signature(fn, eval_str=True).return_annotation
+        assert annotation == list[dict], (
+            f"{tool} declares {annotation!r}: the array schema is what carries the "
+            "#8482 `_safe` failure payload, so a non-list envelope defeats the "
+            "reason this door is still live")
+
+        reached = _handler_sdk_reach(fn)
+        assert sdk_door in reached, (
+            f"{tool} no longer answers through `{sdk_door}` (reaches {sorted(reached)})"
+            " — the door must keep answering through a door that resolves")
+        assert hasattr(TortoiseSDK, sdk_door), (
+            f"{tool} answers through `TortoiseSDK.{sdk_door}`, which does not exist "
+            "— the live door would raise on its first call")
+
+    def test_the_six_are_the_whole_exception(self):
+        """The exception is these six NAMES, not a category — no seventh door."""
+        live_names = {t.name for t in TOOL_REGISTRY}
+        kept = {tool for tool, _ in WRAP_ENVELOPE_DOORS}
+        assert kept <= live_names
+        retired_forward = kept & set(RETIRED_USE_INSTEAD)
+        assert not retired_forward, retired_forward
+
+
+class TestSuggestEntryPointsFallback:
+    """The MCP door's ZERO-HIT arm — the one no test exercised (#12951 review P1).
+
+    The door's shape is: try the hybrid read, and if it returns nothing fall back to
+    entity resolution. The fallback used to call `sdk.suggest_entry_points`, which this
+    PR re-privatised — and the call sits OUTSIDE `_safe`, so a live advertised read
+    raised `AttributeError` instead of answering `[]` on every zero-hit query. Nothing
+    caught it because the only tool-level test accepted a non-empty hybrid answer.
+    """
+
+    def test_the_zero_hit_fallback_answers_through_the_container(self, monkeypatch):
+        from tortoise import mcp_auth
+        from tortoise import mcp_server as ms
+
+        reached = []
+        sdk = _bare_sdk(monkeypatch, {"search_knowledge"}, reached)
+        # the hybrid arm's own door, returning NOTHING — the fallback's trigger
+        monkeypatch.setattr(TortoiseSDK, "tortoise_fts_query", lambda *a, **k: [])
+        monkeypatch.setattr(ms, "_get_org_sdk", lambda *a, **k: sdk)
+        # `_safe`'s fail-closed auth gate needs a transport mode; stdio is the
+        # dev-mode lane these routing tests run on.
+        token = mcp_auth._transport_mode.set("stdio")
+
+        try:
+            out = ms.tortoise_suggest_entry_points("nothing matches this", limit=3)
+        finally:
+            mcp_auth._transport_mode.reset(token)
+
+        assert out == {"door": "search_knowledge"}, out
+        # the recorder is patched onto the CLASS, so an unbound call arrives with
+        # `self` first — the assertion is on the door, the query and the kwargs.
+        assert len(reached) == 1, reached
+        label, args, kwargs = reached[0]
+        assert label == "search_knowledge", reached
+        assert args[-1] == "nothing matches this", reached
+        assert kwargs == {"mode": "entry_points", "kind": None, "limit": 3}, reached
+
+    def test_an_empty_query_is_no_hits_and_touches_no_door(self, monkeypatch):
+        """`[]`, not a refusal: the container REFUSES an empty query, and this door's
+        contract has always been "no hits" — answered before either door is reached."""
+        from tortoise import mcp_auth
+        from tortoise import mcp_server as ms
+
+        reached = []
+        sdk = _bare_sdk(monkeypatch, {"search_knowledge"}, reached)
+        monkeypatch.setattr(ms, "_get_org_sdk", lambda *a, **k: sdk)
+        token = mcp_auth._transport_mode.set("stdio")
+        try:
+            assert ms.tortoise_suggest_entry_points("") == []
+            assert ms.tortoise_suggest_entry_points("   ") == []
+        finally:
+            mcp_auth._transport_mode.reset(token)
+        assert reached == []
+
+
 class TestApprovedNames:
     @pytest.mark.parametrize("name", CONTAINERS)
     def test_the_name_is_the_owner_approved_one(self, name):
@@ -411,9 +559,99 @@ class TestApprovedNames:
 
         A container built under a name that is not on it would be an unapproved
         addition however sensible the name is.
-        """
-        from tortoise import __all__ as approved
 
-        assert name in approved.__all__, (
+        The declaration is loaded BY PATH, never as the dotted name: importing
+        `tortoise.__all__` binds the MODULE on the package, and `from tortoise
+        import *` then raises `TypeError: 'module' object is not iterable` for
+        the rest of the process — which is the trap
+        `test_sdk_surface_declaration.py::test_loading_the_declaration_by_path_does_not_shadow_star_import`
+        pins (#12951 review P1: this test used the dotted form and red it).
+        """
+        from pathlib import Path
+
+        from tools import sdk_surface_declaration as surface
+
+        approved = surface.load_declaration(
+            Path(__file__).resolve().parent.parent / "tortoise" / "__all__.py")
+
+        assert name in approved["__all__"], (
             f"{name} is not one of the owner-approved 40 — building it under this name "
             "would be a surface change nobody approved")
+
+
+class TestProvenanceDoorDoesNotPayTheCalibrationGate:
+    """The RETIRED `tortoise_provenance` door answers the CHAIN on an uncalibrated graph.
+
+    `TortoiseSDK.provenance` retired into `check_confidence`, whose claim arm pays the
+    #344 / #7478 EP gate — so a door whose whole job is "who decided this?" raised
+    `CalibrationError` on any graph with one uncalibrated evidence point, while the
+    chain itself resolved fine (measured on this head; found by the test sweep, not
+    by the review). The fix passes `require_calibration=False` because this door
+    THROWS THE POSTERIOR AWAY and answers with the chain only.
+
+    ⛔ This class exists because nothing observed the door's posture: `grep -rn
+    'tortoise_provenance(' tests/` had no hits, so reverting the fix left the suite
+    GREEN — the fix-round review's P2 (the same class of defect as the review's own
+    "the citation named a pin that did not exist").
+    """
+
+    def _sdk_that_pays_the_gate(self, monkeypatch, chain, seen):
+        """The CONTAINER's recorded contract: the claim arm raises unless opted out.
+
+        Patched onto the CLASS (the same discipline as `_bare_sdk`) so the real
+        `check_confidence` dispatch runs and the argument it forwards is what is
+        measured — not a spy that would accept any kwargs.
+        """
+        from tortoise.exceptions import CalibrationError
+
+        def get_confidence(self, claim_id, require_calibration=None):
+            seen.append(require_calibration)
+            if require_calibration is not False:
+                # the #344 posture: fail-closed on an uncalibrated posterior
+                raise CalibrationError(
+                    "get_confidence: 1 uncalibrated evidence points")
+            return {"mean": 0.5, "variance": 0.1}
+
+        monkeypatch.setattr(TortoiseSDK, "get_confidence", get_confidence)
+        monkeypatch.setattr(TortoiseSDK, "_provenance",
+                            lambda self, pid: chain)
+        return TortoiseSDK.__new__(TortoiseSDK)
+
+    def test_the_door_answers_the_chain(self, monkeypatch):
+        from tortoise import mcp_auth
+        from tortoise import mcp_server as ms
+
+        chain = {"authoredBy": ["operator-1"], "entity": "point-1"}
+        seen: list = []
+        sdk = self._sdk_that_pays_the_gate(monkeypatch, chain, seen)
+        monkeypatch.setattr(ms, "_get_org_sdk", lambda *a, **k: sdk)
+        token = mcp_auth._transport_mode.set("stdio")
+        try:
+            out = ms.tortoise_provenance("point-1")
+        finally:
+            mcp_auth._transport_mode.reset(token)
+
+        assert not isinstance(out, ms._SafeError), (
+            "the live door returned the #344 gate's CalibrationError instead of the "
+            f"chain: {out!r} — this door discards the posterior and owes the chain")
+        assert out == chain
+        # the opt-out is the DOOR's argument, not an ambient default
+        assert seen == [False], seen
+
+    def test_a_caller_that_serves_the_posterior_still_pays_the_gate(self, monkeypatch):
+        """The gate is not relaxed — only this one door opts out."""
+        import inspect
+
+        from tortoise.exceptions import CalibrationError
+
+        seen: list = []
+        sdk = self._sdk_that_pays_the_gate(monkeypatch, {}, seen)
+        with pytest.raises(CalibrationError):
+            sdk.check_confidence("point-1", include_provenance=True)
+        # and the container's own default remains "the shared posture"
+        assert (inspect.signature(TortoiseSDK.check_confidence)
+                .parameters["require_calibration"].default is None), (
+            "check_confidence's default posture changed — `None` means 'use the "
+            "shared fail-closed default (#344)', and only the provenance door may "
+            "opt out of it")
+

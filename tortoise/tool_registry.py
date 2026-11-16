@@ -1106,7 +1106,13 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Find Points not updated in N days. Returns {stale, count, cutoff, limit}.",
         risk="read",
         http_policy=True,
-        sdk_method="",  # #11609: the SDK method retired into graph_overview(section=\'stale\'); the handler answers through it
+        # ⛔ `stale_points` did NOT retire (#12951 review P3): the owner's narrow-alias
+        # row names `stale`, the TOOL, not this method name, so no approving region
+        # authorises its retirement and it stays public in `sdk.py`. The empty binding
+        # is a different fact — this door answers through the orientation container
+        # (`graph_overview(section='stale')`), which dispatches to `stale_points`, so
+        # there is no single SDK method for the row to name.
+        sdk_method="",
     ),
     ToolDefinition(
         name="tortoise_review_connections",

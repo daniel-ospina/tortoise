@@ -1252,7 +1252,14 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_suggest_entry_points
-  served_from: tortoise/mcp_server.py:aae4bf5f5ceffe7c
+  # RE-CUT FOR #12951's P1 FIX (this PR): the zero-hit fallback called the retired
+  # `suggest_entry_points`, which raised OUTSIDE `_safe`; the handler now answers through
+  # `search_knowledge(mode='entry_points')`. The digest moves with the implementation.
+  # The cell was re-cut SURGICALLY (no `cut` run): this box's `skills/` symlink points at a
+  # macOS path that does not resolve here, and a full re-cut re-derives the skill-docs
+  # evidence as ZERO (the hazard `tools/surface_manifest.py` documents) — that would blank
+  # unrelated rows to fix one.
+  served_from: tortoise/mcp_server.py:e84ff2f166b5210f
   served_attributes: 542cf2dbb222d260
   family: memory
   family_rank: 1

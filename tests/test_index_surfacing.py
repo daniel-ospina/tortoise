@@ -115,7 +115,7 @@ def test_e2e6_list_sources_flat_rows_and_by_kind(corpus):
         r = sdk.index_directory(str(corpus), extract_metadata=False)
         assert r["indexed"] == 4 and r["failed"] == 0 and r["skipped"] == 0
 
-        rows = sdk.list_sources()
+        rows = sdk.list_knowledge("source")
         assert len(rows) == 4
         # Flat rows: every row carries url + sourceKind + points.
         assert all({"url", "sourceKind", "points"} <= set(row) for row in rows)
@@ -292,7 +292,7 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
 
         # The registry sourceKind is what got indexed (vocabulary consistency
         # with E2E-6.1).
-        rows = sdk.list_sources()
+        rows = sdk.list_knowledge("source")
         assert dict(Counter(row["sourceKind"] for row in rows)) == {
             "agentSession": 2, "meeting_summary": 1, "document": 1}
         assert _required_sweep(g) == 0
@@ -410,7 +410,7 @@ def test_e2e6_uc1_pool_negative_regression(corpus):
         assert all(r.get("entity_type") not in {"source", "event"}
                    for r in rows)
         # Raw sweep: no Source/Event node is reachable via the pool.
-        assert all(r.get("id") not in {row["url"] for row in sdk.list_sources()}
+        assert all(r.get("id") not in {row["url"] for row in sdk.list_knowledge("source")}
                    for r in rows)
         assert _required_sweep(g) == 0
     finally:

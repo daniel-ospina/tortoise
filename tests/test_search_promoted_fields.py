@@ -166,7 +166,7 @@ def test_expand_relationships_full_content(sdk):
     b = sdk.create_point("statement", "beta claim with unique content payload")
     sdk.create_operator("IMPL", a["id"], [b["id"]])
 
-    expanded = sdk.expand_relationships(a["id"])
+    expanded = sdk.explore_connections(a["id"], include_content=True)
     assert len(expanded) == 1
     assert "related_content" in expanded[0]
     assert "beta claim" in expanded[0]["related_content"]
@@ -175,7 +175,7 @@ def test_expand_relationships_full_content(sdk):
 
 
 def test_expand_relationships_missing_point(sdk):
-    assert sdk.expand_relationships("does-not-exist") == []
+    assert sdk.explore_connections("does-not-exist", include_content=True) == []
 
 
 def test_expand_mcp_tool(sdk, monkeypatch):
@@ -205,7 +205,10 @@ def test_expand_tool_registered(sdk):
     names = {t.name for t in TOOL_REGISTRY}
     assert "tortoise_expand_relationships" in names
     entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_expand_relationships")
-    assert entry.sdk_method == "expand_relationships"
+    assert entry.sdk_method == "", (
+        "#11609: the SDK method retired into explore_connections(id, "
+        "include_content=True); the door is served by its MCP handler, which "
+        "binds no SDK method")
     assert entry.group == "memory"
 
 

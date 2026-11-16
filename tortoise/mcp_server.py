@@ -5201,6 +5201,13 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     Returns [{id, name, kind, confidence}] in the read's own (relevance) order;
     the ``suggest_entry_points`` FALLBACK sorts the match by confidence DESC.
     """
+    # An empty query is NOT a resolution request. `search_knowledge(mode=
+    # 'entry_points')` refuses it (text-driven read), but this door's contract
+    # is "no hits" → `[]`, so the refusal is answered here rather than turned
+    # into a `_SafeError` — the behaviour this fallback always had (#12951
+    # review P1: the retired `suggest_entry_points` call raised instead).
+    if not (query or "").strip():
+        return []
     try:
         # #12297: THE RETURNED PAGE **IS** THE RESOLUTION RESULT SET, at
         # ``limit`` default 5 — far inside the shipped pool width of 40 — so an
@@ -5210,7 +5217,8 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
         # this PR's own docstring defines. ⛔ This function does NOT sort (it
         # returns ``_safe(...)``'s list as-is, see the return below); the
         # confidence-DESC sort lives in the SDK lane it mirrors,
-        # ``sdk.suggest_entry_points``, which opts out for its own reason.
+        # ``search_knowledge(mode='entry_points')``, which opts out for its own
+        # reason.
         results = _safe(_get_org_sdk().tortoise_fts_query, query,
                         kind=kind_filter, limit=limit,
                         _rerank_candidates=False)
@@ -5240,7 +5248,8 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
                     for r in results]
     except Exception:
         pass
-    return _safe(_get_org_sdk().suggest_entry_points, query, limit=limit, kind_filter=kind_filter)
+    return _safe(_get_org_sdk().search_knowledge, query,
+                 mode="entry_points", kind=kind_filter, limit=limit)
 
 
 # ── Semantic Search (#6990) ────────────────────────────────────
@@ -6473,9 +6482,18 @@ def _check_confidence_provenance(point_id: str) -> dict:
     chain through the container rather than through the name that no longer resolves.
     The container's claim arm returns `{"confidence": …, "provenance": …}`; this peels
     the chain off and keeps the answer byte-identical to the live tool's.
+
+    ⛔ `require_calibration=False` is not a relaxed gate: this door THROWS THE
+    POSTERIOR AWAY and answers with the chain only, and the #344 / #7478 gate
+    guards the EP posterior. Paying it here turned a pure read ("who decided
+    this?") into a `CalibrationError` on any graph with one uncalibrated
+    evidence point — measured on this head, `sdk.check_confidence(id,
+    include_provenance=True)` raised while the chain resolved fine (#12951
+    review, found by the test sweep). The gate still governs every caller that
+    serves the posterior, because the default posture is unchanged.
     """
     payload = _safe(_get_org_sdk().check_confidence, point_id,
-                    include_provenance=True)
+                    include_provenance=True, require_calibration=False)
     if isinstance(payload, _SafeError):
         return payload
     return (payload or {}).get("provenance", {}) if isinstance(payload, dict) else payload

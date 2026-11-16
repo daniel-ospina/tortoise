@@ -610,7 +610,7 @@ class TestSourceTierAPI:
         with fresh_sdk() as sdk:
             sdk.create_source("https://list.example", "T1", tier="T1")
             sdk.create_source("https://list2.example", "github_issue", tier="T2")
-            sources = sdk.list_sources()
+            sources = sdk.list_knowledge("source")
             by_url = {s["url"]: s for s in sources}
             assert by_url["https://list.example"]["sourceKind"] == "T1"
             assert by_url["https://list2.example"]["sourceKind"] == "github_issue"
@@ -618,20 +618,32 @@ class TestSourceTierAPI:
 
 class TestMCPRegistration:
     def test_new_tools_registered_and_http_allowed(self):
-        """New MCP tools are registered and present in the HTTP allowlist."""
+        """New MCP tools are registered and present in the HTTP allowlist.
+
+        #11609: `tortoise_get_source_reliability` is RETIRED (its name is a
+        #3883 shim, and its read is the `source_reliability` arm of
+        #`tortoise_list_knowledge`), so it must be ABSENT from the advertised
+        surface while its replacement is present — the assertion is kept, and
+        its direction flips with the surface rather than being deleted.
+        """
         import asyncio  # noqa: I001
         from tortoise.mcp_server import mcp
         from tortoise.mcp_auth import HTTP_ALLOWED
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
 
         async def _names():
             tools = await mcp._list_tools()
             return {t.name for t in tools}
 
         tool_names = asyncio.run(_names())
-        for name in ("tortoise_get_source_reliability", "tortoise_assess_source",
-                     "tortoise_set_source_tier"):
+        for name in ("tortoise_assess_source", "tortoise_set_source_tier",
+                     "tortoise_list_knowledge"):
             assert name in tool_names, f"{name} not registered"
             assert name in HTTP_ALLOWED, f"{name} missing from HTTP_ALLOWED"
+        assert "tortoise_get_source_reliability" not in tool_names, (
+            "the retired door is advertised again — its name is a #3883 shim and "
+            "its read is tortoise_list_knowledge(kind='source_reliability')")
+        assert "tortoise_get_source_reliability" in RETIRED_USE_INSTEAD
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -787,10 +799,15 @@ class TestReviewGateFixes:
 
 class TestMCPAnnotationsContract:
     def test_get_source_reliability_has_no_read_only_hint(self):
-        """get_source_reliability writes the cache → must NOT be readOnlyHint.
+        """The caching reliability read must NOT be advertised as readOnlyHint.
 
         A regression adding readOnlyHint would silently auto-approve a
         cache-writing tool (plan Task 6 acceptance).
+
+        #11609: the per-source door is retired; the arm that RECOMPUTES and
+        caches now lives on `tortoise_list_knowledge(kind='source_reliability')`,
+        so that is the door the guard has to read — the promise follows the arm,
+        not the name.
         """
         import asyncio  # noqa: I001
         from tortoise.mcp_server import mcp
@@ -800,12 +817,12 @@ class TestMCPAnnotationsContract:
             return {t.name: t for t in tools}
 
         tools = asyncio.run(_get())
-        t = tools["tortoise_get_source_reliability"]
-        # readOnlyHint must NOT be True (it writes the cache) — registered via
-        # tool_registry with _rw() (readOnlyHint=False, destructiveHint=True).
-        ro = getattr(t.annotations, "readOnlyHint", getattr(t.annotations, "read_only_hint", False))
+        t = tools["tortoise_list_knowledge"]
+        ro = getattr(t.annotations, "readOnlyHint",
+                     getattr(t.annotations, "read_only_hint", False))
         assert ro is not True, (
-            "get_source_reliability writes the reliability cache — no readOnlyHint"
+            "tortoise_list_knowledge's source_reliability arm writes the "
+            "reliability cache — no readOnlyHint"
         )
 
     def test_assess_and_set_tier_are_destructive_hint(self):

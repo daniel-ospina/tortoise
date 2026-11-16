@@ -336,7 +336,10 @@ class TestResolveEntityId:
         sdk = sdk_factory()
         subj = sdk.create_subject("pi-agent", "agent")
         p = sdk.create_point("statement", "A claim", authoredBy=subj["id"])
-        out = sdk.provenance(p["id"])
+        # The chain is not an EP surface: the posterior gate is opted out, exactly as
+        # `_check_confidence_provenance` (mcp_server) does the same for the live door.
+        out = sdk.check_confidence(p["id"], include_provenance=True,
+            require_calibration=False)['provenance']
         assert out["subject"] is not None
         assert out["subject"]["name"] == "pi-agent"
 
@@ -345,7 +348,8 @@ class TestResolveEntityId:
         sdk.create_subject("El Dato Team", "team")
         p = sdk.create_point("statement", "B claim",
                              authoredBy="el dato team")
-        out = sdk.provenance(p["id"])
+        out = sdk.check_confidence(p["id"], include_provenance=True,
+            require_calibration=False)['provenance']
         assert out["subject"] is not None
         assert out["subject"]["name"] == "El Dato Team"
 
@@ -356,7 +360,8 @@ class TestResolveEntityId:
         _create_subject_rows(sdk, "dup", ["sub-a", "sub-b"])
         p = sdk.create_point("statement", "C claim", authoredBy="DUP")
         with pytest.raises(AmbiguousEntityName):
-            sdk.provenance(p["id"])
+            sdk.check_confidence(p["id"], include_provenance=True,
+                require_calibration=False)['provenance']
 
     def test_provenance_terminal_author_refused_and_recorded(self, sdk_factory):
         """D2: a terminal-only author never resolves to a terminal id. The
@@ -369,7 +374,8 @@ class TestResolveEntityId:
             "status:'retracted'})")
         p = sdk.create_point("statement", "D claim",
                              authoredBy="ghost-author")
-        out = sdk.provenance(p["id"])
+        out = sdk.check_confidence(p["id"], include_provenance=True,
+            require_calibration=False)['provenance']
         assert out["subject"] is None
         assert [e.shape for e in non_folded_entries()] == ["no-live-holder"]
 

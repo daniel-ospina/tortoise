@@ -1224,7 +1224,9 @@ def test_a_clamped_count_budget_actually_starves_the_real_count(monkeypatch):
             proj.g.query.return_value = MagicMock(result_set=[[1]])
             return proj
 
-        def taxonomy(self):
+        # #11609: `taxonomy()` retired into the orientation container; this stub mirrors
+# the call `monitoring.metrics` actually makes (`graph_overview(section='taxonomy')`).
+        def graph_overview(self, section=None, **kwargs):
             return {"Point": 7}
 
     counted: list[int] = []
@@ -1257,7 +1259,7 @@ def test_a_clamped_count_budget_actually_starves_the_real_count(monkeypatch):
     # budget, and overrunning THAT is a real error. GRAPH_SIZE_TIMEOUT is shrunk so the overrun is
     # provable in milliseconds rather than in 1.5 s of wall clock.
     class StalledCount(ObservedProbe):
-        def taxonomy(self):
+        def graph_overview(self, section=None, **kwargs):
             time.sleep(0.5)
             return {"Point": 7}
 

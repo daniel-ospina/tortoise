@@ -113,11 +113,18 @@ class TestRegistryEquivalence:
         rows arrived — `tortoise_search_knowledge`, `tortoise_list_knowledge`,
         `tortoise_check_confidence`, `tortoise_explore_connections`,
         `tortoise_review_link_candidates` — and NINE member doors retired into them:
-        `tortoise_issue_insight`, `tortoise_list_topics`, `tortoise_provenance`,
-        `tortoise_session_context`, `tortoise_entity_profile`, `tortoise_traverse`,
+        `tortoise_belief_timeline`, `tortoise_list_topics`, `tortoise_provenance`,
+        `tortoise_get_confidence`, `tortoise_entity_profile`, `tortoise_traverse`,
         `tortoise_review_connections`, `tortoise_list_dedup_candidates`,
         `tortoise_get_source_reliability`. 68 − 9 + 5 = **64** live, 23 + 9 = **32**
-        retired. ⛔ SIX of the family's members are DELIBERATELY still live —
+        retired. ⛔ `tortoise_issue_insight` and `tortoise_session_context` are NOT
+        in that nine: each carries a `rest_spec` (`GET /v1/issue-insight`,
+        `GET /v1/context`), and retiring the registry entry would delete its REST
+        route with it — a public API removal, not a rename (the reason is spelled
+        out at `tortoise/tool_registry.py:2247-2259`). The membership above is
+        re-derived from `RETIRED_USE_INSTEAD`, not typed: `config/surface-order.yml`
+        records the same nine.
+        ⛔ SIX of the family's members are DELIBERATELY still live —
         `search_sessions`, `suggest_entry_points`, `list_batches`,
         `list_namespaces`, `diary_read`, `expand_relationships` — because each
         declares a list envelope, which is what carries the #8482 failure repair a

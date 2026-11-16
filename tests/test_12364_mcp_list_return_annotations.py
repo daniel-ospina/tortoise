@@ -186,7 +186,11 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
             offenders.append(
                 f"{name}: wrapper declares {wrapper_kind!r} but "
                 f"TortoiseSDK.{passed_through} returns {sdk_kind!r}")
-    assert checked >= 20, (
+    # 19, not 20: `tortoise_list_dedup_candidates` left the pass-through
+    # population when its SDK method retired into `review_link_candidates`
+    # (#11609), which returns `Any` and so owes no list type. The floor moved
+    # DOWN with the surface — it is a vacuity guard, not a target.
+    assert checked >= 19, (
         f"only {checked} pass-through wrappers were found — the scan is not "
         f"reaching the registry, so a clean result here would be vacuous")
     assert not offenders, (
@@ -211,14 +215,30 @@ def test_the_two_named_tools_declare_a_shape_fastmcp_accepts():
     what the scan above measures. Do not delete those on the strength of this
     passing.
     """
-    for name, sdk_method in (("tortoise_belief_timeline", "belief_timeline"),
-                             ("tortoise_list_dedup_candidates", "list_dedup_candidates")):
+    for name, sdk_method, expected in (
+            ("tortoise_belief_timeline", "belief_timeline", "list"),
+            # #11609: the SDK method retired into `review_link_candidates`, which
+            # returns `Any` — so this door owes its OWN envelope (`-> dict`) rather
+            # than the SDK method's list type. The premise is re-derived, not dropped.
+            ("tortoise_list_dedup_candidates", "review_link_candidates", typing.Any)):
         assert callable(getattr(ms, name, None)), f"{name} is not on the MCP surface"
-        sdk_kind = _annotation_kind(
-            inspect.signature(getattr(TortoiseSDK, sdk_method)).return_annotation)
-        assert sdk_kind == "list", (
-            f"TortoiseSDK.{sdk_method} no longer returns a list — this test's "
-            f"premise changed; re-derive the guard instead of deleting it")
+        raw = inspect.signature(getattr(TortoiseSDK, sdk_method)).return_annotation
+        if expected is typing.Any:
+            # ⛔ `_annotation_kind` answers `None` for BOTH `-> Any` and "no annotation
+            # at all", so `assert sdk_kind == None` also passed once the container lost
+            # its annotation entirely (-\u003e the door's own envelope would be derived from
+            # nothing). Pin the CONTAINER's shape on the raw annotation (#12951 fix-round
+            # review P3); `from __future__ import annotations` makes it the string "Any".
+            assert raw in (typing.Any, "Any"), (
+                f"TortoiseSDK.{sdk_method} no longer declares `-> Any` (raw annotation "
+                f"{raw!r}): the container's shape is what {name}'s own envelope is "
+                f"derived from — re-derive the guard instead of deleting it")
+        else:
+            sdk_kind = _annotation_kind(raw)
+            assert sdk_kind == expected, (
+                f"TortoiseSDK.{sdk_method} now returns {sdk_kind!r}, not {expected!r} "
+                f"— this test's premise changed; re-derive the guard instead of "
+                f"deleting it")
         wrapper_kind = _annotation_kind(
             inspect.signature(getattr(ms, name)).return_annotation)
         schema = _output_schema(getattr(ms, name))
@@ -246,7 +266,8 @@ class _StubSDK:
     def belief_timeline(self, topic, limit=50):
         return []
 
-    def list_dedup_candidates(self, candidate_type="content", limit=50):
+    def review_link_candidates(self, kind="connections", *,
+                               candidate_type="content", limit=50):
         return []
 
 
@@ -283,7 +304,8 @@ async def test_a_non_empty_list_result_keeps_its_rows(stubbed):
     """The fix must not just satisfy the empty case: the rows a caller wants
     have to survive the envelope."""
     class _Rows(_StubSDK):
-        def list_dedup_candidates(self, candidate_type="content", limit=50):
+        def review_link_candidates(self, kind="connections", *,
+                                  candidate_type="content", limit=50):
             return [{"id": "c1", "content": "a", "candidate_type": candidate_type}]
 
     ms._get_org_sdk = lambda *a, **k: _Rows()
@@ -300,7 +322,7 @@ async def test_a_non_empty_list_result_keeps_its_rows(stubbed):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name,args,raising", [
     ("tortoise_belief_timeline", {"topic": "Helios"}, "belief_timeline"),
-    ("tortoise_list_dedup_candidates", {}, "list_dedup_candidates"),
+    ("tortoise_list_dedup_candidates", {}, "review_link_candidates"),
 ])
 async def test_a_safe_failure_is_not_demoted_into_the_success_payload(
         name, args, raising, monkeypatch):

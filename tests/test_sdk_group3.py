@@ -301,12 +301,12 @@ class TestDiary:
         assert p["authoredBy"] == "pi-agent"
         assert p["wing"] == "test_wing"  # #49: wing replaces context
 
-        entries = sdk.diary_read("pi-agent", last_n=10, wing="test_wing")
+        entries = sdk.list_knowledge("diary", agent="pi-agent", limit=10, wing="test_wing")
         assert len(entries) == 1
         assert entries[0]["pointKind"] == "diary"
 
     def test_read_empty(self, sdk):
-        entries = sdk.diary_read("nobody", last_n=5)
+        entries = sdk.list_knowledge("diary", agent="nobody", limit=5)
         assert entries == []
 
     # flake: known redislite lifecycle issue (#176)
@@ -314,8 +314,8 @@ class TestDiary:
         sdk.diary_write("agent-a", "entry a1")
         sdk.diary_write("agent-b", "entry b1")
 
-        a_entries = sdk.diary_read("agent-a", last_n=10)
-        b_entries = sdk.diary_read("agent-b", last_n=10)
+        a_entries = sdk.list_knowledge("diary", agent="agent-a", limit=10)
+        b_entries = sdk.list_knowledge("diary", agent="agent-b", limit=10)
 
         assert len(a_entries) == 1
         assert len(b_entries) == 1
@@ -325,7 +325,7 @@ class TestDiary:
     def test_read_respects_last_n(self, sdk):
         for i in range(5):
             sdk.diary_write("agent-c", f"entry {i}")
-        entries = sdk.diary_read("agent-c", last_n=3)
+        entries = sdk.list_knowledge("diary", agent="agent-c", limit=3)
         assert len(entries) == 3
 
 
@@ -334,7 +334,7 @@ class TestDiary:
 class TestStatus:
     def test_connected_and_counts(self, sdk):
         sdk.create_point("statement", "hello")
-        result = sdk.status()
+        result = sdk.graph_overview("status")
         assert result["connected"] is True
         assert "Point" in result["counts"]
         assert result["counts"]["Point"] >= 1
