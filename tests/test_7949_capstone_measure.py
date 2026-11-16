@@ -57,6 +57,8 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from tools import capstone_verdict_check as cvc  # noqa: E402
+from tests._cite_resolution import cite_failure as _cite_failure  # noqa: E402
+from tests._cite_resolution import locate_hint as _locate_hint  # noqa: E402
 
 PROBE = _REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
 PREREG = _REPO / "docs/evidence/7949-capstone/preregistration.json"
@@ -4421,34 +4423,52 @@ def _bundle_rule(source: str, paragraph: str, base: int, cite_pos: int):
 
 def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
                     end_spec=None):
-    """[] when the cite resolves, else what the cited lines do not carry."""
+    """[] when the cite resolves, else what is missing AND where it actually is.
+
+    ⛔ Each description is RESOLVED, not merely negative (#12989). The sweep knows
+    the anchor the rule claims and the file it claims it in, so the old message —
+    `sdk.py:19326 reads '# #4716 Part 1: …', which carries none of
+    ['"stats": _capture_stats_with_step_witness(…)']` — told a fixer what was wrong
+    and made them grep `sdk.py` to find what was right. That grep IS the
+    re-derivation this whole exercise keeps paying for (#12877 re-derived these;
+    #12882/#12904/#12959/#12915 moved them again). `locate_hint` answers it from the
+    bytes already in hand: one message, both lines, one edit.
+    """
     stop = int(end) if end else start
     if kind == "line":
         got = source_lines[start - 1]
-        return [a for a in anchors if a not in got]
+        return [f"{a!r} {_locate_hint(source_lines, a, 'line', start)}"
+                for a in anchors if a not in got]
     if kind == "def":
         got = source_lines[start - 1]
-        return [] if got.lstrip().startswith(anchors[0]) else [anchors[0]]
+        return ([] if got.lstrip().startswith(anchors[0]) else
+                [f"{anchors[0]!r} {_locate_hint(source_lines, anchors[0], 'def', start)}"])
     if kind == "span":
         span = source_lines[start - 1:stop]
-        missing = [a for a in anchors if not any(a in ln for ln in span)]
+        missing = [f"{a!r} {_locate_hint(source_lines, a, 'line', start)}"
+                   for a in anchors if not any(a in ln for ln in span)]
         # A RANGE's end is a claim too: `8278-8284` that closes one line into the
         # next block still carries its start anchor and would otherwise pass, so
         # the end line has to read what the rule says it reads.
         if end and end_spec:
             how, token = end_spec
             got = source_lines[stop - 1]
+            hint = _locate_hint(source_lines, token,
+                                "exact" if how == "exact" else "line", stop)
             if how == "exact" and got.strip() != token:
-                missing.append(f"an end line reading {token!r} (it reads {got.strip()!r})")
+                missing.append(
+                    f"an end line reading {token!r} (it reads {got.strip()!r}; the "
+                    f"block's end {hint})")
             elif how == "contains" and token not in got:
                 missing.append(
-                    f"an end line carrying {token!r} (it reads {got.strip()!r})")
+                    f"an end line carrying {token!r} (it reads {got.strip()!r}; that "
+                    f"line {hint})")
         return missing
     # method-span: the def is HERE, the range must not run into the next `def`,
     # and the cited END is a claim too (it must read what the rule says it reads).
     assert kind == "method-span", kind
     if not source_lines[start - 1].lstrip().startswith(anchors[0]):
-        return [anchors[0]]
+        return [f"{anchors[0]!r} {_locate_hint(source_lines, anchors[0], 'def', start)}"]
     next_def = next(
         (i + 1 for i in range(start, len(source_lines))
          if re.match(r" {0,4}def ", source_lines[i])), len(source_lines))
@@ -4457,10 +4477,14 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
     if end and end_spec:
         how, token = end_spec
         got = source_lines[stop - 1]
+        hint = _locate_hint(source_lines, token,
+                            "exact" if how == "exact" else "line", stop)
         if how == "exact" and got.strip() != token:
-            return [f"an end line reading {token!r} (it reads {got.strip()!r})"]
+            return [f"an end line reading {token!r} (it reads {got.strip()!r}; that "
+                    f"line {hint})"]
         if how == "contains" and token not in got:
-            return [f"an end line carrying {token!r} (it reads {got.strip()!r})"]
+            return [f"an end line carrying {token!r} (it reads {got.strip()!r}; that "
+                    f"line {hint})"]
     return []
 
 
@@ -4513,9 +4537,19 @@ def _bundle_sweep(docs, sources) -> dict:
                                       start, end, end_spec)
             if missing:
                 shown = source_lines[source][start - 1].strip()
+                # ⛔ TOLERANT label: `_bundle_sweep` is also driven over SYNTHETIC
+                # documents by the tests (its docstring promises it asserts nothing),
+                # and a temp-path source is not under `_REPO` — `relative_to` raised
+                # ValueError out of the failure path instead of returning a failure.
+                _src_path = sources[source]
+                source_label = (
+                    _src_path.relative_to(_REPO) if _src_path.is_relative_to(_REPO)
+                    else _src_path
+                ).as_posix()
                 failures.append(
-                    f"{cite} ({label}): {source}.py:{start} reads {shown!r}, which "
-                    f"carries none of {missing!r}")
+                    f"{cite} ({label}): {source_label}:{start} reads {shown!r}, so the "
+                    f"cite does not hold what it names — and the tree already says "
+                    f"where that is: " + "; ".join(missing))
     return {"fired": fired, "checked": checked, "unmatched": unmatched,
             "failures": failures, "skipped": skipped}
 
@@ -4653,29 +4687,29 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
             continue
         line = hits[0]
         for number, anchor in cites:
+            # ⛔ THE MISS IS RESOLVED, NOT MERELY REPORTED (#12989). These branches used
+            # to say what the cited line READS and leave the fixer to grep `sdk.py`
+            # for the anchor by hand — the re-derivation that has now been done for
+            # this table at #11837, #12462, #12545, #12569 and #12989. The row
+            # already carries the anchor, so `_cite_resolution` answers the only
+            # question left: WHERE IS IT NOW. One message, both lines, one edit.
+            kind, token = (
+                ("exact", anchor[1]) if isinstance(anchor, tuple) else ("line", anchor)
+            )
             if f":{number}" not in line and f"-{number}" not in line:
                 failures.append(
                     f"{doc_label}: the sentence containing {phrase!r} does not "
                     f"cite :{number} — a bare continuation is invisible to "
-                    f"_BUNDLE_CITE, so this pin is the only thing reading it")
+                    f"_BUNDLE_CITE, so this pin is the only thing reading it. The "
+                    f"thing it names is `{token}`, which "
+                    f"{_locate_hint(sources[source_key], token, kind, int(number))}; "
+                    f"the sentence must carry THAT number, not a stale one")
                 continue
-            source_lines = sources[source_key]
-            if int(number) > len(source_lines):
-                failures.append(
-                    f"{source_label}:{number} (cited by {doc_label}) is PAST THE END "
-                    f"of {source_label} ({len(source_lines)} lines) — the cite names a line "
-                    f"the file does not have, or this row's SOURCE key is wrong")
-                continue
-            got = source_lines[int(number) - 1]
-            if isinstance(anchor, tuple):
-                if got.strip() != anchor[1]:
-                    failures.append(
-                        f"{source_label}:{number} (cited by {doc_label}) reads "
-                        f"{got.strip()!r}, not exactly {anchor[1]!r}")
-            elif anchor not in got:
-                failures.append(
-                    f"{source_label}:{number} (cited by {doc_label}) reads "
-                    f"{got.strip()!r}, which carries no {anchor!r}")
+            failure = _cite_failure(
+                doc_label, source_label, int(number), sources[source_key], (token,),
+                kind=kind, what=f"the sentence containing {phrase!r}")
+            if failure:
+                failures.append(failure)
     return failures
 
 
@@ -5829,7 +5863,7 @@ _EPIC_CITE_DOCS = {
     # BEFORE it on the same markdown line ("…is STAMP-bound (`:1186` is the `corpus = {…}`
     # line here; the frozen literal is at `:1194`)"). Three are pinned on the two rows
     # below (`19341`/`19448` here, `sdk.py:10037` on its own row because a row carries ONE
-    # source key), `10334`/`10387` on their OWN `05-verify.md` row (round 6 — NOT by the
+    # source key), `10064`/`10117` on their OWN `05-verify.md` row (round 6 — NOT by the
     # `subject_binding_available` rows that predate this PR: those scope `00-plan.md` and
     # `03-test-design.md`, and a row resolves only against the `doc_label` it names, so they
     # cannot read this document — citing them as coverage is how a dropped row goes unseen),
@@ -6011,12 +6045,6 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6659", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            # 10252 -> 10334, 10305 -> 10387: the SECOND re-cut — the forward merge of
-            # `origin/main` `dba61c32bb` (#12941's read fallback) inserts 82 lines above
-            # this carrier. Re-derived at the merged tree with
-            # `grep -n 'subject_binding_available,' tortoise/sdk.py` (the anchor text is
-            # unchanged; only the number moved) — never carried from either side, and never
-            # by adding the offset: the first re-cut's pair was correct at ITS head.
             ("10334", "subject_binding_available,"),
             ("10387", "and not subject_binding_available(graph):"),
         ), "sdk"),
@@ -6027,8 +6055,6 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            # 10252 -> 10334 / 10305 -> 10387, re-derived at THIS merged tree (see the
-            # `00-plan.md` sibling row above for the command).
             ("10334", "subject_binding_available,"),
             ("10387", "and not subject_binding_available(graph):"),
         ), "sdk"),
@@ -6179,9 +6205,6 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("11686", '"pointKind": pkind,'),
         ), "extractor_v2"),
         ("04-plan.md", "operator / label path", (
-            # RE-DERIVED by CONTENT on this merge (lane B's write containers inserted 170
-            # lines above this anchor in `tortoise/sdk.py`):
-            # `grep -n 'declared = declared_relation_predicates()' tortoise/sdk.py` -> 25892.
             ("25892", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # ⛔ THE RECONCILE APPENDIX'S OWN REPRODUCTION BLOCK (#12462 review round 2).
@@ -6261,7 +6284,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("19583", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
-        # re-states `hosted_api.py:19454` as the same guard read at an older head, so it is
+        # re-states `hosted_api.py:19448` as the same guard read at an older head, so it is
         # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
         # merger to re-point line 82, which is exactly how 236 comes to assert the old
         # number while 82 moves. Unpinned until the review reverted it green. Only the
@@ -6284,10 +6307,6 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
             # `:10063`/`:10116` stayed GREEN).
-            # 10225 -> 10307, 10252 -> 10334, 10305 -> 10387 at THIS merged tree (the second
-            # re-cut, `origin/main` `dba61c32bb`), re-derived with
-            # `grep -n 'subject_binding_available,' tortoise/sdk.py` and
-            # `grep -n '_registry_cache = PackRegistry(packs_dir)' tortoise/sdk.py`.
             ("10334", "subject_binding_available,"),
             ("10387", "and not subject_binding_available(graph):"),
         ), "sdk"),
@@ -6304,12 +6323,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "extractor_v4_arch"),
         # ⛔ THE TWO THIS-HEAD NUMBERS TWO EARLIER CUTS LEFT UNREAD (#12569 review), and the
         # count that hid one of them. D5's row states NINE distinct this-head numbers: `19451`,
-        # `19558`, `10307`, `10334`, `10387`, `1186`, `1194`, `1400`, `1418` (the first two were
+        # `19558`, `10225`, `10252`, `10305`, `1186`, `1194`, `1400`, `1418` (the first two were
         # `19406`/`19519` before `#12947`'s +39 re-derivation moved them, and those two now
         # survive ONLY inside the document's history arrows — `19406→19412`, `19513→19519` — so
-        # a count taken over the doc must read the current-tense pair; the `sdk` triple was
-        # `10225`/`10252`/`10305` on BOTH parents and reads +82 on this merged tree, re-derived
-        # with `grep -n 'subject_binding_available,' tortoise/sdk.py`). The
+        # a count taken over the doc must read the current-tense pair). The
         # counts in the comments above said SEVEN, then EIGHT, and each time the number left
         # out was green under mutation: `:1418` (in the "Measured at" continuation) and
         # `:1194` — which is stated one clause EARLIER on the same markdown line, in the
@@ -6518,7 +6535,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ⛔ AND THE SAME TREATMENT FOR THE TWO OTHER HITS D5 STATES TWICE (#12462 review
         # cycle 3): `:1400` occurs as the current-tense `Projection` cite AND as the historical
         # "D6" cite, so a row that merely finds the number passes on the twin when the
-        # current-tense one is re-pointed wrongly (measured: 413 passed). `:10334`/`:10387`
+        # current-tense one is re-pointed wrongly (measured: 413 passed). `:10064`/`:10117`
         # are stated twice, both "at this head", so a partial move leaves one stale.
         "`EXTRACTOR-V4-ARCHITECTURE.md:1400` is a **`Projection`** row here",
         "`sdk.py:10334`/`:10387` at this head",
@@ -6531,7 +6548,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "leaves the document asserting two numbers for one `git grep` hit")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:14471-14548`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:14465-14542`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
@@ -7134,13 +7151,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     "`config/ci-surfaces.yml` — 12 shards",
     # ⛔ …AND THE FALSE-RED THAT `(?<![\w.])` ON THE SECOND ARM EXISTS FOR. Without
     # that lookbehind, ANOTHER file's cite sitting BEFORE the manifest's name is read
-    # as a manifest cite (`sdk.py:9614` matches `<sep><num>` and then any gap to the
+    # as a manifest cite (`sdk.py:9612` matches `<sep><num>` and then any gap to the
     # filename), and the pin accuses the author of a number they never wrote. Measured
     # by rebuilding the pattern without the lookbehind: both fixtures below become
     # matches (`True`), and with it they are clean (`False`) — so removing the guard
     # as noise REDs exactly these two rows, and nothing else in this table does.
-    "the loader (`sdk.py:9614`) reads `config/ci-surfaces.yml` on every run",
-    "`sdk.py:9614` then `config/ci-surfaces.yml`",
+    "the loader (`sdk.py:9612`) reads `config/ci-surfaces.yml` on every run",
+    "`sdk.py:9612` then `config/ci-surfaces.yml`",
     # ⛔ AND THE `entries` MEMBERSHIP OF `_UNIT_POSITION_WORDS` IS PAID FOR HERE
     # (#12369 review, P3). `entries` is in that list; `_UNIT` excludes those nouns, so
     # `_NUM` does not read `1450 entries` as a line cite — a COUNT of entries is a
@@ -7325,17 +7342,17 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     # ⛔ THE NEIGHBOUR ARM MUST NOT REFUSE ANOTHER FILE'S CITE, and both of these were
     # measured RED before `_neighbour_number_strays` existed. They are the natural
     # prose of a maintainer explaining the block's mechanism — and `03-test-design.md`
-    # is the bundle's cite-heavy document (`sdk.py:10334`/`:10387`, `capstone_run.py`),
+    # is the bundle's cite-heavy document (`sdk.py:10064`/`:10117`, `capstone_run.py`),
     # so its neighbours WILL name other modules with line numbers. Both numbers are
-    # re-derived at this head (`grep -n subject_binding_available tortoise/sdk.py`
-    # -> `:10334` and `:10387`) — and they are stated as the merged tree reads them,
-    # because a carried OFFSET is exactly the rot this PR exists to remove (the
-    # superseded pair this comment used to carry resolved to no line at any head).
+    # re-derived at this head (`grep -n subject_binding_available tortoise/sdk.py`) —
+    # an earlier revision carried `9867`/`9920`, which is that pair minus 71: a
+    # carried OFFSET, the exact rot this PR exists to remove, caught by the same
+    # review that re-derived the document's copy of the pair.
     ("`surfaces:` blocks are spliced by `tools/ci_selection.py::register_tests` (its "
      "`entry_lines` loop, `:4906`) and the entry line moves under them.", []),
     ("The `corpus` block in `capstone_run.py` is frozen; its literal sits at `:1186`.",
      []),
-    ("`sdk.py`'s `extraction_mode` literal sits at `sdk.py:16325` — another row's cite.",
+    ("`sdk.py`'s `extraction_mode` literal sits at `sdk.py:16323` — another row's cite.",
      []),
     # …and the forms it MUST still catch, so the "another file" exemption cannot become
     # a bypass: a bare cite with NO other file named, and the history-trimmed number.
@@ -7581,7 +7598,7 @@ def _block_findings(message: str) -> list[str]:
 
     ⛔ WHY THE ARM TABLE NEEDS THIS, MEASURED. `pytest.raises(AssertionError)` only
     asks that the pin failed, and at a head where a TABLE ROW is stale — `#12381`
-    moved `tortoise/sdk.py` under the bundle's `sdk.py:25184` row, which this branch
+    moved `tortoise/sdk.py` under the bundle's `sdk.py:25189` row, which this branch
     does not own — EVERY case in the table passed with its arm deleted, because the
     unrelated row's red satisfied `pytest.raises` (measured: the identity mutation,
     which changes nothing at all, is RED). A case is therefore evidence for its arm
@@ -8825,7 +8842,7 @@ _ENTRY_POINT_DOCS = (
 def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
     """The `:N` continuation naming the `_extract_session_v2` CALL is checked.
 
-    `_BUNDLE_CITE` only matches a cite that NAMES a file, so `(sdk.py:14299;
+    `_BUNDLE_CITE` only matches a cite that NAMES a file, so `(sdk.py:14297;
     called at :13334)` had exactly one checked number and one unverifiable one —
     and the unchecked half went stale TWICE on this branch, once at the commit
     that re-derived it (it was already `:13299` there). Re-staling it to a wrong
@@ -14063,7 +14080,7 @@ _CITE_QUALIFIER_PATTERN = (
     # optional `(?:-\d+)?` tail the helper reported BOTH of them as UNQUALIFIED — a
     # false BLOCK of a conformant edit whose own message told the author to add the base
     # they had already added (measured by a fresh-context review at `f885a51663`).
-    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:18061-18075`
+    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:18058-18072`
     # (`A2`'s mint seam) is printed UNQUALIFIED in the record, and that is not a false
     # block — the range arm below reads the range OUT OF THE RECORD and asserts both of its
     # endpoints against `tortoise/sdk.py`, so this cite is pinned by derivation instead of
@@ -14211,8 +14228,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
 
     Rule 3 of agent-infra#3442: this leg pins the record's LIVE cites — the four
-    #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17475`->`:17681`,
-    `sdk.py:16416-16430`->`:16536-16550` x3 — `#11548` moved this seam +13 after that
+    #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17681`,
+    `sdk.py:16414-16428`->`:16536-16550` x3 — `#11548` moved this seam +13 after that
     re-point. ⛔ The number printed here is a CONVENIENCE COPY, not a pin: the arm below
     reads this range OUT OF THE RECORD and asserts both of its endpoints against
     `tortoise/sdk.py`, so the value above is what a reader is spared from grepping for,
@@ -14232,7 +14249,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #11376 did not move these lines), the `:12929` `vet_enabled` live-cite, the
     bundle's `hasPart`/`hierarchies` split, and the four further LIVE cites a fresh
     review found still unwatched (`pack_hierarchy.py:431`, the
-    `probes/capstone_measure.py:275-283` window and the `sdk.py:19847` cite it carries
+    `probes/capstone_measure.py:275-283` window and the `sdk.py:17681` cite it carries
     INSIDE it, `identity_hold.py:125`, `value_gate.py:89`) — and, measured before
     this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
@@ -14562,7 +14579,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "cite — re-stale it and this record's only reproduction path points at a dead line")
     # ⛔ DIRECTION FLIPPED with the correction this arm forced. The comment at this line used to
     # read "nothing in this tree consumes `result[\"relations\"]`" — a claim that was FALSE from the
-    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:19080`), so the
+    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:19077`), so the
     # arm was pinning a falsehood into the live tree. It now asserts the corrected sentence AT THE
     # SAME LINE (the block's line count was held at 13 so every cite below keeps its number) and that
     # the retracted sentence is gone from the file entirely.
@@ -14584,7 +14601,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "\"nothing consumes it\" reading is what this arm replaced")
     assert "nothing in this tree consumes" not in "\n".join(ext), (
         "the retracted sentence is back in the live file — it was false while this record's own §5 "
-        "cited `sdk.py:19080` as the consumer, so no arm may require it again")
+        "cited `sdk.py:19077` as the consumer, so no arm may require it again")
 
     # A1's environment block: the reproduction that states A1's producer claim — the
     # bare-token grep whose four `create_operator` mentions ARE its evidence that the
@@ -14930,7 +14947,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — §2 carries NINE FILE-QUALIFIED
         # cites and only THREE are held (main's enumeration, re-measured on this tree at this
         # merge: 9 found, matching this list exactly). Held: `identity_hold.py:125` and
-        # `tortoise/value_gate.py:89` (`_cite` loop below) and `sdk.py:18601-18625` (the count-3
+        # `tortoise/value_gate.py:89` (`_cite` loop below) and `sdk.py:18058-18072` (the count-3
         # range arm) — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
         # `:9617`, `:11731-11732`, and the `research-brief.md` / `02-research-brief.md` cites.
         # ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's SCOPE paragraph

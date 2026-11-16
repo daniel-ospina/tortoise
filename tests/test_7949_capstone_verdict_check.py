@@ -31,6 +31,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from tools import capstone_verdict_check as cvc  # noqa: E402
+from tests._cite_resolution import locate_hint as _locate_hint  # noqa: E402
 
 LOG = _REPO / "docs/evidence/7949-capstone/capstone.log"
 PROBE = _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"
@@ -2110,10 +2111,14 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     def_line, call_line = (int(n) for n in sdk_cites.groups())
     assert sources["sdk"][def_line - 1].lstrip().startswith("def _extract_session_v2("), (
         f"README cites the _extract_session_v2 def at sdk.py:{def_line}, which is "
-        f"{sources['sdk'][def_line - 1].strip()!r} — the line moved and the cite did not")
+        f"{sources['sdk'][def_line - 1].strip()!r} — the line moved and the cite did "
+        f"not: `def _extract_session_v2(` "
+        f"{_locate_hint(sources['sdk'], 'def _extract_session_v2(', 'def', def_line)}")
     assert "self._extract_session_v2(" in sources["sdk"][call_line - 1], (
         f"README cites the call at sdk.py:{call_line}, which is "
-        f"{sources['sdk'][call_line - 1].strip()!r} — the line moved and the cite did not")
+        f"{sources['sdk'][call_line - 1].strip()!r} — the line moved and the cite did "
+        f"not: `self._extract_session_v2(` "
+        f"{_locate_hint(sources['sdk'], 'self._extract_session_v2(', 'line', call_line)}")
     # Anchored on the entry-point SENTENCE, not on the first backticked
     # `extractor_v2.py:NNNN` anywhere in a 40 KB document: the bundle cites
     # dozens of lines in that file (the flag reads, the gates, the surfaces),
@@ -2149,7 +2154,9 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         text = sources["extractor_v2"][int(lineno) - 1]
         assert symbol.split(".")[-1] in text, (
             f"README cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
-            f"{text.strip()!r} — the line moved and the cite did not")
+            f"{text.strip()!r} — the line moved and the cite did not: "
+            f"`{symbol.split('.')[-1]}` "
+            f"{_locate_hint(sources['extractor_v2'], symbol.split('.')[-1], 'line', int(lineno))}")
     # (c) The probe's nine bare step cites (#10211). They name a SYMBOL and a
     # bare `:NNNN` with no filename, so rule (b) cannot see them (it reads the
     # README) and the bundle's own sweep cannot either (`_BUNDLE_CITE` requires
@@ -2180,7 +2187,9 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
             f"the probe cites `{first}`"
             + (f" / `{second}`" if second else "")
             + f" at extractor_v2.py:{lineno}, which reads {text.strip()!r} — "
-            "the line moved and the cite did not")
+            "the line moved and the cite did not: "
+            + "; ".join(f"`{sym}` {_locate_hint(sources['extractor_v2'], sym, 'line', int(lineno))}"
+                        for sym in named))
     # (d) The probe's ENTRY-POINT sentence, the same (def, call) pair rule (a)
     # pins in the README (#10021 review). Rule (c) covers only the probe's nine
     # bare STEP cites, so this sentence — the one that names the entry point a
@@ -2212,7 +2221,8 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     assert sources["sdk"][p_def - 1].lstrip().startswith("def _extract_session_v2("), (
         f"the probe cites the _extract_session_v2 def at sdk.py:{p_def}, which "
         f"is {sources['sdk'][p_def - 1].strip()!r} — the line moved and the "
-        "cite did not")
+        "cite did not: `def _extract_session_v2(` "
+        f"{_locate_hint(sources['sdk'], 'def _extract_session_v2(', 'def', p_def)}")
     assert "self._extract_session_v2(" in sources["sdk"][p_call - 1], (
         f"the probe cites the call at sdk.py:{p_call}, which is "
         f"{sources['sdk'][p_call - 1].strip()!r} — the line moved and the cite "
@@ -3003,7 +3013,9 @@ def test_the_probes_line_citations_resolve_too():
         text = extractor[lineno - 1]
         assert symbol.split(".")[-1] in text, (
             f"probe cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
-            f"{text.strip()!r} — the line moved and the cite did not")
+            f"{text.strip()!r} — the line moved and the cite did not: "
+            f"`{symbol.split('.')[-1]}` "
+            f"{_locate_hint(extractor, symbol.split('.')[-1], 'line', lineno)}")
 
 
 # ── V7 across a multi-artifact table (the capstone's own rows) ────────────
