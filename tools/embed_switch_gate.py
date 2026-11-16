@@ -151,6 +151,15 @@ LAST ``b``, not the first. ``_parent_stage`` walked forward and graded the dead 
 =1`` over an image whose ``Config.Env`` (``docker image inspect``) carries no ``TORTOISE_*``. The
 mirror ordering was a false refusal; both are pinned.
 
+⛔ **Three more shapes complete that model** (review round 4, each measured against bash). The
+group OPENER requires a real command after the brace — `{}` (`find … -exec … {} +`), `{1..5}` and
+`{logs,cache}` are DATA, and counting them pushed a phantom frame so a forked group's fork was
+applied to the wrong frame. A redirection TARGET stops at the shell's metacharacters, so a GLUED
+operator (`2>&1|tee`, `>/f|tee`) is still seen as a fork. And `exec`/`exit` terminate the file only
+when they PROVABLY run: a redirect-only `exec > >(tee -a log) 2>&1` (the boot-log idiom) keeps the
+shell alive, and an `exit` behind `||` or inside a helper body cannot end the file — the old rule
+keyed on the VERB and refused an honest ``entrypoint.sh`` with a message blaming the value.
+
 ``.env.example`` is a template nothing deploys, so it is not a channel of this gate; the
 read-only instrument (``tools/dod_5090_probe.py``) is what scores it.
 
@@ -271,6 +280,37 @@ _SHELL_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SHELL_STATEMENT_PREFIX = re.compile(
     r"^[ \t]*(?:\{|\bcommand\b|\bbuiltin\b|\bthen\b|\belse\b|\belif\b|\bdo\b)"
 )
+
+
+def _terminates_the_shell(statement: str) -> bool:
+    """Whether this statement really REPLACES or EXITS the shell that runs the rest of the file.
+
+    ``exec`` only replaces the process when it carries a COMMAND WORD; ``exec > >(tee -a log) 2>&1``
+    is a redirection of the shell's own file descriptors and the script continues (review round 4,
+    measured: that line — the ordinary boot-log idiom — made every later ``export`` unreachable and
+    refused an honest ``entrypoint.sh``). ``exit`` always ends the shell, but only where it RUNS:
+    the caller gates this on the same provably-runs predicate the retraction arms use, so an
+    ``exit`` inside a function body, a branch or a group cannot terminate the file.
+    """
+    match = _SHELL_TERMINATES.match(statement)
+    if not match:
+        return False
+    if match.group(0).strip() == "exit":
+        return True
+    # A parenthesised group cannot be the command WORD: it is a process substitution the redirect
+    # feeds (`exec > >(tee -a log)`) or a subshell. Dropping them first is what lets the state
+    # machine below see `exec > >(tee …) 2>&1` as redirections only, while `exec "$@"` (a quoted
+    # span, blanked in the structural view) still counts as the command word it is.
+    rest = re.sub(r"[<>]?\([^()]*\)", " ", statement[match.end() :])
+    while True:
+        rest = rest.lstrip()
+        operator = _REDIRECT_OPERATOR.match(rest)
+        if not operator:
+            return bool(rest.strip())
+        rest = rest[operator.end() :].lstrip()
+        target = re.match(r"[^\s|&;<>()]+", rest)
+        if target:
+            rest = rest[target.end() :]
 
 
 def _strip_statement_prefix(raw: str, view: str) -> tuple[str, str]:
@@ -411,7 +451,13 @@ _SHELL_GROUP_BRACE = re.compile(r"(?<![\w${,])\}(?![})])")
 #: groups on one statement, and a boolean push desynced the frame stack — the outer group's fork
 #: was applied to a frame that had already been replaced, so it was silently dropped and both
 #: switches were credited over a subshell that exports nothing.
-_SHELL_GROUP_OPEN = re.compile(r"(?<![\w${])\{(?![A-Za-z0-9_.,])")
+_SHELL_GROUP_OPEN = re.compile(r"(?<![\w${])\{(?=[\s$({!\\]|$)")
+
+#: A redirection OPERATOR with no target (see `_terminates_the_shell`).
+#: `>&`/`<&` are listed BEFORE the plain `>` arm (review round 4, measured): with the other
+#: order `2>&1` matched `2>` and left `&1` looking like a command WORD, so a
+#: redirect-only `exec` still terminated the file.
+_REDIRECT_OPERATOR = re.compile(r"(?:[0-9]*(?:&>>?|>&|<&|>>?\|?|<<<?-?|<>?))")
 
 #: ⛔ A redirection token, stripped from between a group closer and the operator that follows it
 #: (review P2, measured BOTH ways). The first pattern spelled the redirect as
@@ -1887,7 +1933,14 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # `closers` is the REDUCED list from the depth step above: the group's own `}` has
             # already been taken out, so it cannot close the FUNCTION BODY it merely sits in.
             fn_body = max(0, fn_body - len([c for c in closers if "}" in c])) + opened_fn
-            if depth == 0 and _SHELL_TERMINATES.match(raw):
+            # ⛔ Only a statement that PROVABLY RUNS can terminate the rest of the file, and an
+            # `exec` carrying no command word does not terminate anything (review round 4,
+            # measured BOTH ways). `exec > >(tee -a /var/log/boot.log) 2>&1` — the ordinary
+            # boot-log idiom — and `[ -x /usr/bin/env ] || { echo nope; exit 1; }` each marked the
+            # rest of the script unreachable, so a shipped `entrypoint.sh` stating both switches
+            # was REFUSED with a message about the VALUE. `retracts` is the provably-runs
+            # predicate: it excludes a body, a branch, a group behind a guard and a subshell.
+            if retracts and _terminates_the_shell(content_raw):
                 terminated = True
     return stated, ambiguous
 

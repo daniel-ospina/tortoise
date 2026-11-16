@@ -2960,6 +2960,8 @@ def test_NESTED_groups_keep_their_frames(script):
         ("2>&1|&tee", False),
         ("> /tmp/f.log 2>&1|tee", False),
         ("&>/tmp/f.log|tee", False),
+        (">/tmp/f.log|tee", False),
+        (">/tmp/f.log&", False),
     ],
 )
 def test_a_group_redirect_is_not_a_fork(trailer, credited):
@@ -3092,6 +3094,11 @@ def test_the_code_ON_the_allman_body_brace_line_is_inside_the_body():
         # …and so is a brace EXPANSION (a group opener must be followed by a command)
         "mkdir -p {logs,cache}",
         "printf '%s\\n' {1..5}",
+        # ⛔ and `{}` (review round 4, measured): an EMPTY pair is followed by `}`, which the first
+        # discriminator did not exclude, so `find … -exec … {} +` inside a piped group pushed a
+        # phantom frame and the group's fork was never applied.
+        "echo {}",
+        "find /tmp -maxdepth 0 -exec true {} +",
     ],
 )
 def test_a_brace_that_is_DATA_does_not_push_a_group_frame(body):
@@ -3131,3 +3138,68 @@ def test_a_brace_that_is_DATA_does_not_push_a_group_frame(body):
     assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
         f"the unforked mirror runs in the current shell, so bash keeps both: {stated}"
     )
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        # ⛔ the boot-log idiom this repo's own entrypoint would plausibly adopt (review round 4):
+        # a redirect-only `exec` does NOT replace the process, the shell continues.
+        "exec > >(tee -a /var/log/tortoise-boot.log) 2>&1",
+        "exec >> /var/log/tortoise-boot.log 2>&1",
+        "exec 2>&1",
+        # ⛔ an `exit` that runs only on a failure branch cannot terminate the file.
+        '[ -x /usr/bin/env ] || { echo "no env"; exit 1; }',
+        # an `exit` inside a helper body the script may never call
+        "cleanup() {\n  exit 1\n}",
+    ],
+)
+def test_a_REDIRECT_ONLY_exec_or_a_GUARDED_exit_does_not_terminate_the_file(prefix):
+    """Review round 4 (measured, BOTH directions) — `terminated` was set by any `exec`/`exit`.
+
+    `_SHELL_TERMINATES` matched the VERB, so one realistic line prepended to this repo's own
+    `entrypoint.sh` turned it RED:
+
+        exec > >(tee -a /var/log/tortoise-boot.log) 2>&1     # a redirect-only `exec`
+        export TORTOISE_VALUE_GATE="${TORTOISE_VALUE_GATE:-1}"    # never reached, said the reader
+
+    → `entrypoint.sh mentions TORTOISE_VALUE_GATE but does not state a value this gate can read …
+    state it as a literal assignment` — advice the file already follows, with nothing pointing at
+    the `exec` line. `env -i bash` sets both switches. The same for an `exit` guarded behind `||`
+    or sitting in a helper body.
+
+    A redirect-only `exec` now needs no command WORD (`_terminates_the_shell` strips the
+    redirections and the process substitutions first, on RAW text so `exec "$@"` still counts), and
+    termination is gated on `retracts` — the provably-runs predicate — so a branch, a body or a
+    guarded group cannot end the file. The two true positives are pinned in the same test.
+
+    Mutation-proved: reverting to `_SHELL_TERMINATES.match(raw)` reds all five rows; treating every
+    `exec` as harmless reds the `exec "$@"` row.
+    """
+    script = f"{prefix}\nexport TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+    stated, ambiguous = gate._shell_assignments(script)
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"bash runs the exports after {prefix!r}, so the reader must credit them: {stated} "
+        f"(ambiguous={ambiguous})"
+    )
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "exec /usr/bin/env",  # a COMMAND WORD replaces the process
+        'exec "$@"',
+        "exit 0",
+        "exit",
+    ],
+)
+def test_a_real_exec_or_exit_still_terminates_the_file(prefix):
+    """The mirror of the row above — the two shapes that DO end the rest of the file.
+
+    Without this, "nothing terminates" would pass while a script that execs a different program
+    before exporting the switches was credited for exports that never run.
+    """
+    script = f"{prefix}\nexport TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+    stated, ambiguous = gate._shell_assignments(script)
+    assert stated == {}, f"nothing after {prefix!r} runs, so nothing is stated: {stated}"
+    assert set(SWITCHES) <= ambiguous, ambiguous
