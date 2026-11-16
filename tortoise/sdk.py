@@ -48738,11 +48738,44 @@ class TortoiseSDK:
             # RENDERING-aware, it is also what tells an echo through an exotic
             # key apart from a write that never named the field at all. A
             # mutation that deletes it is an EQUIVALENT mutant, not a hole.)
+            # ⛔ BOTH SIDES ARE COMPARED BY CONTENT, never by the object (#12907
+            # review cycle 3, P2). This exemption is what DISARMS the terminal
+            # guard on the line below, and that guard is the ONLY instrument for
+            # a stored word `_ALLOWED_TRANSITIONS` has no key for (`deprecated`,
+            # the legacy `outdated` flag, an operator fan-out) — the loop down at
+            # the status arm DEFERS on an unknown word, so a wrongly-entailed
+            # call reaches the write with nothing left to refuse it. A `str`
+            # subclass answers `__eq__` for whichever side of the tuple element
+            # it occupies, so either operand could make `('live',) ==
+            # ('deprecated',)` true. Measured, both directions:
+            #   stored `deprecated` read as a lying-`__eq__` subclass ->
+            #     `status='live'` ACCEPTED, row resurrected, guard never asked;
+            #   stored `deprecated` + `status=<lying subclass 'live'>` ->
+            #     ACCEPTED and resurrected too — that one is CALLER-controlled,
+            #     no engine seam needed (the class sits in `props`, normalised to
+            #     its content only AFTER this test).
+            # So each side is reduced to its exact content, and a side that is
+            # not a `str` at all (a stored list/int, an impostor claiming
+            # `__class__ = str`) makes the set NOT entailed — fail-closed: the
+            # guard is asked rather than skipped. The legal shapes are unchanged,
+            # because a genuine `str` subclass reduces to the content it holds: a
+            # read-modify-write echo is still entailed (the #3305 capability a
+            # refused echo contradicted), and a subclass rewriting its content
+            # is not.
+            _pt_statuses_exact = (
+                tuple(str.__str__(_stored_status)
+                      for _stored_status in _pt_statuses)
+                if all(issubclass(type(_stored_status), str)
+                       for _stored_status in _pt_statuses) else None)
+            _rendered_status = _lifecycle_rendered.get("status")
+            _rendered_status_exact = (
+                str.__str__(_rendered_status)
+                if issubclass(type(_rendered_status), str) else None)
             _status_entailed = (
                 "status" in _lifecycle_rendered
                 and not (_TEMPORAL_RESTAMP_PROPS & set(_lifecycle_rendered))
                 and not _bound_null_statuses
-                and _pt_statuses == (_lifecycle_rendered["status"],))
+                and _pt_statuses_exact == (_rendered_status_exact,))
             for _lifecycle_id in (() if _status_entailed else _lifecycle_ids):
                 try:
                     # ⛔ `refuse_event_terminalization=False` (#11825 merge): this
