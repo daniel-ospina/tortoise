@@ -5219,6 +5219,13 @@ def _deleted_point_payload(id: str) -> dict:
 _JOURNAL_ENVELOPE_KEYS = (
     "type", "id", "point", "payload",
     "event_id", "ts", "recorded_ts", "initiated_by", "projection_version",
+    # ``seq`` is a journal POSITION, not a tenant property (#12894). It is the
+    # name `record_projection._carried_position` reads to decide a record's
+    # ordinal, and `record_projection.ENVELOPE_KEYS` already declares it an
+    # `_emit_event`-owned envelope name — it is reserved here too so no caller
+    # prop can put one on a line. See `_RESERVED_ENVELOPE_PROPS` for the
+    # collision this closes.
+    "seq",
 )
 
 #: Every `_emit_event` ENVELOPE name a caller prop must not be able to set —
@@ -5252,9 +5259,21 @@ _JOURNAL_ENVELOPE_KEYS = (
 #
 # The set is spelled out rather than derived so an auditor sees it whole; it
 # must stay equal to `_JOURNAL_ENVELOPE_KEYS` minus ``id``.
+#
+# ⛔ ``seq`` IS LOAD-BEARING HERE, not tidiness (#12894). `#9190` makes the
+# record CARRY its ordinal, so `record_projection._carried_position` READS a
+# record's `seq` and REFUSES the write when it disagrees with the enumeration.
+# A caller prop named ``seq`` rode `event.update(extra)` onto the journal line
+# top level (neither this set nor `_JOURNAL_ENVELOPE_KEYS` named it), so
+# ``update_point(pid, seq=42)`` produced a line whose ``seq`` disagreed with
+# every enumeration the journal could ever make — refusing that record's live
+# write (fail-soft: counted on `record_write_failures`, the row never lands) AND
+# every replay of it, since replay reads the same key. Unhealable by the one
+# repair the seam advertises. Stripped at intake like the other envelope names,
+# so a caller ``seq`` cannot forge a position.
 _RESERVED_ENVELOPE_PROPS = (
     "type", "point", "payload", "event_id", "ts", "recorded_ts",
-    "initiated_by", "projection_version",
+    "initiated_by", "projection_version", "seq",
 )
 
 #: The SERVER-MANAGED embedding journal fields — the names a caller may never
