@@ -235,7 +235,13 @@ _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s
 #: (`while IFS= read -r line || [ -n "$line" ]; do`) matches TWICE and the file balances 100
 #: openers to 91 closers, so the depth never returns to 0; without it, 91 to 91.
 _SHELL_OPENERS = re.compile(
-    r"(?:^|[;&|])\s*(?:(?:then|else|elif|do)\s+)?(?:if|while|until|for|case|select)\b"
+    # ⛔ A leading CONTROL WORD does not change what the keyword opens (review P2, measured).
+    # `! if false; then export K=1; fi` and `time if …` are valid shell (`bash -n` accepts both)
+    # and are the same never-running body this reader refuses — but the anchor demanded the
+    # keyword immediately after the separator, so the block never opened, its body read at depth
+    # 0, and both exports were credited (gate `ok`, exit 0, real process: no switch at all).
+    r"(?:^|[;&|])\s*(?:(?:!|time)\s+)*(?:(?:then|else|elif|do)\s+)?"
+    r"(?:if|while|until|for|case|select)\b"
     # ⛔ `{` is an opener WHEREVER it appears at a word start, not only at end of statement
     # (review P1, measured): a one-line function body (`f() { :; export K=1; }`) put the brace
     # mid-statement, so it never opened, the body ran at depth 0, and an export the process never
@@ -262,6 +268,12 @@ _SHELL_OPENERS = re.compile(
 #: fail-closed direction (a body is refused) while un-refusing the mirror (a group is credited).
 #: ⛔ The brace arm cannot stay in `_SHELL_OPENERS`: that pattern only ever runs on the STRUCTURAL
 #: view, where `f()`'s `()` are blanked, so the `)` that identifies a body is invisible there.
+#: ⛔ It also covers BRACE EXPANSION, which a peer round landed a narrower guard for:
+#: `mkdir -p {logs,cache}` has a `{` followed by a list character, opens no block, and leaking
+#: the depth up there REFUSED an honest entrypoint while the message blamed its VALUE rather
+#: than the depth. Under this rule NO `{` outside a function body changes the depth, so an
+#: expansion, a group and a `${VAR}` are all out — one rule instead of a lookahead that has to
+#: enumerate every non-block spelling.
 _SHELL_FN_BRACE = re.compile(r"\)\s*\{|\bfunction\s+[A-Za-z_][A-Za-z0-9_.-]*\s*\{")
 
 
@@ -344,16 +356,19 @@ _SHELL_EXPORT_UNEXPORT = re.compile(
 #: not a new spelling to credit: `declare`/`local` inside a function is local to it, `readonly`
 #: can never be reassigned, and none of them is the shipped configuration stating a usable value.
 _SHELL_BUILTIN_ASSIGN = re.compile(r"^\s*(?:declare|typeset|readonly|local|printf)\b(?P<rest>.*)$")
-#: ⛔ `exec env -i "$@"` REPLACES the process with one whose environment is EMPTY (review P2,
-#: measured): every `export` above it is discarded by `exec`, so the daemon sees nothing — while
-#: the gate credited both and printed `ok`. `-i`/`-`/`--ignore-environment` clears everything, and
-#: `-u NAME`/`--unset[=]NAME` removes one name; both now fail CLOSED, because a value run through
-#: them cannot be shown to survive. Kept to `exec` on purpose: an `env -i` that is NOT exec'd
-#: applies to a CHILD process, and the parent's exports still reach the daemon at its own `exec`.
-_EXEC_STATEMENT = re.compile(r"^\s*exec\b(?P<rest>.*)$")
-_ENV_IGNORES = re.compile(r"(?:^|\s)(?:-i|--ignore-environment|-)(?=\s|$)")
-_ENV_UNSETS = re.compile(
+#: ⛔ A FOURTH way a later statement takes an earlier `export K=1` back (review P3, measured):
+#: the statement is an `env` INVOCATION that strips the variable from the child's environment.
+#: `export K=1; exec env -u K "$@"` leaves the process without K, and `env -i` strips everything —
+#: both were reported `STATED` because the reader only modelled shell BUILTINS (`unset`,
+#: `export -n`, a bare `K=`). `env VAR=1 cmd` (no `-u`/`-i`) states nothing and is left alone.
+_SHELL_ENV_CALL = re.compile(r"^\s*(?:exec\s+)?(?:command\s+)?env\b(?P<args>.*)$")
+_SHELL_ENV_UNSET = re.compile(
     r"(?:^|\s)(?:-u|--unset)(?:\s+|=)(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+)
+_SHELL_ENV_IGNORE = re.compile(
+    # ⛔ the BARE `-` is bash's short spelling of `-i` — `exec env - "$@"` clears the environment
+    # exactly as `-i` does, and it was the one shape that still slipped through (measured)
+    r"(?:^|\s)(?:-i|--ignore-environment|-)(?=\s|$)"
 )
 
 #: A trailing `#` comment (idiomatic after a shell assignment) is NOT part of the value — leaving
@@ -536,16 +551,23 @@ def _scrubbed_env() -> dict[str, str]:
     return {k: os.environ[k] for k in _ENV_ALLOWLIST if k in os.environ}
 
 
-def _logical_lines(text: str) -> list[str]:
-    """``text`` as logical lines: backslash continuations joined, full-line comments dropped.
+def _join_logical(raw_lines: list[str]) -> list[str]:
+    """``raw_lines`` as logical lines: backslash continuations joined, full-line comments dropped.
 
     Comment lines are dropped BEFORE joining because a comment inside a continuation is not
     part of the value (Docker and the shell both strip it) — leaving it in would make an
     innocent ``ENV A=1 \\`` + ``# note`` + ``B=2`` read as one unparseable blob.
+
+    ⛔ **The SHELL reader applies this AFTER removing heredoc bodies, not before (review P2,
+    measured).** Joining first let a BODY line's trailing backslash swallow the terminator: in a
+    QUOTED heredoc bash does not continue, so it ends the body there and runs the statements after
+    it, while the reader ate them — and REFUSED an honest entrypoint whose two switches do reach
+    the process, with a message that blamed the value. One physical line at a time is the order the
+    shell itself uses, so the body pass must see physical lines.
     """
     lines: list[str] = []
     current = ""
-    for raw in text.splitlines():
+    for raw in raw_lines:
         if raw.strip().startswith("#"):
             continue
         if raw.rstrip().endswith("\\"):
@@ -556,6 +578,11 @@ def _logical_lines(text: str) -> list[str]:
     if current:
         lines.append(current)
     return lines
+
+
+def _logical_lines(text: str) -> list[str]:
+    """``text`` as logical lines (see `_join_logical`)."""
+    return _join_logical(text.splitlines())
 
 
 #: A heredoc opener on an instruction line — `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`.
@@ -865,7 +892,7 @@ def _shell_code_lines(text: str) -> list[str]:
     # separately because the two views open different frames, and mixing them would carry a
     # string frame from one into the other.
     scan_stack: tuple = ()
-    for line in _logical_lines(text):
+    for line in text.splitlines():
         if pending:
             # ⛔ The terminator must match what the SHELL accepts, not `strip()` (review P2,
             # measured). Bash strips leading TABS only for `<<-`, and compares the line EXACTLY
@@ -899,7 +926,7 @@ def _shell_code_lines(text: str) -> list[str]:
             return out
         for match in openers:
             pending.append((_heredoc_delimiter(match.group("delim")), match.group(0).startswith("<<-")))
-    return out
+    return _join_logical(out)
 
 
 def _shell_structure(
@@ -1318,11 +1345,31 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     ambiguous: set[str] = set()
     depth = 0
     terminated = False
+    #: The separator a PREVIOUS line ended with. ⛔ It has to cross the line boundary (review P1,
+    #: measured): `_shell_statements` carries a separator only WITHIN one logical line, so the
+    #: idiomatic multi-line guard
+    #:
+    #:     [ -n "${MAYBE_ARM:-}" ] &&
+    #:       export TORTOISE_VALUE_GATE=1 &&
+    #:       export TORTOISE_EMBED_GATE=1
+    #:
+    #: handed each export a first-segment `separator == ""`, so both were credited `STATED` —
+    #: gate `ok`, exit 0 — while `bash` (MAYBE_ARM unset) ran no `export` at all and the process
+    #: had neither switch. The verdict then flips on an invisible line break, which is exactly the
+    #: fail-open the one-line pin was meant to close. The same applies to `||`, and to a trailing
+    #: FORK operator (`|`), which `_SHELL_FORK` sees only on its own line.
+    carried = ""
     code_lines = _shell_code_lines(text)
     for line, structure in zip(code_lines, _shell_structures(code_lines), strict=True):
         # ⛔ STRUCTURE, not the raw line: a closer inside a quote or a comment is DATA (review P1),
         # and quote state carried across lines covers a quoted string that spans a newline.
-        for raw, view, separator in _shell_statements(line, structure):
+        segments = _shell_statements(line, structure)
+        for index, (raw, view, separator) in enumerate(segments):
+            if index == 0:
+                separator = separator or carried
+            if index == len(segments) - 1 and not raw.strip():
+                # The trailing operator of this line is the final, empty segment's separator.
+                carried = separator
             depth = max(0, depth - len(_SHELL_CLOSERS.findall(view)))
             # ⛔ `depth > 0 or terminated` is NOT the whole population of statements the process
             # may never receive, and the gaps were all measured fail-OPEN (review):
@@ -1407,6 +1454,15 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 if retracts:
                     ambiguous.add(unexported.group("key"))
                     stated.pop(unexported.group("key"), None)
+            elif (env_call := _SHELL_ENV_CALL.match(view)) and retracts:
+                # Same gate as the builtins above: a forked or short-circuited `env` cannot change
+                # the parent's environment, so only a statement that provably runs is a retraction.
+                stripped = set(_SHELL_ENV_UNSET.findall(env_call.group("args")))
+                if _SHELL_ENV_IGNORE.search(env_call.group("args")):
+                    stripped |= set(SWITCHES)
+                for name in stripped & set(SWITCHES):
+                    ambiguous.add(name)
+                    stated.pop(name, None)
             else:
                 # A statement that states no switch is where a MENTION lives (prose, a help line,
                 # a `[[ … == *TORTOISE_* ]]` test): recorded, never credited. A segment that DID
@@ -1418,20 +1474,6 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 # leaves K EMPTY and still exported while the gate kept the earlier `=1`.
                 if retracts and (builtin := _SHELL_BUILTIN_ASSIGN.match(raw)):
                     for name in _mentioned_switches(builtin.group("rest")):
-                        ambiguous.add(name)
-                        stated.pop(name, None)
-            # ⛔ `exec env -i "$@"` discards every export above it (review P2, measured): the
-            # process is REPLACED with one whose environment is empty, while the gate credited
-            # both switches and printed `ok`. Handled here rather than in the arms above because
-            # the statement's own argv is what carries the effect, and it names no assignment.
-            if exec_statement := _EXEC_STATEMENT.match(raw):
-                argv = exec_statement.group("rest")
-                if depth == 0 and re.search(r"\benv\b", argv):
-                    cleared = set(SWITCHES) if _ENV_IGNORES.search(argv) else set()
-                    unset_names = {
-                        match.group("name") for match in _ENV_UNSETS.finditer(argv)
-                    }
-                    for name in cleared | (unset_names & set(SWITCHES)):
                         ambiguous.add(name)
                         stated.pop(name, None)
             depth += len(_SHELL_OPENERS.findall(view)) + _function_body_braces(raw, view)
