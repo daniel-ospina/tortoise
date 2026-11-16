@@ -2592,10 +2592,18 @@ def write_live_record(record: Mapping[str, Any], *,
         # row needs a number, and inventing one collides with a later replay's
         # numbering. Counted and warned above, so the skip is observable.
         # ⛔ With `allocate=True` the number comes from the RECORD's counter
-        # instead (#12894), so `seq` is neither needed nor consulted.
+        # instead (#12894), so `seq` is neither needed nor consulted — and it
+        # must NOT be forwarded as `first_seq`, because `replay_plan` REFUSES a
+        # caller watermark on that arm (`allocate=True derives the position from
+        # the record's counter, so start_seq must be left at 1`). MEASURED
+        # (review cycle 1, P1): forwarding it made a cut-over door refuse EVERY
+        # write — all three production sites pass a real `seq` from `log.append`
+        # — while the wiring gate blessed the body. So the arm passes the one
+        # value the plan accepts and reports the ALLOCATED block back.
         write = write_records([record], org_id=org_id, graph_id=graph_id,
                               position=True if allocate else seq is not None,
-                              first_seq=seq if seq is not None else 1,
+                              first_seq=(1 if allocate
+                                         else (seq if seq is not None else 1)),
                               allocate=allocate)
         _close_live_breaker()
         connection = write.connection

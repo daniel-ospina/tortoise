@@ -451,7 +451,29 @@ def live_door_writes_the_journals_position(
                 "replay's numbering"
             )
         first_seq = bound.get("first_seq")
-        if not _references_ordinal(first_seq):
+        allocate = bound.get("allocate")
+        allocate_bound = (isinstance(allocate, ast.Name)
+                          and allocate.id == "allocate")
+        if allocate_bound:
+            # ⛔ THE ALLOCATOR ARM's WATERMARK (#12894 review cycle 1, P1). `seq`
+            # must NOT be forwarded here: `replay_plan` REFUSES
+            # `allocate=True` with a caller watermark, so a body that passes
+            # `first_seq=seq …` beside `allocate=allocate` refuses EVERY write
+            # the moment a door is cut over — and every production site HAS a
+            # `seq` from `log.append`, so that is not a corner. Measured before
+            # this rule: the gate returned `[]` for exactly that body (a false
+            # PASS on the gate whose whole job is to stop an invented ordinal).
+            if ast.unparse(first_seq) != _ALLOCATOR_FIRST_SEQ:
+                problems.append(
+                    f"{_LIVE_DOOR}() calls {_call_name(call)}(…) with "
+                    f"allocate= and first_seq="
+                    f"{ast.unparse(first_seq) if first_seq is not None else '<unset>'}"
+                    f" — with `allocate=` bound the record issues the number, so "
+                    f"`first_seq` must be `{_ALLOCATOR_FIRST_SEQ}`: forwarding "
+                    f"the journal's ordinal is REFUSED by `replay_plan` on that "
+                    f"arm (a cut-over door would write nothing at all)"
+                )
+        elif not _references_ordinal(first_seq):
             problems.append(
                 f"{_LIVE_DOOR}() calls {_call_name(call)}(…) with "
                 f"first_seq={ast.unparse(first_seq) if first_seq is not None else '<unset>'}"
@@ -498,6 +520,14 @@ def _is_position_from_ordinal(value: ast.expr | None,
 #: (#9307 review P2). Add a form here when an honest one appears; the omission
 #: is a false RED (noisy), never a false green (silent).
 _ORDINAL_EXPRESSION_FORMS = frozenset({"seq", "seq if seq is not None else 1"})
+
+#: The `first_seq=` form the ALLOCATOR arm must bind (#12894 review cycle 1).
+#: With `allocate=` bound the record issues the number, so the caller's ordinal
+#: has no meaning — and `replay_plan` raises rather than dropping it silently,
+#: so a body forwarding `seq` refuses every write on a cut-over door. This is
+#: therefore the ONLY accepted spelling when `allocate=` is bound: the ordinal
+#: form above is a REFUSAL shape on that arm, not an alternative.
+_ALLOCATOR_FIRST_SEQ = "1 if allocate else seq if seq is not None else 1"
 
 
 def _references_ordinal(value: ast.expr | None) -> bool:

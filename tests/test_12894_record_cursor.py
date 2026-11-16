@@ -185,7 +185,20 @@ def test_case_two_is_unrepresentable_in_the_seed_sql() -> None:
     assert execute_at < divergence_at, (
         "the divergence refusal happens before the seed statement runs — case 2 "
         "would be enforced by prose rather than by the SQL")
-    assert seed_body.count("row_max >") == 0 or True  # the guard lives in SQL
+    # ⛔ THE CLASSIFIER, NOT A GATE (#12894 review cycle 1, P2). The line here
+    # used to read `assert seed_body.count("row_max >") == 0 or True` — `X or
+    # True` can never fail, so it certified nothing while reading as the check
+    # that case 2 is enforced by the SQL. It also had the polarity backwards:
+    # `seed()` DOES carry `row_max > floor`, and that is correct — it names
+    # WHICH refusal the statement just produced (the count is 3, two of them in
+    # prose). The property that matters is ORDER: the comparison can only
+    # CLASSIFY a refusal that already happened, so it must run AFTER the
+    # statement — a Python check placed before `cursor.execute(SEED_SQL)` would
+    # be the enforcement the SQL is supposed to own.
+    assert seed_body.rindex("row_max > floor") > execute_at, (
+        "seed() compares row_max before the seed statement runs — case 2 would "
+        "be enforced by Python rather than by the SQL's own `WHERE row_max <= "
+        "enumerated_floor` guard")
 
 
 def test_the_seed_sets_the_tenant_scope_itself() -> None:

@@ -1033,11 +1033,27 @@ def test_the_live_door_rule_fires_when_the_ordinal_is_dropped(wiring):
     # record's own allocator — and the gate must accept it exactly when the same
     # call binds `allocate=`. Accepting the expression ALONE would let a body
     # that never receives `allocate` write `position=True` and invent a number.
+    #
+    # ⛔ AND THE WATERMARK IS PART OF THAT ARM (#12894 review cycle 1, P1).
+    # `replay_plan` REFUSES `allocate=True` with a caller watermark, and every
+    # production site has a `seq` from `log.append`, so a body that forwards it
+    # beside `allocate=allocate` refuses EVERY write on a cut-over door. The
+    # gate blessed that body before this arm existed — a FALSE PASS on the one
+    # check whose job is to stop an invented ordinal.
     allocator = ("position=True if allocate else seq is not None, "
-                 "first_seq=seq if seq is not None else 1, allocate=allocate")
+                 "first_seq=1 if allocate else seq if seq is not None else 1, "
+                 "allocate=allocate")
     assert module.live_door_writes_the_journals_position(
         source % allocator) == [], (
         "the gate rejects the allocator arm — the honest #12894 spelling")
+    forwarding = ("position=True if allocate else seq is not None, "
+                  "first_seq=seq if seq is not None else 1, allocate=allocate")
+    forwarded = module.live_door_writes_the_journals_position(
+        source % forwarding)
+    assert forwarded and "first_seq" in forwarded[0], (
+        "the gate accepts `first_seq=<the journal's ordinal>` beside "
+        f"`allocate=`, which `replay_plan` refuses at every cut-over door: "
+        f"{forwarded}")
     unbound = ("position=True if allocate else seq is not None, "
                "first_seq=seq if seq is not None else 1")
     fired = module.live_door_writes_the_journals_position(source % unbound)

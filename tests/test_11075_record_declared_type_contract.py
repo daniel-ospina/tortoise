@@ -889,15 +889,18 @@ def test_the_allocator_columns_are_in_its_statement():
     for."""
     from tortoise import record_allocator as ra
 
-    migrations = "\n".join(
-        (REPO_ROOT / "supabase" / "migrations" / name).read_text(encoding="utf-8")
-        for name in rp.RECORD_MIGRATIONS)
     for entry in WRITTEN_BY_THE_ALLOCATOR:
         table, column = entry.split(".", 1)
         assert table == ra.RECORD_CURSOR_TABLE
-        assert column in ra.SEED_SQL or column in ra.ALLOCATION_SQL or (
-            f"{column} " in migrations and "record_cursor" in migrations), (
-            f"{entry} is named as the allocator's but nothing writes it")
+        # ⛔ NO MIGRATION DISJUNCT (#12894 review cycle 1, P2). The third clause
+        # used to be `f"{column} " in migrations and "record_cursor" in
+        # migrations` — TRUE for every column of a table the migration creates,
+        # so "the allocator's SQL actually writes this" could never fail on its
+        # account. The enumeration is about what the ALLOCATOR WRITES, so it is
+        # checked against the allocator's own statements only.
+        assert column in ra.SEED_SQL or column in ra.ALLOCATION_SQL, (
+            f"{entry} is named as the allocator's, but neither `SEED_SQL` nor "
+            f"`ALLOCATION_SQL` writes it")
 
 
 def test_the_enumeration_accounts_for_every_declared_column():

@@ -447,6 +447,43 @@ def test_the_allocated_number_reaches_the_watermark_and_the_byte_meter(
     assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3, 4, 5, 6, 7]
 
 
+def test_a_cut_over_DOOR_still_writes_when_the_journal_has_a_position(
+        schema, tenant, app, monkeypatch):
+    """THE DOOR SHAPE (#12894 review cycle 1, P1). Every production door
+    (`api.py`, `mining.py`, `sdk.py`) calls the live door WITH the ordinal
+    `log.append` reported, so a cut-over deployment is
+    `write_live_record(record, seq=<n>, allocate=True)` — not
+    `seq=None`. The door used to forward that ordinal as `first_seq`, and
+    `replay_plan` REFUSES `allocate=True` with a caller watermark
+    (`start_seq must be left at 1`), so every cut-over write would have been
+    refused; the wiring gate blessed the body that did it.
+
+    Driven through the DOOR rather than `RecordWriter` because that is where the
+    forwarding lived — a `RecordWriter(allocate=True)` test cannot see it.
+    """
+    from tests.test_9078_record_written_by_production_path import _app_role_dsn
+
+    org, graph = tenant
+    _seed_and_arm(app, org, graph, 0)
+    # The door opens its OWN connection from the arming env; that is the
+    # shape production has, and the shape whose forwarding was wrong.
+    monkeypatch.setenv(rw.RECORD_DSN_ENV,
+                       _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
+    write = rw.write_live_record(RECORD, seq=7, allocate=True,
+                                 tenant=(org, graph))
+
+    assert write is not None and write.outcome is rw.RecordWriteOutcome.APPLIED, (
+        f"a cut-over door refused a write that carried a journal position: "
+        f"{write!r}")
+    # The ALLOCATED number is reported, not the journal's 7: allocation is what
+    # `allocate=True` is FOR, and the ordinal the append reported has no meaning
+    # on this arm.
+    assert (write.first_seq, write.last_seq) == (1, 1), (
+        f"the door reported {write.first_seq}..{write.last_seq}, not the "
+        f"allocated block")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1]
+
+
 def test_a_duplicate_position_fails_the_transaction(schema, tenant, app):
     """FINDING (round 1, B5): the position insert's `ON CONFLICT … DO NOTHING`
     absorbed a duplicate WITHOUT an error while the counter had already advanced:
