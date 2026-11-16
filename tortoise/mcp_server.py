@@ -5201,17 +5201,19 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     Returns [{id, name, kind, confidence}] in the read's own (relevance) order;
     the ``suggest_entry_points`` FALLBACK sorts the match by confidence DESC.
     """
-    # An empty (or blank) query is NOT a resolution request. `search_knowledge(mode=
-    # 'entry_points')` refuses it (text-driven read), but this door's contract is
-    # "no hits" → `[]`, so the refusal is answered here rather than turned into a
-    # `_SafeError` (#12951 review P1: the retired `suggest_entry_points` call raised
-    # instead). Two halves, only one of them longstanding:
-    #   * `""` — what this door always answered (the hybrid read returned `[]`, the
-    #     fallback returned `[]`).
-    #   * `"   "` — a DELIBERATE CHANGE in this round: the raw string used to reach
+    # An empty query is NOT a resolution request. `search_knowledge(mode=
+    # 'entry_points')` REFUSES the empty string (it is a text-driven read), but this
+    # door's contract is "no hits" → `[]`, so the refusal is answered here rather than
+    # turned into a `_SafeError` (#12951 review P1: the retired `suggest_entry_points`
+    # call raised instead). Two halves, and only one of them is that refusal:
+    #   * `""` — refused by the container, answered `[]` here; this door answered `[]`
+    #     before the guard too (the hybrid read returned `[]`, and so did the fallback).
+    #   * `"   "` — the container does NOT refuse a blank string (it answers `[]`), so
+    #     this half is a DELIBERATE CHANGE made here: the raw string used to reach
     #     `tortoise_fts_query`, which matches EVERY row for a blank query (measured: 5
-    #     rows on a 6-point graph), so a blank query answered with arbitrary entities.
-    #     That is a false resolution answer rather than an enumeration request.
+    #     rows at `limit=5`, 6 of 6 rows at `limit=50`), so a blank query answered with
+    #     arbitrary entities. That is a false resolution answer, not an enumeration
+    #     request, so it is answered `[]`.
     if not (query or "").strip():
         return []
     try:

@@ -566,18 +566,18 @@ class TestSuggestEntryPointsFallback:
         assert kwargs == {"mode": "entry_points", "kind": None, "limit": 3}, reached
 
     def test_an_empty_query_is_no_hits_and_touches_no_door(self, monkeypatch):
-        """`[]`, not a refusal, for BOTH halves — and only one half is longstanding.
+        """`[]` for BOTH halves — by two different routes, and only one is longstanding.
 
-        The container REFUSES a text-driven read with no text, and this door's contract
-        is "no hits", so the refusal is answered here rather than raised:
+        `""` — the container REFUSES the empty string (it is a text-driven read), and
+        this door's contract is "no hits", so the refusal is answered here rather than
+        raised. This door answered `[]` before the guard as well.
 
-        * `""` — the behaviour this door always had (the hybrid read returned `[]`, so
-          it fell through to the fallback, which returned `[]`).
-        * `"   "` — a DELIBERATE CHANGE in this fix round. The old handler reached the
-          hybrid read with the raw string, and `tortoise_fts_query("   ")` matches every
-          row (measured: 5 rows on a 6-point graph), so a blank query used to answer
-          with arbitrary entities. That is a false resolution answer, not an
-          enumeration request, so it is answered `[]` here (#12951 review round 2, P3).
+        `"   "` — the container does NOT refuse a blank string. The old handler reached
+        the hybrid read with the raw string, and `tortoise_fts_query("   ")` matches every
+        row (measured: 5 rows at `limit=5`, 6 of 6 rows at `limit=50` on a 6-point graph),
+        so a blank query used to answer with arbitrary entities. That is a false
+        resolution answer, not an enumeration request, so it is a DELIBERATE CHANGE to
+        answer `[]` (#12951 review rounds 1 and 3).
         """
         from tortoise import mcp_auth
         from tortoise import mcp_server as ms
