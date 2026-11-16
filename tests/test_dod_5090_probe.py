@@ -3197,6 +3197,14 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
             "case $ENV in (prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;; esac\n",
             "case $ENV in\n  (prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
             "case $ENV\nin prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+            # ⛔ …and a SPACE between the leading `(` and the first alternative, or before the
+            # closing `)` (`case $E in ( prod | staging ) …`). `bash` ARMS that spelling
+            # (measured), but the pattern list took the paren and then required an
+            # alternative IMMEDIATELY, so the arm matched nothing, landed in NO bucket, and
+            # the file published a DEFINITE `OFF` over a shape the run never measured (fresh
+            # review of `#12902`, P2).
+            "case $ENV in ( prod | staging ) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $ENV in ( prod | staging | dev ) export TORTOISE_EMBED_GATE=1 ;; esac\n",
             # ⛔ …and a QUOTED or PARAMETERISED SUBJECT (`case "${ENV}" in prod)`,
             # `case ${ENV:-prod} in prod)`). bash expands the `case` word before matching
             # (bash(1) 3.2.5.2), so both are ordinary and both ARM the file — but the

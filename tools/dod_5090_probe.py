@@ -4137,12 +4137,16 @@ _SHELL_LEADING_KEYWORD = re.compile(
 #: sharing grammar accepts (`_SHELL_CASE_ARM_PATTERN.match("f() { …")` is `None`).
 #: ⛔ ONE definition of a `case` PATTERN LIST: one alternative, or any number separated
 #: by `|` with optional spaces (`x)`, `x|y)`, `prod|staging|dev)`, `prod | staging )`), with
-#: bash's optional leading `(` (`case $E in (prod|staging) …`).
+#: bash's optional leading `(` (`case $E in (prod|staging) …`), which may be followed by
+#: SPACES before the first alternative (`case $E in ( prod | staging ) …`, measured: bash
+#: ARMS that spelling). `\(?` alone dropped it, so the arm landed in NO bucket and the file
+#: published a DEFINITE `OFF` over a shape the run never measured (fresh review of
+#: `#12902`, P2).
 #: A two-element-unspaced-only form dropped the rest — 36 of this repo's tracked arms — and
 #: the arm then landed in NO bucket (fresh review of `#12902`, P2).
 _SHELL_CASE_ALTERNATIVE = r"[^ \t(){};&|)]+"
 _SHELL_CASE_SEPARATOR = r"[ \t]*\|[ \t]*"
-_SHELL_CASE_PATTERN_LIST = (r"\(?" + _SHELL_CASE_ALTERNATIVE +
+_SHELL_CASE_PATTERN_LIST = (r"\(?[ \t]*" + _SHELL_CASE_ALTERNATIVE +
                             r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*"
                             r"[ \t]*\)")
 
@@ -4182,7 +4186,7 @@ _SHELL_CASE_SUBJECT_PATTERN = re.compile(
 #: `UNMEASURED` — so the bar was what made a held shape definite (fresh review of `#12902`,
 #: P2).
 _SHELL_CASE_PATTERN_POSITION = re.compile(
-    r"^(?:case[ \t]+[^ \t(){};&|]+[ \t]+in[ \t]+|in[ \t]+)?" + r"\(?" +
+    r"^(?:case[ \t]+[^ \t(){};&|]+[ \t]+in[ \t]+|in[ \t]+)?" + r"\(?[ \t]*" +
     _SHELL_CASE_ALTERNATIVE +
     r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*$")
 
