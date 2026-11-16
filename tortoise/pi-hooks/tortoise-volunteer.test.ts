@@ -1846,17 +1846,158 @@ test("INDICATOR 1: a degraded turn discloses — silently on a silent surface, r
 });
 
 test("INDICATOR 3: a HEALTHY empty block discloses NOTHING — routine silence stays silent", async () => {
+  // ⛔ THE RECORD IS PRE-SEEDED, and that is the whole point of this row: with a
+  // fresh `tmpHome()` a `degradation === null` assertion is true with OR WITHOUT
+  // any clearing code (the ENOENT arm returns a null record), so it would pass on
+  // the broken version of `noteHealthy` — the review finding that re-cut this
+  // row. A recorded run is what makes the assertion discriminating.
   const clean = degradeHarness({ result: () => ({ block: "", surfaced: [] }) });
+  recordVolunteerDegradation(clean.statusPath, "timeout");
   assert.equal(
     await clean.pi.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX()),
     undefined,
     "an empty graph is not a degradation",
   );
-  // …and it leaves no status record behind either: a healthy box must not read
-  // DEGRADED on the next session start.
+  // …and the CLEAN-EMPTY turn is positive evidence of health: it clears the run,
+  // so the next session start reads OK instead of re-reporting a finished outage
+  // (`volunteer.empty_response()` is a completed read, not a failed one).
   const read = readVolunteerStatus(clean.statusPath);
   assert.ok("status" in read);
   if ("status" in read) assert.equal(read.status.degradation, null);
+});
+
+test("a DEGRADED run ends on the first clean-empty turn — the healthy shape a degradation mimics", async () => {
+  // ⛔ THIS ROW GOES THROUGH THE REAL RESOLVER, not a `reflexImpl` stub, and that
+  // is the point: the review finding was in `resolveBlock`'s `empty` verdict
+  // (`:1788` returned `null` before anything cleared the record), a branch a stub
+  // NEVER reaches. A stub-driven row passed over the bug — which is exactly why
+  // the original INDICATOR-3 row was vacuous and this one drives a fake
+  // `tortoise` CLI whose turn 1 degrades and whose turn 2 is clean-empty.
+  const home = tmpHome();
+  const counter = join(home, "turns");
+  const configPath = join(home, "tortoise-config.json");
+  writeFileSync(configPath, JSON.stringify({}));
+  const cli = fakeCli(
+    join(home, "bin"),
+    [
+      "cat > /dev/null",
+      `n=$(cat ${JSON.stringify(counter)} 2>/dev/null || echo 0); n=$((n+1)); printf '%s' "$n" > ${JSON.stringify(counter)}`,
+      `if [ "$n" -le 1 ]; then`,
+      `  printf '%s' '{"pointers":[],"why":[],"surfaced":[],"block":"","degraded_reason":"timeout"}'`,
+      "else",
+      `  printf '%s' '{"pointers":[],"why":[],"surfaced":[],"block":"","degraded_reason":null}'`,
+      "fi",
+    ].join("\n"),
+  );
+  const statusPath = join(home, STATUS_FILE);
+  const lines: string[] = [];
+  let clock = Date.UTC(2026, 10, 16, 14, 17, 35);
+  const pi = mockPi();
+  tortoiseVolunteer(pi as never, {
+    env: { TORTOISE_COMMAND: cli },
+    home,
+    configPath,
+    breadcrumbDir: join(home, "capture-errors"),
+    statusPath,
+    logImpl: (line: string) => lines.push(line),
+    now: () => (clock += 1000),
+  });
+
+  const first = (await pi.handlers.before_agent_start(
+    { messageType: "user", prompt: "turn 1" },
+    SESSION_CTX(),
+  )) as { message: { content: string } };
+  assert.match(first.message.content, /memory unavailable this turn/);
+  const degraded = readVolunteerStatus(statusPath);
+  assert.ok("status" in degraded);
+  if ("status" in degraded) assert.equal(degraded.status.degradation?.count, 1);
+
+  // Turn 2 is a CLEAN-EMPTY read — no block, `degraded_reason: null` — and must
+  // end the run: it is a completed read, not a failed one.
+  assert.equal(
+    await pi.handlers.before_agent_start({ messageType: "user", prompt: "turn 2" }, SESSION_CTX()),
+    undefined,
+  );
+  const cleared = readVolunteerStatus(statusPath);
+  assert.ok("status" in cleared);
+  if ("status" in cleared) {
+    assert.equal(cleared.status.degradation, null, "a completed clean-empty read ends the run");
+  }
+  assert.equal(
+    lines.filter((line) => /^volunteer: RECOVERED \(the 1-turn timeout run has ended/.test(line))
+      .length,
+    1,
+    `the recovery is reported ONCE; got ${JSON.stringify(lines)}`,
+  );
+  // The health line an operator reads at the NEXT session start is OK, not a
+  // stale DEGRADED naming an outage that ended.
+  assert.equal(
+    volunteerHealthLine(
+      readVolunteerConfig({ TORTOISE_COMMAND: cli }, configPath),
+      [],
+      statusPath,
+    ).state,
+    "ok",
+  );
+});
+
+test("the healthy latch is RE-ARMED by a degradation — a second run is not swallowed", async () => {
+  // `healthConfirmed` skips the status read on the common healthy path. Without
+  // the re-arm a degradation in the SAME process leaves the latch set and the
+  // turn that recovers it never reads the record — the stale-verdict bug one
+  // level down. Drives clean -> degraded -> clean through the real resolver.
+  const home = tmpHome();
+  const counter = join(home, "turns");
+  const configPath = join(home, "tortoise-config.json");
+  writeFileSync(configPath, JSON.stringify({}));
+  const cli = fakeCli(
+    join(home, "bin"),
+    [
+      "cat > /dev/null",
+      `n=$(cat ${JSON.stringify(counter)} 2>/dev/null || echo 0); n=$((n+1)); printf '%s' "$n" > ${JSON.stringify(counter)}`,
+      `if [ "$n" -eq 2 ]; then`,
+      `  printf '%s' '{"pointers":[],"why":[],"surfaced":[],"block":"","degraded_reason":"assembly_error"}'`,
+      "else",
+      `  printf '%s' '{"pointers":[],"why":[],"surfaced":[],"block":"","degraded_reason":null}'`,
+      "fi",
+    ].join("\n"),
+  );
+  const statusPath = join(home, STATUS_FILE);
+  const pi = mockPi();
+  tortoiseVolunteer(pi as never, {
+    env: { TORTOISE_COMMAND: cli },
+    home,
+    configPath,
+    breadcrumbDir: join(home, "capture-errors"),
+    statusPath,
+    logImpl: () => {},
+  });
+
+  // Turn 1: clean-empty, so the latch is set by the FIRST healthy turn.
+  assert.equal(
+    await pi.handlers.before_agent_start({ messageType: "user", prompt: "turn 1" }, SESSION_CTX()),
+    undefined,
+  );
+  // Turn 2: degraded — must record, and must re-arm the latch.
+  const degraded = (await pi.handlers.before_agent_start(
+    { messageType: "user", prompt: "turn 2" },
+    SESSION_CTX(),
+  )) as { message: { content: string } };
+  assert.match(degraded.message.content, /degraded_reason=assembly_error/);
+  // Turn 3: clean-empty again — with the latch still set, nothing would clear it.
+  assert.equal(
+    await pi.handlers.before_agent_start({ messageType: "user", prompt: "turn 3" }, SESSION_CTX()),
+    undefined,
+  );
+  const final = readVolunteerStatus(statusPath);
+  assert.ok("status" in final);
+  if ("status" in final) {
+    assert.equal(
+      final.status.degradation,
+      null,
+      "a degradation must re-arm the healthy read, or the run it started is never cleared",
+    );
+  }
 });
 
 test("a RUN of degradations discloses EVERY turn, and counts the run", async () => {
@@ -2037,15 +2178,21 @@ test("session_start prints ONE health line, and a recovery clears the run", asyn
   assert.match(lines[0], /^volunteer: DEGRADED \(degraded_reason=timeout, 1 consecutive turn since /);
 
   // Recovery: a healthy turn reports the run ENDING, once, and the next
-  // session's line is OK again.
+  // session's line is OK again. ⛔ Driven through the REAL resolver (a fake CLI
+  // that returns a BLOCK) rather than a `reflexImpl` stub: the stub has its own
+  // health-evidence call, so a stub-driven row cannot see the `block` verdict's
+  // clear going missing — measured, that mutant survived this row.
+  const healthyCli = fakeCli(
+    join(stateHome, "bin"),
+    `cat > /dev/null; printf '%s' '{"pointers":[],"why":[],"surfaced":[{"label":"CI","band":"measured"}],"block":"- **CI**","degraded_reason":null}'`,
+  );
   const healthy = mockPi();
   tortoiseVolunteer(healthy as never, {
-    env: { TORTOISE_COMMAND: "/usr/bin/tortoise" },
+    env: { TORTOISE_COMMAND: healthyCli },
     home: stateHome,
     configPath,
     breadcrumbDir: join(stateHome, "capture-errors"),
     logImpl: (line: string) => lines.push(line),
-    reflexImpl: () => ({ block: "- **CI**", surfaced: ["CI"] }),
   });
   await healthy.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX());
   assert.ok(

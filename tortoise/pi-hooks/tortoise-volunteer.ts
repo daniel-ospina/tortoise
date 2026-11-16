@@ -1739,12 +1739,45 @@ export default function tortoiseVolunteer(
   // `/reload` keeps the environment). Only the `inert` class latches —
   // `timeout` and `empty` are per-turn facts and must be re-evaluated.
   let inertLatched = false;
+  // ⛔ HEALTH EVIDENCE IS A COMPLETED READ, NOT A NON-EMPTY ONE (review finding 1).
+  // A clean-empty turn (`degraded_reason: null` + an empty block) is a SUCCESSFUL
+  // read — the healthy shape of every quiet graph, and the exact shape a
+  // degradation imitates. Clearing the recorded run only on a non-empty block
+  // left `volunteer: DEGRADED (… since <old date>)` printing forever after the
+  // outage ended, and inflated the consecutive count across the healthy turns in
+  // between: a stale verdict on the one surface indicator 2 exists to be. So the
+  // clear runs for `block` AND for `empty`, and never for `timeout` / `refused` /
+  // `inert` — those carry no evidence of health, so the run stays as it was.
+  //
+  // The latch makes the common path free: nothing can be recorded unless a
+  // degradation happened, so after the first healthy turn of this process (which
+  // MUST read, to clear a run an earlier session recorded) the read is skipped
+  // until a degradation flips it back.
+  let healthConfirmed = false;
+  const noteHealthy = (): void => {
+    if (healthConfirmed) return;
+    healthConfirmed = true;
+    const recovered = clearVolunteerDegradation(statusPath);
+    if (!recovered) return;
+    // Reported ONCE, so a recovered box has a dated end to the outage in its log
+    // and its next `session_start` reads OK instead of re-reporting a finished
+    // run.
+    logLine(
+      `volunteer: RECOVERED (the ${recovered.count}-turn ${recovered.reason} run has ` +
+        "ended; this turn's read completed)",
+    );
+    logHealth();
+  };
 
   /** Run the reflex for one turn, fail-open in every direction. */
   const reflex = async (prompt: string, sessionId: string): Promise<ReflexResult | null> => {
     if (deps.reflexImpl) {
       try {
-        return await deps.reflexImpl(prompt, sessionId);
+        const stubbed = await deps.reflexImpl(prompt, sessionId);
+        // A stub is the transport here, so its healthy answer is health evidence
+        // too — the same rule the real transports get below.
+        if (stubbed && !(stubbed.degradedReason ?? "")) noteHealthy();
+        return stubbed;
       } catch {
         return null;
       }
@@ -1785,7 +1818,10 @@ export default function tortoiseVolunteer(
       );
       return null;
     }
-    if (verdict.status === "empty") return null;
+    if (verdict.status === "empty") {
+      noteHealthy();
+      return null;
+    }
     if (verdict.status === "timeout") {
       // Review finding 4: the single most operationally important failure this
       // file documents (a reflex that exceeds the budget injects nothing on
@@ -1808,6 +1844,7 @@ export default function tortoiseVolunteer(
     // disclosed reason and falls through to the HANDLER, which turns it into a
     // disclosure — ONE branch for both the resolver and a `reflexImpl` stub, so
     // a stub can drive the degraded rows without a second code path.
+    if (verdict.status === "block") noteHealthy();
     return verdict.result;
   };
 
@@ -1862,6 +1899,9 @@ export default function tortoiseVolunteer(
         // when the run STARTS, so the box log carries the beginning of an
         // outage and not just its absence on the next session's start.
         const streak = recordVolunteerDegradation(statusPath, degradedReason, now);
+        // A degradation RE-ARMS the read: the next healthy turn must ask the
+        // record again, whatever this process knew before.
+        healthConfirmed = false;
         trace(
           `degraded: degraded_reason=${degradedReason}` +
             (result.degradedRaw
@@ -1876,17 +1916,6 @@ export default function tortoiseVolunteer(
         // healthy injection.
         if (result.block.trim()) continuity.remember(sessionKey || HARNESS, result.block);
         return { message: disclosure };
-      }
-      // Positive evidence of health clears a recorded run, and reports the
-      // recovery ONCE — a `DEGRADED` line that never clears is the growing
-      // backlog shape `capture:` refuses to print.
-      const recovered = clearVolunteerDegradation(statusPath);
-      if (recovered) {
-        logLine(
-          `volunteer: RECOVERED (the ${recovered.count}-turn ${recovered.reason} run has ` +
-            "ended; this turn's read completed)",
-        );
-        logHealth();
       }
       const message = buildInjection(result.block, result.surfaced, cfg.display);
       if (!message) return undefined;
