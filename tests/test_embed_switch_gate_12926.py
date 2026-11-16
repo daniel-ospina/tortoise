@@ -131,30 +131,79 @@ def test_neither_code_default_moved():
     assert value_gate.value_gate_enabled() is True, "unset must still read value_gate=ON"
 
 
-@pytest.mark.parametrize("raw", [None, "", "  ", "1", "true", "yes", "on", "0", "false", "no", "off", "garbage"])
-def test_the_one_default_site_agrees_with_each_gates_own_read(raw, monkeypatch):
-    """One resolution order per switch: `resolve_enabled(raw)` IS what `*_gate_enabled()` does.
+#: The behaviour, written out INDEPENDENTLY of the implementation (review P3: comparing
+#: `resolve(env.get(flag))` with `*_gate_enabled()` is vacuous when the latter is DEFINED as the
+#: former — no spelling could make it fail). These are the two opposite directions the issue is
+#: about, over the whole truthy contract: absent ⇒ value=ON / embed=OFF, and a blank or falsy
+#: statement ⇒ OFF for both, while garbage reads OFF rather than flipping a default-ON knob.
+_EXPECTED = {
+    # raw value: (value_gate expected, embed_gate expected)
+    None: (True, False),
+    "": (False, False),
+    "   ": (False, False),
+    "1": (True, True),
+    "true": (True, True),
+    "TRUE": (True, True),
+    "yes": (True, True),
+    "on": (True, True),
+    "0": (False, False),
+    "false": (False, False),
+    "no": (False, False),
+    "off": (False, False),
+    "garbage": (False, False),
+}
 
-    The startup line reports through `resolve_enabled`, so this is what makes "the log cannot
-    say ON while the gate behaves OFF" a measured fact rather than an intention.
+
+@pytest.mark.parametrize("raw", list(_EXPECTED))
+def test_the_two_switches_resolve_as_declared_in_both_directions(raw, monkeypatch):
+    """The table above, against each gate's OWN read AND against the startup line's report.
+
+    Both arms are load-bearing: the first pins the behaviour (so "unset still means
+    value=ON / embed=OFF" cannot drift), the second pins that the *line an operator reads* states
+    the same value the gate acts on — a log that disagrees with the behaviour is worse than none.
     """
-    for env_flag, resolve, enabled in (
-        (embed_gate.ENV_FLAG, embed_gate.resolve_enabled, embed_gate.embed_gate_enabled),
-        (value_gate.ENV_FLAG, value_gate.resolve_enabled, value_gate.value_gate_enabled),
+    expected_value, expected_embed = _EXPECTED[raw]
+    for env_flag, resolve, enabled, expected in (
+        (value_gate.ENV_FLAG, value_gate.resolve_enabled, value_gate.value_gate_enabled, expected_value),
+        (embed_gate.ENV_FLAG, embed_gate.resolve_enabled, embed_gate.embed_gate_enabled, expected_embed),
     ):
         if raw is None:
             monkeypatch.delenv(env_flag, raising=False)
         else:
             monkeypatch.setenv(env_flag, raw)
-        assert resolve(os.environ.get(env_flag)) is enabled(), (env_flag, raw)
+        assert enabled() is expected, (env_flag, raw)
+        assert resolve(raw) is expected, (env_flag, raw, "the one default site")
+
+    line = gate_visibility.startup_line()
+    assert f"TORTOISE_VALUE_GATE={'ON' if expected_value else 'OFF'}" in line, (raw, line)
+    assert f"TORTOISE_EMBED_GATE={'ON' if expected_embed else 'OFF'}" in line, (raw, line)
+
+
+def test_a_blank_statement_is_reported_as_blank_not_as_unset(monkeypatch):
+    """Review P3: a blank variable is a DISTINCT fact, and it is not the code default.
+
+    `TORTOISE_VALUE_GATE=""` reads **OFF** (the truthy contract), while an ABSENT one reads the
+    default **ON** — so rendering both as "unset → code default ON" would print a value that is
+    not the one in force.
+    """
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "")
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    line = gate_visibility.startup_line()
+    assert "TORTOISE_VALUE_GATE=OFF (stated '' — blank reads as unset, so this value is the residual)" in line
+    assert "TORTOISE_EMBED_GATE=OFF (unset → code default OFF)" in line
+    assert "code default ON" not in line
+
+    reported = {row["switch"]: row for row in gate_visibility.effective_switches()}
+    assert reported["TORTOISE_VALUE_GATE"]["source"] == "blank"
+    assert reported["TORTOISE_VALUE_GATE"]["code_default"] is True
 
 
 def test_the_switch_names_are_the_resolvers_own():
     """The check's names are the gate modules' `ENV_FLAG`s — never a second spelling."""
     assert gate.SWITCHES == (value_gate.ENV_FLAG, embed_gate.ENV_FLAG)
     assert set(gate.SWITCHES) == set(SWITCHES)
-    assert [switch for switch, _resolve, _default in gate_visibility.SWITCHES] == list(gate.SWITCHES)
-    for switch, resolve, _default in gate_visibility.SWITCHES:
+    assert [switch for switch, _resolve in gate_visibility.SWITCHES] == list(gate.SWITCHES)
+    for switch, resolve in gate_visibility.SWITCHES:
         assert resolve.__module__.startswith("tortoise."), switch
 
 
@@ -232,6 +281,24 @@ def test_nothing_discovered_is_not_a_pass(tmp_path):
     channels, failures = gate.evaluate(tmp_path)
     assert channels == []
     assert failures and "nothing was compared" in failures[0]
+
+
+@needs_docker
+def test_a_population_of_only_non_channels_is_not_a_pass(tmp_path):
+    """Review P3: the other shape of "nothing compared" — manifests were found, none is a channel.
+
+    A compose file left with only sidecar services (or whose Tortoise service lost every
+    `TORTOISE_*` key, which is what makes it a channel) must not report `OK … (0 checked)`.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  db:\n    image: falkordb/falkordb-server:v4.20.4\n"
+    )
+    channels, failures = gate.evaluate(tmp_path)
+    assert channels and all(channel.noted for channel in channels)
+    assert failures == [
+        "every discovered manifest was skipped as a non-channel, so no deployment channel was "
+        "checked — 'nothing compared' is not a pass"
+    ]
 
 
 # ── discovery, not a list ────────────────────────────────────────────────────────────────────

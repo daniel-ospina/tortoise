@@ -1864,6 +1864,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # around it. Pinned by
              # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
              "tools/dod_5090_probe.py",
+             # #12926: the pre-merge deployment-config check. `tools/` is in
+             # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and a
+             # tool-only diff answers with `surfaces: []` — measured before this entry:
+             # `--changed-files tools/embed_switch_gate.py` -> `surfaces=[]`,
+             # `full=False`, `test_embed_switch_gate_12926.py` ABSENT from `test_files`.
+             # That is the silent-drop class this entry exists for, and it bites the exact
+             # diff that could weaken the check (its discovery globs, its three verdict
+             # words, its `COULD NOT BE READ` refusal, its scrub of the ambient env) with
+             # every falsifier asleep. Same remedy and same class as the
+             # `tools/dod_5090_probe.py` entry directly above (#10465 review P1).
+             "tools/embed_switch_gate.py",
              # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
              # `core`-registered, but `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches
