@@ -238,7 +238,7 @@ at this head.
 
 The **SUPERSEDED** `capstone-measured-e0fc940b.log` carried the cites **as-of its own
 stamp**, and those are the numbers listed here — the ones that log rendered, exactly as it
-renders them: `sdk.py:12421` (the meta fold), `sdk.py:12702` (the
+renders them: `sdk.py:12401` (the meta fold), `sdk.py:12682` (the
 references-edge writer), `sdk.py:2367` (`_TURN_WRITE_CYPHER`), `edges.py:467`
 (`_DERIVATION_REFERENCES_LABELS`), `edges.py:494-503` (`_anchor_on_create` / `_DERIVATION_ANCHOR_SET`,
 re-derived by this bundle to `774`/`782`), `edges.py:2168-2192` (`link_source_to_event`),
