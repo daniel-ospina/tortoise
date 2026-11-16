@@ -3711,6 +3711,12 @@ def _shell_unset_values(line: str) -> set[str]:
 #: QUOTE-MASKED copy of the line, so a `<<` inside a quoted word is not an operator.
 _SHELL_HEREDOC_OP = re.compile(r"(?<!<)<<(-?)(?!<)")
 
+#: ⛔ `let` takes ARITHMETIC WORDS, so a `<<` among its operands is a LEFT SHIFT and not
+#: a heredoc operator. Anchored on a command POSITION (start of the line, or after a
+#: separator / a leading control-flow keyword) so a `let` inside a word is not a command.
+_SHELL_LET_COMMAND = re.compile(
+    r"(?:^|[;&|(]|\b(?:then|do|else))[ \t]*let[ \t]+")
+
 
 def _shell_mask_quoted(line: str) -> str:
     """``line`` with every QUOTED span (and its escapes) blanked to spaces.
@@ -3804,9 +3810,22 @@ def _shell_mask_arithmetic(line: str) -> str:
 
     Depth-counted on parentheses, so a nested `$(( (a+b) << 2 ))` closes at the right
     place, and offsets are preserved so a match on the mask can be read from the
-    original. ⚠️ Declared bound: a construct this scanner does not model (a `<<` inside
-    a `$( … )` command substitution, or in `$[ … ]`) is left alone — nothing here
-    invents a span it is not sure of, so the worst case is the pre-fix reading.
+    original.
+
+    ⛔ **`$[ … ]` AND A `let` OPERAND ARE ARITHMETIC TOO, and leaving them out did not
+    fall back to "the pre-fix reading" — it published a DEFINITE `OFF`.** Measured, both
+    directions wrong against `bash` and against `origin/main`:
+
+        x=$[1<<2] / export FLAG=1      reader: OFF, indeterminate: []   bash: FLAG=1
+        let x<<=1 / export FLAG=1      reader: OFF, indeterminate: []   bash: FLAG=1
+
+    `_shell_heredoc_operator_delimiter` read `2]` (resp. `=1`) as a delimiter word, queued
+    a body and swallowed the REST OF THE FILE as data — so the arm below it was never
+    scored and the surface read `OFF` where `main` reads `ON`. `$[ … ]` is blanked by
+    BRACKET depth here, and a `let` command's operands are blanked up to the next
+    unquoted separator (`let` takes arithmetic words, so no operator inside them is
+    shell grammar). A `<<` anywhere else is still an operator, and `<<=` is deliberately
+    NOT special-cased: in bash `cat <<=X` really does open a body.
     """
     masked = list(line)
     index = 0
@@ -3823,6 +3842,32 @@ def _shell_mask_arithmetic(line: str) -> str:
                     if depth == 0:
                         index += 1
                         break
+                index += 1
+            for blank in range(start, index):
+                masked[blank] = " "
+            continue
+        if line.startswith("$[", index):
+            start = index
+            depth = 0
+            while index < length:
+                if line[index] == "[":
+                    depth += 1
+                elif line[index] == "]":
+                    depth -= 1
+                    if depth == 0:
+                        index += 1
+                        break
+                index += 1
+            for blank in range(start, index):
+                masked[blank] = " "
+            continue
+        let_match = _SHELL_LET_COMMAND.match(line, index)
+        if let_match:
+            start = let_match.end()
+            index = start
+            while index < length:
+                if line[index] in ";&|":
+                    break
                 index += 1
             for blank in range(start, index):
                 masked[blank] = " "

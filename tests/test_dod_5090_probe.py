@@ -3311,15 +3311,33 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
     assert _shipped("foo|bar) export TORTOISE_EMBED_GATE=1\n")[
         "per_surface"]["entrypoint"]["state"] == "OFF"
     # ⛔ …and the same FALSE-ARM direction through the CONSTRUCT GATE, where the two depth
-    # counters can DESYNC: an unmatched `done`/`fi` inside a `case` leaves the line
-    # "covered" by `_shell_case_open_lines` while `_shell_control_flow_lines` no longer
-    # calls it a control line, and the arm was then stripped and scored UNCONDITIONALLY —
-    # definite `ON` over a script bash REFUSES (`bash -n` exit 2, nothing runs, so the flag
-    # is UNSET). `in_case` now requires BOTH, so a desync can over-hold but never over-arm
-    # (fresh review of `#12902`, P3).
-    assert _shipped("case $ENV in\n  prod) ;;\ndone\n"
-                    "  prod) export TORTOISE_EMBED_GATE=1 ;;\nesac\n")[
+    # counters can DESYNC. ⛔ The reachable desync is a `case` KEYWORD INSIDE A HEREDOC
+    # BODY: `_shell_control_flow_lines` skips body lines (a body is data, not commands)
+    # while `_shell_case_open_lines` used to count them, so a `case q in` written as DATA
+    # opened a cover that no `esac` closes — the arm below it was "covered", stripped, and
+    # scored UNCONDITIONALLY: definite `ON` over a script bash REFUSES (`bash -n` exit 2,
+    # nothing runs, so the flag is UNSET). `in_case` now requires BOTH, so a desync can
+    # over-hold but never over-arm (fresh review of `#12902`, P3).
+    #
+    # ⛔ The ASSERTION IS THE DESYNC ITSELF, not just the state: a fixture with no desync
+    # would pass on the PRE-FIX code too, which is a pin that cannot fail (measured — the
+    # first version of this pin used an unmatched `done` inside a `case`, where a
+    # mismatched closer is INERT and the two counters already agreed, so it read the same
+    # before and after).
+    desynced = ("cat <<'EOF'\ncase q in\nEOF\n"
+                "prod) export TORTOISE_EMBED_GATE=1 ;;\n")
+    assert probe._shell_case_open_lines(desynced) - probe._shell_control_flow_lines(
+        desynced), (probe._shell_case_open_lines(desynced),
+                    probe._shell_control_flow_lines(desynced))
+    assert _shipped(desynced)[
         "per_surface"]["entrypoint"]["state"] != "ON"
+    # …and an unmatched `done`/`fi` inside a `case` does NOT desync: a closer closes only
+    # the construct that opened it, so the two counters agree there (pinned, because the
+    # prose above used to claim this shape was the reachable one).
+    assert not (probe._shell_case_open_lines(
+        "case $ENV in\n  prod) ;;\ndone\n  prod) export F=1 ;;\nesac\n")
+        - probe._shell_control_flow_lines(
+            "case $ENV in\n  prod) ;;\ndone\n  prod) export F=1 ;;\nesac\n"))
     # …pinned at the helper too, so the strip and the construct test cannot drift: the same
     # text IS stripped once a `case` covers it, and is NOT stripped when none does.
     assert probe._shell_strip_leading_keywords(
@@ -3365,9 +3383,25 @@ def test_an_ARITHMETIC_left_shift_opens_NO_heredoc_body(tmp_path, monkeypatch):
     assert _state("x=$(( (1+2) << 2 ))\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
     # …and the helper sees no body either, so the two readings cannot drift.
     assert probe._shell_heredoc_bodies("x=$((1<<2))\nexport F=1\n") == set()
+    # ⛔ `$[ … ]` IS ARITHMETIC TOO, and leaving it out did not fall back to "the pre-fix
+    # reading" — it published a DEFINITE `OFF`: `_shell_heredoc_operator_delimiter` read
+    # `2]` as a delimiter word, queued a body and swallowed the rest of the FILE, so the
+    # arm below it was never scored. Measured WRONG both against bash (`FLAG=1`) and
+    # against `origin/main` (`ON`), i.e. a regression this branch introduced.
+    assert _state("x=$[1<<2]\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
+    assert probe._shell_heredoc_bodies("x=$[1<<2]\nexport F=1\n") == set()
+    # …and so is a `let` OPERAND: `let` takes arithmetic words, so a `<<` among them is a
+    # left shift, not an operator (same measured regression, `=1` read as the delimiter).
+    assert _state("let x<<=1\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
+    assert _state("if true; then let x<<=1; fi\nexport TORTOISE_EMBED_GATE=1\n") == "ON"
+    assert probe._shell_heredoc_bodies("let x<<=1\nexport F=1\n") == set()
     # ── CONTROL: a REAL opener still opens its body, with or without the space.
     assert probe._shell_heredoc_bodies("cat<<EOF\nbody\nEOF\n") == {2}
     assert _state("cat<<EOF\nexport TORTOISE_EMBED_GATE=1\nEOF\n") == "OFF"
+    # …including the `=`-leading delimiter, which is why `<<=` is NOT special-cased: bash
+    # really does open a body on `cat <<=X` (measured), so the operand blanking above is
+    # scoped to a `let` command rather than to the operator's spelling.
+    assert probe._shell_heredoc_bodies("cat <<=X\nbody\n=X\n") == {2}
 
 
 def test_a_heredoc_whose_DELIMITER_is_unknown_HOLDS_the_file(tmp_path, monkeypatch):
