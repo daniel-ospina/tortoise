@@ -1481,7 +1481,19 @@ def test_sc4_deprecation_markers_present():
     from tortoise.sdk import TortoiseSDK  # noqa: I001
     import inspect
     for method_name in ("ingest_corpus", "index_sessions"):
-        doc = inspect.getdoc(getattr(TortoiseSDK, method_name)) or ""
+        # `index_sessions` left the PUBLIC surface in #12901's retirement wave (it is
+        # reached through `index_sources_from_directory`, and the departure is recorded in
+        # `tortoise/sdk_retired.py::RETIRED_SDK_METHODS`); its frozen legacy BODY survives
+        # as `_index_sessions`, and that is where the DEPRECATED marker now lives. Asserting
+        # the marker on the surviving body is what this test always meant — re-adding the
+        # public attribute would itself be a surface change.
+        door = getattr(TortoiseSDK, method_name, None) or getattr(
+            TortoiseSDK, f"_{method_name}", None)
+        assert door is not None, (
+            f"{method_name} has neither a public door nor a private seam — the frozen "
+            "legacy surface was deleted rather than privatised"
+        )
+        doc = inspect.getdoc(door) or ""
         assert "DEPRECATED" in doc, f"{method_name} missing DEPRECATED marker"
         assert "index_directory" in doc, \
             f"{method_name} marker must name the replacement"

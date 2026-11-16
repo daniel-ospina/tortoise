@@ -24,14 +24,6 @@
 # cannot be green by construction.
 #
 #
-# LOWERED 124 → 102 (SDK methods) on 2026-11-16 by #12901 wave 2 — the
-# control-plane partition (`N1`–`N6`): sixteen members left the public surface and
-# every body was privatised. The tools pin is unchanged (wave 2 touches no MCP tool).
-# Same reason as every line below — slack above the live surface is a false PASS
-# waiting to happen, and leaving it at 124 would let a re-added retired control-plane
-# name (`apikey_create`, `graph_delete`, `org_get`, …) land UNDER the ceiling while
-# `surface-guard` step 7 stayed green.
-#
 # LOWERED 72 → 67 (tools) and 150 → 124 (SDK methods) on 2026-11-13 by the
 # SOURCES/MINE/SESSION batch of #4282 Phase 2 (#11609 lane C). ⛔ THAT STEP LEFT SLACK
 # and this re-cut closes it: after lane C the pins read 67/124 while the live surface was
@@ -111,6 +103,23 @@
 # next to a live 56 and wonder whether to "restore" 67 or 72, do not — the retired names are
 # pinned by `tests/test_tool_registry.py` and the slack would hide their return.
 #
+# LOWERED 110 → 94 (SDK methods) on 2026-11-16 by #12901 wave 2 — the canonical
+# CONTROL-PLANE partition (`N1`–`N6`): sixteen console/hosted members left the PUBLIC
+# surface and every body survives as the private seam its hosted caller already used
+# (`org_get` → `_org_get`, `apikey_create` → `_apikey_create`, …). The tools pin is
+# UNCHANGED at 55 and no MCP door moved: wave 2 touches the SDK surface only.
+# ⛔ 110 − 16 = 94 IS THE MERGED DERIVATION, NOT WAVE 2's OWN NUMBER. Wave 2 was
+# authored on a base that measured 118 and recorded 102; main then landed the
+# READ/QUERY family (#12951) and moved it to 110, so neither side's number survived the
+# rebase. Re-derive, never inherit: `uv run python tools/sdk_surface.py --check`.
+# The pin is LOWERED for the reason every block above names — slack above the live
+# surface is a false PASS waiting to happen, and leaving it at 110 would let a re-added
+# retired control-plane name (`apikey_create`, `graph_delete`, `org_get`, …) land
+# UNDER the ceiling while `surface-guard` step 7 stayed green. These sixteen are a
+# DEPARTURE with no replacement NAMED on the surface, so each is a
+# `REMOVED_SDK_METHODS` record in `tortoise/sdk_retired.py` — not a `#3836 (c)`
+# retirement with a hint.
+#
 # THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so
 # drift is visible (tools/surface-guard.py). The approved TARGET is recorded in
 # docs/product/canonical-mcp-tools.md and docs/product/beta-sdk-surface.md; compliance
@@ -134,8 +143,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: d741bd4a5a8d45198ec9c8fd2324c93ca746af5e
-cut_at_commit: 6c160da471d98ae206164409bfae3a4aeff62b6b
+cut_at_commit: 486f5ca25b637b1a4346af06ce16876ae06a4912
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -955,11 +963,8 @@ approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
   tools: 55
-  sdk_public_methods: 110
+  sdk_public_methods: 94
   retired: 53
-  tools: 59
-  sdk_public_methods: 102
-  retired: 44
   keyword_distribution:
     fetch: 11
     create: 14
@@ -972,8 +977,6 @@ counts:
     link: 2
     operate: 2
 high_water_counts:
-  tools: 55
-  sdk_public_methods: 110
   tools: 67
   sdk_public_methods: 102
 retired:
@@ -3794,75 +3797,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:graph_active_key_count
-  method: graph_active_key_count
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_active_key_count.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:graph_delete
-  method: graph_delete
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_delete.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: control-plane
-- name: sdk:graph_key_ids
-  method: graph_key_ids
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_key_ids.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:graph_overview
   method: graph_overview
   approved: true
@@ -4830,38 +4764,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:sweep_invite_ghost_memberships
-  method: sweep_invite_ghost_memberships
-- name: sdk:taxonomy
-  method: taxonomy
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.sweep_invite_ghost_memberships.
-  dependency: 'reached by no registered MCP tool; caller categories: other-tooling, tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: other-tooling, tenant-rest'
-  job: Public SDK method TortoiseSDK.taxonomy.
-  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_taxonomy (retired)'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: keep
-  reason: reached by 0 registered tool(s) and 1 retired name(s)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-  class: agent-reachable
 - name: sdk:test_guard
   method: test_guard
   approved: false
