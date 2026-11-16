@@ -1048,10 +1048,18 @@ class ServedAnswer:
 def residency_armed() -> bool:
     """Is the completeness marker's own flag on? (default off — #4097 contract)
 
-    Read BEFORE any graph handle is touched, so a deployment that never armed
-    the marker pays no query and no handle construction for it: `off` mode stays
-    byte-identical, which is the whole reason this predicate exists rather than
-    each door calling `residency.residency_enabled()` after opening a graph.
+    Read BEFORE the marker issues any query or reads any declaration
+    (``point_residency`` returns on this predicate before it reaches
+    ``read_declaration``), so a deployment that never armed the marker pays no
+    graph round trip FOR THE MARKER and answers byte-identically, which is the
+    whole reason this predicate exists rather than each door asking
+    ``residency.residency_enabled()`` late enough to have already paid for it.
+
+    ⛔ NOT a claim about the DOOR's handles: both call sites may open one for
+    their own read before this is reached — the `off` arm's fallback cache read,
+    `record` mode's SDK, and the SDK accessor's own ``_cache_handle()`` which it
+    passes in as ``g``. What the ordering buys is that the MARKER adds no read
+    of its own to an unarmed deployment; it does not make the door free.
     """
     from .residency import residency_enabled
 
