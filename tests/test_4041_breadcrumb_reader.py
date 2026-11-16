@@ -216,17 +216,22 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
       the group.  While bash is blocked inside the foreground `_run_digest`
       (`:793`) — which must return before `:801` can run — the child that arm
       spawned is still live (`:689`, or the `-c` arm at `:691`-`:697` ending in
-      `main(["context"])`), and it is the one with a proven unbounded path: the
-      local-store `session_context()` (`tortoise/__main__.py:5823`-`5830`)
-      carries no timeout — the case `:756` names as able to outlive this bound.
+      `main(["context"])`).  That child is the one that can outlive this bound
+      WITH A NUMBER behind it: the local-store `session_context()`
+      (`tortoise/__main__.py:5823`-`5830`) passes no deadline, and its four
+      reads are each bounded only by the store's own socket timeout — 10 s,
+      fail-closed and not disableable (`tortoise/projection/__init__.py:411`,
+      `:620`-`:626`) — with one retry on that lane (`:477`), so the worst case
+      is ~4 × 2 × 10 s ≈ 80 s, past this 60 s bound.  That is the case `:756`
+      names as able to outlive it.
       The BACKGROUNDED install-probe beacon (`:786`) is the other: not
       `nohup`-detached (`:767` says it does not join that fire-and-forget
-      shape), but backgrounded, so nothing reaps it if `:801` is never reached.
-      Its network leg is bounded (`urlopen(req, timeout=15)`,
-      `tortoise/__main__.py:9724`) — a per-socket timeout, not a wall-clock
-      deadline, and neither DNS resolution nor the CLI import ahead of it is
-      covered — so it has usually exited by then, leaving an unreaped zombie
-      as the usual residue.
+      shape), but backgrounded.  Its network leg is bounded
+      (`urlopen(req, timeout=15)`, `tortoise/__main__.py:9724`) — a per-socket
+      timeout, not a wall-clock deadline, and neither DNS resolution nor the
+      CLI import ahead of it is covered — so it has usually exited by then, and
+      bash has already reaped it.  If `:801` is never reached its exit status
+      is simply never collected — not a zombie.
       Neither of those two is guaranteed: `_run_digest` spawns NOTHING when
       both its arms miss (`:687`-`:698` has no `else`, and a stall in the `-d`
       test at `:690` is already inside the function with no child yet), and the
