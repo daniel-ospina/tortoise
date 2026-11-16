@@ -45,10 +45,11 @@ from tortoise.tool_registry import (
 
 #: The tools the #4122 ruling is about. They refresh stored state, so they are
 #: not pure reads; they keep a read permission, so they are not writes.
-#: ⛔ THREE -> TWO in #11609 batch 1: `tortoise_packs_list` was the third and is
-#: ARCHIVED (`archive/mcp-tools/b1-removed-no-destination/tortoise_packs_list.py`), so
-#: the `maintenance` tier is carried by the two confidence tools today. The RULING is
-#: unchanged — a maintenance entry is not a read and must not claim `readOnlyHint`.
+#: ⛔ Counts are NOT the pin, the names below are: `tortoise_packs_list` was the third
+#: and is ARCHIVED (`archive/mcp-tools/b1-removed-no-destination/`), #11609 Phase 2 then
+#: added the four containers that reach a declared read-through writer, and #12951 added
+#: `tortoise_provenance`. The RULING is unchanged — a maintenance entry is not a read
+#: and must not claim `readOnlyHint`.
 MAINTENANCE_TOOLS = (
     # #3883/#4282: the retired door keeps its entry (served() includes the shims).
     "tortoise_get_confidence",
@@ -59,6 +60,13 @@ MAINTENANCE_TOOLS = (
     "tortoise_check_confidence",
     "tortoise_list_knowledge",
     "tortoise_search_knowledge",
+    # #12951 fresh-context review (ISSUE 1): the retired `tortoise_provenance` door
+    # answers the chain through `check_confidence`, whose claim arm reaches
+    # `get_confidence` — whose lazy-consistency path DREAMS a dirty root
+    # (`SET n.confidence`). It declared `read`, so its #3883 shim shipped
+    # `readOnlyHint: true` over a `graphs:read` call that writes. It is the same
+    # writer as the two rows above, reached through one more hop.
+    "tortoise_provenance",
 )
 
 

@@ -133,7 +133,15 @@ NON_SDK_READ_OPERATIONS: dict[str, str] = {
 # `by_method` index, so the read-classification property must also be asserted
 # per TOOL NAME or it silently stops being checked (#4035 review).
 NON_SDK_READ_BINDINGS: dict[str, str] = {
-    # EMPTY since #11609 batch 1, with NON_SDK_READ_OPERATIONS above.
+    # #12951 review (P1): `tortoise_provenance` is handler-served (`sdk_method=""`)
+    # and its reach to the read-through writer `check_confidence` lives inside the
+    # `_check_confidence_provenance` HELPER, not in the handler body. Between the two,
+    # the op-keyed `by_method` arm above had no declaration to key on and the door was
+    # observed by NOTHING — so the maintenance tier it now carries was a comment: a
+    # later lane could demote it back to `read` (a `readOnlyHint: true` over a call that
+    # dreams a dirty root) and no arm would red. Declared by TOOL NAME so the tier arm
+    # below actually checks it.
+    "check_confidence": "tortoise_provenance",
 }
 
 # ── #9576: read-classified RETENTION housekeeping through another module ─────

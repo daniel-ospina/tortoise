@@ -1485,10 +1485,12 @@ class TestCapabilityModel:
         `sdk_method`, so the `by_method` loop in declared_set_violations can never
         key on it; the property is asserted per TOOL NAME via NON_SDK_READ_BINDINGS.
 
-        The live ledger is EMPTY since #11609 batch 1 archived every handler-served
-        read-through door (`tortoise_packs_list` was the last), so this test drives
-        the SAME arm with a probe declaration over a live handler-served row —
-        emptying the ledger must not retire the check it pays for.
+        The live ledger declares ONE handler-served read-through door since #12951
+        (`check_confidence` → `tortoise_provenance`: blanked `sdk_method`, reach inside
+        the `_check_confidence_provenance` helper), so the premise is no longer
+        "empty" — it is "exactly that one". The probe below still drives the SAME arm
+        over a SECOND live handler-served row, so the check is exercised for a door the
+        live declaration does not name.
 
         Mutation: re-classify the bound tool as a pure `read` and the guard must go
         red — #4122 moved the required posture from "readOnlyHint is True" to
@@ -1503,15 +1505,15 @@ class TestCapabilityModel:
 
         # The real registry is clean — the violation below is caused by the probe.
         assert declared_set_violations(served_registry()) == []
-        # ... and the live ledger genuinely declares no read-through op (the premise
-        # of the finding, restated: the declaration is what makes the arm necessary).
+        # ... and the live ledger declares exactly the #12951 door, whose tool is
+        # handler-served (`sdk_method=""`) — the premise of the finding, restated.
+        # ⚠ The live intersection alone would be a statement about the state; the
+        # probe below is what proves the invariant has a false branch.
         assert not any(e.sdk_method == "get_tenant_packs" for e in served_registry())
-        # ⚠ The EMPTINESS is the premise, not a property: with the ledger empty this
-        # intersection cannot be non-empty, so asserting it alone would be a tautology.
-        # What is asserted here is the state, and the probe below proves the invariant
-        # has a false branch (a read-through op bound to a handler-served tool).
-        assert tsc.NON_SDK_READ_BINDINGS == {}, tsc.NON_SDK_READ_BINDINGS
-        assert not (set(tsc.READ_THROUGH_WRITE_METHODS) & set(tsc.NON_SDK_READ_BINDINGS))
+        assert tsc.NON_SDK_READ_BINDINGS == {
+            "check_confidence": "tortoise_provenance"}, tsc.NON_SDK_READ_BINDINGS
+        assert set(tsc.READ_THROUGH_WRITE_METHODS) & set(tsc.NON_SDK_READ_BINDINGS) \
+            == {"check_confidence"}
 
         probe_op, probe_tool = "probe_read_through", "tortoise_entity_profile"
         monkeypatch.setitem(tsc.READ_THROUGH_WRITE_METHODS, probe_op,
@@ -1523,7 +1525,8 @@ class TestCapabilityModel:
         # Non-vacuity of the invariant above: for a read-through op bound to a
         # handler-served tool the SAME expression is false, so it is not a tautology
         # that can never red.
-        assert set(tsc.READ_THROUGH_WRITE_METHODS) & set(tsc.NON_SDK_READ_BINDINGS) == {probe_op}
+        assert set(tsc.READ_THROUGH_WRITE_METHODS) & set(tsc.NON_SDK_READ_BINDINGS) \
+            == {probe_op, "check_confidence"}
 
         # Non-vacuity: the probe binds a LIVE handler-served row with no sdk_method,
         # i.e. exactly the shape the `by_method` loop cannot see.
@@ -1560,10 +1563,10 @@ class TestCapabilityModel:
         with no binding AND an op bound to a tool that has vanished from the served
         set. Both halves exist because a rename drops the check silently otherwise.
 
-        Driven by probes since #11609 batch 1 emptied the live ledger. Deleting
-        EITHER half of the guard's condition leaves one of the two assertions green:
-        measured by the reviewer as a surviving mutant when only the `None` half was
-        covered.
+        Driven by probes, since the LIVE ledger's only entry (#12951's
+        `tortoise_provenance`) names a tool that does resolve. Deleting EITHER half of
+        the guard's condition leaves one of the two assertions green: measured by the
+        reviewer as a surviving mutant when only the `None` half was covered.
         """
         import tool_surface_capabilities as tsc
         from tool_surface_capabilities import declared_set_violations, served_registry
@@ -1674,13 +1677,23 @@ class TestCapabilityModel:
         assert self_heal_writers <= set(entries), (
             f"a declared read-through writer binds no live tool: "
             f"{sorted(self_heal_writers - set(entries))}")
-        # ⛔ The handler-served half of the declaration is EMPTY since #11609 batch 1
-        # (`tortoise_packs_list` / `get_tenant_packs` are archived). The TOOL-NAME arm
-        # that read it is exercised against a probe in
-        # `test_read_through_non_sdk_binding_is_checked_by_tool_name`, so emptying the
-        # ledger does not quietly retire the check.
+        # ⛔ The handler-served half is NOT empty any more: #12951 declared
+        # `tortoise_provenance` by TOOL NAME, because its binding is blanked
+        # (`sdk_method=""`) and its reach to `check_confidence` sits inside the
+        # `_check_confidence_provenance` HELPER — the exact #4035 blind spot. Pinned
+        # LITERALLY so a second name-keyed declaration is a decision, not a diff.
+        name_keyed = {
+            tool for operation, tool in tsc.NON_SDK_READ_BINDINGS.items()
+            if operation in tsc.READ_THROUGH_WRITE_METHODS
+        }
+        assert name_keyed == {"tortoise_provenance"}, (
+            "the handler-served read-through declaration changed: "
+            f"{sorted(name_keyed)}")
+        # The TOOL-NAME arm that reads it is exercised against a probe in
+        # `test_read_through_non_sdk_binding_is_checked_by_tool_name`.
         assert self_heal_writers == {
-            by_method[m] for m in tsc.READ_THROUGH_WRITE_METHODS if m in by_method}
+            by_method[m] for m in tsc.READ_THROUGH_WRITE_METHODS if m in by_method
+        } | name_keyed
         assert "tortoise_compute_confidence" in self_heal_writers
         assert self_heal_writers <= {
             name for name, e in entries.items() if e.risk != "read"}, (
