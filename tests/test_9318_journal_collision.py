@@ -710,6 +710,13 @@ def test_the_capture_arm_cannot_fire_when_this_write_carries_no_ts() -> None:
         "the capture-time arm is UNGUARDED — a `ts`-less replay falls back to "
         "`now()` there, so two replays of ONE record would be refused as "
         "collisions")
+    # …and the guard CONJOINS the arm rather than sitting beside it: an `OR`
+    # here (mutation C in WORKTREE-REPORT.md) keeps the `IS NOT NULL` text while
+    # restoring exactly the false red it was added for, and only the DB leg
+    # caught that, so the CONJUNCTION is pinned too.
+    assert "AND recorded_at IS DISTINCT FROM" in sql, (
+        "the capture arm is OR-ed in, not conjoined — `IS NOT NULL` is present "
+        "but no longer guards the comparison")
     # A NULL bind can never read as the same capture: `recorded_at` is NOT NULL.
     conn = Absorbed(stored=None)
     ts_less = {k: v for k, v in RECORD_A.items() if k != "ts"}
