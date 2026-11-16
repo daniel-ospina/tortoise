@@ -3240,6 +3240,26 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
         "echo in y) export TORTOISE_EMBED_GATE=1"
     assert _shipped("echo in y) export TORTOISE_EMBED_GATE=1\n")[
         "per_surface"]["entrypoint"]["state"] == "OFF"
+    # ⛔ A CLOSER INSIDE A `case` BODY IS A WORD, NOT THE END OF A LOOP. Counting every
+    # `done` as a depth decrement closed the construct, so an arm that may never run was
+    # scored DEFINITE — `ON` with `indeterminate: []` where bash has `0` (a false ARM in the
+    # certification direction), and the mirror shape dropped the arm (fresh review of
+    # #12902, P1). A closer now pops only the construct that opened it; a mismatched one is
+    # inert.
+    for first in ("0", "1"):
+        word_done = (f"export TORTOISE_EMBED_GATE={first}\ncase x in\n  x) echo done ;;\n"
+                     f"  a) export TORTOISE_EMBED_GATE={1 - int(first)} ;;\nesac\n")
+        held = _shipped(word_done)
+        assert held["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
+            first, held["per_surface"]["entrypoint"])
+        assert held["indeterminate"], held["indeterminate"]
+    # …and the stack still closes a REAL loop, so a line AFTER the `done` is unconditional
+    # again (pinned at the helper: `export` is an ATTRIBUTE decision, so a conditional one
+    # legitimately holds the whole file and the walk state cannot show the closure).
+    looped = ("for i in 1 2; do\nexport TORTOISE_EMBED_GATE=1\ndone\n"
+              "export TORTOISE_EMBED_GATE=0\n")
+    assert 3 in probe._shell_control_flow_lines(looped)
+    assert 4 not in probe._shell_control_flow_lines(looped)
     # …and on the ARM path the strip still happens, which is what the one-line `case` row
     # above depends on (pinned here at the helper so the two cannot drift).
     assert probe._shell_commands(
@@ -3376,6 +3396,31 @@ def test_a_heredoc_whose_DELIMITER_is_unknown_HOLDS_the_file(tmp_path, monkeypat
              "cat <<$D >/dev/null\nexport TORTOISE_EMBED_GATE=1\n")
     assert probe._shell_unresolved_heredoc_lines(mixed) == {4}
     assert _walk(mixed)["per_surface"]["entrypoint"]["state"] == "UNMEASURED"
+
+    # ⛔ A HEREDOC OPENED INSIDE A QUOTED `$( … )` IS STILL A HEREDOC. `_shell_mask_quoted`
+    # read the `"` before `"$@"` as CLOSING the outer quote and the `"` after it as
+    # OPENING one, so everything from the operator to the end of the line was masked and
+    # `_shell_heredoc_bodies` answered NOTHING — the body was scored as commands. Both
+    # directions were measured wrong (fresh review of #12902, P1):
+    #
+    #     export FLAG=1 / x="$(cat - <<'EOF' 2>&1 / FLAG=0 / EOF / )"
+    #       bash: FLAG=1     reader: OFF    ← the arm was SWALLOWED into the "body"
+    #     body `export FLAG=1`            reader: ON     ← and the body was scored as commands
+    #
+    # Not a synthetic shape: THIS REPO'S OWN `entrypoint.sh:1111` opens its Python heredoc
+    # as `_gate_out="$(python - "$@" <<'PY' 2>&1`, and the masker answered ZERO bodies over
+    # 1138 lines — the Python body was scanned as shell, where its `if` opened a construct
+    # nothing closes. After the fix the real file reports 12 bodies.
+    quoted_heredoc = ("export TORTOISE_EMBED_GATE=1\n"
+                      "x=\"$(cat - <<'EOF' 2>&1\nTORTOISE_EMBED_GATE=0\nEOF\n)\"\n")
+    assert probe._shell_heredoc_bodies(quoted_heredoc) == {3}
+    assert _walk(quoted_heredoc)["per_surface"]["entrypoint"]["state"] == "ON"
+    quoted_disarm = "x=\"$(cat - <<'EOF' 2>&1\nexport TORTOISE_EMBED_GATE=1\nEOF\n)\"\n"
+    assert _walk(quoted_disarm)["per_surface"]["entrypoint"]["state"] == "OFF"
+    # …and the masker itself: the operator inside the substitution must survive, while a
+    # `<<` in a plainly quoted word still must not.
+    assert "<<" in probe._shell_mask_quoted('_gate_out="$(python - "$@" <<\'PY\' 2>&1')
+    assert "<<" not in probe._shell_mask_quoted('echo "a << b"')
 
 
 def test_a_REDIRECTION_does_not_end_the_parent_shell(tmp_path, monkeypatch):

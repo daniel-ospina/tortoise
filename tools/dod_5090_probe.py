@@ -3718,29 +3718,70 @@ def _shell_mask_quoted(line: str) -> str:
     Offsets are preserved so a match on the mask can be read from the original. Used to
     find shell OPERATORS without matching one that sits inside a word — `echo "a << b"`
     opens no heredoc.
+
+    ⛔ **A `$( … )` INSIDE a double-quoted word is a FRESH quoting context**, and reading
+    it as the same quote state blanked everything after it. `_gate_out="$(python - "$@"
+    <<'PY' 2>&1` is how THIS REPO'S OWN `entrypoint.sh:1111` opens a heredoc: the `"`
+    before `$@` was read as CLOSING the outer quote, the `"` after it OPENED one, and
+    `<<'PY'` was masked to spaces — so `_shell_heredoc_bodies` answered **0 bodies over
+    1138 lines** and the Python body was scanned as shell commands, where its `if`
+    opened a construct nothing closes (`_shell_control_flow_lines` depth stuck at 1, 548
+    lines marked "may not have run"). A heredoc operator inside the substitution is a
+    live OPERATOR, so the substitution's own characters stay VISIBLE and the outer quote
+    resumes at its matching `)`.
     """
     masked: list[str] = []
     quote: str | None = None
     escaped = False
-    for char in line:
+    #: Each `$( … )` opened INSIDE a quoted word, as [the quote to RESUME, paren depth
+    #: since]. An empty stack leaves this scanner exactly as it was.
+    substitutions: list[list] = []
+    index = 0
+    length = len(line)
+    while index < length:
+        char = line[index]
         if escaped:
             masked.append(" ")
             escaped = False
+            index += 1
             continue
         if char == "\\" and quote != "'":
             masked.append(" ")
             escaped = True
+            index += 1
             continue
         if quote is not None:
+            if (quote == '"' and char == "$" and index + 1 < length
+                    and line[index + 1] == "("):
+                substitutions.append([quote, 0])
+                quote = None
+                masked.append("  ")
+                index += 2
+                continue
             masked.append(" ")
             if char == quote:
                 quote = None
+            index += 1
             continue
         if char in "'\"":
             masked.append(" ")
             quote = char
+            index += 1
             continue
+        if substitutions:
+            if char == "(":
+                substitutions[-1][1] += 1
+            elif char == ")":
+                if substitutions[-1][1] == 0:
+                    #: The substitution CLOSES: the outer quote resumes, and this `)`
+                    #: is a quoted character again.
+                    quote = substitutions.pop()[0]
+                    masked.append(" ")
+                    index += 1
+                    continue
+                substitutions[-1][1] -= 1
         masked.append(char)
+        index += 1
     return "".join(masked)
 
 
@@ -3804,18 +3845,38 @@ def _shell_control_flow_lines(text: str) -> set[int]:
     time) is not seen here — the same class as the channel's other declared bounds.
     """
     keywords = {"if", "for", "while", "until", "case", "select"}
-    closers = {"fi", "done", "esac"}
+    #: ⛔ **A CLOSER CLOSES ONLY THE CONSTRUCT THAT OPENED IT.** Counting every `done` as
+    #: a decrement let a WORD inside a `case` body — `x) echo done ;;` — drop the depth to
+    #: 0, so the construct stopped being held and an arm that may never run was scored
+    #: DEFINITE: `export F=0` / `case x in` / `x) echo done ;;` / `a) export F=1 ;;` /
+    #: `esac` read `ON` with `indeterminate: []` where bash has `0` (a FALSE ARM, fresh
+    #: review of `#12902`), and the mirror shape dropped the arm. A mismatched closer is
+    #: therefore INERT — it does not pop, and the construct stays open.
+    closers = {"fi": {"if"}, "done": {"for", "while", "until", "select"},
+               "esac": {"case"}}
     bodies: set[int] = set()
-    depth = 0
+    #: ⛔ A HEREDOC BODY IS DATA: a body line is not a command, so its words are not
+    #: construct keywords. Skipping them is what stops a body's own `if` from opening a
+    #: construct nothing closes (see `_shell_mask_quoted`).
+    heredoc_bodies = _shell_heredoc_bodies(text)
+    stack: list[str] = []
     for number, raw in enumerate(text.splitlines(), 1):
+        if number in heredoc_bodies:
+            continue
         masked = _shell_mask_arithmetic(_shell_mask_quoted(_shell_strip_comment(raw)))
-        words = set(re.findall(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_])",
-                               masked))
-        opened = len(words & keywords)
-        closed = len(words & closers)
-        if depth > 0 or opened or closed:
+        tokens = re.findall(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_])",
+                            masked)
+        touched = False
+        for token in tokens:
+            if token in keywords:
+                stack.append(token)
+                touched = True
+            elif token in closers:
+                touched = True
+                if stack and stack[-1] in closers[token]:
+                    stack.pop()
+        if stack or touched:
             bodies.add(number)
-        depth = max(depth + opened - closed, 0)
     return bodies
 
 
