@@ -670,7 +670,10 @@ def declared_relation_predicates() -> frozenset[str] | None:
 # A pack `ontology.relations[]` entry is only *real* if some runtime surface
 # accepts its predicate. This is the ONE place that decides which declared
 # paths apply — so pack load, `tortoise pack validate` and
-# `sdk.list_relations()` cannot disagree about it. That disagreement is the
+# `PackRegistry.list_relations()` cannot disagree about it. (The SDK's own
+# `list_relations()` door was retired in #12901 wave 1; the registry reader is
+# the surviving surface, and this verdict is what it shares with the validator.)
+# That disagreement is the
 # defect #2766 reports: the declared registry, the writer, the validator and
 # the discoverable API each derived the relation vocabulary independently, and
 # an edge no surface constrained was the only one that got through.

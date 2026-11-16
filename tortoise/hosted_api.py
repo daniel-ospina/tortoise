@@ -7631,13 +7631,19 @@ def _record_health() -> dict:
         block["record_writes_applied"] = applied
         block["record_last_write_at"] = last_write_at
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
-    # this counter carries — SIX values, documented at
+    # this counter carries — SEVEN values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly
     # replay-healable, and naming four of them here sent operators to a replay
     # that could not exist for two:
     #
     #   ``write_failed``      the record was unreachable or the projection
     #                         refused the row — a REPLAY heals it.
+    #   ``journal_collision`` the position row holds content this write would
+    #                         not produce (a different record, or this record's
+    #                         payload re-derived since that row was written)
+    #                         (#9318): a REPLAY DOES NOT HEAL IT — it
+    #                         re-raises. The remedy is journal identity in the
+    #                         key (#12894).
     #   ``no_tenant``         armed with no tenant in scope; heal the tenant
     #                         resolution, then replay.
     #   ``malformed_dsn``     the value is configured but unusable — fix the
@@ -8065,7 +8071,7 @@ async def health():
     return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"])
             else "degraded",
             # ⛔ Its OWN key, not `degraded_reasons` — that name is taken by
-            # `record.degraded_reasons` (a documented six-value vocabulary,
+            # `record.degraded_reasons` (a documented seven-value vocabulary,
             # `docs/infra-runbook.md`, pinned by `test_record_searchkeys_10620`).
             # Two schemas under one name is how a consumer reads the wrong one.
             "refusals": refusals,
@@ -31933,8 +31939,8 @@ _EXPORT_MAX_EVENTS = 5000  # event log is a rolling window (30d retention)
 # Internal bookkeeping excluded from exports/backups. Meta nodes are
 # key-scoped (#1625): the R2/R3 FTS-migration markers (point_fts_v2 /
 # event_fts_v2) are re-created on projection open, but Meta {key:
-# 'calibration_milestone'} is DATA (Gate B state, calibration_passed()
-# reads it) and MUST survive backup/restore.
+# 'calibration_milestone'} is DATA (Gate B state, read by the SDK's
+# calibration-milestone marker accessor) and MUST survive backup/restore.
 _EXPORT_SKIP_LABELS = {"GraphEventMeta", "TeamMeta", "EpMeta"}  # label-wide
 _EXPORT_SKIP_META_KEYS = frozenset({"point_fts_v2", "event_fts_v2"})
 
@@ -49709,7 +49715,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 183 tracked files (450 distinct
+# ABSOLUTE line number from 185 tracked files (455 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

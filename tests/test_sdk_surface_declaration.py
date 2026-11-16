@@ -19,8 +19,8 @@ What each test is for, and why the naive version of it would prove nothing:
      by the declaration's content, not by the test's other machinery.
   4. **An approved method that does not exist fails, and is NAMED** — the mirror direction,
      with the same non-vacuity pattern. A gate tested in one direction permits the other.
-  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 125 live, 112
-     off the surface, 26 approved-but-absent). This is the honest reading of #4282; it goes
+  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 119 live, 100
+     off the surface, 20 approved-but-absent). This is the honest reading of #4282; it goes
      green when Phase 2 lands, not before — which is why the three live numbers carry an
      explicit "update this premise" note instead of being restated from the declaration.
   6. **The CONTRACT half is green and is the required-CI invariant** — the declaration is
@@ -192,11 +192,11 @@ def test_the_absence_failure_is_NOT_vacuous():
 
 
 def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
-    """#4282's true state: 40 approved, 125 live. Not green, and not vague.
+    """#4282's true state: 40 approved, 119 live. Not green, and not vague.
 
-    The approved side has not moved: 14 of the 40 exist (13 live methods the
+    The approved side has not moved: 20 of the 40 exist (19 live methods the
     declaration names, plus row 1's `Tortoise(...)`, which resolves to the class
-    itself), 26 do not. The LIVE side moved
+    itself), 20 do not. The LIVE side moved
     150 → 124 on 2026-10-27, when the owner's ruling that the surplus methods nothing calls
     may be deleted (PR #10187) removed the 26 with no caller under `tortoise/**` — so the
     off-surface gap falls 138 → 112 — 124 → 125 on 2026-11-14 (#10015), when approved
@@ -206,7 +206,11 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     six approved rows implemented (`absent` 26 → 20) and seven live names retired
     (`off-surface` 112 → 105). Nothing approved was
     removed: the 26 are all off-surface surplus, which is why this premise and the 40 are
-    separate numbers.
+    separate numbers. Then 125 → 120 on 2026-11-15 (#12901 wave 1), which retired the first
+    five off-surface methods with NO production caller, so the gap falls 105 → 100 without
+    moving `absent` (a surplus departure is not an approved name). The 119 and the 100 are
+    the numbers at the head where BOTH moves are present, which is the only place they can
+    be read together.
     """
     declared = _declaration()["__all__"]
     live = _live()
@@ -219,8 +223,8 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
     # verify nothing at all. Each literal carries its own premise note —
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    assert len(live) == 124, "the live surface moved — update this premise (it pins today's gap)"
-    assert len(off_surface) == 105, "the gap moved — update this premise (it pins today's gap)"
+    assert len(live) == 119, "the live surface moved — update this premise (it pins today's gap)"
+    assert len(off_surface) == 100, "the gap moved — update this premise (it pins today's gap)"
     assert len(absent) == 20, "the gap moved — update this premise (it pins today's gap)"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.

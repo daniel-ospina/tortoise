@@ -62,7 +62,7 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # approved 40 did NOT grow — the owner's approval (`#10015` comment `6863608333`) is for
 # delivering a name that was already approved and unshipped, which is the same move PR
 # #10053 made for three rows ("what grew is the IMPLEMENTATION of three names the owner
-# already approved"). `high_water_counts.sdk_public_methods` stays at 150 in
+# already approved"). `high_water_counts.sdk_public_methods` stays at 124 in
 # `config/surface-manifest.yml` — the growth pin did not move, and this literal tracks the
 # frozen row set, which must move whenever a row is added.
 #
@@ -73,7 +73,16 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # (`create_source`, `assess_source`, `set_source_tier`, `index_directory`,
 # `index_sessions`, `mine_corpus`, `checkpoint`). The net is −1, and DOWN is the phase
 # rule: every #4282 Phase 2 batch must end with fewer public methods than it started with.
-DECLARED_COUNT = 124
+#
+# 124 → 119 (#12901 wave 1, 2026-11-15, merged into this branch): a RETIREMENT, not a
+# growth. Five off-surface methods (`backfill_v25`, `list_relations`, `quarantine_batch`,
+# `calibration_passed`, `membership_get`) were deleted from the public surface, frozen into
+# `archive/sdk-methods/b2-sdk-retirement-wave-1/` and recorded in
+# `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`. No approved row gained or lost a `def`,
+# so the approved 40 is untouched and `high_water_counts` stays 124 — the count moves DOWN,
+# which is the cheap direction for this pin (a row leaving cannot break a caller that the
+# declaredness check already protects). 119 is the count with BOTH moves present.
+DECLARED_COUNT = 119
 
 
 def _declaration() -> dict:

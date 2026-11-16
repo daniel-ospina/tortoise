@@ -1476,7 +1476,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     # ruling comment 6831894340): it targets ONTOLOGY v2.5 against a v3.13 schema, has no
     # destination in the approved 27-tool target, and no replacement. Its `ToolDefinition`
     # + handler are frozen in `archive/mcp-tools/b1-removed-no-destination/`. The SDK
-    # method `backfill_v25` still exists — the SDK surface is trimmed by its own batch.
+    # method `backfill_v25` followed it one wave later: #12901 wave 1 deleted it from the
+    # public SDK surface and froze the body in
+    # `archive/sdk-methods/b2-sdk-retirement-wave-1/`.
     # ── Onboarding tools (#498/#499/#500) ─────────────────────────
     # ⛔ FIVE of the seven `onboarding_*` tools are REMOVED from the MCP surface
     # (#4282 Phase 3.2). Owner ruling 2026-09-22: the `run_onboarding` container
