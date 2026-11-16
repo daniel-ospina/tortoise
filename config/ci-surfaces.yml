@@ -7452,7 +7452,9 @@ surfaces:
   # `Dockerfile`s, `entrypoint.sh`) and `python-ci.yml`'s wiring, so it is registered beside its
   # #5008 / #11445 siblings rather than under a lane of its own. `core`: it writes no graph, opens
   # no connection, needs no model — the compose arm shells out to `docker compose config`, and
-  # SKIPS (with the reason) where no docker CLI exists.
+  # where no docker CLI exists that is an UNREADABLE CHANNEL (a refusal, exit 1) at the tool level;
+  # the SUITE's docker-marked falsifiers skip there, which is the `needs_docker` mark, not the
+  # tool's own verdict. (Review round 4, P3: this note said the tool "skips", which inverted it.)
   - test_embed_switch_gate_12926.py
   # #11086: the EMBED decision's STEP (v4 §4.3 G2, now `S6a EMBED-DECISION`) and the
   # ordering that makes it correct. Guards three source surfaces at once: `tortoise/embeddings.py`

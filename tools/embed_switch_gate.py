@@ -315,21 +315,27 @@ def _read_text(path: Path) -> tuple[str, str]:
         return "", f"{type(exc).__name__}: {exc}"
 
 
-def _compose_channels(path: Path, root: Path) -> list[Channel]:
-    """One ``Channel`` per SERVICE of a compose base file, read through `docker compose config`."""
-    label = path.name
+def _image_repo(reference: object) -> str:
+    """An image reference without its tag/digest — ``ghcr.io/o/x:1.2`` -> ``ghcr.io/o/x``.
+
+    Used to ask "is this the SAME image this repo builds?", which is the only offline evidence a
+    PULLED service can offer that it runs Tortoise (review round 4, P2).
+    """
+    text = str(reference or "").strip()
+    if not text:
+        return ""
+    text = text.split("@", 1)[0]
+    head, sep, tail = text.rpartition(":")
+    return head if sep and "/" not in tail else text
+
+
+def _resolve_compose(path: Path, root: Path) -> tuple[dict | None, str]:
+    """`docker compose config --format json` for one file as ``(model, reason)``."""
     if not shutil.which("docker"):
-        return [
-            Channel(
-                channel=label,
-                kind="compose",
-                resolver="docker compose config",
-                unreadable=(
-                    "the `docker` CLI is not on PATH, so the compose project cannot be resolved "
-                    "(a text scan is a different question — see this module's docstring)"
-                ),
-            )
-        ]
+        return None, (
+            "the `docker` CLI is not on PATH, so the compose project cannot be resolved — a text "
+            "scan is a different question (see this module's docstring)"
+        )
     argv = [
         "docker",
         "compose",
@@ -352,51 +358,85 @@ def _compose_channels(path: Path, root: Path) -> list[Channel]:
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return [
-            Channel(
-                channel=label,
-                kind="compose",
-                resolver="docker compose config",
-                unreadable=f"the resolver could not run: {type(exc).__name__}: {exc}",
-            )
-        ]
+        return None, f"the resolver could not run: {type(exc).__name__}: {exc}"
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        return [
-            Channel(
-                channel=label,
-                kind="compose",
-                resolver="docker compose config",
-                unreadable=(
-                    f"`docker compose config` exited {proc.returncode}: "
-                    f"{detail[-1] if detail else '(no output)'}"
-                ),
-            )
-        ]
+        return None, (
+            f"`docker compose config` exited {proc.returncode}: "
+            f"{detail[-1] if detail else '(no output)'}"
+        )
     try:
         model = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
+        return None, f"`docker compose config` did not emit JSON: {exc}"
+    if not (model.get("services") or {}):
+        return None, "the resolver produced no services, so there is no environment to read"
+    return model, ""
+
+
+def _built_image_repos(models: list[dict]) -> set[str]:
+    """Every image this repo BUILDS, per the compose projects — the positive "ours" signal.
+
+    A service with ``build:`` AND ``image:`` names the repository its own build is published to;
+    collecting the whole tree's set before classifying means a PULLED service that names one of
+    them is recognised as ours wherever it appears.
+    """
+    repos: set[str] = set()
+    for model in models:
+        for service in (model.get("services") or {}).values():
+            if service.get("build"):
+                repo = _image_repo(service.get("image"))
+                if repo:
+                    repos.add(repo)
+    return repos
+
+
+def _is_tortoise_service(service: dict, built_repos: set[str]) -> tuple[bool, str]:
+    """``(is_channel, why_not)`` for one resolved compose service.
+
+    ⛔ NOT every service in a project is a channel — the switch is read by TORTOISE, and a
+    Redis/FalkorDB sidecar never reads it. But "not built here" is NOT evidence of that: a service
+    that pulls one of OUR OWN images (a pinned release, a staged tag) boots the same daemon and
+    reads the same two codes-defaults, so it MUST state them (review round 4, P2 — the first rule
+    let such a service through with the actively false report "it never reads either switch").
+
+    Positive evidence of ours, in order: it is BUILT here; or its environment already carries a
+    ``TORTOISE_*`` key (we configure it); or its image is one this tree BUILDS (same repository,
+    tag ignored); or its image repository names Tortoise, which covers a fork/other-namespace
+    publication. Everything else is a sidecar and is REPORTED as one.
+
+    ⚠️ Declared bound: a Tortoise image pulled from a namespace that neither matches a build in
+    this tree nor contains "tortoise" is indistinguishable offline from a third-party image, and
+    is reported as skipped. That is what the report line says ("no evidence this service runs
+    Tortoise") rather than asserting the process never reads the switches.
+    """
+    if service.get("build"):
+        return True, ""
+    environment = service.get("environment") or {}
+    if any(str(key).startswith("TORTOISE_") for key in environment):
+        return True, ""
+    repo = _image_repo(service.get("image"))
+    if repo and repo in built_repos:
+        return True, ""
+    if "tortoise" in repo.lower():
+        return True, ""
+    return False, (
+        "no evidence this service runs Tortoise — it is not built here, its image is not one this "
+        f"tree builds, and it carries no TORTOISE_* config (image `{service.get('image') or '(none)'}`)"
+    )
+
+
+def _compose_channels(path: Path, root: Path, built_repos: set[str]) -> list[Channel]:
+    """One ``Channel`` per SERVICE of a compose base file, read through `docker compose config`."""
+    label = path.name
+    model, reason = _resolve_compose(path, root)
+    if model is None:
         return [
-            Channel(
-                channel=label,
-                kind="compose",
-                resolver="docker compose config",
-                unreadable=f"`docker compose config` did not emit JSON: {exc}",
-            )
-        ]
-    services = model.get("services") or {}
-    if not services:
-        return [
-            Channel(
-                channel=label,
-                kind="compose",
-                resolver="docker compose config",
-                unreadable="the resolver produced no services, so there is no environment to read",
-            )
+            Channel(channel=label, kind="compose", resolver="docker compose config", unreadable=reason)
         ]
     channels: list[Channel] = []
-    for name in sorted(services):
-        service = services[name]
+    for name in sorted(model.get("services") or {}):
+        service = (model.get("services") or {})[name]
         environment = service.get("environment") or {}
         # compose renders both `K: v` and `- K=v` into one mapping; a value-less entry is
         # `null`, which states NO value (the host's environment is substituted) — recorded as
@@ -406,36 +446,14 @@ def _compose_channels(path: Path, root: Path) -> list[Channel]:
             for key, value in environment.items()
             if key in SWITCHES
         }
-        # ⛔ NOT every service in the project is a channel. The switch is read by TORTOISE, so a
-        # service this repo BUILDS (`build:` — our source, our process) or one that already
-        # carries any `TORTOISE_*` key (a pulled image we configure) is a channel; a pulled
-        # third-party sidecar that carries none (the FalkorDB server image) is not, and is
-        # REPORTED as such rather than silently dropped — requiring a Redis container to set a
-        # Python-app storage switch would be cargo cult, and dropping it quietly would be the
-        # omission this gate exists to refuse.
-        is_channel = bool(service.get("build")) or any(
-            str(key).startswith("TORTOISE_") for key in environment
-        )
-        if not is_channel:
-            channels.append(
-                Channel(
-                    channel=f"{label}: {name}",
-                    kind="compose",
-                    resolver="docker compose config --format json",
-                    noted=(
-                        "not a channel — pulled image "
-                        f"`{service.get('image') or '(unknown image)'}` with no Tortoise "
-                        "config, so it never reads either switch"
-                    ),
-                )
-            )
-            continue
+        is_channel, why_not = _is_tortoise_service(service, built_repos)
         channels.append(
             Channel(
                 channel=f"{label}: {name}",
                 kind="compose",
                 resolver="docker compose config --format json",
-                stated=stated,
+                stated=stated if is_channel else {},
+                noted=why_not,
             )
         )
     return channels
@@ -554,6 +572,16 @@ def discover(root: Path) -> list[Channel]:
     channels: list[Channel] = []
 
     compose_files = _root_files(root, COMPOSE_FAMILY_GLOB)
+    # Pass 1: resolve every base project, so the tree's OWN built image repositories are known
+    # before any single service is classified (a pulled service may name an image another compose
+    # file builds).
+    models: list[dict] = []
+    for path in compose_files:
+        if path.name in COMPOSE_BASE_NAMES:
+            model, _reason = _resolve_compose(path, root)
+            if model is not None:
+                models.append(model)
+    built_repos = _built_image_repos(models)
     for path in compose_files:
         if path.name not in COMPOSE_BASE_NAMES:
             channels.append(
@@ -572,7 +600,7 @@ def discover(root: Path) -> list[Channel]:
                 )
             )
             continue
-        channels.extend(_compose_channels(path, root))
+        channels.extend(_compose_channels(path, root, built_repos))
 
     for path in _root_files(root, FLY_MANIFEST_GLOB):
         channels.append(_fly_channel(path, root))

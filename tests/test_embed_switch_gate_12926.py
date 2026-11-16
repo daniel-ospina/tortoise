@@ -337,7 +337,11 @@ def test_a_service_this_repo_does_not_build_is_reported_not_required(tmp_path):
     assert failures == []
     noted = [channel for channel in channels if channel.noted]
     assert [channel.channel for channel in noted] == ["docker-compose.yml: db"]
-    assert "not a channel" in noted[0].noted
+    assert "no evidence this service runs Tortoise" in noted[0].noted
+    assert "never reads either switch" not in noted[0].noted, (
+        "the skip line must claim only what was measured — 'no evidence it runs Tortoise' — and "
+        "never assert what the process does or does not read"
+    )
 
     # The same pulled service, carrying Tortoise config, IS a channel.
     (tmp_path / "docker-compose.yml").write_text(
@@ -349,6 +353,41 @@ def test_a_service_this_repo_does_not_build_is_reported_not_required(tmp_path):
     )
     _channels, failures = gate.evaluate(tmp_path)
     assert any("does not state" in failure for failure in failures), failures
+
+
+@needs_docker
+def test_a_pulled_service_that_runs_OUR_image_is_a_channel_not_a_sidecar(tmp_path):
+    """Review round 4, P2 — the escape the first rule left open.
+
+    A service with NO `build:` and NO `TORTOISE_*` key that pulls one of THIS TREE'S OWN images
+    boots the same daemon and reads the same two code defaults (EMBED = OFF), so it must state
+    them. Measured before the fix: `skipped … never reads either switch` next to an armed
+    `build:` sibling, then `OK … (1 checked)`, rc 0.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n"
+        "    build: .\n"
+        "    image: ghcr.io/daniel-ospina/tortoise-selfhost:local\n"
+        "    environment:\n"
+        '      TORTOISE_VALUE_GATE: "1"\n'
+        '      TORTOISE_EMBED_GATE: "1"\n'
+        "  pulled:\n"
+        "    image: ghcr.io/daniel-ospina/tortoise-selfhost:latest\n"
+    )
+    channels, failures = gate.evaluate(tmp_path)
+    pulled = [channel for channel in channels if channel.channel.endswith("pulled")]
+    assert pulled and not pulled[0].noted, [c.as_dict() for c in channels]
+    assert any("pulled does not state TORTOISE_EMBED_GATE" in failure for failure in failures), failures
+
+    # The same shape in a NAMESPACE this tree does not build from: still ours by the image name,
+    # which is the conservative side — a false positive only asks an image to state the switches.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  pulled:\n    image: ghcr.io/some-fork/tortoise-selfhost:1.2\n"
+    )
+    channels, failures = gate.evaluate(tmp_path)
+    assert channels and not channels[0].noted
+    assert failures, "a pulled Tortoise image must not pass as a sidecar"
 
 
 @needs_docker
