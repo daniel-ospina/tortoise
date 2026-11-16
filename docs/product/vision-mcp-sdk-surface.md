@@ -69,7 +69,6 @@ leaves the response unchanged is **not** a gate failure, but must be recorded.
 
 ## The reconciliation — MCP 91 → 27
 
-
 > Every figure below is the COMPOSED surface at this head (the composed
 > **59 live + 44 retired shims = 103 served**), not either branch's own measurement: the vision started at **99**, the five
 > `run_onboarding` deletions removed five (#4282 Phase 3.2, 81 → 76 advertised), the
@@ -133,9 +132,9 @@ movement of the advertised surface since #3540. The `graph_overview` container t
 
 same population to 72 live + 23 retired shims, #11609 batch 1 moved it to 68 live + 23 retired
 shims (91 served), and #11609 batch 2 moved it once more to
-**59 live + 44 retired shims = 103 served** — the figures the table above records (the two
-#11609 Phase 2 waves now on the same tree, composed), and the
-numbers `config/surface-manifest.yml` derives. Every
+**59 live + 44 retired shims = 103 served** — the figures the table above records (the two #11609
+Phase 2 waves now on the same tree, composed), and the numbers `config/surface-manifest.yml`
+derives. Every
 capability those five carried survives
 on REST — each route is hand-written in `tortoise/hosted_api.py` — and the two tenant-visible
 reads are rehomed to the tenancy block. Their recorded reasons live in

@@ -355,7 +355,6 @@ every retired name still answers on its retired name), and the SERVED population
 six approved in, seven retired out). Every number here is MEASURED off the merged registry, not added
 by hand — `tools/bridge_table.py` and `tests/test_tool_risk_tiers.py` read the same three.
 
-
 Three consequences for readers of the paragraph below, which is left as written because it records
 the 2026-10-27 ruling, not the current state:
 
