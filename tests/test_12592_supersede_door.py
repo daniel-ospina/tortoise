@@ -1374,3 +1374,81 @@ def test_a_non_str_successor_on_a_word_keeping_write_is_the_clears_refusal(sdk, 
         assert _row(sdk, "Object", node) == before, (
             f"a refused shadow-spelled write moved the row: "
             f"{before} -> {_row(sdk, 'Object', node)}")
+
+
+class _ImpostorEqBoom(_Impostor):
+    """An impostor whose ``__eq__`` raises — ``==`` is a caller read too."""
+
+    __hash__ = None
+
+    def __eq__(self, other):
+        raise RuntimeError("eq-boom")
+
+
+def test_the_self_successor_gate_does_not_dispatch_to_the_caller(sdk):
+    """``_old_word == _new_word`` must not run the caller's ``__eq__``.
+
+    Measured on this fix's sixth cut (#12914 review P2, cycle 7):
+    ``supersede(<live Object>, <impostor defining a raising ``__eq__``>)`` raised
+    ``RuntimeError: eq-boom`` from the self-successor comparison, where the same
+    call with a plain impostor answers ``supersede: no :Object <id>``. The gate
+    now runs only when BOTH operands are genuinely ``str`` — the only case in
+    which two "words" exist — so the value falls through to `_rows`' documented
+    "names no node" answer instead of executing caller code.
+
+    Mutation: drop the ``issubclass(type(...), str)`` pair from the gate
+    condition -> ``RuntimeError: eq-boom``.
+    """
+    node = _make(sdk, "Object", "eq-boom-successor")
+    before = _row(sdk, "Object", node)
+
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(node, _ImpostorEqBoom())
+    msg = str(exc.value)
+    assert "no :Object" in msg, (
+        f"the missing-successor refusal must land, not a caller exception: {msg!r}")
+    assert _row(sdk, "Object", node) == before, (
+        f"a refused eq-boom successor moved the row: {before} -> "
+        f"{_row(sdk, 'Object', node)}")
+
+    # The genuine self-successor refusal is unchanged.
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(node, node)
+    assert "must differ" in str(exc.value), str(exc.value)
+
+
+class _PlainStrSubclassName(str):
+    """A GENUINE ``str`` subclass — a usable value everywhere except here."""
+
+
+def test_a_camel_str_subclass_successor_is_not_diagnosed_as_a_shadow_spelling(sdk):
+    """The repair must name the ACTUAL cause: the value's class, not the spelling.
+
+    Measured on this fix's sixth cut (#12914 review P3, cycle 7):
+    ``update_entity(<live Object>, status='superseded', supersededBy=Name('v2'))``
+    was refused with "supplies the successor under a spelling NO READER
+    RESOLVES (`supersededBy`)" — false: `supersededBy` IS the resolving spelling
+    and `supersededBy='v2'` is admitted. The shadow-column diagnosis is now
+    reserved for a value supplied under the SNAKE spelling.
+
+    Mutation: drop ``and not _camel_supplied`` -> the false diagnosis returns.
+    """
+    node = _make(sdk, "Object", "camel-str-subclass")
+    before = _row(sdk, "Object", node)
+
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(node, status="superseded",
+                          supersededBy=_PlainStrSubclassName("v2"))
+    msg = str(exc.value)
+    assert "NO READER RESOLVES" not in msg, (
+        f"the camel spelling DOES resolve — this diagnosis is false: {msg!r}")
+    assert "CLEARS" in msg, msg
+
+    # The snake spelling keeps its own (correct) diagnosis.
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(node, status="superseded", **{"superseded_by": "v2"})
+    assert "NO READER RESOLVES" in str(exc.value), str(exc.value)
+
+    assert _row(sdk, "Object", node) == before, (
+        f"a refused str-subclass successor moved the row: {before} -> "
+        f"{_row(sdk, 'Object', node)}")

@@ -22911,7 +22911,17 @@ class TortoiseSDK:
                      if issubclass(type(old_id), str) else old_id)
         _new_word = (str.__str__(new_id)
                      if issubclass(type(new_id), str) else new_id)
-        if _old_word == _new_word:
+        if (issubclass(type(old_id), str) and issubclass(type(new_id), str)
+                and _old_word == _new_word):
+            # ⛔ THE COMPARISON ITSELF IS A CALLER READ (#12914 review P2, cycle 7):
+            # `==` on a operand that is not genuinely `str` dispatches to the
+            # CALLER's `__eq__` — measured, an impostor defining `__eq__` made
+            # `supersede(<live Object>, <impostor>)` raise `RuntimeError: eq-boom`
+            # where the same call with a plain impostor answers
+            # `supersede: no :Object <id>`. The self-successor refusal needs both
+            # words in base content anyway, so it runs only when BOTH operands
+            # are; a value that is not genuinely `str` names no node and falls
+            # through to `_rows`' documented "names no node" answer below.
             raise ValueError(
                 f"supersede: old_id and new_id must differ ({_refusal_repr(old_id)}) — a "
                 f"row cannot be its own successor")
@@ -48897,7 +48907,18 @@ class TortoiseSDK:
             _shadow_only = any(issubclass(type(v), str)
                                and str.__str__(v).strip()
                                for v in _name_values)
-            if _shadow_only:
+            # WHICH spelling the caller used decides WHICH repair is honest
+            # (#12914 review P3, cycle 7): `supersededBy=<a str subclass>` is
+            # refused by `_successor_named_by`'s exact-`str` rule, and naming the
+            # CAMEL spelling "one NO READER RESOLVES" is false — that spelling is
+            # the one every reader keys on (measured: `supersededBy=Name('v2')`
+            # got the shadow-column diagnosis while `supersededBy='v2'` is the
+            # admitted form). The shadow branch is for a value supplied under the
+            # SNAKE spelling only.
+            _camel_supplied = any(issubclass(type(k), str)
+                                  and str.__str__(k) == _SUCCESSOR_PROP
+                                  for k in _name_keys)
+            if _shadow_only and not _camel_supplied:
                 # A value IS supplied — under a spelling no reader resolves
                 # (`superseded_by`, #12782). Not a clear, and not a name either.
                 repair = (
