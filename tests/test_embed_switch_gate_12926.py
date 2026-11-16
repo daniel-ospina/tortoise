@@ -479,6 +479,30 @@ def test_a_profiled_service_cannot_hide_from_the_gate(tmp_path):
     assert any("worker does not state" in f for f in failures), failures
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "setup() {\n  export TORTOISE_VALUE_GATE=1\n}\n",
+        "if false; then\n  export TORTOISE_VALUE_GATE=1\nfi\n",
+        "exit 0\nexport TORTOISE_VALUE_GATE=1\n",
+        "for f in a b; do\n  export TORTOISE_VALUE_GATE=1\ndone\n",
+    ],
+)
+def test_an_assignment_the_process_never_receives_is_refused(body):
+    """Review at `8aa35e5d56`, P3 — the residual the peer lane recorded, now CLOSED.
+
+    A function body, a branch, a loop body and anything after a top-level `exit`/`exec` are
+    assignments the process may never receive, so none may be credited as a statement the shipped
+    configuration makes. Each lands on the fail-closed `ambiguous` verdict instead.
+    """
+    stated, ambiguous = gate._shell_assignments(body)
+    assert stated == {}, (body, stated)
+    assert ambiguous == {"TORTOISE_VALUE_GATE"}, (body, ambiguous)
+    # a top-level assignment in the SAME file still counts
+    stated, _ = gate._shell_assignments("export TORTOISE_EMBED_GATE=1\n" + body)
+    assert stated == {"TORTOISE_EMBED_GATE": "1"}
+
+
 def test_the_shell_reader_requires_export():
     """Review round 8, P3: the entrypoint `exec "$@"`s, so only an EXPORTED value reaches it."""
     stated, ambiguous = gate._shell_assignments("TORTOISE_VALUE_GATE=1\n")
