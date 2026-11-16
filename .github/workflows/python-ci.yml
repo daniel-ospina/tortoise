@@ -3095,7 +3095,7 @@ jobs:
           # than from a job-level `env:` block (see the #6253 note on test-slow).
           path: ${{ runner.temp }}/pytest.log
           if-no-files-found: ignore
-      - name: Validate docker-compose.yml (ports, headers, embedding switches #12926)
+      - name: Validate docker-compose.yml (ports + header edits)
         # parse check + the omits-a-switch refusal (tools/embed_switch_gate.py); always() so a red step cannot skip it
         if: always()
         run: docker compose config -q && echo "compose config OK" && python3 tools/embed_switch_gate.py
