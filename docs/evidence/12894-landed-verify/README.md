@@ -43,10 +43,11 @@ What this lane did **not** do: it did not run a Postgres-backed suite (the one D
 run, `tools/record_wiring_check.py`, which is DB-free by design), and it did not modify product code.
 The docs lint is the one instrument whose history had to be corrected rather than simply reported: the
 first invocation exited **2** on its own missing required inputs (`--markdownlint-output`,
-`--markdownlint-expected-files`, `--lychee-output`), so it *never ran* — recorded in
-`WORKTREE-REPORT.md` as suite 2, exit 2, a red that is kept rather than deleted — and the lint was then
-run through the `docs` job's own scripts at its pinned versions, where it reports **0 markdownlint
-issues, 0 link errors and 0 new baseline findings** (§9, rows 7–9). Both states are in the record. It also
+`--markdownlint-expected-files`, `--lychee-output`), so at that point it had not run — recorded in
+`WORKTREE-REPORT.md` as a red row that is kept rather than deleted. It was then run through the `docs`
+job's own scripts at their pinned versions, where it reports **0 markdownlint issues in 1 file, 0 link
+errors over `total=0` links** (this document contains none, so that gate had nothing to resolve), **and
+0 new / 0 known baseline findings** (§9). Both states are in the record. It also
 did not re-derive the discussion on `#12894`/`#12959` line by line — where a PR-body claim is quoted
 below it is marked as a claim and the code is what settles it.
 
@@ -257,7 +258,7 @@ ON CONFLICT (org_id, graph_id, seq) DO NOTHING
 
 | Arm | Loud? | Where |
 |---|---|---|
-| genuine replay (same type, same payload, same capture) | silent — that is idempotence | `:6718-6723` (the arm), `:6812-6813` (the silent return), `:6847` |
+| genuine replay (same type, same payload, same capture) | silent — that is idempotence | `:6718-6723` (the arm), `:6812-6813` (the silent return — a genuine replay's conflict query returns no row, so it never reaches the drift return at `:6847`) |
 | same type **and** same capture, payload differs → read as *derivation drift* | **silent** — admitted as a *reading*, not evidence | `:6820-6846`, `:6847` |
 | anything else → `JournalPositionCollision` | loud: named refusal `journal_collision`, counter, WARNING | `:6858-6872`, `record_writer.py:2747-2771` |
 | `ts` is `NULL` and the payload differs | loud (`capture_state="unknown"`) | `record_projection.py:6849-6853` |
@@ -420,7 +421,8 @@ it. `§A7.7` step numbers are the plan's.
 
 ## V6 — anything merged that should not have been
 
-The chain had four review rounds. Each named defect, and where it stands now:
+The **landed PRs** had four review rounds between them — that count is theirs and is unrelated to the
+eight rounds *this document* went through in §9. Each named defect, and where it stands now:
 
 | # | Defect named in review | Status | Evidence |
 |---|---|---|---|
@@ -512,24 +514,28 @@ The honest comparison is `git log refs/pull/12959/head..<wip-ref>` plus a path-s
 
 ---
 
-## 9. Commands used (verbatim, with counts)
+## 9. Commands used (verbatim)
 
-**Which invocations are registered, and which are not.** Nine suite runs went through the lane's report
-tool (`WORKTREE-REPORT.md`, "Suites run"): **row 1 and rows 3–6 are the wiring check** — row 1 while
-drafting, then four runs across the eight review rounds, **not** one per round (the fix batches for
-cycles 2, 3 and 4 were never followed by a run); **row 2 is the docs-lint invocation that exited `2`
-without running**; and **rows 7–9 are that lint re-attempted properly** — the CI's own
-`docs-markdownlint.sh` (0 issues), its `docs-link-check.sh` (0 errors), and
-`docs_lint_baseline.py check` over both reports, which returned `0 new, 0 known (baseline), 0 in
-generated files`, exit 0. ⚠️ **That register is not part of this PR and is not readable downstream:**
-`WORKTREE-REPORT.md` is gitignored (`.gitignore:158`) and lives only in the measurement worktree, so the
-counts above are this lane's record of what it ran rather than an artifact a reader of the merged
-document can open. What IS re-measurable is the wiring check itself, which is why V5 item 1 asks for its
-exit code to be re-established at the head that moves the gate.
+**Which invocations are registered, and which are not.** The lane's report tool took every check this
+lane ran, and `WORKTREE-REPORT.md` is the register: the wiring check after each fix batch, the docs lint
+first as a non-run (exit `2`, kept as a red row rather than deleted) and then through the workflow's own
+pinned producers, which returned `0` markdownlint issues in one file, `0` link errors over `total=0`
+links — this document contains no links, so that gate had nothing to resolve and its pass is vacuous —
+and `0 new, 0 known (baseline)` from the baseline differ, exit `0`.
 
-Two lane-tool invocations in the block below are *not* in the register — `worktree_report.py init`, and
+Two things about that register are load-bearing for how it should be read. It is **gitignored**
+(`.gitignore:158`) and lives only in the measurement worktree, so it is **not part of this PR** and a
+reader of the merged document cannot open it: the counts above are this lane's record of what it ran,
+not an artifact shipped beside the claims. And the row numbering is deliberately **not** restated here,
+because a number written into this document goes stale the next time a check is registered — the first
+two drafts of this section each carried a row count and each was falsified by a later run in the same
+session. What IS re-measurable without the register is the gates themselves, which is why V5 item 1 asks
+for the wiring check's exit code to be re-established at the head that moves it.
+
+Three lane-tool invocations in the block below are *not* in the register — `worktree_report.py init`,
+`worktree_report.py check` (which reads the register rather than producing a suite), and
 `gh_write_preflight.py`, whose probe creates, confirms and deletes a throwaway remote ref, so it is
-neither read-only nor registered. Every other measurement in this document is a read-only inspection
+neither read-only nor a suite. Every other measurement in this document is a read-only inspection
 (`rg`, `sed`, `grep`, `git log`/`git merge-base`/`git for-each-ref`, `gh issue|pr view`, and two
 `uv run python -c` evaluations), quoted inline at the claim it supports. Both `python` evaluations are
 reproduced verbatim at the end of this section, and V6-5 quotes their results rather than restating
@@ -544,8 +550,7 @@ they cover the shipping commit. Each run is labelled with the round it follows, 
 `started_at`/`finished_at`, so a row can be placed between two commits. Row 3 is where that check
 bites — it lands between `77951e15cf` (the cycle-1 fixes) and `3053bd2827` (the cycle-2 fixes), so it is
 a cycle-1 run and covers nothing the cycle-2 round added; row 4 lands after `3ada51d627` (cycle-4) and
-was taken with the cycle-5 edits already in the working tree; rows 5 and 6 follow the cycle-6 and
-cycle-7 edits. A run labelled one round fresher than its
+was taken with the cycle-5 edits already in the working tree. A run labelled one round fresher than its
 timestamps allow is the defect this paragraph exists to prevent: the first draft of this section
 attributed that row to cycle 3, and the register said otherwise.
 
@@ -557,34 +562,39 @@ document, so the commits after the last registered run — all of them
 **V6-6's blind spot**, and it is worth stating where the instrument is introduced rather than only where
 the finding is: a defect in `tools/` or in `supabase/migrations/` — the `ON DELETE CASCADE` is one — is
 outside what this check can see, so its exit 0 says nothing about it.
-The property does **not** extend to the docs lint, which is why its non-run stays a red.
+The property does **not** extend to the docs lint, which is why the first non-run stays a red row even
+though the producer runs later ran it clean.
 
 **One recorded suite did not run, and the gap is kept in the register rather than deleted:** the first
 docs-lint invocation exited `2` because the harness needs three outputs the lane had not produced, so
-the document was not linted by that tool at that point. The register carries the gap as suite 2 (exit
-`2`) and again as a `Could not do` note, and `check` still reports `1 FAILING SUITE` because of it.
-Rows 7–9 are the correction: run through the workflow's own scripts with its pinned versions, the lint
-reports **0 markdownlint issues, 0 link errors, and 0 new / 0 known baseline findings**. Both states are
+the document was not linted by that tool at that point. The register carries the gap as a red row (exit
+`2`) and again as a `Could not do` note, and `check` still reports `1 FAILING SUITE` because of it. The
+correction is in the register too: run through the workflow's own scripts with its pinned versions, the
+lint reports **0 markdownlint issues in 1 file, 0 link errors over `total=0` links, and 0 new / 0 known
+baseline findings**. Both states are
 recorded — the failure that happened and the pass that closed it — because deleting the red row would
 make the register read as though the lint had been green all along.
 
 ```bash
 uv run python tools/worktree_report.py init --issue 12894
-uv run python tools/gh_write_preflight.py --repo .
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 1, exit 0
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/docs_lint_baseline.py check --baseline config/docs-lint-baseline.json'   # suite 2, exit 2, NEVER RAN
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 3, exit 0 (re-run after the cycle-1 fixes)
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 4, exit 0 (re-run after the cycle-5 edits)
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 5, exit 0 (re-run after the cycle-6 edits)
-uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'   # suite 6, exit 0 (re-run after the cycle-7 edits)
-# rows 7–9 — the docs lint, run the way the workflow runs it (pinned producers, real reports)
+uv run python tools/gh_write_preflight.py --repo .          # GH-WRITE-OK(origin)
+
+# the DB-free gate, invoked once after each batch of fixes. Every instance exited 0;
+# the register holds each one with its timestamp, which is what §9's placement rests on.
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/record_wiring_check.py'
+
+# the docs lint, FIRST as the bare invocation — a non-run, kept as a red row:
+uv run python tools/worktree_report.py run --cmd 'uv run python tools/docs_lint_baseline.py check --baseline config/docs-lint-baseline.json'
+
+# …and then the way the workflow runs it, with its pinned producers and real reports:
 bash .github/scripts/docs-markdownlint.sh --label 'Markdownlint (changed files)' \
-    --cli2 markdownlint-cli2@0.23.3 --files-from /tmp/md.nul --output /tmp/mdlint.txt   # 0 issues
+    --cli2 markdownlint-cli2@0.23.3 --files-from /tmp/md.nul --output /tmp/mdlint.txt   # 0 issues in 1 file
 bash .github/scripts/docs-link-check.sh --label 'Link check (changed files)' \
-    --files-from /tmp/md.txt --output /tmp/lychee.json                                   # 0 errors
+    --files-from /tmp/md.txt --output /tmp/lychee.json                # 0 errors over total=0 links
 uv run python tools/docs_lint_baseline.py check --markdownlint-output /tmp/mdlint.txt \
     --markdownlint-expected-files 1 --lychee-output /tmp/lychee.json \
-    --baseline config/docs-lint-baseline.json    # 0 new, 0 known — exit 0
+    --baseline config/docs-lint-baseline.json                     # 0 new, 0 known — exit 0
+
 uv run python tools/worktree_report.py check        # exit 3 — VALID EVIDENCE, 1 FAILING SUITE
 ```
 
