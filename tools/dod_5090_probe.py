@@ -2701,11 +2701,21 @@ def _compose_blank_declarations(argv: list[str], flag: str) -> dict[str, str] | 
     if not run["ok"]:
         return None
     try:
-        model = json.loads(run["stdout"] or "{}")
+        # ⛔ NOT `or "{}"` (`#12902` review, P2, MEASURED): an EMPTY stdout became `{}`,
+        # which parsed into `services == {}` and an empty `declarations` — and
+        # `_compose_blank_is_interpolated` then answered `False` for a gate whose value
+        # the resolver had just failed to produce, publishing a `${MISSING}` gate as a
+        # MEASURED `OFF`. That is a false PASS on the blocking axis, and it is the one
+        # branch of this helper's announced fail-closed rule that was not applied.
+        # An empty stdout is a JSON error, so it now takes the `None` path below.
+        model = json.loads(run["stdout"])
     except json.JSONDecodeError:
         return None
     services = (model.get("services") or {}) if isinstance(model, dict) else {}
-    if not isinstance(services, dict):
+    # ⛔ And an ANSWER WITH NO MODEL is not an answer: this probe is only asked when the
+    # primary model HAD services, so a supplementary model with none contradicts it.
+    # `None` holds every blank UNRESOLVED, which is what the docstring promises.
+    if not isinstance(services, dict) or not services:
         return None
     declarations: dict[str, str] = {}
     for name, service in services.items():

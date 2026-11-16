@@ -11778,6 +11778,55 @@ def test_12549_a_blank_declaration_is_judged_from_the_UNINTERPOLATED_model(
     assert "MISSING_B" in reason and "MISSING_A" not in reason, reason
 
 
+def test_12549_an_uninterpolate_probe_with_NO_MODEL_holds_the_blank(
+        tmp_path, monkeypatch):
+    """An answer with no model is NOT an answer — the blank must stay `UNRESOLVED`.
+
+    ⛔ MEASURED (`#12902` review, P2): `json.loads(run["stdout"] or "{}")` turned an
+    EMPTY stdout into `{}`, and `model.get("services") or {}` turned an absent
+    `services` into `{}`, so `_compose_blank_declarations` returned an EMPTY
+    `declarations` — and `_compose_blank_is_interpolated` then answered `False` for a key
+    whose declaration it had never seen. A gate set to `"${MISSING_VAR}"` was published
+    as a MEASURED `OFF`: a false PASS on the blocking axis, on the one branch of the
+    helper's own announced fail-closed rule that was not applied.
+
+    The four probe answers below are the whole surface: a REFUSAL and a non-JSON body
+    already failed closed; the two model-less successes did not. All four must hold the
+    file, because this probe is only asked when the PRIMARY model had services, so a
+    supplementary model with none contradicts the file it just read.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${MISSING_VAR}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    real = probe._run_config_resolver
+    for label, fake in (
+            ("refuses", {"ok": False, "stdout": "", "stderr": "", "reason": "x",
+                          "argv": []}),
+            ("non-json", {"ok": True, "stdout": "not json", "stderr": "",
+                          "reason": None, "argv": []}),
+            ("empty model", {"ok": True, "stdout": "{}", "stderr": "",
+                             "reason": None, "argv": []}),
+            ("empty stdout", {"ok": True, "stdout": "", "stderr": "",
+                              "reason": None, "argv": []})):
+        calls = {"n": 0}
+
+        def patched(argv, *, extra_env=None, _fake=fake, _count=calls):
+            # call 1 is the PRIMARY resolve and must stay real (it is what makes the
+            # key blank); only the `--no-interpolate` probe is faked.
+            _count["n"] += 1
+            return (real(argv, extra_env=extra_env) if _count["n"] == 1
+                    else dict(_fake))
+
+        monkeypatch.setattr(probe, "_run_config_resolver", patched)
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, (
+            f"a model-less probe answer ({label}) was read as a MEASURED answer: "
+            f"{shipped['deployment']['files']}")
+        assert shipped["deployment"]["measured"] is False, shipped["deployment"]
+    monkeypatch.setattr(probe, "_run_config_resolver", real)
+
+
 def test_12549_a_PROFILED_blank_is_NOT_published_as_a_disarm(tmp_path, monkeypatch):
     """The mirror half: the all-profiles pass never consulted the unset warning.
 
