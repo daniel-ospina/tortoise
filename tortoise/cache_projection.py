@@ -823,39 +823,61 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   generalise any one shape into "the record cannot express un-superseded"; it
 #:   can, via the carriers. The STATUS-ONLY `update_entity(status='live')` shape is
 #:   a record no-op (`never_store` yields a literal `SET node_key = node_key`).
-#:   ⛔ **THE DOOR, NOT THE LAYER — #12745 closes ONE SDK route out of a dead row.**
-#:   The example this bullet used to carry
+#:   ⛔ **THE DOOR, NOT THE LAYER — and it is the COHERENT shape it ADMITS.**
+#:   #12745 briefly refused the example this bullet used to carry
 #:   (`sdk.update_entity(obj, status='live', supersededBy=None,
-#:   supersededAt=None)`) is REFUSED at `main` since #12745: `superseded` is in
-#:   `commit_ops.OBJECT_TERMINAL_STATUSES`, and that door now refuses a dead
-#:   state's transition to a current-reading STATUS WORD (measured: the refusal
-#:   lands BEFORE any write, so no `EntityMutated` reaches this stream).
-#:   The record's expressive power above is unchanged — it is the graph write
-#:   that no longer happens.
-#:   ⛔ **AND THE ROUTE IS NOT CLOSED — do not read the paragraph above as "the
-#:   row cannot be made current again".** A NULL status is NOT a word, so the
-#:   same guard skips it (`sdk.py`, `if not isinstance(_np_status, str):
-#:   continue`) and `update_entity(obj, status=None)` on a superseded Object is
-#:   still ACCEPTED: measured, it REMOVES the property (`SET n += {status: null}`)
-#:   and journals one record, and `live._terminal_excluded` treats an ABSENT
-#:   status as current, so the graph then serves the row as LIVE while
-#:   `DERIVED_FROM_RECORD` still folds `superseded` from the retained carrier
-#:   pair — the residual this bound already states below (the `status=None`
-#:   shape, #9974). So an un-supersede is WRITABLE today and NOT MODELLED as a
-#:   removal today; the two halves of that sentence are different defects, and
-#:   #12592 is the
-#:   missing SDK *supersede* verb for an Object/Subject, not the un-supersede
-#:   route.
+#:   supersededAt=None)`) because it read the dead set from the RECALL set, which
+#:   answers "which stored states are dead" and not "which states a writer may
+#:   mint"; #12825 restored it and #12882 restated the pins, so it is ACCEPTED
+#:   again on a superseded row: the write clears BOTH carriers, so no carrier
+#:   survives for this reader to re-derive the dead word from and graph and
+#:   record AGREE. What the door REFUSES is the INCOHERENT half — `status='live'`
+#:   ALONE, which would leave this reader folding `superseded` off the retained
+#:   carriers against a live graph — and every other dead→current-word
+#:   transition.
+#:   ⛔ **AND THE `status=None` SHORTCUT IS NOW CLOSED TOO (#12882).** An earlier
+#:   revision of this bullet described the NULL clear as an OPEN route: "a NULL
+#:   status is NOT a word, so the same guard skips it (`sdk.py`, `if not
+#:   isinstance(_np_status, str): continue`)". That skip is GONE — it was the
+#:   resurrection hole (#12882 part 2: a non-string target LIFTED a dead row
+#:   instead of being skipped) — and `update_entity(obj, status=None)` on a
+#:   `superseded`/terminal `:Object` is now REFUSED **when the call names the
+#:   status ALONE** (measured: `ValueError … 'superseded' is TERMINAL for a
+#:   :Object`, the row unchanged, no record). ⛔ **AND THE COMPOSED NON-WORD
+#:   ROUTE IS CLOSED TOO (#12882 review cycle 5).** An earlier revision of this
+#:   bullet said the shape was still producible one call away: the coherence
+#:   allowance keyed on the carrier CLEAR and on the KEYS supplied
+#:   (`_status_key_leaves_the_dead_state`), never on the value written, so
+#:   `status=None` / `123` / `True` / `['live']` TOGETHER WITH both carrier
+#:   clears was ADMITTED and the row went `(None, None, None)` against a record
+#:   still folding `superseded`. That was measured and true (`#12856` held the
+#:   decision, then closed without it), so the allowance now requires a `str`
+#:   target: measured at this head, every one of those composed shapes raises
+#:   `'superseded' is TERMINAL for a :Object` with the row unchanged and no
+#:   record, while the licensed `status='live'` + both clears is still ACCEPTED.
+#:   What stays reachable is the STORED-side hole (#12869) and a historical row
+#:   already written that way — plus an undeclared STRING word
+#:   (`status='banana'`), which stores and reads current: that is the `:Object`
+#:   vocabulary hole (#10371, #8166), not this bound.
 #:   ⛔ THE WRITE DOOR ADMITS THIS SHAPE, AND ONLY THIS SHAPE (#12786). A
 #:   terminal-Object guard (#12745) briefly refused EVERY departure from
 #:   `superseded`, which made this bullet's measured shape unexpressible and
 #:   reddened `tests/test_status_projection.py::TestLifecycleCarrierCoherence::`
-#:   `test_clearing_a_supersession_is_still_writable`. The write door restores it
+#:   `test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot`
+#:   (the name #12790/#12882 gave the pin this sentence used to cite as
+#:   `test_clearing_a_supersession_is_still_writable`). The write door restores it
 #:   under the coherence condition this derivation needs — the row HELD a carrier
 #:   and the
 #:   write leaves NONE (`DERIVED_FROM_RECORD`, above, is what it reads) — so a
 #:   status-only `live`, a PARTIAL clear, and a carrier-less `superseded` stay
-#:   refused, and `archived`/`deprecated`/`retracted` never become recoverable.
+#:   refused, and `archived`/`deprecated`/`retracted` never become recoverable
+#:   THIS WAY. ⚠️ Not "never recoverable, full stop": a TWO-call
+#:   reclassification (`archived -> superseded` naming a successor, then this
+#:   coherent clear) does lift them — measured, the row is recalled again after
+#:   `rebuild_all`. That is the fail-open filed as #12908 (the gate's answer
+#:   depends on how many calls a caller spends), and it is NOT licensed here:
+#:   it fabricates the supersession this bullet's coherence condition exists to
+#:   withdraw.
 #:   That is the rule this bullet states ("the record CAN express it, via the
 #:   carriers") becoming executable at the door rather than a promise the graph
 #:   could not keep. The SNAKE spelling does not reach the node property yet
@@ -1009,19 +1031,27 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   ⚠️ Also STATED BOUND — a null-valued `state.status` (`update_entity(obj,
 #:   status=None)`) is NOT modelled: the graph applies `SET n += {status: null}`,
 #:   which REMOVES the property, while this reader skips a non-string value and
-#:   keeps whatever an earlier fold left. The two DISAGREE in two reachable
-#:   places, and the second needs no stream fold at all (#9974 review round 11):
-#:   (a) an explicit null arriving AFTER a restatus/connector fold on the same
-#:   node, and (b) an explicit null after the carrier derivation —
-#:   `update_entity(obj, status='superseded', supersededBy='p2')` then
-#:   `update_entity(obj, status=None)` leaves the graph LIVE (the `SET n += {status:
-#:   null}` removes the property, and `live._terminal_excluded` reads only
-#:   `n.status`) while the record's surviving `superseded_by` still derives
-#:   `superseded` through :data:`DERIVED_FROM_RECORD`, so the rebuild HIDES a name
-#:   the graph resolves. (b) predates this change; only the scope of the residual
-#:   is at issue here. Closing either means modelling an explicit removal as a
-#:   fold output, which is its own change and is recorded on #9974 rather than
-#:   assumed here.
+#:   keeps whatever an earlier fold left. ⛔ THE SHAPE THE DOOR NO LONGER PRODUCES
+#:   IS THE LONE NULL (#12882): the non-string target is no longer skipped, so
+#:   `update_entity(<terminal row>, status=None)` ALONE is REFUSED (measured:
+#:   `'superseded' is TERMINAL for a :Object`, row unchanged, journal delta 0),
+#:   and with it goes
+#:   (b) the explicit null after the carrier derivation (`update_entity(obj,
+#:   status='superseded', supersededBy='p2')` then `update_entity(obj,
+#:   status=None)`) — the second call now raises instead of leaving the graph
+#:   LIVE with the record's surviving `superseded_by` still deriving `superseded`
+#:   through :data:`DERIVED_FROM_RECORD`.
+#:   ⛔ AND THE COMPOSED NON-WORD ROUTE IS CLOSED (#12882 review cycle 5): the
+#:   coherence allowance keys on the CARRIER CLEAR and on the KEYS supplied, not
+#:   on the value written, so `status=None` (or `123`, or `['live']`) TOGETHER
+#:   with both carrier clears USED to be admitted — measured, the row went
+#:   `(None, None, None)` while this reader kept the `superseded` an earlier
+#:   supersede record folded, so a rebuild HID a name the graph resolves. The
+#:   allowance now requires a `str` target, so neither shape above is reachable
+#:   by a composed call (each raises, row unchanged, no record). The bound stays
+#:   stated for a row already written that way or written out of band (the
+#:   STORED side, #12869) — and modelling an explicit removal as a fold output
+#:   is still its own change on #9974.
 #:
 #: `(property, source properties, value)`, applied in :func:`node_from_row` only
 #: where the record is SILENT about the target property — which, for a name the
@@ -1230,10 +1260,14 @@ class LifecycleEvent:
     #: reader never inspects `op` (see the class docstring). Value the caller
     #: wrote, from the record's own `state` map. `None` means "this record carries no status write". ⚠️ It does
     #: NOT mean the caller cleared the field: `update_entity(obj, status=None)` is
-    #: a real clear (`sdk.py`: "a null REMOVES the property … a clear is CALLER
-    #: intent") and that shape is R4's declared bound, not a representable state
-    #: here. A caller who wants a live value writes `status='live'`, which IS
-    #: carried.
+    #: a real clear on a NON-terminal row (`sdk.py`: "a null REMOVES the property …
+    #: a clear is CALLER intent"), and since #12882 that same call on a TERMINAL
+    #: row is REFUSED (a non-string target out of a dead state is a resurrection
+    #: attempt) — ALONE and also COMPOSED with both carrier clears, which the
+    #: allowance refuses as of review cycle 5. So a null `restatus_status` reaching
+    #: here is R4's declared bound below for a row ALREADY written that way (or
+    #: written out of band, #12869) — not a state this door can still produce. A
+    #: caller who wants a live value writes `status='live'`, which IS carried.
     restatus_status: str | None = None
     #: A state op **or a creation record** — the `(label, id)` the live fold
     #: matches on. `EntityMutated` sets it from `state`, and since #9974's BIRTH
@@ -3353,14 +3387,28 @@ def apply_event_stream_folds(
         # no-op, and `DERIVED_FROM_RECORD` still derives from the retained pair.
         # That divergence PRE-EXISTS this change (#10189) and is recorded on
         # #9974; a temporal guess here would manufacture a rule the record cannot
-        # support. ⛔ AND #12745 CHANGED ONE ARM OF IT: the `status='<current-reading
-        # word>'` un-terminate of an Object or a Subject is REFUSED before any write,
-        # so the graph can no longer read LIVE that way while this reader folds
-        # `superseded`. The NULL-status shape is NOT refused (a null is not a word),
-        # so that arm of this bound is unchanged and still stands: the graph serves
-        # the row as current (absent status) while this reader keeps folding the
-        # retained carrier pair (#9974). The ordering gap is unchanged either way —
-        # it is the WORD write that stopped arriving.
+        # support. ⛔ AND THE DOOR HAS SINCE NARROWED BOTH ARMS — measured, not
+        # assumed (#12882): the `status='<current-reading word>'` un-terminate of
+        # an Object is REFUSED unless the same call ALSO clears both carriers
+        # (that composed, coherent shape is the one #12825 restored and #12882
+        # pins as ACCEPTED), and a status write that names no word at all —
+        # `status=None` — is REFUSED on a terminal row when it arrives ALONE
+        # (measured: `'superseded' is TERMINAL for a :Object`, row unchanged,
+        # journal delta 0), which is what stopped the graph reading LIVE while
+        # this reader folded `superseded`.
+        # ⛔ AND THE COMPOSED ROUTE IS CLOSED TOO (#12882 review cycle 5). An
+        # earlier revision of this comment said the bound was "narrowed, not
+        # closed" because a non-word target (`None`, `123`, `True`, `['live']`)
+        # TOGETHER WITH both carrier clears was still ADMITTED — the allowance
+        # keys on the carrier CLEAR and `_status_key_leaves_the_dead_state` reads
+        # the KEYS supplied rather than the value written — landing the row
+        # `(None, None, None)` while this reader kept the `superseded` an earlier
+        # supersede record folded. That was measured and true; the allowance now
+        # requires a `str` target, so each of those composed shapes raises with
+        # the row unchanged, and the bound is reachable only for a row ALREADY
+        # written that way or written out of band (#12869). An undeclared STRING
+        # word is still accepted — the `:Object` vocabulary hole (#10371, #8166),
+        # a different surface.
         if _is_terminal_status(current):
             out.append(node)
             continue
