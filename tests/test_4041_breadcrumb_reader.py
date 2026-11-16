@@ -198,21 +198,24 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
     happened, for the failure message to splice in — the message must not claim
     a kill that was suppressed.
 
-    The group, not the child, for TWO different reasons — one per path:
+    The group, not the child, for two reasons — BOTH on the TIMEOUT path,
+    because that is the only path on which this function runs at all:
+    `_run_hook` calls it from `except subprocess.TimeoutExpired`, and on the
+    SUCCESS path it deliberately kills nothing (a drain is *meant* to outlive
+    the hook — see that docstring).
 
-    - On the SUCCESS path, the hook's three `nohup … session drain … >/dev/null
-      2>&1 &` arms (`session-start.sh:831`, `:846`, `:854`) are fire-and-forget
-      by design — they are meant to outlive the hook — so a bound that reaps
-      only bash leaves them running past the test that spawned them.
-    - On the TIMEOUT path, the install-probe beacon is a plain `_run_probe
-      >/dev/null 2>&1 &` (`:786`): NOT `nohup`-detached, and reaped by a `wait`
-      (`:801`) on the normal path — which is why `:767` says it does not join
-      the fire-and-forget shape.  But it is still BACKGROUNDED, and the
-      foreground `_run_digest` (`:793`) that has to finish before that `wait`
-      is precisely where a hung hook stalls, so a hook that never reaches
-      `:801` leaves it unreaped.  It is a `session probe` against the same API
-      the digest is blocked on, i.e. the child most likely to still be running
-      when the bound fires.
+    - A hook killed after it has dispatched one of its three `nohup … session
+      drain … >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:846`, `:854`)
+      leaves that drain in the group.  `nohup` ignores SIGHUP but changes
+      neither the drain's process group nor its reachability by SIGKILL, so a
+      bound that reaps only bash leaks it.
+    - A hook that stalls before the `wait` (`:801`) leaves the BACKGROUNDED
+      install-probe beacon (`:786`) unreaped.  It is not `nohup`-detached —
+      `:767` says it does not join that fire-and-forget shape — but it is
+      backgrounded, and the foreground `_run_digest` (`:793`) that must finish
+      before that `wait` is precisely where a hung hook stalls.  It is a
+      `session probe` against the same API the digest is blocked on, i.e. the
+      child most likely to still be running when the bound fires.
 
     Both failures are absorbed on purpose —
     ``ProcessLookupError`` when the group is already gone, ``PermissionError``
