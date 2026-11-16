@@ -820,18 +820,21 @@ def test_the_position_statement_carries_no_schema_ask() -> None:
     there is this record's own drift, which is exactly what this guard reports.
     ⛔ AND THIS PIN CARRIES THE TWO READINGS TOO, not #12894 alone (review P2):
     a red here means EITHER that the key gained journal identity (#12894, so the
-    pin is DELETED with the guard) OR that the payload derivation moved (so the
-    boundary must be RE-MEASURED). Naming one reading sends the next reader down
-    the wrong one — the event_id pin above already carries both.
+    pin is DELETED with the guard) OR that the STATEMENT WAS RESHAPED — which is
+    the only other way this assertion can move, because `_journal_row` returns
+    `_JOURNAL_POSITION_INSERT_SQL` VERBATIM. A payload-derivation change moves the
+    PARAM assertions below, never this one; naming it here sent the next reader
+    hunting a cause this red cannot have.
     """
     statement = rp._journal_row(RECORD_A, 1, ORG, GRAPH)
     assert statement.sql == rp._JOURNAL_POSITION_INSERT_SQL, (
         "`_journal_row` no longer emits the statement the collision guard knows "
         "how to read. TWO readings, and this pin does not choose between them: "
         "if the KEY GAINED JOURNAL IDENTITY (#12894), the guard is DELETED with "
-        "it — do not re-point this pin at the new shape; if instead the PAYLOAD "
-        "DERIVATION MOVED (`ENVELOPE_KEYS` or a record type's field set "
-        "changed), the boundary must be RE-MEASURED")
+        "it — do not re-point this pin at the new shape; if instead the "
+        "STATEMENT WAS RESHAPED (`RETURNING`, `DO UPDATE`, or a probe folded "
+        "into the `VALUES` list), the guard's POSITIONAL bind reading must be "
+        "RE-MEASURED against the new spelling")
     assert statement.sql.endswith(
         "ON CONFLICT (org_id, graph_id, seq) DO NOTHING")
     assert "RETURNING" not in statement.sql
@@ -878,7 +881,7 @@ def test_the_guard_bails_when_the_position_statement_is_reshaped() -> None:
         (ORG, GRAPH, "journal-1", 1, "ObjectRegistered",
          json.dumps(_payload_of(RECORD_A)), RECORD_A["ts"]),
     )
-    appended_bind = rp.Statement(genuine.sql, genuine.params + ("journal-1",))
+    appended_bind = rp.Statement(genuine.sql, (*genuine.params, "journal-1"))
 
     for label, statement in (("renamed", reshaped_sql),
                              ("bind appended", appended_bind)):
@@ -1148,7 +1151,7 @@ def test_a_ts_less_replay_is_silent_on_a_real_database(
     the arm conditional on there being a capture time to compare, and this leg is
     what reds when it is removed.
     """
-    _, tenant, _, _ = record_tenant
+    _, _tenant, _, _ = record_tenant
     journal = EventLog(tmp_path / "corpus" / ".events.jsonl")
     ts_less = {k: v for k, v in RECORD_B.items() if k != "ts"}
     assert "ts" not in ts_less

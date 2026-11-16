@@ -1021,8 +1021,10 @@ class JournalPositionCollision(RecordProjectionError):
     reader cannot mistake this silence for coverage.
     ⚠️ Why it is admitted rather than closed HERE: closing it means requiring
     that `_identity_evidence` did not answer `disagrees` before taking the drift
-    reading, which is a SEMANTICS change to this verdict — it belongs to
-    #12904's owner, not to the round that measured the window. `#12894`'s
+    reading, which is a SEMANTICS change to this verdict — it belongs to a
+    recorded decision on `#9318` (open; `#12904` is MERGED and closed, so it
+    cannot carry one), not to the round that measured the window. That decision
+    is stated in full, with its measurement, on `#9318`. `#12894`'s
     journal IDENTITY in the key removes it with the rest of the residual,
     because two journals can then no longer meet at one position at all.
     ⛔ The remaining false-red subset, named rather than implied: a write with NO
@@ -1101,12 +1103,12 @@ class JournalPositionCollision(RecordProjectionError):
         # already shared with the payload digests.
         capture = {
             "differs": (
-                f"This write and the surviving row were CAPTURED at different "
-                f"times (`recorded_at`), which a re-derivation of the payload "
-                f"alone does not change. "),
+                "This write and the surviving row were CAPTURED at different "
+                "times (`recorded_at`), which a re-derivation of the payload "
+                "alone does not change. "),
             "unknown": (
-                f"This write carries no `ts`, so its capture time cannot be "
-                f"compared with the surviving row's. "),
+                "This write carries no `ts`, so its capture time cannot be "
+                "compared with the surviving row's. "),
         }.get(capture_state, "")
         # ⛔ The CONSEQUENCE is cause-neutral too (review cycle 5). The earlier
         # wording — "every row written under it would be indexed by ANOTHER
@@ -6712,8 +6714,9 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     # `test_a_same_capture_instant_pair_is_ADMITTED_not_detected`), so the
     # silence cannot be mistaken for coverage. `main` (post-#12904) refused it
     # (payload differs ⇒ collision); closing it here would mean refusing on
-    # `disagrees`, a semantics change to this verdict that belongs to #12904's
-    # owner, and #12894's journal identity in the key retires it outright.
+    # `disagrees`, a semantics change to this verdict that belongs to a recorded
+    # decision on `#9318` (open; `#12904` is merged and closed and cannot carry
+    # one), and #12894's journal identity in the key retires it outright.
     # ⚠️ `ts is not None` is written out even though a NULL bind can never read as
     # `same_capture` (`recorded_at` is NOT NULL, so `IS NOT DISTINCT FROM NULL`
     # is false): the two facts live in different places, and a reader must not
