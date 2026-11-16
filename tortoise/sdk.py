@@ -8161,7 +8161,7 @@ def _refuse_document_kind_demotion(stored_kinds, props, *, surface: str,
             f"a caller can un-meter is not a cap). Retarget among metered "
             f"genres is allowed (`report` -> `brief`). To drop a document's "
             f"metering, delete the document; to record that a source became "
-            f"unavailable, use `create_source(..., raw_state=...)`."
+            f"unavailable, use `register_source(..., raw_state=...)`."
         )
 
 
@@ -32157,7 +32157,7 @@ class TortoiseSDK:
                 "MATCH (s:Source {url:$url}) RETURN count(s)",
                 params={"url": url},
             ).result_set
-            node = self.create_source(url, source_kind, **item)
+            node = self._create_source(url, source_kind, **item)
             canonical = node.get("id") or node.get("url") or url
             if ref:
                 # Pre-registered in the ref pre-scan (url known upfront) —
@@ -39211,8 +39211,8 @@ class TortoiseSDK:
                 elif src_url and not eff_tier:
                     item["suggestion"] = (
                         f"Source {src_url} is untiered — call "
-                        f"set_source_tier('{src_url}', 'T0'..'T4') or "
-                        f"create_source(url, kind, tier=...) "
+                        f"manage_source_trust('{src_url}', tier='T0'..'T4') or "
+                        f"register_source(url, kind, tier=...) "
                         f"(covers all points from this source)"
                     )
                 else:
@@ -40274,7 +40274,7 @@ class TortoiseSDK:
             from .exceptions import BundleValidationError
             raise BundleValidationError(violations)
 
-    def checkpoint(self, items: list[dict], agent_name: str = "checkpoint",
+    def _checkpoint(self, items: list[dict], agent_name: str = "checkpoint",
                    threshold: float = 0.95) -> dict:
         """Session batch save — two-tier dedup (content hash + embedding similarity).
 
@@ -41077,7 +41077,7 @@ class TortoiseSDK:
         return {"ingested": ingested, "updated": updated, "skipped": skipped,
                 "failed": failed, "errors": errors}
 
-    def mine_corpus(self, directory: str, *, extract_entities: bool = True,
+    def _mine_corpus(self, directory: str, *, extract_entities: bool = True,
                     progress_file: str | None = None, model=None,
                     event_log_path: str | None = None) -> dict:
         """Batch-mine a session corpus (J-1, plan §6.1) into this graph.
@@ -49075,7 +49075,7 @@ class TortoiseSDK:
                         f"{_managed!r} is server-managed on a :Source and "
                         f"cannot be set through the generic entity surface "
                         f"(#3998/D30). Record a DELETION with "
-                        f"`create_source(..., raw_state=...)`, which validates "
+                        f"`register_source(..., raw_state=...)`, which validates "
                         f"the value (accepted: {sorted(WRITABLE_RAW_STATES)}). "
                         f"`offline`/`access_revoked` are CONDITIONS, observed "
                         f"live and never stored (raw_state's \"Option A\" "
@@ -52486,7 +52486,7 @@ class TortoiseSDK:
             if conn is not None:
                 with contextlib.suppress(Exception):
                     conn.close()
-    def index_directory(self, directory: str,
+    def _index_directory(self, directory: str,
                         *, file_type: str = "auto",
                         corpus_name: str | None = None,
                         extract_metadata: bool = True,
@@ -53335,7 +53335,7 @@ class TortoiseSDK:
             # race-safe creator signal for concurrent same-key MERGEs; the
             # lock makes the single-statement MERGE + detection atomic w.r.t.
             # other index writers (threads leg). bolt:// stats stay honest.
-            self.create_source(
+            self._create_source(
                 url, kind, sourceDate=source_date, source_path=abs_path,
                 contentHash=content_hash, title=title,
                 _searchText=_source_search_text(title=title),
@@ -53803,7 +53803,7 @@ class TortoiseSDK:
         # Source's hash here would report a STALE Event as current.
         proj.link_source_to_legacy_event(url, event_id)
 
-    def index_sessions(self, directory: str, extract_metadata: bool = True,
+    def _index_sessions(self, directory: str, extract_metadata: bool = True,
                        llm_model: str | None = "gpt-5-mini",
                        progress_file: str | None = None) -> dict:
         """Index session files as AgentSession Events.
@@ -54130,7 +54130,7 @@ class TortoiseSDK:
         except Exception:
             return url
 
-    def create_source(self, url: str, sourceKind: str, *,
+    def _create_source(self, url: str, sourceKind: str, *,
                       tier: str | None = None, sourceDate: str | None = None,
                       source_path: str | None = None,
                       raw_state: str | None = None,
@@ -54237,16 +54237,21 @@ class TortoiseSDK:
                    "rawState", "rawStateAt", "raw_state"):
             if _k in props:
                 # #1501: name the actual sanctioned keyword per key (is_episodic
-                # became a sanctioned create_source keyword in this change; #3998
+                # became a sanctioned keyword in this change; #3998
                 # adds raw_state for the absent-raw state, server-managed for the
                 # same reason — a props payload must not be able to CLEAR a
                 # recorded absence, which is the whole point of the state).
+                # #12948 review F3: the sentence named `create_source`, which this
+                # batch RETIRES (the body survives as the private `_create_source`) —
+                # so the refusal sent the caller into a bare `AttributeError`. It now
+                # names the live container, as the same sentence already does in
+                # `_refuse_document_kind_demotion` above and in `quota.py`.
                 sanctioned = ("source_path" if _k in ("sourcePath", "source_path")
                               else "raw_state" if _k in ("rawState", "rawStateAt", "raw_state")
                               else _k)
                 raise ValueError(
                     f"{_k!r} is a server-managed field and cannot be set via "
-                    f"props — use the sanctioned create_source({sanctioned}=) "
+                    f"props — use the sanctioned register_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
                 )
         # #5196 round 5, P1: the token has TWO spellings, and this is the second.
@@ -54718,8 +54723,8 @@ class TortoiseSDK:
         `True == 1 == 1.0`, while FalkorDB stores a bool and an int as distinct
         values. Measured before this guard::
 
-            sdk.create_source(url, "document", contentHash="h-0", flag=True)
-            sdk.create_source(url, "document", contentHash="h-0", flag=1)
+            sdk.register_source(url, "document", contentHash="h-0", flag=True)
+            sdk.register_source(url, "document", contentHash="h-0", flag=1)
 
           -> 0 records appended, live `flag = 1` (int), rebuilt `flag = True`.
 
@@ -54883,7 +54888,7 @@ class TortoiseSDK:
                 return False
         return True
 
-    def set_source_tier(self, url: str, tier: str) -> dict:
+    def _set_source_tier(self, url: str, tier: str) -> dict:
         """Set (or change) a Source's credibility tier — non-destructive.
 
         Writes ``credibilityTier`` only; never touches ``sourceKind`` (legacy
@@ -55111,7 +55116,7 @@ class TortoiseSDK:
         self._write_reliability_cache(url, mean, comp, now)
         return {"url": url, "reliability": mean, "components": comp, "cache": "recomputed"}
 
-    def assess_source(self, url: str, assessor: str, score: float, rationale: str) -> dict:
+    def _assess_source(self, url: str, assessor: str, score: float, rationale: str) -> dict:
         """Record an agent's assessment of a Source (issue #398 Task 5).
 
         Creates a ``pointKind='assessment'`` Statement Point (ontology §2 —
@@ -55620,6 +55625,331 @@ class TortoiseSDK:
         """
         from .projection import clear_config_reset
         return clear_config_reset(self._get_proj().g)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # #4282 Phase 2 — the SOURCES / MINE / SESSION containers
+    # ══════════════════════════════════════════════════════════════════════
+    # Every name below is an OWNER-APPROVED target row (`tortoise/__all__.py`;
+    # `docs/product/beta-sdk-surface.md` rows 14-18 and 40). Each one
+    # CONTAINER-ises the off-surface members `docs/product/bridge-table.md`
+    # Part A names, and each member is RETIRED IN THE SAME RELEASE (the owner's
+    # Option B, #3836 (c)): the body lives on as the private `_x` method the
+    # container delegates to, and the old public name now RAISES with this name
+    # in the message (`tortoise/sdk_retired.py`). There is no alias layer.
+    #
+    # SHAPE — why a container with a discriminator, and not one verb per member.
+    # A container's members answer the SAME question and take the same first
+    # argument, so they are one operation whose second dimension is a FILTER.
+    # That is the shape AIP-132 gives `List` (here: `file_type`, `tier`,
+    # `items` vs `conversation`), and AIP-136 reserves a custom method for
+    # functionality that "can not be easily expressed via standard methods" —
+    # which is why `check_connection` is its own row rather than a section of
+    # `manage_source_trust`. Anthropic's tool-writing guidance states the agent
+    # half of the same rule: consolidate discrete operations under one tool,
+    # but "make sure each tool you build has a clear, distinct purpose".
+    #
+    # ⛔ APPEND-ONLY, DELIBERATELY. This block sits at the END of the class body
+    # so not one `sdk.py:NNNN` citation in the repo is re-staled — the same
+    # discipline the `_wire_vocabulary_gap_run_reader_10626` note at the foot of
+    # this file records. Insert above, and you own 1,400+ cite re-derivations.
+
+    def register_source(self, url: str, sourceKind: str, *,
+                        tier: str | None = None,
+                        sourceDate: str | None = None,
+                        source_path: str | None = None,
+                        raw_state: str | None = None,
+                        is_episodic: bool | None = None,
+                        **props) -> dict:
+        """Declare a source exists (row 14). **The URL is its identity.**
+
+        Absorbs `create_source` (bridge-table Part A: `register_source` <- 1
+        tool, no discriminator), which is why it takes that method's signature
+        NAME-FOR-NAME: a rename that silently narrowed a caller's arguments
+        would be the #8447 truncation shape at the SDK boundary.
+
+        Trust defaults from the source KIND — `sourceKind` is what the source
+        IS (a tier-form sourceKind, e.g. "T2", mirrors to `credibilityTier`),
+        while `tier=` overrides the derived tier only. An existing Source (URL
+        collision) is never re-kinded; only `credibilityTier` moves. See
+        `_create_source` for the full dual-write, evidence-age and journaling
+        contract this delegates to — the behaviour did not change, only the
+        name the surface offers.
+        """
+        return self._create_source(
+            url, sourceKind, tier=tier, sourceDate=sourceDate,
+            source_path=source_path, raw_state=raw_state,
+            is_episodic=is_episodic, **props)
+
+    def manage_source_trust(self, url: str, *,
+                            tier: str | None = None,
+                            assessor: str | None = None,
+                            score: float | None = None,
+                            rationale: str | None = None) -> dict:
+        """Set how far a source is trusted, and return the write (row 18).
+
+        Absorbs `assess_source` and `set_source_tier` (bridge-table Part A:
+        `manage_source_trust` <- 2 tools, "none — dispatch is by argument").
+        The discriminator is WHICH WRITE THE CALLER SUPPLIED, because the two
+        members write two different things and neither can be defaulted:
+
+          * `score=` (with `assessor=` and `rationale=`) records an
+            ASSESSMENT — a `pointKind='assessment'` Statement Point with its
+            own reputation-weighted confidence. Returns the assessment write.
+          * `tier=` sets the source's CREDIBILITY TIER (T0-T4) — a property on
+            the Source node, never an assessment.
+
+        Supplying BOTH is refused rather than silently picking one: they are
+        not two spellings of one write (an assessment does not move the tier,
+        and a tier does not record who judged it), so a call that names both is
+        a caller who believes something false about this method.
+
+        Reads are NOT here — the approved disposition sends them to
+        `list_knowledge(kind='source')` (bridge-table D1/D2b), which is where a
+        caller asks "what is the tier" without writing one.
+        """
+        wants_assessment = score is not None or assessor is not None or rationale is not None
+        wants_tier = tier is not None
+        if wants_assessment and wants_tier:
+            raise ValueError(
+                "manage_source_trust: pass `tier=` OR `score=`/`assessor=`/"
+                "`rationale=` — an assessment and a tier are different writes, "
+                "so one call cannot be both"
+            )
+        if wants_assessment:
+            if score is None or assessor is None or rationale is None:
+                raise ValueError(
+                    "manage_source_trust: an assessment needs all three of "
+                    "`score=`, `assessor=` and `rationale=` — a score with no "
+                    "assessor is unattributable, and one with no rationale is "
+                    "an assertion the graph cannot weigh"
+                )
+            out = self._assess_source(url, assessor, score, rationale)
+            return out if isinstance(out, dict) else {"result": out}
+        if wants_tier:
+            out = self._set_source_tier(url, tier)
+            return out if isinstance(out, dict) else {"result": out}
+        raise ValueError(
+            "manage_source_trust: nothing to write — pass `tier=` to set the "
+            "credibility tier, or `score=`/`assessor=`/`rationale=` to record "
+            "an assessment"
+        )
+
+    def index_sources_from_directory(self, directory: str, *,
+                                     file_type: str = "auto",
+                                     corpus_name: str | None = None,
+                                     extract_metadata: bool = True,
+                                     llm_model: str | None = "gpt-5-mini",
+                                     embedding_repair_backoff: float | None = None,
+                                     progress_file: str | None = None) -> dict:
+        """Read files off disk and register each as a source (row 15).
+
+        Absorbs `index_directory`, `index_sessions` and `ingest_corpus`
+        (bridge-table Part A: `index_sources_from_directory` <- 3 tools,
+        "none — dispatch is by argument"). **Nothing is extracted** — this is
+        the indexer, not `mine_knowledge_from_directory`; the distinction the
+        beta doc calls unmissable is the one between these two names.
+
+        `file_type` is the discriminator the members collapse onto:
+        `auto` | `agent_session` | `meeting` | `doc`. The two legacy members
+        are exactly two of those values — `index_sessions` indexed
+        `agent_session`, `ingest_corpus` indexed `doc` — and both were
+        self-declared DEPRECATED in favour of the unified `auto` walk this
+        name now fronts. Routing them through ONE walker is the point of the
+        retirement: the legacy branches carried a documented flag-semantics
+        divergence (`_ingest_corpus` computed session embeddings even with
+        `extract_metadata=False`, while the unified path short-circuits them),
+        and a caller that keeps the old name keeps the old behaviour only
+        through the retired MCP tool's own frozen body.
+
+        Batched and resumable: `progress_file` is realpath-bounded and
+        `embedding_repair_backoff` bounds the repair retries. See
+        `_index_directory` for the return envelope and the #329 path bounds.
+        """
+        return self._index_directory(
+            directory, file_type=file_type, corpus_name=corpus_name,
+            extract_metadata=extract_metadata, llm_model=llm_model,
+            embedding_repair_backoff=embedding_repair_backoff,
+            progress_file=progress_file)
+
+    def mine_knowledge_from_session(self, *,
+                                   conversation: list[dict[str, str]] | None = None,
+                                   session_id: str | None = None,
+                                   items: list[dict] | None = None,
+                                   agent_name: str = "checkpoint",
+                                   threshold: float = 0.95,
+                                   max_turns: int = MAX_SESSION_TURNS,
+                                   harness: str | None = None) -> dict:
+        """Extract claims, operators and entities from ONE conversation (row 16).
+
+        Absorbs `checkpoint` and `session_capture` (bridge-table Part A:
+        `mine_knowledge_from_session` <- 2 tools, "none — dispatch is by
+        argument"). The discriminator is the SHAPE OF WHAT THE CALLER HOLDS,
+        which is also the honest description of the two members:
+
+          * `conversation=` — a session transcript. The M2 extractor turns the
+            turns into epistemic Points (+ IMPL/NAND operators) and links the
+            Session to its subject/project entities. `session_id` is the
+            idempotency key; `max_turns` and `harness` are the capture's own
+            bounds. **The backend is the target graph's configuration** — the
+            capture harness is resolved from it, never chosen per call.
+          * `items=` — an already-distilled batch of `{content, ...}` items.
+            Two-tier dedup (content hash + embedding similarity) files the new
+            ones. `agent_name` and `threshold` are the batch's own knobs, and
+            the `threshold` default (0.95) is the near-IDENTICAL-text bar the
+            two owners keep in sync (`#1349` T14).
+
+        Supplying both is refused: extraction and batch-filing are different
+        pipelines, and a caller that has both must say which one it wants.
+        """
+        if items is not None and conversation is not None:
+            raise ValueError(
+                "mine_knowledge_from_session: pass `conversation=` (a transcript "
+                "to extract from) OR `items=` (an already-distilled batch to "
+                "file) — they are different pipelines, not two spellings of one"
+            )
+        if items is not None:
+            out = self._checkpoint(items, agent_name=agent_name, threshold=threshold)
+            return out if isinstance(out, dict) else {"result": out}
+        if conversation is not None:
+            out = self._capture_session(conversation, session_id,
+                                       max_turns=max_turns, harness=harness)
+            return out if isinstance(out, dict) else {"result": out}
+        raise ValueError(
+            "mine_knowledge_from_session: nothing to mine — pass `conversation=` "
+            "for one session transcript, or `items=` for a distilled batch"
+        )
+
+    def mine_knowledge_from_directory(self, directory: str, *,
+                                      extract_entities: bool = True,
+                                      progress_file: str | None = None,
+                                      model: object = None,
+                                      event_log_path: str | None = None) -> dict:
+        """The same for a FOLDER of files, each mined by its own type (row 17).
+
+        Absorbs `mine_corpus` (bridge-table Part A:
+        `mine_knowledge_from_directory` <- 1 tool). It is the **batch form of
+        `mine_knowledge_from_session`**, not a kind of indexing — which is why
+        it is its own row instead of an `file_type` value on
+        `index_sources_from_directory`: that name registers sources and
+        extracts nothing, this one extracts and is the expensive call. The
+        reply is `_mine_corpus`'s, unchanged.
+        """
+        return self._mine_corpus(
+            directory, extract_entities=extract_entities,
+            progress_file=progress_file, model=model,
+            event_log_path=event_log_path)
+
+    def check_connection(self, key_id: str | None = None) -> dict:
+        """What does this credential reach? (row 40 — makes isolation verifiable).
+
+        **Programmatic, returns a result — not a wizard** (the #3540 ruling that
+        replaced `run_onboarding` with this row). Omit `key_id` to read THIS
+        handle's own connection; pass one to inspect a single credential's
+        declared reach.
+
+        Returns::
+
+            {
+              "connected": bool,        # the graph this handle reads answers
+              "graph": {"name": ..., "namespace": ...},
+              "account": {...} | None,  # row 28's own-account read, or None
+              "account_error": str | None,   # WHY it is None, never a silent 0
+              "key": {...} | None,      # only when key_id is given and reachable
+              "key_error": str | None,
+            }
+
+        ⛔ **The isolation promise is the `key` half, and it is enforced by the
+        ANSWER SHAPE.** A key that belongs to another account and a key that
+        does not exist return the SAME `key_error` ("not found in this
+        account"): if the two differed, this tool could be used to test whether
+        another tenant holds a given key id — an existence oracle on the
+        credential surface. The tenant a key is compared against is the SDK's
+        own (the same `record_tenant_effective` seam every write uses), never a
+        caller-supplied id.
+
+        Read-only: nothing here writes a node, flips a key, or touches a cap.
+        `account` is `get_organisation_account`'s reply verbatim — one account
+        read, not a second opinion beside it.
+        """
+        from .record_writer import is_usable_tenant, record_tenant_effective
+
+        uri_graph: str | None = None
+        if self._db_uri is not None:
+            from urllib.parse import urlparse
+            uri_graph = urlparse(self._db_uri).path.lstrip("/") or "tortoise"
+        graph_name = _derive_graph_name(
+            namespace=self._namespace, graph_name=self._graph_name,
+            uri_graph=uri_graph)
+
+        connected = False
+        probe_error: str | None = None
+        try:
+            self._get_proj().g.query("MATCH (n) RETURN count(n) LIMIT 1")
+            connected = True
+        except Exception as exc:  # a probe REPORTS, it never masks
+            probe_error = type(exc).__name__
+
+        account: dict | None = None
+        account_error: str | None = None
+        try:
+            account = self.get_organisation_account()
+        except Exception as exc:  # the reason is the answer
+            account_error = f"{type(exc).__name__}: {exc}"
+
+        tenant = record_tenant_effective(self._record_tenant)
+        own_org = tenant[0] if is_usable_tenant(tenant) else None
+
+        out: dict = {
+            "connected": connected,
+            "graph": {"name": graph_name, "namespace": self._namespace},
+            "account": account,
+            "account_error": account_error,
+            "key": None,
+            "key_error": None,
+        }
+        if probe_error is not None:
+            out["probe_error"] = probe_error
+        if key_id is None:
+            return out
+
+        if not isinstance(key_id, str) or not key_id.strip():
+            out["key_error"] = "key_id must be a non-empty string"
+            return out
+        if own_org is None:
+            out["key_error"] = (
+                "no account is bound to this connection, so a key cannot be "
+                "resolved against one — bind a tenant "
+                "(record_writer.use_record_tenant) or inspect the credential "
+                "itself"
+            )
+            return out
+        try:
+            rows = self._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.org_id, k.graph_id, k.scopes, "
+                "k.revoked_at, k.expires_at, k.name, k.delegation_depth",
+                params={"id": key_id},
+            ).result_set
+        except Exception as exc:  # an unreadable registry is NOT "no key"
+            out["key_error"] = (
+                f"the key registry could not be read ({type(exc).__name__}) — "
+                f"this is NOT an answer about the key"
+            )
+            return out
+        # ⛔ One reply for "absent" and "someone else's": see the docstring.
+        if not rows or rows[0][0] != own_org:
+            out["key_error"] = "not found in this account"
+            return out
+        row = rows[0]
+        out["key"] = {
+            "key_id": key_id,
+            "name": row[5],
+            "graph_id": row[1],
+            "scopes": list(row[2] or []),
+            "delegation_depth": row[6],
+            "revoked": row[3] is not None,
+            "expires_at": row[4],
+        }
+        return out
 
 
 class _V2SessionMock:

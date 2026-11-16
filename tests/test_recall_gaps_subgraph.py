@@ -221,7 +221,7 @@ def _set_posterior(sdk, pid: str, alpha: float, beta: float):
 def _link_source(sdk, pid: str, url: str):
     """Attach a Source to a Point via extractedFrom (reification-era graphs
     attach provenance directly, no operator involved)."""
-    sdk.create_source(url, "T1")
+    sdk.register_source(url, "T1")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}), (s:Source {url:$u}) CREATE (n)-[:extractedFrom]->(s)",
         params={"id": pid, "u": url},

@@ -969,11 +969,13 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
         ),
     ),
     (
-        "tortoise.sdk::create_source",
+        "tortoise.sdk::_create_source",
         WriterClass(
             EXEMPT,
-            "`tortoise/sdk.py::create_source` issues no Cypher LITERAL of its own (measured: "
-            "zero `.query(`, no `SET `, in 35,275 CHARACTERS (35,541 bytes) \u2014 its `MERGE`/`CREATE` spellings are ALL prose "
+            "`tortoise/sdk.py::_create_source` issues no Cypher LITERAL of its own (measured: "
+            "zero `.query(`, no `SET `, in 35,275 CHARACTERS (35,541 bytes, measured at the `#12182` head; "
+            "the SAME BODY re-measures 35,672 CHARACTERS / 35,940 bytes / 141 non-ASCII at the "
+            "`#12948` head, the delta being growth since that reading, not this row) \u2014 its `MERGE`/`CREATE` spellings are ALL prose "
             "\u2014 docstring and `#` comments, none in executable code. The COUNT, with its tokenisation "
             "named because that is what two readers disagreed about (`#12182` cycles 7-8): 8 "
             "word-boundary spellings \u2014 3 in the docstring, 5 in `#` comments \u2014 plus 2 forms that are "

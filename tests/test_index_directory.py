@@ -96,7 +96,7 @@ def lock_dir(tmp_path, monkeypatch):
 def test_session_unit_e2e1(corpus):
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["indexed"] == 3 and r["failed"] == 0 and r["skipped"] == 0
         g = sdk._get_proj().g
         u = f"corpus://{corpus.name}/s1.md"
@@ -149,7 +149,7 @@ def test_session_unit_encoded_url(corpus):
     (corpus / "strategy.md").unlink()
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         u = f"corpus://{corpus.name}/sessions/s%201.md"
         assert g.query("MATCH (s:Source {url:$u}) RETURN count(s)",
@@ -168,7 +168,7 @@ def test_session_unit_encoded_url(corpus):
 def test_meeting_unit_e2e2(corpus):
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         u = f"corpus://{corpus.name}/meeting-2026-08-05.md"
         rows = g.query(
@@ -210,7 +210,7 @@ def test_meeting_collision_suffix(corpus):
         "date: \"2026-08-05T14:00:00+00:00\"", "date: \"2026-08-05\""))
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         rows = g.query(
             "MATCH (e:Event {eventKind:'meeting'}) RETURN e.eventId, e.source_file "
@@ -223,7 +223,7 @@ def test_meeting_collision_suffix(corpus):
         assert ids[0] == "meeting_2026-08-05-team-sync"
         assert ids[1].startswith("meeting_2026-08-05-team-sync-")
         # re-run idempotence: same ids, no new events
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         rows2 = g.query(
             "MATCH (e:Event {eventKind:'meeting'}) RETURN e.eventId ORDER BY e.eventId",
         ).result_set
@@ -237,7 +237,7 @@ def test_meeting_collision_suffix(corpus):
 def test_doc_unit_e2e3(corpus):
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         # GLOBAL Source count == 4: 3 corpus Sources + the document Source
         # (D10 §4.4 — a document IS a :Source keyed url=doc_strategy.md)
@@ -284,14 +284,14 @@ def test_doc_unit_e2e3(corpus):
 def test_idempotent_rerun(corpus):
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["skipped"] == 3 and r2["indexed"] == 0 and r2["updated"] == 0
         # version UNCHANGED after skip (gate prevented unconditional bump)
         assert g.query("MATCH (s:Source) RETURN count(DISTINCT s.version)"
                        ).result_set[0][0] == 1
-        r3 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r3 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r3["skipped"] == 3
         # zero duplicate urls/eventIds (dialect-safe duplicate check)
         urls = [r[0] for r in g.query(
@@ -307,7 +307,7 @@ def test_idempotent_rerun(corpus):
 def test_changed_file_in_place(corpus):
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         u = f"corpus://{corpus.name}/s1.md"
         (corpus / "s1.md").write_text(SESSION_FIXTURE.replace(
@@ -316,7 +316,7 @@ def test_changed_file_in_place(corpus):
             "Added: rotate refresh tokens too.  ",
         ).replace('title: "Auth refactor session"',
                   'title: "Auth refactor session v2"'))
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["updated"] == 1 and r["indexed"] == 0
         rows = g.query(
             "MATCH (s:Source {url:$u}) RETURN s.title, s._searchText, s.version, "
@@ -348,7 +348,7 @@ def test_size_guard_over_limit(corpus, monkeypatch):
     big.write_bytes(b"x" * (50 * 1024 * 1024 + 1))  # sparse-ish write, over default
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         errs = [e for e in r["errors"] if e["file"] == "big.md"]
         assert r["failed"] == 1
         assert errs and errs[0]["cause"] == "size" and errs[0]["retryable"] is False
@@ -364,7 +364,7 @@ def test_size_guard_boundary_and_env(corpus, monkeypatch):
     over.write_bytes(b"b" * (1024 * 1024 + 1))
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         # exact == limit indexed (guard is `>`); over → failed size
         assert r["indexed"] == 4
         assert r["failed"] == 1
@@ -384,7 +384,7 @@ def test_size_guard_bad_env(monkeypatch):
     sdk = _sdk()
     try:
         with pytest.raises(ValueError):
-            sdk.index_directory("/tmp", extract_metadata=False)
+            sdk.index_sources_from_directory("/tmp", extract_metadata=False)
     finally:
         sdk.close()
 
@@ -416,7 +416,7 @@ def test_size_guard_toctou(corpus, monkeypatch):
             return real_stat(path, *a, **kw)
         # patch the pre-read size-guard stat call (the layer-1 guard)
         monkeypatch.setattr(os, "stat", _lying_stat)
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         errs = [e for e in r["errors"] if e["file"] == "s1.md"]
         assert errs and errs[0]["cause"] == "size"
     finally:
@@ -439,7 +439,7 @@ def test_non_regular_files_fifo_socket(tmp_path):
     s.bind(str(sock))
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False, llm_model=None)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False, llm_model=None)
         failed_files = {e["file"] for e in r["errors"]}
         assert "fifo.md" in failed_files and "sock.md" in failed_files
         for e in r["errors"]:
@@ -463,7 +463,7 @@ def test_symlink_escape_and_inner(corpus, tmp_path, monkeypatch):
     (corpus / "inner.md").symlink_to(corpus / "s1.md")
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         reasons = {e["file"]: e["cause"] for e in r["errors"]}
         assert reasons.get("leak.md") == "escape"          # resolved-target reject
         # inner symlink → realpath dedup → symlink-duplicate (skipped), one Source
@@ -487,7 +487,7 @@ def test_symlink_loopdir_no_hang(corpus):
     (b / "loop").symlink_to(a, target_is_directory=True)
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["file_count"] >= 3
         assert r["failed"] == 0
     finally:
@@ -499,7 +499,7 @@ def test_non_md_ignored(corpus):
     (corpus / "UPPER.MD").write_text(SESSION_FIXTURE)
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["ignored"] == 2
         assert r["file_count"] == 3
         g = sdk._get_proj().g
@@ -514,7 +514,7 @@ def test_empty_dir_and_empty_file(tmp_path):
     empty_dir.mkdir()
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(empty_dir), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(empty_dir), extract_metadata=False)
         assert r["file_count"] == 0 and r["indexed"] == 0 and r["failed"] == 0
     finally:
         sdk.close()
@@ -523,7 +523,7 @@ def test_empty_dir_and_empty_file(tmp_path):
     (c / "empty.md").write_text("")
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(c), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r["indexed"] == 1
         g = sdk._get_proj().g
         assert g.query("MATCH (s:Source) RETURN s.contentHash").result_set[0][0] == \
@@ -535,7 +535,7 @@ def test_empty_dir_and_empty_file(tmp_path):
 def test_nonexistent_dir_zero_count(tmp_path):
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(tmp_path / "missing"), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(tmp_path / "missing"), extract_metadata=False)
         assert r["file_count"] == 0 and r["failed"] == 0
     finally:
         sdk.close()
@@ -550,11 +550,11 @@ def test_progress_resume_fast_skip(corpus, tmp_path, lock_dir):
     prog = tmp_path / "progress.json"
     sdk = _sdk()
     try:
-        r1 = sdk.index_directory(str(corpus), extract_metadata=False,
+        r1 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False,
                                  progress_file=str(prog))
         assert r1["indexed"] == 6
         # resume: all 6 fast-skipped via the stat key (no re-read, no writes)
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False,
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False,
                                  progress_file=str(prog))
         assert r2["skipped"] == 6 and r2["indexed"] == 0 and r2["updated"] == 0
         g = sdk._get_proj().g
@@ -563,7 +563,7 @@ def test_progress_resume_fast_skip(corpus, tmp_path, lock_dir):
         # modified prefix file → full fast path → updated (never stale skip)
         (corpus / "f0.md").write_text(
             "---\nsessionId: sid0\ntitle: F0\n---\nBody 0. EDITED.")
-        r3 = sdk.index_directory(str(corpus), extract_metadata=False,
+        r3 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False,
                                  progress_file=str(prog))
         assert r3["updated"] == 1 and r3["skipped"] == 5
     finally:
@@ -578,14 +578,14 @@ def test_progress_stale_checkpoint(corpus, tmp_path, lock_dir):
     prog = tmp_path / "progress.json"
     sdk = _sdk()
     try:
-        sdk.index_directory(str(other), extract_metadata=False,
+        sdk.index_sources_from_directory(str(other), extract_metadata=False,
                             progress_file=str(prog))
-        r = sdk.index_directory(str(corpus), extract_metadata=False,
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False,
                                 progress_file=str(prog))
         assert r["indexed"] == 3
         # corrupt checkpoint → full honest re-run
         prog.write_text("{corrupt")
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False,
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False,
                                  progress_file=str(prog))
         assert r2["skipped"] == 3 and r2["indexed"] == 0
     finally:
@@ -597,10 +597,10 @@ def test_progress_file_bounds(corpus, tmp_path, monkeypatch):
     sdk = _sdk()
     try:
         with pytest.raises(ValueError):
-            sdk.index_directory(str(corpus), extract_metadata=False,
+            sdk.index_sources_from_directory(str(corpus), extract_metadata=False,
                                 progress_file=str(tmp_path / ".." / "escape.json"))
         with pytest.raises(ValueError):
-            sdk.index_directory(str(corpus), extract_metadata=False,
+            sdk.index_sources_from_directory(str(corpus), extract_metadata=False,
                                 progress_file="/etc/escape.json")
     finally:
         sdk.close()
@@ -617,7 +617,7 @@ def test_duplicate_session_id_primary_election(corpus, lock_dir):
     (sub / "s1.md").write_text(SESSION_FIXTURE)  # same sessionId as corpus/s1.md
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)  # noqa: F841
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)  # noqa: F841
         g = sdk._get_proj().g
         # exactly ONE Event for the sessionId — owned by the FIRST SORTED
         # rel-path ("dup/s1.md" < "s1.md", W4 primary election pin)
@@ -641,7 +641,7 @@ def test_duplicate_session_id_primary_election(corpus, lock_dir):
             params={"u": nonprim}).result_set[0][0] == 0
         # re-run: election-suppressed units resolve to skipped (Source-existence
         # completeness — never a repair loop, E2E-14 re-run legs)
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["skipped"] == 4 and r2["indexed"] == 0 and r2["updated"] == 0
     finally:
         sdk.close()
@@ -680,7 +680,7 @@ def test_concurrent_indexers_threads(corpus):
             "WHERE s.contentHash <> e.file_hash RETURN count(*)").result_set[0][0] == 0
         # sequential re-run converges
         sdk = TortoiseSDK(db, namespace="e2e-900")
-        rr = sdk.index_directory(str(corpus), extract_metadata=False)
+        rr = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert rr["skipped"] == 3 and rr["indexed"] == 0
         sdk.close()
     finally:
@@ -692,7 +692,7 @@ def test_concurrent_indexers_threads(corpus):
 def test_hash_pair_sweep_clean(corpus):
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         assert g.query(
             "MATCH (s:Source)-[:references]->(e:Event) "
@@ -793,7 +793,7 @@ def test_e2e2_meeting_fallback_tiers(tmp_path):
         "---\nfileType: meeting\ntitle: \"Team Sync\"\n---\nBody")
     sdk = _sdk()
     try:
-        sdk.index_directory(str(c), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c), extract_metadata=False)
         g = sdk._get_proj().g
         ev = g.query(
             "MATCH (e:Event {eventId:'meeting_2026-08-05-team-sync'}) "
@@ -807,7 +807,7 @@ def test_e2e2_meeting_fallback_tiers(tmp_path):
         "---\nfileType: meeting\ntitle: \"Standup Review\"\n---\nBody")
     sdk = _sdk()
     try:
-        sdk.index_directory(str(c2), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c2), extract_metadata=False)
         g = sdk._get_proj().g
         ev = g.query(
             "MATCH (e:Event {eventId:'meeting_standup-review'}) "
@@ -841,7 +841,7 @@ def test_e2e2_date_format_stability(tmp_path, date_line, expected_id,
         f"---\nfileType: meeting\ntitle: \"Team Sync\"\n{date_line}\n---\nBody")
     sdk = _sdk()
     try:
-        sdk.index_directory(str(c), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c), extract_metadata=False)
         g = sdk._get_proj().g
         ev = g.query(
             "MATCH (e:Event) RETURN e.eventId, e.startedAt").result_set
@@ -852,7 +852,7 @@ def test_e2e2_date_format_stability(tmp_path, date_line, expected_id,
         src = g.query("MATCH (s:Source) RETURN s.sourceDate").result_set
         assert src[0][0] == expected_source_date
         # re-run stability: same id, no fork
-        sdk.index_directory(str(c), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c), extract_metadata=False)
         ev2 = g.query("MATCH (e:Event) RETURN e.eventId").result_set
         assert len(ev2) == 1 and ev2[0][0] == expected_id
     finally:
@@ -868,7 +868,7 @@ def test_e2e4_deletion_leg_accept_and_document(corpus):
     NO stale-mark, NO warning; second re-run identical (stable state)."""
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         before_sources = g.query("MATCH (s:Source) RETURN count(s)"
                                  ).result_set[0][0]
@@ -880,7 +880,7 @@ def test_e2e4_deletion_leg_accept_and_document(corpus):
         assert g.query("MATCH (s:Source {url:$u}) RETURN count(s)",
                        params={"u": u}).result_set[0][0] == 1
         (corpus / "s1.md").unlink()
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         # file_count drops by exactly 1 — the deleted file is simply absent
         assert r["file_count"] == 2
         assert r["indexed"] == 0 and r["failed"] == 0 and r["skipped"] == 2
@@ -898,7 +898,7 @@ def test_e2e4_deletion_leg_accept_and_document(corpus):
                        params={"u": u}).result_set[0][0] is None
         assert r["errors"] == []
         # second re-run → identical stable state
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["file_count"] == 2 and r2["skipped"] == 2
         assert g.query("MATCH (s:Source) RETURN count(s)"
                        ).result_set[0][0] == before_sources
@@ -917,7 +917,7 @@ def test_e2e5_sessionid_removal_old_event_preserved(corpus):
     references edge; honest counters updated==1; re-run → skipped."""
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         # cycle-3 fixture pin: the rewritten frontmatter RETAINS
         # `fileType: agentSession` so the file still classifies as a session
@@ -928,7 +928,7 @@ def test_e2e5_sessionid_removal_old_event_preserved(corpus):
             "startedAt: \"2026-08-10T09:00:00+00:00\"\n---\n"
             "## Summary\nRefactored the auth middleware; decided to keep JWT "
             "rotation.\nAdded a third paragraph to alter the hash.")
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["updated"] == 1 and r["indexed"] == 0
         # both Events exist: the OLD session_abc123 preserved + NEW file_s1
         # (the meeting Event is untouched — three Event nodes total)
@@ -946,7 +946,7 @@ def test_e2e5_sessionid_removal_old_event_preserved(corpus):
         assert _hash_pair_sweep(g) == 1
         assert _required_sweep(g) == 0
         # re-run → skipped, state unchanged
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["skipped"] == 3
         assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 3
     finally:
@@ -976,7 +976,7 @@ def test_e2e12_collision_families(tmp_path):
         "---\nfileType: meeting\ntitle: Ünïcödé Sync\ndate: 2026-08-05\n---\nBody D")
     sdk = _sdk()
     try:
-        sdk.index_directory(str(c), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c), extract_metadata=False)
         g = sdk._get_proj().g
         ev = g.query(
             "MATCH (e:Event) RETURN e.eventId, e.source_file "
@@ -992,7 +992,7 @@ def test_e2e12_collision_families(tmp_path):
         # (only the all-widths-taken cell errors + fails) — the test asserts
         # the implemented contract (distinct ids + zero collapse + stability).
         # re-run → all skipped, no suffix churn
-        r2 = sdk.index_directory(str(c), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r2["skipped"] == 4 and r2["indexed"] == 0
         ids2 = sorted(x[0] for x in g.query(
             "MATCH (e:Event) RETURN e.eventId").result_set)
@@ -1013,10 +1013,10 @@ def test_e2e12_relocation_whole_corpus_move(tmp_path):
     (c / "s1.md").write_text("---\nsessionId: r1\ntitle: S\n---\nBody")
     sdk = _sdk()
     try:
-        sdk.index_directory(str(c), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c), extract_metadata=False)
         newp = tmp_path / "p2"; newp.mkdir()  # noqa: E702
         os.rename(str(c), str(newp / "corpus"))
-        r2 = sdk.index_directory(str(newp / "corpus"), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(newp / "corpus"), extract_metadata=False)
         assert r2["skipped"] == 2 and r2["indexed"] == 0
         g = sdk._get_proj().g
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 2
@@ -1038,11 +1038,11 @@ def test_e2e12_relocation_per_file_move(tmp_path):
         "---\nfileType: meeting\ntitle: Sync\ndate: 2026-08-05\n---\nA")
     sdk = _sdk()
     try:
-        sdk.index_directory(str(c), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c), extract_metadata=False)
         g = sdk._get_proj().g
         assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 1
         os.rename(str(c / "m1.md"), str(sub / "m1.md"))
-        sdk.index_directory(str(c), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c), extract_metadata=False)
         ids = sorted(x[0] for x in g.query(
             "MATCH (e:Event) RETURN e.eventId").result_set)
         # file-count(1) + moved-count(1) == 2 Events: the original (unsuffixed)
@@ -1071,7 +1071,7 @@ def test_e2e13_special_char_filenames_round_trip(tmp_path):
     (c / "resumé.md").write_text("---\nsessionId: sp5\ntitle: Resume\n---\nBody")
     sdk = _sdk()
     try:
-        sdk.index_directory(str(c), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c), extract_metadata=False)
         g = sdk._get_proj().g
         rows = g.query("MATCH (s:Source) RETURN s.url").result_set
         urls = [r[0] for r in rows]
@@ -1127,10 +1127,10 @@ def test_e2e14_session_move_variant(tmp_path, lock_dir):
     sess.write_text("---\nsessionId: mv1\ntitle: MV\n---\nBody")
     sdk = _sdk()
     try:
-        sdk.index_directory(str(c), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c), extract_metadata=False)
         g = sdk._get_proj().g
         os.rename(str(sess), str(sub / "sess.md"))
-        r2 = sdk.index_directory(str(c), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r2["indexed"] == 1
         assert g.query("MATCH (e:Event {eventId:'session_mv1'}) RETURN count(e)"
                        ).result_set[0][0] == 1
@@ -1156,21 +1156,21 @@ def test_e2e14_primary_flip_variant(tmp_path, lock_dir):
     (c / "b.md").write_text("---\nsessionId: dup1\ntitle: B\n---\nBody B")
     sdk = _sdk()
     try:
-        sdk.index_directory(str(c), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c), extract_metadata=False)
         g = sdk._get_proj().g
         sf1 = g.query("MATCH (e:Event {eventId:'session_dup1'}) RETURN e.source_file"
                       ).result_set[0][0]
         assert sf1 == "a.md"
         (c / "0-new.md").write_text(
             "---\nsessionId: dup1\ntitle: New\n---\nBody New")
-        r2 = sdk.index_directory(str(c), extract_metadata=False)  # noqa: F841
+        r2 = sdk.index_sources_from_directory(str(c), extract_metadata=False)  # noqa: F841
         sf2 = g.query("MATCH (e:Event {eventId:'session_dup1'}) RETURN e.source_file"
                       ).result_set[0][0]
         assert sf2 == "0-new.md"             # primary flipped
         assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 1
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
         # no repair loop
-        r3 = sdk.index_directory(str(c), extract_metadata=False)
+        r3 = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r3["skipped"] == 3 and r3["indexed"] == 0 and r3["updated"] == 0
     finally:
         sdk.close()
@@ -1189,7 +1189,7 @@ def test_e2e14_issues_prs_fixture_leg(tmp_path, lock_dir):
         "prs: [repo#2]\n---\nBody with issue references")
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(c), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r["indexed"] == 1
         g = sdk._get_proj().g
         # The plan's INSTANTIATES naming maps to the IMPLEMENTED edge label
@@ -1220,13 +1220,13 @@ def test_e2e7_crlf_immunity(tmp_path):
     f.write_text("---\nsessionId: lf1\ntitle: LF\n---\nLine one\nLine two")
     sdk = _sdk()
     try:
-        r1 = sdk.index_directory(str(c), extract_metadata=False)
+        r1 = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         g = sdk._get_proj().g
         assert r1["indexed"] == 1
         v1 = g.query("MATCH (s:Source) RETURN s.version, s.contentHash"
                      ).result_set[0]
         f.write_bytes(f.read_bytes().replace(b"\n", b"\r\n"))
-        r2 = sdk.index_directory(str(c), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r2["skipped"] == 1 and r2["indexed"] == 0
         v2 = g.query("MATCH (s:Source) RETURN s.version, s.contentHash"
                      ).result_set[0]
@@ -1245,7 +1245,7 @@ def test_e2e7_binary_non_utf8(tmp_path):
     (c / "good.md").write_text("---\nsessionId: g2\ntitle: Good\n---\nBody")
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(c), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r["failed"] == 1 and r["indexed"] == 1
         errs = [e for e in r["errors"] if e["file"] == "binary.md"]
         assert errs and errs[0]["cause"] == "decode"
@@ -1267,7 +1267,7 @@ def test_e2e7_broken_frontmatter_degraded(tmp_path):
     (c / "good.md").write_text("---\nsessionId: g3\ntitle: Good\n---\nBody")
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(c), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r["indexed"] == 2 and r["failed"] == 0
         g = sdk._get_proj().g
         # the FILE's corpus Source (documentKind IS NULL); the D10 document
@@ -1301,7 +1301,7 @@ def test_e2e7_oserror_family(tmp_path):
     try:
         sdk = _sdk()
         try:
-            r = sdk.index_directory(str(c), extract_metadata=False)
+            r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
             assert r["indexed"] == 1        # only lf.md
             assert r["failed"] == 5         # noperm + dir.md + broken + loop pair
             by_file = {e["file"]: e for e in r["errors"]}
@@ -1334,7 +1334,7 @@ def test_e2e7_linkdir_inside_outside(tmp_path, monkeypatch):
     (c / "linkdir-inside").symlink_to(real, target_is_directory=True)
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(c), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r["file_count"] == 2         # both aliases enumerated
         assert r["indexed"] == 1
         assert r["skipped"] == 1
@@ -1351,7 +1351,7 @@ def test_e2e7_linkdir_inside_outside(tmp_path, monkeypatch):
     (c2 / "linkdir-outside").symlink_to(out, target_is_directory=True)
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(c2), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(c2), extract_metadata=False)
         assert r["file_count"] == 0
         assert r["indexed"] == 0 and r["failed"] == 0
         g = sdk._get_proj().g
@@ -1377,7 +1377,7 @@ def test_e2e7_hardlinks_in_out_combo(tmp_path):
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(c))
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(c), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r["indexed"] == 2            # lf.md + hardlink-in.md
         assert r["failed"] == 2             # hardlink-out.md + combo-link.md
         for e in r["errors"]:
@@ -1413,7 +1413,7 @@ def test_e2e7_malicious_frontmatter(tmp_path):
         "source_url: corpus://evil/fork\nevilKey: x\n---\nbody")
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(c), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r["indexed"] == 2 and r["failed"] == 0
         g = sdk._get_proj().g
         # no stray props anywhere
@@ -1439,7 +1439,7 @@ def test_e2e7_corpus_root_symlink_v1(tmp_path, monkeypatch):
     sdk = _sdk()
     try:
         with pytest.raises(ValueError):
-            sdk.index_directory(str(linkroot), extract_metadata=False)
+            sdk.index_sources_from_directory(str(linkroot), extract_metadata=False)
         g = sdk._get_proj().g
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 0
     finally:
@@ -1457,7 +1457,7 @@ def test_e2e7_corpus_root_symlink_v2(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(linkroot), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(linkroot), extract_metadata=False)
         assert r["indexed"] == 1
         g = sdk._get_proj().g
         url = g.query("MATCH (s:Source) RETURN s.url").result_set[0][0]
@@ -1491,7 +1491,7 @@ def test_e2e7_undecodable_filename_seam(tmp_path, monkeypatch):
         "---\nsessionId: x2\ntitle: Surrogate\n---\nBody")
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(c), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r["indexed"] == 1
         # the surrogate-named file lands in the failed bucket with the
         # pinned disposition — per-file failed{retryable:false} cause-class
@@ -1521,7 +1521,7 @@ def test_e2e7_walk_time_oserror(tmp_path):
     try:
         sdk = _sdk()
         try:
-            r = sdk.index_directory(str(c), extract_metadata=False)
+            r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
             assert r["file_count"] == 1     # only top.md enumerated
             assert r["indexed"] == 1
             dir_errs = [e for e in r["errors"]
@@ -1549,7 +1549,7 @@ def test_e2e7_summary_arithmetic_and_message_content(tmp_path):
     (c / "notes.txt").write_text("ignored")
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(c), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r["file_count"] == 3         # non-md excluded
         assert r["ignored"] == 1
         assert r["indexed"] == 1 and r["failed"] == 2
@@ -1657,7 +1657,7 @@ def test_e2e9_stale_writer_clobber_session(corpus):
         assert _hash_pair_sweep(g) == 0
         # ONE convergence re-run (reads v2 from disk, no progress_file)
         sdk_c = TortoiseSDK(db, namespace="e2e-900")
-        r = sdk_c.index_directory(str(corpus), extract_metadata=False)
+        r = sdk_c.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["updated"] == 1
         row2 = g.query("MATCH (s:Source {url:$u}) RETURN s.contentHash",
                        params={"u": u}).result_set[0]
@@ -1703,7 +1703,7 @@ def test_e2e9_stale_writer_clobber_doc(corpus):
                       params={"u": u}).result_set[0]
         assert row[0] == h1 and row[1] <= 3
         sdk_c = TortoiseSDK(db, namespace="e2e-900")
-        r = sdk_c.index_directory(str(corpus), extract_metadata=False)
+        r = sdk_c.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["updated"] == 1
         assert g.query("MATCH (s:Source {url:$u}) RETURN s.contentHash",
                        params={"u": u}).result_set[0][0] == h2
@@ -1815,7 +1815,7 @@ def test_e2e9_cross_process_embedded_overlap(tmp_path):
     # follow-up sequential run converges
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["indexed"] == 4 and r["failed"] == 0
         g = sdk._get_proj().g
         urls = [x[0] for x in g.query("MATCH (s:Source) RETURN s.url").result_set]
@@ -1849,7 +1849,7 @@ def test_e2e10_kill_between_session_leg(corpus, monkeypatch, lock_dir):
 
     monkeypatch.setattr(sdkmod.TortoiseSDK, "_session_event_write", _raise_first)
     try:
-        r1 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r1 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r1["failed"] == 1 and r1["indexed"] == 2
         g = sdk._get_proj().g
         u = f"corpus://{corpus.name}/s1.md"
@@ -1865,7 +1865,7 @@ def test_e2e10_kill_between_session_leg(corpus, monkeypatch, lock_dir):
                            params={"u": u}).result_set[0][0]
         # re-run with the patch removed → REPAIR
         monkeypatch.undo()
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["updated"] == 1 and r2["failed"] == 0
         assert g.query("MATCH (e:Event {eventId:'session_abc123'}) RETURN count(e)"
                        ).result_set[0][0] == 1
@@ -1877,7 +1877,7 @@ def test_e2e10_kill_between_session_leg(corpus, monkeypatch, lock_dir):
         assert v_after == v_before           # no version bump by the repair
         assert _required_sweep(g) == 0
         # 3rd run → skipped
-        r3 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r3 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r3["skipped"] == 3
     finally:
         sdk.close()
@@ -1902,7 +1902,7 @@ def test_e2e10_kill_between_doc_leg(corpus, monkeypatch, lock_dir):
 
     monkeypatch.setattr(sdkmod.TortoiseSDK, "_doc_write", _raise_first)
     try:
-        r1 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r1 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r1["failed"] == 1 and r1["indexed"] == 2
         g = sdk._get_proj().g
         u = f"corpus://{corpus.name}/strategy.md"
@@ -1913,7 +1913,7 @@ def test_e2e10_kill_between_doc_leg(corpus, monkeypatch, lock_dir):
         v_before = g.query("MATCH (s:Source {url:$u}) RETURN s.version",
                            params={"u": u}).result_set[0][0]
         monkeypatch.undo()
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["updated"] == 1
         assert g.query("MATCH (s:Source {url:'doc_strategy.md'}) RETURN count(s)"
                        ).result_set[0][0] == 1
@@ -1945,7 +1945,7 @@ def test_e2e10_source_only_orphan_heals(corpus, lock_dir):
             "MERGE (s:Source {url:$u}) SET s.sourceKind='agentSession', "
             "s.contentHash=$h, s.title='orphan', s.ingestedAt=$now, s.version=1",
             params={"u": u, "h": h, "now": "2026-08-01T00:00:00+00:00"})
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["updated"] == 1             # healed — never skipped
         assert g.query("MATCH (e:Event {eventId:'session_abc123'}) RETURN count(e)"
                        ).result_set[0][0] == 1
@@ -1974,7 +1974,7 @@ def test_e2e10_source_event_no_edge_heals(corpus, lock_dir):
             "MERGE (e:Event {eventId:'session_abc123'}) SET e.eventKind='AgentSession', "
             "e.source_file='s1.md', e.file_hash=$h, e.keywords=['k']",
             params={"h": h})
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["updated"] == 1
         assert g.query(
             "MATCH (s:Source {url:$u})-[:references]->(:Event) RETURN count(*)",
@@ -1993,7 +1993,7 @@ def test_e2e10_lock_held_skip_heals(corpus, lock_dir):
     lock = SessionIndexLock("abc123")
     try:
         assert lock.acquire() in ("acquired", "stale-recovered")
-        r1 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r1 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r1["skipped"] >= 1
         lock_err = [e for e in r1["errors"] if e["file"] == "s1.md"]
         assert lock_err and lock_err[0]["retryable"] is True
@@ -2001,7 +2001,7 @@ def test_e2e10_lock_held_skip_heals(corpus, lock_dir):
         assert g.query("MATCH (e:Event {eventId:'session_abc123'}) RETURN count(e)"
                        ).result_set[0][0] == 0
         lock.release()
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["indexed"] == 1          # only s1.md was lock-skipped
         assert g.query("MATCH (e:Event {eventId:'session_abc123'}) RETURN count(e)"
                        ).result_set[0][0] == 1
@@ -2049,13 +2049,13 @@ def test_e2e10_checkpoint_resume_crash(tmp_path, lock_dir, monkeypatch):
     monkeypatch.setattr(sdkmod.TortoiseSDK, "_index_read_file", _read_spy)
     try:
         with pytest.raises(RuntimeError):
-            sdk.index_directory(str(corpus), extract_metadata=False,
+            sdk.index_sources_from_directory(str(corpus), extract_metadata=False,
                                 progress_file=str(prog))
         # resume — prefix files stat-fast-skip, never opened
         monkeypatch.undo()   # crash patch removed; read spy stays? undo removes both
         monkeypatch.setattr(sdkmod.TortoiseSDK, "_index_read_file", _read_spy)
         reads.clear()
-        r = sdk.index_directory(str(corpus), extract_metadata=False,
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False,
                                 progress_file=str(prog))
         assert r["skipped"] == 100 and r["indexed"] == 50
         # the 100-file prefix was NOT re-read (fast-skip); the tail WAS
@@ -2088,14 +2088,14 @@ def test_e2e10_repair_with_changed_content(corpus, monkeypatch, lock_dir):
 
     monkeypatch.setattr(sdkmod.TortoiseSDK, "_session_event_write", _raise_first)
     try:
-        r1 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r1 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r1["failed"] == 1
         # EDIT the file before the repair run
         (corpus / "s1.md").write_text(SESSION_FIXTURE.replace(
             "decided to keep JWT rotation.",
             "decided to keep JWT rotation AND a fresh decision."))
         monkeypatch.undo()
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["updated"] == 1
         g = sdk._get_proj().g
         u = f"corpus://{corpus.name}/s1.md"
@@ -2138,7 +2138,7 @@ def test_e2e11_llm_raises_after_n(tmp_path, monkeypatch):
     monkeypatch.setattr(si, "extract_metadata_with_llm", _flaky)
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=True)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=True)
         assert r["indexed"] == 6 and r["failed"] == 0
         g = sdk._get_proj().g
         rows = g.query(
@@ -2170,7 +2170,7 @@ def test_e2e11_embedding_raise_and_heal(tmp_path, monkeypatch):
         def _outage(self, *a, **k):
             raise RuntimeError("embedding outage")
         monkeypatch.setattr(sdkmod.TortoiseSDK, "_session_embedding", _outage)
-        r1 = sdk.index_directory(str(corpus), extract_metadata=True)
+        r1 = sdk.index_sources_from_directory(str(corpus), extract_metadata=True)
         assert r1["indexed"] == 3 and r1["failed"] == 0
         g = sdk._get_proj().g
         assert g.query(
@@ -2184,7 +2184,7 @@ def test_e2e11_embedding_raise_and_heal(tmp_path, monkeypatch):
         def _available(self, *a, **k):
             return [0.1] * 384
         monkeypatch.setattr(sdkmod.TortoiseSDK, "_session_embedding", _available)
-        r2 = sdk.index_directory(str(corpus), extract_metadata=True)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=True)
         assert r2["updated"] == 3 and r2["skipped"] == 0
         assert g.query(
             "MATCH (e:Event) WHERE e.embedding IS NOT NULL RETURN count(e)"
@@ -2192,7 +2192,7 @@ def test_e2e11_embedding_raise_and_heal(tmp_path, monkeypatch):
         # no version bump from the heal (carve-out, unchanged hash)
         assert g.query("MATCH (s:Source) RETURN count(DISTINCT s.version)"
                        ).result_set[0][0] == 1
-        r3 = sdk.index_directory(str(corpus), extract_metadata=True)
+        r3 = sdk.index_sources_from_directory(str(corpus), extract_metadata=True)
         assert r3["skipped"] == 3
     finally:
         sdk.close()
@@ -2220,7 +2220,7 @@ def test_e2e11_persistence_and_backoff(tmp_path, monkeypatch):
             calls["n"] += 1
             raise RuntimeError("embedding outage")
         monkeypatch.setattr(sdkmod.TortoiseSDK, "_session_embedding", _outage)
-        r1 = sdk.index_directory(str(corpus), extract_metadata=True)
+        r1 = sdk.index_sources_from_directory(str(corpus), extract_metadata=True)
         assert r1["indexed"] == 2
         g = sdk._get_proj().g
         assert g.query(
@@ -2228,7 +2228,7 @@ def test_e2e11_persistence_and_backoff(tmp_path, monkeypatch):
             "RETURN count(e)").result_set[0][0] == 0   # NO marker on index
         # run 2: repair attempts fire exactly once per unit and fail
         calls["n"] = 0
-        r2 = sdk.index_directory(str(corpus), extract_metadata=True)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=True)
         assert calls["n"] == 2                     # EXACTLY one call per unit
         assert r2["skipped"] == 2 and r2["updated"] == 0
         assert g.query(
@@ -2236,7 +2236,7 @@ def test_e2e11_persistence_and_backoff(tmp_path, monkeypatch):
             "RETURN count(e)").result_set[0][0] == 2
         # run 3: backoff window (large) suppresses → ZERO calls
         calls["n"] = 0
-        r3 = sdk.index_directory(str(corpus), extract_metadata=True,
+        r3 = sdk.index_sources_from_directory(str(corpus), extract_metadata=True,
                                  embedding_repair_backoff=24.0)
         assert calls["n"] == 0
         assert r3["skipped"] == 2
@@ -2246,7 +2246,7 @@ def test_e2e11_persistence_and_backoff(tmp_path, monkeypatch):
             return [0.2] * 384
         monkeypatch.setattr(sdkmod.TortoiseSDK, "_session_embedding", _available)
         calls["n"] = 0
-        r4 = sdk.index_directory(str(corpus), extract_metadata=True,
+        r4 = sdk.index_sources_from_directory(str(corpus), extract_metadata=True,
                                  embedding_repair_backoff=0.0)
         assert calls["n"] == 2
         assert r4["updated"] == 2
@@ -2256,7 +2256,7 @@ def test_e2e11_persistence_and_backoff(tmp_path, monkeypatch):
         assert g.query(
             "MATCH (e:Event) WHERE e.embeddingRepairFailedAt IS NOT NULL "
             "RETURN count(e)").result_set[0][0] == 0  # marker cleared
-        r5 = sdk.index_directory(str(corpus), extract_metadata=True)
+        r5 = sdk.index_sources_from_directory(str(corpus), extract_metadata=True)
         assert r5["skipped"] == 2
     finally:
         sdk.close()
@@ -2299,21 +2299,21 @@ def test_e2e11_mocked_embedding_success_leg(tmp_path, monkeypatch):
         def _available(self, *a, **k):
             return vec
         monkeypatch.setattr(sdkmod.TortoiseSDK, "_session_embedding", _available)
-        r1 = sdk.index_directory(str(corpus), extract_metadata=True)
+        r1 = sdk.index_sources_from_directory(str(corpus), extract_metadata=True)
         assert r1["indexed"] == 1
         g = sdk._get_proj().g
         emb = g.query("MATCH (e:Event {eventId:'session_e0'}) RETURN e.embedding"
                       ).result_set[0][0]
         assert emb is not None
         # False flip over the SAME corpus → embedding PRESERVED
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["skipped"] == 1
         emb2 = g.query("MATCH (e:Event {eventId:'session_e0'}) RETURN e.embedding"
                        ).result_set[0][0]
         assert emb2 is not None             # never SET-None
         # fresh unit under False stays NULL
         (corpus / "s1.md").write_text("---\nsessionId: e1\ntitle: E1\n---\nBody 1")
-        r3 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r3 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r3["indexed"] == 1
         emb3 = g.query("MATCH (e:Event {eventId:'session_e1'}) RETURN e.embedding"
                        ).result_set[0][0]
@@ -2379,7 +2379,7 @@ def test_e2e18_scale_poison_counters(tmp_path):
     monkeypatch.setenv("TORTOISE_MAX_FILE_MB", "1")
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         n_poison = 4 if not hasattr(os, "mkfifo") else 5
         assert r["failed"] == n_poison
         assert r["ignored"] == 1
@@ -2422,7 +2422,7 @@ def test_e2e18_memory_and_single_read(tmp_path, monkeypatch):
     try:
         import tracemalloc
         tracemalloc.start()
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         _cur, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         assert r["indexed"] == 80
@@ -2470,7 +2470,7 @@ def test_e2e18_hard_crash_sigkill_resume(tmp_path):
         f"sdk = TortoiseSDK({db!r}, namespace='e2e-900', "
         f"event_log_path={log_path!r})\n"
         "print('CHILD-START', flush=True)\n"
-        f"r = sdk.index_directory({str(corpus)!r}, extract_metadata=False)\n"
+        f"r = sdk.index_sources_from_directory({str(corpus)!r}, extract_metadata=False)\n"
         "print('CHILD-DONE:' + str(r.get('indexed')), flush=True)\n"
         "time.sleep(30)\n"
     )
@@ -2522,7 +2522,7 @@ def test_e2e18_hard_crash_sigkill_resume(tmp_path):
     # ── resume in the parent: fresh SDK on the SAME path → converge ──
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         # structural identity vs a crash-free run: every file indexed, no
         # duplicate urls, honest counters
         assert r["indexed"] == 24 and r["failed"] == 0
@@ -2534,7 +2534,7 @@ def test_e2e18_hard_crash_sigkill_resume(tmp_path):
         eids = [x[0] for x in g.query("MATCH (e:Event) RETURN e.eventId").result_set]
         assert len(eids) == len(set(eids))
         # second full run → all skipped
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["skipped"] == 24 and r2["indexed"] == 0
         assert _required_sweep(g) == 0
     finally:
@@ -2584,7 +2584,7 @@ def test_e2e19_embedded_db_write_failure(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sdkmod.TortoiseSDK, "_index_source_merge", _raise_enospc)
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         # 5 indexed (s0-s4) + 3 db-failed (s5-s7) — the retry budget aborts
         assert r["indexed"] == 5
         assert r["failed"] == 3
@@ -2598,7 +2598,7 @@ def test_e2e19_embedded_db_write_failure(tmp_path, monkeypatch):
         assert _required_sweep(g) == 0
         # re-run without the patch → converges
         monkeypatch.undo()
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r2["skipped"] == 5 and r2["indexed"] == 3
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 8
         urls = [x[0] for x in g.query("MATCH (s:Source) RETURN s.url").result_set]
@@ -2630,14 +2630,14 @@ def test_e2e19_checkpoint_write_failure(tmp_path, monkeypatch):
         return real_replace(src, dst)
     monkeypatch.setattr(os, "replace", _fail_replace)
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False,
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False,
                                 progress_file=str(prog))
         assert r["indexed"] == 3 and r["failed"] == 0
         # no checkpoint materialized (the write failed)
         assert not prog.exists()
         # resume (patch removed) → no-checkpoint fallback → honest re-run
         monkeypatch.undo()
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False,
+        r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=False,
                                  progress_file=str(prog))
         assert r2["skipped"] == 3 and r2["indexed"] == 0
         g = sdk._get_proj().g

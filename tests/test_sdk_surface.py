@@ -64,13 +64,13 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # #10053 made for three rows ("what grew is the IMPLEMENTATION of three names the owner
 # already approved"). `high_water_counts.sdk_public_methods` stayed at 150 at that head —
 # that move did not touch the growth pin (it has since been lowered to 111; see the
-# three-move chain below), and this literal tracks the
+# four-move chain below), and this literal tracks the
 # frozen row set, which must move whenever a row is added.
 #
-# 125 → 111 across THREE moves, none of them growth — every one moves DOWN toward the
-# owner's target of 40, the direction #4282 requires. The two #11609 waves are DISJOINT
-# (wave 1's membership rule excluded any name a `tool_registry` entry bound, and the
-# doors Phase 2 re-keys were live MCP tools at that time):
+# 125 → 110 across FOUR moves, none of them growth — every one moves DOWN toward the
+# owner's target of 40, the direction #4282 requires. The three #11609 waves are DISJOINT
+# (the membership rule excluded any name a `tool_registry` entry bound, and the doors each
+# wave re-keys were live MCP tools at that time):
 #   #12901 wave 1 — five off-surface methods with no production caller were deleted
 #                   (`backfill_v25`, `list_relations`, `quarantine_batch`,
 #                   `calibration_passed`, `membership_get`), frozen into
@@ -86,11 +86,17 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 #                   `refresh_confidence`, `write_question`, `record_decision`) and
 #                   RETIRED four public names into them (`supersede`, `update_entity`,
 #                   `file_decision`, `file_human_approval`), a net −1.   −4 + 3
-# 125 + 6 − 14 − 5 − 4 + 3 = 111. The frozen baseline moved with it
+#   #11609 lane C — the SOURCES/MINE/SESSION containers landed SIX approved methods
+#                   (`mine_knowledge_from_session`, `mine_knowledge_from_directory`,
+#                   `index_sources_from_directory`, `register_source`, `list_sources`,
+#                   `manage_source_trust`) and retired SEVEN public names into them
+#                   (`index_directory`, `index_sessions`, `mine_corpus`, `index_file`,
+#                   `capture_session`, `commit_session`, `assess_source`).  +6 − 7
+# 125 + 6 − 14 − 5 − 4 + 3 + 6 − 7 = 110. The frozen baseline moved with it
 # (`config/surface-manifest.yml` `counts` + `high_water_counts`), re-cut rather than
-# hand-edited — and the pin is LOWERED to 111, because slack in a growth pin is the thing
+# hand-edited — and the pin is LOWERED to 110, because slack in a growth pin is the thing
 # the pin exists to stop.
-DECLARED_COUNT = 111
+DECLARED_COUNT = 110
 
 
 def _declaration() -> dict:

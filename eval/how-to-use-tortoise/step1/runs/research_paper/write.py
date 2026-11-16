@@ -34,7 +34,7 @@ def nid(res):
 
 
 # ---------------------------------------------------------------- provenance
-src = sdk.create_source(
+src = sdk.register_source(
     "https://arxiv.org/abs/2005.11401",
     "research",
     tier="high",

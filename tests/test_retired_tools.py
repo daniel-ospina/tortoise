@@ -47,7 +47,7 @@ class TestDeclaration:
             assert callable(handler), f"handler {spec.name}() was removed"
 
     def test_public_sdk_surface_is_unchanged(self):
-        """The SDK surface did not GROW: 111 public methods, as pinned today.
+        """The SDK surface did not GROW: 110 public methods, as pinned today.
 
         This used to read *"Only MCP tool NAMES are retired — every public SDK method
         stays"*, which #4282 phase 2 made false: `events_poll`/`restore_point_at`
@@ -55,11 +55,11 @@ class TestDeclaration:
         (#10053) implemented three approved-but-absent names, so the count
         moves by design and this test is the pin on where it lands. A retirement or
         an approved name gaining a `def` is an OWNER-APPROVED row in
-        `docs/product/beta-sdk-surface.md`, never this assertion. The 125 → 120 → 112 → 111
-        move is #12901 wave 1's five off-surface retirements, then #4282 **Phase 2**'s
-        six READ/QUERY containers (net −8) and its four-for-three WRITE/MUTATE name swap
-        (net −1) — the two #11609 waves being disjoint, on a base wave 1 had already taken
-        to 120 (see the THREE-moves block below).
+        `docs/product/beta-sdk-surface.md`, never this assertion. The 125 → 120 → 118 → 110
+        move is #12901 wave 1's five off-surface retirements, then #11609 Phase 2's three
+        waves — four retired and three delivered by lane B (119), seven retired and six
+        delivered by lane C (118), then fourteen retired and six delivered by this branch's
+        READ/QUERY containers (110) — all disjoint, so no wave drops another's moves.
         The 150 → 124 move is
         #4282's owner-ruled deletion of the 26 surplus methods nothing called
         (2026-10-27, PR #10187); the 124 → 125 move is an owner-approved
@@ -73,6 +73,9 @@ class TestDeclaration:
         declared surface change". Note that `beta-sdk-surface.md` says of itself, in its
         own header: "This document is a PROPOSAL, and it is NOT the authority for the
         MCP target" — where it and `canonical-mcp-tools.md` differ, canonical governs.
+        #11609 batch 2 then moved it 125 → 124 (SIX approved containers implemented, SEVEN
+        live names retired), and the phase rule is that every batch ends BELOW where it
+        started, which is what makes this pin move DOWN and never up.
         #12521 (`8e4e335b05`) gave it its `def`, approved by daniel-ospina on 2026-11-14
         and recorded at `#10015` comment `6863608333`; `docs/product/beta-sdk-surface.md`
         read *"40 methods against **125** today"* at that move (it now reads **111**, moved
@@ -142,7 +145,7 @@ class TestDeclaration:
             for n in dir(TortoiseSDK)
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
-        assert len(public) == 111, f"SDK surface changed: {len(public)} != 111"
+        assert len(public) == 110, f"SDK surface changed: {len(public)} != 110"
         # 125 → 111 across TWO 2026-11 waves, all DOWN — the direction #4282 requires:
         #   #12901 wave 1  retired 5 off-surface methods with no production caller  (−5)
         #   #11609 Phase 2 landed 6 approved READ/QUERY containers (+6) and

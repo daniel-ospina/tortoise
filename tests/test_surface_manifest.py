@@ -1289,6 +1289,7 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     """
     doc = _manifest()
     # The pin is set ONE BELOW the live count so the run must red: the property
+
     # under test is "growth past the pin reds", not any particular number — so it is
     # READ from the live count instead of being re-typed on every surface move. The count
     # moved five times: #4282's container (81 -> 77), #4282 Phase 3.2's `run_onboarding`
@@ -4860,6 +4861,7 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # live, since it carries the #8482 wrap-envelope repair). The pin moves with every
     # landed container batch until the approved 27 is reached. #4282 Phase 3.2 (main) then
     # removes the five `run_onboarding` tools — a disjoint name set — so the merged
+
     # surface is 72, not either side's own figure.
     # #11609 Phase 2, READ/QUERY wave: 68 -> 64 (nine members retired into five new
     # containers). Its WRITE/MUTATE wave then retired fourteen doors into six containers

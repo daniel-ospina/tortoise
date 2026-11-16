@@ -146,7 +146,7 @@ class TestDe2e3:
         corpus.mkdir()
         (corpus / "s.md").write_text(
             "---\nsessionId: s-idem\n---\n\n" + TRANSCRIPT)
-        r1 = sdk.mine_corpus(str(corpus), extract_entities=False)
+        r1 = sdk.mine_knowledge_from_directory(str(corpus), extract_entities=False)
         assert r1["dedup_hits"] >= 1, r1
         before = len(sdk.review_link_candidates("dedup", candidate_type="content"))
         r2 = sdk.mine_corpus(str(corpus), extract_entities=False)  # noqa: F841
@@ -182,9 +182,9 @@ class TestDe2e3:
 
     def test_checkpoint_back_compat(self, sdk):
         """R14: checkpoint() behavior is unchanged (checkpoint-item scoping)."""
-        r1 = sdk.checkpoint([{"wing": "w", "room": "r", "content": "hello dedup"}])
+        r1 = sdk.mine_knowledge_from_session(items=[{"wing": "w", "room": "r", "content": "hello dedup"}])
         assert r1["filed"] == 1 and r1["duplicates"] == 0
-        r2 = sdk.checkpoint([{"wing": "w", "room": "r", "content": "hello dedup"}])
+        r2 = sdk.mine_knowledge_from_session(items=[{"wing": "w", "room": "r", "content": "hello dedup"}])
         assert r2["filed"] == 0 and r2["duplicates"] == 1
 
     def test_7951_checkpoint_provenance_event_reaches_journal_and_replays(
@@ -197,7 +197,7 @@ class TestDe2e3:
         ``EventRecorded/pointAdded`` and ``rebuild_all`` drops the Event."""
         from tortoise.log import EventLog
 
-        sdk.checkpoint([{"wing": "w", "room": "r", "content": "prov"}])
+        sdk.mine_knowledge_from_session(items=[{"wing": "w", "room": "r", "content": "prov"}])
         proj = sdk._get_proj()
         journal = EventLog(str(tmp_path / "events.jsonl")).read_all()
         prov = [e for e in journal
@@ -226,8 +226,7 @@ class TestDe2e3:
         main's #2795 D2 now RECOMPUTES ``content_hash`` on replay, so this
         test constructs the condition explicitly instead of depending on it."""
         content = "the rebuilt graph must not duplicate this checkpoint item"
-        first = sdk.checkpoint(
-            [{"wing": "w", "room": "r", "content": content}], threshold=1.0)
+        first = sdk.mine_knowledge_from_session(items=[{"wing": "w", "room": "r", "content": content}], threshold=1.0)
         assert first == {"filed": 1, "duplicates": 0}
         pid = sdk.query(kind="checkpoint-item")[0]["id"]
 
@@ -255,8 +254,7 @@ class TestDe2e3:
         assert sdk._content_exists(content) == pid
         # And Tier-1 dedup must reject the re-file (threshold=1.0 disables the
         # Tier-2 semantic tier so only the hash gate is under test).
-        second = sdk.checkpoint(
-            [{"wing": "w", "room": "r", "content": content}], threshold=1.0)
+        second = sdk.mine_knowledge_from_session(items=[{"wing": "w", "room": "r", "content": content}], threshold=1.0)
         assert second == {"filed": 0, "duplicates": 1}, second
         count = sdk._get_proj().g.query(
             "MATCH (n:Point {content:$c}) RETURN count(n)",
@@ -364,11 +362,11 @@ class TestDe2e3ReviewFixes:
         corpus.mkdir()
         (corpus / "s.md").write_text(
             "---\nsessionId: s-idem2\n---\n\n" + TRANSCRIPT)
-        sdk.mine_corpus(str(corpus), extract_entities=False)
+        sdk.mine_knowledge_from_directory(str(corpus), extract_entities=False)
         log1 = sdk._get_event_log().read_all()
         rec1 = [e for e in log1 if e.get("type") == "DedupeRecorded"]
         assert rec1, "first run must record the candidate"
-        sdk.mine_corpus(str(corpus), extract_entities=False)
+        sdk.mine_knowledge_from_directory(str(corpus), extract_entities=False)
         log2 = sdk._get_event_log().read_all()
         rec2 = [e for e in log2 if e.get("type") == "DedupeRecorded"]
         assert len(rec2) == len(rec1), f"DedupeRecorded count grew {len(rec1)}→{len(rec2)}"

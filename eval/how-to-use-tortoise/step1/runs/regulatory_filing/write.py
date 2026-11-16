@@ -33,7 +33,7 @@ def edge(relation, a, b):
 
 
 # ---- Source: the filing document itself -------------------------------
-SRC = track("Source", sdk.create_source(
+SRC = track("Source", sdk.register_source(
     URL,
     sourceKind="document",
     tier="gold",

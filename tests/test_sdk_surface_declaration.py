@@ -237,9 +237,9 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
     # verify nothing at all. Each literal carries its own premise note —
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    assert len(live) == 111, "the live surface moved — update this premise (it pins today's gap)"
-    assert len(off_surface) == 89, "the gap moved — update this premise (it pins today's gap)"
-    assert len(absent) == 17, "the gap moved — update this premise (it pins today's gap)"
+    assert len(live) == 110, "the live surface moved — update this premise (it pins today's gap)"
+    assert len(off_surface) == 82, "the gap moved — update this premise (it pins today's gap)"
+    assert len(absent) == 11, "the gap moved — update this premise (it pins today's gap)"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.
     assert sum(1 for p in problems if "NOT on the approved surface" in p) == len(off_surface)
