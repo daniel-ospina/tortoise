@@ -1184,7 +1184,19 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.provenance",
         description="Provenance chain — 'Who decided this?' "
                     "Follows authoredBy → Subject → delegation.",
-        risk="read",
+        # ⛔ maintenance, NOT read (#12951 review, P1): the handler answers through
+        # `check_confidence(claim_id, include_provenance=True)`, whose claim arm reaches
+        # `get_confidence` — and that read's lazy-consistency path DREAMS a dirty root
+        # (`dream(dirty_only=True, …)` SETs `n.confidence`), a graph write. The tier is
+        # what produces `readOnlyHint`, so a `read` tier here advertised "this call
+        # writes nothing" over a call that does — the exact #4122 defect this file's
+        # `READ_THROUGH_WRITE_METHODS` ledger exists to refuse. `require_calibration=False`
+        # is forwarded into that dream, so the write happens on the uncalibrated path too.
+        # A `graphs:read` key can still call it: maintenance is the third state, for
+        # exactly this shape — it just does not auto-approve. Same tier as
+        # `tortoise_check_confidence` / `tortoise_get_confidence`, which reach the same
+        # writer.
+        risk="maintenance",
         http_policy=True,
         sdk_method="",  # #11609: the SDK method retired into check_confidence(claim_id, include_provenance=True); the handler answers through it
     ),

@@ -135,6 +135,84 @@ class TestGraphOverview:
         assert reached[0][2] == {"days": 7, "limit": 3}
 
 
+class TestOverviewSectionSets:
+    """The container's set and the DOOR's set — one approved container, two tables.
+
+    `tortoise_graph_overview` dispatches through `_overview_section`, NOT through
+    `TortoiseSDK.graph_overview`, so the two value sets can disagree — and at
+    `07f5d61bfa` they did: the SDK declared 13 sections and RAISED for `graphs`/
+    `health`, while the MCP door served 15 (13 + those two), and NOTHING compared the
+    two. The comments on both sides claimed the SDK tuple drove the door's tuple; it
+    did not (#12951 fresh-context review, ISSUE 4).
+
+    The difference is legitimate and is now DECLARED at
+    `mcp_server._OVERVIEW_TRANSPORT_ONLY_SECTIONS` (with the reason each one cannot be
+    an SDK section). What these cases add is the pin that the declared difference is
+    the WHOLE difference, in both directions, and that the two no-`section` folds are
+    as different as they in fact are.
+    """
+
+    def test_the_door_serves_the_container_s_sections_plus_exactly_the_declared_two(self):
+        from tortoise import mcp_server as ms
+
+        served = set(ms._OVERVIEW_SECTIONS)
+        declared = set(TortoiseSDK.GRAPH_OVERVIEW_SECTIONS)
+        assert declared <= served, (
+            "the container dispatches sections this door cannot serve: "
+            f"{sorted(declared - served)} — `tortoise_graph_overview(section=…)` is "
+            "where the approved values are advertised")
+        undeclared = served - declared - set(ms._OVERVIEW_TRANSPORT_ONLY_SECTIONS)
+        assert not undeclared, (
+            f"{sorted(undeclared)} are served by the MCP door but are neither "
+            "container sections nor declared transport-only: a third dispatch table "
+            "grew back")
+
+    def test_the_transport_only_set_is_the_two_named_sections(self):
+        """Pinned LITERALLY: a third transport-only section is a DECISION, not a diff."""
+        from tortoise import mcp_server as ms
+
+        assert set(ms._OVERVIEW_TRANSPORT_ONLY_SECTIONS) == {"graphs", "health"}
+
+    def test_the_sdk_refuses_the_transport_only_sections_and_names_its_own_set(self):
+        """The SDK's `Valid sections:` list must be the set it can actually dispatch.
+
+        At the pre-pin head the MCP door served `graphs`/`health` while
+        `sdk.graph_overview("health")` raised a message advertising 13 values — so a
+        caller reading that message was told, by the container, that a section the
+        transport serves does not exist.
+        """
+        from tortoise import mcp_server as ms
+
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+        for section in ms._OVERVIEW_TRANSPORT_ONLY_SECTIONS:
+            with pytest.raises(ValueError) as exc:
+                sdk.graph_overview(section, entity_id="point-1")
+            message = str(exc.value)
+            assert section in message
+            valid = [s.strip() for s in message.split("Valid sections:")[1].split(",")]
+            assert section not in valid, (
+                f"the SDK advertised {section!r} as valid but cannot dispatch it")
+            for approved in TortoiseSDK.GRAPH_OVERVIEW_SECTIONS:
+                assert approved in valid, approved
+
+    def test_the_two_no_section_folds_differ_exactly_as_documented(self):
+        """Both docstrings claimed one set; the SDK and the transport fold differently.
+
+        The SDK's combined read leaves out only its argument-requiring sections; the
+        transport's default summary is the OLDER epic-#888 envelope, so it keeps
+        `audit`/`dream_health` out and its two transport-only sections in. That is a
+        presentation decision on each side — the defect was that each side said they
+        were the same, so a caller could not know which envelope to expect.
+        """
+        from tortoise import mcp_server as ms
+
+        sdk_fold = set(TortoiseSDK.GRAPH_OVERVIEW_SECTIONS) - set(
+            TortoiseSDK.GRAPH_OVERVIEW_NEEDS_ARGUMENT)
+        transport_fold = set(ms._OVERVIEW_DEFAULT_SUMMARY_KEYS)
+        assert sdk_fold - transport_fold == {"audit", "dream_health"}
+        assert transport_fold - sdk_fold == set(ms._OVERVIEW_TRANSPORT_ONLY_SECTIONS)
+
+
 # ── row 3 — search_knowledge, mode= ───────────────────────────────────
 SEARCH_KNOWLEDGE_DOORS = {
     "hybrid": "tortoise_fts_query",
@@ -158,9 +236,12 @@ class TestSearchKnowledge:
         reached: list = []
         sdk = _bare_sdk(monkeypatch, set(SEARCH_KNOWLEDGE_DOORS.values()), reached)
         # The tag arm pages the rows its door returns, so that door answers with rows.
+        # It is ALSO asked not to record the population (#7983) — this stub has to
+        # accept that kwarg, which is the same reach the pg arm performs.
         monkeypatch.setattr(
             TortoiseSDK, "query_points_by_tag",
-            lambda self, tag: reached.append(("query_points_by_tag", (), {}))
+            lambda self, tag, _record_reads=True: reached.append(
+                ("query_points_by_tag", (), {}))
             or [{"id": "point-1"}])
         kwargs = {"query": "q", "tag": "t", "title": "a title"}
         sdk.search_knowledge(mode=mode, **kwargs)
@@ -210,6 +291,88 @@ class TestSearchKnowledge:
             sdk.search_knowledge(mode=mode)
         assert reached == [], f"mode={mode!r} called a door with no argument"
         assert missing in str(exc.value)
+
+
+class TestSearchKnowledgeTagArm:
+    """The `tag` arm's two dropped contracts (#12951 fresh-context review 2 and 3).
+
+    The arm is four lines: read the tag, slice a page, return. It therefore
+      * DECLARED `include_retracted=False` and never applied it — `query_points_by_tag`
+        has no exclusion of its own, so every caller was served tombstones, while the
+        pre-existing door for the same question filters them (Epic #888); and
+      * read the tag through the accessor's DEFAULT `_record_reads=True`, recording the
+        WHOLE population while serving one page — the direction `query_points_by_tag`'s
+        own docstring says must not happen (#7983), since a tag of 400 points inflated
+        the read fraction `f` by 400 for a 100-row answer.
+
+    Both were invisible because the only tag-arm assertion in this file was *which
+    door* it reached.
+    """
+
+    def _sdk(self, monkeypatch, rows):
+        """A real instance: the accessor stubbed, the ledger WATCHED."""
+        from tortoise import sdk as sdk_mod
+
+        calls: list = []
+
+        def fake(self, tag, _record_reads=True):
+            calls.append((tag, _record_reads))
+            return list(rows)
+
+        monkeypatch.setattr(TortoiseSDK, "query_points_by_tag", fake)
+        recorded: list = []
+        monkeypatch.setattr(sdk_mod, "_ledger_record",
+                            lambda label, page: recorded.append((label, list(page))))
+        return TortoiseSDK.__new__(TortoiseSDK), calls, recorded
+
+    def test_retracted_points_are_excluded_by_default(self, monkeypatch):
+        rows = [{"id": "live-1", "status": "live"},
+                {"id": "dead-1", "status": "retracted"},
+                {"id": "live-2"}]
+        sdk, _, _ = self._sdk(monkeypatch, rows)
+        out = sdk.search_knowledge(mode="tag", tag="pricing")
+        assert [r["id"] for r in out["results"]] == ["live-1", "live-2"], (
+            "a caller who omits include_retracted (the default) was served the tombstone")
+        # the envelope describes the population the caller asked for, not the raw tag
+        assert out["total"] == 2 and out["hasMore"] is False
+
+    def test_include_retracted_returns_the_tombstones(self, monkeypatch):
+        rows = [{"id": "live-1", "status": "live"},
+                {"id": "dead-1", "status": "retracted"}]
+        sdk, _, _ = self._sdk(monkeypatch, rows)
+        out = sdk.search_knowledge(mode="tag", tag="pricing", include_retracted=True)
+        assert [r["id"] for r in out["results"]] == ["live-1", "dead-1"], (
+            "the flag must still surface tombstones — the fix is the default, not a filter")
+
+    def test_the_filter_runs_before_the_page_so_the_total_is_honest(self, monkeypatch):
+        rows = [{"id": "dead-1", "status": "retracted"},
+                {"id": "live-1"}, {"id": "live-2"}, {"id": "live-3"}]
+        sdk, _, _ = self._sdk(monkeypatch, rows)
+        out = sdk.search_knowledge(mode="tag", tag="pricing", limit=2)
+        assert [r["id"] for r in out["results"]] == ["live-1", "live-2"]
+        assert out["total"] == 3 and out["hasMore"] is True
+
+    def test_the_accessor_is_asked_not_to_record_the_population(self, monkeypatch):
+        sdk, calls, _ = self._sdk(monkeypatch, [{"id": f"p{i}"} for i in range(5)])
+        sdk.search_knowledge(mode="tag", tag="pricing", limit=2)
+        assert calls == [("pricing", False)], (
+            "the tag arm IS the paginated caller `query_points_by_tag`'s docstring "
+            "warns about: recording the whole tag would bias `f` HIGH (#7983)")
+
+    def test_the_ledger_records_the_served_page_not_the_tag(self, monkeypatch):
+        rows = [{"id": f"p{i}"} for i in range(5)]
+        sdk, _, recorded = self._sdk(monkeypatch, rows)
+        sdk.search_knowledge(mode="tag", tag="pricing", offset=1, limit=2)
+        assert recorded == [("Point", [{"id": "p1"}, {"id": "p2"}])], (
+            "the ledger must see exactly the rows this call served — one page of two, "
+            "never the five-point tag")
+
+    def test_the_ledger_is_not_written_when_the_page_is_empty(self, monkeypatch):
+        """A page past the end records NOTHING — an empty read is not a read of rows."""
+        sdk, _, recorded = self._sdk(monkeypatch, [{"id": "p0"}])
+        out = sdk.search_knowledge(mode="tag", tag="pricing", offset=9)
+        assert out["results"] == [] and out["hasMore"] is False
+        assert recorded == [("Point", [])]
 
 
 # ── row 4 — list_knowledge, kind= ─────────────────────────────────────
@@ -697,3 +860,56 @@ class TestProvenanceDoorDoesNotPayTheCalibrationGate:
             "shared fail-closed default (#344)', and only the provenance door may "
             "opt out of it")
 
+
+
+class TestProvenanceDoorIsNotAReadTier:
+    """The RETIRED `tortoise_provenance` door WRITES, so it cannot claim `read`.
+
+    `#12951` fresh-context review, ISSUE 1. The door answers through
+    `check_confidence(claim_id, include_provenance=True)`, whose claim arm reaches
+    `get_confidence` — and that read's lazy-consistency path DREAMS a dirty root
+    (`dream(dirty_only=True, …)` runs `SET n.confidence`). It declared `risk="read"`,
+    so its #3883 shim shipped `readOnlyHint: true` over a call that can write a
+    `graphs:read` key's graph — the #4122 defect in its exact shape.
+
+    Two things hid it, and this class closes both:
+
+      * `require_calibration=False` was read as "no write". It removes the GATE, not
+        the dream — the posture the calibration-pin class above measures, and the
+        reason that pin did not catch this.
+      * the reach lives inside the `_check_confidence_provenance` HELPER and the row's
+        binding is blanked (`sdk_method=""`), so the #4122 ledger's op-keyed arm had
+        nothing to key on. It is declared by TOOL NAME now
+        (`tests/tool_surface_capabilities.NON_SDK_READ_BINDINGS`).
+    """
+
+    def _row(self):
+        row = {t.name: t for t in RETIRED_TOOL_REGISTRY}.get("tortoise_provenance")
+        assert row is not None, "tortoise_provenance left the retired registry"
+        return row
+
+    def test_the_tier_is_maintenance_because_the_door_reaches_a_write(self):
+        row = self._row()
+        assert row.risk == "maintenance", (
+            f"tortoise_provenance is tiered {row.risk!r}: its claim arm reaches "
+            "get_confidence, whose lazy dream WRITES n.confidence (#4122)")
+        assert row.annotations is not None
+        assert row.annotations.readOnlyHint is False, (
+            "readOnlyHint is what a client auto-approves on — a maintenance-tier "
+            "door must not claim it (#4122)")
+
+    def test_the_4122_ledger_now_sees_the_door(self):
+        """The declaration is by TOOL NAME, because the binding is blank.
+
+        `declared_set_violations` is the arm that refuses a read-through writer bound
+        to a non-`maintenance` HTTP tool. Before this declaration it could not see
+        this door at all, so demoting the tier back to `read` reddened NOTHING.
+        """
+        from tests import tool_surface_capabilities as caps
+
+        assert caps.NON_SDK_READ_BINDINGS.get("check_confidence") == \
+            "tortoise_provenance"
+        problems = caps.declared_set_violations(
+            [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY])
+        named = [p for p in problems if "tortoise_provenance" in p]
+        assert not named, named

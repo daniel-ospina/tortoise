@@ -27357,9 +27357,19 @@ class TortoiseSDK:
     # for what the standard methods cannot express, and consolidating them must
     # not change what the operation MEANS.
 
-    #: The `section=` values :meth:`graph_overview` dispatches on — ONE home, read
-    #: by the dispatch, the MCP container's own list and the tests, so a section
-    #: cannot exist in the code without appearing where a caller is told it does.
+    #: The `section=` values :meth:`graph_overview` dispatches on — THE home for the
+    #: container's approved set. Read by the dispatch and by the tests; the MCP door's
+    #: own list (`mcp_server._OVERVIEW_SECTIONS`) is this set PLUS its declared
+    #: transport-only sections, and the relationship is pinned in
+    #: `tests/test_11609_read_containers.py` in BOTH directions (#12951 review: the
+    #: comment here used to claim this tuple was read by "the MCP container's own list",
+    #: which was false — that list is an independent literal).
+    #:
+    #: ⛔ Do not add a section here to make the two sets match: the difference is exactly
+    #: `mcp_server._OVERVIEW_TRANSPORT_ONLY_SECTIONS` (`graphs`, `health`), and neither
+    #: belongs in this set — `graphs` is another container's source (bridge-table Part A
+    #: sends it to `tenancy:list_memory_graphs`) and `health` is a monitoring probe with
+    #: no SDK read behind it.
     GRAPH_OVERVIEW_SECTIONS = (
         "taxonomy", "structure", "structure_check", "pointkinds", "tags",
         "sources", "namespaces", "topics", "status", "stale",
@@ -27385,11 +27395,15 @@ class TortoiseSDK:
           namespaces | status | stale | validate_domain (`domain` required) |
           audit (`point_kinds` optional) | dream_health | topics (`entity_id`)
 
-        Omit ``section`` → a combined dict of one entry per section, keyed by the
-        section name. The COMBINED read is the same set the MCP container folds
-        to bounded counts: the folding is a presentation decision (it keeps the
-        orientation answer compact as the graph grows, #3510) and belongs to the
-        transport, not here.
+        Omit ``section`` → a combined dict of one entry per section that does not
+        require an argument, keyed by the section name. ⚠️ This is NOT the set the MCP
+        container folds: the transport's no-`section` summary is an OLDER envelope
+        (`mcp_server._OVERVIEW_DEFAULT_SUMMARY_KEYS`, kept byte-identical to what
+        `tortoise_overview` returned before the consolidation), so it keeps ``audit``
+        and ``dream_health`` OUT and carries its two transport-only sections
+        (``graphs``, ``health``) IN. Both folds are presentation; this one is the
+        container's. (#12951 review: the sentence here claimed the two were "the same
+        set", which they are not.)
 
         ``structure_check`` keeps its own door live on purpose (#10914): that read
         is the one member with a WRAP envelope (``list[dict]``) and the failure
@@ -27483,6 +27497,9 @@ class TortoiseSDK:
               vector-free hybrid — stated rather than implied.
           tag — the Points reachable through one Tag. Sliced from a full scan, so
               a walked tag page is approximate, not the complete set (#5346).
+              Retracted Points are excluded unless ``include_retracted=True`` —
+              the same tombstone contract as every other mode, applied here
+              because the accessor has no exclusion of its own.
           sessions — indexed agent sessions, filtered by ``agent``/``topics`` and
               bounded by ``after``/``before``.
           entry_points — entity resolution: a natural-language query to matching
@@ -27518,8 +27535,30 @@ class TortoiseSDK:
                 raise ValueError(
                     "search_knowledge(mode='tag') requires tag= — name the Tag "
                     "whose Points to read")
-            rows = self.query_points_by_tag(tag)
+            # #7983: `_record_reads=False` on the accessor, then record the page
+            # this call actually SERVES — this arm IS the paginated caller
+            # `query_points_by_tag`'s docstring warns about. Recording inside the
+            # accessor would count the WHOLE tag population for a call that
+            # receives one page of it, biased `f` HIGH (“the direction that must
+            # not happen”); recording nothing would leave the served rows
+            # unrecorded. The MCP tag arm performs the same two steps
+            # (`mcp_server.tortoise_query`), and the two must measure one thing.
+            rows = self.query_points_by_tag(tag, _record_reads=False)
+            # `query_points_by_tag` has no terminal-status exclusion of its own
+            # (it returns `properties(p)` for the whole tag population), so the
+            # `include_retracted=` this container DECLARES has to be applied
+            # here — the pre-existing door for the same question
+            # (`mcp_server.tortoise_query_points_by_tag`) filters
+            # `status != "retracted"` for exactly this reason (Epic #888).
+            # Unapplied, a caller who omitted the flag (every caller — the
+            # default is False) was served tombstones, and two live doors
+            # answering "the Points reachable through one Tag" would disagree
+            # about tombstones with no signal. Filtered BEFORE the slice, so
+            # `total`/`hasMore` describe the population the caller asked for.
+            if not include_retracted:
+                rows = [r for r in rows if r.get("status") != "retracted"]
             page = rows[offset:offset + (limit or 100)]
+            _ledger_record("Point", page)  # #7983: the served page, not the tag
             return {"results": page, "total": len(rows),
                     "hasMore": offset + (limit or 100) < len(rows)}
         if mode == "sessions":

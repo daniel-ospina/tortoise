@@ -7444,6 +7444,45 @@ _OVERVIEW_SECTIONS = (
     # defaults — the container's shared `limit=50` against the door's `limit=2`.
     "validate_domain", "audit", "dream_health",
 )
+# ⛔ This tuple is the approved container's set (`TortoiseSDK.GRAPH_OVERVIEW_SECTIONS`)
+# PLUS `_OVERVIEW_TRANSPORT_ONLY_SECTIONS` below, and NOTHING else. It was an
+# independent literal that happened to agree with the SDK tuple … except for those two,
+# which nothing declared or pinned (#12951 fresh-context review, ISSUE 4). The
+# relationship is asserted by `tests/test_11609_read_containers.py`, in both directions:
+# a section added to the container with no arm here reds, and a section served here
+# without being either approved or declared transport-only reds.
+#
+# Kept as a LITERAL rather than derived (`… = TortoiseSDK.GRAPH_OVERVIEW_SECTIONS +
+# _OVERVIEW_TRANSPORT_ONLY_SECTIONS`) because `tests/test_curation_11469.py` reads this
+# constant out of the module SOURCE with `ast.literal_eval` — it must not import this
+# module, whose import raises on an ambient `TORTOISE_API_KEY`. A pin that can FAIL is
+# also the stronger statement here, the same reason `_OVERVIEW_DEFAULT_SUMMARY_KEYS` is
+# pinned literally rather than derived.
+
+#: The sections THIS TRANSPORT serves and `TortoiseSDK.GRAPH_OVERVIEW_SECTIONS` does
+#: NOT — the whole difference between the approved container's set and this door's,
+#: named in ONE place so a pin can hold it (`tests/test_11609_read_containers.py`)
+#: instead of leaving it an accident of two literals that happened to agree
+#: (#12951 fresh-context review, ISSUE 4: nothing compared the two, and the comments
+#: on both sides claimed the SDK tuple drove this tuple).
+#:
+#:   graphs — `tortoise_list_graphs` is a LIVE door whose destination in
+#:       `docs/product/bridge-table.md` Part A is `tenancy:list_memory_graphs`, NOT
+#:       this container. It is a section HERE because `tortoise_overview(section=
+#:       "graphs")` retires forward through this door, and because the read carries
+#:       the #9340 HTTP tenant filter — a transport concern applied on top of
+#:       `list_graphs`, so an SDK section would not be able to answer it.
+#:   health — this IS one of the container's approved sections
+#:       (`docs/product/canonical-mcp-tools.md`'s `tortoise_health` pointer is
+#:       `tortoise_graph_overview(section="health")`), but it has no SDK read to
+#:       delegate to: `tortoise_health` is a monitoring probe bounded by a TRANSPORT
+#:       deadline clamp (#10749 / `_health_setup_allowance`).
+#:
+#: ⛔ Neither can be closed by a lane adding a section to the SDK tuple: `health` has
+#: no SDK read and `graphs` is another container's source. Both are therefore DECLARED
+#: here and pinned, so a third difference cannot appear silently and neither of these
+#: two can be dropped without reddening.
+_OVERVIEW_TRANSPORT_ONLY_SECTIONS = ("graphs", "health")
 
 #: Sections that REQUIRE an argument, so the no-`section` combined summary cannot
 #: call them. `topics` was the only one; #4282 added `validate_domain` (needs
@@ -7831,6 +7870,15 @@ def tortoise_graph_overview(section: str | None = None,
 # Part C1 of `docs/product/bridge-table.md` exists to catch. The `mode=`/`kind=`
 # enum is a closed set on both sides: an unknown value REFUSES with the valid set
 # named (AIP-193), never silently falls through to a default.
+#
+# ⛔ ONE member of the six is NOT shaped that way, and saying so is the point of this
+# paragraph: `tortoise_graph_overview` dispatches through `_overview_section`, whose
+# arms were the epic-#888 `tortoise_overview` aliases and predate this batch. Its value
+# set is `TortoiseSDK.GRAPH_OVERVIEW_SECTIONS` PLUS the two transport-only sections
+# declared at `_OVERVIEW_TRANSPORT_ONLY_SECTIONS` (`graphs`, `health` — see the reason
+# there), and `tests/test_11609_read_containers.py` pins that relationship in both
+# directions. The claim "there cannot be a second copy" was FALSE for this container
+# (#12951 fresh-context review, ISSUE 4); the pin is what makes it true now.
 
 
 def tortoise_search_knowledge(query: str | None = None, mode: str = "hybrid",
