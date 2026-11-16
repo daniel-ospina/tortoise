@@ -220,22 +220,24 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
       WITH NUMBERS behind it.  `session_context()`
       (`tortoise/__main__.py:5823`-`5830`) passes no deadline of its own; what
       bounds it is the store.  On the embedded lane that is a 10 s socket
-      timeout, fail-closed by default and with no ``off`` opt-out (`:411`,
-      `:620`-`:626`), plus one retry (`:477`) and a 2 s connect bound with a
-      sub-second backoff (`:410`, `:478`-`:479`) — over the four reads the
-      digest issues (`tortoise/sdk.py:40754`-`40776`) that is
-      ≈ 4 × 2 × 10 s ≈ 80 s typical and a little more at worst, either way
-      PAST this 60 s bound, which is the case `:756`-`:757` names.
+      timeout, fail-closed by default and with no ``off`` opt-out
+      (`tortoise/projection/__init__.py:411`, `:620`-`:626`), plus one retry
+      (`:477`) and a 2 s connect bound with a sub-second backoff (`:410`,
+      `:478`-`:479`) — over the four reads the digest issues
+      (`tortoise/sdk.py:40754`-`40776`) that is ≈ 4 × 2 × 10 s ≈ 80 s typical
+      and a little more at worst, either way PAST this 60 s bound, which is the
+      case `session-start.sh:756`-`:757` names.
       The `TORTOISE_DB_URI` arm of the same call differs on both counts: zero
-      retries (`:246`, `:293`) and a `TORTOISE_DB_SOCKET_TIMEOUT` an operator
+      retries (`tortoise/projection/__init__.py:246`, `:293`) and a
+      `TORTOISE_DB_SOCKET_TIMEOUT` an operator
       CAN switch off (`:126`-`:127`) — where it outlives the bound, the extent
       is the operator's: a finite value is capped at the knob's own 600 s
       ceiling (`_DB_TIMEOUT_MAX_PER_LANE_S`, `:436`; above it the knob fails
       loud rather than clamping, `:174`-`:178`), and unbounded only under that
       documented `none`/`off`/`0` opt-out.
-      The BACKGROUNDED install-probe beacon (`:786`) is the other: not
-      `nohup`-detached (`:767` says it does not join that fire-and-forget
-      shape), but backgrounded.  Its network leg is bounded
+      The BACKGROUNDED install-probe beacon (`session-start.sh:786`) is the
+      other: not `nohup`-detached (`:767` says it does not join that
+      fire-and-forget shape), but backgrounded.  Its network leg is bounded
       (`urlopen(req, timeout=15)`, `tortoise/__main__.py:9724`) — a per-socket
       timeout, not a wall-clock deadline, and neither DNS resolution nor the
       CLI import ahead of it is covered — so it has usually exited by then, and
