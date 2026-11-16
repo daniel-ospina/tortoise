@@ -186,6 +186,7 @@ def test_case_two_is_unrepresentable_in_the_seed_sql() -> None:
     assert execute_at < divergence_at, (
         "the divergence refusal happens before the seed statement runs — case 2 "
         "would be enforced by prose rather than by the SQL")
+
     # ⛔ THE CLASSIFIER, NOT A GATE (#12894 review cycle 1, P2). The line here
     # used to read `assert seed_body.count("row_max >") == 0 or True` — `X or
     # True` can never fail, so it certified nothing while reading as the check

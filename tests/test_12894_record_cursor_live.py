@@ -81,6 +81,31 @@ def _records(n: int) -> list[dict]:
     return out
 
 
+@pytest.fixture(autouse=True)
+def _release_pooled_handles():
+    """Hand back every idle record connection this suite's writes opened.
+
+    MEASURED, and it cost a flake in the job that runs these files together: the
+    live door opens its connection through `_default_connect`, which POOLS it,
+    and `close()` returns the handle to that module-level idle set rather than to
+    the kernel. A handle left in the pool can still be holding the allocator's
+    row lock, and the NEXT record suite's `_ensure_record_schema` re-applies the
+    unguarded migrations (`DROP`/`CREATE POLICY`, `ALTER`) — an
+    AccessExclusiveLock on `public.record_cursor`. The two deadlock:
+
+        process A waits for AccessExclusiveLock on relation …record_cursor;
+        blocked by process B, which waits for ShareLock on transaction …
+
+    `record_writer._release_pooled_connections()` is the module's own documented
+    seam for exactly this ("the TEST suite's isolation seam today"), and
+    `tests/test_9558_record_write_cost.py` uses it for the same reason.
+    """
+    yield
+    from tortoise import record_writer as _rw
+
+    _rw._release_pooled_connections()
+
+
 @pytest.fixture(scope="module")
 def schema():
     """The record schema (this tree's migrations) + the byte meter, once.
@@ -793,3 +818,53 @@ def test_the_seed_separates_a_tail_from_a_burn(schema, tenant, app):
     assert (burned.seq, burned.healed_tail, burned.burned) == (7, False, True), (
         f"a counter ahead of every row must report `burned`, not the benign "
         f"tail: {burned}")
+
+
+def test_the_live_door_takes_the_allocated_number_over_the_journals(
+        schema, tenant, app, monkeypatch):
+    """FINDING (review P1): `write_live_record(seq=…)` forwarded the JOURNAL's
+    ordinal as the plan's `first_seq`, and `replay_plan` refuses
+    `allocate and start_seq != 1` — so at the documented cutover every armed write
+    after position 1 came back `REFUSED refusal="write_failed"`, attributed to a
+    remedy ("a replay heals the record") that cannot apply, while
+    `tools/record_wiring_check.py` CERTIFIED the same call shape.
+
+    All three production doors pass `seq=` (that is what `EventLog.append` gives
+    them, #9190), so the wiring, not the caller, was wrong: with
+    ``allocate=True`` the record's counter issues the number and the journal's own
+    ordinal stays in the journal FILE, whose coordinate it is.
+
+    The falsifier drives the REAL live door with a journal ordinal of 9 on a
+    graph whose counter is at 3: the write must APPLY at 4, and the position row
+    must BE 4 — a forwarded `first_seq` reds this test twice over (a refusal, and
+    a position of 9 if the refusal were ever relaxed).
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2, 3])
+    _seed_and_arm(app, org, graph, 3)
+    app.commit()
+    # The live door resolves its DSN from the env (that is the arming seam the
+    # production doors use); the tenant comes from the explicit argument, so no
+    # single-tenant declaration is needed.
+    # ⛔ THE APP ROLE, NOT THE ADMIN DSN. The live door opens its OWN connection,
+    # so it goes through the same role gate as every other caller: a superuser
+    # DSN is refused by `scope_connection` (BYPASSRLS), and the refusal surfaces
+    # as `write_failed` — which would make this test fail for a reason that has
+    # nothing to do with the ordinal.
+    from tests.test_9078_record_written_by_production_path import _app_role_dsn
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV,
+                       _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
+
+    write = rw.write_live_record(
+        RECORD, durable=True, seq=9, tenant=(org, graph), allocate=True)
+    assert write is not None, "the live door returned nothing (an unarmed read?)"
+    assert write.outcome is rw.RecordWriteOutcome.APPLIED, (
+        f"a journal ordinal of 9 refused an ALLOCATED write: outcome="
+        f"{write.outcome} refusal={write.refusal!r} — `first_seq` is still "
+        f"carrying the journal's number into the plan")
+    assert (write.first_seq, write.last_seq) == (4, 4), (
+        f"the watermark is not the allocated position: "
+        f"{write.first_seq}..{write.last_seq}")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3, 4], (
+        "the position row is not the allocated number")

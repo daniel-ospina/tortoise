@@ -2592,6 +2592,7 @@ def write_live_record(record: Mapping[str, Any], *,
         # row needs a number, and inventing one collides with a later replay's
         # numbering. Counted and warned above, so the skip is observable.
         # ⛔ With `allocate=True` the number comes from the RECORD's counter
+
         # instead (#12894), so `seq` is neither needed nor consulted — and it
         # must NOT be forwarded as `first_seq`, because `replay_plan` REFUSES a
         # caller watermark on that arm (`allocate=True derives the position from

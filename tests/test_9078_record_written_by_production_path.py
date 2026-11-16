@@ -356,10 +356,22 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # leg would write into a database with no counter table (`42P01`) while this
     # suite read green. LAST, because it GRANTs to `tortoise_record_app` and
     # `RAISE EXCEPTION`s when that role is absent — the order is the dependency.
-    # Re-apply safe: CREATE TABLE IF NOT EXISTS, DROP POLICY IF EXISTS before
-    # every CREATE POLICY.
+    #
+    # ⛔ AND IT IS `creates`-GUARDED, not `None`. With `None` this file re-applied
+    # on EVERY `_ensure_record_schema` call — i.e. once per record-suite module
+    # fixture — and its `DROP POLICY` / `CREATE POLICY` / `GRANT` take an ACCESS
+    # EXCLUSIVE lock on `public.record_cursor`. MEASURED: running this suite and
+    # `tests/test_12894_record_cursor_live.py` in ONE pytest invocation (which is
+    # what the `test-record-postgres` job does) ended in
+    # `ERROR test_9318_journal_collision::test_a_genuine_replay_… - DeadlockDetected`
+    # raised HERE, at the re-apply loop — the DDL waiting on a live allocator
+    # transaction that held the counter row. The table's own presence is the
+    # right probe (unlike the tenancy file's roles, which no relation can show):
+    # present ⇒ this tree's schema is already there ⇒ nothing to apply, no lock
+    # taken. Re-apply safety itself is proven by the PGlite drill and by the
+    # reviewer's double-apply, which do not depend on this list.
     (REPO_ROOT / "supabase" / "migrations"
-     / "20261116000001_record_cursor_allocator.sql", None),
+     / "20261116000001_record_cursor_allocator.sql", "public.record_cursor"),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
@@ -1034,6 +1046,7 @@ def test_the_live_door_rule_fires_when_the_ordinal_is_dropped(wiring):
     # call binds `allocate=`. Accepting the expression ALONE would let a body
     # that never receives `allocate` write `position=True` and invent a number.
     #
+
     # ⛔ AND THE WATERMARK IS PART OF THAT ARM (#12894 review cycle 1, P1).
     # `replay_plan` REFUSES `allocate=True` with a caller watermark, and every
     # production site has a `seq` from `log.append`, so a body that forwards it
@@ -1046,6 +1059,7 @@ def test_the_live_door_rule_fires_when_the_ordinal_is_dropped(wiring):
     assert module.live_door_writes_the_journals_position(
         source % allocator) == [], (
         "the gate rejects the allocator arm — the honest #12894 spelling")
+
     forwarding = ("position=True if allocate else seq is not None, "
                   "first_seq=seq if seq is not None else 1, allocate=allocate")
     forwarded = module.live_door_writes_the_journals_position(
