@@ -202,7 +202,7 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
     that is the only path on which this function runs at all: `_run_hook`
     calls it from `except subprocess.TimeoutExpired`, and on the SUCCESS path
     it deliberately kills nothing (a drain is *meant* to outlive the hook —
-    see that docstring).  Two children are the reason it exists:
+    see that docstring).  The children it exists for:
 
     - A hook killed after it has dispatched one of its three `nohup … session
       drain … >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:840`–`:846`,
@@ -217,13 +217,17 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
       (`:793`) — which must return before `:801` can run — the child that arm
       spawned is still live (`:689`, or the `-c` arm at `:691`-`:697` ending in
       `main(["context"])`).  That child is the one that can outlive this bound
-      WITH A NUMBER behind it: the local-store `session_context()`
-      (`tortoise/__main__.py:5823`-`5830`) passes no deadline, and its four
-      reads are each bounded only by the store's own socket timeout — 10 s,
-      fail-closed and not disableable (`tortoise/projection/__init__.py:411`,
-      `:620`-`:626`) — with one retry on that lane (`:477`), so the worst case
-      is ~4 × 2 × 10 s ≈ 80 s, past this 60 s bound.  That is the case `:756`
-      names as able to outlive it.
+      WITH NUMBERS behind it.  `session_context()`
+      (`tortoise/__main__.py:5823`-`5830`) passes no deadline of its own; what
+      bounds it is the store.  On the embedded lane that is a 10 s socket
+      timeout, fail-closed by default and with no ``off`` opt-out (`:411`,
+      `:620`-`:626`), plus one retry (`:477`) and a 2 s connect bound with a
+      sub-second backoff (`:410`, `:478`-`:479`) — so ≈ 4 × 2 × 10 s ≈ 80 s
+      typical and a little more at worst, either way PAST this 60 s bound.
+      The `TORTOISE_DB_URI` arm of the same call differs on both counts: zero
+      retries (`:245`, `:293`) and a `TORTOISE_DB_SOCKET_TIMEOUT` an operator
+      CAN switch off (`:126`-`:127`) — where it outlives the bound, it does so
+      without limit.  That is the case `:756`-`:757` names.
       The BACKGROUNDED install-probe beacon (`:786`) is the other: not
       `nohup`-detached (`:767` says it does not join that fire-and-forget
       shape), but backgrounded.  Its network leg is bounded
@@ -232,14 +236,14 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
       CLI import ahead of it is covered — so it has usually exited by then, and
       bash has already reaped it.  If `:801` is never reached its exit status
       is simply never collected — not a zombie.
-      Neither of those is guaranteed to be there: `_run_digest` spawns NOTHING
+      None of them is guaranteed to be there: `_run_digest` spawns NOTHING
       when both its arms miss (`:687`-`:698` has no `else`, and a stall in the
       `-d` test at `:690` is already inside the function with no child yet),
       and the beacon does not exist at all unless `_probe_reachable` passed
-      (`:781`).  Nor is the group limited to them: `_record_hook_run`
-      (`:517`-`:529`) has two command substitutions (the second execs `date`)
-      and a `mkdir` after `:801`, so that window carries its own short-lived
-      children.
+      (`:781`).  Nor is the group limited to them: `_record_hook_run` — called
+      after `:801`, at `:809` — has two command substitutions (`:519`, `:520`,
+      the second exec'ing `date`) and a `mkdir` (`:521`), so that window
+      carries its own short-lived children.
 
     So what this function actually provides is the thing a bash-only
     `proc.kill()` cannot: every member of the group is sent SIGKILL — and
