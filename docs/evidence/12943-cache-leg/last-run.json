@@ -1,0 +1,28 @@
+{
+  "org": "org12943fde43a6444",
+  "graph_id": "g_12943fde43a6444",
+  "cache_graph": "org_org12943fde43a6444_g_12943fde43a6444",
+  "record": {
+    "object": 2,
+    "subject": 0,
+    "point": 3,
+    "event": 0,
+    "relation": 4,
+    "journal_event": 6
+  },
+  "cache": {
+    "Object": 2,
+    "Subject": 0,
+    "Point": 3,
+    "Event": 0,
+    "Source": 0
+  },
+  "metric_deltas": {
+    "record_writes_applied": "0 -> 6",
+    "record_last_write_at": "None -> '2026-11-16T01:05:50.405007+00:00'",
+    "server_code": {
+      "tracked": 20
+    },
+    "uptime": "1.07 -> 9.43"
+  }
+}
