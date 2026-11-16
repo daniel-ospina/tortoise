@@ -707,10 +707,18 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # ⛔ THE REPAIR AND THE CONSEQUENCE DEPEND ON TWO FACTS THE ANCHOR DOES NOT
     # IMPLY, so both are read below rather than assumed:
     #
-    #   * ``supersededBy`` — the anchor is ``status = 'superseded'``, and the
-    #     generic ``update_entity(status='superseded')`` door reaches that status
-    #     with NO successor at all (#11824's AX table: that mirror shape is out of
-    #     the guard on purpose — refusing it would over-block). Telling a reader
+    #   * ``supersededBy`` — the anchor is ``status = 'superseded'``, and a
+    #     row can carry that status with NO successor at all: the live write
+    #     door now REFUSES it (#12592's `_assert_supersession_names_a_successor`
+    #     in `tortoise/sdk.py`), but LEGACY rows and journalled ones do exist —
+    #     §4.3's last clause keeps a replay restoring a successorless
+    #     supersession — so this instrument still meets the shape and must still
+    #     not prescribe a repair it cannot perform. (This block previously read
+    #     that the generic update door "reaches that status with NO successor at
+    #     all … out of the guard on purpose": #12592 INVERTED that, and the
+    #     fixture moved with it — `tests/test_11826`'s
+    #     `_legacy_successorless_supersede`. Corrected in place, #12914 review P3.)
+    #     Telling a reader
     #     to re-point "onto the successor named by its supersededBy" then names a
     #     node that does not exist, so the repair cannot be performed — the
     #     #7819 rule this module already applies to a remedy that always raises.

@@ -27,8 +27,12 @@ replaced it through any door.
 
 What this suite pins (each row names the mutation that reds it):
 
-* A BARE ``status='superseded'`` is REFUSED on every label, writes nothing and
-  journals nothing. Mutation: delete the
+* A BARE ``status='superseded'`` is REFUSED **at the update door**, on every
+  label, writes nothing and journals nothing. (The CREATE door is a disclosed
+  residual: ``create_object(name, kind, status='superseded')`` still mints the
+  bare fact, because a record-sourced rebuild must be able to re-create a row a
+  journal recorded as superseded — see the guard's SCOPE paragraph in
+  ``tortoise/sdk.py``.) Mutation: delete the
   ``self._assert_supersession_names_a_successor(...)`` call in
   ``_update_entity`` -> the three ``test_a_bare...`` cases red.
 * The pair IS admitted through the same door (the guard is not a blanket ban on
@@ -1649,3 +1653,128 @@ def test_a_camel_str_subclass_successor_is_not_diagnosed_as_a_shadow_spelling(sd
     assert _row(sdk, "Object", node) == before, (
         f"a refused str-subclass successor moved the row: {before} -> "
         f"{_row(sdk, 'Object', node)}")
+
+
+class _StrSubLyingRender(str):
+    """A GENUINE ``str`` subclass whose WIRE RENDERING is not its base content.
+
+    ``falkordb.helpers.quote_string`` renders a parameter through
+    ``v.replace(...)`` and the caller's ``__format__``, so overriding
+    ``replace`` changes the bytes the engine receives while ``str.__str__``
+    still answers the base content the gate compares. That gap is the
+    guard/wire split #12914 review P1 measured.
+    """
+
+    render_as = ""
+
+    def replace(self, sub, rep, *args):  # noqa: D401 - the driver's own call
+        return self.render_as
+
+    __hash__ = str.__hash__
+
+
+def test_a_SUCCESSOR_that_only_RENDERS_as_the_old_id_is_not_a_self_supersession(sdk):
+    """The guard must not compare a value the write does not send (#12914 P1).
+
+    Measured on the reviewed head: an id whose BASE CONTENT is ``"fff"`` but
+    which renders as the live row's id walked ``supersede_knowledge(<Object>,
+    <that id>)`` past the self-successor gate — the gate compared base content,
+    the probe and the write sent the RENDERED id — and the row was stored as
+    ``['MinOld', 'superseded', 'MinOld']``: the row naming ITSELF as its
+    successor, the exact state ``old_id != new_id`` exists to refuse. On the
+    Point arm the same call wrote ``['superseded', True, None]`` plus a self
+    ``CORRECTS`` edge.
+
+    Mutation: probe and write the CALLER'S OBJECT while the gate compares base
+    content (i.e. drop the `old_id = _old_word` / `new_id = _new_word` rebind in
+    ``_supersede_entity``, or the ``str.__str__`` rebind in
+    ``supersede_point``) -> both arms accept and store the self-successor.
+    """
+    for label in ("Point", "Object"):
+        node = _make(sdk, label, f"render-first-{label.lower()}")
+        before = _row(sdk, label, node)
+
+        successor = _StrSubLyingRender("fff")
+        successor.render_as = node
+
+        with pytest.raises(ValueError):
+            sdk.supersede_knowledge(node, successor)
+
+        assert _row(sdk, label, node) == before, (
+            f"{label}: a refused self-supersession moved the row: "
+            f"{before} -> {_row(sdk, label, node)}")
+        row = _row(sdk, label, node)
+        assert row is None or row[1] != node, (
+            f"{label}: the row names itself as its own successor: {row}")
+        if label == "Point":
+            assert not _corrects_self(sdk, node), (
+                f"Point: a self CORRECTS edge was written: {_corrects_self(sdk, node)}")
+
+        # The DIRECT door is pinned too — it carries its own copy of the gate.
+        with pytest.raises(ValueError):
+            sdk.supersede_point(node, successor) if label == "Point" \
+                else sdk.supersede_knowledge(node, successor)
+
+
+def test_a_no_status_update_on_a_LEGACY_successorless_row_is_not_refused(sdk):
+    """The guard adjudicates what the CALL writes, not the row's stored word.
+
+    Measured on the reviewed head (#12914 review P2): with the stored status used
+    as a fallback, a call that named NO status was still adjudicated against it,
+    so on a legacy successorless-superseded ``:Object``/``:Subject`` the
+    legitimate temporal fields were refused — ``update_knowledge(<legacy
+    superseded Object>, expiredAt=…)`` and the same with ``validTo=…`` raised
+    "refused status='superseded' … with no successor", naming a field the caller
+    never sent. That contradicts this PR's own statement that a graph already
+    holding the shape "is untouched", and it hits exactly the population
+    ``tests/test_11826``'s audit exists to repair.
+
+    Mutation: restore ``effective = word_after or stored_status`` -> both calls
+    below raise.
+    """
+    for label in ("Object", "Subject"):
+        node = _make(sdk, label, f"legacy-window-{label.lower()}")
+        # The legacy shape: the word with no carrier, written under the guard.
+        sdk._get_proj().g.query(
+            f"MATCH (n:{label} {{id:$id}}) SET n.status='superseded', "
+            "n.supersededBy=NULL",
+            params={"id": node},
+        )
+        assert _row(sdk, label, node)[0] == "superseded"
+
+        # A window-only revision names no lifecycle word: it must land.
+        sdk.update_knowledge(node, expiredAt="2026-01-01T00:00:00Z")
+        sdk.update_knowledge(node, validTo="2026-01-02T00:00:00Z")
+        # ...and the legacy row is still the shape it was (nothing re-minted).
+        assert _row(sdk, label, node)[1] is None
+
+
+def test_transfer_edges_is_refused_on_the_family_arm_in_BOTH_directions(sdk):
+    """An explicit ``transfer_edges`` the arm cannot honour is REFUSED, not dropped.
+
+    Measured on the reviewed head (#12914 review P3): the parameter defaulted to
+    ``True``, so on an ``:Object``/``:Subject`` an EXPLICIT ``True`` was silently
+    dropped — no edges transferred, no ``edges_transferred`` in the return —
+    while ``False`` on the same labels was refused. That is the one-arm-per-call
+    rule this file states for the Point arm (#10053) applied unevenly.
+
+    Mutation: restore the ``transfer_edges: bool = True`` default (an explicit
+    ``True`` then takes the arm silently) -> the ``True`` case below reds.
+    """
+    node = _make(sdk, "Object", "family-transfer-explicit-true")
+    successor = _make(sdk, "Object", "family-transfer-explicit-true-v2")
+
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede_knowledge(node, successor, True)
+    assert "transfer_edges=True" in str(exc.value), str(exc.value)
+    assert _row(sdk, "Object", node)[0] != "superseded", (
+        "a refused keyword must cost no write")
+
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede_knowledge(node, successor, False)
+    assert "transfer_edges=False" in str(exc.value), str(exc.value)
+
+    # The omitted keyword still takes the family arm.
+    out = sdk.supersede_knowledge(node, successor)
+    assert out["superseded"] is True, out
+    assert _row(sdk, "Object", node)[0] == "superseded"
