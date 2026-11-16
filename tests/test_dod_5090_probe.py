@@ -11750,6 +11750,25 @@ def test_12549_the_export_attribute_is_a_MOMENT_not_a_file_property(
         # `--` ENDS option processing, so the `-a` after it is a POSITIONAL parameter.
         ("set -- -a", "set -- -a\nTORTOISE_EMBED_GATE=1\n", "OFF"),
         ("set -- -o allexport", "set -- -o allexport\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        # ⛔ A trailing shell OPERATOR ends the `set` command, so `set +a;` DISARMS — and
+        # all three matchers anchored at end-of-line, read the line as "no `set` at all",
+        # left the state armed, and published a FALSE ARM over an entrypoint that turns
+        # the gate off (measured: `set -a; set +a; FLAG=1; env` has no FLAG; fresh review
+        # of #12902, P1). The ARM spelling `set -a;` was a false HOLD in the same way.
+        ("set -a;", "set -a;\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        ("set +a; after set -a", "set -a\nset +a;\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        # …and the long spelling with a QUOTED name arms too (`set -o "allexport"`).
+        ('set -o "allexport"', 'set -o "allexport"\nTORTOISE_EMBED_GATE=1\n', "ON"),
+        # ⛔ A GLUED OPERATOR is not part of the VALUE: `export FLAG=1;` runs `FLAG=1`, and
+        # the ASSERTION path stripped it while the PUBLISH path did not — so a later bare
+        # `export FLAG` republished `1;` (not truthy) and the run stated an override that
+        # does not exist (false hold plus a false cause).
+        # ⛔ `&` is NOT in that class: bash runs `export FLAG=1&` in a SUBSHELL, so the
+        # parent environment never receives it — stripping it would be a false ARM. Both
+        # measured (fresh review of #12902, P2 / P1).
+        ("export F=1; then bare export",
+         "export TORTOISE_EMBED_GATE=1;\nexport TORTOISE_EMBED_GATE\n", "ON"),
+        ("export F=1& lands in a subshell", "export TORTOISE_EMBED_GATE=1&\n", "OFF"),
     ):
         (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
                                                 encoding="utf-8")
@@ -12653,6 +12672,17 @@ def test_12549_a_MULTI_KEY_dockerfile_ENV_is_read_for_every_pair(
         # …and the LEGACY `ENV KEY value` form still sets KEY to the rest of the line.
         (f"FROM alpine\nENV {flag} 0\n", "OFF"),
         (f"FROM alpine\nENV {flag} 1\n", "ON"),
+        # ⛔ An EMPTY value is an ASSIGNMENT: `ENV FLAG=` builds an image holding `FLAG=`,
+        # which is falsy. Folding it into "no decision" let an EARLIER `ENV FLAG=1` stand,
+        # so the row published `gate enabled by default: True` over a disarmed image — a
+        # false PASS (measured with `docker build` + `docker run`; fresh review, P1).
+        (f"FROM alpine\nENV {flag}=1\nENV {flag}=\n", "OFF"),
+        (f'FROM alpine\nENV {flag}=1\nENV {flag}=""\n', "OFF"),
+        # ⛔ `ENV OTHER FLAG=1` is the LEGACY form — it sets OTHER to the WHOLE rest of the
+        # line — so the image has no FLAG and harvesting the pair out of it was a false
+        # ARM (measured: `docker run … env` shows `OTHER=TORTOISE_EMBED_GATE=1`, no FLAG).
+        # Docker decides the form from the FIRST word after `ENV`, as here.
+        (f"FROM alpine\nENV OTHER {flag}=1\n", "OFF"),
     ]
     for body, expected in cases:
         (tmp_path / "Dockerfile").write_text(body, encoding="utf-8")

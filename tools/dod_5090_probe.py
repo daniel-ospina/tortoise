@@ -3377,10 +3377,18 @@ _SHELL_ALLEXPORT = re.compile(r"^\s*set\s+-[a-zA-Z]*a[a-zA-Z]*\s*$")
 #: `set +a` ENDS allexport — the same option, unset. Matched separately because a
 #: file-global flag would keep every later assignment "exported" after the mode is off.
 _SHELL_ALLEXPORT_OFF = re.compile(r"^\s*set\s+\+[a-zA-Z]*a[a-zA-Z]*\s*$")
-#: A `set` line and its arguments, up to a command separator.
-_SHELL_SET = re.compile(r"^\s*set\s+(?P<args>[^;&|]*)$")
+#: A `set` line and its arguments, up to a command separator. ⛔ The SEPARATOR TERMINATES
+#: the command rather than anchoring the match: `set +a;` runs `set +a` and then ends, so
+#: an end-anchored matcher read it as "no `set` at all", the allexport state stayed armed,
+#: and an entrypoint that DISARMS the gate published `gate enabled by default: True` — a
+#: FALSE ARM (fresh review of #12902, P1).
+_SHELL_SET = re.compile(r"^\s*set\s+(?P<args>[^;&|]*?)\s*(?:[;&|].*)?$")
 #: A shell command SEPARATOR glued to a value (`FLAG=1;`, `FLAG="1"&&`).
-_SHELL_OPERATOR_TAIL = re.compile(r"(?:;|&&?|\|\|?|&)+$")
+#: ⛔ `&` and a lone `|` are NOT in this set: bash runs `export FLAG=1&` and `…=1|cat` in
+#: a SUBSHELL, so the parent environment never receives the assignment. Stripping `&`
+#: published a value the process does not have — a false ARM (measured: `bash -c 'export
+#: FLAG=1& wait; env'` has no FLAG, while `…=1;` and `…=1&& true` do).
+_SHELL_OPERATOR_TAIL = re.compile(r"(?:;|&&|\|\|)+$")
 
 
 def _shell_set_allexport(line: str) -> bool | None:
@@ -3406,9 +3414,12 @@ def _shell_set_allexport(line: str) -> bool | None:
 
     The long form is resolved by the option NAME the ``o`` consumes, never by the rest of
     its own cluster: measured, ``set -oallexport`` ARMS (via the ``a``) and then errors on
-    ``-l``, and ``set -eo allexport`` / ``set -oe allexport`` both arm, so ``o`` takes the
-    next WORD. ``set -o noallexport`` is NOT a disarm — ``bash`` rejects it as an invalid
-    option name — so only the NAME ``allexport`` is read.
+    ``-l``, while ``set -eo allexport`` arms through the trailing ``o``. ``set -o
+    noallexport`` is NOT a disarm — ``bash`` rejects it as an invalid option name — so only
+    the NAME ``allexport`` is read, and the NAME is unquoted (`set -o "allexport"` arms in
+    bash too). ⛔ DECLARED BOUND: ``set -oe allexport`` (a flag AFTER the ``o`` in the same
+    cluster) is NOT read — the next word is consumed only when ``o`` ENDS its cluster, so
+    that spelling is a false HOLD (the arm is missed, never invented).
     """
     match = _SHELL_SET.match(line)
     if not match:
@@ -3430,17 +3441,18 @@ def _shell_set_allexport(line: str) -> bool | None:
             for position, char in enumerate(cluster):
                 if char == "a":
                     answer = sign_on
-                elif char == "o" and position == len(cluster) - 1:
+                elif (char == "o" and position == len(cluster) - 1
+                      and index + 1 < len(words)):
                     # The long spelling of the SAME option: `-o allexport` arms, `+o
                     # allexport` disarms. ⛔ `o` takes the NEXT WORD **only when it ENDS
                     # its own word** — measured: `set -oallexport` does NOT take the rest
                     # as a name (it arms via the `a` and then errors on `-l`), while `set
                     # -o allexport` does; and `set -oerrexit -o allexport` arms through
-                    # the SECOND `-o`, so the first `o` must not swallow it.
-                    if index + 1 < len(words):
-                        index += 1
-                        if words[index] == "allexport":
-                            answer = sign_on
+                    # the SECOND `-o`, so the first `o` must not swallow it. The quoted
+                    # NAME arms too: `set -o "allexport"` (measured).
+                    index += 1
+                    if words[index].strip("'\"") == "allexport":
+                        answer = sign_on
         index += 1
     return answer
 
@@ -3575,7 +3587,13 @@ def _shell_export_args(
             names.append(name)
             if bare[len(name):len(name) + 1] == "=":
                 assigned.add(name)
-                values[name] = bare[len(name) + 1:]
+                # ⛔ The PUBLISHED value needs the same normalisation `_assigned_value`
+                # applies. `export FLAG=1;` kept the glued `;` HERE (that fix landed on
+                # the assignment path only), so a later bare `export FLAG` republished
+                # `1;` — not truthy — and the run stated an override that does not exist:
+                # a false hold carrying a FALSE CAUSE in the string the row prints.
+                published = _SHELL_OPERATOR_TAIL.sub("", bare[len(name) + 1:])
+                values[name] = published.strip("'\"")
     return names, assigned, options, values
 
 
@@ -3940,7 +3958,13 @@ def _assigned_value(line: str, flag: str) -> str | None:
     # `indeterminate: []`/`outside_runtime: []` — nothing in ANY bucket). The
     # `ENV key=value key2=value2` form is the Dockerfile's own multi-assignment
     # spelling, so every pair is read rather than only the first (fresh review, P1).
-    if legacy_value_form and "=" in stripped:
+    # ⛔ Docker decides the FORM from the FIRST word after `ENV`; the walker decided from
+    # "does the line contain `=`". `ENV OTHER FLAG=1` is the LEGACY form — it sets OTHER to
+    # the whole rest of the line — so harvesting `FLAG=1` out of it published an arm the
+    # image does not have (measured: `docker run … env` shows `OTHER=TORTOISE_EMBED_GATE=1`
+    # and no FLAG; the same one-line-discriminator class as the legacy `#` fix).
+    if (legacy_value_form and "=" in stripped
+            and "=" in stripped.split()[0]):
         pairs = {m.group("name"): m.group("value").strip("'\"")
                  for m in _DOCKERFILE_ENV_PAIR.finditer(stripped)}
         if flag in pairs:
@@ -3949,7 +3973,12 @@ def _assigned_value(line: str, flag: str) -> str | None:
             # `0` (measured with `docker build` + `docker run`), so returning the FIRST
             # was a false ARM (fresh review, P2). This branch is reached whenever the
             # line carries `=`, so the single-pair spelling is unchanged.
-            return pairs[flag] or None
+            # ⛔ NOT `or None`: an EMPTY value is an ASSIGNMENT. `ENV FLAG=` builds an image
+            # with `FLAG=` — falsy — so folding it into None made the line produce NO
+            # decision, an EARLIER `ENV FLAG=1` stood, and the row published `gate enabled
+            # by default: True` over a disarmed image (measured with `docker build` +
+            # `docker run`; a false PASS).
+            return pairs[flag]
     # The flag must be the KEY: at the start of the line, followed by `=` or
     # `:` and nothing but the value. `Set FLAG=1 to enable` and
     # `name: verify FLAG=1 takes effect` fail here, which is the point.
