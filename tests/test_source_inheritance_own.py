@@ -628,8 +628,13 @@ class TestMCPRegistration:
             return {t.name for t in tools}
 
         tool_names = asyncio.run(_names())
-        for name in ("tortoise_get_source_reliability", "tortoise_assess_source",
-                     "tortoise_set_source_tier"):
+        # #4282 Phase 2 (#11609 lane C) retired `tortoise_assess_source` and
+        # `tortoise_set_source_tier` into `tortoise_manage_source_trust`, which
+        # dispatches on the argument (`score=` vs `tier=`). The registration +
+        # HTTP-allowlist property those rows measured travels with the capability,
+        # so it is asserted on the container.
+        for name in ("tortoise_get_source_reliability",
+                     "tortoise_manage_source_trust"):
             assert name in tool_names, f"{name} not registered"
             assert name in HTTP_ALLOWED, f"{name} missing from HTTP_ALLOWED"
 
@@ -809,6 +814,14 @@ class TestMCPAnnotationsContract:
         )
 
     def test_assess_and_set_tier_are_destructive_hint(self):
+        """The trust write is destructive.
+
+        #4282 Phase 2 (#11609 lane C) folded `tortoise_assess_source` and
+        `tortoise_set_source_tier` into ONE tool; both were `destructiveHint`
+        (each writes a reputation-weighted Point or a tier the EP weights read), so
+        the container that carries both must keep the hint — otherwise a client
+        auto-approves a write it used to ask about.
+        """
         import asyncio  # noqa: I001
         from tortoise.mcp_server import mcp
 
@@ -817,10 +830,8 @@ class TestMCPAnnotationsContract:
             return {t.name: t for t in tools}
 
         tools = asyncio.run(_get())
-        a = tools["tortoise_assess_source"].annotations
-        b = tools["tortoise_set_source_tier"].annotations
+        a = tools["tortoise_manage_source_trust"].annotations
         assert getattr(a, "destructiveHint", getattr(a, "destructive_hint", False)) is True
-        assert getattr(b, "destructiveHint", getattr(b, "destructive_hint", False)) is True
 
 
 #: ONE document. NOTE (measured, and it matters): the write path applies S0a and
