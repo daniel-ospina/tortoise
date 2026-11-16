@@ -7765,10 +7765,12 @@ def test_the_line_and_block_findings_are_told_apart(tmp_path):
     (#13033 review round 5, P2). An earlier cut of this test matched literal strings
     lifted out of the source, so a re-wording inside a producer left the test GREEN
     while `_ROW_FINDING` went dead again — the same silent rot, one level up. Each case
-    below calls `_pin_row_failures` / `_bundle_missing` / `_bundle_sweep` and classifies
-    what comes back: three row SHAPES (the fourth fixture is `_cite_failure` again with a
-    hyphenated label, which pins the label class rather than a fourth producer) and one
-    block finding driven through the real sweep.
+    below calls `_pin_row_failures` or `_bundle_sweep` and classifies what comes back:
+    FOUR row producer SHAPES (`_cite_failure`'s miss, the bare continuation, the
+    unregistered source key, the scoping phrase) plus a fifth fixture that is
+    `_cite_failure` again with a hyphenated label — that one pins the `-` in the label
+    class rather than a fifth producer — and one block finding driven through the real
+    sweep.
     """
     src = tmp_path / "seam.py"
     src.write_text("# a comment\ntarget = 1\nother = 2\n", encoding="utf-8")
