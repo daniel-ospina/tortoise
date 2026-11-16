@@ -70,10 +70,10 @@ already-approved name, not an addition to the approved 40. **TWO waves landed in
 are disjoint**, so the merged count is one subtraction from each side rather than either side's
 number:
 
-* **125 → 120 on 2026-11-15** — `#12901` wave 1 retired five off-surface methods
+- **125 → 120 on 2026-11-15** — `#12901` wave 1 retired five off-surface methods
   (`backfill_v25`, `calibration_passed`, `list_relations`, `membership_get`, `quarantine_batch`),
   none of them an approved row, so the declaration stays at 40.
-* **120 → 119 on 2026-11-16** — #11609 Phase 2's WRITE/MUTATE batch: three approved rows gained
+- **120 → 119 on 2026-11-16** — #11609 Phase 2's WRITE/MUTATE batch: three approved rows gained
   their `def` (`supersede_knowledge`, `write_question`, `record_decision` — `update_knowledge`
   already had one) while four absorbed doors were retired (`supersede`, `file_decision`,
   `file_human_approval`, `update_entity`), a net −1. Four names stay live for stated reasons
