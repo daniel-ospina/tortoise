@@ -1080,7 +1080,7 @@ def test_a_caller_supplied_vector_through_update_entity_clears_the_enriched_text
     assert t0[3] is not None, t0
 
     # A caller vector: the node must not keep the text the OLD vector described.
-    sdk.update_entity(t0[0], embedding=[1.0, 0.0, 0.0, 0.0])
+    sdk.update_knowledge(t0[0], embedding=[1.0, 0.0, 0.0, 0.0])
     after = _turn_rows(sdk, "sess-ue")[0]
     assert after[2] is None, (
         "a caller-supplied vector replaced the vector an embeddingText was "
@@ -1093,14 +1093,14 @@ def test_a_caller_supplied_vector_through_update_entity_clears_the_enriched_text
     sdk._capture_session(CONV, session_id="sess-ue2")
     t0b = _turn_rows(sdk, "sess-ue2")[0]
     assert t0b[2] == "[user] the auth flow is blocked", t0b
-    sdk.update_entity(t0b[0], status="live")
+    sdk.update_knowledge(t0b[0], status="live")
     assert _turn_rows(sdk, "sess-ue2")[0][2] == t0b[2], (
         "an update_entity with no vector changed the writer-minted "
         "embeddingText")
 
     # The CLEAR arm (`embedding=None`) replaces the vector too, so it clears
     # the text as well (the same two arms `update_point` guards).
-    sdk.update_entity(t0b[0], embedding=None)
+    sdk.update_knowledge(t0b[0], embedding=None)
     cleared = _turn_rows(sdk, "sess-ue2")[0]
     assert cleared[2] is None, (
         "a caller CLEAR of the vector left the embeddingText it described "

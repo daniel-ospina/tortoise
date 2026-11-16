@@ -1669,15 +1669,15 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
-    moved to the figure §5 states, in seven moves, one per workstream:
+    moved to the figure §5 states, in eight moves, one per workstream:
     `cache_eviction.py:956` (the #10976 census's note on why labels do not partition
     the node set), #8447's ingest door (`tortoise/ingest.py`, the
     `REFUSED_NOT_FOUND` enum docstring), #11729's runtime-label writers
     (`tortoise/hosted_backup.py` — a file the population had not previously reached,
     carrying no `:Document` mention at `4f68a2aa7`; its added mentions are the
     dump-and-restore prose about pre-D10 artifacts), #11682's own
-    `tortoise/search_engine.py:3367` corpus-join comment (one line, an existing
-    file; the block opens at `:3365` — re-measured at this head, review round 25,
+    `tortoise/search_engine.py:3389` corpus-join comment (one line, an existing
+    file; the block opens at `:3388` — re-measured at this head, review round 25,
     because the `:2107`/`:2109` this sentence used to carry was true only at
     `d06c001ff9` and had drifted since), #12015's edge-vector prose — three lines in
     that same `hosted_backup.py` bound plus one in `tortoise/cache_projection.py`
@@ -1686,8 +1686,10 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     `tortoise/why.py:200` (`live.KIND_PROPERTIES`' scope note, `kind_expression`'s
     docstring, `_entity_label`'s record of the derived map) — the first move whose
     point is a WIDENING rather than a retirement — and **#12434**'s `:Document`
-    retirement prose in `tortoise/mcp_server.py:4233`, the seventh, whose point IS
-    a retirement. Each move is the mechanism
+    retirement prose in `tortoise/mcp_server.py:4281`, the seventh, whose point IS
+    a retirement — and **#12915**'s (`#4282` Phase 2, lane B) `record_decision`
+    docstring at `tortoise/sdk.py:33175`, the eighth, whose `Args:` block for
+    `artifact_id` names the retired label to state the D10 rule. Each move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
     of the number being quietly widened or the guard loosened.
 

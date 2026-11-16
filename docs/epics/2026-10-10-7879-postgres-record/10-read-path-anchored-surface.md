@@ -41,9 +41,11 @@ indistinguishable from an omission:
 |---|---|
 | `anchored-neighbours` | the cache's answer includes operator nodes and an `idx` convention a record row cannot reproduce without re-deciding it. Pinning parity to an answer this unit cannot show is the same one would freeze a decision it has not made. (**#6976** — an operator-hop requirement that returned `[]` for points that had edges, fixed by **#8991** — is the historical member of this defect family, and the reason the anchor must bind or fail.) |
 | `anchored-ep-scalars` | `confidence` / `ep_*` / `posterior_*` are **recomputed from the structure** (§2.0 clause (a), §17.5) and the schema refuses them as columns AND as `props` keys. |
-| `internal-accessor` (`TortoiseSDK.get_point`) | write paths call it **mid-write**; a record-served answer would read a store the same write has not finished projecting. Its caller-facing surface is `tortoise_get_entity(id, type="point")` (`tortoise_get_point` is its **retired** alias, `tool_registry.RETIRED_USE_INSTEAD`), which is not wired because an MCP call carries no hosted org credential from which to resolve a record tenant. |
-| `entity-accessor` (`TortoiseSDK.get_entity` → `tortoise_get_entity`) | a **second** internal accessor with the **same** mid-write hazard (`_get_entity` echoes a written entity back at **two** write sites — a write echo and a post-write read-back — plus the read accessor's own delegation). Excluded for the same reason as `get_point`, and named separately because it is a different accessor: the **bare** `tortoise_get_entity(id)` reaches `TortoiseSDK.get_entity`, while the **typed** `type="point"` form reaches `get_point` through `tortoise_get`'s dispatcher (so it is covered by the row above). ⚠️ `tortoise_get` is **not** a separate escape: it is a by-id dispatcher, and `tortoise_get(id, type="point")` lands on the same accessor, so it carries a coordinate and is covered here — only a list-shaped call has none. |
+| `internal-accessor` (`TortoiseSDK.get_point`) | write paths call it **mid-write**; a record-served answer would read a store the same write has not finished projecting. Its caller-facing surface is `tortoise_get_entity(id, type="point")` (`tortoise_get_point` is its **retired** alias, `tool_registry.RETIRED_USE_INSTEAD`), which was not wired because an MCP call carried no hosted org credential from which to resolve a record tenant — it does now (#9192/#10025/#10046 install the tenant ambiently via `mcp_auth._record_tenant_scope`), so since **#12941** that route honours this seam through the accessor's **opt-in** caller-facing form (`get_point(..., served_out=…)`); the ACCESSOR stays cache-only because of the mid-write hazard above, and no write path passes the sink. |
+| `entity-accessor` (`TortoiseSDK.get_entity` → `tortoise_get_entity`) | a **second** internal accessor with the **same** mid-write hazard (`_get_entity` echoes a written entity back at **two** write sites — a write echo and a post-write read-back — plus the read accessor's own delegation). Excluded for the same reason as `get_point`, and named separately because it is a different accessor: the **bare** `tortoise_get_entity(id)` reaches `TortoiseSDK.get_entity`, while the **typed** `type="point"` form reaches `get_point` through `tortoise_get`'s dispatcher (so it is covered by the row above). ⚠️ `tortoise_get` is **not** a separate escape: it is a by-id dispatcher, and `tortoise_get(id, type="point")` lands on the same accessor, so it carries a coordinate and is covered here — only a list-shaped call has none. **Since #12941 this is ONE of the remaining read-your-writes gaps an agent can hit** by verifying an Object/Event by id: the MCP-tenant objection that used to sit beside this reason no longer holds, and `node-by-key` can answer the door once parity is MEASURED for that label (the caveat on that entry, #9721). |
 | `selfhost-endpoint` (`GET /points/{id}` in `selfhost_api.py`) | a **second** caller-facing anchored read. Not wired: the record tenant it needs is resolved from a hosted org credential, and the selfhost surface presents none — that needs its own tenant decision, not a copy of this one. |
+| `auto-detect-by-id` (the RETIRED bare form `tortoise_get(<id>)` — ⚠️ the LIVE `tortoise_get_entity(<id>)` does NOT reach it, it goes to `TortoiseSDK.get_entity` above) | resolves across five labels with Point priority then an AgentSession lookup, on the cache — a coordinate, but not ONE label's, so a record answer would have to re-decide the resolution ORDER before it could claim parity. A LIVE read-your-writes gap (#12941), filed as such rather than absorbed by a parity claim nothing measures. |
+| `session-accessor` (`tortoise_get_entity(id, type="session")` → `TortoiseSDK.get_session`) | a session, down **two lanes in different states**: the indexed AgentSession `:Event` by `session_id` (cache), and the durable `:Session` node (`_read_captured_session`) whose session row is cached but whose **turns already come from both stores** — `_record_turn_answer` → `record_read.session_turns`, union-merged ahead of the graph copy (#3557/#10000). ⛔ Not a missing record capability, and NOT an `:Event` parity job for that lane: a **placement** question about which reader owns the session row (#12941). |
 | `whole-graph` (the 377 sites) | no coordinate ⇒ a record answer cannot be shown to be the same SET. Out of this unit's scope by the issue's own wording. |
 
 The three properties that make "no silent fallback" structural rather than remembered:
@@ -79,13 +81,18 @@ fallback whose cache also held nothing was counted (`fallback_counts()`); hiding
 the invisible fallback the design forbids. In `off` mode the detail is the plain pre-#7970
 string — no wrapper, no keys — and a test pins that too.
 
-**S4/S5, stated precisely — this unit covers the PARITY half only.** The issue's S4/S5 clause has
-two halves: *"a read answered from the record must return the same answer as the cache path"*
-(**this unit**, §2 below) and *"a read for a non-resident node must return `not-hot`, never
-empty"* (**not this unit**): the `residency` marker field is emitted by the cache read path
-(`GET /v1/search`, `#7952`/`#7953`) and this unit does not touch it. What the record path
-contributes to that discipline is its own mirror, pinned by test: **an impaired record is 503,
-never 404** — *"the record could not be asked"* is not "no such point".
+**S4/S5 — the PARITY half, plus (since #12941) the anchored read's own `not-hot`.** The issue's
+S4/S5 clause has two halves: *"a read answered from the record must return the same answer as the
+cache path"* (**this unit**, §2 below) and *"a read for a non-resident node must return `not-hot`,
+never empty"*. The second half was the SEARCH path's (`GET /v1/search`, `#7952`/`#7953`) and this
+unit did not touch it; **#12941** gives the anchored point read its own verdict, from one rule in
+`record_serve`: an empty answer is a finding of absence only when the record answered it
+(`served_from == "record"`) or was successfully ASKED first (`record-miss`, the sole member of
+`RECORD_ANSWERED_REASONS`) — every other fallback reason means nobody who could see the node was
+consulted, and the answer carries `residency: "not-hot"` (`ServedAnswer.absent_wire`, deliberately a
+separate method from `as_wire` whose key set is pinned). The record path's own mirror is unchanged
+and still pinned by test: **an impaired record is 503, never 404** — *"the record could not be
+asked"* is not "no such point".
 
 `node_key` is the anchor column, not the property column: it is the primary key (indexed) and the
 schema's own CHECK pins it to the label's key property (`chk_point_node_key_is_contract_key` and its

@@ -1028,9 +1028,9 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     # setdefaults), and a merge has no business overwriting what the caller
     # wrote. Its absence is the only case this write repairs.
     if not survivor_canonical:
-        sdk.update_entity(survivor_id,
+        sdk.update_knowledge(survivor_id,
                           canonical_name=normalize_entity_name(survivor_name))
-    sdk.update_entity(survivor_id, aliases=alias_list)
+    sdk.update_knowledge(survivor_id, aliases=alias_list)
     # ⛔ The candidate's `canonical_name` is only FILLED, never rewritten — the
     # same rule as the survivor arm above. A caller-supplied value is a real
     # addressable spelling (`_with_folded_entity_name` setdefaults, and
@@ -1057,8 +1057,8 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     # the fold's bounded walk, which grades cannot-answer).
     dependents = _dependents_of(graph, candidate_id)
     for dependent_id in dependents:
-        sdk.update_entity(dependent_id, resolved_from=survivor_id)
-    sdk.update_entity(candidate_id, **_candidate_props)
+        sdk.update_knowledge(dependent_id, resolved_from=survivor_id)
+    sdk.update_knowledge(candidate_id, **_candidate_props)
     out = {"survivor_id": survivor_id, "candidate_id": candidate_id,
            "aliases": alias_list, "method": method,
            "similarity": round(float(similarity), 4)}

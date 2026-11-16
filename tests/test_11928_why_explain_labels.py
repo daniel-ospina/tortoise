@@ -219,7 +219,7 @@ def test_a_retired_judgement_is_not_reported_as_a_live_verdict(sdk):
     _indicator, _target, goal = _world(sdk, tag="retired")
     recorded = _judge(sdk, _indicator, _target, goal, 12.0,
                       at="2026-11-11T10:00:00Z")
-    sdk.update_entity(recorded["point_id"], status="superseded")
+    sdk.update_knowledge(recorded["point_id"], status="superseded")
 
     block = assemble_why_blocks(sdk._get_proj(), [goal["id"]])[goal["id"]]
     assert not block.get("assessment"), (

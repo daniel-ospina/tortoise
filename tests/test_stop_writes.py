@@ -66,7 +66,7 @@ def test_create_without_context(sdk):
 def test_file_decision_no_context(sdk):
     """file_decision does not accept context param (Phase 2)."""
     with pytest.raises(TypeError, match="context"):
-        sdk.file_decision(
+        sdk.write_question(
             options=["A", "B"],
             evidence=["E1 supports A"],
             choice=0,

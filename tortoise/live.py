@@ -430,6 +430,52 @@ def classify_lifecycle_fanout(rows) -> tuple:
     return ("ok", rows[0][1], rows[0][2])
 
 
+def first_terminal_row(rows) -> tuple | None:
+    """The ``(status, outdated)`` pair of the FIRST terminal row, or ``None``.
+
+    The ONE place a caller that needs the offending ROW (not a verdict) asks a
+    ``LIFECYCLE_FANOUT_QUERY`` result "which row made this terminal?" — because
+    the pair reaches a refusal MESSAGE, and two callers picking it their own way
+    is how the same fan-out comes to be explained two different ways.
+
+    Selected by the SAME stable key ``classify_lifecycle_fanout`` sorts with
+    (status text, then flag), never by position: point ids are not unique and
+    server row order is not a contract (#7822).
+
+    It carries NO operator precedence, and that is deliberate: it answers "which
+    row is dead", which a caller may ask of ANY fan-out — it returns ``None`` on
+    a healthy one. ``classify_lifecycle_fanout`` ranks ``operator`` ABOVE
+    ``terminal``, so its verdict ALONE cannot answer this question on a mixed
+    operator+terminal fan-out; the pair therefore comes from the rows, never from
+    the classifier's ``status``.
+    """
+    return min(((st, od) for _is_op, st, od in rows
+                if is_terminal_status(st, od)),
+               key=lambda r: (str(r[0] or ""), bool(r[1])), default=None)
+
+
+def terminal_row_marker(row) -> str:
+    """The WORD a refusal/warning uses for a ``first_terminal_row`` result.
+
+    The second half of the same problem ``first_terminal_row`` answers: picking
+    the row is one decision, NAMING it is the next, and a caller that renders the
+    pair itself is how one row is called ``live`` in a warning while
+    ``is_terminal_status`` says it is dead (#12586 review cycle 4). The flag has
+    to be rendered, not just read: a row whose status is ``NULL`` or ``live``
+    while ``outdated`` is set is terminal BY THE FLAG, and ``status or "live"``
+    reports exactly the opposite of the verdict that selected it.
+
+    ``None`` renders ``live``: callers that ask on a healthy fan-out still need
+    the word ``classify_lifecycle_fanout`` would have given them.
+    """
+    if row is None:
+        return "live"
+    status, outdated = row
+    return ("outdated" if outdated
+            and status not in TERMINAL_EXCLUDED_STATUSES
+            else (status or "live"))
+
+
 def _live_only(clause: str, include_draft: bool = False) -> str:
     """Return a Cypher predicate excluding draft AND terminal nodes.
 

@@ -150,7 +150,7 @@ class TestSearchKeysFlattenedOnEveryWritePath:
         """The defect: a list landed as an ARRAY, so FTS could never match it."""
         p = sdk.create_point("statement", "flatten target",
                              search_keys=["alpha", "beta"])
-        sdk.update_entity(p["id"], search_keys=["gamma", "delta"])
+        sdk.update_knowledge(p["id"], search_keys=["gamma", "delta"])
         stored = self._stored(sdk, p["id"])
         assert stored == "gamma delta", (
             "update_entity must flatten search_keys to a space-joined string "
@@ -165,7 +165,7 @@ class TestSearchKeysFlattenedOnEveryWritePath:
         """
         p = sdk.create_point("statement", "empty-list target",
                              search_keys="keepme")
-        sdk.update_entity(p["id"], search_keys=[])
+        sdk.update_knowledge(p["id"], search_keys=[])
         assert self._stored(sdk, p["id"]) == "keepme"
         sdk.update_point(p["id"], search_keys=[])
         assert self._stored(sdk, p["id"]) == "keepme"
@@ -173,7 +173,7 @@ class TestSearchKeysFlattenedOnEveryWritePath:
     def test_update_entity_leaves_a_flat_string_alone(self, sdk):
         """No-op for scalars — flattening must not rewrite a flat value."""
         p = sdk.create_point("statement", "scalar target")
-        sdk.update_entity(p["id"], search_keys="already flat")
+        sdk.update_knowledge(p["id"], search_keys="already flat")
         assert self._stored(sdk, p["id"]) == "already flat"
 
     def test_the_other_two_paths_are_the_parity_baseline(self, sdk):
@@ -361,7 +361,7 @@ class TestEntityPropsPersisted:
     def test_update_entity_persists_arbitrary_props(self, sdk):
         obj = sdk.create_object("Updatable", "service")
         obj_id = obj.get("id") or obj.get("eventId")
-        updated = sdk.update_entity(obj_id, tier="enterprise", sla="99.9")
+        updated = sdk.update_knowledge(obj_id, tier="enterprise", sla="99.9")
         assert updated.get("tier") == "enterprise"
         assert updated.get("sla") == "99.9"
 
@@ -416,7 +416,7 @@ class TestEntityPropsPersisted:
         """#452: update_entity on second-returned id persists props."""
         first = sdk.create_object("Update via second", "widget", tag="v1")
         second = sdk.create_object("Update via second", "widget", tag="v2")
-        updated = sdk.update_entity(second["id"], tier="gold")
+        updated = sdk.update_knowledge(second["id"], tier="gold")
         assert updated.get("tier") == "gold"
         # verify via canonical id too
         refetch = sdk.get_entity(first["id"])

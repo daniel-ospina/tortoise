@@ -112,9 +112,23 @@ class TestRetiredDocumentLabelClaims:
         assert "document ``:Source``" in doc, doc
 
     def test_file_human_approval_docstring_names_the_document_source(self):
+        """#5121 still holds — read on the verb that OWNS the public surface now.
+
+        ⛔ RE-POINTED, NOT RELAXED (#12915 review F5). `file_human_approval` is a
+        RETIRED SDK name as of #4282 Phase 2: `TortoiseSDK.__getattr__` raises on
+        it, so the original `inspect.getdoc` on that retired name could
+        only ever produce `""` — the pin was reading a name that no longer
+        resolves, and would have passed vacuously the moment the negative
+        assertion stopped matching the empty string. Its approved absorber is
+        `record_decision`, so the pin moves to `record_decision`. The correction
+        itself (the D10 wording) is restored on the PUBLIC docstring in `sdk.py`;
+        reading the private `_file_human_approval` instead would satisfy the
+        letter of this test while deleting the guarantee it exists to keep.
+        """
         from tortoise.sdk import TortoiseSDK
 
-        doc = inspect.getdoc(TortoiseSDK.file_human_approval) or ""
+        doc = inspect.getdoc(TortoiseSDK.record_decision) or ""
+        assert doc, "record_decision carries no docstring — the pin is vacuous"
         assert "Object/Document id" not in doc, doc
         # Positive half: the MCP handler's copy of this parameter was already
         # corrected, so the SDK's copy must carry the same phrasing rather

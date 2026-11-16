@@ -183,8 +183,10 @@ def _stored(event_type: Any, payload: Any, *, same_type: bool = True,
     """The conflict query's four projected columns, as Postgres would return them.
 
     ⛔ THE FAKE CANNOT EVALUATE THE SQL (review P2-5), so these legs pin the
-    guard's DECISION, not the predicate: the two DB acceptance legs are what
-    exercise the `WHERE`. Composing the row explicitly is also what keeps the
+    guard's DECISION, not the predicate: the DB-backed legs are what exercise
+    the `WHERE` (THIS FAKE NEVER RUNS IT — so no count of them belongs here: it
+    re-stales every time a round adds one, which is what an earlier "the two
+    ACCEPTANCE legs" did at six). Composing the row explicitly is also what keeps the
     drift split (#12904 P0-1) visible in every test — `same_type` and
     `same_capture` are the two facts the verdict turns on, so a leg that wants a
     COLLISION has to say which of them differed, and one that wants DRIFT says
