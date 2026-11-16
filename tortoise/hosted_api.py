@@ -7592,6 +7592,19 @@ def _record_health() -> dict:
         NON-ZERO value is the claim "a transaction committed here", not a row
         count — the runbook's SQL read is still the witness for how many rows
         landed.
+      * ``cache_leg_failures`` — **the CACHE half of the write (#12943)**, and a
+        FOURTH counter outside "the record counters" above: it does not describe
+        a record write at all, it describes a construction whose cache is not the
+        record's store (the record armed, no shared cache ⇒ the cache is a
+        process-local file and the record is in Postgres). ⚠️ Its unit is
+        **SDK constructions, not writes** — the store choice is made once per
+        construction and this read path serves reads too, so it is NOT comparable
+        with ``record_writes_applied`` beside it. ⛔ It does **NOT** move ``ok``
+        or ``status``: ``#10185`` ruled the verdict window-based over rows
+        actually dropped, and a split cache drops no rows — it strands them in a
+        store the record is not in. Read it as HISTORY, like
+        ``record_write_failures``, and read it on the process that PERFORMED the
+        write (a process with a shared cache reports ``{}`` by construction).
       * ``counters_error`` — why the counter snapshot could not be read, or ``None``.
         Kept distinct from ``error`` so the documented pairing
         (*``error`` non-null ⇔ set-but-unusable value*) stays true.
@@ -7646,6 +7659,7 @@ def _record_health() -> dict:
     try:
         from tortoise import record_writer
         from tortoise.monitoring import (
+            cache_leg_failure_counts,
             record_last_write_at,
             record_non_journal_skip_counts,
             record_position_unproven_count,
@@ -7664,6 +7678,9 @@ def _record_health() -> dict:
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
+                # Present-and-null for the same reason (#12943): a missing key
+                # must not read as "the cache is fine".
+                "cache_leg_failures": None,
                 # The POSITIVE pair is present-and-null here for the same reason:
                 # a consumer must not read a missing key as "no writes" (#9548).
                 "record_writes_applied": None, "record_last_write_at": None,
@@ -7686,6 +7703,13 @@ def _record_health() -> dict:
         "record_write_failures": None,
         "record_non_journal_skips": None,
         "record_position_unproven": None,
+        # #12943: seeded ``None`` for the same reason as the three above — this
+        # is the dict the `counters_error` arm PUBLISHES, so a key that is only
+        # assigned in the `else` arm is ABSENT exactly when the snapshot failed,
+        # and an absent key reads as "the cache is fine" (#9548 review P2's
+        # missing-key class). Caught by review cycle 2; the seeded arm had no
+        # test at all.
+        "cache_leg_failures": None,
         # The POSITIVE pair (#9548): committed writes, and when. Seeded ``None``
         # for the same reason as the three above — an unread counter is not a
         # zero, and a ``0`` here is exactly what a never-writing deployment
@@ -7743,6 +7767,12 @@ def _record_health() -> dict:
         # move the zero that means "no record row was lost" (#9231/#9307).
         skips = record_non_journal_skip_counts()
         unproven = record_position_unproven_count()
+        # #12943: the CACHE leg, read in the SAME snapshot so the block stays
+        # all-read or all-``None``. ``metrics()`` alone was not enough: the
+        # hosted app publishes THIS block and has no ``/metrics`` route, so a
+        # key that only existed there would have made the split visible to a
+        # scrape and invisible to ``/health`` — the surface an operator reads.
+        cache_leg = cache_leg_failure_counts()
         # The POSITIVE pair (#9548) rides the SAME snapshot for the same reason.
         applied = record_write_applied_count()
         last_write_at = record_last_write_at()
@@ -7755,6 +7785,7 @@ def _record_health() -> dict:
         block["record_position_unproven"] = unproven
         block["record_writes_applied"] = applied
         block["record_last_write_at"] = last_write_at
+        block["cache_leg_failures"] = cache_leg
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
     # this counter carries — SEVEN values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly
@@ -49895,7 +49926,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 185 tracked files (459 distinct
+# ABSOLUTE line number from 186 tracked files (459 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
