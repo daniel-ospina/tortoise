@@ -5707,13 +5707,18 @@ def tortoise_get_operator(id: str) -> dict:
     Alias → get(id, type='operator') (epic #888 W3).
 
     ⚠️ Its registry `description` (see `tool_registry.py`) is safe to extend for
-    this door ONLY because `tortoise_get_operator` is a RETIRED name: the LIVE
-    entry is `tortoise_get_entity`, whose description is hashed by
-    `tools/surface-guard.py` (`co_consts`) and rendered into
-    `docs/product/bridge-table.md`, so editing THAT text moves a gate and a
-    generated artifact. The retired text still has to stay within its existing
-    line count, because `bridge-table`/`mcp-rename-table` publish a
-    `tool_registry.py:<line>` column that a reflow would rewrite for every tool.
+    this door ONLY because `tortoise_get_operator` is a RETIRED name, and the two
+    artifacts that would otherwise move are both keyed to LIVE entries: a live
+    description is snapshotted verbatim into `config/surface-manifest.yml`'s
+    `job:` field and compared by `tools/surface_manifest.py check`, while
+    `tools/surface-guard.py` digests the HANDLER's docstring through `co_consts`
+    (this one, in fact). Neither reads a retired entry — its manifest row carries
+    `use_instead` and no `job:` — which is why editing the LIVE entry
+    (`tortoise_get_entity`) is the change that needs the approval and the re-cut.
+    Note `bridge-table`/`mcp-rename-table` are unaffected by a description either
+    way: they never render one. What they DO publish is a
+    `tool_registry.py:<line>` column, so a registry edit of any size restages both
+    and both are regenerated, never hand-reconciled.
 
     ⚠️ ARMED MODES (`TORTOISE_RECORD_SERVE`) change TWO of those sentences (#12941):
     a found operator also names the store that answered (`servedFrom` /
