@@ -507,7 +507,13 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str], dict[str, str]
             cursor = _heredoc_end(lines, cursor - 1, cursor)
             continue
         stage = envs[-1] if envs else before_from
-        body = _strip_inline_comment(match.group("body")).strip()
+        # ⛔ NO inline-comment stripping here, unlike the shell reader: a Dockerfile has no
+        # trailing-comment form — Docker itself REFUSES `ENV K=1  # x` with
+        # `Syntax error - can't find = in "#"` (measured), so the line can never ship. Stripping
+        # it would REPORT that value as stated for a file that does not build, and the direction
+        # that matters here is a false STATED (review at `3e2b944afd`, P3). Left intact, the
+        # tiling rule refuses the line instead.
+        body = match.group("body").strip()
         if _ENV_PAIRS.match(body):
             for key, value in _ENV_ASSIGNMENT.findall(body):
                 if key in SWITCHES and not _states_a_literal(value):
