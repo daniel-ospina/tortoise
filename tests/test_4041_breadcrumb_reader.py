@@ -198,15 +198,23 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
     happened, for the failure message to splice in — the message must not claim
     a kill that was suppressed.
 
-    The group, not the child: the hook's three `nohup … session drain …
-    >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:846`, `:854`) are
-    fire-and-forget by design — they are meant to outlive the hook — so a bound
-    that reaps only bash leaves them running past the test that spawned them.
-    ⛔ That is `nohup`-detached and outliving; the install-probe beacon is NOT
-    an example of it. That one is a plain `_run_probe >/dev/null 2>&1 &`
-    (`:786`) whose outcome is the payload, so bash `wait`s it in the foreground
-    (`:801`) and it cannot outlive the hook at all — the script says so itself
-    at `:767`.  Both failures are absorbed on purpose —
+    The group, not the child, for TWO different reasons — one per path:
+
+    - On the SUCCESS path, the hook's three `nohup … session drain … >/dev/null
+      2>&1 &` arms (`session-start.sh:831`, `:846`, `:854`) are fire-and-forget
+      by design — they are meant to outlive the hook — so a bound that reaps
+      only bash leaves them running past the test that spawned them.
+    - On the TIMEOUT path, the install-probe beacon is a plain `_run_probe
+      >/dev/null 2>&1 &` (`:786`): NOT `nohup`-detached, and reaped by a `wait`
+      (`:801`) on the normal path — which is why `:767` says it does not join
+      the fire-and-forget shape.  But it is still BACKGROUNDED, and the
+      foreground `_run_digest` (`:793`) that has to finish before that `wait`
+      is precisely where a hung hook stalls, so a hook that never reaches
+      `:801` leaves it unreaped.  It is a `session probe` against the same API
+      the digest is blocked on, i.e. the child most likely to still be running
+      when the bound fires.
+
+    Both failures are absorbed on purpose —
     ``ProcessLookupError`` when the group is already gone, ``PermissionError``
     on macOS when only zombies remain — because a cleanup error must never
     replace the assertion it is cleaning up after.
