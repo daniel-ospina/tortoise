@@ -204,8 +204,8 @@ seed accepts.
 Two things make this worth stating precisely rather than as a nit:
 
 - the module's own label is `reason="divergence"` for `row_max > floor` (`:418-429`), which is plan
-  **case 1**, not plan case 2 — so *"round-2 case 2"* in `:127-130` and `:375-380` names a different
-  case than the plan's case 2 does;
+  **case 1**, not plan case 2 — so the module's phrase *"round-2 case 2"* (`:375-376`; `:127-130` calls
+  the same refusal *"round-2 B1's refusal"*) names a different case than the plan's case 2 does;
 - lifting 2b is not obviously wrong *once the `#9318` guard exists* (a longer replacement journal's old
   rows collide loudly at replay rather than being absorbed). But that is a **new argument the landed
   code makes implicitly**, and the plan's refusal was written before the guard. Nothing in the tree
@@ -348,10 +348,13 @@ it. `§A7.7` step numbers are the plan's.
    items 2 and 3 first or every live write is refused (`CursorNotActive`).
 5. **Reader-first window + journal identity in the key** (`§A7.7` 6.1 — *specified, partially done*).
    The refusal half exists (`_refuse_an_enumerated_replay`, `record_projection.py:7340`). Two things are
-   missing: (a) the journal *export line* does not carry a `seq` field (no writer emits one — `rg` finds
-   no `"seq"` key in the emitted envelope; `last_exported` exists **only in the plan document**, at
-   `docs/plans/2026-11-15-issue-12894-storage-shape.md:1256` and the six lines that follow, and in no
-   Python module); (b)
+   missing: (a) the journal *export line* does not carry a `seq` field — which is what `§A7.7` 6.3 asks writers
+   to start emitting, so its absence is the plan's own evidence that 6.1's write half has not shipped.
+   No writer adds one (`rg -n 'event\["seq"\]|"seq":'` over `sdk.py`/`api.py`/`log.py`/`mining.py`
+   finds only the CUR cursor encoding at `sdk.py:13585`), and the name is already reserved by
+   `ENVELOPE_KEYS` (`record_projection.py:528-529`), which strips it from the durable payload. `last_exported` exists **only in the plan document** —
+   `docs/plans/2026-11-15-issue-12894-storage-shape.md:1256`,
+   `:1263`, `:1296`, `:1331`, `:1335`, `:1336`, `:2206`, `:2246` — and in no Python module); (b)
    `§A7.8` item 6's precondition — `event_id` in `journal_event` — is not done:
    `CREATE TABLE … journal_event (… PRIMARY KEY (org_id, graph_id, seq))` with no identity column
    (`supabase/migrations/20261012000001_record_event_stream.sql:81-90`). The plan says that widening
