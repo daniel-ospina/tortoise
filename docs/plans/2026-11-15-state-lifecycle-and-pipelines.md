@@ -145,7 +145,7 @@ Because a stage's *name* is the most customisable thing in the system — a pack
 
 A pack declares pipelines for its own kinds. A graph with no pack still works: a core kind has no pipeline **until a default is declared for it**, and its state is the lifecycle word alone.
 
-This is what makes the model customisable without becoming a configuration language: **the shape is fixed (four slots, ordered stages, one outcome on a terminal stage); the contents are declared per kind** — which is exactly the two-tier split `tortoise/pipeline.py` already ships (canonical slots in core, tenant stages declared per graph). A CRM funnel, a work item's flow and a goal's outcome are all the same shape with different stage names.
+This is what makes the model customisable without becoming a configuration language: **the shape is fixed (four slots, ordered stages, one outcome on a terminal stage); the contents are declared per kind** — which is exactly the two-tier split `tortoise/pipeline.py` already ships (canonical slots in core, tenant stages declared per graph). A CRM funnel, a work item's flow and a goal's pursuit are all the same shape with different stage names.
 
 ---
 
