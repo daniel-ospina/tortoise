@@ -810,6 +810,42 @@ def test_the_standalone_runner_cannot_lose_a_test_defined_below_it():
         f"defined below it — move the guard to EOF")
 
 
+def test_the_operator_lever_is_declared_in_the_env_contract():
+    """``TORTOISE_EMBED_THREADS`` must be DECLARED in ``.env.example``.
+
+    ``.env.example`` is this repo's declared env contract — the place an
+    operator looks for a name to set. That doctrine is already recorded in
+    ``tests/test_env_contract_covers_supabase_config.py`` ("a fresh clone has
+    no documented way to configure the local stack, and the gap is invisible
+    because the config is not read as documentation"); it is not
+    Supabase-specific in its reasoning.
+
+    The lever shipped with its measured default and its ``status()["threads"]``
+    reading, but the contract never named it — so the only way to discover it
+    was to read ``tortoise/embeddings.py``, and an operator on a slow bulk lane
+    cannot widen a knob the contract does not mention.
+
+    Declared means the ASSIGNMENT form the contract uses (``NAME=`` or a
+    commented ``# NAME=`` placeholder). A bare prose mention gives an operator
+    nothing to copy, so it does not count. Asserted STATICALLY on the contract
+    text: the file is documentation, and an operator reading it is the whole
+    point of the assertion.
+    """
+    import re
+    from pathlib import Path
+
+    mod = _embed_module()
+    contract = Path(__file__).resolve().parents[1] / ".env.example"
+    text = contract.read_text(encoding="utf-8")
+    decl = re.compile(
+        r"^\s*#?\s*" + re.escape(mod.EMBED_THREADS_ENV) + r"\s*=", re.MULTILINE)
+    assert decl.search(text), (
+        f"{mod.EMBED_THREADS_ENV} is the operator lever for the #10296 thread "
+        "pin, but .env.example — the repo's declared env contract — never "
+        "declares it, so an operator cannot discover it without reading "
+        "tortoise/embeddings.py; add a `# NAME=` line in the embedder block")
+
+
 # ── runner (LAST — see the note on `_run_all`) ────────────────────────────
 
 if __name__ == "__main__":
