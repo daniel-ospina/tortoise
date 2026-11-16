@@ -208,24 +208,31 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
       drain … >/dev/null 2>&1 &` arms (`session-start.sh:831`, `:840`–`:846`,
       `:848`–`:854`) leaves that drain in the group.  `nohup` ignores SIGHUP
       but changes neither the drain's process group nor its reachability by
-      SIGKILL, so a
-      bound that reaps only bash leaks it.  That window is narrow: those arms
+      SIGKILL, so a bound that reaps only bash leaks it.  That window is
+      narrow: those arms
       are the script's LAST statements (`:855-856` are their closing `fi`s), so
-      it is the instant between dispatch and exit — this bullet is a
-      completeness argument, and the beacon below is the operative one.
-    - A hook that stalls before the `wait` (`:801`) leaves children in the
-      group.  The one CERTAINLY still running is the digest's own child
-      (`:689`, or `:691`'s `main(["context"])`): the foreground `_run_digest`
-      (`:793`) must return before `:801` can run, so whatever that child is
-      blocked on is what the hook is blocked on — the unbounded local-store
-      `session_context()` that `:756` names as able to outlive this bound,
-      with no network timeout to rescue it.  The BACKGROUNDED install-probe
+      it is the instant between dispatch and exit — a completeness argument.
+    - A hook that stalls before the `wait` (`:801`) can leave a live child in
+      the group.  While the stall is inside the foreground `_run_digest`
+      (`:793`) — which must return before `:801` can run — that function's own
+      child is running by construction (`:689`, or the `-c` arm at
+      `:691`-`:697` ending in `main(["context"])`), and it is the one with a
+      proven unbounded path: the local-store `session_context()`
+      (`tortoise/__main__.py:5823`-`5830`) carries no timeout — the case `:756`
+      names as able to outlive this bound.  The BACKGROUNDED install-probe
       beacon (`:786`) is the other: not `nohup`-detached (`:767` says it does
       not join that fire-and-forget shape), but backgrounded, so nothing reaps
-      it if `:801` is never reached.  It self-bounds
-      (`urlopen(req, timeout=15)`), so expect it finished or an unreaped
-      zombie — that arm is a completeness argument, not the chief one.  Both
-      are in the group, which is what a bash-only kill misses.
+      it if `:801` is never reached.  Its network leg is bounded
+      (`urlopen(req, timeout=15)`, `tortoise/__main__.py:9724`) — a per-socket
+      timeout, not a wall-clock deadline, and neither DNS resolution nor the
+      CLI import ahead of it is covered — so it has usually exited by then,
+      leaving an unreaped zombie as the usual residue.  Neither child is
+      guaranteed: `_run_digest` spawns NOTHING when both its arms miss
+      (`:687`-`:698` has no `else`), and a stall after `:801` (e.g. in
+      `_record_hook_run`, `:809`) has no child at all.  So the guarantee is
+      the narrower one this function exists to make good: whenever children
+      ARE in the group, none of them survives the kill — which a bash-only
+      `proc.kill()` cannot say.
 
     Both failures are absorbed on purpose —
     ``ProcessLookupError`` when the group is already gone, ``PermissionError``
