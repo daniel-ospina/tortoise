@@ -10585,8 +10585,13 @@ _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     #   • OVER-BLOCK (the live bug): a healed note with an unlisted past verb reds
     #     `test-slow`. Loud, and one word fixes the list — deliberately preferred
     #     over a silent miss, because a silent miss ships an unread claim.
-    #   • FAIL-OPEN (unavoidable here): a future claim spelled after a modal with a
-    #     listed irregular (`until the refresher will set …`) reads as healed.
+    #   • FAIL-OPEN (unavoidable here): a future claim whose sweep action is spelled
+    #     with a LISTED past form after a modal reads as healed — measured
+    #     `until the refresher will have replaced …`, `… has landed a reading`,
+    #     `… will be resolved` are all silent. (A modal in front of an UNLISTED verb
+    #     like `will set` still bites, which is why the example has to name a listed
+    #     form; the original draft of this sentence cited `will set` and was wrong
+    #     about its own code — #12962 review cycle 11.)
     # ⛔ THE ROOT IS FILED, NOT WORKED AROUND: regex tense detection over free prose
     # cannot be made complete in both directions, which is the same structural reason
     # these row guards cannot reach block comments. Recorded on **#9442** (the home
@@ -10992,7 +10997,6 @@ def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
     # …and the SAME construction in the PRESENT tense bites. Pinned because the
     # boundary is the shipped six-verb list only in its `until the refresher` form:
     # these spell the claim with a present predicate the list does not cover.
-    # no way to write the note and an arm that misses the present form reads nothing.
     synonym_owing = (
         "  test_a.py: 27.3  # it stays at the flat default until the refresher"
         " corrects the row." + basis + "\n"
