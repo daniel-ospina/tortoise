@@ -287,11 +287,23 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_the_recall_lane(sdk, ret
     ⛔ Measured RED before this case existed: `_retirement` tested the narrower
     `commit_ops.OBJECT_TERMINAL_STATUSES`, which OMITS `outdated`, so an input
     retired with the legacy word returned ``None`` — HEALTHY — and the derived
-    state kept counting. `sdk.update_entity(<object>, status='outdated')` is an
-    accepted public write, and #11825 measured that the SDK accepts terminal
-    statuses on Objects — so this is the issue's own headline ("a conclusion
-    whose justification is gone"), reachable through a public door, not a
-    theoretical spelling.
+    state kept counting.
+
+    ⚠️ **UPDATED BY #11824 S0, and the change is the POINT of this edit, not a
+    workaround.** This test used to retire the input with
+    `sdk.update_entity(<object>, status='outdated')` — an accepted PUBLIC write
+    when it was written. S0 closes that door: `outdated` says the record ended
+    without saying whether anything was put in its place, so it now names TWO
+    words (`deprecated` / `superseded`) and is REFUSED with that choice named.
+    So the test asserts both halves:
+
+      1. the public door REFUSES `outdated` (S0's own contract, asserted here so
+         the moved pin documents itself), and
+      2. a LEGACY row that ALREADY holds `outdated` — written out-of-band, which
+         is what every pre-S0 graph carries and what S0 explicitly does not
+         backfill (#11824 §1) — still retires the derived state. That is the
+         half this test was actually about, and it must keep working now that
+         no door can produce the word.
 
     ⚠️ THE INVARIANT IS STALENESS, NOT READER UNANIMITY, and this docstring said the
     opposite until a review falsified it against the source: the OBJECT family is
@@ -302,13 +314,22 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_the_recall_lane(sdk, ret
     only in the POINT-terminal set"*). Retiring anyway is correct because a state
     derived from an input carrying the legacy invalidate word is exactly the stale
     conclusion #11926 exists to retire, and re-derivation mints a fresh claim —
-    nothing is lost.
+    nothing is lost. ⚠️ #11824 S0 changed the PRODUCER of that word, never this
+    reader: the split is still the read side's shape, and the population it
+    serves is now exactly the legacy rows this test writes out of band.
     """
     i, t, g = _world(sdk, tag=f"legacy-outdated-{retire}")
     made = _judge(sdk, i, t, g)
     node = {"target": t, "indicator": i, "goal": g}[retire]
-    sdk.update_entity(node["id"], status="outdated")
-    # the write landed; this assertion is what the sweep will read back
+    # 1. no door may MINT the word any more (#11824 S0).
+    with pytest.raises(ValueError, match="outdated"):
+        sdk.update_entity(node["id"], status="outdated")
+    # 2. the LEGACY population: write the stored word out of band, exactly as a
+    #    pre-S0 graph holds it, and assert the sweep still retires on it.
+    sdk._get_proj().g.query(
+        "MATCH (n {id:$id}) SET n.status = 'outdated'",
+        params={"id": node["id"]},
+    )
     assert sdk.get_entity(node["id"])["status"] == "outdated"
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation.reason == reason, v.invalidation

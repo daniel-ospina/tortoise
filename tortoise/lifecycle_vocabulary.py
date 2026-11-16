@@ -167,6 +167,21 @@ _ACCEPTED_FORMS = (
 STATUS_WRITE_OUTCOMES: dict[str, int] = {"normalised": 0, "refused": 0}
 
 
+def _render(value: object) -> str:
+    """``repr(value)`` that CANNOT escape as its own exception (#12906 P3).
+
+    A refusal interpolates the refused value, and for a non-``str`` that is the
+    CALLER'S ``__repr__``. A caller whose ``__repr__`` raises would otherwise turn
+    the promised ``ValueError`` into its own exception class — measured on the
+    guard this door replaces (``RuntimeError: repr-boom``). The contract is "refuse
+    with ``ValueError``", so the rendering is contained here, once.
+    """
+    try:
+        return repr(value)
+    except Exception:  # noqa: BLE001 — a hostile __repr__ must not escape
+        return f"<{type(value).__name__} whose repr() raised>"
+
+
 def _refusal(value: object, fault: str, repair: str) -> ValueError:
     """Count, log and describe ONE refused caller status (#11824 S0).
 
@@ -177,7 +192,7 @@ def _refusal(value: object, fault: str, repair: str) -> ValueError:
     """
     STATUS_WRITE_OUTCOMES["refused"] += 1
     message = (
-        f"status {value!r} was refused: {fault}. {repair} "
+        f"status {_render(value)} was refused: {fault}. {repair} "
         f"({_ACCEPTED_FORMS}; ONTOLOGY §3 of #11824's model.)"
     )
     _logger.warning("status refused at the write door: %s", message)
@@ -208,17 +223,27 @@ def read_caller_status(value: object, *, kind: str = "") -> str:
     treated the row as current), and coercing it here would mint a word the
     caller never wrote. The refusal names the vocabulary, which is a performable
     third part.
+
+    ⛔ THE SPELLING DECISION READS THE CONTENT, NEVER THE CALLER'S METHODS.
+    ``isinstance(x, str)`` is not the boundary — a STR SUBCLASS keeps the
+    caller's ``__str__``/``strip``/``lower``/``__eq__``, so ``token =
+    value.strip().lower()`` would let it forge a word the caller never wrote
+    (#12896, #12906). The gate is therefore ``issubclass(type(value), str)`` (an
+    object can claim ``__class__ = str``, which ``isinstance`` believes and which
+    makes ``str.__str__`` raise), and the content is read with ``str.__str__``,
+    which cannot consult an override. Everything after that operates on a PLAIN
+    ``str``, so no later comparison can be lied to either.
     """
-    if not isinstance(value, str):
+    if not issubclass(type(value), str):
         raise _refusal(
             value,
             f"a status must be a plain string, and {type(value).__name__} is "
             f"not one",
             "Pass the word itself, as a string.",
         ) from None
-    token = value.strip().lower()
+    token = str.__str__(value).strip().lower()
     if token in LIFECYCLE_STATUS_SET:
-        if token != value:
+        if token != str.__str__(value):
             # A re-spelling of a legal word: same meaning, stored canonically,
             # reported to nobody (AX §1). Counted, because the ratio of
             # re-spellings to clean writes is the measurement that says whether

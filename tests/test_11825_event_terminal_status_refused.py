@@ -1555,9 +1555,12 @@ class TestTheGuardDoesNotOverBlock:
         assert row[0][0] == "superseded"
 
     def test_a_point_still_refuses_an_undeclared_status(self, sdk):
-        """The Point door's own vocabulary is untouched by this change."""
+        """The Point door validates through the SHARED four-word door (#11824 S0)."""
         pid = sdk.create_point("statement", "a claim", status="live")["id"]
-        with pytest.raises(ValueError, match="Invalid status"):
+        # #11824 S0: the message comes from `lifecycle_vocabulary`, which every
+        # knowledge kind now shares — same refusal, one home, and its third part
+        # names the words that ARE accepted.
+        with pytest.raises(ValueError, match="not a lifecycle word for :Point"):
             sdk.update_entity(pid, status="dead")
 
     def test_a_subject_still_takes_a_terminal_status(self, sdk):
@@ -1604,10 +1607,22 @@ class TestTheGuardDoesNotOverBlock:
     def test_the_whole_terminal_vocabulary_is_a_subset_of_the_point_vocabulary(self):
         """Documents the boundary: the Point door validates, the Event door denies.
 
-        `TERMINAL_EXCLUDED_STATUSES` is the Point vocabulary's terminal half plus
-        the legacy `deprecated`; every member except `deprecated` is a legal
-        Point status. Nothing here changes that — this is a WRITE denial on the
-        one label that has no lifecycle.
+        `TERMINAL_EXCLUDED_STATUSES` is the READ vocabulary; `POINT_STATUS_VALUES`
+        is the WRITE one, and #11824 S0 made the read set strictly WIDER than the
+        write set — deliberately (#2977): stored rows keep whatever they hold (no
+        backfill), so `retracted`/`outdated`/`archived` still read as dead while no
+        door can mint them any more. `deprecated` used to be the single member
+        outside the write set; it is now IN it, which is the reversal S0 records.
         """
         extra = TERMINAL_EXCLUDED_STATUSES - POINT_STATUS_VALUES
-        assert extra == {"deprecated"}
+        assert extra == {"retracted", "outdated", "archived"}
+        # …and the door's treatment of each is NOT uniform, which is the point of
+        # the three words being different: `retracted`/`archived` are DECLARED
+        # SYNONYMS (stored as `deprecated`, silently), while `outdated` is
+        # REFUSED because it names a CHOICE — the two endings differ, and the
+        # caller is the only one who knows which happened.
+        from tortoise.lifecycle_vocabulary import read_caller_status
+        for synonym in ("retracted", "archived"):
+            assert read_caller_status(synonym) == "deprecated", synonym
+        with pytest.raises(ValueError, match="deprecated"):
+            read_caller_status("outdated")

@@ -761,6 +761,14 @@ class TestProjectionFold:
 # ── Work-item fold (Step 7) ──────────────────────────────────────────
 
 class TestWorkItemFold:
+    # ⚠️ #11824 S0 MOVED these pins from `o.status` to the PIPELINE STAGE, and
+    # that is the slice's deliverable rather than a test detail: the connector
+    # folds used to write `in_progress` / `completed` as `Object.status`, which
+    # the four-word lifecycle axis can no longer hold (they are POSITION words —
+    # design §3.2). They now advance the CORE default work-item pipeline
+    # (`pipeline.CORE_WORK_ITEM_PIPELINE`), so the words are preserved on the axis
+    # they belong to and `status` stays a lifecycle word. The `isClosed` half is
+    # asserted with each one because it is what reads a terminal stage as ended.
     def test_linear_card_completed(self):
         sdk = _fresh_sdk()
         try:
@@ -768,9 +776,18 @@ class TestWorkItemFold:
             sdk.create_event("card done", "pm:cardCompleted",
                              object="TASK-42", endedAt="2026-08-18")
             rows = sdk._get_proj().g.query(
-                "MATCH (o:Object {name:$n}) RETURN o.status",
+                "MATCH (o:Object {name:$n}) "
+                "RETURN o.status, o.pipelineStageId, o.pipelineSlot, "
+                "       o.pipelineOutcome, o.isClosed",
                 params={"n": "TASK-42"}).result_set
-            assert rows and rows[0][0] == "completed"
+            assert rows, "the fold did not reach the Object"
+            status, stage, slot, outcome, closed = rows[0]
+            assert stage == "done", rows
+            assert (slot, outcome, closed) == ("terminal", "completed", True), \
+                rows
+            assert status is None, (
+                "the connector fold wrote a LIFECYCLE word — a position word on "
+                f"the status axis is the defect S0 removes: {status!r}")
         finally:
             sdk.close()
 
@@ -780,14 +797,30 @@ class TestWorkItemFold:
             sdk.create_entity("object", "the bug", objectKind="dev:issue")
             sdk.create_event("opened", "github.issue.open", object="the bug")
             rows = sdk._get_proj().g.query(
-                "MATCH (o:Object {name:$n}) RETURN o.status",
+                "MATCH (o:Object {name:$n}) "
+                "RETURN o.status, o.pipelineStageId, o.isClosed",
                 params={"n": "the bug"}).result_set
-            assert rows[0][0] == "in_progress"
+            assert rows and tuple(rows[0][1:]) == ("in_progress", False), rows
+            assert rows[0][0] is None, rows
             sdk.create_event("closed", "github.issue.closed", object="the bug")
             rows = sdk._get_proj().g.query(
-                "MATCH (o:Object {name:$n}) RETURN o.status",
+                "MATCH (o:Object {name:$n}) "
+                "RETURN o.status, o.pipelineStageId, o.isClosed",
                 params={"n": "the bug"}).result_set
-            assert rows[0][0] == "completed"
+            assert rows and tuple(rows[0][1:]) == ("done", True), rows
+            assert rows[0][0] is None, rows
+            # …and the REOPEN fold clears the durable close, which is the reason
+            # the closing fold targets a terminal STAGE and not the lifecycle
+            # word `deprecated` (that ending is final; a stage is reopenable).
+            sdk.create_event("reopened", "github.issue.reopened",
+                             object="the bug")
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:$n}) "
+                "RETURN o.status, o.pipelineStageId, o.isClosed",
+                params={"n": "the bug"}).result_set
+            assert rows and tuple(rows[0][1:]) == ("in_progress", False), (
+                "github.issue.reopened did not reopen a closed work item: "
+                f"{rows}")
         finally:
             sdk.close()
 
@@ -845,7 +878,7 @@ class TestWorkItemFold:
             sdk.create_event("reopened", "github.issue.reopened",
                              object="the live bug")
             rows = sdk._get_proj().g.query(
-                "MATCH (o:Object {name:$n}) RETURN o.status",
+                "MATCH (o:Object {name:$n}) RETURN o.pipelineStageId",
                 params={"n": "the live bug"}).result_set
             assert rows and rows[0][0] == "in_progress", \
                 "live-Object reopen fold regressed under the guard"
@@ -884,11 +917,18 @@ class TestWorkItemFold:
                 for ev_kind in ("github.issue.closed", "github.issue.reopened"):
                     sdk.create_event("e", ev_kind, object=name)
                     rows = sdk._get_proj().g.query(
-                        "MATCH (o:Object {name:$n}) RETURN o.status",
+                        "MATCH (o:Object {name:$n}) "
+                        "RETURN o.status, o.pipelineStageId",
                         params={"n": name}).result_set
                     assert rows and rows[0][0] == status, (
                         f"{ev_kind} resurrected a terminal Object: "
                         f"{status} -> {rows[0][0] if rows else 'MISSING'}")
+                    # #11824 S0: the same latch must hold on the POSITION axis —
+                    # the fold is a stage move now, so a dead Object must not
+                    # acquire a stage either.
+                    assert rows[0][1] is None, (
+                        f"{ev_kind} wrote a pipeline stage onto a terminal "
+                        f"Object: {rows[0][1]!r}")
             finally:
                 sdk.close()
 
@@ -1372,7 +1412,12 @@ class TestLifecycleCarrierCoherence:
                 params={"id": oid})
             before = _carrier_row(sdk, "Object", "delta")
             assert before[1] == "archived", before
-            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+            # ⚠️ #11824 S0: the refusal now comes from the VOCABULARY door,
+            # which runs before the transition guard — a non-string is refused
+            # with a performable repair ("Pass the word itself, as a string.")
+            # rather than with the dead-set message. The ROW assertion below is
+            # the invariant both doors must keep, and it is unchanged.
+            with pytest.raises(ValueError, match="was refused"):
                 sdk.update_entity(oid, status=target)
             assert _carrier_row(sdk, "Object", "delta") == before, (
                 "a refused resurrection moved the row: " +
@@ -1398,6 +1443,16 @@ class TestLifecycleCarrierCoherence:
         re-assert is legitimately accepted (it asks for no transition), so this
         asserts that whatever the door answers, the dead row does not move and
         never comes back CURRENT.
+
+        ⚠️ **UPDATED BY #11824 S0 — the row now CANONICALISES, and that is the
+        point of the update, not a relaxation.** `archived` is a declared
+        SYNONYM of `deprecated` (design §3.1: *ended, and nothing replaced it*),
+        and the write door stores the canonical word — silently (AX §1). So a
+        same-content re-assert of `archived` rewrites the stored word to
+        `deprecated`. What the pin still demands, and now demands more sharply,
+        is the thing it was written for: the store writes the word the DOOR read,
+        never the caller's RENDERING — so `live`/`""` (what the two lies below
+        produce) must never appear on the row.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12906.db"))
         try:
@@ -1410,11 +1465,17 @@ class TestLifecycleCarrierCoherence:
             try:
                 sdk.update_entity(oid, status=target)
             except ValueError as exc:
-                assert "is TERMINAL for a :Object" in str(exc), exc
-            assert _carrier_row(sdk, "Object", "epsilon") == before, (
-                "a rendering lie moved a DEAD row: "
-                f"{before} -> {_carrier_row(sdk, 'Object', 'epsilon')} — the "
-                "guard approved the CONTENT and the store wrote the RENDERING")
+                assert "was refused" in str(exc), exc
+            after = _carrier_row(sdk, "Object", "epsilon")
+            assert after[0] == before[0] and after[2:] == before[2:], (
+                "a rendering lie moved a DEAD row's carriers: "
+                f"{before} -> {after}")
+            assert after[1] == "deprecated", (
+                "the store did not write the CANONICAL word the door read — the "
+                f"guard approved the CONTENT and the store wrote the RENDERING: "
+                f"{before} -> {after}")
+            assert after[1] != "live" and after[1] != "", (
+                f"a rendering lie RESURRECTED the row: {after}")
         finally:
             sdk.close()
 
@@ -1445,7 +1506,10 @@ class TestLifecycleCarrierCoherence:
                 "MATCH (o:Object {id:$id}) SET o.status='archived'",
                 params={"id": oid})
             before = _carrier_row(sdk, "Object", "zeta")
-            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+            # #11824 S0: a non-string is refused by the VOCABULARY door, whose
+            # message renders the value — so this still pins #12906 P3 exactly:
+            # a caller-controlled `__repr__` must not escape as its own class.
+            with pytest.raises(ValueError, match="was refused"):
                 sdk.update_entity(oid, status=_BoomRepr())
             assert _carrier_row(sdk, "Object", "zeta") == before, before
 
@@ -1459,7 +1523,6 @@ class TestLifecycleCarrierCoherence:
             with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
                 sdk.update_entity(_IdLie(oid), status="live")
             assert _carrier_row(sdk, "Object", "zeta") == before, before
-
             # ⛔ AND THE CONFLICTING-WRITE door, ONE BRANCH ABOVE it (review cycle
             # 10 P3): that refusal renders `id_val` too, so the same id object
             # escaped as `RuntimeError: id-repr-boom` there. One helper for both
@@ -1556,18 +1619,26 @@ class TestLifecycleCarrierCoherence:
                                   (_UnhashHonest("banana"),
                                    "unhashable membership"),
                                   (_Impostor(), "__class__ impostor")):
-                with pytest.raises(ValueError,
-                                   match="is TERMINAL for a :Object"):
+                # #11824 S0: the VOCABULARY door refuses first, and it reads the
+                # content with `str.__str__` behind an `issubclass(type(x), str)`
+                # gate — the two devices this test exists to require. The
+                # dead-row assertion is unchanged.
+                with pytest.raises(ValueError, match="was refused"):
                     sdk.update_entity(oid, status=target)
                 assert _carrier_row(sdk, "Object", "eta") == before, (
                     f"a {label} target moved the dead row: "
                     + repr(_carrier_row(sdk, "Object", "eta")))
 
-            # normalising must not over-refuse: same CONTENT as the dead word
+            # normalising must not over-refuse: same CONTENT as the dead word.
+            # ⚠️ #11824 S0: `archived` is a declared SYNONYM of `deprecated`, so
+            # the re-assert is still ACCEPTED — and the store now writes the
+            # canonical word (that IS the door's contract, and it is silent per
+            # AX §1). What must not happen is the row going CURRENT.
             sdk.update_entity(oid, status=_PlainSub("archived"))
-            assert _carrier_row(sdk, "Object", "eta") == before, (
-                "a plain `str` subclass re-asserting the dead word was not the "
-                "no-op it was: " + repr(_carrier_row(sdk, "Object", "eta")))
+            after = _carrier_row(sdk, "Object", "eta")
+            assert after == (before[0], "deprecated") + tuple(before[2:]), (
+                "a plain `str` subclass re-asserting the dead word did not land "
+                "as the canonical synonym: " + repr(after))
         finally:
             sdk.close()
 
@@ -1607,7 +1678,11 @@ class TestLifecycleCarrierCoherence:
             assert _carrier_row(sdk, "Object", "zeta")[1:] == (
                 "superseded", "zeta-v2", None)
             before = _carrier_row(sdk, "Object", "zeta")
-            with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
+            # #11824 S0: a non-string target is refused by the VOCABULARY door,
+            # which precedes the coherence allowance — so this composed shape can
+            # no longer ride into the row at all, which is a STRONGER result than
+            # the allowance's `str` requirement.
+            with pytest.raises(ValueError, match="was refused"):
                 sdk.update_entity(oid, status=target,
                                   supersededBy=None, supersededAt=None)
             assert _carrier_row(sdk, "Object", "zeta") == before, (
@@ -1616,45 +1691,36 @@ class TestLifecycleCarrierCoherence:
         finally:
             sdk.close()
 
-    def test_a_non_string_status_on_a_LIVE_row_is_still_the_undeclared_word_hole(
+    def test_a_non_string_status_on_a_LIVE_row_is_REFUSED_now_the_door_closed(
             self, tmp_path):
-        """The sibling pin, so the guard above is not read as a vocabulary.
+        """⛔ **INVERTED BY #11824 S0** — this pin used to keep the hole OPEN.
 
-        A live row accepts these exactly as it did before — the vocabulary hole
-        for Objects is #10371 and needs per-kind resolution (§4.3: a pack kind
-        validates against its own declared words). What this change adds is the
-        LIFECYCLE half, not the vocabulary half.
+        It was written to prove the #10371 guard was a TRANSITION guard and not a
+        vocabulary: a live row accepted `status=['live']`, and the docstring said
+        so plainly ("a live row accepts these exactly as it did before — the
+        vocabulary hole for Objects is #10371 and needs per-kind resolution").
+        That reading is now retired by the model: there IS no per-kind *status*
+        resolution to wait for, because a pack's own words are its pipeline
+        STAGES (design §4.2, and the `OVERRIDES` (2) reversal recorded on
+        #11824), so ONE four-word set is correct for every knowledge kind.
 
-        ⚠️ This pin also records the RESIDUAL around it, and one measurement that
-        changed. It stores a LIST as the status, so a LATER lifecycle write on this
-        row used to raise `TypeError: unhashable type: 'list'` out of the guard's
-        dead-set membership test — the same defect class one layer down (the STORED
-        side, #12869), reachable only because this vocabulary hole exists. The dead
-        set is now built from `str` STORED values only, so that traceback is gone
-        at this site: a non-`str` stored value is not a dead WORD, the dead set is
-        empty, and the write is `continue`d. ⛔ #12869 is NOT closed by this —
-        re-measure it there before assuming its symptom is gone; what is pinned
-        here is only that the LIVE-row vocabulary half is unchanged.
+        So the hole this test protected is CLOSED, and the assertion is inverted:
+        a non-string is refused on a live row exactly as on a dead one, and the
+        row is untouched. ⚠️ The seed is kept, and kept for the same reason it was
+        added (#12882 review R1) — the stored word must be a real one so the
+        refusal cannot pass for the `if not _np_stored: continue` exit.
         """
         sdk = TortoiseSDK(str(tmp_path / "t10192v.db"))
         try:
             oid = _make_carrier_entity(sdk, "Object", "epsilon")
-            # ⛔ THE ROW MUST CARRY A STORED WORD, or this pin proves NOTHING
-            # (#12882 review R1). `_make_carrier_entity` mints an Object with no
-            # `status` key at all, and the guard exits at `if not _np_stored:
-            # continue` BEFORE the dead-set comparison — so the write below was
-            # accepted because there was no word to compare, not because a live
-            # word is excluded from the dead set. Measured: the mutant that
-            # refuses a non-string when the stored word is not dead (the #10371
-            # live-row hole this pin claims to keep open) left the unseeded pin
-            # GREEN, and a `status='live'`-seeded control row was refused by that
-            # same mutant. The seed makes the assertion discriminating: the
-            # stored word is `live`, it is NOT in the family's dead set, so the
-            # write must still be accepted.
             sdk.update_entity(oid, status="live")
             assert _carrier_row(sdk, "Object", "epsilon")[1] == "live"
-            sdk.update_entity(oid, status=["live"])
-            assert _carrier_row(sdk, "Object", "epsilon")[1] == ["live"]
+            before = _carrier_row(sdk, "Object", "epsilon")
+            with pytest.raises(ValueError, match="was refused"):
+                sdk.update_entity(oid, status=["live"])
+            assert _carrier_row(sdk, "Object", "epsilon") == before, (
+                "a REFUSED non-string status moved a live row: "
+                + repr(_carrier_row(sdk, "Object", "epsilon")))
         finally:
             sdk.close()
 
@@ -1674,19 +1740,30 @@ class TestLifecycleCarrierCoherence:
         all: the row holds no dead WORD, so no transition is refused, and no
         traceback escapes the door.
 
-        ⛔ The assertion is "did not raise, row is intact" — NOT a claim about
-        which word lands. A live row's vocabulary is #10371's business, and a
-        `str` target is not involved here.
+        ⛔ The assertion is "did not raise `TypeError`, row is intact" — NOT a
+        claim about which word lands. ⚠️ #11824 S0 moved the PRODUCER of such a
+        row: a non-string `status` can no longer be written through the door at
+        all, so the stored non-string is seeded OUT OF BAND here — which is
+        exactly the legacy population the guard must still not crash on.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869dead.db"))
         try:
             oid = _make_carrier_entity(sdk, "Object", "kappa")
-            sdk.update_entity(oid, status=["live"])
-            assert _carrier_row(sdk, "Object", "kappa")[1] == ["live"]
+            sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) SET o.status=$s",
+                params={"id": oid, "s": target})
+            before = _carrier_row(sdk, "Object", "kappa")
+            assert before[0] == oid, before
+            # ⚠️ NOT `before[1] == target`: the engine DEGRADES an unstorable
+            # value (a map) to NULL before this reader ever sees it — the #7369
+            # degradation the original docstring already recorded. What matters
+            # here is that the STORED shape does not crash the door.
             # The write under test must complete: `TypeError` out of a door that
-            # promises a refusal is the defect this pins shut.
-            sdk.update_entity(oid, status=target)
-            assert _carrier_row(sdk, "Object", "kappa")[0] == oid
+            # promises a refusal is the defect this pins shut. A non-string
+            # TARGET is refused by the vocabulary door, cleanly.
+            with pytest.raises(ValueError, match="was refused"):
+                sdk.update_entity(oid, status=target)
+            assert _carrier_row(sdk, "Object", "kappa") == before
         finally:
             sdk.close()
 
@@ -1970,11 +2047,19 @@ class TestBirthStatusIsDerivedNotFabricated:
                     params={"n": name}).result_set
                 return rows[0][0] if rows else "<absent>"
 
-            assert status_of("theta") == "archived", status_of("theta")
+            # ⚠️ #11824 S0: `archived` is a declared SYNONYM of `deprecated`, so
+            # the live write stores the CANONICAL word (silently, AX §1) — and the
+            # affinity this test exists to prove, "the record's value is CARRIED,
+            # not lost", holds BETWEEN THE TWO ROUTES because the DOOR puts the
+            # canonical word in the RECORD too (measured: `create_object(...,
+            # status='archived')` journals `status: "deprecated"`). So the replay
+            # stores exactly what the graph holds, with no second spelling rule
+            # anywhere on the read side.
+            assert status_of("theta") == "deprecated", status_of("theta")
             proj.rebuild_all(str(events), confirm_destructive=True)
-            assert status_of("theta") == "archived", (
-                "a caller-supplied birth status was dropped by replay: "
-                f"{status_of('theta')!r}")
+            assert status_of("theta") == "deprecated", (
+                "a caller-supplied birth status was dropped (or re-spelled) by "
+                f"replay: {status_of('theta')!r}")
         finally:
             sdk.close()
 

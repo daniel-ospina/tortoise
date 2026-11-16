@@ -496,15 +496,28 @@ def _portfolio_declared_statuses() -> dict[str, frozenset[str]]:
         fold_index = None
     out: dict[str, frozenset[str]] = {}
     for kind, spec in (pack.kind_defs or {}).items():
-        statuses = spec.get("statuses") if isinstance(spec, dict) else None
-        if not (isinstance(statuses, list) and statuses):
+        if not isinstance(spec, dict):
+            continue
+        statuses = spec.get("statuses")
+        if isinstance(statuses, list) and statuses:
+            allowed = frozenset(s for s in statuses if isinstance(s, str))
+        elif isinstance(spec.get("pipeline"), dict):
+            # ── #11824 S0: a MIGRATED kind's status vocabulary ──
+            # The kind's own words moved to the pipeline STAGE axis, so its
+            # `status` vocabulary is the four-word lifecycle base — exactly what
+            # the write door accepts for it (`lifecycle_vocabulary`). Returning
+            # nothing here would make this rule grade ZERO rules and report
+            # `portfolio_rules_unavailable`, i.e. turn a real clean verdict into
+            # "not evidence" for the pack's own acceptance.
+            from .lifecycle_vocabulary import LIFECYCLE_STATUS_SET
+            allowed = LIFECYCLE_STATUS_SET
+        else:
             continue
         namespaced = f"{_PORTFOLIO_DOMAIN}:{kind}"
         if fold_index is not None:
             forms = fold_index.kind_forms_for(namespaced)
         else:  # registry without a fold index — the same two admitted forms
             forms = [namespaced.lower(), str(kind).lower()]
-        allowed = frozenset(s for s in statuses if isinstance(s, str))
         for form in forms:
             out[str(form).lower()] = allowed
     return out

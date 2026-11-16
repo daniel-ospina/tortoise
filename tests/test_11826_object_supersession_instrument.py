@@ -765,8 +765,11 @@ def test_a_terminal_successor_with_no_chain_is_not_told_to_follow_one(sdk):
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
     sdk.update_entity(v1["id"], status="superseded", **{"supersededBy": "ArcA2"})
     sdk.update_entity(arc["id"], status="archived")
+    # ⚠️ #11824 S0: `archived` is a DECLARED SYNONYM of `deprecated` and the write
+    # door stores the canonical word, so the row holds `deprecated`. It is still a
+    # TERMINAL Object with no chain, which is what this test is about.
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.status, o.supersededBy",
-              {"i": arc["id"]}) == [["archived", None]]
+              {"i": arc["id"]}) == [["deprecated", None]]
 
     issues = [i for i in _issues(sdk, "superseded_object_active_edges")
               if i.node_id == v1["id"]]

@@ -2358,13 +2358,21 @@ def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
     assert "retracted" in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
     for st in ("superseded", "deprecated", "archived", "outdated"):
         assert st not in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
-    # #3302: the successor-probe set is EXACTLY the canonical OBJECT vocabulary
-    # plus its one load-bearing divergence. `outdated` is not a dead member —
-    # create_entity/update_entity can write it through the public MCP surface
-    # (`status` is not server-managed), so an exact pin is required rather than
-    # a subset check.
+    # #3302: the successor-probe set is EXACTLY the canonical OBJECT vocabulary.
+    # ⚠️ #11824 S0 MOVED this pin, and the move is the point of the pin: the
+    # `|"outdated"` divergence existed for ONE reason, stated here verbatim —
+    # "create_entity/update_entity can write it through the public MCP surface"
+    # — so an exact membership was required. S0 closes that door: `outdated`
+    # names two different lifecycle words (`deprecated` / `superseded`) and is
+    # REFUSED with the choice named, so no write can produce it any more and the
+    # divergence is unreachable weight. The set is therefore the base, exactly.
+    # ⛔ What this does NOT do is widen `OBJECT_TERMINAL_STATUSES`: stored rows
+    # keep whatever they hold (no backfill, #11824 §1), so `outdated` stays a
+    # member of the READ vocabularies that name it — this is the RECALL ladder's
+    # own set, and its question is "what does a WRITER produce", which is now
+    # the four words.
     assert set(_RECALL_OBJECT_EXCLUDED_STATUSES) == \
-        set(OBJECT_TERMINAL_STATUSES) | {"outdated"}
+        set(OBJECT_TERMINAL_STATUSES)
 
 
 # ── #4061 R1/R2/R3: the exclusion is decided where it is applied ───────────

@@ -407,13 +407,22 @@ def stage_move_refusal(cur_stage: PipelineStage | None, target: PipelineStage, *
 
 
 def stage_move_props(pipeline_key: str, target: PipelineStage,
-                     at: str) -> dict[str, Any]:
+                     at: str | None) -> dict[str, Any]:
     """The props a stage move writes — the ONE spelling of ``STAGE_PROPS``.
 
     ``isClosed`` is derived from the TARGET's slot (``stage.is_terminal``), so a
     terminal stage closes durably and a non-terminal one re-opens the marker only
     where the guard above admitted the move (a ``reopen=True`` from a terminal
     stage).
+
+    ⛔ ``at=None`` CLEARS ``pipelineStageSince`` instead of minting a clock, and
+    that is what makes a FOLD replay-identical (#11824 S0). A verb has a caller
+    and a wall clock; a fold has neither — it runs inside the projection, on the
+    live path AND on every rebuild, so ``_now()`` there would record the REPLAY's
+    instant and the two routes would disagree on a prop that is in
+    ``STAGE_PROPS``. The event itself is the record of when, so the honest value
+    for a fold-driven move is "no since recorded" — clearing also stops a
+    previous move's clock from reading as this move's.
     """
     props: dict[str, Any] = {
         "pipelineStageId": target.stage_id,
@@ -472,7 +481,7 @@ def apply_stage_fold(cur: dict, pipeline_key: str, decl: dict | None,
                                 reopen=reopen, correction=correction)
     if reason is not None:
         return reason, {}
-    return None, stage_move_props(pipeline_key, target, at or _now())
+    return None, stage_move_props(pipeline_key, target, at)
 
 
 

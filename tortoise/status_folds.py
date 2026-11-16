@@ -66,6 +66,7 @@ dependency is one-directional and cycle-free.
 from __future__ import annotations
 
 import logging
+from typing import NamedTuple
 
 from .pipeline import (
     CORE_WORK_ITEM_PIPELINE as _CORE_WORK_ITEM_PIPELINE,
@@ -136,6 +137,41 @@ SHARED_CONNECTOR_STATUS_WORDS: frozenset[str] = frozenset({
 #: (``lifecycle_vocabulary``). A ``status`` target is still accepted so a pack
 #: that has not migrated keeps working, and exactly ONE of the two is required.
 VALID_FOLD_KEYS: frozenset[str] = frozenset({"event", "status", "stage"})
+
+#: The two axes a fold target may name. ``status`` is the LIFECYCLE axis (the
+#: four-word vocabulary, ``lifecycle_vocabulary``) and ``stage`` is the POSITION
+#: axis (a stage id of the kind's declared ``pipeline``). One fold targets one of
+#: them — never both, because "which axis moved?" would have no answer.
+FOLD_AXIS_STATUS = "status"
+FOLD_AXIS_STAGE = "stage"
+
+
+class FoldTarget(NamedTuple):
+    """One fold's target: WHICH axis, and which word/stage.
+
+    ``kind`` is the namespaced object kind (``venture:tranche``) the fold is
+    guarded to. ``axis`` is ``"status"`` (the lifecycle axis) or ``"stage"``
+    (the position axis, resolved in the kind's declared pipeline).
+
+    ⚠️ A ``FoldTarget`` is the RESOLVED, validated form. The index accepts a
+    bare ``(kind, status)`` pair too (:meth:`StatusFoldIndex.folds_for_event`
+    normalises it), because that pair was the whole contract before #11824 S0
+    and a caller-built index is a supported test shape.
+    """
+
+    kind: str
+    axis: str
+    target: str
+
+    @property
+    def status(self) -> str | None:
+        """The lifecycle word, when this fold is on the status axis."""
+        return self.target if self.axis == FOLD_AXIS_STATUS else None
+
+    @property
+    def stage(self) -> str | None:
+        """The stage id, when this fold is on the position axis."""
+        return self.target if self.axis == FOLD_AXIS_STAGE else None
 
 
 def _declared_statuses(pack, kind: str) -> list:
@@ -457,31 +493,57 @@ class StatusFoldIndex:
     """
 
     __slots__ = ("by_event", "kind_forms", "lifecycle_kinds",
-                 "statuses_by_kind")
+                 "statuses_by_kind", "pipelines_by_kind")
 
     def __init__(self) -> None:
         #: case-folded event kind (``ns:local`` OR bare ``local``) →
-        #: [(namespaced object kind, status), ...]
-        self.by_event: dict[str, list[tuple[str, str]]] = {}
-        #: namespaced object kinds that declare a `statuses` lifecycle
+        #: [FoldTarget, ...]  (a bare ``(kind, status)`` pair is accepted too —
+        #: :meth:`folds_for_event` normalises it)
+        self.by_event: dict[str, list] = {}
+        #: namespaced object kinds that declare a state surface of their own
+        #: (a `statuses` lifecycle OR a `pipeline`) — the set `owns_state`
+        #: answers from, and the one that suppresses the built-in connector
+        #: fold (#2725 contract 2).
         self.lifecycle_kinds: frozenset[str] = frozenset()
         #: namespaced object kind → declared status tuple (order preserved)
         self.statuses_by_kind: dict[str, tuple[str, ...]] = {}
+        #: namespaced object kind → its declared ``pipeline`` (#11824 S0). A
+        #: stage-targeted fold resolves in THIS declaration, and the fold's own
+        #: validation already refused a stage that is not in it — so the index
+        #: carries the declaration rather than a stage id whose pipeline would
+        #: have to be guessed.
+        self.pipelines_by_kind: dict[str, dict] = {}
         #: every case-folded spelling (``ns:local`` AND bare ``local``) of a
-        #: kind that declares a lifecycle — the built-in connector fold's
+        #: kind that declares a state surface — the built-in connector fold's
         #: ``$declared`` guard, so a bare-spelled ``objectKind`` is suppressed
         #: exactly like its namespaced twin.
         self.kind_forms: frozenset[str] = frozenset()
 
-    def folds_for_event(self, event_kind: str) -> list[tuple[str, str]]:
-        """The declared ``(kind, status)`` targets for one event kind.
+    def folds_for_event(self, event_kind: str) -> list[FoldTarget]:
+        """The declared fold TARGETS for one event kind.
 
         Case-insensitive and form-widened: a bare ``disbursement`` and a
         namespaced ``venture:disbursement`` both resolve. Empty for a
         built-in-only or unknown event — the caller then applies the
         compatibility fold, which knows nothing about kinds.
+
+        A raw ``(kind, status)`` pair is normalised into a status-axis
+        :class:`FoldTarget`. That pair was the whole contract before #11824 S0
+        and a caller-built index is a supported shape, so accepting it keeps a
+        test/hand-built index working instead of silently folding nothing.
         """
-        return list(self.by_event.get((event_kind or "").lower(), ()))
+        out: list[FoldTarget] = []
+        for entry in self.by_event.get((event_kind or "").lower(), ()):
+            if isinstance(entry, FoldTarget):
+                out.append(entry)
+            elif isinstance(entry, (tuple, list)) and len(entry) == 2:
+                out.append(FoldTarget(str(entry[0]), FOLD_AXIS_STATUS,
+                                      str(entry[1])))
+        return out
+
+    def pipeline_for(self, namespaced_kind: str) -> dict | None:
+        """The kind's declared ``pipeline``, or ``None`` when it declares none."""
+        return self.pipelines_by_kind.get(namespaced_kind)
 
     def statuses_for(self, namespaced_kind: str) -> tuple[str, ...]:
         return self.statuses_by_kind.get(namespaced_kind, ())
@@ -507,11 +569,18 @@ class StatusFoldIndex:
 def build_status_fold_index(packs) -> StatusFoldIndex:
     """Compile the fold index from ``{namespace: PackManifest}``.
 
-    Every declared ``statuses`` list becomes a lifecycle kind, EVEN WHEN the
-    kind declares no folds: owning the vocabulary is what suppresses the
+    A kind that declares a STATE SURFACE of its own becomes a state kind, EVEN
+    WHEN it declares no folds: owning the vocabulary is what suppresses the
     built-in connector fold for that kind, and a kind whose state moves only
     through an explicit write (the SDK's ``restatus``) still must not be
     silently re-labelled by a connector event.
+
+    ⚠️ #11824 S0: "a state surface" is EITHER axis — a ``statuses`` lifecycle
+    (the legacy/compat declaration) or a ``pipeline`` (the migrated one, whose
+    words are stages). Reading only ``statuses`` was fine while every pack
+    declared statuses; after the migration a kind whose words live on the
+    position axis would have read as declaring NOTHING and fallen through to
+    the connector fold — the collision contract 2 exists to prevent.
 
     CATALOG-level, not graph-gated: the index is compiled from every loaded
     pack, never from a graph's ``:PackInstall`` approval set. A kind already
@@ -522,15 +591,20 @@ def build_status_fold_index(packs) -> StatusFoldIndex:
     """
     index = StatusFoldIndex()
     statuses_by_kind: dict[str, tuple[str, ...]] = {}
-    by_event: dict[str, list[tuple[str, str]]] = {}
+    pipelines_by_kind: dict[str, dict] = {}
+    by_event: dict[str, list[FoldTarget]] = {}
     kind_forms: set[str] = set()
     for ns, pack in packs.items():
         for kind in getattr(pack, "object_kinds", ()) or ():
-            statuses = _declared_statuses(pack, kind)
-            if not statuses:
+            if not _declares_state(pack, kind):
                 continue
             namespaced = f"{ns}:{kind}"
-            statuses_by_kind[namespaced] = tuple(statuses)
+            statuses = _declared_statuses(pack, kind)
+            if statuses:
+                statuses_by_kind[namespaced] = tuple(statuses)
+            pipeline_decl = _declared_pipeline(pack, kind)
+            if pipeline_decl is not None:
+                pipelines_by_kind[namespaced] = pipeline_decl
             # The built-in fold's `$declared` guard reads these, and the write
             # gate stores the kind verbatim — so BOTH the namespaced and the
             # bare spelling are registered, case-folded, or a bare-spelled
@@ -542,8 +616,10 @@ def build_status_fold_index(packs) -> StatusFoldIndex:
                 if not isinstance(fold, dict):
                     continue
                 event = fold.get("event")
-                status = fold.get("status")
-                if not isinstance(event, str) or not isinstance(status, str):
+                if not isinstance(event, str):
+                    continue
+                target = _fold_target(namespaced, fold)
+                if target is None:
                     continue
                 local = event.partition(":")[2] or event
                 # Index under the namespaced AND the bare spellings — the two
@@ -551,12 +627,30 @@ def build_status_fold_index(packs) -> StatusFoldIndex:
                 # and the form the extraction commit actually writes
                 # (`sdk.py::_extract_session_v2` strips the namespace).
                 for key in {f"{ns}:{local}".lower(), local.lower()}:
-                    by_event.setdefault(key, []).append((namespaced, status))
+                    by_event.setdefault(key, []).append(target)
     index.statuses_by_kind = statuses_by_kind
-    index.lifecycle_kinds = frozenset(statuses_by_kind)
+    index.pipelines_by_kind = pipelines_by_kind
+    index.lifecycle_kinds = frozenset(statuses_by_kind) | frozenset(
+        pipelines_by_kind)
     index.kind_forms = frozenset(kind_forms)
     index.by_event = by_event
     return index
+
+
+def _fold_target(namespaced_kind: str, fold: dict) -> FoldTarget | None:
+    """One fold entry's resolved :class:`FoldTarget`, or ``None`` when unusable.
+
+    ``validate_status_decl`` has already refused an entry carrying BOTH axes or
+    neither, so this reader only has to be total (it runs on the projection hot
+    path, against a registry that may be half-loaded).
+    """
+    stage = fold.get("stage")
+    if isinstance(stage, str) and stage:
+        return FoldTarget(namespaced_kind, FOLD_AXIS_STAGE, stage)
+    status = fold.get("status")
+    if isinstance(status, str) and status:
+        return FoldTarget(namespaced_kind, FOLD_AXIS_STATUS, status)
+    return None
 
 
 def bare_lifecycle_kind_collisions(packs) -> dict[str, list[str]]:
@@ -581,7 +675,7 @@ def bare_lifecycle_kind_collisions(packs) -> dict[str, list[str]]:
     owners: dict[str, list[str]] = {}
     for ns, pack in packs.items():
         for kind in getattr(pack, "object_kinds", ()) or ():
-            if not _declared_statuses(pack, kind):
+            if not _declares_state(pack, kind):
                 continue
             owners.setdefault(str(kind), []).append(ns)
     return {
@@ -591,11 +685,28 @@ def bare_lifecycle_kind_collisions(packs) -> dict[str, list[str]]:
     }
 
 
-def builtin_fold_status(event_kind: str) -> str | None:
-    """The compatibility fold's status for an event kind, or ``None``.
+def builtin_fold_stage(event_kind: str) -> str | None:
+    """The compatibility fold's STAGE for an event kind, or ``None``.
+
+    #11824 S0 renamed this from ``builtin_fold_status``: the map's values are
+    stage ids of :data:`BUILTIN_CONNECTOR_PIPELINE` now, so a caller that read
+    one as a ``status`` would write a position word onto the lifecycle axis —
+    the exact defect this slice exists to remove. The name states the axis, so
+    the mistake cannot be made by accident.
 
     The caller must only apply it to an Object whose ``objectKind`` is NOT a
-    declared lifecycle kind (contract 2) — this function answers only "is this
-    a built-in fold key", not "may it apply".
+    declared state kind (contract 2) — this function answers only "is this a
+    built-in fold key", not "may it apply".
     """
     return BUILTIN_CONNECTOR_FOLDS.get(event_kind)
+
+
+def builtin_fold_reopens(event_kind: str) -> bool:
+    """Does this built-in fold REOPEN the work item (``github.issue.reopened``)?
+
+    A fold that moves a terminal-stage Object back into an active slot must say
+    so, because ``pipeline.apply_stage_fold`` applies the same terminal guard
+    the ``advance_stage`` verb does — and that guard's escape hatch is an
+    explicit ``reopen=True``, never an implicit "the event said so".
+    """
+    return event_kind in BUILTIN_CONNECTOR_REOPENS

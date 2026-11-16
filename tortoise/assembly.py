@@ -2165,8 +2165,10 @@ def docker_resolver_port(sdk) -> ResolverPort:
 # NARROWING of the read-surface vocabulary
 # ``commit_ops.OBJECT_TERMINAL_STATUSES`` (#3301); the resolver's legs
 # apply it, see `docker_resolver_port`), and (b) the RENDER/probe-time set
-# (``_RECALL_OBJECT_EXCLUDED_STATUSES``, five statuses including ``outdated``,
-# used only by `_probe_visible_successors`). Neither is EVER applied to a
+# (``_RECALL_OBJECT_EXCLUDED_STATUSES``, used only by
+# `_probe_visible_successors` — and since #11824 S0 that set is the canonical
+# one exactly, its former ``outdated`` divergence removed with the write path
+# that could mint the word). Neither is EVER applied to a
 # resolved subject's OWN state row (the superseded couch's state IS the
 # answer) nor to Points). One batched typed walk (never
 # row-level N+1, never blind BFS): state slice
@@ -4365,23 +4367,35 @@ def collect_class_slices(port, window: ClassWindow, *,
 # set that was a frozen snapshot of a source it did not reference drifts the
 # moment the canonical set moves.
 #
-# The one divergence is ``outdated``, and it is LOAD-BEARING — not dead. The
-# generic write path CAN put it on an :Object: ``create_entity("object", ...)``
-# spreads caller props over its literal defaults, and ``_update_entity`` issues
-# an unvalidated ``SET n += $props``; ``status`` is not a server-managed prop,
-# so both are reachable from the MCP surface (``tortoise_create_entity`` /
-# ``tortoise_update_entity``). Dropping the member would flip such a successor
-# from recall-excluded (NAME-ONLY annotation) to a verified link. The guard
-# that would reject the status (#2977 / PR #3326, ``OBJECT_STATUS_VALUES``) is
-# NOT on main.
+# ── #11824 S0: the ``outdated`` divergence is GONE, and the reason is the
+# REASON IT EXISTED. The paragraph this replaces recorded it as LOAD-BEARING
+# *because the generic write path could put the word on an :Object* —
+# ``create_entity`` spreads caller props over its defaults and ``_update_entity``
+# issued an unvalidated ``SET n += $props``, so ``status='outdated'`` was
+# reachable from ``tortoise_create_entity`` / ``tortoise_update_entity``. It is
+# not any more: every knowledge kind's ``status`` is read through ONE door
+# (``tortoise/lifecycle_vocabulary.py``) which REFUSES ``outdated`` because it
+# names two different words without saying which, and stores
+# ``archived``/``retracted`` as ``deprecated``. A member that exists to cover a
+# value a writer can no longer produce is weight, not defence — and removing a
+# value from a filter BEFORE removing it from the write path is the inverted
+# order this slice exists to avoid (an unguarded write minting a word no reader
+# excludes).
 #
-# The divergence is FROZEN by tests/test_assembly_pure.py, which asserts this
-# set equal to ``OBJECT_TERMINAL_STATUSES | {"outdated"}`` — a silent drop or
-# widening of the member cannot pass unnoticed. (The canonical set itself is
-# pinned by tests/test_object_search_visibility_3301.py; the #3317 pin beside
-# it guards the RESOLVER set and is not the oracle for this one.)
-_RECALL_OBJECT_EXCLUDED_STATUSES = frozenset(
-    OBJECT_TERMINAL_STATUSES | {"outdated"})
+# ⚠️ STATED RESIDUAL, not a hidden one: rows ALREADY holding ``outdated`` keep it
+# (no backfill, #11824 §1), and this set decides the successor-EXISTENCE probe's
+# NAME-ONLY annotation — so such a legacy successor now reads as a verified link
+# rather than an invisible one. That is the intended direction (the Object is
+# still there and still says what it says) and it is why ``outdated`` stays a
+# member of the READ vocabularies that name it (``live.TERMINAL_EXCLUDED_STATUSES``,
+# ``commit_ops.OBJECT_TERMINAL_STATUSES``).
+#
+# The EQUALITY is still FROZEN by tests/test_assembly_pure.py, which asserts this
+# set equal to ``OBJECT_TERMINAL_STATUSES`` exactly — a silent drop or widening
+# cannot pass unnoticed. (The canonical set itself is pinned by
+# tests/test_object_search_visibility_3301.py; the #3317 pin beside it guards the
+# RESOLVER set and is not the oracle for this one.)
+_RECALL_OBJECT_EXCLUDED_STATUSES = frozenset(OBJECT_TERMINAL_STATUSES)
 
 
 @dataclass(frozen=True)
