@@ -334,19 +334,6 @@ _ENVELOPE_KEYS = frozenset({
     "initiated_by",
     "agent_id",
     "actor_user_id",
-    # ⛔ `seq` IS NOT A CALLER PROP (#12894). It is the journal POSITION, and
-    # `#9190` made it load-bearing: the live door reads a record's carried `seq`
-    # as that record's ordinal and REFUSES when it disagrees with the
-    # enumeration, and a replay reads the same key. `sdk.py` reserves it at its
-    # own intake (`_RESERVED_ENVELOPE_PROPS`), but this funnel did not — so
-    # `add_event(seq=42)` / `add_object(..., seq=42)` rode `_emit`'s
-    # `**payload` onto the journal line's TOP level and produced a record whose
-    # live write refused (`_carried_position`) AND whose every replay refused: a
-    # state unhealable by the "a replay heals the record" the seam advertises,
-    # on an append-only line. Reserved on both channels, like the rest of this
-    # family (it propagates to `_ENVELOPE_KEYS_AT_PASSTHROUGH`, so the passthrough
-    # and forged-envelope checks refuse it too).
-    "seq",
 })
 
 #: …and the envelope names a PASSTHROUGH door can set obliquely. `_emit` binds
