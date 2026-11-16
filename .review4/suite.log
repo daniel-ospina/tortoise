@@ -1,0 +1,27 @@
+........................................................................ [  9%]
+........................................................................ [ 18%]
+........................................................................ [ 27%]
+........................................................................ [ 36%]
+........................................................................ [ 45%]
+........................................................................ [ 54%]
+........................................................................ [ 63%]
+........................................................................ [ 72%]
+........................................................................ [ 82%]
+........................................................................ [ 91%]
+......................................................................   [100%]
+=============================== warnings summary ===============================
+tests/test_ci_selection.py::test_the_surface_audit_separates_the_lane_from_drift
+  <unknown>:98: SyntaxWarning: invalid escape sequence '\.'
+
+tests/test_ci_selection.py::test_the_surface_audit_separates_the_lane_from_drift
+tests/test_ci_selection.py::test_the_surface_audit_separates_the_lane_from_drift
+  <unknown>:2050: SyntaxWarning: invalid escape sequence '\.'
+
+tests/test_ci_selection.py::test_the_surface_audit_separates_the_lane_from_drift
+  <unknown>:1222: SyntaxWarning: invalid escape sequence '\s'
+
+tests/test_ci_selection.py::test_the_surface_audit_separates_the_lane_from_drift
+  <unknown>:1866: SyntaxWarning: invalid escape sequence '\|'
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+790 passed, 5 warnings in 315.44s (0:05:15)
