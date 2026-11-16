@@ -148,6 +148,10 @@ ENTRYPOINT_GLOB = "entrypoint*.sh"
 #: failure ("mentions it but the assignment shape was not read"), never a silent pass.
 _ENV_ASSIGNMENT = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>\"[^\"]*\"|'[^']*'|\S*)")
 _ENV_INSTRUCTION = re.compile(r"(?i)^\s*ENV\s+(?P<body>.+)$")
+#: A build-stage boundary. `ENV` is STAGE-SCOPED, so only the instructions after the last `FROM`
+#: reach the image that ships — crediting a builder stage would read a two-stage file as STATED
+#: while the final image says nothing (review P2).
+_FROM_INSTRUCTION = re.compile(r"(?i)^\s*FROM\s+\S")
 #: The body of an `ENV` line that is NOTHING BUT `K=V` pairs (quotes honoured). Anything else is
 #: not tiled, so it is never parsed as a set of assignments.
 _ENV_PAIRS = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)\s*)+$")
@@ -340,7 +344,14 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str]]:
     """
     stated: dict[str, str] = {}
     ambiguous: set[str] = set()
-    for line in _logical_lines(text):
+    lines = _logical_lines(text)
+    # ⛔ ONLY the final build stage reaches the runtime image (review P2). Everything before the
+    # LAST `FROM` is stage-local and arms nothing that ships. A file with no `FROM` is read whole
+    # (there is no stage boundary to honour, and the caller discovered it as an image build file).
+    starts = [i for i, line in enumerate(lines) if _FROM_INSTRUCTION.match(line)]
+    if starts:
+        lines = lines[starts[-1] + 1 :]
+    for line in lines:
         match = _ENV_INSTRUCTION.match(line)
         if not match:
             continue
@@ -348,7 +359,12 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str]]:
         if _ENV_PAIRS.match(body):
             for key, value in _ENV_ASSIGNMENT.findall(body):
                 if key in SWITCHES and not _states_a_literal(value):
-                    ambiguous.add(key)  # an interpolation that can resolve empty (review P3)
+                    # ⛔ LAST ASSIGNMENT WINS in Docker and in the shell, so an ambiguous
+                    # assignment must also DROP an earlier literal: otherwise `ENV K=1` followed
+                    # by `ENV K=${X}` reports the stale `1` as STATED while the image resolves
+                    # empty (review P2). `stated` outranks `ambiguous` in `switch_problem`.
+                    ambiguous.add(key)
+                    stated.pop(key, None)
                     continue
                 stated[key] = _unquote(value)
             continue
@@ -356,6 +372,7 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str]]:
         if len(parts) == 2 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", parts[0]):
             if parts[0] in SWITCHES and not _states_a_literal(parts[1]):
                 ambiguous.add(parts[0])
+                stated.pop(parts[0], None)
                 continue
             stated[parts[0]] = _unquote(parts[1])
             continue
@@ -380,7 +397,11 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
         if match:
             key, value = match.group("key"), _strip_inline_comment(match.group("value"))
             if key in SWITCHES and not _states_a_literal(value):
-                ambiguous.add(key)  # `${X:-}` / `$X` — can resolve empty (review P3)
+                # Same last-wins rule as the Dockerfile reader: an ambiguous assignment must
+                # drop an earlier literal, or the stale literal is reported as STATED while the
+                # script resolves empty (review P2).
+                ambiguous.add(key)
+                stated.pop(key, None)
                 continue
             stated[key] = _unquote(value)
             continue
