@@ -6223,8 +6223,8 @@ _JOURNAL_CONFLICT_CONTENT_SQL = (
 def _affected_rows(cursor: Any) -> int | None:
     """The cursor's affected-row count for the statement it just ran, or None.
 
-    ``None`` means *this cursor cannot answer*, and it is the ONLY value that
-    skips the collision check (#9318). It is not a hypothetical: the DB-free
+    ``None`` means *this cursor cannot answer*; every value but a positive
+    ``0`` skips the collision check (#9318). It is not a hypothetical: the DB-free
     halves of this suite drive `replay()` through recording fakes, and a fake
     that never sets ``rowcount`` must keep behaving exactly as before — a guard
     that invented a refusal from an unreadable cursor would be a new source of
@@ -6484,7 +6484,7 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
 
     ⚠️ A cursor that cannot report ``rowcount``, or a conflict query that
     somehow returns no row, also returns silently: the guard may only fire on
-    POSITIVE evidence that a different record owns the position. Its job is to
+    POSITIVE evidence the position's content differs from this write's. Its job is to
     make an existing silent failure loud, never to become a new silent one or a
     new false alarm.
 

@@ -277,8 +277,8 @@ def test_a_re_derived_record_is_not_reportable_as_two_records() -> None:
 
 
 def test_two_payloads_with_no_comparable_identity_say_so() -> None:
-    """`unknown` is an answer, not a guess — a difference still collides."""
-    # NEITHER side carries an identity key, so `unknown` is the honest answer
+    """`none` is an answer, not a guess — a difference still collides."""
+    # NEITHER side carries an identity key, so `none` is the honest answer
     # (`one_sided` is the answer when only one of them does — asserted below).
     # `IngestStarted` is a declared `NoRecordEffect` type (audit-only run
     # marker), so its record carries no node identity at all — the one shape in
@@ -338,7 +338,7 @@ def test_a_NESTED_payload_identity_is_read() -> None:
     assert excinfo.value.identity_state == "agrees"
     assert "point.id=p1" in str(excinfo.value), (
         "the identity was not read from the nested snapshot — a PointAdded's id "
-        "lives under `point`, and reporting 'unknown' for it tells an operator "
+        "lives under `point`, and reporting 'none' for it tells an operator "
         "the payloads carry no identity when both do")
 
 
@@ -401,7 +401,7 @@ def test_an_identity_read_from_a_SUBDICT_matches_a_TOP_LEVEL_one() -> None:
     `PointAdded`/`PointRevised` carry the snapshot under `point` while other
     carriers put the id at the top level, so the two sides of a real comparison
     can arrive at DIFFERENT levels. Matching on the printed label instead of the
-    key would call them incomparable and fall back to `unknown` — losing the one
+    key would call them incomparable and fall back to `none` — losing the one
     signal the class exists to report.
     """
     state, detail = rp._identity_evidence({"point": {"id": "p1"}}, {"id": "p1"})
@@ -583,7 +583,7 @@ def test_an_ENVELOPE_only_difference_is_invisible_to_the_verdict() -> None:
     # docstring above promises this leg REDS when #12894 lands — but `params[:5]`
     # and `params[5]` cannot see the change that matters: a `journal_id`
     # APPENDED to the key leaves `params[:5]` byte-identical and leaves
-    # `params[5]` (the payload) untouched, so both assertions below would stay
+    # `params[5]` (the `ts`/`recorded_at` bind) untouched, so both assertions below would stay
     # green while `_refuse_a_journal_collision` compared a key no longer unique.
     # The COUNT is what moves, so the count is the thing asserted.
     assert len(row_first.params) == 6, (

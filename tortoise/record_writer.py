@@ -494,7 +494,7 @@ class RecordWrite:
     #: reports the refusal and an operator reading the metric are naming one
     #: thing, and a second word list is a second thing to drift.
     #:
-    #: ⛔ ``journal_collision`` IS THE ONE POST-WRITE TOKEN (#9318). Every other
+    #: ⛔ ``journal_collision`` IS THE ONE CONFLICT-DECIDED TOKEN (#9318). Every other
     #: value is decided before a socket is opened (`_live_write_verdict`) or by
     #: a failed statement; this one is a VERDICT on a conflict: the position row
     #: holds content this write would not produce (a different record, or this
