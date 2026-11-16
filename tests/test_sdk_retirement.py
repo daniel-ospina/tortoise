@@ -425,7 +425,7 @@ def test_a_removed_name_fails_with_the_documented_error() -> None:
 # reason written from it, to the inventory — in both directions.
 
 def test_every_surplus_destination_is_the_one_the_record_records() -> None:
-    """The cell IS the inventory's column — re-typed values red here, not in production.
+    """Both destination cells ARE the inventory's column — re-typed values red here.
 
     Non-vacuity: on the pre-fix tree this fails on eight names — `batch_create_points`
     (`create_entity` vs `write_knowledge_batch`), `get_provenance_chain`
@@ -433,25 +433,36 @@ def test_every_surplus_destination_is_the_one_the_record_records() -> None:
     `list_knowledge`), `backfill_about_entities`/`backfill_sources`/`complete_source`
     (a target where the record has `—`), and `apikey_list`/`membership_list`/
     `membership_delete` (`—` where the record has a target).
+
+    The `#12901` wave-1 cell is held the same way and for the same reason: it was prose
+    only until 2026-11-16, and `quarantine_batch`'s recorded destination is a LIVE method
+    that the hint arm could therefore never see.
     """
-    from tortoise.sdk_retired import SURPLUS_DELETION_DESTINATIONS
+    from tortoise.sdk_retired import (
+        SURPLUS_DELETION_DESTINATIONS,
+        WAVE1_DELETION_DESTINATIONS,
+    )
 
     inventory = _inventory_destinations()
-    missing = sorted(n for n in SURPLUS_DELETION_DESTINATIONS if n not in inventory)
-    assert not missing, (
-        f"declared in the surplus destination cell but absent from "
-        f"{INVENTORY_DOC.name}: {missing}. The inventory is the record this cell "
-        "transcribes; a name it does not list has no recorded disposition."
-    )
-    wrong = {
-        n: (dests, inventory[n])
-        for n, dests in SURPLUS_DELETION_DESTINATIONS.items()
-        if dests != inventory[n]
-    }
-    assert not wrong, (
-        "a surplus name's recorded destination is not the one "
-        f"{INVENTORY_DOC.name} records (cell, inventory): {wrong}"
-    )
+    for cell_name, cell in (
+        ("SURPLUS_DELETION_DESTINATIONS", SURPLUS_DELETION_DESTINATIONS),
+        ("WAVE1_DELETION_DESTINATIONS", WAVE1_DELETION_DESTINATIONS),
+    ):
+        missing = sorted(n for n in cell if n not in inventory)
+        assert not missing, (
+            f"declared in {cell_name} but absent from "
+            f"{INVENTORY_DOC.name}: {missing}. The inventory is the record this cell "
+            "transcribes; a name it does not list has no recorded disposition."
+        )
+        wrong = {
+            n: (dests, inventory[n])
+            for n, dests in cell.items()
+            if dests != inventory[n]
+        }
+        assert not wrong, (
+            f"a {cell_name} entry's recorded destination is not the one "
+            f"{INVENTORY_DOC.name} records (cell, inventory): {wrong}"
+        )
 
 
 def test_a_surplus_reason_states_only_the_recorded_destination() -> None:
@@ -486,28 +497,33 @@ def test_a_surplus_reason_states_only_the_recorded_destination() -> None:
 def test_a_live_recorded_destination_is_hinted_or_declared() -> None:
     """A destination a caller can actually call must be NAMED on failure (#3836 (c)).
 
-    Measured at this head two surplus names have a LIVE recorded destination. The hint is
-    free for `get_provenance_chain` (`get_entity` has a `def`), and it carries one;
-    `create_or_update_point` cannot, because two records disagree about its destination —
-    so that divergence is DECLARED in `UNHINTED_LIVE_DESTINATIONS` with its reason rather
-    than silently skipped. Both directions are pinned: an undeclared live miss reds, and
-    so does a declaration that has stopped being live (a stale excuse).
+    Measured at this head THREE declared destinations have a LIVE `def` on `TortoiseSDK`:
+    two surplus names and one wave-1 name. The hint is free for `get_provenance_chain`
+    (`get_entity` has a `def`), and it carries one; `create_or_update_point` and
+    `quarantine_batch` cannot, because two records disagree about their destination — so
+    each divergence is DECLARED in `UNHINTED_LIVE_DESTINATIONS` with its reason rather
+    than silently skipped. The population is BOTH deletion cells: the wave-1 destinations
+    were prose-only until 2026-11-16, which is how a live one escaped this arm. Both
+    directions are pinned: an undeclared live miss reds, and so does a declaration that
+    has stopped being live (a stale excuse).
     """
     from tortoise.sdk_retired import (
         RETIRED_SDK_METHODS,
         SURPLUS_DELETION_DESTINATIONS,
         UNHINTED_LIVE_DESTINATIONS,
+        WAVE1_DELETION_DESTINATIONS,
     )
 
     public = _public_methods()
+    destinations = {**SURPLUS_DELETION_DESTINATIONS, **WAVE1_DELETION_DESTINATIONS}
     live_unhinted = {
         name: dest
-        for name, dests in SURPLUS_DELETION_DESTINATIONS.items()
+        for name, dests in destinations.items()
         for dest in dests
         if dest in public and RETIRED_SDK_METHODS.get(name) != dest
     }
     assert set(live_unhinted) == set(UNHINTED_LIVE_DESTINATIONS), (
-        "a surplus name whose recorded destination is LIVE on `TortoiseSDK` today is "
+        "a name whose recorded destination is LIVE on `TortoiseSDK` today is "
         "neither hinted (RETIRED_SDK_METHODS -> that destination) nor declared as a "
         f"recorded divergence (live-and-unhinted, declared): {sorted(live_unhinted)}, "
         f"{sorted(UNHINTED_LIVE_DESTINATIONS)}"

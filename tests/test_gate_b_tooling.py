@@ -289,8 +289,9 @@ def test_gate_b_cli_reads_the_private_marker_seam():
     A receiver-keyed scan misses the caller too: its receiver is a CONSTRUCTOR CALL
     (``TortoiseSDK()``), not a name. So the wiring is pinned at the source.
 
-    FAILS IF gates.py goes back to a public accessor that no longer exists, or invents a
-    third read path instead of the one seam.
+    FAILS IF gates.py goes back to a public accessor that no longer exists, if it stops
+    carrying the seam's value into the Gate B verdict, or if it invents a third read path
+    that fills `calibration_passed` from somewhere else.
     """
     import ast
     import inspect
@@ -313,6 +314,41 @@ def test_gate_b_cli_reads_the_private_marker_seam():
     assert "calibration_passed" not in called, (
         "gates.py calls the retired public accessor `calibration_passed()`, which no longer "
         "exists on TortoiseSDK (#12901 wave 1)"
+    )
+    # ⛔ PRESENCE IS NOT FLOW. The two arms above only ask whether the seam is CALLED — a
+    # `gates.py` that calls it for effect and then fills the flag from somewhere else passes
+    # both, which is the "third read path" the docstring claims to reject (measured
+    # 2026-11-16 by a fresh-context reviewer). So the variable that carries Gate B's state
+    # into `check_gates` is pinned at its SOURCES: it may be the seam call or the `False`
+    # fallback, and nothing else.
+    assignments = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "calibration_passed" for t in n.targets)
+    ]
+    assert any(
+        isinstance(n.value, ast.Call)
+        and getattr(n.value.func, "attr", None) == "_calibration_marker_recorded"
+        for n in assignments
+    ), (
+        "gates.py never assigns `calibration_passed` FROM the private seam — naming the seam "
+        "in a call does not carry its value into the Gate B verdict, so the marker read "
+        "result is thrown away"
+    )
+    other_sources = sorted(
+        ast.unparse(n.value)
+        for n in assignments
+        if not (
+            (
+                isinstance(n.value, ast.Call)
+                and getattr(n.value.func, "attr", None) == "_calibration_marker_recorded"
+            )
+            or (isinstance(n.value, ast.Constant) and n.value.value is False)
+        )
+    )
+    assert not other_sources, (
+        "gates.py fills `calibration_passed` from a THIRD read path — only the private seam "
+        f"and the `False` fallback may source it, found: {other_sources}"
     )
     # The seam must be reachable on the class the CLI constructs, or the except swallows it.
     # ⛔ Attribute access, not `getattr(..., "<name>")`: B009 (ruff, active on this repo's

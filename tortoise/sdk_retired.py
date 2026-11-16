@@ -13,8 +13,10 @@ users there is no telemetry to harvest and no caller to protect.
 
 WHY THIS IS A SMALL HAND-KEPT MAP, NOT A READ OF THE MIGRATION TABLE
 --------------------------------------------------------------------
-``tools/sdk_rename_table.py`` is the migration map: all 124 current names and their
-approved destinations, most of whose renames have **not** landed yet. Two reasons this
+``tools/sdk_rename_table.py`` is the migration map: every name on the LIVE surface (120
+at this head — re-derive with ``tools/sdk_surface.py --check``; the numeral is not typed
+here because it moves with every wave) and its approved destination, most of whose
+renames have **not** landed yet. Two reasons this
 map is separate and deliberately tiny:
 
   * a product module must not import a build tool, and that table reads two product docs
@@ -50,10 +52,14 @@ names no replacement), so it is pinned differently, in the direction that was mi
 before #4282 phase 2.3: the gate requires each entry to name a method that has really
 left the surface, to be accounted for in the inventory, and to keep the recorded-
 universe count whole — so a departure cannot go unrecorded the way these two did. And
-for the 26-name surplus block it holds the RECORDED DESTINATION too:
-:data:`SURPLUS_DELETION_DESTINATIONS` is transcribed from the inventory's own column and
-every reason below is pinned to it, because a hand-typed destination is how TEN of them
-drifted off the record (#10226 review, 2026-11-10).
+for the recorded-destination cells it holds the RECORDED DESTINATION too:
+:data:`SURPLUS_DELETION_DESTINATIONS` (the 26-name `#4282` block) and
+:data:`WAVE1_DELETION_DESTINATIONS` (the `#12901` wave-1 block) are both transcribed from
+the inventory's own column and every reason below is pinned to them, because a hand-typed
+destination is how TEN of them
+drifted off the record (#10226 review, 2026-11-10) — and how one wave-1 destination
+(`quarantine_batch` → a LIVE `update_knowledge`) sat outside the pin entirely until
+2026-11-16.
 """
 
 from __future__ import annotations
@@ -153,11 +159,12 @@ SURPLUS_DELETION_DESTINATIONS: dict[str, tuple[str, ...]] = {
     "traverse": ("explore_connections",),
 }
 
-#: The surplus names whose recorded destination HAS a `def` on `TortoiseSDK` today but which
-#: must stay UNHINTED, with the reason. A hint exists to be FOLLOWED (#3836 (c)), so a live
-#: destination should always produce one; this cell is the exception, and it is a DECLARATION
-#: rather than an omission — `tests/test_sdk_retirement.py` reds both on a live destination
-#: that is neither hinted nor declared here, and on an entry here that has stopped being live.
+#: The recorded destinations in BOTH deletion cells that HAVE a `def` on `TortoiseSDK`
+#: today but which must stay UNHINTED, with the reason. A hint exists to be FOLLOWED
+#: (#3836 (c)), so a live destination should always produce one; this cell is the
+#: exception, and it is a DECLARATION rather than an omission —
+#: `tests/test_sdk_retirement.py` reds on a live destination in either cell that is
+#: neither hinted nor declared here, and on an entry here that has stopped being live.
 UNHINTED_LIVE_DESTINATIONS: dict[str, str] = {
     "create_or_update_point": (
         "two records name two different destinations, so a hint would pick a winner nobody "
@@ -166,6 +173,34 @@ UNHINTED_LIVE_DESTINATIONS: dict[str, str] = {
         "the 40 numbered targets, so an ordinal for it cannot be recorded. Reconciling the "
         "two records is #4282 phase 2 work; until then this departure names nothing."
     ),
+    "quarantine_batch": (
+        "two records name two different destinations, so a hint would pick a winner nobody "
+        "recorded: the canonical inventory's column says `update_knowledge` (quarantine is "
+        "a FIELD on the partial update, not a verb), while the beta `w11_lifecycle` region "
+        "the approval quotes names TWO targets, `update_knowledge` and `list_knowledge`, and "
+        "the derived-ordinal arm refuses to choose between them. The capability is not lost "
+        "either way — `tortoise.mining.quarantine_batch` survives and is what the delegate "
+        "called — so until the records are reconciled this departure names nothing."
+    ),
+}
+
+#: The #12901 wave-1 names' recorded destination, transcribed from the inventory's own
+#: column exactly as :data:`SURPLUS_DELETION_DESTINATIONS` is, and pinned to it in both
+#: directions by `tests/test_sdk_retirement.py`.
+#:
+#: ⛔ WHY IT IS A CELL AND NOT PROSE. The surplus block learned this the expensive way: a
+#: hand-typed destination in a reason is a copy of a machine record, and the copy rots. The
+#: wave-1 reasons below carried their destinations in prose only, OUTSIDE the pin, so the
+#: gate that keeps `UNHINTED_LIVE_DESTINATIONS` honest could not see them — measured
+#: 2026-11-16, a fresh-context reviewer: `quarantine_batch` records the LIVE
+#: `update_knowledge` and no arm could have noticed. This cell is the population that arm
+#: now reads (the 26-name `#4282` block stays CLOSED — its own counter is untouched).
+WAVE1_DELETION_DESTINATIONS: dict[str, tuple[str, ...]] = {
+    "backfill_v25": (),
+    "calibration_passed": ("check_confidence",),
+    "list_relations": ("graph_overview",),
+    "membership_get": (),
+    "quarantine_batch": ("update_knowledge",),
 }
 
 #: removed public name -> why it is gone, and what a caller does instead (prose only).
@@ -207,7 +242,9 @@ REMOVED_SDK_METHODS: dict[str, str] = {
     #   * `create_or_update_point` → `create_entity` — LIVE, but deliberately UNHINTED: the
     #     owner's ledger row for that name points at `create_point`, so two records disagree.
     #     :data:`UNHINTED_LIVE_DESTINATIONS` carries that reason, and the pin holds the cell to
-    #     exactly the set it declares.
+    #     exactly the set it declares — which is now THREE names, the third being
+    #     `quarantine_batch` → `update_knowledge` from the `#12901` wave-1 cell below (it is
+    #     outside this 26-name block, so it does not move the counters here).
     #
     # The other twelve recorded destinations are the Phase-2 targets
     # `mine_knowledge_from_session`, `check_confidence`, `explore_connections`,
@@ -418,12 +455,15 @@ REMOVED_SDK_METHODS: dict[str, str] = {
         "`tortoise.mining.quarantine_batch`, which is exactly what the delegate called. "
         "The beta `w11_lifecycle` region records "
         "`update_knowledge` as the destination (quarantine is a FIELD on the partial "
-        "update, not a verb). It is recorded here in prose and NOT in "
-        "`SURPLUS_DELETION_DESTINATIONS`, which is the CLOSED #4282 block. It is "
+        "update, not a verb). The recorded destination lives in "
+        "`WAVE1_DELETION_DESTINATIONS` (NOT in `SURPLUS_DELETION_DESTINATIONS`, which is "
+        "the CLOSED #4282 block). It is "
         "UNHINTED even though `update_knowledge` is live: the approving region names "
         "TWO targets (`update_knowledge` and `list_knowledge`), so the derived-ordinal "
         "arm refuses to pick a winner between them, and a hint would record a judgement "
-        "no source makes."
+        "no source makes. That divergence is DECLARED in "
+        "`UNHINTED_LIVE_DESTINATIONS`, and the pin reds on a divergence that is neither "
+        "hinted nor declared."
     ),
     "calibration_passed": (
         "#12901 wave 1 (2026-11-15): DELETED FROM THE PUBLIC SURFACE. The Gate B "
