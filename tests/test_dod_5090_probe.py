@@ -4114,6 +4114,25 @@ _CONDITIONAL_SHAPES = [
     ('cond && set -a\nTORTOISE_EMBED_GATE=1\n', "UNMEASURED",
      "bash: FLAG present only when `cond` succeeds — allexport decides it",
      "conditional set -a"),
+    # ⛔ An ATTRIBUTE-level conditional is NOT overridden by a later hit, and these two are
+    # the P1 of the fifth review: the file ended `ON` — a false ARM in the certification
+    # direction — because the indeterminate was recorded and then discarded by the
+    # "only downgrade a file that is not ON" rule, while the conditional `set +a` /
+    # `export -n` was the very thing deciding whether the last line exports at all.
+    ('set -a\ntrue && set +a\nTORTOISE_EMBED_GATE=1\n', "UNMEASURED",
+     "bash: FLAG absent — the conditional `set +a` ran and ended allexport",
+     "conditional set +a before a bare assignment"),
+    ('export TORTOISE_EMBED_GATE=1\ntrue && export -n TORTOISE_EMBED_GATE\n'
+     'TORTOISE_EMBED_GATE=1\n', "UNMEASURED",
+     "bash: FLAG absent — `export -n` removed the attribute, so the last line is a shell "
+     "variable the process never sees",
+     "conditional export -n before a bare assignment"),
+    # …CONTROL: a deferred VALUE decision IS overridden by a later definite arm, which is
+    # why the two are tracked apart — `cond && export F=1; export F=1` runs `F=1`
+    # whatever `cond` did, so the file is genuinely ON.
+    ('cond && export TORTOISE_EMBED_GATE=1\nexport TORTOISE_EMBED_GATE=1\n', "ON",
+     "bash: FLAG=1 — the last line arms it unconditionally",
+     "a deferred VALUE decision loses to a later definite arm"),
     # …CONTROLS — `;` is a real separator and must keep being READ, in both directions.
     # ⛔ `a && b; export FLAG=1` runs the export whatever a/b did: `;` ENDS the and-or
     # list. Carrying the conditional flag across the `;` read a real arm UNMEASURED — the
@@ -4161,6 +4180,25 @@ _HEREDOC_SHAPES = [
     ('echo "a << b"\nexport TORTOISE_EMBED_GATE=1\n', "ON",
      "bash: FLAG=1 — a `<<` inside a quoted word is not an operator",
      "a quoted << is not an operator"),
+    # ⛔ The DELIMITER may begin with a NON-WORD character: `cat <<.EOF` is legal, and a
+    # `[A-Za-z0-9_]` start read it as "no delimiter", so the body was scanned as commands
+    # and its `export FLAG=1` published a FALSE ARM (fresh review of #12902, P2).
+    ("cat <<.EOF >/dev/null\nexport TORTOISE_EMBED_GATE=1\n.EOF\n", "OFF",
+     "bash: FLAG absent — `.EOF` is the terminator",
+     "a delimiter beginning with a non-word character"),
+    # ⛔ `cat << ; …` is a SYNTAX ERROR — bash parses nothing after it, so nothing in the
+    # rest of the file runs. `main` read this `OFF`; the arm that followed the operator
+    # was being published as `ON`.
+    ("cat << ; export TORTOISE_EMBED_GATE=1\n", "OFF",
+     "bash: refuses to parse the script (syntax error near `;`) — nothing runs",
+     "an operator with NO delimiter"),
+    # ⛔ A terminator carrying TRAILING WHITESPACE does not terminate, so what follows is
+    # still body. This row is the pin on the `candidate == delimiter` EXACTNESS: under a
+    # `.rstrip()` mutant the whole suite was green and this shape read `ON` — a false ARM
+    # (fresh review of #12902, P2).
+    ("cat <<'EOF' >/dev/null\nbody\nEOF   \nexport TORTOISE_EMBED_GATE=1\n", "OFF",
+     "bash: `EOF   ` is NOT the delimiter `EOF`, so the arm stays inside the body",
+     "a terminator with trailing whitespace"),
 ]
 
 
@@ -10557,7 +10595,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `256 + 1` and `255 + 2` at THIS tree, both equal to the `257` the pin re-derives
+    count: `259 + 1` and `258 + 2` at THIS tree, both equal to the `260` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.

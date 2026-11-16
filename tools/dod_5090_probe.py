@@ -2464,7 +2464,11 @@ DECLARED_CHANNEL_BOUNDS: tuple[dict[str, str], ...] = (
                        "spellings of an assignment — `declare -x FLAG=0`, "
                        "`declare FLAG=0` and `readonly FLAG=0` all leave this reader "
                        "with no decision, so a later truthy `export` stands (tracked as "
-                       "`#12952`; the `export NAME=value` spelling IS read)"),
+                       "`#12952`; the `export NAME=value` spelling IS read); and a "
+                       "CRLF-terminated script, which text-mode reading makes look as "
+                       "though its heredocs terminate (`EOF\\r` arrives as `EOF`) — such "
+                       "a file cannot EXECUTE at all, so it is declared rather than "
+                       "half-converted"),
         "why": ("a shell's value is decided by EXECUTION, not by text, and "
                 "ShellCheck checks syntax and never evaluates values — there is no "
                 "resolver for this grammar short of running the script. Phase 1 "
@@ -3443,13 +3447,13 @@ def _shell_set_allexport(line: str) -> bool | None:
     SUBSHELL, so it never reaches this shell's state (`_shell_commands`).
     """
     answer: bool | None = None
-    for command, conditional in _shell_commands(line):
-        # ⛔ A CONDITIONAL operand runs only if its test passes, and this reader cannot
-        # evaluate the test (`[ -n "$X" ] && set -a`). Applying it either way is a
-        # reading the run did not measure — the same three-valued rule the rest of the
-        # module follows, so it contributes nothing here and the caller holds the file.
-        if conditional:
-            continue
+    # ⛔ Every CONSUMER already splits the line and skips its conditional operands before
+    # calling this (`_shell_export_states` — a conditional `set -a` may not have run, so it
+    # is reported indeterminate and the file held), so `line` here is always ONE
+    # unconditional command. A `conditional` guard inside this loop would be unreachable
+    # code with no falsifier — the fifth review measured exactly that: deleting it left
+    # the suite byte-identical, because the path cannot be taken.
+    for command, _conditional in _shell_commands(line):
         change = _shell_set_cluster_allexport(command)
         if change is not None:
             answer = change
@@ -3743,7 +3747,12 @@ def _shell_heredoc_operator_delimiter(rest: str) -> str | None:
         return rest[1:close] if close > 0 else None
     if rest[0] == "\\":
         rest = rest[1:]
-    match = re.match(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", rest)
+    # ⛔ The DELIMITER is a shell WORD, and it may begin with a NON-WORD character:
+    # `cat <<.EOF` / `cat <<-x` / `cat <<=END` are all legal, and a `[A-Za-z0-9_]` start
+    # read them as "no delimiter here" — so the heredoc body was scanned as commands and
+    # a body `export FLAG=1` published a FALSE ARM (fresh review of `#12902`, P2).
+    # Metacharacters cannot appear in it, so they terminate the word.
+    match = re.match(r"[^\s;&|<>()]+", rest)
     return match.group(0) if match else None
 
 
@@ -3763,10 +3772,18 @@ def _shell_heredoc_bodies(text: str) -> set[int]:
     plain assignment inside a body reach `_assigned_value` with `exported=True`), so it
     is a regression against `main` as well as a reading the run did not measure.
 
-    ⛔ **Declared bound:** a heredoc whose operator is itself produced by an expansion
-    (`eval`, a `$(…)` command substitution that emits `<<EOF`) is not seen here. That is
-    the same class as the channel's other declared shell bounds — decided by execution,
-    not by text — and it is named in `DECLARED_CHANNEL_BOUNDS`, not left implicit.
+    ⛔ **Declared bounds**, not left implicit:
+
+    * a heredoc whose OPERATOR is itself produced by an expansion (`eval`, a `$(…)`
+      command substitution that emits `<<EOF`) is not seen here — the same class as the
+      channel's other declared shell bounds, decided by execution rather than text;
+    * a **CRLF-terminated** script. This walk reads the file in TEXT mode, so line endings
+      are normalised and `EOF\r` arrives as `EOF`, while bash sees the `\r`, does NOT
+      terminate the heredoc, and keeps consuming the rest of the file as its body. The
+      reader is therefore OPTIMISTIC on such a file. Declared rather than half-converted
+      because the same normalisation applies to every channel's reader, and because a
+      CRLF shell script cannot EXECUTE at all (`#!` line ends in `\r`, so the kernel looks
+      for an interpreter named `/bin/bash\r`). A file that cannot run is not a deployment.
 
     A TERMINATOR line is the one that equals the delimiter, after leading tabs when the
     operator was `<<-`; it is NOT a body line, so it is still scanned like any other
@@ -3775,7 +3792,15 @@ def _shell_heredoc_bodies(text: str) -> set[int]:
     """
     bodies: set[int] = set()
     pending: list[tuple[str, bool]] = []
+    #: ⛔ An operator with NO delimiter (`cat << ; …`) is a SYNTAX ERROR: bash parses
+    #: nothing after it, so nothing in the rest of the file runs. Reading on published the
+    #: arm that follows it — a FALSE ARM on a script that cannot execute at all (fresh
+    #: review of `#12902`, P2). Everything from that line on is therefore opaque.
+    opaque = False
     for number, raw in enumerate(text.splitlines(), 1):
+        if opaque:
+            bodies.add(number)
+            continue
         if pending:
             delimiter, strip_tabs = pending[0]
             candidate = raw.lstrip("\t") if strip_tabs else raw
@@ -3796,9 +3821,41 @@ def _shell_heredoc_bodies(text: str) -> set[int]:
         masked = _shell_mask_quoted(_shell_strip_comment(raw))
         for match in _SHELL_HEREDOC_OP.finditer(masked):
             delimiter = _shell_heredoc_operator_delimiter(raw[match.end():])
-            if delimiter:
-                pending.append((delimiter, match.group(1) == "-"))
+            if delimiter is None:
+                opaque = True
+                bodies.add(number)
+                break
+            pending.append((delimiter, match.group(1) == "-"))
     return bodies
+
+
+def _shell_command_changes_ATTRIBUTE(command: str, flag: str) -> bool:
+    """Does ONE command change WHETHER ``flag`` is exported, rather than only its VALUE?
+
+    ⛔ **The distinction is load-bearing, and it is the difference between a deferred
+    decision and a held file.** A conditional VALUE change (`cond && export FLAG=1`) is
+    legitimately overridden by a later definite assignment — `cond && export F=1; export
+    F=0` runs `F=0` whatever `cond` did — so `LAST-WINS` is correct there. An
+    ATTRIBUTE change is not overridden: it decides the MEANING of every assignment after
+    it, so scoring a later hit `ON` publishes a verdict the run never measured.
+
+    MEASURED (fresh review of `#12902`, P1) — both read `ON`, bash exports nothing:
+
+        'set -a' / 'true && set +a' / 'FLAG=1'
+        'export FLAG=1' / 'true && export -n FLAG' / 'FLAG=1'
+    """
+    if _shell_set_cluster_allexport(command) is not None:
+        return True
+    if flag in _shell_unset_values(command):
+        return True
+    if _shell_unset_target(command, flag) is not None:
+        return True
+    parsed = _shell_export_args(command)
+    if parsed is not None:
+        names, _assigned, options, _values = parsed
+        if flag in names and ("n" in options or "f" in options):
+            return True
+    return False
 
 
 def _shell_command_affects_flag(command: str, flag: str) -> bool:
@@ -4703,6 +4760,12 @@ def flag_in_shipped_configs(flag: str) -> dict:
         surface_searched: list[str] = []
         surface_unreadable: list[str] = []
         surface_indeterminate: list[str] = []
+        #: ⛔ Files an ATTRIBUTE-level conditional left unknowable. Kept apart from
+        #: `surface_indeterminate` because the two are downgraded differently: a
+        #: deferred VALUE decision is overridden by a later definite assignment
+        #: (LAST-WINS), while an attribute change decides the MEANING of every
+        #: assignment after it and may not be overridden by anything.
+        surface_attribute_indeterminate: set[str] = set()
         surface_file_hits: dict[str, list[str]] = {}
         # ⛔ A resolved channel's per-FILE verdict (ON/OFF/DISAGREE/UNMEASURED) and the
         # files whose services DISAGREE. Both are kept beside the line-derived
@@ -4825,6 +4888,8 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 if conditional and _shell_command_affects_flag(line, flag):
                     indeterminate.append(f"{posix}:{number}: {shown.strip()[:90]}")
                     surface_indeterminate.append(posix)
+                    if _shell_command_changes_ATTRIBUTE(line, flag):
+                        surface_attribute_indeterminate.add(posix)
                     decisions.append((None,
                                       f"{posix}: {shown.strip()[:90]}",
                                       f"{posix}:{number}: {shown.strip()[:90]}"))
@@ -5028,6 +5093,16 @@ def flag_in_shipped_configs(flag: str) -> dict:
         for posix in surface_indeterminate:
             if file_states.get(posix, {}).get("state") != "ON":
                 file_states[posix] = {"state": "UNMEASURED", "hits": []}
+        # ⛔ …but an ATTRIBUTE-level indeterminate is NEVER overridden, not even by a
+        # later hit. `set -a` / `true && set +a` / `FLAG=1` and `export FLAG=1` /
+        # `true && export -n FLAG` / `FLAG=1` both read `ON` under the rule above while
+        # bash exports NOTHING: the conditional decides whether the later assignment is
+        # exported at all, so the later hit's truthiness is exactly what is unknown. A
+        # false ARM in the row's certification direction, and the declared bound's own
+        # "the FILE is held UNMEASURED" sentence was false without this (fresh review of
+        # `#12902`, P1).
+        for posix in surface_attribute_indeterminate:
+            file_states[posix] = {"state": "UNMEASURED", "hits": []}
         per_surface[rel] = {"state": state, "hits": surface_hits,
                             "files": file_states,
                             "searched": surface_searched,
