@@ -3612,7 +3612,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         # ⚠️ MEASURED, and it corrects an earlier claim here (review round 7, P2):
         # at DEBUG this line is NOT emitted in the hosted deployment. uvicorn's
         # `LOGGING_CONFIG` configures only the `uvicorn*` loggers and leaves root
-        # at WARNING, `Dockerfile.hosted:153` passes no `--log-level`, and nothing
+        # at WARNING, `Dockerfile.hosted:163` passes no `--log-level`, and nothing
         # in `tortoise/` or `entrypoint.sh` sets a level for `tortoise.*` — so
         # `tortoise.api` is effectively WARNING there and `Logger.isEnabledFor`
         # drops the record (reproduced under the real `dictConfig`). The PRODUCTION
