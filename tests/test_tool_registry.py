@@ -940,9 +940,11 @@ class TestCapabilityModel:
         assert {"create_point", "delete", "update"} <= mutators
         assert not ({"query", "get_point", "list_pointkinds"} & mutators)
         # over-inclusion sentinel: control-plane READS are not mutators. `apikey_list`
-        # was here until #4282 deleted it; `apikey_verify` is the surviving read in the
-        # same family, so the sentinel keeps a live name instead of going vacuous.
-        assert not ({"org_list", "graph_list", "apikey_verify", "org_get"} & mutators)
+        # was here until #4282 deleted it; `apikey_verify` was the surviving read in the
+        # same family until #12901 wave 2 privatised it, so the sentinel now names the
+        # SEAMS that carry those bodies (`_apikey_verify`, `_org_get`) rather than going
+        # vacuous — the derivation walks every class member, private ones included.
+        assert not ({"org_list", "graph_list", "_apikey_verify", "_org_get"} & mutators)
         fs = sdk_filesystem_methods()
         # #11609 batch 2: the walker is `_index_directory` and its public door is
         # `index_sources_from_directory`; the sentinel names both so the derivation
@@ -951,9 +953,11 @@ class TestCapabilityModel:
                 "index_sources_from_directory"} <= fs
         assert not ({"_probe_embedded_busy", "session_index_health"} & fs)
         op = sdk_operator_only_mutators()
-        assert {"org_create", "membership_create", "apikey_revoke",
-                "invitation_revoke"} <= op
-        assert not ({"org_list", "graph_list", "apikey_verify"} & op)
+        # #12901 wave 2 closed the public control-plane doors; each body survives as the
+        # private seam its hosted caller now uses, so the sentinel names the SEAMS.
+        assert {"org_create", "_membership_create", "_apikey_revoke",
+                "_invitation_revoke"} <= op
+        assert not ({"org_list", "graph_list", "_apikey_verify"} & op)
 
     def test_handler_operations_reads_value_passed_and_alias_forms(self):
         """`_get_org_sdk().<m>` as a passed value and via an alias are both seen."""

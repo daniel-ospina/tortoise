@@ -3519,10 +3519,10 @@ def _registry_with_bound_and_wide_keys(tmp_path, monkeypatch):
         # limits — and none is needed: the fixture exists for the two KEY
         # SHAPES (`graph_id` set / NULL), and no assertion below reads a limit.
         graph = reg._graph_create(org_id, "graph-10180-bound", kind="custom")
-        bound = reg.apikey_create(org_id, "bound-10180",
+        bound = reg._apikey_create(org_id, "bound-10180",
                                   graph_id=graph["graph_id"],
                                   scopes=["graphs:read"], prefix="tk_")
-        wide = reg.apikey_create(org_id, "wide-10180", prefix="tk_")
+        wide = reg._apikey_create(org_id, "wide-10180", prefix="tk_")
         return {
             "org_id": org_id,
             "custom_ns": graph["namespace"],

@@ -343,7 +343,7 @@ def test_tombstoned_graph_patch_404_and_capture_403(spine_env, monkeypatch):
     it cannot capture (fail closed) — no dead writes on tombstones."""
     sdk, tid, g, tc, _def_pt = spine_env
     # Registry lane tombstone via graph_delete.
-    sdk.graph_delete(tid, g["graph_id"])
+    sdk._graph_delete(tid, g["graph_id"])
     mgr = _mint_key(sdk, tid, scopes=["team:manage"])
     r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": True},

@@ -17292,7 +17292,7 @@ def _cmd_key_create(args) -> int:
     # #5109 NOTE: DELIBERATE show-once — the plaintext is returned exactly here
     # and exists nowhere else (only a hash is stored), so printing it is the
     # only way to hand it to the user. Do NOT "tidy" it away.
-    key = sdk.apikey_create(org_id, created_by="local-cli")
+    key = sdk._apikey_create(org_id, created_by="local-cli")
     print()
     print(f"✅ Created API key: {key['api_key']}")
     print("   Store it securely — the plaintext is shown once.")
