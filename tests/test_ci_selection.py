@@ -10577,18 +10577,24 @@ _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     # these arms cannot see. That is the ungated-provenance-prose class, recorded on
     # #9442 rather than claimed closed here. Its size is COUNTED, not asserted — at
     # 3d74516 the rows whose tail names `--refresh-durations` and carries no `until`
-    # numbered 112, of which 106 carry a landed `; was N` tail (re-count rather than
-    # trusting the figures; an earlier revision of this comment asserted 121/112,
-    # which no counting of the class reproduces).
-    # ⛔ The WINDOW is the SENTENCE — `[^.;\n]*?` — and the anchor eats its OWN period
-    # (#12962 cycles 7-8). Two revisions each inverted a different polarity: `[^.;]`
-    # cannot span `tools/ci_timing.py`, so the arm was silent on the very row it was
-    # written for; `[^;\n]{0,80}` let the window cross a `.` into the NEXT sentence,
-    # where `What the weight covers:` — the map's dominant opener, 121 occurrences —
-    # supplied a present-tense verb and falsely red a correctly past-tensed row. That
-    # is the over-block this arm's own contract forbids, so it is not a nit:
-    # `tools/ci_timing(?:\.py)?` consumes the anchor's period, which restores the
-    # sentence bound with no character budget to be surprised by.
+    # (case-insensitive, as this regex compiles) numbered 111, of which 105 carry a
+    # landed `; was N` tail. Re-count rather than trusting the figures; two earlier
+    # revisions of this comment asserted 121/112 and then 112/106, and neither
+    # reproduces (the second counted `until` case-SENSITIVELY, which files the
+    # uppercase `UNTIL THE REFRESHER` row as unguarded — and this guard bites it).
+    # ⛔ The WINDOW is `[^.;\n]` — `.`, `;` and the newline, NOT "the sentence" — and
+    # the anchor eats its OWN period (#12962 cycles 7-8). Two revisions each inverted a
+    # different polarity: `[^.;]` cannot span `tools/ci_timing.py`, so the arm was
+    # silent on the very row it was written for; `[^;\n]{0,80}` let the window cross
+    # a `.` into the NEXT sentence, where `What the weight covers:` — the map's
+    # dominant opener, 104 occurrences at aff53070 — supplied a present-tense verb and
+    # falsely red a correctly past-tensed row. That is the over-block this arm's own
+    # contract forbids, so it is not a nit: `tools/ci_timing(?:\.py)?` consumes the
+    # anchor's period, restoring that bound with no character budget. ⚠️ Residual, so
+    # the wording does not overclaim again: `…`, `!` and `?` are NOT in the class, so a
+    # healed row whose boundary is one of those can still reach the next sentence's
+    # verb. No shipped row is reachable that way (the opener's preceding character is
+    # `.` x89, `;` x11, line-start x4 — zero ellipsis/bang/question).
     r"|\buntil\s+(?:a\s+)?(?:CI\s+)?junit[^.;\n]*?"
     r"\b(?:carries|lands|collects|measures|covers|exists|arrives)\b"
     r"|\buntil\s+`?tools/ci_timing(?:\.py)?[^.;\n]*?"
