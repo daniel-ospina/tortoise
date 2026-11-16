@@ -2151,6 +2151,88 @@ test("INDICATOR 2: the health line separates INERT, DEGRADED, OK and UNREADABLE"
   assert.equal(volunteerHealthLine(okCfg, [], okPath).state, "ok");
 });
 
+test("a clear that does NOT land reports nothing, and is RETRIED on the next healthy turn", async () => {
+  // Review finding (round 3): `clearVolunteerDegradation` returned `prior`
+  // unconditionally, so a failed write produced `volunteer: RECOVERED` followed
+  // by `logHealth()` re-reading the record the write had failed to change and
+  // printing `volunteer: DEGRADED` — two contradictory lines one millisecond
+  // apart on the surface indicator 2 exists to answer "which state am I in?".
+  // The unit half mirrors the sibling's failed-write contract; the handler half
+  // pins the latch, because `healthConfirmed` set before the attempted clear
+  // meant the clear was never retried for the life of the process.
+  const home = tmpHome();
+  const statusPath = volunteerStatusPath({}, home);
+  recordVolunteerDegradation(statusPath, "timeout", () => Date.UTC(2026, 10, 16, 14, 17, 35));
+
+  // UNIT: a clear whose write fails reports NO cleared run.
+  assert.equal(
+    clearVolunteerDegradation(statusPath, () => false),
+    undefined,
+    "a clear that did not land must not be reported as a clear",
+  );
+  const stillThere = readVolunteerStatus(statusPath);
+  assert.ok("status" in stillThere);
+  if ("status" in stillThere) assert.equal(stillThere.status.degradation?.count, 1);
+
+  // HANDLER: turn 1's healthy read cannot land the clear; turn 2 can.
+  let writable = false;
+  const lines: string[] = [];
+  const configPath = join(home, "tortoise-config.json");
+  writeFileSync(configPath, JSON.stringify({}));
+  const cli = fakeCli(
+    join(home, "bin"),
+    `cat > /dev/null; printf '%s' '{"pointers":[],"why":[],"surfaced":[],"block":"","degraded_reason":null}'`,
+  );
+  const pi = mockPi();
+  tortoiseVolunteer(pi as never, {
+    env: { TORTOISE_COMMAND: cli },
+    home,
+    configPath,
+    breadcrumbDir: join(home, "capture-errors"),
+    statusPath,
+    logImpl: (line: string) => lines.push(line),
+    statusWriteImpl: (path: string, status: unknown) =>
+      writable
+        ? (writeFileSync(path, `${JSON.stringify(status, null, 2)}\n`), true)
+        : false,
+  });
+
+  assert.equal(
+    await pi.handlers.before_agent_start({ messageType: "user", prompt: "turn 1" }, SESSION_CTX()),
+    undefined,
+  );
+  assert.deepEqual(
+    lines,
+    [],
+    `a failed clear must claim nothing — no RECOVERED, and no DEGRADED line contradicting it; got ${JSON.stringify(lines)}`,
+  );
+  const stillDegraded = readVolunteerStatus(statusPath);
+  assert.ok("status" in stillDegraded);
+  if ("status" in stillDegraded) {
+    assert.equal(
+      stillDegraded.status.degradation?.count,
+      1,
+      "and it must not fold a later degradation into a record that was never emptied",
+    );
+  }
+
+  // The box becomes writable: the NEXT healthy turn retries and reports once.
+  writable = true;
+  assert.equal(
+    await pi.handlers.before_agent_start({ messageType: "user", prompt: "turn 2" }, SESSION_CTX()),
+    undefined,
+  );
+  assert.equal(
+    lines.filter((line) => /^volunteer: RECOVERED \(the 1-turn timeout run has ended/.test(line))
+      .length,
+    1,
+    `the retried clear reports the recovery once; got ${JSON.stringify(lines)}`,
+  );
+  const cleared = readVolunteerStatus(statusPath);
+  assert.ok("status" in cleared);
+  if ("status" in cleared) assert.equal(cleared.status.degradation, null);
+});
+
 test("session_start prints ONE health line, and a recovery clears the run", async () => {
   // The session-start line is what an operator reads on the box (indicator 2) —
   // it must be emitted without a turn, and must never be on the awaited tick.

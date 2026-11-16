@@ -5085,7 +5085,7 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # edit" verdict a re-pin could falsify. The entry is still being CREATED. A
     # later byte change to a SHIPPED generation is a BUMP (25 in BOTH Pi
     # artifacts, a new entry here, the paired pin below moved with it).
-    24: "41d952649a3e6479c2b2dcab659e8b0e1461e47807db6283c81a77c00118bf77",
+    24: "c2ca381fb7032049a67a1063d23eaa4979621983f1591e64973c57d2b683503d",
     # Generation 23 (#12603): only the header line moves — the read half's
     # behaviour is untouched, but `contract_version_for('pi')` grades the PAIR as
     # one contract and answers None when the two markers disagree, so the read
@@ -5130,7 +5130,7 @@ _READ_SEAM_GENERATION_DIGESTS = {
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    24, "41d952649a3e6479c2b2dcab659e8b0e1461e47807db6283c81a77c00118bf77")
+    24, "c2ca381fb7032049a67a1063d23eaa4979621983f1591e64973c57d2b683503d")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

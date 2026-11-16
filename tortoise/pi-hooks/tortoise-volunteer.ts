@@ -367,6 +367,13 @@ export interface VolunteerDeps {
   logImpl?: (line: string) => void;
   /** Clock seam, so a status record's timestamps are pinnable. */
   now?: () => number;
+  /** #13039: the status-record WRITER. Defaults to the real atomic writer.
+   *  A read/write asymmetry (`ENOSPC` / `EROFS` / `EDQUOT` fail the write while
+   *  the read still succeeds) is the designed-for case, and it is not reachable
+   *  portably in a unit row — a privilege-dropped box cannot chmod its way to
+   *  one. So the failed-clear / failed-record rows drive this seam rather than
+   *  the filesystem. */
+  statusWriteImpl?: (path: string, status: VolunteerStatus) => boolean;
 }
 
 function truthy(value: unknown): boolean {
@@ -1251,6 +1258,7 @@ export function recordVolunteerDegradation(
   statusPath: string,
   reason: string,
   now: () => number = Date.now,
+  write: (path: string, status: VolunteerStatus) => boolean = writeVolunteerStatus,
 ): VolunteerDegradation | undefined {
   const at = new Date(now()).toISOString();
   const read = readVolunteerStatus(statusPath);
@@ -1266,7 +1274,7 @@ export function recordVolunteerDegradation(
   // caller prints a health line off this return value, and a line read from a
   // record that was never written says `OK` about a degradation we just
   // observed. The turn's own disclosure already reached the model either way.
-  return writeVolunteerStatus(statusPath, { version: 1, degradation: next }) ? next : undefined;
+  return write(statusPath, { version: 1, degradation: next }) ? next : undefined;
 }
 
 /**
@@ -1274,22 +1282,38 @@ export function recordVolunteerDegradation(
  * clean-empty response.
  *
  * Writes only when there is something to clear, so a healthy box pays no write
- * per turn. Returns the run that was cleared (so the caller can report the
- * RECOVERY once), or `undefined` when nothing was recorded.
+ * per turn. Returns the run that WAS cleared (so the caller can report the
+ * RECOVERY once), or `undefined` when nothing was recorded — or when the clear
+ * did not land.
+ *
+ * ⛔ The failed-write case returns `undefined`, mirroring `recordVolunteerDegradation`
+ * (`:1269`) rather than trusting the attempt. Returning `prior` unconditionally
+ * said "the run that was cleared" about a write that never happened, so the caller
+ * printed `volunteer: RECOVERED` and then `logHealth()` re-read the record the
+ * write had failed to change and printed `volunteer: DEGRADED` a millisecond
+ * later — two contradictory lines on the one surface indicator 2 exists to
+ * answer "which state am I in?". A read/write asymmetry is the designed-for case
+ * (`ENOSPC` / `EROFS` / `EDQUOT` fail the write while the read still succeeds),
+ * which is why `writeVolunteerStatus` carries its catch at all.
+ *
+ * `write` is the seam the failed-clear rows drive; production always passes the
+ * real writer, so this is not a behavioural hook.
  */
 export function clearVolunteerDegradation(
   statusPath: string,
+  write: (path: string, status: VolunteerStatus) => boolean = writeVolunteerStatus,
 ): VolunteerDegradation | undefined {
   const read = readVolunteerStatus(statusPath);
   if (!("status" in read)) {
     // Repair an unparseable record once we have positive evidence of health.
-    writeVolunteerStatus(statusPath, { version: 1, degradation: null });
+    // Nothing is reported either way: there is no run to name, and a failed
+    // repair leaves the record UNREADABLE, which `logHealth()` says out loud.
+    write(statusPath, { version: 1, degradation: null });
     return undefined;
   }
   const prior = read.status.degradation;
   if (!prior) return undefined;
-  writeVolunteerStatus(statusPath, { version: 1, degradation: null });
-  return prior;
+  return write(statusPath, { version: 1, degradation: null }) ? prior : undefined;
 }
 
 export interface VolunteerHealth {
@@ -1756,9 +1780,21 @@ export default function tortoiseVolunteer(
   let healthConfirmed = false;
   const noteHealthy = (): void => {
     if (healthConfirmed) return;
+    const write = deps.statusWriteImpl ?? writeVolunteerStatus;
+    const recovered = clearVolunteerDegradation(statusPath, write);
+    if (!recovered) {
+      // `undefined` here is TWO states — nothing recorded (the common healthy
+      // turn) and a clear that did NOT land. Ask the record which one, because
+      // only the first may latch: latching on a failed clear would skip the
+      // retry for the life of the process, and every later degraded turn would
+      // fold its streak into a record that was never emptied, inflating
+      // `N consecutive turns` across turns that were not consecutive.
+      const settled = readVolunteerStatus(statusPath);
+      if ("status" in settled && settled.status.degradation) return;
+      healthConfirmed = true;
+      return;
+    }
     healthConfirmed = true;
-    const recovered = clearVolunteerDegradation(statusPath);
-    if (!recovered) return;
     // Reported ONCE, so a recovered box has a dated end to the outage in its log
     // and its next `session_start` reads OK instead of re-reporting a finished
     // run.
@@ -1898,7 +1934,12 @@ export default function tortoiseVolunteer(
         // The durable half (indicator 2): one record per box, and a health line
         // when the run STARTS, so the box log carries the beginning of an
         // outage and not just its absence on the next session's start.
-        const streak = recordVolunteerDegradation(statusPath, degradedReason, now);
+        const streak = recordVolunteerDegradation(
+          statusPath,
+          degradedReason,
+          now,
+          deps.statusWriteImpl ?? writeVolunteerStatus,
+        );
         // A degradation RE-ARMS the read: the next healthy turn must ask the
         // record again, whatever this process knew before.
         healthConfirmed = false;
