@@ -86,7 +86,10 @@ What this suite pins (each row names the mutation that reds it):
   raising ``__repr__`` (``_refusal_repr``) and a raising ``__name__`` on the
   class (``_refusal_type_name``) each still answer ``ValueError``.
   Mutation: spell either ``{old_id!r}`` / ``{type(old_id).__name__}`` -> the
-  impostor refusal escapes as the caller's own ``RuntimeError``.
+  impostor refusal escapes as the caller's own ``RuntimeError``. The same holds
+  where a metaclass ANSWERS with a non-``str`` name (``RuntimeError: fmt-boom``)
+  and at the exotic-key refusal that groups class names
+  (``{type(k).__name__ for k in _exotic_keys}`` -> ``RuntimeError: name-boom``).
 
 Runnable (docker lane):
 
@@ -1120,4 +1123,103 @@ def test_an_impostor_whose_class_name_raises_still_answers_this_door(sdk):
 
     assert _row(sdk, "Object", node) == before, (
         "a refused boom-name impostor moved the row: "
+        f"{before} -> {_row(sdk, 'Object', node)}")
+
+
+class _BoomFmt:
+    """A value whose EVERY rendering raises — a hostile ``__name__``'s answer."""
+
+    def __format__(self, spec):
+        raise RuntimeError("fmt-boom")
+
+    def __repr__(self) -> str:
+        raise RuntimeError("fmt-boom")
+
+    __str__ = __repr__
+
+
+class _FmtBoomMeta(type):
+    """A metaclass whose ``__name__`` ANSWERS, but not with a ``str``.
+
+    Guarding the attribute READ is not enough (measured: ``RuntimeError:
+    fmt-boom`` from the f-string), so the helper must also refuse the ANSWER.
+    """
+
+    __name__ = property(lambda self: _BoomFmt())
+
+
+class _ImpostorFmtBoom(_Impostor, metaclass=_FmtBoomMeta):
+    """An impostor whose class name is unrenderable rather than raising."""
+
+
+class _ImpostorBoomReprFmt(_ImpostorBoomRepr, metaclass=_FmtBoomMeta):
+    """Both reads hostile: ``__repr__`` raises AND the class name is unrenderable."""
+
+
+def test_a_class_name_that_is_not_a_str_cannot_escape_the_refusal(sdk):
+    """A ``__name__`` that ANSWERS with a non-``str`` must not reach the f-string.
+
+    Measured on this fix's third cut: a metaclass returning an object whose
+    ``__format__``/``__str__``/``__repr__`` raise made
+    ``supersede(<impostor>, <id>)`` escape as ``RuntimeError: fmt-boom`` at BOTH
+    call sites of ``_refusal_type_name`` (the door's message and
+    ``_refusal_repr``'s fallback), where the contract is ``ValueError``.
+    Fail-closed — the row does not move — but the contract is the exception CLASS.
+
+    Mutation: drop ``return name if type(name) is str else …`` and return the
+    bare ``name`` -> ``RuntimeError: fmt-boom`` on both arms.
+    """
+    node = _make(sdk, "Object", "impostor-fmt-boom")
+    before = _row(sdk, "Object", node)
+
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(_ImpostorFmtBoom(), node)
+    msg = str(exc.value)
+    assert "is not a node id" in msg, msg
+    assert "its name is not a str" in msg, (
+        f"the refusal must say the name is unrenderable: {msg!r}")
+
+    # The `_refusal_repr` fallback path: both reads hostile at once.
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(_ImpostorBoomReprFmt(), node)
+    assert "is not a node id" in str(exc.value), exc.value
+
+    assert _row(sdk, "Object", node) == before, (
+        "a refused fmt-boom impostor moved the row: "
+        f"{before} -> {_row(sdk, 'Object', node)}")
+
+
+class _BoomNameKey(str, metaclass=_BoomNameMeta):
+    """A GENUINE ``str`` subclass whose class name raises.
+
+    ``**props`` admits it (CPython's keyword check is a ``str`` instance check,
+    which a subclass satisfies) and the exotic-key guard's own filter keeps it
+    (``type(k) is not str``), so its class name reaches that refusal's message.
+    """
+
+
+def test_an_exotic_key_whose_class_name_raises_is_still_a_refusal(sdk):
+    """The exotic-key refusal groups class NAMES — that read must be safe too.
+
+    Measured on this fix's third cut: ``update_entity(<live Object>,
+    status='superseded', **{<str subclass with a raising ``__name__``>: 1})``
+    escaped as ``RuntimeError: name-boom`` from the ``type(k).__name__`` set
+    comprehension, where the benign control (a plain ``str`` subclass key)
+    answers the documented "not plain `str`" ValueError — the same class this
+    whole review round is about, in a refusal this PR adds.
+
+    Mutation: spell the message ``{type(k).__name__ for k in _exotic_keys}`` ->
+    ``RuntimeError: name-boom`` instead of ``ValueError``.
+    """
+    node = _make(sdk, "Object", "exotic-key-boom-name")
+    before = _row(sdk, "Object", node)
+
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(node, status="superseded", **{_BoomNameKey("harmless"): 1})
+    msg = str(exc.value)
+    assert "are not plain `str`" in msg, msg
+    assert "metaclass raises" in msg, (
+        f"the refusal must name the unreadable class instead of crashing: {msg!r}")
+    assert _row(sdk, "Object", node) == before, (
+        "a refused exotic-key write moved the row: "
         f"{before} -> {_row(sdk, 'Object', node)}")

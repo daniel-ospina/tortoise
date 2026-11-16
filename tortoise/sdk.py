@@ -11958,9 +11958,14 @@ def _refusal_type_name(value) -> str:
     below, and shared so the two cannot drift.
     """
     try:
-        return type(value).__name__
+        name = type(value).__name__
     except Exception:  # noqa: BLE001, RUF100 — a hostile metaclass is the point
         return "unreadable (its metaclass raises)"
+    # The READ surviving is not enough: the property may ANSWER with something
+    # that is not a `str`, and an f-string then renders it with the caller's own
+    # `__format__` (measured: `RuntimeError: fmt-boom`). Exact-`str` also keeps
+    # the value safe to hash and sort in a refusal that groups names.
+    return name if type(name) is str else "unreadable (its name is not a str)"
 
 
 def _refusal_repr(value) -> str:
@@ -48642,7 +48647,7 @@ class TortoiseSDK:
             raise ValueError(
                 f"update_entity refused status='superseded' on {_refusal_repr(id_val)}: "
                 f"{len(_exotic_keys)} property key(s) are not plain `str` "
-                f"({', '.join(sorted({type(k).__name__ for k in _exotic_keys}))}). "
+                f"({', '.join(sorted({_refusal_type_name(k) for k in _exotic_keys}))}). "
                 f"A key whose RENDERING can differ between this check and the "
                 f"write cannot be checked at all — the write renders it again, "
                 f"later, and could store `{_SUCCESSOR_PROP}` after this guard saw "
