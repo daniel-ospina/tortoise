@@ -7387,9 +7387,9 @@ def _capture_health() -> dict:
                 last, UTC).isoformat()
     except Exception as exc:  # a health path must always answer
         # ⛔ THE DEGRADED ARM PUBLISHES THE SAME KEYS AS THE HEALTHY ONE (#12992
-        # review P2). An ad-hoc short dict is the defect this file records 250
-        # lines below for `wait_bound_breaches` — "an ad-hoc `{"error",
-        # "refusing"}` dict is 2 of 13 keys, so a dashboard reading
+        # review P2). An ad-hoc short dict is the defect this file records for
+        # `wait_bound_breaches` in `health()` at `:8226` — the "250 lines below"
+        # this said was wrong by 836 and head-bound — 2 of 13 keys, so a dashboard reading
         # `refusals["share"]` … gets a `KeyError` on exactly the degraded path
         # where it is looking for an answer", measured twice. The operator
         # contract in `docs/infra-runbook.md` §4.1.1b documents ten keys, so a
