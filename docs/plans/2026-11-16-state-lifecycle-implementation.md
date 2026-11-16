@@ -4,7 +4,7 @@
 
 This is the *plan to build* the approved model. The design says what the model is; this says what changes, in what order, and what proves each change. The design's owner approval (2026-11-16, PR #12895) is the ruling that makes its reversals of earlier recorded positions stand — a lane landing S2–S5 depends on that ruling, not on its own reading of the code.
 
-**Status: drafted, two review rounds, NOT converged.** §8 records two conflicts between the approved design and the code that this plan cannot resolve by choosing — they need the owner. Do not dispatch execution until §8 is answered and a review round comes back clean.
+**Status: drafted, two review rounds, NOT converged.** §8 records one conflict between the approved design and the code that this plan cannot resolve by choosing — it needs the owner. The second conflict is now resolved by protocol (see §8's second item). Do not dispatch execution until §8's first item is answered and a review round comes back clean.
 
 ## 0. What is already true, so this plan does not rebuild it
 
@@ -38,7 +38,7 @@ This is the *plan to build* the approved model. The design says what the model i
 
 **Failure it prevents:** `deprecated` **cannot be written on a Point** — missing from `POINT_STATUS_VALUES` (`sdk.py:275`), so the vocabulary gate raises before `_ALLOWED_TRANSITIONS` (`:4639-4653`) is consulted; and a Point can still be `retracted` and `outdated` through verbs, so one ending has five spellings.
 
-**Change:** add `deprecated` to the Point write set **and** its transition entry; **remove `retracted` and `outdated` from `POINT_STATUS_VALUES` and from the `live` row of `_ALLOWED_TRANSITIONS` (`sdk.py:4644`)** — without that removal the slice's own acceptance is unreachable; `retract_point` (`sdk.py:24170`, takes no successor) targets `deprecated`. ⚠️ `invalidate_point` (`sdk.py:22414`) takes a **required** `corrected_by_id` and always writes `CORRECTS`, so by the design's defining rule it is a **supersede** — it targets `superseded` (§7).
+**Change:** add `deprecated` to the Point write set **and** its transition entry; **remove `retracted` from `POINT_STATUS_VALUES` (`sdk.py:275`) and from the `live` row of `_ALLOWED_TRANSITIONS` (`:4646`, `frozenset({"retracted", "superseded"})`), and remove `outdated` from `POINT_STATUS_VALUES` and from its own terminal entry (`:4653`, `"outdated": frozenset()`, the `#2498` shared-guard key)** — without that removal the slice's own acceptance is unreachable; `retract_point` (`sdk.py:24172`, takes no successor) targets `deprecated`. ⚠️ `invalidate_point` (`sdk.py:22416`) takes a **required** `corrected_by_id` and always writes `CORRECTS`, so by the design's defining rule it is a **supersede** — it targets `superseded` (§7).
 
 ⚠️ **Pinned invariant this slice deliberately breaks:** `tests/test_lifecycle_guards.py:87` asserts `"deprecated" not in POINT_STATUS_VALUES` (the pin for a deliberate omission recorded at `live.py:90-98`). That test is updated in the same commit, with the reason, not silently deleted.
 
@@ -113,7 +113,8 @@ This is the *plan to build* the approved model. The design says what the model i
 | `GOAL_STATE_VALUES` (S5) | SDK/MCP surface approval | approved in principle; the diff needs its own record |
 | **Read-tool scope parameter** (S6) | generalising `include_retracted` touches the MCP/SDK read surface | **not gated yet** |
 | `:Source` `status` | declares a field, a writer and a reader that do not exist | not proposed |
-| **§8 conflicts** | the plan cannot pick a side on either | **open** |
+| **§8 conflict 1** | the plan cannot pick a side on it | **open** |
+| §8 conflict 2 | was resolved by recording the reversal on #2901 before moving the pin | **resolved** |
 
 ## 5. What proves each slice
 
@@ -126,12 +127,16 @@ The test that fails before and passes after; the **measured** baseline it moves 
 - `:Source` has no lifecycle until it has a successor route, a writer and a reader.
 - Priority/importance has no design; `guideline`'s intent is parked there.
 
-## 7. A design-doc correction this plan surfaces
+## 7. The ending verbs, resolved (was: a design-doc correction)
 
-The design's §3.1 maps **`invalidate` → `deprecated`**, but `invalidate_point` (`sdk.py:22414`) takes a **required** `corrected_by_id` and always writes `CORRECTS` — so by §3's own defining rule (*"`superseded` names its successor; if nothing replaced it, the word is `deprecated`"*) it is a supersede. Proposed correction: move `invalidate` to the `superseded` row, leaving `retract`, `withdraw`, `abandon`, `drop`, `reject` on `deprecated`.
+The design's §3.1 maps **`invalidate` → `deprecated`**, but `invalidate_point` (`sdk.py:22416`) takes a **required** `corrected_by_id` and always writes `CORRECTS` — so by §3's own defining rule (*"`superseded` names its successor; if nothing replaced it, the word is `deprecated`"*) it is a supersede. Rather than patch one row, the verbs are now aligned on a single rule, and **`invalidate` is not a word-producing verb at all**: it names *our record* going out of date — the `expiredAt` bookkeeping `invalidate_point` and `supersede_point` write — which is exactly how W3C PROV splits it (`prov:Invalidation` ends the entity and says nothing about a replacement; `prov:wasRevisionOf` is a separate relation).
 
-## 8. Two conflicts this plan cannot resolve
+So: `retract_point` (no successor, `sdk.py:24172`) → `deprecated`; `invalidate_point` (required successor) → `superseded`; and **the rule, not the verb, picks the word**. The exact replacement text for §3.1 is recorded on #11824 (issuecomment-6906427754). Renaming `invalidate_point` is a surface change and is not proposed.
 
-**Conflict 1 — #12855's required change contradicts the design's delta rule.** #12855 requires `assembly._RECALL_OBJECT_EXCLUDED_STATUSES` (`assembly.py:4383`, literally `OBJECT_TERMINAL_STATUSES | {"outdated"}`) to drop `outdated`. That **is** re-pointing a declared delta at the base, which the design forbids (§6: *"never a list to be re-pointed at the base"*), and the set is frozen by `tests/test_assembly_pure.py` (`assembly.py:4378-4382` asserts it equals `OBJECT_TERMINAL_STATUSES | {"outdated"}`). Either #12855's case is dropped, or the design admits one more re-point with its reason recorded — this needs a ruling, not a lane's preference.
+⚠️ **One gap this surfaced in today's code:** `invalidate_point` and `supersede_point` both stamp the dedicated expiry prop (`expiredAt`, `sdk.py:22541`, `:24130`), but **`retract_point` does not** — it writes `status`, the belief halves, `updatedAt = $now` and an optional `validTo` (`sdk.py:24303-24305`; the replay fold agrees, `projection/__init__.py:10256-10257`). So a retracted claim's ending instant survives **only in the generic `updatedAt`**, which any later write moves, rather than in the expiry prop the other two endings write (`sdk.py`'s own `:22464`: *"`expiredAt`/`updatedAt` record when the graph LEARNED of the end, not when the claim ended"*). S2 closes it: retraction stamps `expiredAt` like every other ending. Until then, "invalidation is the bookkeeping, not a word" describes the intended model rather than all of today's code.
 
-**Conflict 2 — S2 vs the pinned "no `deprecated` on a Point" invariant.** `tests/test_lifecycle_guards.py:87` asserts `"deprecated" not in POINT_STATUS_VALUES`, pinning a deliberate omission (`live.py:90-98`). S2 removes the omission. The plan's position is that the pin is updated with its reason in the same commit — but the pin exists because a *recorded decision* put it there, so the reversal should be recorded on that decision's own artifact before the test moves.
+## 8. Two conflicts, and where each stands
+
+**Conflict 1 — #12855's required change contradicts the design's delta rule. STILL OPEN.** #12855 requires `assembly._RECALL_OBJECT_EXCLUDED_STATUSES` (`assembly.py:4383`, literally `OBJECT_TERMINAL_STATUSES | {"outdated"}`) to drop `outdated`. That **is** re-pointing a declared delta at the base, which the design forbids (§6: *"never a list to be re-pointed at the base"*), and the set is frozen by `tests/test_assembly_pure.py` (`assembly.py:4378-4382` asserts it equals `OBJECT_TERMINAL_STATUSES | {"outdated"}`). Either #12855's case is dropped, or the design admits one more re-point with its reason recorded.
+
+**Conflict 2 — S2 vs the pinned "no `deprecated` on a Point" invariant. RESOLVED BY PROTOCOL.** `tests/test_lifecycle_guards.py:87` pins a deliberate omission from a recorded decision. Per the AGENTS.md rule that a recorded decision is reopened in its own home, the reversal was **recorded on #2901** (issuecomment-6906438450) — the issue that made the decision — *before* the test moves. S2 therefore proceeds as: add the word and the transition entry, point `retract_point` at it, and update the pin in the same commit **linking #2901**, so the change is a recorded reversal rather than a silent test edit.
