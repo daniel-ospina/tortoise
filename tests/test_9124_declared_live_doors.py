@@ -342,7 +342,11 @@ _NO_JOURNAL = {
     "_touch_inherited_at",
     "_write_props",
     "_write_reliability_cache",
-    "backfill_v25",
+    # ⛔ #12901 wave 1 — `backfill_v25` LEFT this set: the door was DELETED from
+    # `TortoiseSDK` (one-shot ONTOLOGY v2.5 migration, zero callers anywhere), so a
+    # row here would be a STALE census entry — which
+    # `test_the_inventories_hold_no_stale_entry` reds on. A door that no longer
+    # exists has no lane to name.
     "ingest",
     "set_source_tier",
 }

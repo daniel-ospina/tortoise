@@ -624,8 +624,9 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
         "was deleted (which would exempt the row from this comparison instead of reding it) "
         f"or the two were reworded apart: {one_sided}"
     )
-    assert compared >= 40, (
-        f"only {compared} rows carry a comparable caller list (40 today) — this check "
+    assert compared >= COMPARABLE_CALLER_ROWS_FLOOR, (
+        f"only {compared} rows carry a comparable caller list "
+        f"({COMPARABLE_CALLER_ROWS_FLOOR} today) — this check "
         "has stopped reading the manifest's rows and would pass vacuously. The bound is "
         "the measured count, not one below it: a floor set one row short lets a single "
         "row leave the comparison unnoticed, which is the hole the one-sided arm above "
@@ -636,6 +637,21 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
         f"{mismatched}. Re-cut the row (or update both fields together) — the rendered "
         "table prints them as the same fact"
     )
+
+
+#: The number of manifest rows that carry a caller list in BOTH derived columns — the
+#: measured coverage of the cross-check below, not a round floor.
+#:
+#: History, because this number MOVES with the surface and each move needs a reason:
+#:   41 -> 38 on 2026-11-15 (#12901 wave 1): three of the five retired rows
+#:   (`calibration_passed`, `list_relations`, `quarantine_batch`) each carried both lists,
+#:   so they left the comparison with the row. ⚠️ Their `callers: engine` came from
+#:   `scan_callers`' DOCUMENTED receiver-blind false positive (`registry.list_relations()`
+#:   and `from .mining import quarantine_batch` are name collisions, not calls on the
+#:   SDK) — which is why the manifest classified them `internal` while a receiver-aware
+#:   AST walk finds NO production caller. The over-inclusion is deliberate there (never
+#:   MISS a caller), so the precise instrument decision was taken on the precise scan.
+COMPARABLE_CALLER_ROWS_FLOOR = 38
 
 
 def test_the_reason_dependency_cross_check_can_fail():
@@ -649,7 +665,9 @@ def test_the_reason_dependency_cross_check_can_fail():
     row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
     row["reason"] = "no MCP tool binds it; callers: engine, other-tooling, tenant-rest"
     compared, mismatched, one_sided = _caller_lists(doc)
-    assert compared >= 40, f"the cross-check reads only {compared} rows on a doctored copy"
+    assert compared >= COMPARABLE_CALLER_ROWS_FLOOR, (
+        f"the cross-check reads only {compared} rows on a doctored copy"
+    )
     assert not one_sided, f"a two-sided row was reported as one-sided: {one_sided}"
     assert [name for name, _dep, _reason in mismatched] == ["sdk:supersede_point"], (
         f"a one-sided edit to `reason` did not red the cross-check: {mismatched}"
@@ -4822,18 +4840,24 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # rationale beside it. 150 → 124 on 2026-10-27: the owner ruled the surplus methods
     # nothing calls may be deleted (PR #10187), and the 26 with no caller left the class.
     # 124 → 125 on 2026-11-14 (#10015): row 28 `get_organisation_account` was IMPLEMENTED.
+    # 125 → 120 on 2026-11-15 (#12901 wave 1): the first five off-surface methods with no
+    # production caller were retired (archived + recorded in `REMOVED_SDK_METHODS`), so the
+    # LIVE set shrank without touching the approved 40 or `high_water_counts` (150).
     # The approved 40 did not grow — the approval (`#10015` comment `6863608333`) delivers a
     # name that was already approved and unshipped, the same move PR #10053 made for three
     # rows — so `high_water_counts` (150) does not move; only the frozen ROW SET does.
-    # #11609 Phase 2 moved it 125 → 117: SIX read containers arrived and FOURTEEN member
-    # methods were re-privatised behind them (125 + 6 − 14 = 117). The approved 40 did not
-    # grow, and the pin beside it in the manifest was LOWERED to 117 for the reason that
-    # block states — slack in a growth pin is the thing the pin exists to stop.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 117
+    # Two 2026-11-15 waves moved it 125 → 112, both DOWN: #12901 wave 1 retired five
+    # off-surface methods with no production caller (−5), and #11609 Phase 2 landed SIX
+    # read containers (+6) while re-privatising the FOURTEEN member methods behind them
+    # (−14). 125 + 6 − 14 − 5 = 112. The approved 40 did not grow, and the pin beside it
+    # in the manifest is LOWERED for the reason that block states — slack in a growth pin
+    # is the thing the pin exists to stop.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 112
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():
-    """That sentence's typed count has drifted once per rename: 150 → 149 → 147 → 150 → 124.
+    """That sentence's typed count has drifted once per rename: 150 → 149 → 147 → 150 → 124 →
+    125 → 120.
 
     #10053 review (P3): at that head it read 147 while the class and the manifest both
     said 150, so the doc that tells a reader where the canonical SDK list lives named a

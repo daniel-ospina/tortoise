@@ -733,6 +733,12 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 #                             filed under a guessed tenant (#9192);
 #   ``write_failed``          the record was unreachable or the projection
 #                             refused the record;
+#   ``journal_collision``     the position row holds content this write would
+#                             not produce (a different record, or this record's
+#                             payload re-derived) (#9318). ⛔ Unlike ``write_failed``
+#                             a REPLAY CANNOT heal it — the replay re-raises —
+#                             so the remedy is journal identity in the key
+#                             (#12894), not a replay;
 #   ``circuit_open``          a connect to the record FAILED moments ago, so the
 #                             live door refused this write locally instead of
 #                             paying the connect timeout once per record
@@ -2098,11 +2104,12 @@ def record_record_write_failure(reason: str) -> None:
 
     ``reason`` is the vocabulary documented at ``RECORD_WRITE_FAILURE_COUNT``,
     restated here because THIS function is the definition site an operator
-    reads. SIX distinct values: FOUR emitted by ``tortoise/record_writer.py::
+    reads. SEVEN distinct values: FIVE emitted by ``tortoise/record_writer.py::
     write_live_record`` (``malformed_dsn``, ``no_tenant``, ``write_failed``,
-    ``circuit_open``) plus THREE SDK-only values — ``malformed_dsn`` is shared,
-    which is why the counts overlap (4 + 3 − 1 = 6). The split is named because
-    each value names a different fix:
+    ``circuit_open``, ``journal_collision``) plus THREE SDK-only values —
+    ``malformed_dsn`` is shared, which is why the counts overlap
+    (5 + 3 − 1 = 7). The split is named because each value names a different
+    fix:
 
     * ``malformed_dsn`` — the DSN is configured but unusable (the seam; and
       ``TortoiseSDK._record_write_without_journal`` on the journal-less lane,
@@ -2132,6 +2139,24 @@ def record_record_write_failure(reason: str) -> None:
       neither set it names the graph-bound credential instead;
     * ``write_failed`` — the record was unreachable or the projection refused
       the record; ``replay`` heals it from the journal;
+    * ``journal_collision`` — the record WAS reached and refused to index this
+      record under a journal position whose content differs from what this write
+      would produce (a different record, or this record's payload re-derived
+      since that row was written) (#9318). Neither unreachable nor
+      misconfigured: the journal holds the
+      record, and what the record cannot do is file it under that position — so
+      the fix is not on this deployment at all. The population is any journal
+      instance whose numbering resumes below the tenant's position high-water
+      mark — a second durable journal under one tenant (two corpus roots, two
+      SDKs with different ``event_log_path``), a journal RESTORE, a rotation, or
+      a truncation — AND any journal whose payload DERIVATION changed since that
+      row was written, which reuses the same journal's own numbering and needs no
+      second instance at all. ``replay`` heals every other failure; it cannot heal this
+      one, because the append-only row that owns the position carries that
+      other content, and the key carries no journal identity — that is ``#12894``'s
+      schema decision. A genuine REPLAY (same position, same content) never
+      reaches this counter: the fold compares the surviving row's content and
+      stays silent;
     * ``circuit_open`` — a connect to the record failed within
       ``record_writer.LIVE_WRITE_BREAKER_SECONDS``, so the live door refused this
       write locally: no socket, no timeout. The record is DEGRADED, not

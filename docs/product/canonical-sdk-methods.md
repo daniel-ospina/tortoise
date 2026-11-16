@@ -217,10 +217,10 @@ Three rules, each of which caught a real error in this document.
 |---|---|---|---|---|
 | R1 | `search_knowledge` | #1 | `search_knowledge`, `tortoise_fts_query`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse — `suggest_entry_points` and `search_sessions` retired into the container on 2026-11-15 (#11609 Phase 2 — see *Removed from the surface*) |
 | R2 | `list_knowledge` | #2 | `list_knowledge`, `query`, `paginated_query`, `query_points_by_tag` | keep, collapse |
-| R3 | `recall_beliefs` | #3 | `check_confidence`, `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*), and `provenance` retired into the container on 2026-11-15 (#11609 Phase 2) |
+| R3 | `recall_beliefs` | #3 | `check_confidence`, `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*), and `provenance` retired into the container on 2026-11-15 (#11609 Phase 2), while `calibration_passed` retired on 2026-11-15 (#12901 wave 1 — see *Removed from the surface*) |
 | R4 | `get_entity` | #4 | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` | keep, collapse |
 | R5 | `explore_connections` | #5 | `explore_connections`, `get_owned_entities` | keep, collapse — `traverse` and `get_org_structure` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*), and `expand_relationships` retired into the container on 2026-11-15 (#11609 Phase 2) |
-| R6 | `graph_overview` | #6 | `graph_overview`, `list_relations`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability; `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics` and `validate_domain` retired into the container on 2026-11-15 (#11609 Phase 2) |
+| R6 | `graph_overview` | #6 | `graph_overview`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability; `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics` and `validate_domain` retired into the container on 2026-11-15 (#11609 Phase 2), and `list_relations` retired on 2026-11-15 (#12901 wave 1 — see *Removed from the surface*) |
 | R7 | `review_link_candidates` | #7 | `review_link_candidates`, `review_connections`, `get_cross_lens_candidates` | keep, collapse — `list_dedup_candidates` retired into the container on 2026-11-15 (#11609 Phase 2) |
 | R8 | `poll_events` | #8 | `poll_events` | keep |
 | R9 | `inspect_batch` | #9 | `list_batch`, `list_batches` | keep, collapse |
@@ -239,7 +239,7 @@ Three rules, each of which caught a real error in this document.
 | W8 | `manage_source_trust` | #14 | `assess_source`, `set_source_tier`, `get_source_reliability` | keep — **`get_source_reliability` writes** |
 | W9 | `link_entities` | #15 | `link_entities`, `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split |
 | W10 | `record_decision` | #16 | `file_decision`, `file_human_approval` | keep, collapse |
-| W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `quarantine_batch` | keep, collapse — **the widest group; see Open items** |
+| W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline` | keep, collapse — **the widest group; see Open items**; `quarantine_batch` retired on 2026-11-15 (#12901 wave 1 — see *Removed from the surface*) |
 | W12 | `delete_knowledge` | #18 | `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |
 | W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation` | keep — **`compute_confidence` mislabelled read** |
 | W14 | `approve_merge` | #20 | `approve_merge` | keep |
@@ -255,7 +255,7 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 |---|---|---|
 | N1 | `org` | `org_create`, `org_get`, `get_organisation_account` |
 | N2 | `graph` | `list_memory_graphs`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |
-| N3 | `membership` | `membership_create`, `membership_get` |
+| N3 | `membership` | `membership_create` |
 | N4 | `apikey` | `apikey_create`, `apikey_revoke`, `apikey_verify` |
 | N5 | `invitation` | `invitation_list`, `invitation_get_by_id`, `invitation_revoke`, `sweep_invite_ghost_memberships` |
 | N6 | `signup_token` | `signup_token_lookup`, `signup_token_recover`, `signup_token_revoke` |

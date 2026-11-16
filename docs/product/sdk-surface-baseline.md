@@ -14,10 +14,10 @@
 | measured | count |
 |---|---|
 | approved methods (the target) | 40 |
-| live public methods on `TortoiseSDK` | 117 |
+| live public methods on `TortoiseSDK` | 112 |
 | approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 20 |
 | approved but not implemented yet | 20 |
-| live and NOT approved (migration backlog) | 98 |
+| live and NOT approved (migration backlog) | 93 |
 
 Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs. It resolves
 to `TortoiseSDK` (the only constructible entry point); it is not a method on it.
@@ -65,10 +65,8 @@ the count above is the honest measure of the gap.
 - `apikey_verify`
 - `assess_source`
 - `audit`
-- `backfill_v25`
 - `belief_timeline`
 - `calibrate_summary`
-- `calibration_passed`
 - `check_structure`
 - `checkpoint`
 - `compute_confidence`
@@ -116,16 +114,13 @@ the count above is the honest measure of the gap.
 - `list_batch`
 - `list_batches`
 - `list_graphs`
-- `list_relations`
 - `membership_create`
-- `membership_get`
 - `mine_corpus`
 - `mitigate_operator`
 - `org_create`
 - `org_get`
 - `paginated_query`
 - `promote_point`
-- `quarantine_batch`
 - `query`
 - `query_points_by_tag`
 - `recall_gaps`

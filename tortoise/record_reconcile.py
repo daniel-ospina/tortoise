@@ -83,12 +83,52 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   bound, `#9974`), not a red, so the value remains cache-only.
   ⛔ A CLEAR is the route only where the value is not trustworthy, and it is
   LABEL-DEPENDENT: on an ``:Object`` ``update_entity(…, status=None)`` is applied
-  as ``SET n += {status: null}``, a REMOVAL; on a ``:Subject`` the SAME call is
+  as ``SET n += {status: null}``, a REMOVAL, **only while the row is NOT
+  terminal** — since #12882 a non-string status out of a DEAD state is REFUSED
+  **when the call names the status ALONE** (it was the resurrection hole: the
+  target is not a dead WORD, so a dead row was LIFTED instead of skipped), so the
+  ``:Object`` clear is NOT a route for the TERMINAL case this repair exists for;
+  on a ``:Subject`` the SAME call is
   REFUSED — ``sdk._update_entity``'s Subject status door validates against
   ``_SUBJECT_STATUS_VALUES``, and ``None`` is not one of them (the missing SDK
   door is `#11271`) — so a ``:Subject``'s clear is the graph-side ``REMOVE
   n.status`` or the wipe below, and it makes a TERMINAL entity read LIVE
-  (``live._terminal_excluded`` reads an absent ``status`` as live). ⛔ Neither is
+  (``live._terminal_excluded`` reads an absent ``status`` as live).
+  ⛔ WHAT IS PERFORMABLE ON A TERMINAL ``:Object`` TODAY is the COHERENT
+  un-supersede only, and only for a ``superseded`` row: ``update_entity(…,
+  status='live', supersededBy=None, supersededAt=None)`` — a CURRENT-READING
+  word (``'live'`` on a plain kind; a pack kind's own current word goes in its
+  place, as ``sdk.py``'s own refusal hint says) with BOTH carriers cleared in the
+  SAME call, which #12825 restored and #12882 pinned. ⛔ **NOT the row's STORED
+  word:** ``status='superseded'`` beside the two clears is ACCEPTED by the
+  entailed short-circuit (``all(isinstance(s, str) and str.__eq__(s, _np_status)
+  is True …)``, ``sdk.py`` — the ``s == _np_status`` form this sentence used to
+  cite is GONE: it consulted the caller's ``__eq__``, #12896) and leaves the
+  row TERMINAL *with its carriers gone* — the goal unmet and NO error reported.
+  ⚠️ That row is not lost, but recovering it takes TWO accepted calls: re-plant a
+  carrier (``update_entity(…, status='superseded', supersededBy='<successor>')``)
+  and THEN the coherent clear above; measured, the final journal record carries
+  ``status='live'`` with both carriers null, so graph and record agree. ⛔ Do NOT
+  read "carrier-less" as "irreparable" and reach for a whole-graph restore — the
+  wipe below is the last resort, not this one. Every OTHER terminal word has no
+  SDK route **in one accepted call** (#12592), so naming the clear there would
+  prescribe a call that raises (AX rule 2). ⚠️ Do NOT read that as "irreparable
+  some other way": `archived`/`deprecated`/`retracted` DO lift in TWO accepted
+  calls — reclassify to `superseded` with a successor, then the coherent clear
+  above — which is the fail-open filed as #12908 (measured; the guard's answer
+  then depends on how many calls a caller spends). It is NOT offered here as a
+  repair: it fabricates the supersession it withdraws.
+  ⛔ A COMPOSED NON-WORD IS NOT A REPAIR EITHER, AND IT IS NOW REFUSED: naming a
+  non-word (``status=None``, ``123``, ``['live']``, ``True``) TOGETHER WITH both
+  carrier clears USED to pass the coherent allowance — it keys on the carrier
+  clear and, through ``_status_key_leaves_the_dead_state``, on the KEYS supplied,
+  never on the value written — so the graph went CURRENT on a word nobody can
+  read and, for the null shapes, this module's rebuild kept the ``superseded`` an
+  earlier record folded (#9974's damage direction). Measured, and pre-existing;
+  the allowance now requires a ``str`` target (review cycle 5), so those calls
+  raise with the row unchanged. What is still unvalidated is an undeclared STRING
+  word (``status='banana'``) — the ``:Object`` vocabulary hole, `#10371` /
+  `#8166`. ⛔ Neither is
   a record-sourced re-projection, which is ADDITIVE (``MERGE … SET n += $props``,
   no REMOVE pass) and would leave the value in place — and a clear writes
   ``state.status = null`` into the record, which the state-op leg's
@@ -680,10 +720,21 @@ def reconcile_record_and_cache(
     ``clean``. A CLEAR is only for an
     untrustworthy value
     and is LABEL-DEPENDENT: ``update_entity(…, status=None)``, ``SET n +=
-    {status: null}``, a REMOVAL, on an ``:Object``; on a ``:Subject`` that call
+    {status: null}``, a REMOVAL, on an **non-terminal** ``:Object`` (since
+    #12882 a non-string status out of a DEAD state is REFUSED when the call
+    names the status ALONE, so it is not a route for the terminal case); on a
+    ``:Subject`` that call
     is REFUSED (#1423's status door accepts only ``SUBJECT_STATUS_VALUES``, and
     ``None`` is not one of them), so a Subject's clear is the graph-side
-    ``REMOVE n.status`` — and a clear makes a TERMINAL entity read LIVE. Clear,
+    ``REMOVE n.status`` — and a clear makes a TERMINAL entity read LIVE. For a
+    TERMINAL ``:Object`` the only performable route is the COHERENT un-supersede
+    of a ``superseded`` row (``status='live'`` — a CURRENT-READING word, the pack
+    kind's own word in place of ``'live'`` — with BOTH carriers cleared in the
+    same call, #12825). ⛔ NOT the stored word: ``status='superseded'`` beside the
+    two clears is ACCEPTED by the entailed short-circuit and leaves the row
+    terminal with its carriers gone (measured). Every other terminal word has no
+    SDK route in ONE accepted call (#12592); a two-call reclassification does
+    lift them, and that is #12908's fail-open, not a repair. Clear,
     or the wipe, but ⛔ NOT a record-sourced re-projection, which is ADDITIVE and
     leaves the value in place — see the module docstring's (5)),
     a record-sourced clear IN PLACE for the declined pair —
