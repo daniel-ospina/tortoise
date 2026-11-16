@@ -7287,6 +7287,29 @@ surfaces:
   # subpackage, and `integrity()` requires every `tests/**/test_*.py` to be
   # classified.
   - test_9649_update_entity_point_lifecycle.py
+  # #12586: `update_point`'s draft→live promote arm now consults the legacy
+  # `outdated` flag, through the SAME shared predicate the read surfaces and
+  # `retract_point`'s CAS already use (`tortoise/live.py::_terminal_excluded`),
+  # so a flag-dead point is refused instead of being lifted to `['live',
+  # outdated=true]`. The file also pins the fan-out row PICKER (which terminal
+  # row a refusal names) and the statement-level CAS witness, so it is an
+  # `sdk.py` door pin AND a `tortoise/live.py` shared-predicate pin. `core` for
+  # the same reason as the #9649 row directly above: the subject is the door in
+  # `tortoise/sdk.py`, a `SHARED_MODULES` entry whose change runs the full
+  # matrix, and `integrity()` requires every `tests/**/test_*.py` to be
+  # classified.
+  #
+  # ⛔ POOL: the FAST pool, deliberately NOT `slow_files`. The #9649/#10371 rows
+  # are slow because of what one case costs them; this file's WHOLE-FILE cost
+  # was measured at this head (`25 passed in 10.19s` through
+  # `tools/test_lane.py run` on a private lane container) and the fast pool
+  # already carries files an order of magnitude heavier (`test_9124_declared_
+  # live_doors.py` is 90.0 s there and `test_calibration.py` 355.0 s). Those
+  # files mint their own throwaway engine too, so "DB-backed" alone does not
+  # make a file slow — its measured weight does, and this one is ~10 s. It is
+  # not `carve_out` either: it builds its own engine (`TortoiseSDK(str(tmp_path
+  # / "t12586.db"))`), so it tolerates the URI redirect rather than needing it.
+  - test_12586_update_point_promote_flag.py
   - test_uri_env_mutations_declared.py
   # #8066: the served-skill relay ratchet. Its SUBJECT is every
   # `tests/**/*.py`, so it must be registered on every surface such a file can
@@ -11311,6 +11334,7 @@ durations:
   eval/write_path/test_write_path_runner.py: 146.2  # #9017 CI-junit 2026-10-18 (run 39165691659); was 135.8 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (84.1s) is a LOWER bound; kept 146.2
   test_unjournaled_mutation_class.py: 7.7  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 4.9 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (6.6s) is a LOWER bound; kept 7.7
   test_2296_document_created_journal.py: 1.4  # by the refresher; Measured on this host 2026-10-14 on a private `tools/test_lane.py` docker container reached via TORTOISE_DB_URI: pytest session total 26.49s (that reading was the file's original 7 tests; the file now collects 8 and a later re-measure on a loaded host read 24.9s). WHAT THE NUMBER IS: the pytest session total, NOT what the refresher computes — it reads the TEXTUAL `--durations=15` block out of the CI log, so a CI reading is a LOWER bound. Refresh from the first post-merge push run that includes it — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 5.8
+  test_12586_update_point_promote_flag.py: 2.0  # new in #12586 (PR #12912) — the #3400/#4348 trap, same basis as the #9649 row below: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, so without this row it would be a fast file nothing has ever weighed. ⚠️ MEASURED LOCALLY as context, NOT as the weight: whole-file through `tools/test_lane.py run` measured **25 passed in 10.19 s** on a private lane container at the rebase head `672bde362c` (2026-11-16), so the flat 2.0 UNDERSTATES it until a sweep re-bases it — exactly as every embedded-file row here records; `25` is what pytest COLLECTS, against 19 `def test_` functions, because six cases are parametrised. It is NOT in `slow_files` (the registration comment above states why: ~10 s whole-file against a fast pool whose heaviest members are 90–355 s). ⛔ The CASE COUNT is deliberately not quoted as a weight input — `tools/ci_selection.py --integrity` is the authority and `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_9649_update_entity_point_lifecycle.py: 2.0  # new in #9649 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts it in `fast_pool()` and the `slow_files` row puts it on the gated slow leg. ⚠️ MEASURED LOCALLY as context, NOT as the weight: whole-file through `tools/test_lane.py run` measured **45 passed in 12.8 s** on a private lane container at the review-round head (2026-11-13; 44 passed in 14.3 s before the `#12403` residual pin was added), so the flat 2.0 still UNDERSTATES it until a sweep re-bases it, exactly as every embedded-file row here records. The "~110-127 s" this row carried before that re-measurement is NOT supported by any reading taken at this head; it is replaced rather than kept beside the measurement, because a context figure that is off by ~8x is the stale-reading class the neighbouring rows forbid. What the weight covers: both measured probes (`supersede_point` then `status='live'`; a terminal point's `validTo`/`validFrom`/precision/`expiredAt`/`when`), the legacy `outdated=true` flag arm, the AX three-part refusal wording, the declared-transition gate (`_ALLOWED_TRANSITIONS`, incl. `draft -> live` staying legal and an identical restatus remaining a no-op), the preserved #3305 content-revision scope, the journal/row atomicity of a refusal, and non-leakage onto the Object/Subject labels the same door serves. Also pins the DECLARED residual (#12403): a declared terminalizing target (`superseded`) through this door writes `status` + `restatus` and NOTHING else — no `PointSuperseded`, no `CORRECTS` successor, no window close — with the verb's behaviour as the non-vacuity contrast. ⛔ The CASE COUNT is deliberately not quoted as a weight input — `tools/ci_selection.py --integrity` is the authority and `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_3311_multilabel_status_vocab.py: 8.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.5 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (5.5s) is a LOWER bound; kept 8.8
   test_url_keyed_source_write_4649.py: 3.0  # #4649: 169.5s wall for the whole file; the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 3.1
