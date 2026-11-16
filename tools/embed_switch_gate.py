@@ -389,16 +389,19 @@ _SHELL_FN_HEADER = re.compile(
 #: see (review P1, measured).
 _SHELL_GROUP_CLOSE = re.compile(r"^\s*\}(?![)}])")
 
-#: A brace GROUP's OPENER: a `{` at a WORD start. The lookbehind is what excludes the other three
-#: spellings — `${VAR}` (parameter expansion), `a{b,c}` (brace expansion) and `{ {` (the second
-#: brace is preceded by a space, so it IS an opener). A function BODY's brace matches too and is
-#: subtracted by the caller through `_function_body_braces`, which is the only thing that can tell
-#: the two apart (the body brace is preceded by `)` or by `function NAME`).
+#: A brace GROUP's OPENER: a `{` at a WORD start that is followed by a COMMAND (or ends the
+#: statement), counted on the STRUCTURAL VIEW. Four spellings must NOT count, and each of them was
+#: a measured fail-OPEN when the count ran on the raw line (review round 3): `${VAR}` (parameter
+#: expansion — the `$` lookbehind), `a{b,c}` / `{1..5}` brace EXPANSION (the lookahead: an expansion
+#: continues with a word character, dot or comma, while a group must be followed by whitespace, a
+#: quote, a substitution or the end of the statement), and a `{` inside a quoted span or a comment
+#: (blanked in the view). A phantom frame pushed by any of them sat ON TOP of the real group's
+#: frame, so the forked closer popped the phantom and the group's fork was never applied.
 #: ⛔ COUNTED, not one-per-statement (review P2, measured): `{ { export …=1; }; } | tee` opens TWO
 #: groups on one statement, and a boolean push desynced the frame stack — the outer group's fork
 #: was applied to a frame that had already been replaced, so it was silently dropped and both
 #: switches were credited over a subshell that exports nothing.
-_SHELL_GROUP_OPEN = re.compile(r"(?<![\w${])\{")
+_SHELL_GROUP_OPEN = re.compile(r"(?<![\w${])\{(?![A-Za-z0-9_.,])")
 
 #: ⛔ A redirection token, stripped from between a group closer and the operator that follows it
 #: (review P2, measured BOTH ways). The first pattern spelled the redirect as
@@ -408,7 +411,7 @@ _SHELL_GROUP_OPEN = re.compile(r"(?<![\w${])\{")
 #: fail-open). Order matters: `&>`/`&>>` is tried before a bare `>` so the `&` is not mistaken for a
 #: background operator, and `>&`/`<&` consume their fd target.
 _SHELL_REDIRECT = re.compile(
-    r"(?:[0-9]*&>>?|[0-9]*(?:>>?\|?|>&|<&)\s*(?:[0-9-]+|\S+)|<>?\s*\S+|<<<?-?\s*\S+)"
+    r"(?:[0-9]*&>>?\s*\S+|[0-9]*(?:>>?\|?|>&|<&)\s*(?:[0-9-]+|\S+)|<>?\s*\S+|<<<?-?\s*\S+)"
 )
 
 #: The operator that makes the statement it FOLLOWS run in a subshell. `&&`/`&>`/`>&` are
@@ -1713,7 +1716,13 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # nothing. The opener's own `conditional` is recorded with it, so `[ -n "${ARM:-}" ] &&
             # {` cannot credit a group that never runs. A function body's brace is not a group
             # (`_function_body_braces` / `allman_body`).
-            openers = len(_SHELL_GROUP_OPEN.findall(raw)) - _function_body_braces(raw, view)
+            # ⛔ The count runs on the STRUCTURAL view and the pattern requires a REAL opener
+            # (review round 3, measured): a `{` inside a quoted span (`echo '{"status":"armed"}'`)
+            # or a brace EXPANSION (`mkdir -p {logs,cache}`) pushed a phantom frame, so a forked
+            # closer popped the phantom and the group's fork was never applied — both switches
+            # credited over a subshell. `_function_body_braces` still reads RAW (the `)` that
+            # identifies a body is blanked in the view).
+            openers = len(_SHELL_GROUP_OPEN.findall(view)) - _function_body_braces(raw, view)
             openers -= 1 if allman_body else 0
             openers = max(0, openers)
             #: Counted everywhere, because a group inside a FUNCTION BODY still owns a `}`.

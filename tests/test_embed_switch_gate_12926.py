@@ -2923,6 +2923,11 @@ def test_NESTED_groups_keep_their_frames(script):
         # …but a redirect followed by a PIPE does
         ("> /tmp/f.log 2>&1 | tee -a /tmp/g.log", False),
         ("2>&1 |& tee", False),
+        # ⛔ the `&>`/`&>>` spellings must consume their TARGET before the fork test
+        # (review round 3, measured): the arm matched the operator only, so the target was left
+        # where the fork operator should be and a piped group was credited over a subshell.
+        ("&> /tmp/f.log | tee", False),
+        ("&>> /tmp/f.log | tee", False),
     ],
 )
 def test_a_group_redirect_is_not_a_fork(trailer, credited):
@@ -3004,4 +3009,53 @@ def test_the_code_ON_the_allman_body_brace_line_is_inside_the_body():
     )
     assert group == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
         f"the mirror — a brace GROUP runs in the current shell: {group}"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # a `{` inside a QUOTED span is data
+        """echo '{"status":"armed"}'""",
+        # …and so is a brace EXPANSION (a group opener must be followed by a command)
+        "mkdir -p {logs,cache}",
+        "printf '%s\\n' {1..5}",
+    ],
+)
+def test_a_brace_that_is_DATA_does_not_push_a_group_frame(body):
+    """Review round 3 (measured) — the opener count ran on the RAW line, so data pushed a frame.
+
+    The count was `_SHELL_GROUP_OPEN.findall(raw)`, which matches a `{` in a quoted string
+    (`echo '{"status":"armed"}'`) and the head of a brace EXPANSION (`mkdir -p {logs,cache}`). Each
+    pushed a PHANTOM frame on top of the real group's frame, so a forked closer popped the phantom
+    and the group's fork was never applied:
+
+        { export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; mkdir -p {logs,cache}; } | tee /tmp/x
+        → reader STATED / exit 0        bash: V=UNSET E=UNSET
+
+    The count now runs on the STRUCTURAL view (spans blanked) and requires a REAL opener — a `{`
+    followed by anything but a word character, a dot or a comma, which is what a group needs and
+    what an expansion never has.
+
+    Mutation-proved: counting on `raw` reds all three rows; requiring `{` + whitespace only would
+    red a group whose first command is quoted (`{ "echo" hi; }` is still a group) — the unforked
+    mirror below keeps that honest.
+    """
+    script = (
+        "{ export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; "
+        f"{body}; }} | tee /tmp/x\n"
+    )
+    stated, _ambiguous = gate._shell_assignments(script)
+    assert stated == {}, (
+        f"the brace in {body!r} is DATA, not a group; the real group is piped and exports nothing: "
+        f"{stated}"
+    )
+
+    unforked = (
+        "{ export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; "
+        f"{body}; }}\n"
+    )
+    stated, _ambiguous = gate._shell_assignments(unforked)
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"the unforked mirror runs in the current shell, so bash keeps both: {stated}"
     )
