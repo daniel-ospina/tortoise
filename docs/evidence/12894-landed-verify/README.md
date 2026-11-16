@@ -442,7 +442,7 @@ The dispatch brief asked for this claim to be checked rather than trusted, so:
 
 `git for-each-ref refs/wip/ | grep 12894` returns two cap-archives, both labelled *"not for merge"*:
 
-```
+```text
 ec0bc91f6d  refs/wip/feat-12894-allocator-spike   (archived 2026-11-16T06:29:21Z)
 703613fa0c  refs/wip/issue-12894-allocator-spike  (archived 2026-11-16T10:08:08Z)
 ```
