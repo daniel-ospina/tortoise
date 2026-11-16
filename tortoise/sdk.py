@@ -257,6 +257,25 @@ from .security import redact_secrets
 import threading
 from datetime import UTC
 
+# #12943: module-scope, not a local import inside ``__init__``. THE IMPORT IS THE
+# ONLY LINE OF THAT HOOK THAT CAN RAISE: ``note_local_cache`` itself is wrapped
+# (its module's contract is "a fault in observability must never deny a caller a
+# graph it can use", the #5148 rule), but a local `from .cache_leg import …`
+# re-executes `cache_leg`'s module body on first use — and by then
+# ``__init__`` has already run ``_mark_embedded_opened``, so a failure here would
+# leave the opened-set claiming a store this dead construction never opened and
+# silence the cross-process busy probe for the next one (epic #900 §5.3).
+# Imported under a guard for the same reason: observability must not be able to
+# break the constructor, so a broken seam degrades to no hook.
+# Placed AFTER the last import on purpose: a module-level ``try`` is a non-import
+# statement, so inserting it mid-region splits sdk.py's imports into two isort
+# sections and ruff flags the whole tail (I001) — the block belongs at the
+# region's end, not beside ``monitoring``.
+try:
+    from .cache_leg import note_local_cache as _note_local_cache
+except Exception:  # observability never denies a usable graph
+    _note_local_cache = None
+
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
 register_kind("checkpoint-item")
@@ -12089,6 +12108,23 @@ class TortoiseSDK:
         if self._db_uri is None and self._db_path:
             self._probe_embedded_busy(self._db_path)
             _mark_embedded_opened(self._db_path)
+        # #12943: the cache leg's own legibility. THIS is the one constructor
+        # every write door passes (SDK direct, the hosted REST lane's
+        # `_data_sdk`/`_make_sdk`, the MCP lane's `mcp_auth._get_org_sdk`), so
+        # the check lives here rather than at three call sites that can drift.
+        # ⛔ Called UNCONDITIONALLY, outside the `_db_uri is None` branch above.
+        # Nested inside it, `cache_uri` is always `None` by construction, so the
+        # predicate's `if cache_uri: return None` arm would be unreachable from
+        # every deployed process and the branch would be the real gate — which
+        # is the drift the predicate exists to prevent (review cycle 2). The
+        # branch above is a cheap short-circuit for the embedded-only probes;
+        # the DECISION is the predicate's, and on a healthy shared deployment it
+        # costs one attribute read and one comparison (its first arm).
+        # Deliberately NOT a raise: #7722's embedded fallback and a declared
+        # single-tenant self-host are both coherent and must keep building.
+        if _note_local_cache is not None:
+            _note_local_cache(cache_uri=self._db_uri,
+                              cache_path=self._db_path)
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}

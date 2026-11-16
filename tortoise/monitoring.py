@@ -772,6 +772,40 @@ RECORD_WRITE_FAILURE_COUNT = Counter(
     ["reason"],
 )
 
+#: The CACHE leg's own channel (#12943). Every counter above counts the RECORD
+#: — a row that never reached Postgres, a journal append that failed, a row
+#: declined because the lane has no journal. NONE of them could see the failure
+#: #12943 measured: the record took every write and the CACHE took none,
+#: because this process's cache was a local store rather than the record's
+#: store. The record's counters read perfectly healthy while that happened, so
+#: the cache needs a counter of its own rather than a new reason on the
+#: record's — the two answer different questions ("did the truth land?" vs
+#: "did the DERIVED copy get the same write?"), and folding them together would
+#: make a healthy record on an unshared cache read as a failing record.
+#:
+#: ⚠️ **THE UNIT IS A CONSTRUCTION, NOT A WRITE**, and the help text says so
+#: because the difference is load-bearing. The condition is a property of the
+#: PROCESS's two stores, and the check runs where that property is decided
+#: (``TortoiseSDK.__init__``), so one increment = one SDK built in the split
+#: shape. It is therefore NOT comparable with ``record_writes_applied`` beside
+#: it: ``hosted_api._make_sdk`` builds an anchor AND a per-request SDK on its
+#: embedded path, and ``_data_sdk`` serves reads as well as writes. What the
+#: number answers is "is this process split, and how hard is it being asked" —
+#: any non-zero value is the misconfiguration, and the RATE is constructions.
+#: (Counting at the write seam instead was rejected: it would need a check per
+#: write, on the hot path, to learn a fact that is already fixed at
+#: construction.)
+#:
+#: ``reason`` vocabulary: ``cache_not_shared`` (the only value today — see
+#: :mod:`tortoise.cache_leg`). Kept as a label rather than a bare counter so a
+#: future cache-leg fault names itself instead of arriving as an increment
+#: nobody can attribute.
+CACHE_LEG_FAILURE_COUNT = Counter(
+    "tortoise_cache_leg_failures_total",
+    "SDK constructions whose cache is not the record's store (#12943)",
+    ["reason"],
+)
+
 #: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
 #:
 #: The counter above is CUMULATIVE since process start and is never reset — that
@@ -2548,6 +2582,34 @@ def record_last_write_at() -> str | None:
 def record_write_failure_counts() -> dict[str, int]:
     """In-process snapshot of ``RECORD_WRITE_FAILURE_COUNT``, by reason (#9188)."""
     return _collect_by_label(RECORD_WRITE_FAILURE_COUNT, "reason")
+
+
+def record_cache_leg_failure(reason: str) -> None:
+    """Count one SDK construction whose CACHE is not the record's store (#12943).
+
+    The UNIT is a construction, not a write — see ``CACHE_LEG_FAILURE_COUNT``'s
+    help for why that is the only place the condition can be answered, and why
+    the number is therefore not comparable with ``record_writes_applied``.
+
+    Single writer: ``tortoise.cache_leg.note_local_cache`` (the ``#501``/``#3677``
+    house shape — callers never touch the counter directly). The vocabulary is
+    documented at ``CACHE_LEG_FAILURE_COUNT``; today's only value is
+    ``cache_not_shared``: the record is armed against a shared store while this
+    process's cache is the embedded one, so the two are different stores rather
+    than two copies of the same data.
+
+    ⛔ It is NOT ``RECORD_WRITE_FAILURE_COUNT`` with a new reason: that family's
+    zero means "no record row was lost", which stays true on exactly the
+    deployment this counter exists to make visible. Reporting a healthy record
+    on an unshared cache as a RECORD failure would be the misattribution the
+    #4034 class is about, pointed the other way.
+    """
+    CACHE_LEG_FAILURE_COUNT.labels(reason=reason).inc()
+
+
+def cache_leg_failure_counts() -> dict[str, int]:
+    """In-process snapshot of ``CACHE_LEG_FAILURE_COUNT``, by reason (#12943)."""
+    return _collect_by_label(CACHE_LEG_FAILURE_COUNT, "reason")
 
 
 def record_journal_write_failure() -> None:
@@ -7534,6 +7596,11 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # keeps meaning "no record row was lost" on a healthy armed deployment —
         # every `capture_session` emits through the M2 lane.
         "record_non_journal_skips": record_non_journal_skip_counts(),
+        # #12943: the CACHE leg's own channel. Every record counter above can
+        # read healthy while the cache holds none of the same writes — that is
+        # the measured shape (record 2 objects/3 points, cache 0/0) — so the
+        # derived store gets its own key rather than a reason on the record's.
+        "cache_leg_failures": cache_leg_failure_counts(),
         # #10515: `update_point`'s ABSENT arm refused a write that may have been
         # a LEGITIMATE revision (the journal knows the id, or the graph key could
         # not be confirmed). Zero on a healthy lane means "no revision was lost in

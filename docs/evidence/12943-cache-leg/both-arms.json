@@ -1,0 +1,82 @@
+{
+  "_arm_a_requires": "cache_count_uri_matches_write_target must be TRUE, or the cache was counted on a DIFFERENT server than the SDK wrote to and the 2/3 says nothing. It is a validity gate for arm A ONLY: arm B's write target is null by construction, so FALSE is its correct value.",
+  "_provenance": "each arm is one `measure.py` run as committed; the per-arm files are the full captures, this file carries EVERY column the README table reads. Both URI fields are FINGERPRINTS (scheme://host[:port]/path#8hex), never the raw value, so a credential cannot reach a committed file.",
+  "_what": "#12943 - the arms of the measure.py table, captured verbatim.",
+  "arm_a_shared_cache": {
+    "cache": {
+      "Event": 0,
+      "Object": 2,
+      "Point": 3,
+      "Source": 0,
+      "Subject": 0
+    },
+    "cache_count_uri": "docker://127.0.0.1:16419/tortoise_test_matrix#66df3206",
+    "cache_count_uri_matches_write_target": true,
+    "cache_count_uri_source": "CACHE_COUNT_URI",
+    "cache_leg_failures": {},
+    "record": {
+      "event": 0,
+      "journal_event": 6,
+      "object": 2,
+      "point": 3,
+      "relation": 4,
+      "subject": 0
+    },
+    "record_dsn_fingerprint": "postgresql://127.0.0.1:33943/record#0367bb5d",
+    "record_write_failures_published": {},
+    "record_writes_applied_delta": "0 -> 6",
+    "write_path_uri": "docker://127.0.0.1:16419/tortoise_test_matrix#66df3206"
+  },
+  "arm_b_local_cache": {
+    "cache": {
+      "Event": 0,
+      "Object": 0,
+      "Point": 0,
+      "Source": 0,
+      "Subject": 0
+    },
+    "cache_count_uri": "docker://127.0.0.1:16419/tortoise_test_matrix#66df3206",
+    "cache_count_uri_matches_write_target": false,
+    "cache_count_uri_source": "CACHE_COUNT_URI",
+    "cache_leg_failures": {
+      "cache_not_shared": 2
+    },
+    "record": {
+      "event": 0,
+      "journal_event": 6,
+      "object": 2,
+      "point": 3,
+      "relation": 4,
+      "subject": 0
+    },
+    "record_dsn_fingerprint": "postgresql://127.0.0.1:33943/record#0367bb5d",
+    "record_write_failures_published": {},
+    "record_writes_applied_delta": "0 -> 6",
+    "write_path_uri": null
+  },
+  "arm_c_reconcile": {
+    "cache": {
+      "Event": 0,
+      "Object": 2,
+      "Point": 2,
+      "Source": 0,
+      "Subject": 0
+    },
+    "cache_count_uri": "docker://127.0.0.1:16419/tortoise_test_matrix#66df3206",
+    "cache_count_uri_matches_write_target": true,
+    "cache_count_uri_source": "CACHE_COUNT_URI",
+    "cache_leg_failures": {},
+    "record": {
+      "event": 0,
+      "journal_event": 4,
+      "object": 2,
+      "point": 2,
+      "relation": 0,
+      "subject": 0
+    },
+    "record_dsn_fingerprint": "postgresql://127.0.0.1:33943/record#0367bb5d",
+    "record_write_failures_published": {},
+    "record_writes_applied_delta": "0 -> 4",
+    "write_path_uri": "docker://127.0.0.1:16419/tortoise_test_matrix#66df3206"
+  }
+}
