@@ -49,7 +49,7 @@ SUMMARY_OUT=last-run-arm-b-local-cache.json \
   TORTOISE_DB_URI='' python measure.py
 ```
 
-```
+```text
 provision_record.py                 a throwaway record Postgres: the record's
                                     migration list (read from
                                     record_projection.RECORD_MIGRATIONS) plus
