@@ -237,8 +237,8 @@ watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier 
 (`Set up job` 182 s = 3 m 02 s, 10:21:30 → 10:24:32, plus 4 m 14 s of uncapped setup steps to the
 suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
 whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
-plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **55.7 m against
-90, x 1.5 = 83.6** — 6.4 m of headroom, where the refreshed map at 9 shards stood at
+plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **55.6 m against
+90, x 1.5 = 83.4** — 6.6 m of headroom, where the refreshed map at 9 shards stood at
 **63.6 m, x 1.5 = 95.5** and reded
 `test_the_test_job_carries_no_unbounded_cache_post_step`. The term that moved is
 the watchdog: it read **26 m** until #10999 registered its own fast suite
@@ -258,12 +258,18 @@ later**: main's `test_embed_decision_step_11086.py` and that branch's
 packs the worst shard at **840.2 s** (either parent alone packed 840.0 s), `ceil(840.2/60 x 2)`
 rounds up to **29 m**, and the arm-2 SUM became **60.64 m, x 1.5 = 90.96 m against the 90 m cap**
 — RED where both parents pass. `fast_shards: 11` packs the same map to 782.0 s → 27 m, i.e. the
-58.6 m / 2.0 m headroom THAT re-cut recorded (the 2026-11-16 sweep had moved the emitted term
-to 23 m, and THIS re-cut's union of the two sides' duration rows — main's
-`test_embed_decision_step_11086.py` and this branch's `test_12943_cache_leg.py`
-durations packing the same fast pool — moved it to 24 m, measured both ways:
-`--emit-push-matrix` reads 23 m on `origin/main`'s manifest and 24 m on the merged
-one. That is the 55.7 m / 83.6 m / 6.4 m row above) instead of the 0.5 m S=10 had been clearing by. The cap was
+58.6 m / 2.0 m headroom THAT re-cut recorded (the 2026-11-16 sweep has since moved the emitted term
+to 24 m — `#12926` registered its own fast suite (`tests/test_embed_switch_gate_12926.py`) with a
+10 m weight, which re-packs the worst shard across the minute boundary, the same mechanism as the
+`#11576` re-cut two sentences above — and this branch's own registration packs into that same fast
+pool without moving it further: this re-cut's union of the two sides' duration rows (main's
+`test_embed_decision_step_11086.py` and this branch's `test_12943_cache_leg.py`) still emits **24 m**,
+measured: `--emit-push-matrix` on the merged manifest reads 24 m, and it read 23 m on the pre-`#12926`
+base this branch first merged (`2c67c0cf99`). The three hand-added figures stay at 55.6 m / 83.4 m /
+6.6 m (the row above), which is the 1-decimal restatement of the terms' own total, 55.64 m, that
+`config/ci-surfaces.yml` already records for this same quantity — ⛔ NOT the sum of the four ROUNDED
+terms, which reads 55.7 m: the startup term is 7.26 m (3 m 02 s + 4 m 14 s − 12 s of embedder), not
+the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) instead of the 0.5 m S=10 had been clearing by. The cap was
 NOT moved — `#3239`'s stale-head exposure is what raising it re-opens, and the SUM rose from the
 POOL, not from the pre-suite terms.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
