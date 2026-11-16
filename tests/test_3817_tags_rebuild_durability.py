@@ -374,7 +374,7 @@ def test_a_removed_tag_is_not_resurrected(env):
         "the node's tag property must hold the journal's FINAL list")
     # Nothing outside the journal's final state may appear: a rebuilt tag set
     # is the replayed set, never a union of every state the point ever held.
-    replayed = {t["name"] for t in sdk.list_tags() if t["count"]}
+    replayed = {t["name"] for t in sdk.graph_overview("tags") if t["count"]}
     assert replayed == {"keep"}, (
         f"a rebuilt tag set contains state the journal's final record does "
         f"not carry: {sorted(replayed - {'keep'})}")

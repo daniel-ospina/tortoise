@@ -607,7 +607,7 @@ class TestFourNodeChain:
         assert r.status_code == 200
         sdk = _team_sdk()
         # Legacy keyword fallback: name/keywords CONTAINS
-        found = sdk.search_sessions("s1")
+        found = sdk.search_knowledge("s1", mode="sessions")
         assert any(ev.get("sessionId") == "s1" or ev.get("session_id") == "s1"
                    for ev in found), f"s1 not discoverable: {found}"
         # get_session by session_id

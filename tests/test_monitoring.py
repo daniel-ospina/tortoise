@@ -36,7 +36,9 @@ class FakeSDK:
         proj.g.query.return_value = MagicMock(result_set=[[1]])
         return proj
 
-    def taxonomy(self):
+    # #11609: `taxonomy()` retired into the orientation container; this stub mirrors
+    # the call `monitoring.metrics` actually makes (`graph_overview(section='taxonomy')`).
+    def graph_overview(self, section=None, **kwargs):
         return {"Point": self._graph_size, "Event": 0}
 
 
@@ -62,7 +64,7 @@ class SlowColdStartSDK:
         proj.g.query.side_effect = _q
         return proj
 
-    def taxonomy(self):
+    def graph_overview(self, section=None, **kwargs):
         return {"Point": self._graph_size, "Event": 0}
 
 
@@ -1493,7 +1495,7 @@ class TestMetricsExplicitSdkArg:
             def __init__(self):
                 super().__init__(db_ok=False)
 
-            def taxonomy(self):
+            def graph_overview(self, section=None, **kwargs):
                 calls["taxonomy"] += 1
                 return {"Point": 5}
 
@@ -1527,11 +1529,11 @@ class TestGraphSizeMeasurementIsBoundedAndReported:
     class EmptySDK(FakeSDK):
         """A reachable graph with no nodes — a REAL measured zero."""
 
-        def taxonomy(self):
+        def graph_overview(self, section=None, **kwargs):
             return {"Point": 0, "Event": 0}
 
     class BoomSDK(FakeSDK):
-        def taxonomy(self):
+        def graph_overview(self, section=None, **kwargs):
             raise RuntimeError("count failed")
 
     def test_success_reports_a_measured_value(self):
@@ -1581,7 +1583,7 @@ class TestGraphSizeMeasurementIsBoundedAndReported:
         release = threading.Event()
 
         class StallSDK(FakeSDK):
-            def taxonomy(self):
+            def graph_overview(self, section=None, **kwargs):
                 # Parked on the DEDICATED graph-size worker, not the caller.
                 release.wait(5.0)
                 return {"Point": 1}
@@ -1609,7 +1611,7 @@ class TestGraphSizeMeasurementIsBoundedAndReported:
         release = threading.Event()
 
         class StallSDK(FakeSDK):
-            def taxonomy(self):
+            def graph_overview(self, section=None, **kwargs):
                 release.wait(5.0)
                 return {"Point": 1}
 
@@ -1648,7 +1650,7 @@ class TestGraphSizeMeasurementIsBoundedAndReported:
         release = threading.Event()
 
         class StallSDK(FakeSDK):
-            def taxonomy(self):
+            def graph_overview(self, section=None, **kwargs):
                 # Parked on the graph-size worker until the test ends — never
                 # returns during the loop, so the slot stays wedged.
                 release.wait(30.0)
@@ -2004,7 +2006,7 @@ class TestProbeSetupBudget:
                 proj.g.query.side_effect = _q
                 return proj
 
-            def taxonomy(self):
+            def graph_overview(self, section=None, **kwargs):
                 return {"Point": 1}
 
         started = time.monotonic()
@@ -2111,7 +2113,7 @@ class TestProbeSetupBudget:
             def __init__(self):
                 super().__init__(db_ok=True)
 
-            def taxonomy(self):
+            def graph_overview(self, section=None, **kwargs):
                 raise RuntimeError("count failed")
 
         monitoring._sdk = None
@@ -2225,7 +2227,7 @@ class TestProbeQueueIsolation:
                 assert release_setup.wait(5.0), "test never released setup"
                 return proj
 
-            def taxonomy(self):
+            def graph_overview(self, section=None, **kwargs):
                 return {"Point": 9019}
 
         holder: dict = {}
@@ -2314,7 +2316,7 @@ class TestProbeQueueIsolation:
                 clock.t += ALLOWANCE  # leftover becomes exactly 0.0
                 return proj
 
-            def taxonomy(self):
+            def graph_overview(self, section=None, **kwargs):
                 return {"Point": 9019}
 
         result = monitoring.metrics(sdk=BoundarySDK(), setup_timeout=ALLOWANCE)
@@ -2439,7 +2441,7 @@ class TestProbeSetupBudgetIntegration:
         sdk = sdk_factory()
         proj = sdk._get_proj()
         proj.g.query("MERGE (p:Point {id:'3143-p1'}) SET p.pointKind='fact'")
-        real_size = sum(sdk.taxonomy().values())
+        real_size = sum(sdk.graph_overview("taxonomy").values())
         assert real_size > 0
 
         # The cold-start overruns the liveness budget; the graph answers fine.
@@ -2464,7 +2466,7 @@ class TestProbeSetupBudgetIntegration:
         assert result["graph_size"] == real_size
         # Issue #3143's third leg: the agent's diagnostic fallback
         # (tortoise_status → sdk.status()) must agree with the health report.
-        assert sdk.status()["total_entities"] == result["graph_size"]
+        assert sdk.graph_overview("status")["total_entities"] == result["graph_size"]
 
 
 class TestRecordFunctions:
@@ -2599,7 +2601,7 @@ class TestProbeWorkerNoLeak:
                 proj.g.query.return_value = MagicMock(result_set=[[1]])
                 return proj
 
-            def taxonomy(self):
+            def graph_overview(self, section=None, **kwargs):
                 return {"Point": 3}
 
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)

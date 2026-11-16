@@ -3014,7 +3014,8 @@ def run_fts_query(
     # pool slots before LIMIT. The predicate lands in the post-YIELD WHERE —
     # i.e. at the retrieval layer, ahead of ORDER BY/LIMIT — on the SAME axis
     # as quota.py's `documents` meter (documentKind IS NOT NULL) and
-    # sdk.list_sources() (documentKind IS NULL). All three legs mean one
+    # sdk.list_sources() (now the private `_list_sources`, retired into
+    # `list_knowledge(kind='source')`) (documentKind IS NULL). All three legs mean one
     # thing: document ⟺ documentKind non-NULL, source ⟺ documentKind NULL.
     if label in _STATUS_FILTERED_LABELS:
         # #3301: the OBJECT family shares this leg's exclusion — before it,
@@ -4323,7 +4324,8 @@ def run_structural_query(
             return []
 
         # D10 (#5026): entity_type="source" is the PROVENANCE Source — the
-        # same partition as sdk.list_sources() (documentKind IS NULL). A D10
+        # same partition as sdk.list_sources() (now the private `_list_sources`,
+        # retired into `list_knowledge(kind='source')`) (documentKind IS NULL). A D10
         # document node is a :Source too, so sourceKind alone does not
         # separate them; the discriminator must be part of the retrieval
         # WHERE. Placed AFTER the no-filters gate (exactly like the status

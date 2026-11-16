@@ -122,10 +122,10 @@
     },
     {
       "kind": "sdk-method",
-      "symbol": "backfill_v25",
-      "batch": "b2-sdk-retirement-wave-1",
-      "reason": "One-shot ONTOLOGY v2.5 migration (status/pointKind backfill); zero callers. Beta w8_backfill region: dead code carrying a public promise. No recorded destination.",
-      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/backfill_v25.py",
+      "symbol": "diary_read",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/diary_read.py",
       "archived_from": "tortoise/sdk.py",
       "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
       "sources": [
@@ -134,17 +134,17 @@
       "blocks": [
         {
           "path": "tortoise/sdk.py",
-          "node": "FunctionDef:backfill_v25",
-          "sha256": "1f17fe7c0a1c22dd960adfe425a1041f03ebaf7e5d8eddfb5632a858e54f29c7"
+          "node": "FunctionDef:diary_read",
+          "sha256": "89cf225fc4b569c2b78f866a7fce2fb4b4f7505550288511e634ce24f0f4aed3"
         }
       ]
     },
     {
       "kind": "sdk-method",
-      "symbol": "calibration_passed",
-      "batch": "b2-sdk-retirement-wave-1",
-      "reason": "Gate B calibration-milestone reader. It had ONE production caller - `tortoise/gates.py`'s CLI read `TortoiseSDK().calibration_passed()` inside a try/except - so the body went PRIVATE as `_calibration_marker_recorded()` and gates.py reads that: the public door closed and the capability stayed. Beta `r3` records `check_confidence`. `_CALIBRATION_MARKER_KEY` stays: projection config-reset reads it.",
-      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/calibration_passed.py",
+      "symbol": "expand_relationships",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/expand_relationships.py",
       "archived_from": "tortoise/sdk.py",
       "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
       "sources": [
@@ -153,8 +153,236 @@
       "blocks": [
         {
           "path": "tortoise/sdk.py",
-          "node": "FunctionDef:calibration_passed",
-          "sha256": "f846c7acffba43b64dcacf4dc96a64303a0cbb5b3b49929df34c829fe5f75fef"
+          "node": "FunctionDef:expand_relationships",
+          "sha256": "e7372e42b0e555872d8e225c17e41198394af556c85fb3f4e794f5a1c46ff804"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_dedup_candidates",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_dedup_candidates.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_dedup_candidates",
+          "sha256": "2b6abaee9a6b2e4e74945b68e49a1da66e451d7111806d375224dc55200d7a60"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_namespaces",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_namespaces.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_namespaces",
+          "sha256": "1fa134fac94d03526b3593f446a4477da82ce587208112b032751b088f815690"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_pointkinds",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_pointkinds.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_pointkinds",
+          "sha256": "430f0940327946b18715844063d0ab0eb71572edd03fef38a2092964abc3b380"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_sources",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_sources.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_sources",
+          "sha256": "285966af1b8b0d0b5de07037d363801b0c600c3661cffb4a63ca91612a8d0bef"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_tags",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_tags.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_tags",
+          "sha256": "29e577c7c75172eb53845f7ad04926bd34639f151450726bcfe4039e05c396f6"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_topics",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_topics.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_topics",
+          "sha256": "3229e8b1148964b856d83dfc6a718ab2cf7d7e8ca8761f9eca073bed7eba5f0b"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "provenance",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/provenance.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:provenance",
+          "sha256": "c7eeba4c3ed19f354a6225b25b6bf5d159fb507e18d169a9f32d828685e9495e"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "search_sessions",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/search_sessions.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:search_sessions",
+          "sha256": "f69df26b5825fafebcafdcecfd22e9f5a948e04d866204a061504786161c3bdb"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "status",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into graph_overview(section='status') (#11609 Phase 2, #4282 row 9): the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/status.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:status",
+          "sha256": "3318ebf7e5a81faf94e0e725c66df8b79055061359bfbe996edc0209581fb183"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "suggest_entry_points",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/suggest_entry_points.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:suggest_entry_points",
+          "sha256": "e4d25c482b9853d7b1fe7f57c4e9340c2910ef44e65e85a2c1a95deeae16464b"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "taxonomy",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/taxonomy.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:taxonomy",
+          "sha256": "e962de4bd674d5b634d320e365ef0dd9bc5654942dc042e18ae9eb6fdd2bf580"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "validate_domain",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/validate_domain.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:validate_domain",
+          "sha256": "c41ac9817fb89846422ceaf218832cf8fd3e41374944958e71dbb5ac120b677a"
         }
       ]
     },
@@ -236,6 +464,63 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "mine_corpus",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into mine_knowledge_from_directory (#4282 Phase 2, #11609): row 17 keeps this miner under its own name, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/mine_corpus.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:mine_corpus",
+          "sha256": "5e3af56db6e2f1cdb752c49376225b7c84eb0e1af4ba231eef2b7be6b6c9f106"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "backfill_v25",
+      "batch": "b2-sdk-retirement-wave-1",
+      "reason": "One-shot ONTOLOGY v2.5 migration (status/pointKind backfill); zero callers. Beta w8_backfill region: dead code carrying a public promise. No recorded destination.",
+      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/backfill_v25.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:backfill_v25",
+          "sha256": "1f17fe7c0a1c22dd960adfe425a1041f03ebaf7e5d8eddfb5632a858e54f29c7"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "calibration_passed",
+      "batch": "b2-sdk-retirement-wave-1",
+      "reason": "Gate B calibration-milestone reader. It had ONE production caller - `tortoise/gates.py`'s CLI read `TortoiseSDK().calibration_passed()` inside a try/except - so the body went PRIVATE as `_calibration_marker_recorded()` and gates.py reads that: the public door closed and the capability stayed. Beta `r3` records `check_confidence`. `_CALIBRATION_MARKER_KEY` stays: projection config-reset reads it.",
+      "file": "archive/sdk-methods/b2-sdk-retirement-wave-1/calibration_passed.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:calibration_passed",
+          "sha256": "f846c7acffba43b64dcacf4dc96a64303a0cbb5b3b49929df34c829fe5f75fef"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "list_relations",
       "batch": "b2-sdk-retirement-wave-1",
       "reason": "Listed pack-declared relation declarations; zero callers. CANONICAL r6_canon (row R6) records graph_overview as destination (no def today, so no hint); the beta tables never recorded a target for this name. Registry call _get_kind_expander().list_relations() survives.",
@@ -269,25 +554,6 @@
           "path": "tortoise/sdk.py",
           "node": "FunctionDef:membership_get",
           "sha256": "32964a8738eb57ac53df7d32d98ca5c74ea469389c9aafc394c2049092a75337"
-        }
-      ]
-    },
-    {
-      "kind": "sdk-method",
-      "symbol": "mine_corpus",
-      "batch": "11609-phase2-sources-containers",
-      "reason": "name retired into mine_knowledge_from_directory (#4282 Phase 2, #11609): row 17 keeps this miner under its own name, frozen here as the record of what the retired name did",
-      "file": "archive/sdk-methods/11609-phase2-sources-containers/mine_corpus.py",
-      "archived_from": "tortoise/sdk.py",
-      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
-      "sources": [
-        "tortoise/sdk.py"
-      ],
-      "blocks": [
-        {
-          "path": "tortoise/sdk.py",
-          "node": "FunctionDef:mine_corpus",
-          "sha256": "5e3af56db6e2f1cdb752c49376225b7c84eb0e1af4ba231eef2b7be6b6c9f106"
         }
       ]
     },

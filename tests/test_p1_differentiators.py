@@ -214,7 +214,10 @@ class TestProvenanceChain:
         """Point authoredBy matches a Subject → returns full chain."""
         sdk.create_subject("pi-agent", subjectKind="agent")
         p = sdk.create_point("statement", "A claim", authoredBy="pi-agent")
-        result = sdk.provenance(p["id"])
+        # The chain is not an EP surface: the posterior gate is opted out, exactly as
+        # `_check_confidence_provenance` (mcp_server) does the same for the live door.
+        result = sdk.check_confidence(p["id"], include_provenance=True,
+            require_calibration=False)['provenance']
         assert "error" not in result
         assert result["point"]["authoredBy"] == "pi-agent"
         assert result["subject"]["name"] == "pi-agent"
@@ -224,26 +227,30 @@ class TestProvenanceChain:
         """Case-insensitive authoredBy → Subject matching."""
         sdk.create_subject("El Dato Team", subjectKind="team")
         p = sdk.create_point("statement", "B claim", authoredBy="el dato team")
-        result = sdk.provenance(p["id"])
+        result = sdk.check_confidence(p["id"], include_provenance=True,
+            require_calibration=False)['provenance']
         assert result["subject"] is not None
         assert result["subject"]["name"] == "El Dato Team"
 
     def test_provenance_no_author(self, sdk):
         """Point without authoredBy → returns point info only."""
         p = sdk.create_point("statement", "no author claim")
-        result = sdk.provenance(p["id"])
+        result = sdk.check_confidence(p["id"], include_provenance=True,
+            require_calibration=False)['provenance']
         assert result["point"]["authoredBy"] == ""
         assert "subject" not in result  # no author → no subject lookup
 
     def test_provenance_no_matching_subject(self, sdk):
         """Point authoredBy has no matching Subject → subject is None."""
         p = sdk.create_point("statement", "orphan", authoredBy="ghost")
-        result = sdk.provenance(p["id"])
+        result = sdk.check_confidence(p["id"], include_provenance=True,
+            require_calibration=False)['provenance']
         assert result["subject"] is None
 
     def test_provenance_nonexistent_point(self, sdk):
         """Nonexistent point → error."""
-        result = sdk.provenance("nonexistent-id")
+        result = sdk.check_confidence("nonexistent-id", include_provenance=True,
+            require_calibration=False)['provenance']
         assert "error" in result
 
     def test_provenance_delegation_chain(self, sdk):
@@ -261,7 +268,8 @@ class TestProvenanceChain:
             params={"sid": sub["id"]},
         )
         p = sdk.create_point("statement", "engineered", authoredBy="Alice")
-        result = sdk.provenance(p["id"])
+        result = sdk.check_confidence(p["id"], include_provenance=True,
+            require_calibration=False)['provenance']
         assert len(result["delegation"]) >= 1
         via_types = [d["via"] for d in result["delegation"]]
         assert "HAS_ROLE" in via_types

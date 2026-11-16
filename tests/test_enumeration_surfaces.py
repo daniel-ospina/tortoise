@@ -87,7 +87,7 @@ def _create_raw_point(sdk: TortoiseSDK, pid: str, kind: str, content: str,
 class TestListPointKinds:
     def test_empty_graph(self, sdk):
         """Empty graph returns empty list."""
-        result = sdk.list_pointkinds()
+        result = sdk.graph_overview("pointkinds")
         assert isinstance(result, list)
         assert result == []
 
@@ -98,7 +98,7 @@ class TestListPointKinds:
         _make_point(sdk, kind="goal", content="gamma")
         _make_point(sdk, kind="observation", content="delta")
 
-        result = sdk.list_pointkinds()
+        result = sdk.graph_overview("pointkinds")
 
         # Should have 3 kinds
         assert len(result) == 3
@@ -124,7 +124,7 @@ class TestListPointKinds:
         # Create an operator (is_operator=true) — needs real source/target
         sdk.create_operator("IMPL", p1["id"], [p2["id"]])
 
-        result = sdk.list_pointkinds()
+        result = sdk.graph_overview("pointkinds")
         # Only "statement" should appear (2 points), not the operator
         by_kind = {r["kind"]: r for r in result}  # noqa: F841
         # The operator's pointKind is typically "statement" (default for operators)
@@ -145,7 +145,7 @@ class TestListPointKinds:
         _create_raw_point(sdk, "legacy_op", "statement", "legacy op",
                          op_type="IMPL")
 
-        result = sdk.list_pointkinds()
+        result = sdk.graph_overview("pointkinds")
         by_kind = {r["kind"]: r for r in result}
         assert by_kind["statement"]["count"] == 2  # legacy op excluded
 
@@ -153,7 +153,7 @@ class TestListPointKinds:
         """When pointKind has colon prefix, pack field is extracted."""
         sdk.create_point("product-strategy:jobToBeDone", "test jtbd")
 
-        result = sdk.list_pointkinds()
+        result = sdk.graph_overview("pointkinds")
         assert len(result) >= 1
 
         # Find our prefixed kind
@@ -168,7 +168,7 @@ class TestListPointKinds:
 class TestListSources:
     def test_empty_graph(self, sdk):
         """Empty graph returns empty list."""
-        result = sdk.list_sources()
+        result = sdk.list_knowledge("source")
         assert isinstance(result, list)
         assert result == []
 
@@ -186,7 +186,7 @@ class TestListSources:
         _make_point(sdk, kind="statement", content="point 2",
                     extractedFrom=url)
 
-        result = sdk.list_sources()
+        result = sdk.list_knowledge("source")
         assert len(result) == 1
         assert result[0]["url"] == url
         assert result[0]["sourceKind"] == "document"  # default from _link_source
@@ -206,7 +206,7 @@ class TestListSources:
         # Delete the point but Source remains
         sdk.delete_point(p["id"])
 
-        result = sdk.list_sources()
+        result = sdk.list_knowledge("source")
         source = [s for s in result if s["url"] == url]
         assert len(source) == 1
         assert source[0]["points"] == 0
@@ -224,7 +224,7 @@ class TestListSources:
         _make_point(sdk, kind="statement", content="p",
                     extractedFrom=url_b)
 
-        result = sdk.list_sources()
+        result = sdk.list_knowledge("source")
         # Filter to only our test sources
         ours = [s for s in result if s["url"] in (url_a, url_b)]
         assert len(ours) == 2
@@ -241,7 +241,7 @@ class TestListSources:
 class TestListNamespaces:
     def test_returns_pack_namespaces(self, sdk):
         """Returns installed pack namespaces with expected keys."""
-        result = sdk.list_namespaces()
+        result = sdk.graph_overview("namespaces")
         assert isinstance(result, list)
         assert len(result) >= 4
 
@@ -380,7 +380,7 @@ class TestSummarizeStructureRekeyed:
         sdk.create_operator("IMPL", p1["id"], [p4["id"]])
 
         status = sdk.summarize_structure()
-        per_kind_sum = sum(r["count"] for r in sdk.list_pointkinds())
+        per_kind_sum = sum(r["count"] for r in sdk.graph_overview("pointkinds"))
         assert status["total"] == per_kind_sum == 4
         assert status["operators"] == 1
         assert status["gate_total"] == 1
@@ -395,7 +395,7 @@ class TestSummarizeStructureRekeyed:
                           op_type="IMPL")
 
         status = sdk.summarize_structure()
-        per_kind_sum = sum(r["count"] for r in sdk.list_pointkinds())
+        per_kind_sum = sum(r["count"] for r in sdk.graph_overview("pointkinds"))
         assert status["total"] == per_kind_sum == 2
         assert status["operators"] == 1
 
@@ -412,7 +412,7 @@ class TestSummarizeStructureRekeyed:
         )
 
         status = sdk.summarize_structure()
-        per_kind_sum = sum(r["count"] for r in sdk.list_pointkinds())
+        per_kind_sum = sum(r["count"] for r in sdk.graph_overview("pointkinds"))
         assert status["total"] == 2
         assert per_kind_sum == 1  # only the kined legacy point is listable
 

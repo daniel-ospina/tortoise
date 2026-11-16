@@ -2,7 +2,8 @@
 
 Why this module exists
 ----------------------
-``TortoiseSDK.list_dedup_candidates(candidate_type='entity')`` answered from a
+``TortoiseSDK.list_dedup_candidates(candidate_type='entity')`` — now the private
+``_list_dedup_candidates``, retired into ``review_link_candidates`` — answered from a
 hard-coded ``return []`` (#783's stub). ``tortoise_list_dedup_candidates`` is a
 live MCP tool, so **"are there duplicate entities?"** answered *"none"* when the
 truth was *"cannot answer"*. That is the fail-open shape this codebase refuses

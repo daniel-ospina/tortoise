@@ -34,7 +34,7 @@ def sdk():
 
 class TestTaxonomy:
     def test_keys(self, sdk):
-        result = sdk.taxonomy()
+        result = sdk.graph_overview("taxonomy")
         # D10 (ONTOLOGY v3.15 §4.4): :Document is retired — a document is a
         # :Source, so the label set carries ``Source``, not ``Document``.
         for label in ("Point", "Event", "Subject", "Object", "Source"):
@@ -75,15 +75,15 @@ class TestTaxonomy:
         block = re.search(r"\{([^}]*)\}", entries[0].description)
         assert block, f"no {{Key: N}} block in the description: {entries[0].description!r}"
         published = {part.split(":")[0].strip() for part in block.group(1).split(",")}
-        assert published == set(sdk.taxonomy().keys())
+        assert published == set(sdk.graph_overview("taxonomy").keys())
         assert "Document" not in published
 
     def test_counts_points(self, sdk):
-        result = sdk.taxonomy()
+        result = sdk.graph_overview("taxonomy")
         assert result["Point"] == 5
 
     def test_empty_labels_return_zero(self, sdk):
-        result = sdk.taxonomy()
+        result = sdk.graph_overview("taxonomy")
         # No events/subjects/objects/sources in test data
         assert result["Event"] == 0
         assert result["Subject"] == 0
@@ -162,7 +162,7 @@ class TestRetiredDocumentLabelClaims:
 
 class TestListPointKinds:
     def test_returns_list(self, sdk):
-        result = sdk.list_pointkinds()
+        result = sdk.graph_overview("pointkinds")
         assert isinstance(result, list)
 
     def test_counts_by_kind(self, sdk):
@@ -170,7 +170,7 @@ class TestListPointKinds:
         sdk.create_point("strategy", "strat two")
         sdk.create_point("research", "research one")
         sdk.create_point("research", "research two")
-        result = sdk.list_pointkinds()
+        result = sdk.graph_overview("pointkinds")
         kinds = {r["kind"]: r["count"] for r in result}
         assert kinds["strategy"] == 2
         assert kinds["research"] == 2
@@ -179,7 +179,7 @@ class TestListPointKinds:
         db_path = os.path.join(tempfile.mkdtemp(), "empty.db")
         s = TortoiseSDK(db_path)
         try:
-            assert s.list_pointkinds() == []
+            assert s.graph_overview("pointkinds") == []
         finally:
             s.close()
 
@@ -188,12 +188,12 @@ class TestListPointKinds:
 
 class TestListTopics:
     def test_entity_not_found(self, sdk):
-        result = sdk.list_topics("nonexistent-id")
+        result = sdk.graph_overview("topics", entity_id="nonexistent-id")
         assert "error" in result
 
     def test_entity_without_neighbors(self, sdk):
         p = sdk.create_point("statement", "loner")
-        result = sdk.list_topics(p["id"])
+        result = sdk.graph_overview("topics", entity_id=p["id"])
         assert result["id"] == p["id"]
         assert result["pointKind"] == "statement"
         assert result["neighbors"] == []
@@ -206,7 +206,7 @@ class TestListTopics:
         sdk.create_operator("IMPL", a["id"], [b["id"]])
         sdk.create_operator("NAND", a["id"], [c["id"]])
 
-        result = sdk.list_topics(a["id"])
+        result = sdk.graph_overview("topics", entity_id=a["id"])
         assert result["id"] == a["id"]
         assert len(result["neighbors"]) == 2
         counts = result["neighborCounts"]

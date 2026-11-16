@@ -423,7 +423,7 @@ fan-out respected; C8 holds.
 from `sdk.py`'s point-creation path at `:19343` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
-`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6659` and
+`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6661` and
 consumed at `sdk.py:10606`/`:10659` — ⚠️ all three are LINE cites, not symbols (nothing in this tree
 keys them by symbol, and an earlier version of this parenthesis said the pair was), so an insert
 above any of them moves the claim: this PR's own +22-line tail to `search_engine.py` moved the definition
