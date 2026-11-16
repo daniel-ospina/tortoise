@@ -207,11 +207,17 @@ _SHELL_OPENERS = re.compile(
 _SHELL_CLOSERS = re.compile(
     r"(?:^|[;&|])\s*(?:fi|done|esac)\b|^\s*\}\s*(?:[0-9]*>&[0-9]+)?\s*$|^\s*\)\s*$"
 )
-#: A heredoc opener: `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"`. Its BODY is data, not shell
-#: (review P1, measured): scanning the body let a `fi`/`done`/`esac` at line start inside it close
-#: the ENCLOSING block, so an `export` in a branch that never runs was credited `STATED` and the
-#: gate exited 0 over an unarmed process. `(?<!<)` keeps `<<<` (here-string) out.
-_SHELL_HEREDOC = re.compile(r"(?<!<)<<-?\s*(?P<q>['\"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=q)")
+#: A heredoc opener: `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"`, `<<\WORD`. Its BODY is data,
+#: not shell (review P1, measured): scanning the body let a `fi`/`done`/`esac` at line start inside
+#: it close the ENCLOSING block, so an `export` in a branch that never runs was credited `STATED`
+#: and the gate exited 0 over an unarmed process. `(?<!<)` keeps `<<<` (here-string) out.
+#: ⛔ A BACKSLASH-quoted delimiter (`<<\EOF`) is the third valid spelling (it suppresses expansion
+#: in the body exactly like quotes do) and was not accepted, so its body was read as SHELL —
+#: measured fail-open, same class (review). The backslash is matched separately rather than inside
+#: the quote group because `(?P=q)` must compare only the QUOTING delimiter.
+_SHELL_HEREDOC = re.compile(
+    r"(?<!<)<<-?\s*(?P<bs>\\)?(?P<q>['\"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=q)"
+)
 #: A `$(( … ))` arithmetic span — `<<` inside it is a SHIFT, not a heredoc opener.
 _SHELL_ARITHMETIC = re.compile(r"\$\(\(.*?\)\)")
 _SHELL_TERMINATES = re.compile(r"^\s*(?:exit|exec)\b")
@@ -618,6 +624,201 @@ def _shell_code_lines(text: str) -> list[str]:
     return out
 
 
+#: Spans whose BODY is data for the depth walk, never block structure. A command substitution or a
+#: subshell runs in its OWN shell, so an `if`/`fi` inside it neither opens nor closes a block in
+#: the script being read (and an `export` inside it never reaches the process, which is why a
+#: substituted export must not be credited either). Quotes are spans for the same reason: their
+#: content is a string.
+_SPAN_SINGLE = "single-quote"
+_SPAN_DOUBLE = "double-quote"
+_SPAN_ANSI_C = "ansi-c"
+_SPAN_CMDSUB = "command-substitution"
+_SPAN_BACKTICK = "backtick"
+_SPAN_SUBSHELL = "subshell"
+
+#: Characters after which an unquoted `#` BEGINS A COMMENT (bash starts one at any WORD start).
+#: Metacharacters plus blanks; `$#`/`a#b`/`${1#/}` are not comments, which is why this is a set
+#: rather than `isspace()` — `set -x;# n/a; fi` is an ordinary comment that the whitespace-only
+#: rule read as CODE, and the `; fi` in it closed the enclosing block (review, measured).
+_COMMENT_STARTS_AFTER = " \t;&|()<>"
+
+
+def _shell_structure(text: str, stack: tuple = ()) -> tuple[str, tuple]:
+    """``text`` with every span body and a trailing comment blanked — the STRUCTURAL view.
+
+    Block keywords are matched against THIS, never against the raw line (review P1 at
+    `19afbd0865`, measured): `_SHELL_CLOSERS` searched the raw logical line, so a `; fi` inside a
+    quoted argument (`echo "n/a; fi"`) or inside a trailing comment (`echo hi  # see; fi below`)
+    closed the ENCLOSING block. The depth then read 0 for a branch that never runs, and both
+    `export`s inside it were credited ``STATED`` — the gate exited 0 over a process that receives
+    neither switch.
+
+    ⛔ Why spans and not quote-cleaning (a fresh reviewer measured four more fail-opens in the
+    quote-only version at `19afbd0865`+, all the same root): a block keyword is data wherever it
+    sits inside a construct this reader does not evaluate — a quoted string, a comment, an
+    ANSI-C string (`$'don\\'t; fi'`), a command substitution (`$(if …; fi)`, `` `if …; fi` ``) or a
+    subshell (`( if …; fi )`). Each leaked a closer into the enclosing depth and re-armed the
+    never-running-branch credit, exit 0. So every span is BLANKED, contents included, and the
+    span can itself contain quotes, further substitutions and parens. The module's contract is
+    that an unmodelled form lands on ``ambiguous`` rather than a pass, and this is that contract
+    made structural: what the reader does not evaluate contributes nothing to the depth.
+
+    The mirror direction matters just as much, and it is why an ESCAPED character is blanked
+    rather than read as a delimiter: `echo \\"n/a\\"` is a literal quote in bash, and reading it as
+    a span opener left the span open for the rest of the file, blanked the real `fi`, and REFUSED
+    an honest `=1` script that passed before this change (measured — a false refusal is a bug on
+    this gate too).
+
+    ``stack`` is the span state still open when the caller's previous line ended, returned for the
+    next line (⛔ a span may SPAN LINES — measured fail-open: `echo "n/a` then `fi"` puts a `fi` at
+    column 0 that no per-line reader can know is data; and `$(` … `)` on separate lines is
+    ordinary shell). Carrying the state is what makes the verdict about the SCRIPT rather than
+    about each line.
+    """
+    out: list[str] = []
+    frames = list(stack)
+    index = 0
+    length = len(text)
+
+    def blank(count: int) -> None:
+        out.extend(" " * count)
+
+    while index < length:
+        char = text[index]
+        kind = frames[-1][0] if frames else ""
+
+        if kind in (_SPAN_SINGLE, _SPAN_DOUBLE, _SPAN_ANSI_C):
+            # Inside a string: only its own delimiter ends it (no escapes in '…'; escapes in "…"
+            # and $'…'). Everything is data.
+            if kind != _SPAN_SINGLE and char == "\\" and index + 1 < length:
+                blank(2)
+                index += 2
+                continue
+            closer = '"' if kind == _SPAN_DOUBLE else "'"
+            if char == closer:
+                frames.pop()
+            blank(1)
+            index += 1
+            continue
+
+        if kind in (_SPAN_CMDSUB, _SPAN_SUBSHELL, _SPAN_BACKTICK):
+            # Inside a substitution/subshell: parens (or the closing backtick) end it, quoted
+            # spans are stepped over, and nothing here opens or closes an enclosing block.
+            if char == "\\" and index + 1 < length:
+                blank(2)
+                index += 2
+                continue
+            if char in "\"'":
+                frames.append((_SPAN_DOUBLE if char == '"' else _SPAN_SINGLE, 0))
+                blank(1)
+                index += 1
+                continue
+            if char == "$" and index + 1 < length and text[index + 1] == "(":
+                frames.append((_SPAN_CMDSUB, 1))
+                blank(2)
+                index += 2
+                continue
+            if char == "`" and kind != _SPAN_BACKTICK:
+                frames.append((_SPAN_BACKTICK, 0))
+                blank(1)
+                index += 1
+                continue
+            if kind == _SPAN_BACKTICK:
+                if char == "`":
+                    frames.pop()
+                blank(1)
+                index += 1
+                continue
+            if char == "(":
+                frames[-1] = (kind, frames[-1][1] + 1)
+                blank(1)
+                index += 1
+                continue
+            if char == ")":
+                if frames[-1][1] <= 1:
+                    frames.pop()
+                else:
+                    frames[-1] = (kind, frames[-1][1] - 1)
+                blank(1)
+                index += 1
+                continue
+            blank(1)
+            index += 1
+            continue
+
+        # ---- no span open: this character is CODE ----
+        if char == "\\" and index + 1 < length:
+            blank(2)  # an escaped character is data, never a delimiter
+            index += 2
+            continue
+        if char == "'":
+            frames.append((_SPAN_SINGLE, 0))
+            blank(1)
+            index += 1
+            continue
+        if char == '"':
+            frames.append((_SPAN_DOUBLE, 0))
+            blank(1)
+            index += 1
+            continue
+        if char == "$" and index + 1 < length:
+            following = text[index + 1]
+            if following == "'":
+                frames.append((_SPAN_ANSI_C, 0))
+                blank(2)
+                index += 2
+                continue
+            if following == "(":
+                frames.append((_SPAN_CMDSUB, 1))
+                blank(2)
+                index += 2
+                continue
+        if char == "`":
+            frames.append((_SPAN_BACKTICK, 0))
+            blank(1)
+            index += 1
+            continue
+        if char == "(":
+            # A subshell/group body or a function's `()`: blanked either way, so `( if …; fi )`
+            # cannot leak a closer and `name() {` still leaves its `{` to open the block.
+            frames.append((_SPAN_SUBSHELL, 1))
+            blank(1)
+            index += 1
+            continue
+        if char == "#" and (index == 0 or text[index - 1] in _COMMENT_STARTS_AFTER):
+            break  # a comment: nothing after it is shell
+        out.append(char)
+        index += 1
+    return "".join(out), tuple(frames)
+
+
+def _shell_structures(lines: list[str]) -> list[str]:
+    """The structural view of every logical line, with SPAN state carried ACROSS lines."""
+    out: list[str] = []
+    stack: tuple = ()
+    for line in lines:
+        structure, stack = _shell_structure(line, stack)
+        out.append(structure)
+    return out
+
+
+def _shell_assignment(line: str, structure: str):
+    """``_SHELL_ASSIGNMENT.match``, but only for a head the STRUCTURE agrees is CODE.
+
+    The assignment match runs on the RAW line (the value needs its quotes intact), so without
+    this guard an ``export TORTOISE_*_GATE=1`` that is merely the TEXT of a top-level multi-line
+    string was credited ``STATED`` — measured: a script whose only "arm" is a line of help text
+    inside ``echo "…"`` printed ``ok`` with exit 0 over a process that receives neither switch.
+    Blanking preserves length, so the head (``export KEY=``) can be compared byte-for-byte against
+    the same slice of the structural view: anything inside a span differs there.
+    """
+    match = _SHELL_ASSIGNMENT.match(line)
+    if not match:
+        return None
+    head = line[: match.start("value")]
+    return match if structure[: len(head)] == head else None
+
+
 def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     """Assignments an entrypoint script exports at TOP LEVEL (last wins) + ambiguous switch names.
 
@@ -631,19 +832,22 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
     ambiguous: set[str] = set()
     depth = 0
     terminated = False
-    for line in _shell_code_lines(text):
-        if _SHELL_CLOSERS.search(line):
+    code_lines = _shell_code_lines(text)
+    for line, structure in zip(code_lines, _shell_structures(code_lines), strict=True):
+        # ⛔ STRUCTURE, not the raw line: a closer inside a quote or a comment is DATA (review P1),
+        # and quote state carried across lines covers a quoted string that spans a newline.
+        if _SHELL_CLOSERS.search(structure):
             # ⛔ A line that OPENS as well as closes a block is net ZERO (review P1 regression,
             # measured): `if [ -n "$X" ]; then echo hi; fi` inside a function body matched the
             # closer, subtracted one, and `continue` skipped the opener accounting — so a
             # nested export AFTER it read as top level and was credited STATED (exit 0 over a
             # helper that is never called). A bare `fi`/`done`/`}` still decrements.
-            if not _SHELL_OPENERS.search(line):
+            if not _SHELL_OPENERS.search(structure):
                 depth = max(0, depth - 1)
             ambiguous.update(_mentioned_switches(line))
             continue
         conditional = depth > 0 or terminated
-        match = _SHELL_ASSIGNMENT.match(line)
+        match = _shell_assignment(line, structure)
         if match:
             key, value = match.group("key"), _strip_inline_comment(match.group("value"))
             if key in SWITCHES and (conditional or not _states_a_literal(value)):
@@ -679,7 +883,7 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             continue
         if _SHELL_EXPORT_NAME.match(line):
             continue  # `export NAME` states no value; not an arm
-        if _SHELL_OPENERS.search(line):
+        if _SHELL_OPENERS.search(structure):
             depth += 1
         if depth == 0 and _SHELL_TERMINATES.match(line):
             terminated = True
