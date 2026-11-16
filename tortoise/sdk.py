@@ -27584,7 +27584,9 @@ class TortoiseSDK:
 
         Paging is a CONTRACT, not decoration (AIP-158, and this surface's own
         row 4): a list that hits its cap must say so and hand back a way to
-        continue. ``claim`` and ``tag`` publishes ``total``/``hasMore``; the
+        continue. ``claim`` publishes ``total``/``hasMore``; the tag read pages
+        through :meth:`search_knowledge` (``mode="tag"``), because ``tag`` is not
+        one of :data:`LIST_KNOWLEDGE_KINDS`. The
         collections that are inherently whole-vocabulary (``source``,
         ``namespace``, ``batch``) are bounded by ``limit`` and are documented as
         capped where they are capped, never silently short.
@@ -27634,10 +27636,14 @@ class TortoiseSDK:
                          require_calibration: bool | None = None) -> Any:
         """How confident the graph is — the confidence view ONLY (row 5).
 
-        The container answers with the confidence read; it never recomputes or
-        writes one (that is :meth:`compute_confidence`'s job, and a read door
-        must not do a write — the reason `compute_confidence` stays its own
-        entry). Dispatch is by argument, as `docs/product/bridge-table.md` Part A
+        The container answers with the confidence VIEW; it never recomputes the
+        posterior (that is :meth:`compute_confidence`'s job, and the reason
+        `compute_confidence` stays its own entry). ⚠️ It is NOT write-free: the
+        ``claim_id`` arm reaches :meth:`get_confidence`, whose lazy-consistency
+        path dreams a DIRTY root (``self.dream(dirty_only=True, …)``) — a write
+        that PRE-DATES this container and is unchanged by it, which is also why
+        the MCP door for this row is tiered ``maintenance`` rather than ``read``.
+        Dispatch is by argument, as `docs/product/bridge-table.md` Part A
         records for this target:
 
           claim_id= — one claim's EP posterior ``{mean, variance, alpha, beta}``;
@@ -27722,7 +27728,7 @@ class TortoiseSDK:
                                mode: str = "both",
                                scope: str | None = None,
                                candidate_type: str = "content",
-                               limit: int = 50,
+                               limit: int | None = None,
                                threshold: float | None = None) -> Any:
         """Connections found but not made — READ-ONLY (row 10).
 
@@ -27740,6 +27746,16 @@ class TortoiseSDK:
         Nothing here writes. Accepting a candidate is
         :meth:`link_entities` with its endpoints — never a side effect of reading
         the queue (the candidates-never-write contract, #438).
+
+        ``limit`` bounds EVERY arm, not just ``dedup`` (#12951 review): the
+        parameter is advertised on the public door, so an arm that dropped it
+        answered with the callee's own bound while the caller believed it had
+        asked for N — the silently-dropped-argument failure this surface exists
+        to kill. ``None`` (the default) preserves each callee's bound exactly, so
+        a caller that does not pass it gets byte-identical behaviour to before
+        the fix: ``connections`` maps it onto ``add_limit``/``prune_limit``,
+        ``cross_lens`` onto ``max_candidates`` (and ``top_k``, capped at the ANN
+        pool), ``dedup`` onto its own ``limit``.
         """
         kind = (kind or "connections").strip().lower()
         if kind not in self.REVIEW_LINK_CANDIDATE_KINDS:
@@ -27747,12 +27763,18 @@ class TortoiseSDK:
                 f"review_link_candidates: unknown kind {kind!r}. Valid kinds: "
                 f"{', '.join(self.REVIEW_LINK_CANDIDATE_KINDS)}")
         if kind == "connections":
-            return self.review_connections(mode=mode, scope=scope)
+            extra = {} if limit is None else {
+                "add_limit": limit, "prune_limit": limit}
+            return self.review_connections(mode=mode, scope=scope, **extra)
         if kind == "dedup":
+            extra = {} if limit is None else {"limit": limit}
             return self._list_dedup_candidates(
-                candidate_type=candidate_type, limit=limit)
+                candidate_type=candidate_type, **extra)
+        extra = {} if limit is None else {
+            "max_candidates": limit, "top_k": min(limit, CROSS_LENS_ANN_TOP_K)}
         return self.get_cross_lens_candidates(
-            threshold=DEFAULT_THRESHOLD if threshold is None else threshold)
+            threshold=DEFAULT_THRESHOLD if threshold is None else threshold,
+            **extra)
 
     # ── Chain Integrity ───────────────────────────────────────────
 

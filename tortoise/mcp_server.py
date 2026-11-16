@@ -7626,7 +7626,11 @@ def tortoise_check_confidence(claim_id: str | None = None,
     """How confident the graph is — the confidence view only (#4282 row 5).
 
     Dispatch by argument: claim_id | topic | session | calibrate (the default
-    when nothing is named). It never recomputes or writes a belief.
+    when nothing is named). It never RECOMPUTES the posterior, and it is not
+    write-free either: the `claim_id` arm reaches `get_confidence`, whose
+    lazy-consistency path dreams a DIRTY root (`self.dream(dirty_only=True, …)`)
+    — a write that PRE-DATES this container and is unchanged by it, which is why
+    the row is tiered `maintenance` rather than `read`.
     """
     return _safe(
         _get_org_sdk().check_confidence, claim_id, topic=topic, session=session,
@@ -7655,12 +7659,15 @@ def tortoise_review_link_candidates(kind: str = "connections",
                                     mode: str = "both",
                                     scope: str | None = None,
                                     candidate_type: str = "content",
-                                    limit: int = 50,
+                                    limit: int | None = None,
                                     threshold: float | None = None) -> Any:
     """Connections found but not made — READ-ONLY (#4282 row 10).
 
     kind: connections | dedup | cross_lens. Nothing here writes; accepting a
     candidate is `link_entities` with its two endpoints.
+
+    `limit` bounds every arm; omitted (the default) keeps each arm's own bound,
+    which is what the SDK container documents at `review_link_candidates`.
     """
     return _safe(
         _get_org_sdk().review_link_candidates, kind, mode=mode, scope=scope,
