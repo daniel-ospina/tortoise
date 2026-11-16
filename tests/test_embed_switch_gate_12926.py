@@ -1057,6 +1057,130 @@ def test_a_heredoc_delimiter_is_a_WORD_not_an_identifier():
     assert stated == {}, f"an unmodelled `<<` let the rest of the file be read: {stated}"
 
 
+def test_a_separator_that_ends_a_LINE_still_makes_the_next_statement_conditional():
+    """Review P1 at `7d356a5494` — the separator did not cross the line boundary.
+
+    `_shell_statements` carries a separator only WITHIN one logical line, so the idiomatic
+    multi-line guard handed each export a first-segment `separator == ""`:
+
+        [ -n "${MAYBE_ARM:-}" ] &&
+          export TORTOISE_VALUE_GATE=1 &&
+          export TORTOISE_EMBED_GATE=1
+
+    Both were credited `STATED` (gate `ok`, exit 0) while bash — `MAYBE_ARM` unset — ran no
+    `export` at all and the process had neither switch. The verdict flipped on an invisible line
+    break, which defeats the one-line pin the class already had.
+    """
+    for label, script in (
+        (
+            "a multi-line `&&` guard",
+            '[ -n "${MAYBE_ARM:-}" ] &&\n  export TORTOISE_VALUE_GATE=1 &&\n  export TORTOISE_EMBED_GATE=1\n',
+        ),
+        ("a line-trailing `&&`", "false &&\n  export TORTOISE_VALUE_GATE=1\n"),
+        ("a line-trailing `||`", "true ||\n  export TORTOISE_VALUE_GATE=1\n"),
+    ):
+        stated, ambiguous = gate._shell_assignments("#!/bin/bash\n" + script + 'exec "$@"\n')
+        assert stated == {}, f"{label}: credited across a line boundary: {stated}"
+        assert "TORTOISE_VALUE_GATE" in ambiguous, (label, ambiguous)
+
+    # The other direction: a `;` that ends a line is an ordinary separator, not a guard.
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/bash\nexport TORTOISE_VALUE_GATE=1;\nexport TORTOISE_EMBED_GATE=1\nexec \"$@\"\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert ambiguous == set(), ambiguous
+
+
+def test_a_control_word_before_a_compound_command_does_not_hide_the_block():
+    """Review P2 at `7d356a5494` — `!`/`time` before `if` defeated the opener anchor.
+
+    `! if false; then export K=1; fi` is valid shell (`bash -n` accepts it) and is the SAME
+    never-running body the reader already refuses, but the anchor demanded the keyword immediately
+    after the separator: the block never opened, its body read at depth 0, and both exports were
+    credited (gate `ok`, exit 0, real process: no switch at all).
+    """
+    for label, prefix in (("a negation", "!"), ("the time builtin", "time")):
+        stated, ambiguous = gate._shell_assignments(
+            f"#!/bin/bash\n{prefix} if false; then\n"
+            "  export TORTOISE_VALUE_GATE=1\n"
+            "  export TORTOISE_EMBED_GATE=1\n"
+            "fi\nexec \"$@\"\n"
+        )
+        assert stated == {}, f"{label} hid the block: {stated}"
+        assert {"TORTOISE_VALUE_GATE", "TORTOISE_EMBED_GATE"} <= ambiguous, (label, ambiguous)
+
+
+def test_brace_EXPANSION_is_not_a_block_opener():
+    """Review P3 at `7d356a5494` — the word-initial `{` arm over-reached onto brace expansion.
+
+    `mkdir -p {logs,cache}` is brace EXPANSION: crediting its `{` as a block opener leaked the
+    depth UP, so the honest literal `=1` exports below it were refused — with a message that
+    blamed the VALUE instead of the depth. A block brace is a command word, i.e. followed by
+    whitespace or end of statement, which is exactly what the lookahead now requires.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/bash\nmkdir -p {logs,cache}\n"
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+        'exec "$@"\n'
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert ambiguous == set(), ambiguous
+    # …and the real one-line function body is still an opener (the arm this narrowed).
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/bash\narm() { :; export TORTOISE_VALUE_GATE=1; }\nexec \"$@\"\n"
+    )
+    assert stated == {}, stated
+    assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
+
+
+def test_an_env_invocation_that_strips_the_switch_retracts_it():
+    """Review P3 at `7d356a5494` — `exec env -u K` / `env -i` is a retraction too.
+
+    The reader modelled the shell BUILTINS (`unset`, `export -n`, a bare `K=`) and nothing else, so
+    `export K=1; exec env -u K "$@"` was reported `STATED` while the process had no K at all — the
+    same in-script retraction family, one layer out.
+    """
+    for label, tail in (
+        ("`env -u`", 'exec env -u TORTOISE_EMBED_GATE "$@"'),
+        ("`env -i`", 'exec env -i "$@"'),
+    ):
+        stated, ambiguous = gate._shell_assignments(
+            "#!/bin/bash\nexport TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n" + tail + "\n"
+        )
+        assert "TORTOISE_EMBED_GATE" in ambiguous, (label, ambiguous, stated)
+        assert "TORTOISE_EMBED_GATE" not in stated, (label, stated)
+    # `env VAR=1 cmd` states nothing about the switches — it must not retract them.
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/bash\nexport TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+        'exec env FOO=1 "$@"\n'
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert ambiguous == set(), ambiguous
+
+
+def test_a_heredoc_body_line_ending_in_a_BACKSLASH_does_not_eat_the_terminator():
+    r"""Review P2 at `7d356a5494` — continuations were joined BEFORE heredoc bodies were removed.
+
+    In a QUOTED heredoc bash does not continue a body line ending in `\`, so it ends the body at
+    the terminator and runs the statements after it. Joining first swallowed the terminator line
+    and everything below it, so an honest entrypoint whose two switches DO reach the process was
+    refused — with a message that blamed the value. Fixed by removing bodies on PHYSICAL lines
+    first, then joining continuations among the survivors.
+    """
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/bash\n"
+        "cat > /tmp/n.txt <<'EOF'\n"
+        "a literal backslash at end of line \\\n"
+        "EOF\n"
+        "export TORTOISE_VALUE_GATE=1\n"
+        "export TORTOISE_EMBED_GATE=1\n"
+        'exec "$@"\n'
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert ambiguous == set(), ambiguous
+
+
 def test_an_arithmetic_shift_is_not_a_heredoc():
     """Review P3: `<<` inside `$(( … ))` is a SHIFT, and it swallowed the rest of the file.
 
