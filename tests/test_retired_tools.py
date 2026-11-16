@@ -47,7 +47,7 @@ class TestDeclaration:
             assert callable(handler), f"handler {spec.name}() was removed"
 
     def test_public_sdk_surface_is_unchanged(self):
-        """The SDK surface did not GROW: 125 public methods, as pinned today.
+        """The SDK surface did not GROW: 120 public methods, as pinned today.
 
         This used to read *"Only MCP tool NAMES are retired — every public SDK method
         stays"*, which #4282 phase 2 made false: `events_poll`/`restore_point_at`
@@ -70,9 +70,16 @@ class TestDeclaration:
         MCP target" — where it and `canonical-mcp-tools.md` differ, canonical governs.
         #12521 (`8e4e335b05`) gave it its `def`, approved by daniel-ospina on 2026-11-14
         and recorded at `#10015` comment `6863608333`; `docs/product/beta-sdk-surface.md`
-        already reads *"40 methods against **125** today"* and
-        `config/surface-manifest.yml`'s `counts.sdk_public_methods` is already `125`, so
-        this assertion was the one place still pinned to the pre-delivery number.
+        read *"40 methods against **125** today"* at that move (it now reads **120**, moved
+        by #12901 wave 1) and
+        `config/surface-manifest.yml`'s `counts.sdk_public_methods` was `125`, so this
+        assertion was then the one place still pinned to the pre-delivery number.
+
+        #12901 (2026-11-15) then moved it DOWN: 125 → 120, because five OFF-SURFACE
+        methods were retired (archived under `archive/sdk-methods/b2-sdk-retirement-wave-1/`
+        and recorded in `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`). The approved 40
+        did not move and `high_water_counts.sdk_public_methods` stays 150 — this is the
+        cheap direction, and the pin still refuses any UNAPPROVED growth above it.
         Re-derive it from `len(public)` at the head; never type a number ahead of the
         manifest.
 
@@ -115,7 +122,7 @@ class TestDeclaration:
             for n in dir(TortoiseSDK)
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
-        assert len(public) == 125, f"SDK surface changed: {len(public)} != 125"
+        assert len(public) == 120, f"SDK surface changed: {len(public)} != 120"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK

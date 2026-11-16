@@ -31978,8 +31978,8 @@ _EXPORT_MAX_EVENTS = 5000  # event log is a rolling window (30d retention)
 # Internal bookkeeping excluded from exports/backups. Meta nodes are
 # key-scoped (#1625): the R2/R3 FTS-migration markers (point_fts_v2 /
 # event_fts_v2) are re-created on projection open, but Meta {key:
-# 'calibration_milestone'} is DATA (Gate B state, calibration_passed()
-# reads it) and MUST survive backup/restore.
+# 'calibration_milestone'} is DATA (Gate B state, read by the SDK's
+# calibration-milestone marker accessor) and MUST survive backup/restore.
 _EXPORT_SKIP_LABELS = {"GraphEventMeta", "TeamMeta", "EpMeta"}  # label-wide
 _EXPORT_SKIP_META_KEYS = frozenset({"point_fts_v2", "event_fts_v2"})
 

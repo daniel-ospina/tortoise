@@ -76,7 +76,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 30c9e7c4d397aa12876d215d64c92e4640e91429
+cut_at_commit: 58f904ccf7938105d08371bdc325c99ef03a0267
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -936,15 +936,16 @@ approval_date: '2026-09-18'
 # The same holds for `render`: the numbers it prints are this manifest's derivation, not a
 # copy of the base tree's. Precedents where they diverged: #4282 deleted 26 dead public SDK
 # methods at `45eefb26c` (`sdk_public_methods` fell from 150 at its parent `13e6856e4` to
-# 124), and it is 125 since #10015 implemented approved row 28
-# (`get_organisation_account`).
+# 124), it moved 124 → 125 when #10015 implemented approved row 28
+# (`get_organisation_account`), and it is **120** since #12901 wave 1 retired five off-surface
+# methods (125 → 120). The live number is the derived `counts` block below, never this prose.
 # ⛔ A hand-edited `counts` reds `check` — re-cut instead
 # (`cut --commit $(git rev-parse origin/main)`), and never paste a number in. `cut` is
 # OWNER-GATED per this tool's own docstring ("ask Daniel FIRST, before the re-cut") because
 # it re-derives every row from the declaration, so a re-cut needs his word first.
 counts:
   tools: 68
-  sdk_public_methods: 125
+  sdk_public_methods: 120
   retired: 23
   keyword_distribution:
     fetch: 14
@@ -1302,7 +1303,8 @@ rows:
 # on this branch; `used_by_with_unreadable_corpora` still re-derives every label it
 # CAN read) — so on a box whose `skills/` dangles, that churn is no longer a cost,
 # and neither is the `skill-docs` label. `cut` is also owner-gated.
-# ⛔ That 125 is re-derivable from this file: `rows` whose `name` starts `sdk:`.
+# ⛔ The live SDK count is re-derivable from this file: `rows` whose `name` starts
+# `sdk:` (120 today, matching `counts.sdk_public_methods`).
 # So exactly one derived cell moves, to the value `check` itself derives from the
 # declaration (`_code_digest`; verified `aae4bf5f5ceffe7c` for the tool body as it
 # stands on this branch, after the owner's 2239f94ff6 and c82c0337a4 rewrote the
@@ -3181,29 +3183,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:backfill_v25
-  method: backfill_v25
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.backfill_v25.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:belief_timeline
   method: belief_timeline
   approved: false
@@ -3250,29 +3229,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:calibration_passed
-  method: calibration_passed
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.calibration_passed.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
 - name: sdk:check_structure
   method: check_structure
   approved: false
@@ -4655,29 +4611,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:list_relations
-  method: list_relations
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.list_relations.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
-  lifecycle: active
-  used_by: tooling, skill-docs, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
 - name: sdk:list_sources
   method: list_sources
   approved: false
@@ -4770,29 +4703,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:membership_get
-  method: membership_get
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.membership_get.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:mine_corpus
   method: mine_corpus
   approved: false
@@ -4977,29 +4887,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:quarantine_batch
-  method: quarantine_batch
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.quarantine_batch.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
 - name: sdk:query
   method: query
   approved: false
