@@ -3059,7 +3059,14 @@ def _compose_profiled_scopes(path: Path, flag: str, is_truthy, *, primary_servic
     # ⛔ An answer with NO MODEL is not an answer here either: the default-set resolve
     # produced services, so a supplementary model with none contradicts the file, and
     # this pass may only BLOCK — it must never be skipped into an arm.
-    if not isinstance(services, dict) or not services:
+    # ⛔ NOT `or not services` alone (`#12902` review, P2, MEASURED): this pass is ALSO
+    # called for an EMPTY project (the `if not services:` arm above routes it here with
+    # `primary_services=set()`), and `services: {}` is a RESOLVED, measured answer — so a
+    # bare emptiness test published *"answered with NO model"* about a resolve that DID
+    # answer, a cause the run did not measure. `primary_services` is the caller's own
+    # signal that the default-set resolve produced services, which is what makes an
+    # empty reply a CONTRADICTION rather than an answer.
+    if not isinstance(services, dict) or (not services and primary_services):
         out["warnings"].append(
             f"`{COMPOSE_RESOLVER_ALL_PROFILES}` answered with NO model, so "
             "profile-gated services were NOT read")

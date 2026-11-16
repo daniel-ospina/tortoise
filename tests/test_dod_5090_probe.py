@@ -11902,6 +11902,41 @@ def test_12549_the_LIST_spelling_of_environment_is_measured_too(tmp_path, monkey
             f"{shipped['deployment']['files']}, expected {expected}")
 
 
+def test_12549_an_EMPTY_project_answer_is_not_reported_as_NO_model(tmp_path, monkeypatch):
+    """`services: {}` is a MEASURED answer — the profile pass must not call it "no model".
+
+    ⛔ MEASURED (fresh review of `119bd5e74bae`, P2): the model-less guard added there
+    could not tell "no model" from "a model that declares zero services", so every
+    `services: {}` tree published *"answered with NO model, so profile-gated services
+    were NOT read"* into row 1 — a cause the run did not measure, the exact defect class
+    this PR removes, about a resolve that answered `{"name": …, "services": {}}`.
+    """
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    channel = shipped["deployment"]["resolved"]["docker-compose.yml"]
+    assert channel["warnings"] == [], channel["warnings"]
+    # …and the verdict is unchanged: an empty project declares nothing, so it is OFF.
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped
+
+
+def test_12549_an_UNREAD_blank_scope_HOLDS_instead_of_reading_OFF(tmp_path, monkeypatch):
+    """A blank with NO declaration read is UNANSWERED, never a measured `""`.
+
+    ⛔ MEASURED (same review, P2 — this half of the P1 fix had no falsifier): `env_file:`
+    resolves to `environment: null` in the uninterpolated model, so the service has no
+    entry in `declarations`; answering `"$" in ""` turned "I could not read it" into a
+    measured disarm.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    env_file: [cfg.env]\n",
+        encoding="utf-8")
+    (tmp_path / "cfg.env").write_text("TORTOISE_EMBED_GATE=\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+
+
 def test_12549_a_PROFILED_blank_is_NOT_published_as_a_disarm(tmp_path, monkeypatch):
     """The mirror half: the all-profiles pass never consulted the unset warning.
 
