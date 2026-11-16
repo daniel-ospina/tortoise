@@ -10529,11 +10529,14 @@ def _durations_rows_claiming_unmeasured_on_ci(text: str):
 # figure spelled out BIT. That is the same false clean this whole guard family exists
 # to close, one spelling over again. `_CLAUSE` is the window these arms now share:
 # `.` and `;` still bound it, and a `.` followed by a digit does not.
-# ⛔ The NEGATIVE lookaheads below (the future-sweep and past-copula tense arms) keep
-# the narrower `[^.;]` window ON PURPOSE: widening a past-marker scan can only add
-# silence, i.e. push those arms further toward fail-open. Widening a window that
-# CONSUMES between a noun and its verb can only add bites, which is the safe
-# direction. The two are not the same fix and must not be "unified".
+# ⛔ The ONE negative lookahead left in this family — `_FLAT_DEFAULT_STILL_OWED_RE`'s
+# future-sweep `until …` arm — keeps the narrower `[^.;]` window ON PURPOSE: widening
+# a past-marker SCAN can only add silence, i.e. push that arm further toward
+# fail-open. Widening a window that CONSUMES between a noun and its verb can only add
+# bites, which is the safe direction. The two are not the same fix and must not be
+# "unified". (The past-copula arm that used to be the second member of this list is a
+# LOOKBEHIND on the predicate now — see `_WEIGHT_UNCHANGED_CLAIM_RE` — so there is no
+# window left to widen there at all.)
 _CLAUSE = r"(?:[^.;]|\.(?=\d))*?"
 _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     r"\bflat\s+(?:2\.0s?(?:\s+default)?|default|reading|weight)\b" +
@@ -12293,12 +12296,26 @@ _WEIGHT_UNCHANGED_CLAIM_RE = re.compile(
     # lookbehind ON THE PREDICATE — which is the shape `_WEIGHT_DECLARED_CLAIM_RE`
     # below already used, and the two arms now agree about the rule they document.
     #   • The over-block this trades for is real and narrow: a past copula that does
-    #     NOT sit immediately before the predicate ("The 8.8 WEIGHT WAS, per the
-    #     census, deliberately left alone") still bites. Loud, one comma away from a
-    #     legal form, and deliberately preferred over a silent miss — the polarity
-    #     this file's future-sweep arm sets out at length further down.
+    #     NOT sit immediately before the predicate still bites — "The 8.8 WEIGHT
+    #     WAS, per the census, deliberately left alone", "… had all been deliberately
+    #     left alone". Loud, one word away from a legal form, and deliberately
+    #     preferred over a silent miss — the polarity this file's future-sweep arm
+    #     sets out at length further down.
+    #
+    # ⛔ AND A SINGLE TOKEN IS NOT ENOUGH (#12962 rebase review cycle 2, P1). The
+    # first cut of this lookbehind listed five ONE-WORD copulas, so every multi-token
+    # past auxiliary put `been`/`being` immediately before the predicate and fell
+    # straight through it: measured end-to-end, a correctly-healed row reading "The
+    # 8.8 WEIGHT had been deliberately left alone until the 2026-11-16 census
+    # replaced it" reported `[('test_a.py', 8.8, 1.4)]` — a FALSE RED on a
+    # `slow_files` row, i.e. on `test-slow`, which is the very failure this commit's
+    # own sibling fix set out to remove. The auxiliary chains are named explicitly.
+    # ⚠️ `has been` is NOT in the list and must not be: present perfect is a claim
+    # about the CURRENT state ("the 8.8 WEIGHT has been deliberately left alone" says
+    # it is left alone now), so it has to bite. `had been` / `was being` are history.
     _CLAUSE +
     r"(?<!\bwas )(?<!\bwere )(?<!\bhad )(?<!\bheld )(?<!\bbecame )"
+    r"(?<!\bhad been )(?<!\bwas being )(?<!\bwere being )"
     r"\b(?:deliberately\s+(?:unchanged|left\s+alone|not\s+re-derived)"
     r"|(?:is|stays|remains)\s+(?:kept|unchanged|not\s+moved|an\s+upper\s+bound)"
     r"|never\s+corrected\s+downward)",
@@ -12537,13 +12554,23 @@ def test_the_unchanged_weight_claim_check_is_not_vacuous():
         # `weight` noun at all and so needed its own arm.
         "  test_g.py: 1.5  # Declared at 5.0, above the highest observed wall, so a"
         " loaded leg cannot under-pack.\n"
+        # ⛔ the DECIMAL-POINT bound, on the two arms that had no pin for it (#12962
+        # rebase review cycle 2, P2). Both were SILENT on the `[^.;]*?` window and
+        # BITE on `_CLAUSE`; mutation-tested, reverting `_CLAUSE` in EITHER arm left
+        # the whole suite green, so the class could be re-opened silently. Probe #5 is
+        # the reviewer's, verbatim.
+        "  test_i.py: 1.5  # the 8.8 weight is, against the 2.5 local reading,"
+        " deliberately left alone.\n"
+        "  test_j.py: 1.5  # declared at 5.0 against a 2.5 s wall, above the highest"
+        " observed wall, so a loaded leg cannot under-pack.\n"
         "surfaces: []\n")
     assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
         respelled) == [
         ("test_a.py", 8.8, 1.4), ("test_b.py", 18.0, 1.8),
         ("test_c.py", 10.0, 11.3), ("test_d.py", 6.8, 0.5),
         ("test_e.py", 5.0, 0.1), ("test_f.py", 2.0, 4.6),
-        ("test_g.py", 5.0, 1.5)], (
+        ("test_g.py", 5.0, 1.5), ("test_i.py", 8.8, 1.5),
+        ("test_j.py", 5.0, 1.5)], (
         "a guard that reads one spelling of the claim cannot say the claim is "
         "absent — these are the spellings that shipped past it")
 
@@ -12586,9 +12613,30 @@ def test_the_unchanged_weight_claim_check_is_not_vacuous():
         " 2026-11-16 census replaced it with the 1.4 beside this row.\n"
         "  test_b.py: 1.4  # The 8.8 WEIGHT, sitting inside that range, WAS"
         " deliberately left alone.\n"
+        # ⛔ the PAST-AUXILIARY chain (#12962 rebase review cycle 2, P1). Each of
+        # these put `been`/`being` immediately before the predicate, so a one-word
+        # lookbehind fell straight through and reported a FALSE RED on a healed row.
+        "  test_c.py: 1.4  # The 8.8 WEIGHT had been deliberately left alone until"
+        " the 2026-11-16 census replaced it.\n"
+        "  test_d.py: 1.4  # The 8.8 WEIGHT had been deliberately unchanged; the"
+        " 2026-11-16 census replaced it with the 1.4 beside this row.\n"
+        "  test_e.py: 1.4  # The 8.8 WEIGHT was being deliberately left alone when"
+        " the 2026-11-16 census replaced it.\n"
         "surfaces: []\n")
     assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
         healed_with_gap) == []
+    # …and `has been` is PRESENT perfect — it asserts the CURRENT state, so it must
+    # bite. The line between this case and the three above is the whole point of
+    # naming the auxiliary chains explicitly rather than widening `was|were|had`.
+    present_perfect = (
+        "durations:\n"
+        "  test_a.py: 1.4  # The 8.8 WEIGHT has been deliberately left alone since"
+        " the 2026-11-16 census moved everything else.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
+        present_perfect) == [("test_a.py", 8.8, 1.4)], (
+        "`has been` is a claim about the state NOW — only `had been` / `was being` "
+        "are history")
 
 
 #: A row restating its file's total in PROSE, beside the machine-read instrument cite:
