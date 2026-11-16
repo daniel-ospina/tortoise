@@ -704,12 +704,16 @@ def test_an_event_id_only_difference_is_still_invisible() -> None:
     This is the residual that is LEFT after the `recorded_at` arm; `ts` is not in
     it, because `ts` IS carried (`recorded_at`) and is now compared.
 
-    ⛔ THE TWO REDS THIS LEG MUST PRODUCE ARE DIFFERENT, and the messages say so
-    (review P2-6):
-      * "the key gained journal identity" — #12894 landed, this pin is retired
-        WITH the guard;
-      * "the payload derivation moved" — `ENVELOPE_KEYS` or a record type's field
-        set changed, so the boundary moved and this pin must be re-measured.
+    ⛔ THE TWO REDS THIS LEG CAN PRODUCE, and WHICH assertion produces each
+    (review P2-6, second round: the first cut attached them to the wrong ones):
+      * the ARITY assertion reds on a bind that was ADDED OR REMOVED — that is
+        either #12894's journal identity (the pin is retired WITH the guard) or
+        some other reshape of the bind list (re-measure);
+      * the EQUALITY assertion reds on a PAYLOAD DERIVATION MOVE — `ENVELOPE_KEYS`
+        or a record type's field set changed, so the boundary must be re-measured.
+    A key change cannot red the equality assertion (both records derive the same
+    bind) and a payload change cannot red the arity one (#9284: `_journal_row`
+    still binds 6), so each message names only its own red.
     """
     first = dict(RECORD_A, ts="2026-11-15T00:00:00Z", event_id="evt-first")
     second = dict(RECORD_A, ts="2026-11-15T00:00:00Z", event_id="evt-second")
@@ -724,16 +728,20 @@ def test_an_event_id_only_difference_is_still_invisible() -> None:
     assert len(row_first.params) == 6, (
         f"`_journal_row` now binds {len(row_first.params)} parameters "
         f"({row_first.params}) where this boundary was measured at 6 "
-        f"(org, graph, seq, event_type, payload, ts). If the 7th is journal "
-        f"identity then the KEY GAINED JOURNAL IDENTITY (#12894) and this pin "
-        f"is DELETED with the detector, not kept green. If instead a payload "
-        f"field moved in or out of `ENVELOPE_KEYS`, the PAYLOAD DERIVATION "
-        f"MOVED and this boundary must be re-measured")
+        f"(org, graph, seq, event_type, payload, ts). A COUNT can only move when "
+        f"a bind was ADDED or REMOVED: if the 7th is journal identity then the "
+        f"KEY GAINED JOURNAL IDENTITY (#12894) and this pin is DELETED with the "
+        f"detector, not kept green; if instead a bind was appended or dropped "
+        f"for any other reason, the guard's POSITIONAL bind reading must be "
+        f"re-measured. (A payload-derivation move cannot reach this assertion — "
+        f"it moves the content below, not the count.)")
     assert row_first.params == row_second.params, (
         "the durable row content of two event_id-only-different records is no "
-        "longer identical — either the KEY GAINED JOURNAL IDENTITY (#12894, "
-        "delete this pin with the detector) or the PAYLOAD DERIVATION MOVED "
-        "(re-measure the boundary); `event_id` alone cannot cause this")
+        "longer identical — the PAYLOAD DERIVATION MOVED (`ENVELOPE_KEYS` or a "
+        "record type's field set changed), so this boundary must be "
+        "re-measured; `event_id` alone cannot cause it, and a KEY change cannot "
+        "either (both records derive the same bind, so the arity assertion "
+        "above is what reds for #12894)")
 
     # Same bound parameters ⇒ `IS DISTINCT FROM` matches no row ⇒ the stub
     # returns no stored row ⇒ silent no-op, no counter, no exception.
@@ -772,9 +780,11 @@ def test_the_capture_arm_cannot_fire_when_this_write_carries_no_ts() -> None:
         "`now()` there, so two replays of ONE record would be refused as "
         "collisions")
     # …and the guard CONJOINS the arm rather than sitting beside it: an `OR`
-    # here (mutation C in WORKTREE-REPORT.md) keeps the `IS NOT NULL` text while
-    # restoring exactly the false red it was added for, and only the DB leg
-    # caught that, so the CONJUNCTION is pinned too.
+    # here keeps the `IS NOT NULL` text while restoring exactly the false red it
+    # was added for, and only the DB leg caught that, so the CONJUNCTION is
+    # pinned too. (There is no WORKTREE-REPORT.md in this tree — it is
+    # gitignored, so nothing may point at it; the red measurement lives in the
+    # PR body and in the DB leg's own guard.)
     assert "AND recorded_at IS DISTINCT FROM" in sql, (
         "the capture arm is OR-ed in, not conjoined — `IS NOT NULL` is present "
         "but no longer guards the comparison")
@@ -797,6 +807,28 @@ def test_a_different_event_type_alone_is_a_collision() -> None:
     """
     conn = Absorbed(stored=_stored("PointAdded", _payload_of(RECORD_A),
                                    same_type=False))
+
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
+    assert excinfo.value.stored_event_type == "PointAdded"
+    assert excinfo.value.event_type == "ObjectRegistered"
+
+
+def test_a_different_event_type_at_the_SAME_capture_instant_is_still_a_collision() -> None:
+    """DRIFT REQUIRES THE SAME TYPE: `same_type` is a conjunct, not a courtesy.
+
+    A row of a DIFFERENT type at the SAME capture instant is a COLLISION. The
+    drift arm reads `same_type and same_capture and ts is not None`, and this leg
+    is what pins the FIRST conjunct — before it, no leg did: the other two
+    type-difference legs (`test_a_different_event_type_alone_is_a_collision`,
+    `test_a_shared_NODE_id_with_two_record_types_is_not_one_record`) pass
+    `same_capture=False` and take the collision path regardless, and every
+    same-capture leg compares same-type records. Drop `same_type` and a record
+    whose TYPE changed is silently absorbed — a wider silent window than the
+    declared mirror residual, which at least requires the same type.
+    """
+    conn = Absorbed(stored=_stored("PointAdded", _payload_of(RECORD_A),
+                                  same_type=False, same_capture=True))
 
     with pytest.raises(rp.JournalPositionCollision) as excinfo:
         rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
@@ -1182,9 +1214,14 @@ def test_a_re_derived_payload_is_silent_on_a_real_database(
     refused, so this leg is the DB-side proof that #12904 P0-1's polarity holds
     where it matters.
 
-    ⚠️ The layer rows of the second write are re-derived and DISCARDED with the
-    absorbed position (the caller rolls the borrow back), which is why only the
-    position row is asserted here.
+    ⚠️ The layer rows are NOT discarded with the absorbed position: the drift arm
+    `return`s WITHOUT raising, so this write reaches its own `commit()` and every
+    layer statement it re-derived LANDS — asserted here only for the position
+    row (append-only, unchanged), which is why the layer effect is stated rather
+    than pinned. For the same-type drift case that is the repair (the row moves to
+    the new derivation); for the mirror residual it is the cost: the second
+    record's LAYER rows are applied and committed while its position row is
+    dropped — the mis-index shape #9318 exists to stop.
     """
     admin, tenant, _, _ = record_tenant
     journal = EventLog(tmp_path / "corpus" / ".events.jsonl")

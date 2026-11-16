@@ -951,9 +951,12 @@ class JournalPositionCollision(RecordProjectionError):
 
     * same `event_type` AND same `recorded_at`, different payload ⇒ **READ AS
       DRIFT**: the same record, re-derived. Reported to NOBODY — no exception, no
-      counter, no log line. The position was already consumed and the surviving
-      row already says so; the layer statements this write re-derives are the
-      ones the record already holds;
+      counter, no log line. The POSITION row was already consumed and stays as
+      the first derivation wrote it (the table is append-only by trigger); the
+      LAYER rows this write re-derives do LAND — the guard returns without
+      raising, so the write reaches its own commit and the record is repaired to
+      the new derivation. That is the repair story, and it is why this arm is
+      silent rather than fatal;
     * anything else ⇒ a COLLISION, and this class.
 
     ⛔ THE POLARITY THAT DECIDES THE TIE: silence is EARNED, never defaulted.
@@ -1015,7 +1018,12 @@ class JournalPositionCollision(RecordProjectionError):
     never asks whether an equal instant means one record. `main` (post-#12904)
     REFUSED this pair — payload
     differs ⇒ collision — so the drift split widens the silent window by exactly
-    this shape. It is ADMITTED, not detected, not counted, not repaired, and
+    this shape. ⚠️ AND ITS COST IS NOT ONLY THE MISSING ERROR: the POSITION row
+    is absorbed (append-only, it keeps the first record's content), but the
+    second record's LAYER rows are applied and COMMITTED — the guard returns
+    without raising, so the write reaches its own `commit()` — i.e. its content
+    lands at the first record's position, which is the mis-index shape `#9318`
+    exists to stop. It is ADMITTED, not detected, not counted, not repaired, and
     it is PINNED AS ADMITTED (`tests/test_9318_journal_collision.py`,
     `test_a_same_capture_instant_pair_is_ADMITTED_not_detected`), so a later
     reader cannot mistake this silence for coverage.
@@ -6699,9 +6707,11 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     # ⛔ DRIFT IS NOT A COLLISION (#12904 P0-1). Same record type AND the same
     # capture instant, only the payload differs ⇒ this is READ as the same
     # record, whose derivation moved since that row was written. Silent: the
-    # position is already consumed, the row already names it, and the repair
-    # story (`replay` heals the record) must not be version-pinned to the tree
-    # that wrote it.
+    # position is already consumed and the row keeps the first derivation's
+    # content, while the LAYER rows this write re-derives do land (the guard
+    # returns without raising, so the write commits) — that is the repair
+    # story (`replay` heals the record), and it must not be version-pinned to the
+    # tree that wrote it.
     # ⛔ AND IT IS A READING, NOT EVIDENCE OF IDENTITY — do not restore the
     # stronger claim. Identical `recorded_at` says only that two writes named
     # the same instant, and `ts` is a per-record value the EMISSION path supplies
