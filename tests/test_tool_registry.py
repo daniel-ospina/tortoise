@@ -1337,8 +1337,15 @@ class TestCapabilityModel:
         assert any("stale map" in v
                    for v in write_surface_map_violations(dropped))
         # FORWARD: a wrap site with no map entry is reported (no KeyError)
+        # #4282 Phase 2: the dropped key must be a method that really HAS a wrap
+        # site in `tortoise/mcp_server.py` — this mutation is only non-vacuous
+        # while the key it deletes exists in the map AND in the AST scan.
+        # `update_point` retired into the container, so deleting it became a
+        # no-op and the assertion could never fire; `update_knowledge` is the
+        # live site (two of them, 5578 and 6819).
+        assert "update_knowledge" in DECLARED_WRITE_SURFACE_MAP
         omitted = {k: v for k, v in DECLARED_WRITE_SURFACE_MAP.items()
-                   if k != "update_point"}
+                   if k != "update_knowledge"}
         assert any("unmapped" in v
                    for v in write_surface_map_violations(omitted))
 

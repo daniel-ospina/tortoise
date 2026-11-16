@@ -76,7 +76,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 1340c397b6683a3dad81895995eb3e0e0d474f13
+cut_at_commit: 58f904ccf7938105d08371bdc325c99ef03a0267
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1449,7 +1449,7 @@ rows:
   family: memory
   family_rank: 1
   served: http
-  sdk_method: update_knowledge
+  sdk_method: ''
   group_source: mapped
   keyword: update
   keyword_rank: 3
@@ -1460,7 +1460,7 @@ rows:
     for an entity); annotation={bias,precision,consistency,directness} → annotate the link; invalid_at=/valid_until=
     (+ corrected_by_id=) → retract, or invalidate against a successor. Retraction is a TEMPORAL FIELD here, not
     a separate verb. One arm per call: a keyword the chosen arm cannot record is refused, never dropped.'
-  dependency: declares TortoiseSDK.update_knowledge (resolves)
+  dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -1959,7 +1959,7 @@ rows:
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_adjust_relationship
-  served_from: tortoise/mcp_server.py:217d4d0e40c93919
+  served_from: tortoise/mcp_server.py:64e520fa73e4c15e
   served_attributes: 9f46e051e33934f2
   family: graph
   family_rank: 2
@@ -5511,12 +5511,12 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.update_knowledge.
-  dependency: 'reached by 1 registered tool(s) and 2 retired name(s): tortoise_update_entity (retired), tortoise_update_knowledge,
-    tortoise_update_point (retired)'
+  dependency: 'reached by 0 registered tool(s) and 2 retired name(s): tortoise_update_entity (retired), tortoise_update_point
+    (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s) and 2 retired name(s)
+  reason: reached by 0 registered tool(s) and 2 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false

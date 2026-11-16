@@ -1500,7 +1500,22 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "call: a keyword the chosen arm cannot record is refused, never dropped.",
         risk="destructive",
         http_policy=True,
-        sdk_method="update_knowledge",
+        # #4282 Phase 2: this container BINDS NO SINGLE SDK METHOD — it dispatches
+        # per arm to the handler it absorbed (`props` -> `tortoise_update` ->
+        # `sdk.update`; `annotation` -> `sdk.annotate_operator`; the temporal arms ->
+        # `sdk.retract_point` / `sdk.invalidate_point`), which is the SAME shape its
+        # two sibling containers ship with (`tortoise_adjust_relationship`,
+        # `tortoise_refresh_confidence`) and the shape `tortoise_graph_overview`
+        # already declares for a per-section dispatcher. Declaring the SDK verb
+        # `update_knowledge` here was a claim the code does not consume: two
+        # independent gates red on it —
+        #   #4337 `binding_resolution_violations`: "declares sdk_method
+        #        'update_knowledge' that its handler never reaches (reaches:
+        #        ['annotate_operator','invalidate_point','retract_point','update'])"
+        #   #3904 `_classify`: DECLARED_BINDING_NOT_CONSUMED, reads=['update']
+        # `tests/tool_surface_capabilities.py::NON_SDK_WRITER_TOOLS` carries the
+        # declaration that this is a handler-served WRITE (the #4035 idiom).
+        sdk_method="",
     ),
     ToolDefinition(
         name="tortoise_supersede_knowledge",
