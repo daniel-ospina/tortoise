@@ -115,7 +115,12 @@ class TestDeclaration:
             for n in dir(TortoiseSDK)
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
-        assert len(public) == 125, f"SDK surface changed: {len(public)} != 125"
+        assert len(public) == 117, f"SDK surface changed: {len(public)} != 117"
+        # 125 → 117 (#11609 Phase 2, 2026-11-15): six approved READ/QUERY containers
+        # gained a `def` and the 14 read methods they cover were re-privatised behind
+        # them in the same batch, so this pin moved DOWN — the direction #4282 requires.
+        # `high_water_counts` in `config/surface-manifest.yml` was re-cut with it, never
+        # hand-edited, and the guard still refuses growth above the new baseline.
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK

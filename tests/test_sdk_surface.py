@@ -65,7 +65,15 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # already approved"). `high_water_counts.sdk_public_methods` stays at 150 in
 # `config/surface-manifest.yml` — the growth pin did not move, and this literal tracks the
 # frozen row set, which must move whenever a row is added.
-DECLARED_COUNT = 125
+#
+# 125 → 117 (#11609 Phase 2, 2026-11-15): the READ/QUERY container family landed SIX
+# approved methods (`graph_overview`, `search_knowledge`, `list_knowledge`,
+# `check_confidence`, `explore_connections`, `review_link_candidates`) and RE-PRIVATISED
+# the 14 read methods they cover, so this counter moved DOWN — 125 + 6 − 14 = 117. A LOWER
+# number is the direction #4282 requires (the owner's target is 40), and the frozen
+# baseline moved with it (`config/surface-manifest.yml` `counts` + `high_water_counts`),
+# re-cut rather than hand-edited.
+DECLARED_COUNT = 117
 
 
 def _declaration() -> dict:

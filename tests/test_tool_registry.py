@@ -75,7 +75,7 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """68 live tools = 98 − 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5 − 4.
+        """64 live tools = 98 − 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5 − 4 − 9 + 5.
 
         The −1 is #3540 ruling B: the two per-source switches were consolidated into
         `tortoise_manage_sources`, which is the ruling's own requirement ("the surface
@@ -108,15 +108,32 @@ class TestRegistryEquivalence:
         above — no replacement NAME to redirect to. 72 − 4 = **68** live, 23 retired;
         the archival is its own move, disjoint from both above, which is why this
         docstring's arithmetic has to name it.
+
+        #11609 Phase 2 (this change): the READ/QUERY container family. FIVE container
+        rows arrived — `tortoise_search_knowledge`, `tortoise_list_knowledge`,
+        `tortoise_check_confidence`, `tortoise_explore_connections`,
+        `tortoise_review_link_candidates` — and NINE member doors retired into them:
+        `tortoise_issue_insight`, `tortoise_list_topics`, `tortoise_provenance`,
+        `tortoise_session_context`, `tortoise_entity_profile`, `tortoise_traverse`,
+        `tortoise_review_connections`, `tortoise_list_dedup_candidates`,
+        `tortoise_get_source_reliability`. 68 − 9 + 5 = **64** live, 23 + 9 = **32**
+        retired. ⛔ SIX of the family's members are DELIBERATELY still live —
+        `search_sessions`, `suggest_entry_points`, `list_batches`,
+        `list_namespaces`, `diary_read`, `expand_relationships` — because each
+        declares a list envelope, which is what carries the #8482 failure repair a
+        `-> Any` container cannot; they answer through their containers today and
+        retire with the envelope (the same reasoning #10914 applied to
+        `check_structure`). Pinned by
+        `tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 68, f"Expected 68, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 64, f"Expected 64, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
         # consolidated and the 5 #4282 container members are NOT live, and each one is
         # declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        assert len(retired) == 23, f"Expected 23 retired, got {len(retired)}"
+        assert len(retired) == 32, f"Expected 32 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -148,7 +165,15 @@ class TestRegistryEquivalence:
                 f"{gone} is back on the served surface — #4282 Phase 3.2 removed it and "
                 "the owner's 2026-09-22 ruling keeps `run_onboarding` off the MCP")
         assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
-        assert "tortoise_review_connections" in names, "Missing #913 review_connections tool"
+        # #11609 Phase 2: #913's `review_connections` door retired into the
+        # `review_link_candidates` container (kind="connections"). As with
+        # `validate_domain` above, the assertion follows the CAPABILITY rather than
+        # re-asserting the name the approved target removes.
+        assert "tortoise_review_link_candidates" in names, (
+            "Missing the review_link_candidates container that #913's review_connections "
+            "read now answers through")
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD as _rui
+        assert "review_link_candidates" in _rui["tortoise_review_connections"]
         assert "tortoise_events_poll" in names, "Missing #432 poll_events tool"
         assert "tortoise_retract_point" in names, "Missing #432 retract_point tool"
         assert "tortoise_find_cross_lens_candidates" in names, "Missing #438 cross-lens tool"
@@ -172,11 +197,24 @@ class TestRegistryEquivalence:
         for name in ("tortoise_query", "tortoise_suggest_entry_points",
                      "tortoise_graph_overview"):
             assert name in names, f"Missing tool: {name}"
-        # Phase-4 mining/promotion/dedup/timeline surface (#787)
-        phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
-                  "tortoise_approve_merge", "tortoise_promote_point",
-                  "tortoise_belief_timeline"}
+        # Phase-4 mining/promotion/dedup/timeline surface (#787).
+        # ⛔ TWO of the five original names retired into #11609 Phase 2's containers
+        # (`tortoise_list_dedup_candidates` → `review_link_candidates(kind="dedup")`,
+        # `tortoise_belief_timeline` → `check_confidence(topic=…)`), so this pin follows
+        # the CAPABILITY, not the removed name — the same idiom the `tortoise_validate_domain`
+        # line above uses. Each retired name must also still name a live replacement, or
+        # the #3883 shim would answer a caller with a dead end.
+        phase4 = {"tortoise_mine_conversations", "tortoise_approve_merge",
+                  "tortoise_promote_point", "tortoise_review_link_candidates",
+                  "tortoise_check_confidence"}
         assert phase4 <= names, f"Missing #787 tools: {phase4 - names}"
+        retired_phase4 = {"tortoise_list_dedup_candidates": "review_link_candidates",
+                          "tortoise_belief_timeline": "check_confidence"}
+        for gone, successor in retired_phase4.items():
+            assert gone not in names, f"{gone} retired into {successor} but is still live"
+            assert successor in RETIRED_USE_INSTEAD[gone], (
+                f"{gone}'s retirement must point at {successor} — a retired name with no "
+                "resolvable replacement is the #3836 (c) failure")
 
     def test_no_duplicate_names(self):
         """No two registry entries share the same name."""
@@ -490,10 +528,18 @@ class TestDescriptionImprovements:
         assert "tortoise_query" in d, "must point at the structural alternative"
 
     def test_entity_profile_distinguished_from_list_topics(self):
-        ep = self._desc("tortoise_entity_profile")
-        lt = self._desc("tortoise_list_topics")
-        assert "BFS" in ep and "tortoise_list_topics" in ep, ep
-        assert "neighbor" in lt.lower() and "tortoise_entity_profile" in lt, lt
+        """#11609 Phase 2 moved BOTH doors into containers, so the distinction the pair
+        existed to carry is now a distinction between two container ARMS. The property
+        is not "these two names are described distinctly" — it is "a caller can still
+        tell a BFS neighbourhood walk from a topic profile", so it is asserted on the
+        containers that now answer for them."""
+        walk = self._desc("tortoise_explore_connections")
+        topics = self._desc("tortoise_list_knowledge")
+        assert "neighbor" in walk.lower() or "hops" in walk.lower(), walk
+        assert "topic" in topics.lower(), topics
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
+        assert "explore_connections" in RETIRED_USE_INSTEAD["tortoise_entity_profile"]
+        assert "list_knowledge" in RETIRED_USE_INSTEAD["tortoise_list_topics"]
 
     def test_query_aliases_retired(self):
         """The two query aliases are RETIRED (#3883), keeping their DEPRECATED
@@ -2197,9 +2243,14 @@ class TestToolIdentity:
         # #11609 batch 1 then ARCHIVED two served writers — `tortoise_pack_install`
         # and `tortoise_backfill_v25` — with no destination (owner ruling), so
         # SERVED 45 -> 43 and LIVE 41 -> 39.
+        # #11609 Phase 2 retired ONE live writer into the `list_knowledge` container —
+        # `tortoise_get_source_reliability` (risk="write": it recomputes and re-caches
+        # `s.reliability`) — so LIVE 39 -> 38 while SERVED holds at 43, because the
+        # #3883 shim still serves the name. This is the #3540-ruling-B shape exactly:
+        # the advertised surface falls, the served one does not.
         assert len(WRITE_TOOL_NAMES) == 43, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 39, f"live write census moved: {len(live)}"
+        assert len(live) == 38, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.

@@ -133,13 +133,31 @@ family_rank:
 # create, `tortoise_packs_list` -> list, `tortoise_pack_install` -> operate):
 # create 15->14 (`backfill_v25`), list 8->7 (`packs_list`), find 5->4 (`analyze`),
 # operate 5->4 (`pack_install`); fetch / update / delete / check / link / trace unmoved.
+# #11609 Phase 2 (the READ/QUERY containers) moved the distribution, and every number below
+# is the derivation's own output — measured row by row against the previous baseline, never
+# counted by hand. FIVE container rows arrived — `search_knowledge` -> fetch,
+# `list_knowledge` -> list, `check_confidence` -> check, `explore_connections` -> fetch,
+# `review_link_candidates` -> check — and NINE member rows left, each moving the keyword ITS
+# name derives (never its container's): `belief_timeline` -> fetch, `get_confidence` ->
+# fetch, `get_source_reliability` -> fetch, `provenance` -> fetch, `traverse` -> fetch,
+# `entity_profile` -> list, `list_dedup_candidates` -> list, `list_topics` -> list,
+# `review_connections` -> check.
+#     fetch   14 -> 11  (+2 container, -5 member: belief_timeline, get_confidence,
+#                        get_source_reliability, provenance, traverse)
+#     list     7 ->  5  (+1 container, -3 member: entity_profile, list_dedup_candidates,
+#                        list_topics)
+#     check    5 ->  6  (+2 container, -1 member: review_connections)
+# create / update / delete / find / link / operate / trace are unmoved — and that is
+# itself a check: five of the nine retirements moved `fetch`, which is what their names
+# derive. `tools/surface_manifest.py check` RE-DERIVES all ten and reds on any
+# disagreement; this block is a reading of that output, never a second source for it.
 # Re-derived from the registry by `tools/surface_manifest.py check`, which reds on any
 # disagreement.
 baseline_counts:
-  fetch: 14
+  fetch: 11
   create: 14
-  list: 7
-  check: 5
+  list: 5
+  check: 6
   operate: 4
   update: 8
   find: 4

@@ -192,11 +192,11 @@ def test_the_absence_failure_is_NOT_vacuous():
 
 
 def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
-    """#4282's true state: 40 approved, 125 live. Not green, and not vague.
+    """#4282's true state: 40 approved, 117 live. Not green, and not vague.
 
-    The approved side has not moved: 14 of the 40 exist (13 live methods the
+    The approved side has not moved: 19 of the 40 exist (18 live methods the
     declaration names, plus row 1's `Tortoise(...)`, which resolves to the class
-    itself), 26 do not. The LIVE side moved
+    itself), 20 do not. The LIVE side moved
     150 → 124 on 2026-10-27, when the owner's ruling that the surplus methods nothing calls
     may be deleted (PR #10187) removed the 26 with no caller under `tortoise/**` — so the
     off-surface gap falls 138 → 112 — and 124 → 125 on 2026-11-14 (#10015), when approved
@@ -204,6 +204,12 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     touching the off-surface 112 (an approved name is not surplus). Nothing approved was
     removed: the 26 are all off-surface surplus, which is why this premise and the 40 are
     separate numbers.
+
+    125 → 117 on 2026-11-15 (#11609 Phase 2): SIX approved containers gained a `def`
+    (`absent` 26 → 20) and the 14 live read methods they cover left the public surface
+    (`off_surface` 112 → 98). Both directions of the migration moved at once — six
+    IMPLEMENTED, fourteen REMOVED — which is why this premise pins all four literals
+    instead of only the live count.
     """
     declared = _declaration()["__all__"]
     live = _live()
@@ -216,9 +222,9 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
     # verify nothing at all. Each literal carries its own premise note —
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    assert len(live) == 125, "the live surface moved — update this premise (it pins today's gap)"
-    assert len(off_surface) == 112, "the gap moved — update this premise (it pins today's gap)"
-    assert len(absent) == 26, "the gap moved — update this premise (it pins today's gap)"
+    assert len(live) == 117, "the live surface moved — update this premise (it pins today's gap)"
+    assert len(off_surface) == 98, "the gap moved — update this premise (it pins today's gap)"
+    assert len(absent) == 20, "the gap moved — update this premise (it pins today's gap)"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.
     assert sum(1 for p in problems if "NOT on the approved surface" in p) == len(off_surface)
@@ -293,13 +299,14 @@ def test_the_declaration_docstring_states_the_measured_split_not_the_delta():
         f"`Tortoise(...)` already resolves, and the {len(absent)} absent names exclude it."
     )
 
+    delta = len(live) - len(declared)
     unlabelled = [ln.strip() for ln in doc.splitlines()
-                  if "109" in ln and "delta" not in ln.lower()]
+                  if str(delta) in ln and "delta" not in ln.lower()]
     assert unlabelled == [], (
         "the docstring states the target-count DELTA (live − approved) as if it were the set "
         f"of methods the migration removes: {unlabelled}. The removals are the "
         f"{len(off_surface)}, and the {len(absent)} absent approved names are IMPLEMENTED, "
-        "not removed — say `delta` on any line that quotes 109."
+        f"not removed — say `delta` on any line that quotes {delta}."
     )
 
 

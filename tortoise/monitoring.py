@@ -7234,7 +7234,11 @@ def _bounded_graph_size(target, timeout: float) -> int:
     ``_reset_graph_size_worker()`` (mirrors ``_reset_probe_worker()``), so
     ``graph_size`` is measurable again without a process restart.
     """
-    future = daemon_worker(GRAPH_SIZE_WORKER_NAME).submit(target.taxonomy)
+    # #11609: `taxonomy()` retired into the orientation container, so the count
+    # is read through the section it became. A lambda (not a bound method) because
+    # the section is an argument to the container, and `submit` takes a callable.
+    future = daemon_worker(GRAPH_SIZE_WORKER_NAME).submit(
+        lambda: target.graph_overview(section="taxonomy"))
     try:
         counts = future.result(timeout=timeout)
     except concurrent.futures.TimeoutError as exc:

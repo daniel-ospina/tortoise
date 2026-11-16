@@ -786,9 +786,10 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     from tools.bridge_table import DESTINATION, _registry_rows
 
     retired = [r for r in _registry_rows() if r["use_instead"]]
-    # 18 after #3540; 23 after #4282's `graph_overview` container retired five more names
-    # (the served registry is live + retired, so this counts the shim-served population).
-    assert len(retired) == 23, f"expected 23 retired rows, got {len(retired)}"
+    # 18 after #3540; 23 after #4282's `graph_overview` container retired five more names;
+    # 32 after #11609 Phase 2's READ/QUERY containers retired nine more (the served registry
+    # is live + retired, so this counts the shim-served population: 64 live + 32 retired).
+    assert len(retired) == 32, f"expected 32 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "
@@ -1281,9 +1282,13 @@ def test_part_d_findings_match_an_independent_recomputation() -> None:
     assert ambiguous == {
         "tortoise_annotate_operator", "tortoise_assess_source", "tortoise_belief_timeline",
         "tortoise_get_source_reliability", "tortoise_mitigate_operator",
-        "tortoise_provenance", "tortoise_session_context",
+        "tortoise_session_context",
         "tortoise_set_source_tier",
     }, f"D3 membership changed: {sorted(ambiguous)}"
+    # #11609 Phase 2 removed `tortoise_provenance` from the set: its SDK binding is no
+    # longer live (the method retired into `check_confidence`), so its row stopped naming
+    # two targets and the ambiguity went with it. Recorded rather than silently dropped —
+    # the pin exists to make exactly this kind of movement visible.
 
     got = _cited_findings()
     for label, want, have in (

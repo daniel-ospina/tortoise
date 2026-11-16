@@ -8875,6 +8875,7 @@ surfaces:
   # policy module moves.
   - test_csp_plan_doc_consistency.py
   sdk:
+  - test_11609_read_containers.py
   - test_11858_source_door_markers.py
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #8290: the RESERVED-namespace half lives in `tortoise/ids.py`, which

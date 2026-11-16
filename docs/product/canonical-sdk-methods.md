@@ -124,6 +124,46 @@ still ON the public surface today** — it is one of the 125 (`config/sdk-surfac
 than deleted; on the live surface it remains a *removal candidate* (see the "Candidates for
 removal" row below), not something that has already left.
 
+## Removed from the surface — 2026-11-15 (#11609 Phase 2)
+
+**These 14 methods left the public surface in the PR that landed the READ/QUERY containers**
+(#11609, the read/query family of #4282 Phase 2). Each one is a *member* of an approved container,
+and each retired only because the container that answers its question **has a `def` on
+`TortoiseSDK` today** — the failure this programme exists to avoid is retiring a member before its
+container covers its behaviour.
+
+The code is not deleted. Each method is re-privatised (a leading `_`) and the per-method archive
+record is under `archive/sdk-methods/11609-a-read-containers/`; the destination map is
+`docs/product/bridge-table.md`. A retired name is in `tortoise/sdk_retired.py`, so calling it
+**fails and names a replacement that resolves** (#3836 (c)) — never a silent no-op.
+
+| Removed method | What it did | The container it retires into |
+|---|---|---|
+| `taxonomy` | Count entities by node label. | `graph_overview(section='taxonomy')` |
+| `list_pointkinds` | Every `pointKind` present, with counts. | `graph_overview(section='pointkinds')` |
+| `list_tags` | Every Tag name, with tagged-Point counts. | `graph_overview(section='tags')` |
+| `list_namespaces` | Installed pack namespaces. | `graph_overview(section='namespaces')` |
+| `list_topics` | One entity's topic profile. | `graph_overview(section='topics')` |
+| `status` | Connectivity + entity counts. | `graph_overview(section='status')` |
+| `validate_domain` | One domain's graph-surface validators. | `graph_overview(section='validate_domain')` |
+| `list_sources` | Every provenance Source, with point counts. | `list_knowledge(kind='source')` |
+| `diary_read` | An agent's recent diary entries. | `list_knowledge(kind='diary')` |
+| `search_sessions` | Search indexed agent sessions. | `search_knowledge(mode='sessions')` |
+| `suggest_entry_points` | NL query → matching entities. | `search_knowledge(mode='entry_points')` |
+| `provenance` | The chain behind one claim. | `check_confidence(claim_id, include_provenance=True)` |
+| `expand_relationships` | One Point's full relationship payload. | `explore_connections(node_id, include_content=True)` |
+| `list_dedup_candidates` | The deduplication review queue. | `review_link_candidates(kind='dedup')` |
+
+⚠️ **`stale_points` is deliberately NOT in this list.** The owner's narrow-alias row names `stale`
+(the MCP tool), not this SDK method name, so no approving region authorises its retirement. It
+stays public and is reachable through `graph_overview(section='stale')`.
+
+⚠️ **Six list-returning MCP member *doors* were deliberately left live** (`tortoise_search_sessions`,
+`tortoise_suggest_entry_points`, `tortoise_list_batches`, `tortoise_list_namespaces`,
+`tortoise_diary_read`, `tortoise_expand_relationships`): each declares a `-> list[dict]` envelope
+that carries the #8482 failure repair, which a `-> Any` container cannot. They answer through their
+containers today and retire with the batch that gives the container a declared envelope.
+
 ## The principle
 
 Same as the tool list, and for the same reason — a caller should be able to hand
@@ -175,13 +215,13 @@ Three rules, each of which caught a real error in this document.
 
 | # | Canonical | MCP tool | Members (current names) | Action |
 |---|---|---|---|---|
-| R1 | `search_knowledge` | #1 | `tortoise_fts_query`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse |
-| R2 | `list_knowledge` | #2 | `query`, `paginated_query`, `query_points_by_tag` | keep, collapse |
-| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `provenance`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads and `provenance`; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |
+| R1 | `search_knowledge` | #1 | `search_knowledge`, `tortoise_fts_query`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse — `suggest_entry_points` and `search_sessions` retired into the container on 2026-11-15 (#11609 Phase 2 — see *Removed from the surface*) |
+| R2 | `list_knowledge` | #2 | `list_knowledge`, `query`, `paginated_query`, `query_points_by_tag` | keep, collapse |
+| R3 | `recall_beliefs` | #3 | `check_confidence`, `recall_state`, `recall_gaps`, `recall_subgraph`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads; `retrieval_legs` and `get_provenance_chain` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*), and `provenance` retired into the container on 2026-11-15 (#11609 Phase 2) |
 | R4 | `get_entity` | #4 | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` | keep, collapse |
-| R5 | `explore_connections` | #5 | `expand_relationships`, `get_owned_entities` | keep, collapse — `traverse` and `get_org_structure` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*) |
-| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability |
-| R7 | `review_link_candidates` | #7 | `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | keep, collapse |
+| R5 | `explore_connections` | #5 | `explore_connections`, `get_owned_entities` | keep, collapse — `traverse` and `get_org_structure` were deleted on 2026-10-27 (#4282 — see *Removed from the surface*), and `expand_relationships` retired into the container on 2026-11-15 (#11609 Phase 2) |
+| R6 | `graph_overview` | #6 | `graph_overview`, `list_relations`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability; `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_topics` and `validate_domain` retired into the container on 2026-11-15 (#11609 Phase 2) |
+| R7 | `review_link_candidates` | #7 | `review_link_candidates`, `review_connections`, `get_cross_lens_candidates` | keep, collapse — `list_dedup_candidates` retired into the container on 2026-11-15 (#11609 Phase 2) |
 | R8 | `poll_events` | #8 | `poll_events` | keep |
 | R9 | `inspect_batch` | #9 | `list_batch`, `list_batches` | keep, collapse |
 
@@ -193,7 +233,7 @@ Three rules, each of which caught a real error in this document.
 | W2 | `write_knowledge` | — | `ingest` | keep — **SDK-only name.** The batch call: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so connections can address nodes created in the same call. Not to be called `ingest_bundle` (jargon) or `write_graph` (collides with `graph_overview` and the graph admin namespace) |
 | W3 | `register_source` | #11 | `create_source` | keep — **not foldable**: the URL is the node identity |
 | W4 | `index_files` | #12 | `index_directory`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health` | keep — **2 self-declared DEPRECATED** |
-| W5 | `capture_knowledge` | #13 | `checkpoint`, `diary_write`, `diary_read` | **superseded — see the amendment below the split table (owner ruling 2026-10-09)**; each member retires to its OWN destination, so they no longer share one |
+| W5 | `capture_knowledge` | #13 | `checkpoint`, `diary_write` | **superseded — see the amendment below the split table (owner ruling 2026-10-09)**; each member retires to its OWN destination, so they no longer share one — `diary_read` retired into `list_knowledge(kind='diary')` on 2026-11-15 (#11609 Phase 2) |
 | W6 | `capture_session_local` | — | — | **no live PUBLIC member** — `capture_session` was retired on 2026-10-27 (#4282, code archived at tag `archive/4282-surplus-sdk-methods`); the body survives as the private `TortoiseSDK._capture_session`, and the capability returns publicly under `mine_knowledge_from_session` |
 | W7 | `capture_session_hosted` | — | — | **no live member** — `commit_session` was deleted on 2026-10-27 (#4282, code archived at the same tag); the capability returns under `mine_knowledge_from_session` |
 | W8 | `manage_source_trust` | #14 | `assess_source`, `set_source_tier`, `get_source_reliability` | keep — **`get_source_reliability` writes** |
