@@ -2424,12 +2424,32 @@ DECLARED_CHANNEL_BOUNDS: tuple[dict[str, str], ...] = (
         "channel": "dockerfile",
         "reader": "line reader: ENV/ARG",
         "cannot_see": ("an `ARG`-substituted `ENV` — `ARG V=0` then "
-                       "`ENV FLAG=$V` — and a builder-stage-only `ENV` in a "
-                       "multi-stage build"),
+                       "`ENV FLAG=$V` — which is HELD `UNMEASURED` and reported, "
+                       "never scored"),
+        # ⛔ A `cannot_see` CLAUSE CAN ONLY DESCRIBE AN UNDER-REPORT, and this shape
+        # was published as one — the opposite of what the reader does (fresh review
+        # of PR #12902, cycle 5, P1). The reader has no `FROM`/stage model, so it
+        # reads a NON-FINAL stage's `ENV` as the file's value and the file reads
+        # `ON` while the image ships without it. That is a FALSE ARM, so it gets its
+        # own field and its own verb in the note: a reader who is told "cannot see"
+        # would treat an unmeasured shape as an absence, which is the one direction
+        # this bound must never lend its authority to. The BEHAVIOUR is #12978;
+        # what changes here is only what the row is allowed to CLAIM about it.
+        "reads_wrong": ("a builder-stage-only `ENV` in a MULTI-STAGE build **as "
+                        "ARMED**: nothing here reads stage semantics, so an `ENV` "
+                        "in a non-final stage is read as the file's value — "
+                        "MEASURED (`docker build` + `docker run` on `FROM alpine "
+                        "AS builder` / `ENV FLAG=1` / `FROM alpine` print no such "
+                        "variable while this walk returns `{'Dockerfile': 'ON'}`, "
+                        "`on: True` with every other bucket empty). Resolving it "
+                        "needs the stage GRAPH (`FROM <stage>` INHERITS that "
+                        "stage's `ENV`), so a final-stage-only rule would be "
+                        "wrong in the other direction; tracked as #12978"),
         "why": ("a Dockerfile `ENV` is literal except `ARG` substitution, whose "
                 "values come from the BUILD (`--build-arg`); the values are not in "
                 "the file, and no resolver reads them without building the image. "
-                "The channel keeps its line reader and this bound."),
+                "The channel keeps its line reader, this bound, and the false-ARM "
+                "bound above it."),
     },
     {
         "channel": "entrypoint",
@@ -2939,14 +2959,23 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
             out["silent_scopes"].append(name)
         elif env[flag] is None:
             # ⛔ MEASURED (`#12549`): compose resolves a value-less `environment:`
-            # entry to `null` — a PASS-THROUGH from the environment `docker compose`
-            # runs in (with `FLAG=1` in the shell it resolves to `"1"`). The file
-            # therefore fixes NO value. This walk scores that as "the file does not
-            # arm it" and REPORTS the line, which is the direction that cannot turn
-            # an unarmed file into an armed one.
+            # entry to `null`. Two measurements, on this box, and the sentence has to
+            # carry BOTH or it is a cause the run did not make (fresh review of PR
+            # #12902, cycle 5, P2 — an earlier revision replaced "UNSETS it" with
+            # "passes it through, NOT an unset", which is wrong in the ordinary case):
+            #   * the deploying host EXPORTS it → compose substitutes the ambient
+            #     value (`FLAG=1` in the shell resolves to `"1"`) — a pass-through;
+            #   * the deploying host does not → the container is given the variable
+            #     with NO value, which REMOVES the image's `ENV` (measured: image
+            #     `ENV FLAG=1` + `environment: [FLAG]`, host not exporting → the
+            #     container prints nothing for it).
+            # Either way the FILE supplies no truthy value, which is why the score is
+            # `NOT_ARMED` in both — but the cannot-arm direction is "the file CLEARS an
+            # inherited arm", not "the file does nothing".
             scope["verdict"] = "NOT_ARMED"
-            scope["reason"] = ("no value in the file — compose takes it from the "
-                               "environment it runs in")
+            scope["reason"] = ("no value in the file — compose passes the ambient "
+                               "value through, and CLEARS an inherited one when the "
+                               "host supplies none")
             out["novalue"].append(name)
             out["off"].append(name)
         else:
@@ -4229,11 +4258,15 @@ def _apply_channel_reading(reading: dict, posix: str, flag: str,
         elif reason.startswith("no value"):
             # ⛔ A value-less declaration is REPORTED in its own bucket, exactly as the
             # line reader reported the compose `- FLAG` spelling (`#12474`): it is the
-            # one shape that can take an INHERITED arm away, and the resolver is what
-            # measured that compose hands it to the ambient environment rather than
-            # "unsetting" it.
+            # one shape that can take an INHERITED arm away. Two measurements, and the
+            # bucket text carries both (fresh review of PR #12902, cycle 5, P2): the
+            # resolver returns `null` for it, so compose substitutes the ambient value
+            # when the deploying host exports one, and REMOVES the image's `ENV` when it
+            # does not (measured with `docker build`/`docker run`). "Takes it from the
+            # environment" alone understated the removal half.
             buckets["unset_declarations"].append(
-                f"{where} (no value — compose takes it from the environment it runs in)")
+                f"{where} (no value — compose passes the ambient value through, "
+                "and CLEARS an inherited one when the host supplies none)")
         elif reason.startswith("set to a non-truthy"):
             # ⛔ A profile-gated value is NOT an override: nothing is inherited in the
             # deployment a default `up` describes, because that deployment never
@@ -4863,9 +4896,11 @@ def per_file_scope_note(deployment: dict) -> str:
     PR #12474, P2): compose `environment:` ADDS TO or OVERRIDES the image's `ENV`, so
     inheritance can ADD an arm — and the two directions that can TAKE IT AWAY are an
     entry that fixes NO VALUE (a shell `unset`; a compose entry with no value, which
-    compose resolves to a PASS-THROUGH from the environment it runs in — MEASURED, and
-    NOT an unset, which is what this docstring said before `#12549`) and a NON-truthy
-    value (which OVERRIDES it). Neither is modelled here; both are REPORTED
+    compose resolves to `null` and therefore DOES fix — it passes the ambient value
+    through when the deploying host exports one and CLEARS an inherited one when it does
+    not; MEASURED both ways with `docker build`/`docker run`, and an earlier revision of
+    this paragraph said flatly "NOT an unset", which the clearing half falsifies) and a
+    NON-truthy value (which OVERRIDES it). Neither is modelled here; both are REPORTED
     (`unset_declarations`, `disarming_assignments`) and named in the sentence this
     function returns, which is the only honest form — an earlier draft said "never
     unsets it, so inheritance can only ADD an arm", which the function five lines below
@@ -4908,8 +4943,9 @@ def per_file_scope_note(deployment: dict) -> str:
             # same note had just printed (fresh review of PR #12474, P2, measured).
             parts.append(
                 f"{unsets} declaration(s) that fix NO VALUE for it (a shell `unset`, or a "
-                "compose entry with no value, which compose resolves to a PASS-THROUGH "
-                "from the environment it runs in) — scored as the file's last word where "
+                "compose entry with no value — which compose resolves to `null`, passing "
+                "the ambient value through and CLEARING an inherited one when the host "
+                "supplies none) — scored as the file's last word where "
                 "it is last, and a LATER truthy assignment leaves the arm standing")
         if overrides:
             parts.append(f"{overrides} value(s) leave it OFF — the LAST of them by compose "
@@ -4951,9 +4987,10 @@ def per_file_scope_note(deployment: dict) -> str:
         "compose file that BUILDS from an ARMED image build file INHERITS that image's "
         "`ENV` — EXCEPT in the two directions that can take the arm away, which this "
         "reading does not model: a NON-TRUTHY value OVERRIDES it, and an entry with NO "
-        "VALUE is handed to the environment compose runs in (MEASURED: the resolver "
-        "returns null for it, so the FILE fixes no value — this reading scores the file, "
-        "not the ambient shell)"
+        "VALUE is resolved to `null` (MEASURED), so the FILE fixes no value of its own — "
+        "compose passes the ambient value through when the deploying host exports one "
+        "and CLEARS an inherited one when it does not, and this reading scores the "
+        "file, not the ambient shell)"
         + disarm
         + edge_note
     )
@@ -4981,16 +5018,33 @@ def _channel_reader_note(deployment: dict) -> str:
     answered is a fact about THIS box (`fly config show` is not installed on every
     lane). A note that named only the intended resolver would be a claim the run did
     not make — the same defect class as calling a read file unreadable.
+
+    ⛔ AND "ANSWERED" MEANS IT SUCCEEDED. Both channels set `resolver` on their
+    FAILURE returns too, so a note filtered on `resolver` alone printed
+    `answered for THIS tree by: compose=docker compose … config --format json` in the
+    SAME string as `CHANNEL UNRESOLVED — … exited 1: …` (fresh review of PR #12902,
+    cycle 5, P2, measured on a malformed `docker-compose.yml`). A refusal is reported
+    under its own verb, because it is a different fact: the resolver ran and said NO.
     """
     readings = list((deployment.get("resolved") or {}).values())
     declared = ", ".join(f"{name}={reader}" for name, reader in CHANNEL_READERS)
     answered = sorted({(reading.get("channel") or "?",
                         reading.get("resolver") or "?")
-                       for reading in readings if reading.get("resolver")})
-    if not answered:
+                       for reading in readings
+                       if reading.get("resolver") and reading.get("ok")})
+    refused = sorted({(reading.get("channel") or "?",
+                       reading.get("resolver") or "?")
+                      for reading in readings
+                      if reading.get("resolver") and not reading.get("ok")})
+    if not answered and not refused:
         return declared
-    text = declared + "; answered for THIS tree by: " + ", ".join(
-        f"{channel}={resolver}" for channel, resolver in answered)
+    text = declared
+    if answered:
+        text += "; answered for THIS tree by: " + ", ".join(
+            f"{channel}={resolver}" for channel, resolver in answered)
+    if refused:
+        text += "; ⛔ REFUSED (ran, and named a reason — scored UNRESOLVED, not answered) " \
+                + ", ".join(f"{channel}={resolver}" for channel, resolver in refused)
     warnings = [warning for reading in readings
                 for warning in (reading.get("warnings") or ())]
     if warnings:
@@ -5011,9 +5065,15 @@ def _declared_bound_note(deployment: dict) -> str:
                 "channels were NOT converted is not a claim it makes")
     if not rows:
         return "none"
+    # ⛔ TWO VERBS, because the two bounds fail in OPPOSITE directions: `cannot see`
+    # is an under-report a reader can trust, `reads … WRONG` is a false ARM. Printing
+    # the second as the first is the "a sentence wider than the measurement under it"
+    # class this probe exists to police (#12978).
     return "; ".join(
         f"{row['channel']} (reader: {row.get('reader', 'line reader')}) "
-        f"cannot see {row['cannot_see']} — {row['why']}"
+        f"cannot see {row['cannot_see']}"
+        + (f"; ⛔ and it READS {row['reads_wrong']}" if row.get("reads_wrong") else "")
+        + f" — {row['why']}"
         for row in rows)
 
 
@@ -5754,7 +5814,11 @@ def score_rule_bullet() -> Row:
             # than the measurement under it" class this probe exists to police (fresh
             # review of PR #12474, P3, measured). The one remaining shape is
             # a builder-stage-only `ENV` in a multi-stage build, since nothing here reads
-            # stage semantics. Stated as examples, never as an enumeration — a list here
+            # stage semantics — ⛔ AND ITS DIRECTION IS A FALSE ARM, not an under-report:
+            # the reader takes a NON-FINAL stage's `ENV` as the file's value, so the file
+            # reads ON while the image ships without it (`#12978`, measured with
+            # `docker build`/`docker run`; `DECLARED_CHANNEL_BOUNDS` carries it as
+            # `reads_wrong`, never as `cannot_see`). Stated as examples, never as an enumeration — a list here
             # is what `#12070` item 1 recorded rotting. The claim
             # is deleted rather than qualified — a second arm here would be another
             # sentence to falsify, and the per-FILE caveat below already carries the

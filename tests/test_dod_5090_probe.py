@@ -12820,3 +12820,114 @@ def test_12549_an_env_file_interpolated_blank_is_not_a_measured_empty(
     # …and the cause it publishes is "could not say", not a literal `''` it never saw.
     assert "OVERRIDES an inherited value" not in note, note
     assert "literal" in note or "could not say" in note or "cannot" in note, note
+
+
+# ---------------------------------------------------------------------------
+# Cycle 5 of PR #12902's review: three published CLAIMS that the run did not
+# make. Each test below reds against the pre-fix tool.
+# ---------------------------------------------------------------------------
+
+
+def test_12549_a_FALSE_ARM_bound_is_never_published_as_cannot_see(
+        tmp_path, monkeypatch):
+    """⛔ THE TWO DECLARED BOUNDS FAIL IN OPPOSITE DIRECTIONS (`#12978`).
+
+    A `cannot_see` clause is an UNDER-report: "this named shape was not measured", which
+    a reader can trust as an absence. The Dockerfile reader has no `FROM`/stage model, so
+    a builder-stage-only `ENV` in a multi-stage build is not *missed* — it is read as the
+    file's value and the file reads **ON** while the image ships without it:
+
+        $ docker build -q -t mstage . && docker run --rm mstage       # FROM alpine AS builder
+        NOFLAG                                                        #   ENV FLAG=1
+        $ flag_in_shipped_configs(...)["deployment"]                  # FROM alpine
+        files={'Dockerfile': 'ON'} on=True armed=['Dockerfile']
+        unmeasured=[] outside=[] indet=[]
+
+    Every bucket but `armed` is empty, so row 1 publishes "armed" and nothing tells the
+    reader a shape went unmeasured — and the earlier text made it WORSE by certifying it
+    as fail-closed under `cannot_see`. The bound therefore gets its own field and its own
+    verb (fresh review, P1; the BEHAVIOUR is `#12978`, this pins only what may be claimed).
+    """
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine AS builder\nENV TORTOISE_EMBED_GATE=1\nFROM alpine\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    dockerfile = next(row for row in shipped["deployment"]["declared_bounds"]
+                      if row["channel"] == "dockerfile")
+    # The false-ARM shape must NOT be claimed as an under-report…
+    assert "builder-stage" not in dockerfile["cannot_see"], dockerfile
+    # …it must be named, with its direction, its measurement and its tracker.
+    wrong = dockerfile["reads_wrong"]
+    assert "builder-stage-only" in wrong and "MULTI-STAGE" in wrong, dockerfile
+    assert "ARMED" in wrong, wrong
+    assert "#12978" in wrong, wrong
+    assert "stage GRAPH" in wrong, wrong
+    note = probe._declared_bound_note(shipped["deployment"])
+    # TWO VERBS in the published note, or the field is decorative.
+    assert "cannot see" in note and "READS" in note, note
+    assert "builder-stage-only" in note, note
+
+
+def test_12549_a_VALUE_LESS_compose_entry_names_BOTH_directions(
+        tmp_path, monkeypatch):
+    """⛔ A PASS-THROUGH AND AN UNSET ARE DIFFERENT CAUSES, and the entry is both.
+
+    Measured on this box (`docker compose v2`, image with `ENV FLAG=1`,
+    `environment: [FLAG]`):
+
+      * host EXPORTS the flag → compose substitutes the ambient value (`"1"`) — the
+        file supplies nothing, it passes the environment through;
+      * host does NOT → the container is given the variable with no value and the
+        image's `ENV` is **REMOVED** (the container prints nothing for it).
+
+    So "NOT an unset, it is a pass-through" is only half true, and the half it drops is
+    the one that can take an INHERITED arm away — the shape this bucket exists to
+    report. The score is `NOT_ARMED` either way (fail-closed); the CLAIM is what changes
+    (fresh review, P2).
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      - TORTOISE_EMBED_GATE\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    # Fail closed, unchanged by this fix.
+    assert shipped["deployment"]["files"].get("docker-compose.yml") != "ON", shipped
+    note = _gate_note(shipped)
+    scope_reason = " ".join(
+        scope.get("reason", "")
+        for scope in shipped["deployment"]["resolved"].values()
+        for scope in (scope.get("scopes") or {}).values())
+    published = note + " " + scope_reason
+    assert "passes the ambient value through" in published, published
+    # …and the CLEARING half, which the previous text denied outright.
+    assert "CLEARS an inherited one" in published, published
+
+
+def test_12549_a_REFUSED_resolver_is_never_published_as_having_ANSWERED(
+        tmp_path, monkeypatch):
+    """⛔ "ANSWERED" MEANS IT SUCCEEDED — a resolver that exits 1 did not answer.
+
+    `_compose_channel`/`_fly_channel` set `resolver` on their FAILURE returns too, and
+    the note filtered on `resolver` alone, so a malformed compose file published
+
+        … answered for THIS tree by: compose=docker compose -f … config --format json
+
+    in the SAME string as `CHANNEL UNRESOLVED — … exited 1: yaml: line 3 …`. A note that
+    names a resolver as having answered a question it refused is a claim the run did not
+    make — the defect class `flag_in_shipped_configs` exists to police, one layer in
+    (fresh review, P2).
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n\timage: [unclosed\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    deployment = shipped["deployment"]
+    # The resolver really did refuse, so the case is the one it claims to be.
+    compose = next(reading for reading in deployment["resolved"].values()
+                   if reading.get("channel") == "compose")
+    assert compose.get("ok") is False, compose
+    note = probe._channel_reader_note(deployment)
+    assert "answered for THIS tree by: compose=" not in note, note
+    assert "REFUSED" in note, note
