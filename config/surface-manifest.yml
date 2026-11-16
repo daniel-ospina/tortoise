@@ -78,6 +78,57 @@
 # reading `tools: 72` next to a live 72 and wondering whether to "restore" 82 or 76, do
 # not — that re-opens the slack. #10906 and #10914 compose because their retired name
 # sets are disjoint (77 − 5 = 72 advertised at #10914's head).
+# 
+# LOWERED 72 → 55 and 150 → 110 on 2026-11-16 by PR #12951, which RE-CUTS onto `main`
+# and so derives the pins from the MERGED declaration rather than from either side. THE
+# COMPOSITION, all four #4282 Phase 2 waves (the READ/QUERY half is this PR, the
+# WRITE/MUTATE half landed as #12915, the SOURCES/MINE/SESSION half as #12948):
+# 68 − 9 + 5 − 14 + 6 − 7 + 6 = 55 advertised tools; 125 − 5 (#12901 wave 1) + 6 − 14
+# (this wave) − 4 + 3 (write wave) − 7 + 6 (sources wave) = 110 public SDK methods.
+# ⛔ NO WAVE's own number is the answer — each was measured on its own base — and both
+# sibling waves left their pins slack (67/124 against a live 59/118), so inheriting either
+# side would re-open exactly the defect this block exists to close. Both numbers are
+# EXACT: zero slack. NINE read doors
+# retired into their containers (issue_insight,
+# list_topics, provenance, session_context, entity_profile, traverse, review_connections,
+# list_dedup_candidates, get_source_reliability) with FIVE container rows arriving
+# (search_knowledge, list_knowledge, check_confidence, explore_connections,
+# review_link_candidates — `tortoise_graph_overview` was already one of the 68), then
+# FOURTEEN write doors retired into SIX containers (update_knowledge,
+# supersede_knowledge, adjust_relationship, refresh_confidence, write_question,
+# record_decision). The SDK side moved 125 → 111: SIX read containers arrived and FOURTEEN
+# read methods were re-privatised behind them (125 + 6 − 14 = 117), the FIVE `#12901` wave 1
+# had already retired took it to 112, and the write family's four retiring re-keys against
+# three newly-implemented approved names took it to 111 (112 − 4 + 3), so the
+# owner's 40-name approved list did not change and the backlog did not grow.
+# ⛔ SIX of the read family's list-returning doors are DELIBERATELY left live — retiring one
+# moves its #8482 failure repair off the advertised path, because a `-> Any` container has
+# no array envelope to carry the failure payload (the reason #10914 kept
+# `tortoise_check_structure`). They answer through their containers today.
+# Both numbers are LOWERED rather than left alone for the reason the 82 → 76 step names: a
+# pin that keeps slack stops being a growth pin — re-adding any retired name would pass
+# `surface-guard.py` green. ⛔ 48/110 IS DELIBERATE, NOT AN ANOMALY: if you read `tools: 48`
+# next to a live 49 and wonder whether to "restore" 55 or 67, do not — the retired names are
+# pinned by `tests/test_tool_registry.py` and the slack would hide their return.
+#
+# LOWERED 55 → 48 (tools) on 2026-11-16 by the #11609 DOOR-RETIREMENT wave (#4282 Phase 2,
+# lane E), with the SDK count LEFT at 110 — that wave retires MCP names only, so the SDK
+# pin does not move and a change that moved it would be a different wave. SEVEN doors left
+# the advertised surface and each retired FORWARD (#3883) into a container that is live on
+# `main`: `get_session` → `get_entity(type="session")`, `find_cross_lens_candidates` →
+# `review_link_candidates(kind="cross_lens")`, `list_batch` → `list_knowledge(kind="batch")`,
+# and `create_subject`/`create_object`/`create_event`/`create_document` →
+# `create_entity(type=...)`. NO row was archived: the archive is for doors with NO
+# destination (`archive/README.md`), and a forwarded name is still served.
+# ⛔ WHY ONLY SEVEN. The other 25 live names absent from the 27-target are each protected by a
+# RECORDED decision, and the list is in `tortoise/tool_registry.py` beside the new rows so the
+# next lane does not re-derive it: six READ doors + `check_structure` + `calibrate_summary`
+# keep their `-> list[dict]` envelope (the #8482 repair), `issue_insight`/`session_context`/
+# `search` keep a `rest_spec` (retiring the entry deletes a REST route), `query` is the paged
+# destination of two already-retired pointers, `create_point`/`diary_write`/
+# `compute_confidence` have no arm on their container, and nine destinations are not live on
+# `main` yet. Lowering the pin to the LIVE count is what keeps it a growth pin: at 55 it would
+# carry seven slots of slack and re-adding any of the seven would read green.
 #
 # THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so
 # drift is visible (tools/surface-guard.py). The approved TARGET is recorded in
@@ -924,13 +975,16 @@ counts:
   tools: 55
   sdk_public_methods: 94
   retired: 53
+  tools: 48
+  sdk_public_methods: 110
+  retired: 60
   keyword_distribution:
-    fetch: 11
-    create: 14
+    fetch: 10
+    create: 10
     update: 5
     delete: 4
-    list: 5
-    find: 4
+    list: 4
+    find: 3
     trace: 2
     check: 6
     link: 2
@@ -938,6 +992,8 @@ counts:
 high_water_counts:
   tools: 55
   sdk_public_methods: 94
+  tools: 48
+  sdk_public_methods: 110
 retired:
 - name: tortoise_annotate_operator
   use_instead: tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., directness=...)
@@ -964,9 +1020,29 @@ retired:
   sdk_method: checkpoint
   http_policy: true
   approval: null
+- name: tortoise_create_document
+  use_instead: tortoise_create_entity(type="document", name=<title>, documentKind=..., props=...)
+  sdk_method: create_document
+  http_policy: true
+  approval: null
+- name: tortoise_create_event
+  use_instead: tortoise_create_entity(type="event", name=..., eventKind=..., props=...)
+  sdk_method: create_event
+  http_policy: true
+  approval: null
+- name: tortoise_create_object
+  use_instead: tortoise_create_entity(type="object", name=..., props=...)
+  sdk_method: create_object
+  http_policy: true
+  approval: null
 - name: tortoise_create_source
   use_instead: tortoise_register_source(url, sourceKind, tier=...)
   sdk_method: create_source
+  http_policy: true
+  approval: null
+- name: tortoise_create_subject
+  use_instead: tortoise_create_entity(type="subject", name=..., props=...)
+  sdk_method: create_subject
   http_policy: true
   approval: null
 - name: tortoise_dream
@@ -992,6 +1068,11 @@ retired:
 - name: tortoise_file_human_approval
   use_instead: tortoise_record_decision(approver_id, artifact_id, point_ids, decision_content=...)
   sdk_method: record_decision
+  http_policy: true
+  approval: null
+- name: tortoise_find_cross_lens_candidates
+  use_instead: tortoise_review_link_candidates(kind="cross_lens", limit=..., threshold=...)
+  sdk_method: get_cross_lens_candidates
   http_policy: true
   approval: null
 - name: tortoise_get
@@ -1024,6 +1105,11 @@ retired:
   sdk_method: get_point
   http_policy: true
   approval: null
+- name: tortoise_get_session
+  use_instead: tortoise_get_entity(id, type="session")
+  sdk_method: get_session
+  http_policy: true
+  approval: null
 - name: tortoise_get_source_reliability
   use_instead: tortoise_list_knowledge(kind="source_reliability", url=...)
   sdk_method: get_source_reliability
@@ -1052,6 +1138,11 @@ retired:
 - name: tortoise_invalidate
   use_instead: tortoise_supersede_knowledge(id, corrected_by_id, transfer_edges=False)
   sdk_method: invalidate_point
+  http_policy: true
+  approval: null
+- name: tortoise_list_batch
+  use_instead: tortoise_list_knowledge(kind="batch", id=...)
+  sdk_method: list_batch
   http_policy: true
   approval: null
 - name: tortoise_list_dedup_candidates
@@ -1231,10 +1322,10 @@ rows:
     surfaces tombstones. For semantic relevance use tortoise_search; for a single known ID use tortoise_get_point.'
   dependency: declares TortoiseSDK.paginated_query (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1377,10 +1468,9 @@ rows:
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
-  recommendation: fix-declaration
-  basis: decided
-  reason: declares an SDK method that does not exist; the tool itself is handler-served and still works, so this
-    is a false declaration to correct (or a tool to retire — that part is the owner's call)
+  recommendation: keep
+  basis: observed
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1562,33 +1652,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_list_batch
-  served_from: tortoise/mcp_server.py:719e932618e3cb36
-  served_attributes: a7ef3c89c9e6bab0
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: list_batch
-  group_source: defaulted
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: 'Audit one ingest bundle: the stamped artifacts (Points created or adopted via dedup + direct edges) carrying
-    the given batch_id. Entities/sources are out of stamp scope; editorial supersede artifacts are outside audit.
-    Completeness holds across rebuild_all.'
-  dependency: declares TortoiseSDK.list_batch (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_list_batches
   served_from: tortoise/mcp_server.py:9f24b2ea216a4739
   served_attributes: a6f98a0ada3b45d0
@@ -1756,14 +1819,12 @@ rows:
   recommendation: keep
   basis: observed
   reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: graph
-  proposed: true
+  recommended_family: null
+  proposed: false
   exemption: false
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_get_entity
-  cluster_note: group `fetch-by-id` is split across ['graph', 'sessions']; proposed family `graph` — waits for your
-    approval
 - name: tortoise_create_entity
   served_from: tortoise/mcp_server.py:b489e9cdb82dbd6d
   served_attributes: 764058954f66db36
@@ -1787,97 +1848,12 @@ rows:
   recommendation: keep
   basis: observed
   reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: graph
-  proposed: true
+  recommended_family: null
+  proposed: false
   exemption: false
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_create_entity
-  cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
-- name: tortoise_create_event
-  served_from: tortoise/mcp_server.py:777802f3585f9042
-  served_attributes: f15148fa26e4d095
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: create_event
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: create
-  canonical: false
-  job: Create an Event node (meeting, decision, deployment, etc.).
-  dependency: declares TortoiseSDK.create_event (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_create_entity` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_create_entity
-  cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
-- name: tortoise_create_object
-  served_from: tortoise/mcp_server.py:8ca97c0d6bfe296d
-  served_attributes: a0b97014d5bd1404
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: create_object
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: create
-  canonical: false
-  job: 'Create an Object node (product, customer, skill, etc.), unless the kind is a §5 Subject kind: the KIND decides
-    the LABEL (#9964), so objectKind=''core:organization'' writes a :Subject and is reported as advisories.kind_layer_routed.'
-  dependency: declares TortoiseSDK.create_object (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_create_entity` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_create_entity
-  cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
-- name: tortoise_create_subject
-  served_from: tortoise/mcp_server.py:45cc3c6f978d5ac1
-  served_attributes: af0f73916896a555
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: create_subject
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: create
-  canonical: false
-  job: 'Create a Subject node (team, role, organization, person), unless the kind names the other entity layer:
-    the KIND decides the LABEL (#9964), so a kind the classifier partitions as an Object (e.g. subjectKind=''core:skill'')
-    writes an :Object and is reported as advisories.kind_layer_routed.'
-  dependency: declares TortoiseSDK.create_subject (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_create_entity` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_create_entity
-  cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
 - name: tortoise_create_edge
   served_from: tortoise/mcp_server.py:f584fb5c935a1e9a
   served_attributes: 674a7d628b644657
@@ -2114,37 +2090,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_find_cross_lens_candidates
-  served_from: tortoise/mcp_server.py:63afae77dd7e95d4
-  served_attributes: 4641b6abde665209
-  family: reasoning
-  family_rank: 3
-  served: http
-  sdk_method: get_cross_lens_candidates
-  group_source: mapped
-  keyword: find
-  keyword_rank: 6
-  cluster: null
-  canonical: null
-  job: 'Cross-lens candidate discovery (READ-ONLY, #438 bring-your-own-agent): surface unverified candidate pairs
-    between Points from DIFFERENT sources (cross-stream discovery over the vector index) with lens pair, cosine
-    similarity, point context, and dedup vs existing operators. Payload carries a single #901 routing field (truth|relevance)
-    but stays NEUTRAL — no op_type hint; the customer agent decides semantics and writes operators via the normal
-    API. Gated on registered sourceKind (any tier, D3); hard cap 200 candidates/cycle (D4); top_k is hard-clamped
-    to 100 so an agent cannot inflate the per-cycle recall budget. Empty results (not errors) when there is nothing
-    to see (D8).'
-  dependency: declares TortoiseSDK.get_cross_lens_candidates (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_check_structure
   served_from: tortoise/mcp_server.py:40375d9fd46546ee
   served_attributes: d1d847feeecfe0de
@@ -2199,34 +2144,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_get_session
-  served_from: tortoise/mcp_server.py:308bf87a6a2da5ee
-  served_attributes: 8df739457ebc961a
-  family: sessions
-  family_rank: 4
-  served: http
-  sdk_method: get_session
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: fetch-by-id
-  canonical: false
-  job: Get a single agent session Event by session_id.
-  dependency: declares TortoiseSDK.get_session (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_get_entity` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_get_entity
-  cluster_note: group `fetch-by-id` is split across ['graph', 'sessions']; proposed family `graph` — waits for your
-    approval
 - name: tortoise_search_sessions
   served_from: tortoise/mcp_server.py:1aed89c1abfa02e4
   served_attributes: 0a83402375ac3bcd
@@ -2615,34 +2532,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_create_document
-  served_from: tortoise/mcp_server.py:106fefa26e8b15ac
-  served_attributes: 2fda7769c65f26af
-  family: sources
-  family_rank: 8
-  served: http
-  sdk_method: create_document
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: create
-  canonical: false
-  job: 'Create a document — a :Source (research, planDoc, meetingNotes, etc.). NOT keyed by url: every call mints
-    a fresh id, so a repeat writes a second Source and a second DocumentCreated.'
-  dependency: declares TortoiseSDK.create_document (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_create_entity` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_create_entity
-  cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
 - name: tortoise_index_sources_from_directory
   served_from: tortoise/mcp_server.py:4501d8ae1df4913c
   served_attributes: 5efd82012e8dcbd5
@@ -3124,11 +3013,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.create_document.
-  dependency: 'reached by 1 registered tool(s): tortoise_create_document'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_create_document (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3193,11 +3082,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.create_event.
-  dependency: 'reached by 1 registered tool(s): tortoise_create_event'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_create_event (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3216,11 +3105,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.create_object.
-  dependency: 'reached by 1 registered tool(s): tortoise_create_object'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_create_object (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3285,11 +3174,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.create_subject.
-  dependency: 'reached by 1 registered tool(s): tortoise_create_subject'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_create_subject (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3561,11 +3450,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_cross_lens_candidates.
-  dependency: 'reached by 1 registered tool(s): tortoise_find_cross_lens_candidates'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_find_cross_lens_candidates (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3723,11 +3612,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_session.
-  dependency: 'reached by 1 registered tool(s): tortoise_get_session'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_get_session (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3953,11 +3842,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.list_batch.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_batch'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_batch (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false

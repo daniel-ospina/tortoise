@@ -4867,11 +4867,16 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #11609 lane C composes with lane B on this tree: 60 -> 59 (six SOURCES/MINE/SESSION
     # containers in, seven advertised members retired into them; the 68 the branch started
     # from is lane B's pre-wave number, so the merged arithmetic is 68 + 6 + 6 - 7 - 14).
-    # #11609 family A's READ/QUERY containers (#12951, merged after this pin was last cut)
-    # then retired nine advertised doors into six containers: 59 - 9 + 5 = 55. The pin had
-    # gone stale on `main` by exactly that wave — this corrects it to the derived count
-    # rather than to any prose, and `surface-target-check.py` reads the same 55.
-    assert live["mcp"] == manifest["counts"]["tools"] == 55
+    # #11609 Phase 2 READ/QUERY (MERGED as #12951): 59 -> 55 — nine READ doors retired into
+    # five arriving containers (the sixth, `graph_overview`, was already live via #10914),
+    # so 59 - 9 + 5 = 55. The retired names keep their #3883 shims, which is why the SERVED
+    # population rises to 108 while the ADVERTISED one falls.
+    # #11609 DOOR RETIREMENT (this PR, lane E): 55 -> 48 — seven doors retired FORWARD into
+    # containers the Phase 2 waves had ALREADY advertised, so the live delta is exactly −7
+    # and there is no `+ n` term. No container row arrives here, the SDK pin does not move
+    # (94, inherited from `main`), and no row is archived: `archive/mcp-tools/` is for doors
+    # with NO destination.
+    assert live["mcp"] == manifest["counts"]["tools"] == 48
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
