@@ -5803,8 +5803,18 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
     # cycle-7): `lifecycle_props_by_rendering` hands back the caller's object, and
     # a `str` subclass can answer `==` however it likes while the wire renders the
     # word. Both guards must read the same word the driver writes (#12907).
-    if (str.__str__(status) if isinstance(status, str) else status) \
-            == _SUPERSEDED_STATUS:
+    # ⛔ `issubclass(type(status), str)`, NOT `isinstance(status, str)` (#12914
+    # review P2, the same class #12882/#12907 pin at `:48509`): `isinstance`
+    # consults `__class__`, so an object that DECLARES ``__class__ = str``
+    # passes the test and `str.__str__` then REFUSES it — measured,
+    # ``update_entity(<live Object>, status=<__class__=str impostor>,
+    # supersededBy='y')`` escaped as ``TypeError: descriptor '__str__'
+    # requires a 'str' object`` where this door's contract is the `ValueError`
+    # below. A value that is not genuinely `str` has no base CONTENT to
+    # compare, so it is not the word and the carrier refusal stands.
+    status_word = (str.__str__(status)
+                   if issubclass(type(status), str) else None)
+    if status_word == _SUPERSEDED_STATUS:
         return
     named = ", ".join(f"{key!r} (record column {column!r})"
                      for key, column in carriers)
@@ -22725,16 +22735,34 @@ class TortoiseSDK:
         input.
         """
         label = self._supersession_label(old_id)
+        # ⛔ AN IMPOSTOR ID IS REFUSED AT THE DOOR (#12914 review P2). A value
+        # that declares ``__class__ = str`` without being one passes
+        # `isinstance` and then `supersede_point`'s own query raises
+        # ``TypeError: argument of type '…' is not iterable`` (measured) — the
+        # Point doors cannot answer their documented ``No point <id>`` for it,
+        # because they query it too. Every GENUINE non-`str` id (`123`, `None`,
+        # `[]`, `object()`) keeps that documented fall-through untouched; only
+        # the forged-`__class__` class is caught here, where this door's stated
+        # contract is a ``ValueError``.
+        if label is None and isinstance(old_id, str) \
+                and not issubclass(type(old_id), str):
+            raise ValueError(
+                f"supersede: {_refusal_repr(old_id)} is not a node id — it declares "
+                f"`__class__ = str` but is a {type(old_id).__name__}, so no "
+                f":Point, :Object or :Subject row can carry it and the graph "
+                f"cannot encode it (#12907). Pass the id string itself."
+            )
         if label in ("Object", "Subject"):
             if not transfer_edges:
                 raise ValueError(
                     f"supersede: transfer_edges=False is the INVALIDATE half, "
                     f"and it is Point-only — `outdated` + a `CORRECTS` edge are "
-                    f"a Point's machinery (ONTOLOGY §4.7), and {old_id!r} is a "
-                    f":{label}. A :{label} that was retired with NO successor "
-                    f"is 'archived' under §4.3 — `update_entity({old_id!r}, "
-                    f"status='archived')` — or, if it WAS replaced, name the "
-                    f"successor with `supersede({old_id!r}, <successor id>)`."
+                    f"a Point's machinery (ONTOLOGY §4.7), and "
+                    f"{_refusal_repr(old_id)} is a :{label}. A :{label} that "
+                    f"was retired with NO successor is 'archived' under §4.3 — "
+                    f"`update_entity({_refusal_repr(old_id)}, status='archived')` "
+                    f"— or, if it WAS replaced, name the successor with "
+                    f"`supersede({_refusal_repr(old_id)}, <successor id>)`."
                 )
             return self._supersede_entity(label, old_id, new_id)
         if transfer_edges:
@@ -22753,6 +22781,15 @@ class TortoiseSDK:
         three labels carries the id — the caller then falls through to the Point
         doors, which answer ``No point <id>`` exactly as before this change.
         """
+        # ⛔ A value that is not genuinely `str` carries no label and names no
+        # node (#12914 review P2): `isinstance` consults `__class__`, so an
+        # object declaring ``__class__ = str`` reached the driver's `str` branch
+        # and the QUERY raised ``TypeError: argument of type '…' is not
+        # iterable`` instead of the caller's documented refusal. Answering
+        # ``None`` here is the same answer every genuinely non-`str` id already
+        # gets (the driver degrades it to null and nothing matches).
+        if not issubclass(type(node_id), str):
+            return None
         rows = self._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN 1 AS rank, count(n) AS hits "
             "UNION "
@@ -22815,13 +22852,37 @@ class TortoiseSDK:
         # caller's object, so a `str` subclass with `__eq__ -> False` slipped this
         # gate and the write stored the row as its OWN successor — the successor
         # then resolved to the row it replaced.
-        if (str.__str__(old_id) if isinstance(old_id, str) else old_id) == \
-                (str.__str__(new_id) if isinstance(new_id, str) else new_id):
+        #
+        # ⛔ The base-content read is gated on `issubclass(type(x), str)`, NOT
+        # `isinstance(x, str)` (#12914 review P2): `isinstance` consults
+        # `__class__`, so an object that DECLARES ``__class__ = str`` passed the
+        # test and `str.__str__` REFUSED it — measured, ``supersede(<live
+        # Object>, <impostor>)`` escaped as ``TypeError: descriptor '__str__'
+        # requires a 'str' object`` at this line instead of the documented
+        # ``supersede: no :Object <id>`` ValueError below. A value with no `str`
+        # base content is left as it is and falls through to that refusal (`_rows`
+        # answers "names no node" for it, see there).
+        _old_word = (str.__str__(old_id)
+                     if issubclass(type(old_id), str) else old_id)
+        _new_word = (str.__str__(new_id)
+                     if issubclass(type(new_id), str) else new_id)
+        if _old_word == _new_word:
             raise ValueError(
-                f"supersede: old_id and new_id must differ ({old_id!r}) — a "
+                f"supersede: old_id and new_id must differ ({_refusal_repr(old_id)}) — a "
                 f"row cannot be its own successor")
 
         def _rows(node_id: str) -> dict:
+            # ⛔ A value that is not genuinely `str` names NO NODE (#12914 review
+            # P2): the graph cannot encode it, and the driver's parameter check
+            # is `isinstance`-shaped — so an object declaring ``__class__ = str``
+            # raised ``TypeError`` INSIDE the query instead of reaching the
+            # refusals below. Every genuinely non-`str` value the driver CAN
+            # encode already degrades to null and matches nothing, so "no rows"
+            # is the answer those values get today; this answers it without the
+            # unencodable round trip, and lets the impostor land on the same
+            # documented ``no :<label> <id>`` / cross-family ValueError.
+            if not issubclass(type(node_id), str):
+                return {"rows": 0, "statuses": [], "names": []}
             rows = proj.g.query(
                 f"MATCH (n:{label} {{id:$id}}) "
                 "RETURN count(n) AS rows, collect(n.status) AS statuses, "
@@ -22837,14 +22898,14 @@ class TortoiseSDK:
         dead = _SUPERSESSION_DEAD_SETS[label]
         old = _rows(old_id)
         if not old["rows"]:
-            raise ValueError(f"No :{label} {old_id!r}")
+            raise ValueError(f"No :{label} {_refusal_repr(old_id)}")
         # The verdict is over EVERY bound row (#7822's fan-out rule): a dead
         # sibling is not made live by the write, so terminalizing the id again
         # would re-terminalize a dead row.
         dead_old = sorted({str(s) for s in old["statuses"] if str(s) in dead})
         if dead_old:
             raise ValueError(
-                f"supersede: :{label} {old_id!r} is already terminal "
+                f"supersede: :{label} {_refusal_repr(old_id)} is already terminal "
                 f"({dead_old[0]}) — {label} supersession cannot re-terminalize a "
                 f"dead row (#2498: terminalization is one-way). Mint the "
                 f"replacement and let it stand as current; the dead row keeps its "
@@ -22853,7 +22914,7 @@ class TortoiseSDK:
         new = _rows(new_id)
         if not new["rows"]:
             raise ValueError(
-                f"supersede: no :{label} {new_id!r} — the successor must be a "
+                f"supersede: no :{label} {_refusal_repr(new_id)} — the successor must be a "
                 f"same-family node (a :{label} cannot name a node of another "
                 f"label as its successor: `supersededBy` is read by a "
                 f"per-label successor probe, so a cross-family name would never "
@@ -22861,8 +22922,8 @@ class TortoiseSDK:
         dead_new = sorted({str(s) for s in new["statuses"] if str(s) in dead})
         if dead_new:
             raise ValueError(
-                f"supersede: the successor {new_id!r} is itself terminal "
-                f"({dead_new[0]}) — {old_id!r} would be replaced by a dead row, "
+                f"supersede: the successor {_refusal_repr(new_id)} is itself terminal "
+                f"({dead_new[0]}) — {_refusal_repr(old_id)} would be replaced by a dead row, "
                 f"leaving nothing current to show. Name a :{label} that is "
                 f"current, or mint one first."
             )
@@ -22870,11 +22931,11 @@ class TortoiseSDK:
                  if n is not None and str(n).strip()]
         if not names:
             raise ValueError(
-                f"supersede: the successor {new_id!r} carries no name — "
+                f"supersede: the successor {_refusal_repr(new_id)} carries no name — "
                 f"`supersededBy` stores the successor's NAME (§4.2/§4.3: "
                 f"*successor name, stored verbatim*) and every read surface "
                 f"resolves it by name, so an id alone cannot be stored here. "
-                f"Give the node a name (`update_entity({new_id!r}, "
+                f"Give the node a name (`update_entity({_refusal_repr(new_id)}, "
                 f"name=<name>)`), then re-send this call."
             )
         successor_name = names[0]
@@ -22888,7 +22949,7 @@ class TortoiseSDK:
             # that did not land must never be reported as one — the phantom-claim
             # class `supersede_point`'s own count probe guards.
             raise ValueError(
-                f"supersede: the write on :{label} {old_id!r} matched no row — "
+                f"supersede: the write on :{label} {_refusal_repr(old_id)} matched no row — "
                 f"nothing was superseded (a concurrent delete, or the row moved). "
                 f"Re-read the row and re-send."
             )

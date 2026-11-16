@@ -70,6 +70,18 @@ What this suite pins (each row names the mutation that reds it):
 * #12825's allowance is untouched: ``status='live'`` WITH both carriers cleared
   lifts a superseded row; a status-ONLY lift is still refused. Mutation: make
   the new guard fire on any status -> the un-supersede case reds.
+* The #12907 IMPOSTOR class, at all three sites this door reads a caller value
+  through a ``str`` test: ``update_entity(status=<impostor>)`` still answers the
+  CARRIER ``ValueError``; ``supersede(<live>, <impostor>)`` still answers
+  ``no :<label> <id>``; ``supersede(<impostor>, <id>)`` answers a ``ValueError``
+  rather than a ``TypeError``. Mutation: spell the base-content gate
+  ``isinstance(x, str)`` instead of ``issubclass(type(x), str)`` -> the first two
+  red with ``TypeError: descriptor '__str__' requires a 'str' object``; delete
+  the door's impostor refusal (or ``_supersession_label``'s non-``str``
+  short-circuit) -> the third reds with ``TypeError: argument of type 'Imp' is
+  not iterable``. A GENUINE non-``str`` id (`123`, `None`, `[]`, `object()`)
+  keeps the documented ``No point <id>`` fall-through, pinned in the same cases,
+  so the bound cannot be widened into a blanket ``str``-only door.
 
 Runnable (docker lane):
 
@@ -883,3 +895,168 @@ def test_a_successor_with_a_lying_eq_is_still_the_same_row(sdk):
         sdk.supersede(NeverEqual(node), NeverEqual(node))
     assert _row(sdk, "Object", node)[0] is None, (
         "a refused self-supersede still moved the row")
+
+
+# ── #12914 review: the IMPOSTOR class, at every site this door reads ──────
+
+class _Impostor:
+    """Declares ``__class__ = str`` WITHOUT being one (#12907's class).
+
+    ``isinstance(x, str)`` consults ``__class__`` and answers True; ``str.__str__``
+    and the driver's ``str`` branch both refuse it. Nothing here overrides
+    ``__eq__`` — the crash is the forged ``__class__`` alone, so a fix that only
+    hardened ``__eq__`` would not close this.
+    """
+
+    __class__ = str
+
+    def __repr__(self) -> str:                 # a stable label in a message
+        return "<impostor>"
+
+
+@pytest.mark.parametrize("label", ["Object", "Subject"])
+def test_an_impostor_status_still_answers_the_carrier_refusal(sdk, label):
+    """the write door's carrier guard reads the status at BASE CONTENT — safely.
+
+    Measured on the #12914-reviewed head ``6823ed2b84``: ``update_entity(<live
+    Object>, status=<impostor>, supersededBy='y')`` escaped as ``TypeError:
+    descriptor '__str__' requires a 'str' object`` (sdk.py:5806) where the same
+    call with ``status='live'`` answers the documented carrier ``ValueError``.
+    Fail-closed either way — the row does not move — but the door's contract is
+    a ``ValueError``, and a ``TypeError`` out of a guard is not a refusal a
+    caller can act on.
+
+    Mutation: spell the base-content gate ``isinstance(status, str)`` ->
+    TypeError instead of ValueError.
+    """
+    node = _make(sdk, label, f"impostor-status-{label.lower()}")
+    before = _row(sdk, label, node)
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(node, status=_Impostor(), supersededBy="v2")
+    msg = str(exc.value)
+    assert "lifecycle CARRIER" in msg, msg
+    assert f":{label}" in msg, f"the refusal must name the label: {msg!r}"
+    assert _row(sdk, label, node) == before, (
+        "a refused impostor write moved the row: "
+        f"{before} -> {_row(sdk, label, node)}")
+
+
+@pytest.mark.parametrize("label", ["Object", "Subject"])
+def test_an_impostor_successor_answers_the_same_missing_node_refusal(sdk, label):
+    """``supersede(<live>, <impostor>)`` answers ``no :<label>``, not a TypeError.
+
+    Measured at ``6823ed2b84``: ``TypeError: descriptor '__str__' requires a
+    'str' object`` at the self-successor gate (sdk.py:22819), where
+    ``supersede(<live>, 'no-such-node')`` answers ``supersede: no :Object …``.
+    A value the graph cannot encode names no node, so it must reach that same
+    refusal.
+
+    Mutation: spell either base-content gate ``isinstance(x, str)`` -> TypeError;
+    drop the non-``str`` short-circuit in ``_rows`` -> TypeError inside the
+    query.
+    """
+    node = _make(sdk, label, f"impostor-new-{label.lower()}")
+    before = _row(sdk, label, node)
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(node, _Impostor())
+    msg = str(exc.value)
+    assert f"no :{label}" in msg, f"the missing-successor refusal must land: {msg!r}"
+    assert _row(sdk, label, node) == before, (
+        "a refused impostor successor moved the row: "
+        f"{before} -> {_row(sdk, label, node)}")
+
+
+def test_an_impostor_old_id_is_refused_at_this_door(sdk):
+    """``supersede(<impostor>, <id>)`` is a ``ValueError``, never a ``TypeError``.
+
+    Measured at ``6823ed2b84``: ``TypeError: argument of type 'Imp' is not
+    iterable`` out of the driver's parameter check, reached from
+    ``_supersession_label``'s query (sdk.py:22756) — where every GENUINE
+    unusable id answers ``No point <id>``. The impostor cannot take that
+    fall-through (`supersede_point` queries it too, and the driver's
+    ``isinstance``-shaped check refuses it there), so the door refuses it here,
+    where the documented contract is a ``ValueError``.
+
+    Mutation: delete the impostor refusal (or the non-``str`` short-circuit in
+    ``_supersession_label``) -> TypeError.
+    """
+    node = _make(sdk, "Object", "impostor-old")
+    before = _row(sdk, "Object", node)
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(_Impostor(), node)
+    msg = str(exc.value)
+    assert "is not a node id" in msg, msg
+    assert "cannot encode it" in msg, (
+        f"the refusal must say the graph cannot carry the value: {msg!r}")
+    assert _row(sdk, "Object", node) == before, (
+        "a refused impostor old_id moved the row: "
+        f"{before} -> {_row(sdk, 'Object', node)}")
+
+
+@pytest.mark.parametrize("value", [123, None, [], (1, 2), object()])
+def test_every_GENUINE_non_str_id_keeps_the_documented_no_point_answer(sdk,
+                                                                     value):
+    """The impostor bound must not become a blanket ``str``-only door.
+
+    Every one of these answers ``No point <id>`` today (measured on the head
+    this suite runs at), and the #12914 fix must leave that untouched: it bounds
+    the FORGED-``__class__`` class only, because those values ARE encodable by
+    the driver (it degrades them to null, so nothing matches) and the impostor is
+    not.
+
+    Mutation: widen the door's impostor refusal to ``not issubclass(type(x),
+    str)`` -> all five red with the impostor's message instead of ``No point``.
+    """
+    node = _make(sdk, "Object", f"genuine-non-str-{type(value).__name__}")
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(value, node)
+    msg = str(exc.value)
+    assert msg.startswith("No point "), (
+        f"a genuine non-`str` id must keep the Point doors' documented answer: "
+        f"{msg!r}")
+    assert _row(sdk, "Object", node)[0] is None, (
+        "a refused non-`str` old_id moved the row")
+
+
+class _ImpostorBoomRepr(_Impostor):
+    """An impostor that also raises in ``__repr__`` (#12907's second lesson).
+
+    A refusal interpolates the refused operand, and for a caller object that is
+    the CALLER'S ``__repr__`` — so a refusal that spells ``!r`` escapes as the
+    caller's exception class instead of the promised ``ValueError``. #12907 fixed
+    this for ``update_entity`` with ``_refusal_repr``; the arms this review round
+    added must use it too.
+    """
+
+    def __repr__(self) -> str:
+        raise RuntimeError("repr-boom")
+
+
+def test_a_hostile_repr_cannot_replace_THIS_doors_new_refusals(sdk):
+    """Both arms added for the impostor class answer ``ValueError``, not ``repr``.
+
+    Measured on this fix's first cut: ``supersede(<impostor with a raising
+    ``__repr__``>, <id>)`` -> ``RuntimeError: repr-boom`` from the new door
+    refusal, and ``supersede(<live Object>, <same>)`` -> ``RuntimeError`` from
+    the missing-successor message, i.e. the arms escaped as the caller's own
+    exception class. Not fail-open (no write, row unchanged) but the contract is
+    the exception CLASS.
+
+    Mutation: spell either arm ``{old_id!r}`` / ``{new_id!r}`` instead of
+    ``_refusal_repr(...)`` -> ``RuntimeError`` instead of ``ValueError``.
+    """
+    node = _make(sdk, "Object", "hostile-repr")
+    before = _row(sdk, "Object", node)
+
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(_ImpostorBoomRepr(), node)
+    assert "is not a node id" in str(exc.value), exc.value
+
+    with pytest.raises(ValueError) as exc:
+        sdk.supersede(node, _ImpostorBoomRepr())
+    assert "no :Object" in str(exc.value), (
+        f"the missing-successor refusal must land: {exc.value!r}")
+
+    assert _row(sdk, "Object", node) == before, (
+        "a refused hostile-repr call moved the row: "
+        f"{before} -> {_row(sdk, 'Object', node)}")
