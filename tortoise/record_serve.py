@@ -484,13 +484,23 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
         # ⚠️ NOT a query — words, for the reason `anchored-neighbours` gives: a
         # `MATCH (` literal in this field is a #7948 census candidate, and this
         # entry was added with one (#12941 review P2-2).
-        cypher="an AgentSession `:Event` addressed by `session_id`, plus (since "
-               "#3557) the durable `:Session` projection through "
-               "`TortoiseSDK._read_captured_session`",
+        cypher="an AgentSession `:Event` addressed by `session_id`; and the "
+               "durable `:Session` node read by "
+               "`TortoiseSDK._read_captured_session`, whose TURNS are already "
+               "record-backed (see `reason`)",
         reason="the MCP tool `tortoise_get_entity(id, type=\"session\")` → "
-               "`tortoise_get_session` reads a session on the cache, down TWO "
-               "lanes: the indexed AgentSession `:Event` by `session_id`, and the "
-               "durable `:Session` projection (`_read_captured_session`). A session's record rows ARE read "
+               "`tortoise_get_session` reads a session down TWO lanes, and they "
+               "are NOT in the same state: (1) the indexed AgentSession `:Event` "
+               "by `session_id`, from the cache; (2) the durable `:Session` "
+               "projection (`_read_captured_session`), whose session ROW comes "
+               "from the cache but whose TURNS already come from BOTH stores — "
+               "`_record_turn_answer` → `record_read.session_turns`, "
+               "union-merged ahead of the graph copy (#3557/#10000). ⛔ So do NOT "
+               "read this exclusion as \"a record capability that is missing\" "
+               "and do not plan an `:Event` parity claim for lane 2 (it is a "
+               "`:Session` node): what is undecided is which reader OWNS the "
+               "session row, and a lane scoping it starts from the union merge "
+               "that already exists. A session's record rows ARE read "
                "already — by the capture and detail doors, through "
                "`record_read.session_turns` / `session_text` — so serving THIS "
                "tool means deciding which reader owns a session, a placement "
