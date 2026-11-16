@@ -32,6 +32,9 @@ restore restarts the allocator    `test_a_restored_counter_continues_past_the_ro
   (B3)                              (the seed reads the rows, not a sequence)
 enumerated replay after cutover   `test_a_post_cutover_replay_cannot_add_a_second_position_`
   ⇒ same record at a 2nd position  `for_one_record` (refusal named; rows unchanged)
+`seeded` / reopened graphs        `test_a_seeded_graph_refuses_the_replay_and_the_refusal_names_ARM`
+  ⇒ mode is the REMEDY, the row   + `test_a_reopened_graph_keeps_its_consumed_numbers_`
+     is the FACT                  `and_still_refuses` (`reopen` keeps `seq`)
 
 THE DSN GATE. `TEST_RECORD_DB_URI` is the record's own Postgres (the CI job
 `test-record-postgres` provisions it, and `provision.sh` makes it a SUPERUSER).
@@ -796,29 +799,27 @@ def test_a_post_cutover_replay_cannot_add_a_second_position_for_one_record(
         f"vs the door's {written}")
 
 
-def test_a_seeded_graph_is_not_cut_over_and_still_replays_enumerated(
+def test_a_seeded_graph_refuses_the_replay_and_the_refusal_names_ARM(
         schema, tenant, app):
-    """FINDING (fresh-context review, P2): `seeded` is NOT a cut-over, and keying
-    the enumerated-replay refusal on ROW EXISTENCE made it one — leaving such a
-    graph with no writable path at all.
+    """FINDING (cycle-1 P2, answered WITHOUT the exemption cycle-2 measured wrong):
+    a `seeded` graph's enumerated replay is refused, and the refusal must name a
+    verb that RUNS from that state.
 
-    THE DEAD END, as measured. `seeded` is the mode `seed()` writes and the mode
-    `reopen()` restores a `halted` graph to, and it means *nobody allocates*: the
-    allocation statement carries `AND mode = 'active'`, so `allocate=True`
-    raises `CursorNotActive` on a `seeded` graph. Before this fix the enumerated
-    arm refused it too (any `record_cursor` ROW was treated as cut over), so
-    NOTHING could write a position for that graph — and the refusal recommended
-    two remedies the same change blocked.
+    ⛔ THE EXEMPTION WAS TRIED AND IS WRONG. It was argued from §A7.5.5 step
+    (0)'s *"a row in mode 'seeded' is NOT [cut over]"* — a sentence about
+    RE-SEEDABILITY — and §A7.7's `halted → seeded` ("abandoning the counter") is
+    `REOPEN_SQL`: `SET mode='seeded'` KEEPING `seq`. So the mode cannot decide
+    this guard; see
+    `test_a_reopened_graph_keeps_its_consumed_numbers_and_still_refuses`.
+    What cycle 1 DID establish is narrower and is what this pins: the refusal
+    named `allocate=True` and a seed, and BOTH refuse on a `seeded` graph
+    (`ALLOCATION_SQL` requires `mode = 'active'`). A `seeded` graph is not a dead
+    end — `arm` is its writer, and it is the cutover's own 6.3 step — so the
+    message must name `arm`.
 
-    ⛔ THIS IS THE PLAN'S OWN PREDICATE, not a convenience: §A7.5.5 step (0)
-    says *"a row in mode 'allocating' or 'halted' is cut over; a row in
-    'seeded' is NOT"*, and §A7.7's `halted → seeded` transition exists for *"a
-    graph whose counter is to be **discarded** and rebuilt from the journal"* —
-    a discarded counter is exactly the enumerated replay this guard would have
-    refused, so refusing it made the documented rollback a one-way door.
-
-    Non-vacuity: pre-fix this test reds at the `replay` call with
-    `RecordProjectionError` and writes no position row.
+    Non-vacuity: the pre-fix message carries the generic sentence ("go through
+    the allocator (allocate=True) or a seed"), which the second assertion
+    forbids, and it never names `arm` for this mode.
     """
     org, graph = tenant
     _append_positions(schema, org, graph, [1, 2])
@@ -827,47 +828,75 @@ def test_a_seeded_graph_is_not_cut_over_and_still_replays_enumerated(
     assert (seeded.seq, seeded.mode) == (2, ra.MODE_SEEDED), (
         f"the seed did not leave the graph SEEDED at its floor: {seeded}")
 
-    # `allocate=True` cannot run here — that is the other half of the dead end.
-    with pytest.raises(ra.CursorNotActive):
-        rp.replay([RECORD], app, org_id=org, graph_id=graph, allocate=True)
+    with pytest.raises(rp.RecordProjectionError) as refused:
+        rp.replay([RECORD], app, org_id=org, graph_id=graph, start_seq=3)
     app.rollback()
+    message = str(refused.value)
+    for needle in ("ENUMERATED replay is REFUSED", "SEEDED", "ARM it",
+                   "seeded → active"):
+        assert needle in message, (
+            f"the `seeded` refusal does not name {needle!r}, so the operator is "
+            f"sent to a verb that refuses rather than to the arming step: {message}")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2], (
+        "a `seeded` graph's replay wrote a position row: "
+        f"{[r[0] for r in _journal_rows(schema, org, graph)]}")
+    assert _counter(schema, org, graph) == (2, ra.MODE_SEEDED)
 
-    # …so the enumerated arm is the ONLY one, and it must work.
-    report = rp.replay([RECORD], app, org_id=org, graph_id=graph, start_seq=3)
+    # AND `arm` IS the writable path, so the state is a gate and not a dead end:
+    # after arming, the allocator issues the next position and the door applies.
+    ra.arm(app, org_id=org, graph_id=graph)
     app.commit()
-    assert report.events == 1
-    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3], (
-        "a `seeded` graph — NOT cut over by the plan's own predicate — refused "
-        f"the only writable arm it has: {[r[0] for r in _journal_rows(schema, org, graph)]}")
-    assert _counter(schema, org, graph) == (2, ra.MODE_SEEDED), (
-        "the enumerated replay moved the counter, which only a seed or an "
-        f"allocation may do: {_counter(schema, org, graph)}")
+    assert _counter(schema, org, graph) == (2, ra.MODE_ACTIVE)
+    allocated = rp.replay([RECORD], app, org_id=org, graph_id=graph,
+                          allocate=True)
+    app.commit()
+    assert allocated.first_seq == 3, (
+        f"the armed graph did not allocate past its floor: {allocated}")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3]
 
 
-def test_a_halted_graph_IS_cut_over_and_refuses_the_enumerated_arm(
-        schema, tenant, app):
-    """The other side of the same predicate: `halted` IS cut over, so exempting
-    `seeded` must not exempt it.
+def test_a_reopened_graph_keeps_its_consumed_numbers_and_still_refuses(
+        schema, tenant, app, monkeypatch):
+    """⛔ CYCLE-2 P1, MEASURED: `reopen()` moves `halted → seeded` and KEEPS
+    `seq`, so a reopened graph's ordinals were issued and consumed even though its
+    mode reads `seeded`. A `seeded` exemption in the enumerated guard let the same
+    payload land at a SECOND position, silently.
 
-    A `halted` graph's numbers were CONSUMED. Enumerating over them stores the
-    same record at a second position — the `#9190` defect — and re-arming it is
-    how the same ordinal gets issued twice. So the refusal stays, and the rows
-    stay untouched.
+    The shape, end to end: the door allocates and writes the record at 4; the
+    counter is halted and reopened to `(4, 'seeded')`; an enumerated replay at the
+    journal's ordinal for it (9) must be REFUSED, and position 9 must NOT exist.
+    Pre-fix this replay SUCCEEDED and `journal_event` held the record at 4 AND 9.
     """
     org, graph = tenant
     _append_positions(schema, org, graph, [1, 2, 3])
     _seed_and_arm(app, org, graph, 3)
-    ra.halt(app, org_id=org, graph_id=graph)
     app.commit()
-    assert _counter(schema, org, graph) == (3, ra.MODE_HALTED)
+    from tests.test_9078_record_written_by_production_path import _app_role_dsn
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV,
+                       _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
+    write = rw.write_live_record(
+        RECORD, durable=True, seq=9, tenant=(org, graph), allocate=True)
+    assert write is not None and write.outcome is rw.RecordWriteOutcome.APPLIED, (
+        f"the allocated door write did not apply: {write}")
+    assert (write.first_seq, write.last_seq) == (4, 4), (
+        f"the door did not take the allocated number: {write.first_seq}")
+
+    ra.halt(app, org_id=org, graph_id=graph)
+    ra.reopen(app, org_id=org, graph_id=graph)
+    app.commit()
+    assert _counter(schema, org, graph) == (4, ra.MODE_SEEDED), (
+        "`reopen` must keep the consumed `seq` — that is the whole hazard: "
+        f"{_counter(schema, org, graph)}")
 
     with pytest.raises(rp.RecordProjectionError) as refused:
         rp.replay([RECORD], app, org_id=org, graph_id=graph, start_seq=9)
     app.rollback()
     assert "ENUMERATED replay is REFUSED" in str(refused.value)
-    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3], (
-        "a `halted` graph's CONSUMED numbers were enumerated over: "
-        f"{[r[0] for r in _journal_rows(schema, org, graph)]}")
+    written = [row[0] for row in _journal_rows(schema, org, graph)]
+    assert written == [1, 2, 3, 4], (
+        "a REOPENED graph — `seeded` with consumed numbers — stored the same "
+        f"record at a second position: {written}")
 
 
 def test_the_allocated_position_cannot_be_absorbed_at_all(schema, tenant, app):
