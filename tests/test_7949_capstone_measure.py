@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util as _ilu
+import inspect
 import io
 import itertools
 import json
@@ -56,6 +57,7 @@ _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from tests import _cite_resolution as _cr  # noqa: E402
 from tests._cite_resolution import anchor_lines as _anchor_lines  # noqa: E402
 from tests._cite_resolution import cite_failure as _cite_failure  # noqa: E402
 from tests._cite_resolution import locate_hint as _locate_hint  # noqa: E402
@@ -7729,7 +7731,7 @@ def _block_findings(message: str) -> list[str]:
 
     ⛔ WHY THE ARM TABLE NEEDS THIS, MEASURED. `pytest.raises(AssertionError)` only
     asks that the pin failed, and at a head where a TABLE ROW is stale — `#12381`
-    moved `tortoise/sdk.py` under the bundle's `sdk.py:25189` row, which this branch
+    moved `tortoise/sdk.py` under one of the bundle's `sdk.py` rows, which this branch
     does not own — EVERY case in the table passed with its arm deleted, because the
     unrelated row's red satisfied `pytest.raises` (measured: the identity mutation,
     which changes nothing at all, is RED). A case is therefore evidence for its arm
@@ -7864,6 +7866,37 @@ def test_the_line_and_block_findings_are_told_apart(tmp_path):
         assert _block_findings(block) == [block[2:]], (
             f"a block finding was dropped by `_block_findings`: {block!r}")
 
+    # ⛔ THE SCOPING-PHRASE SENTENCE HAS TWO EMITTERS and only one of them is a row
+    # finding (#13033 round-6 review, measured). The ROW arm (`_pin_row_failures`, driven
+    # as `ambiguous` above) ends `… time(s) — this pin needs exactly one line to scope the
+    # cite to`; the DOCUMENT arm inside
+    # `test_the_epic_bundle_cites_the_branch_rederived_resolve` ends `… time(s) — this
+    # claim needs exactly one line` and appends to `block_failures`. A pattern matching
+    # the shared prefix swallowed that DOCUMENT finding (`_block_findings` returned `[]`),
+    # so the arm table's non-vacuity assertion could be met with that arm deleted. The
+    # sweep fixture above cannot reach it and no driving call exists (the arm is embedded
+    # in the full-bundle pin), so this case is a LITERAL held to its emitter by the source
+    # assertion below — the one shape a re-wording reds here instead of going silent.
+    doc_arm = ("- 03-test-design.md: the scoping phrase '`carve_out:` holds **one**' "
+               "occurs 2 time(s) — this claim needs exactly one line")
+    emitter = inspect.getsource(test_the_epic_bundle_cites_the_branch_rederived_resolve)
+    assert "— this claim needs exactly one line" in emitter, (
+        "the DOCUMENT arm's discriminating tail is no longer in its emitter — update "
+        "`doc_arm` here (and `_ROW_FINDING` if the row arm moved with it)")
+    assert not _ROW_FINDING.match(doc_arm), (
+        f"the DOCUMENT arm's scoping-phrase finding is read as a row finding: "
+        f"{doc_arm!r} — `_block_findings` would drop it, so the arm table could be "
+        "satisfied by that unrelated red")
+    assert _block_findings(doc_arm) == [doc_arm[2:]], (
+        f"the DOCUMENT arm's finding was dropped by `_block_findings`: {doc_arm!r}")
+    # …and the discrimination is the PHRASE, not the shared prefix: swapping the row
+    # arm's words for the document arm's flips the class of a finding the driven
+    # `ambiguous` fixture really produces.
+    flipped = "- " + ambiguous[0].replace("this pin needs", "this claim needs")
+    assert "- " + ambiguous[0] and _ROW_FINDING.match("- " + ambiguous[0])
+    assert not _ROW_FINDING.match(flipped), (
+        f"the row/document arms are not discriminated by `this pin needs`: {flipped!r}")
+
 
 def test_a_past_the_end_cite_is_a_finding_not_a_traceback(tmp_path):
     """Both miss paths report the miss; neither indexes past its own file.
@@ -7892,6 +7925,79 @@ def test_a_past_the_end_cite_is_a_finding_not_a_traceback(tmp_path):
         [("doc.md", "the row says", [("7", "a")], "unregistered")],
         {"doc.md": doc}, {"src": three})
     assert failures and "SOURCE key is not in the source map" in failures[0], failures
+
+
+def test_the_resolver_refuses_the_anchors_that_would_pass_everything():
+    """`_cite_resolution`'s own safety contract, and the message cap, driven directly.
+
+    ⛔ MEASURED (#13033 round-5/round-6 review): nothing referenced this module's guards.
+    Only `cite_failure`/`locate_hint` were exercised, and only through the capstone pins,
+    so every refusal below could be deleted with the whole suite green — while the module
+    justifies them as preventing a FALSE PASS, the one failure a cite pin exists to
+    refuse. A blank anchor is not defensive tidiness: `'' in text` is true on EVERY line,
+    so it passes any cite it is handed; an empty tuple satisfies `all(...)` vacuously; an
+    unknown `kind` would otherwise fall through to the WEAKEST comparison while the
+    failure message raised. Both grading paths (`cite_holds` for rows, `_bundle_missing`
+    for blocks) must refuse the same inputs or one grades laxer than its message claims.
+    """
+    src = ["x = 1", "y = 2", "z = 3"]
+    # `kind` is validated in BOTH halves, not only where the message is built
+    for half in (_cr.anchor_lines, _cr.cite_holds):
+        with pytest.raises(ValueError):
+            (half(src, "x = 1", "exact ") if half is _cr.anchor_lines
+             else half(src, 1, ("x = 1",), "exact "))
+    # an empty tuple would satisfy `all(...)` VACUOUSLY
+    with pytest.raises(ValueError):
+        _cr.cite_holds(src, 1, ())
+    # `'' in text` is true on every line, so a blank anchor passes any cite
+    for blank in ("", "   "):
+        with pytest.raises(ValueError):
+            _cr.cite_holds(src, 1, ("x = 1", blank))
+        # …and the BLOCK path makes the same refusal (`'' not in got` is FALSE on every
+        # line, so a blank anchor is a vacuous PASS there too), for both kinds it hands
+        # to a different branch and for the empty tuple that reaches `anchors[0]`.
+        for kind in ("line", "def"):
+            with pytest.raises(ValueError):
+                _bundle_missing(kind, (blank,), src, 1, None)
+            with pytest.raises(ValueError):
+                _bundle_missing(kind, (), src, 1, None)
+        with pytest.raises(ValueError):
+            _bundle_missing("exact", (blank,), src, 1, None)
+    # all-of for a pair (`#10214`), and an out-of-range number is a MISS, not a raise
+    assert _cr.cite_holds(src, 1, ("x = 1", "= 1"))
+    assert not _cr.cite_holds(src, 1, ("x = 1", "y = 2"))
+    assert not _cr.cite_holds(src, 9, ("x = 1",))
+    # the nearest candidate is named first, and every other one is still printed
+    multi = ["hit", "pad", "pad", "pad", "pad", "pad", "pad", "hit"]
+    hint = _cr.locate_hint(multi, "hit", "line", cited=7)
+    assert "is at line 8 (nearest of 2 candidates" in hint, hint
+    assert " 1 " in hint, hint          # the other candidate is not averaged away
+    # ⛔ THE CAP IS A PROMISE THE MESSAGE HAS TO KEEP (#13033 round-6 review, P3):
+    # `_MAX_OTHER_CANDIDATES` bounds the enumeration and the tail says it did. An
+    # uncapped list produced a 1 KB wall on the structural closers (`exact ')'` matches
+    # 465 lines of `sdk.py`), and a silently SHORTENED list that does not say "and N
+    # more" reads as "these are all the matches" — the false statement the cap must not
+    # create. Both arms: the nearest-first wording, and the `is on N lines` wording.
+    wall = ["pad"] * 40
+    capped = _cr.locate_hint(wall, "pad", "line", cited=20)
+    assert "nearest of 40 candidates" in capped, capped
+    assert f"{40 - 1 - _cr._MAX_OTHER_CANDIDATES} more — too generic to enumerate" in capped, capped
+    head, _, tail = capped.partition(", and ")
+    assert f"the next {_cr._MAX_OTHER_CANDIDATES} are " in head, capped
+    assert head.count(", ") == _cr._MAX_OTHER_CANDIDATES - 1, capped
+    assert tail, capped            # the truncation is STATED, never silent
+    uncited = _cr.locate_hint(wall, "pad", "line")
+    assert "is on 40 lines (" in uncited, uncited
+    assert f"{40 - _cr._MAX_OTHER_CANDIDATES - 1} more" in uncited, uncited
+    # …and a list that FITS is printed whole, with no truncation tail bolted on
+    small = _cr.locate_hint(["pad"] * 3, "pad", "line")
+    assert "more" not in small, small
+    # a mixed pair gets the re-verify instruction and NOT the contradictory re-point
+    mixed = _cite_failure("D.md", "s.py", 1, src, ("x = 1", "absent_symbol"))
+    assert "appears NOWHERE" in mixed and "re-point the cite" not in mixed, mixed
+    # …and a pair that resolves everywhere still gets it (the cited line carries neither)
+    both = _cite_failure("D.md", "s.py", 2, src, ("x = 1", "z = 3"))
+    assert both is not None and "re-point the cite" in both, both
 
 
 def test_the_arm_table_is_not_satisfied_by_an_unrelated_red():
@@ -9117,8 +9223,9 @@ _ENTRY_POINT_DOCS = (
 def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
     """The `:N` continuation naming the `_extract_session_v2` CALL is checked.
 
-    `_BUNDLE_CITE` only matches a cite that NAMES a file, so `(sdk.py:14297;
-    called at :13334)` had exactly one checked number and one unverifiable one —
+    `_BUNDLE_CITE` only matches a cite that NAMES a file, so a pair like
+    `(sdk.py:<def's own line>; called at :<the call>)` had exactly one checked number
+    and one unverifiable one —
     and the unchecked half went stale TWICE on this branch, once at the commit
     that re-derived it (it was already `:13299` there). Re-staling it to a wrong
     line reds NOTHING: measured, `:13334` → `:13399` in both documents leaves this
