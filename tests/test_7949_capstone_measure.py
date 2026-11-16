@@ -6280,7 +6280,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("1418", "| **D6** | **Two distinct connection sets**"),
         ), "extractor_v4_arch"),
         # ⛔ THE TWO THIS-HEAD NUMBERS TWO EARLIER CUTS LEFT UNREAD (#12569 review), and the
-        # count that hid one of them. D5's row states NINE distinct this-head numbers: `19412`,
+        # count that hid one of them. D5's row states NINE distinct this-head numbers: `19406`,
         # `19519`, `10225`, `10252`, `10305`, `1186`, `1194`, `1400`, `1418`. The
         # counts in the comments above said SEVEN, then EIGHT, and each time the number left
         # out was green under mutation: `:1418` (in the "Measured at" continuation) and
@@ -6356,7 +6356,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # "the only failure was a stale TABLE ROW" on every parametrization. The new START
         # is the `point_count` read the row anchors (`:14536`) and the new END is again the
         # blank line immediately before `return OrgInfoResponse(` (`:14613`), measured — the
-        # shift is +65 NET at BOTH ends (`d05688df59` reads `:14465`/`:14542` for these lines).
+        # shift is +71 NET at BOTH ends (`d05688df59` reads `:14465`/`:14542` for these lines).
+        # ⛔ RE-DERIVED AGAIN at the merge of `#12882` + `#12904`: those two landings added lines
+        # to `hosted_api.py` above `org_info` (START 14530 -> 14536, END 14607 -> 14613, +6 at
+        # BOTH ends) and left this row and `04-plan.md` behind — which is why
+        # `test_each_block_arm_reds_on_the_mutation_it_guards` again reported "the only failure
+        # was a stale TABLE ROW" on every parametrization. Both ends moved together and the
+        # anchors did not: `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("14536", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),

@@ -194,7 +194,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    the capture path at `tortoise/sdk.py:19723`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
    insertion then moved both, and `#11835`'s seam stamp moved them once more; both now read
-   `:19723`.)  <!-- Re-derived TWICE for the same reason. #10226 removed 26 SDK methods above this writer, and the prose cite and the `sed` were re-derived with it while this bare parenthetical was not. Then `#12825` (`32011c4dad`, fix(sdk): allow `superseded -> live` when the write clears the carriers) inserted 286 lines into `tortoise/sdk.py`, 185 of them above this writer, so ALL THREE moved again — the prose cite, this parenthetical and the `sed` below — and were re-derived together off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. --> What is missing is the *declared part-whole* edge, not every structural
+   `:19723`.)  <!-- Re-derived THRICE for the same reason. #10226 removed 26 SDK methods above this writer, and the prose cite and the `sed` were re-derived with it while this bare parenthetical was not. Then `#12825` (`32011c4dad`, fix(sdk): allow `superseded -> live` when the write clears the carriers) inserted 286 lines into `tortoise/sdk.py`, 185 of them above this writer, so ALL THREE moved again — the prose cite, this parenthetical and the `sed` below — and were re-derived together off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. Then `#12882` (`2dfbb5d455`) inserted 379 lines and deleted 29 in `tortoise/sdk.py` (`git show --numstat 2dfbb5d455 -- tortoise/sdk.py` → `379 29`, net `+350`; an earlier cut of this note said “inserted 408”, which is the CHURN, not the insertions) and `#12904` (`5cc36a42d4`) added 8 and deleted 2 in `tortoise/hosted_api.py` (`8 2`, net `+6`, not “added 10”), and a third re-derivation moved all three together again, by the same +20 net band, off the same grep. --> What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
 3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2747-2749`
@@ -775,7 +775,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:14471`) that derives the doc's cite, two are the
+                                                          # (`:14477`) that derives the doc's cite, two are the
                                                           # finder's own conditions (#12569), and the fourth is
                                                           # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
