@@ -420,6 +420,17 @@ def _resolve_compose(path: Path, root: Path) -> tuple[dict | None, str]:
     argv = [
         "docker",
         "compose",
+        # ⛔ THE ALL-PROFILES FLAG IS NOT OPTIONAL (review P2 at `543a1b0467`, measured).
+        # Compose filters out every service behind `profiles:` UNLESS they are enabled, and it
+        # does so SILENTLY — no stderr, no `warnings`, rc 0. So without this flag a Tortoise
+        # service behind a profile is simply absent from the model, and this gate reports OK over
+        # a channel it never saw. Measured on Compose 2.40.3: an armed `app` beside
+        # `worker: {build: ., profiles: ["prod"], environment: {TORTOISE_DB_URI: …}}` resolves to
+        # a model containing only `app`; with the flag, `worker` is present. One `--profile`
+        # deploy away from real is exactly the "discovered channel passes quietly" fail-open the
+        # module docstring forbids, so the widening is unconditional ("*" enables every profile).
+        "--profile",
+        "*",
         "--env-file",
         os.devnull,
         "-f",
