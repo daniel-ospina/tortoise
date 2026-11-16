@@ -13,6 +13,7 @@ users there is no telemetry to harvest and no caller to protect.
 
 WHY THIS IS A SMALL HAND-KEPT MAP, NOT A READ OF THE MIGRATION TABLE
 --------------------------------------------------------------------
+
 ``tools/sdk_rename_table.py`` is the migration map: every name on the LIVE surface
 (re-derive the count with ``tools/sdk_surface.py --check``; the numeral is not typed here
 because it moves with every wave) and its approved destination, most of whose
@@ -100,6 +101,21 @@ RETIRED_SDK_METHODS: dict[str, str] = {
     # names exactly one approved target), which is why nothing is invented here — see
     # `tests/test_sdk_retirement.py::_approved_replacements`' derived-ordinal arm.
     "get_provenance_chain": "get_entity",
+    # ── #4282 Phase 2 — the SOURCES / MINE / SESSION containers land ─────────
+    #
+    # Option B, taken literally: "retire each legacy name in the same release that
+    # lands its replacement". Four of these five were already RECORDED as removed
+    # (`index_file`, `capture_session`, `commit_session`) and two of them cited a
+    # destination with "no `def` today, so there is no surface name to point a hint
+    # at" — that condition is now FALSE, so the bare `AttributeError` they carried
+    # becomes a real migration hint. The state that changes a record's SHAPE is the
+    # one a reader must be told about, so each reason below says it moved.
+    "assess_source": "manage_source_trust",
+    "set_source_tier": "manage_source_trust",
+    "index_file": "index_sources_from_directory",
+    "capture_session": "mine_knowledge_from_session",
+    "commit_session": "mine_knowledge_from_session",
+
     # ── #4282 Phase 2, the WRITE/MUTATE containers (#11609 lane B) ────────────
     # Each of these six left the surface in the release that landed its
     # replacement, which is the owner's Option B. The replacements are the four
@@ -295,10 +311,20 @@ REMOVED_SDK_METHODS: dict[str, str] = {
     #     `quarantine_batch` → `update_knowledge` from the `#12901` wave-1 cell below (it is
     #     outside this 26-name block, so it does not move the counters here).
     #
-    # The other twelve recorded destinations are the Phase-2 targets
-    # `mine_knowledge_from_session`, `check_confidence`, `explore_connections`,
-    # `index_sources_from_directory`, `write_knowledge_batch`, `list_knowledge`, `list_keys`,
-    # `list_members`, `remove_member` and `adjust_relationship` — no `def` today, so a hint
+    # ⚠️ THREE MORE QUALIFY AS OF #4282 PHASE 2's SOURCES CONTAINERS (#11609): `capture_session`
+    # and `commit_session` (→ `mine_knowledge_from_session`) and `index_file` (→
+    # `index_sources_from_directory`) had a recorded destination whose `def` did not exist, so
+    # they were recorded HERE with the "no surface name to point a hint at" reason. Those three
+    # containers landed, the condition is now FALSE, and keeping them here would be a record
+    # that says a hint is impossible when it is not — they MOVED to `RETIRED_SDK_METHODS` above.
+    # Their destinations stay in `SURPLUS_DELETION_DESTINATIONS` (that cell is the RECORD, and it
+    # is pinned at 26 names); only the shape of the departure changed. This is the direction the
+    # test `test_a_live_recorded_destination_is_hinted_or_declared` pins, in both directions.
+    #
+    # The other nine recorded destinations are the Phase-2 targets
+    # `check_confidence`, `explore_connections`, `write_knowledge_batch`, `list_knowledge`,
+    # `list_keys`, `list_members`, `remove_member` and `adjust_relationship` — no `def`
+    # today, so a hint
     # naming one would be false and
     # `tests/test_sdk_retirement.py::test_every_replacement_exists` would red on it. The
     # destination is still recorded per name, which is the whole job of this table — an
@@ -310,19 +336,6 @@ REMOVED_SDK_METHODS: dict[str, str] = {
     #
     # :data:`SURPLUS_DELETION_DESTINATIONS` is the authority for each entry's destination;
     # the reasons below carry it once, in prose:
-    "capture_session": (
-        "#4282 (2026-10-27): RETIRED from the PUBLIC surface. Recorded destination "
-        "`mine_knowledge_from_session`, an approved target with no `def` today, so there "
-        "is no surface name to point a hint at. The capability is not lost: the body "
-        "lives on as the PRIVATE `TortoiseSDK._capture_session` (surplus-and-referenced, "
-        "so it went private rather than out — it drives the journal-first capture "
-        "provenance stamp and the aboutObject pass), and the hosted lane keeps its own "
-        "`_capture_session_impl`."
-    ),
-    "commit_session": (
-        "#4282 (2026-10-27): DELETED. Recorded destination "
-        "`mine_knowledge_from_session` — approved, not yet implemented, so no hint."
-    ),
     "retrieval_legs": (
         "#4282 (2026-10-27): DELETED. Recorded destination `check_confidence`; the "
         "retrieval-leg breakdown is not a customer verb."
@@ -342,11 +355,6 @@ REMOVED_SDK_METHODS: dict[str, str] = {
         "the inventory's destination column is `—`. This is a JUDGEMENT (delete, ship "
         "nothing) rather than a mapping: back-filling edges over history is not the "
         "indexer's question, so no successor is named."
-    ),
-    "index_file": (
-        "#4282 (2026-10-27): DELETED. Recorded destination "
-        "`index_sources_from_directory`; the single-file form is the directory form of "
-        "one path."
     ),
     "backfill_sources": (
         "#4282 (2026-10-27): DELETED. **No** recorded destination — same ledger region and "
@@ -436,6 +444,59 @@ REMOVED_SDK_METHODS: dict[str, str] = {
     "org_delete": (
         "#4282 (2026-10-27): DELETED. Account closure is a console operation in the "
         "approved tenancy block; **no** recorded destination."
+    ),
+    # ── #4282 Phase 2 — the SOURCES / MINE / SESSION containers (#11609) ──────
+    #
+    # These five are the LIVE off-surface methods the containers REPLACE. They are
+    # REMOVALS rather than renames because `RETIRED_SDK_APPROVALS` demands an
+    # owner-approved region of `beta-sdk-surface.md` that names BOTH the retired
+    # name and its numbered successor, and for these pairs that region does not
+    # exist. The collapse IS recorded elsewhere and is not in doubt — the approved
+    # menu (`canonical-mcp-tools.md`) and the non-owner inventory
+    # (`canonical-sdk-methods.md`) both name the destination — so this is a DOC GAP
+    # being recorded honestly, not a judgement that no successor exists. Writing a
+    # region that the owner never wrote would be inventing an approval, which is the
+    # one thing this map may never do.
+    "create_source": (
+        "#4282 Phase 2 (#11609): RETIRED from the public surface. The approved row 14 "
+        "`register_source` carries the same signature and delegates to the same body "
+        "(`_create_source`), so no capability moved. NO HINT, and the reason is the doc:"
+        " `beta-sdk-surface.md` has no region naming both names — its only "
+        "`create_source` row is `create_source` ↛ `create_entity` (the row that says a "
+        "source is NOT an entity), which authorises no replacement at all."
+    ),
+    "index_directory": (
+        "#4282 Phase 2 (#11609): RETIRED from the public surface; the unified walker is "
+        "now `index_sources_from_directory` (row 15), which this delegates to. NO HINT: "
+        "every beta region that names `index_directory` names it as a DESTINATION "
+        "(`index_sessions`/`ingest_corpus` → `index_directory`), never as a source with a "
+        "numbered successor — so the region that would authorise a hint is the reverse "
+        "direction of this departure."
+    ),
+    "index_sessions": (
+        "#4282 Phase 2 (#11609): RETIRED from the public surface; its body was a single "
+        "delegation to `ingest_corpus` (`eventKind='AgentSession'`) — the "
+        "`index_directory` successor its DEPRECATED docstring named was never the "
+        "mechanism — and the operation is now spelled "
+        "`index_sources_from_directory(file_type='agent_session')`. NO HINT: beta's row "
+        "for this name is in its *Removed* table (`Body is a single delegation to another "
+        "public method, no added contract`), and the one region naming both it and a "
+        "successor names `index_directory` — which is ITSELF retired by this change, so a "
+        "hint would point a caller at a dead name."
+    ),
+    "mine_corpus": (
+        "#4282 Phase 2 (#11609): RETIRED from the public surface; `mine_knowledge_from_directory` "
+        "(row 17) is the same operation under its approved name. NO HINT: the beta region "
+        "that records the destination ALSO names `mine_knowledge_from_session` (\"it is the "
+        "batch form of …\"), so it names two approved targets — and picking one is the "
+        "owner's choice, not this map's."
+    ),
+    "checkpoint": (
+        "#4282 Phase 2 (#11609): RETIRED from the public surface; `mine_knowledge_from_session` "
+        "(row 16) files the same batch under its approved name, as its `items=` arm. NO HINT: "
+        "the beta region for the journal family retires it \"into `capture_knowledge`\" (the "
+        "MCP row, not a numbered SDK target) and names `create_entity` and `list_knowledge` "
+        "as its siblings' destinations, so it authorises no single numbered replacement."
     ),
     # ── #12901 wave 1 (2026-11-15) — the retirement wave ─────────────────
     #
@@ -597,6 +658,33 @@ RETIRED_SDK_APPROVALS: dict[str, str] = {
         "`get_provenance_chain`, …) | ~8 | → `get_entity`, except where a genuinely "
         "different shape is returned. |"
     ),
+    # #4282 Phase 2 — one region covers the pair: the beta row names the SETTER's
+    # target first and the reader's second, so the approved destination set this
+    # region authorises is exactly {`manage_source_trust`} (the reader is not a
+    # numbered target).
+    "assess_source": (
+        "| `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → "
+        "`manage_source_trust` for the setter; reads via `list_sources`. |"
+    ),
+    "set_source_tier": (
+        "| `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → "
+        "`manage_source_trust` for the setter; reads via `list_sources`. |"
+    ),
+    "index_file": (
+        "| `ingest_corpus`, `index_file`, `session_index_health` | 3 | → "
+        "`index_sources_from_directory`. |"
+    ),
+    # The row states the ordinal itself (`row 16`), so no author choice is being
+    # made here — `test_each_retirement_records_the_row_it_chose` derives it.
+    "capture_session": (
+        "| `capture_session` / `commit_session` | → row 16 `mine_knowledge_from_session`, "
+        "one method. The backend is the target graph's configuration. |"
+    ),
+    "commit_session": (
+        "| `capture_session` / `commit_session` | → row 16 `mine_knowledge_from_session`, "
+        "one method. The backend is the target graph's configuration. |"
+    ),
+
     # #11609 lane B (#4282 Phase 2) — the WRITE/MUTATE containers. Each quote is the
     # row's own text, copied whole from the doc's "Removed" table.
     "supersede": (
@@ -632,6 +720,12 @@ RETIRED_SDK_APPROVAL_ROWS: dict[str, int] = {
     # Derived, not chosen: the approving region names exactly one approved target
     # (`get_entity`), and that name occupies exactly one numbered target row.
     "get_provenance_chain": 6,
+    "assess_source": 18,
+    "set_source_tier": 18,
+    "index_file": 15,
+    "capture_session": 16,
+    "commit_session": 16,
+
     # #11609 lane B. `supersede_knowledge` is row 23, `update_knowledge` is row 22,
     # `write_question` is row 20 and `record_decision` is row 21 — read from the
     # beta doc's target table, never typed from memory (the gate re-derives them).

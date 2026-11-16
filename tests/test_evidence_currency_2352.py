@@ -107,9 +107,9 @@ def fixture_sdk(tmp_path_factory):
 def _build(sdk):
     """Mint the three sources + claims, then move the DEAD source's version."""
     g = sdk._get_proj().g
-    sdk.create_source(LIVE_URL, "T1", contentHash="L1")
-    sdk.create_source(DEAD_URL, "T1", contentHash="D1")
-    sdk.create_source(AGED_URL, "T1", contentHash="A1", sourceDate=AGED_DATE)
+    sdk.register_source(LIVE_URL, "T1", contentHash="L1")
+    sdk.register_source(DEAD_URL, "T1", contentHash="D1")
+    sdk.register_source(AGED_URL, "T1", contentHash="A1", sourceDate=AGED_DATE)
     points = {
         "live": sdk.create_point("statement", "currency fixture live claim",
                                  extractedFrom=LIVE_URL)["id"],

@@ -494,7 +494,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "(extractedFrom)"),
             # Point-level sourceKind is legacy — tier the SOURCE node instead
             # (#398); see the missing_sourceKind_source check (7).
-            fix=("wire provenance + tier the source: create_source(url, kind, "
+            fix=("wire provenance + tier the source: register_source(url, kind, "
                  "tier=...) then MATCH (ev:Point {id:" + _quoted(ev_id) + "}), "
                  "(s:Source {url:'...'}) CREATE (ev)-[:extractedFrom]->(s)"),
             legacy=True,
@@ -2839,8 +2839,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             detail=(f"Source '{src_url}' (backing evidence '{ev_content}') "
                     "resolves to a NEUTRAL tier (no explicit credibilityTier / "
                     "tier-form or registry-tiered sourceKind)"),
-            fix=(f"tier the source: tortoise_set_source_tier({_quoted(src_url)}, "
-                 f"'T0'..'T4') or create_source({_quoted(src_url)}, kind, "
+            fix=(f"tier the source: tortoise_manage_source_trust({_quoted(src_url)}, "
+                 f"tier='T0'..'T4') or tortoise_register_source("
+                 f"{_quoted(src_url)}, kind, "
                  f"tier=...)"),
         )
         for src_url, ev_content in rows7

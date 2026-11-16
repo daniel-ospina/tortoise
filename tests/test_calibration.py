@@ -1232,7 +1232,7 @@ def test_set_point_baseline_refuses_a_non_epistemic_node(sdk):
     baseline; before the fallback probe it fell through to the historical
     "phantom prior + success dict" — the same false PASS, one label over.
     """
-    sdk.create_source("https://example.org/9063", "web", tier="T1")
+    sdk.register_source("https://example.org/9063", "web", tier="T1")
 
     with pytest.raises(ValueError, match=r":Source"):
         sdk.set_point_baseline("https://example.org/9063", 4.0, 2.0)
@@ -1378,7 +1378,7 @@ def test_guidance_for_a_source_linked_legacy_point_actually_works(sdk):
     non-operator predicate one layer down, and the advice resolves.
     """
     src = "https://example.org/9063-source"
-    sdk.create_source(src, "web", tier="T1")
+    sdk.register_source(src, "web", tier="T1")
     p = _make_legacy_point(sdk, "Legacy sourced claim", status="live",
                            extractedFrom=src)
     row = {r["id"]: r for r in sdk.calibrate_summary()}[p["id"]]
@@ -1407,7 +1407,7 @@ def test_guidance_does_not_offer_an_advice_inheritance_will_refuse(sdk):
     The advice is now the writer that actually clears it.
     """
     src = "https://example.org/9063-frozen"
-    sdk.create_source(src, "web", tier="T1")
+    sdk.register_source(src, "web", tier="T1")
     p = _make_legacy_point(sdk, "Frozen flag, no prior", status="live",
                            extractedFrom=src)
     sdk._get_proj().g.query(
@@ -1462,7 +1462,7 @@ def test_guidance_prefers_the_advice_that_can_actually_clear_a_frozen_id(sdk):
     node of the fan-out, so it must win.
     """
     src = "https://example.org/9063-frozen-fanout"
-    sdk.create_source(src, "web", tier="T1")
+    sdk.register_source(src, "web", tier="T1")
     sdk._get_proj().g.query(
         "MATCH (s:Source {id:$src}) "
         "CREATE (n:Point {id:'frozen-fan-9063', pointKind:'statement', "
@@ -1559,7 +1559,7 @@ def test_refusal_never_claims_a_point_is_not_a_point(sdk):
     assert sdk.set_point_baseline("", 2.0, 1.0)["claim_id"] == ""
     with pytest.raises(ValueError, match=r":Source, not a :Point"):
         # Control: the guard still fires on a real label mismatch.
-        sdk.create_source("https://example.org/9063-refuse", "web", tier="T1")
+        sdk.register_source("https://example.org/9063-refuse", "web", tier="T1")
         sdk.set_point_baseline("https://example.org/9063-refuse", 2.0, 1.0)
 
 

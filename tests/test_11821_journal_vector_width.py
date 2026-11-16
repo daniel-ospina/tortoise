@@ -1737,7 +1737,7 @@ def test_the_transit_anchor_is_derived_and_a_caller_cannot_forge_it(tmp_path):
     log_path = events / "events.jsonl"
     sdk = TortoiseSDK(str(tmp_path / "transit.db"), event_log_path=str(log_path))
     try:
-        sdk.create_source(doc, "document", contentHash="h1")
+        sdk.register_source(doc, "document", contentHash="h1")
         api = EventAPI(EventLog(log_path), initiated_by="extractor",
                        projection=sdk._get_proj())
 

@@ -58,8 +58,42 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_get_operator": 'tortoise_get_entity(id, type="operator")',
     "tortoise_get_point": 'tortoise_get_entity(id, type="point")',
     "tortoise_health": 'tortoise_graph_overview(section="health")',
-    "tortoise_index_sessions": "tortoise_index_files(directory)",
-    "tortoise_ingest_corpus": "tortoise_index_files(directory)",
+    # #11609 lane C: the three per-kind indexing doors retire into the ONE
+    # directory container, each naming the `file_type` that reproduces it. The
+    # pointer must land on the LIVE door — a pointer at the retired
+    # `tortoise_index_files` is a dead end, and two hops resolve nowhere.
+    "tortoise_index_sessions": (
+        'tortoise_index_sources_from_directory(directory, file_type="agent_session")'
+    ),
+    "tortoise_ingest_corpus": (
+        'tortoise_index_sources_from_directory(directory, file_type="doc")'
+    ),
+    "tortoise_index_files": (
+        'tortoise_index_sources_from_directory(directory, file_type=..., progress_file=...)'
+    ),
+    # #11609 lane C: the source-write family retires into the two consolidated
+    # source operations — register on the write side, manage_source_trust on the
+    # scoring side.
+    "tortoise_create_source": 'tortoise_register_source(url, sourceKind, tier=...)',
+    "tortoise_assess_source": (
+        'tortoise_manage_source_trust(url, score=..., assessor=..., rationale=...)'
+    ),
+    "tortoise_set_source_tier": 'tortoise_manage_source_trust(url, tier="T0"-"T4")',
+    # #11609 lane C: the session/corpus miners retire into the knowledge
+    # miners, each naming the `items=`/`conversation=`/`directory=` arm that
+    # reproduces it.
+    "tortoise_checkpoint": (
+        'tortoise_mine_knowledge_from_session(items=..., agent_name=..., threshold=...)'
+    ),
+    "tortoise_session_capture": (
+        'tortoise_mine_knowledge_from_session(conversation=..., harness=..., session_id=..., '
+        'machine_id=..., model=...)'
+    ),
+    "tortoise_mine_conversations": (
+        'tortoise_mine_knowledge_from_directory(directory=..., extract_entities=...)'
+        ' for a corpus — the single-transcript arm is'
+        ' tortoise_mine_knowledge_from_session(conversation=<transcript>, source_id=...)'
+    ),
     # #3540 ruling B: the two per-source switches retired into the ONE
     # consolidated source-management operation (net one tool fewer).
     "tortoise_onboarding_github_index":
@@ -518,13 +552,17 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
         "the Part B intro no longer states the redirect-map size the table covers"
     )
     # 18 after #3540; 23 after #4282's `graph_overview` batch retired five more names
+
     # into the container (and `tortoise_overview` itself into its target); 37 after
     # #4282 Phase 2 retired fourteen WRITE/MUTATE doors into six approved containers
     # (23 + 14 = 37 — the same arithmetic `config/surface-manifest.yml` derives as
     # 68 live − 14 + 6 = 60, since every retired name stays SERVED through the shim).
     # The pin moves with each landed container batch.
-    assert len(RETIRED_LITERAL) == 37, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 37"
+    # 44 after #11609 lane C retired SEVEN SOURCES/MINE/SESSION doors into six
+    # containers on top of lane B's fourteen (23 + 7 + 14 = 44 — the same arithmetic
+    # `config/surface-manifest.yml` derives as 68 + 6 + 6 − 7 − 14 = 59 live).
+    assert len(RETIRED_LITERAL) == 44, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 44"
     )
 
 

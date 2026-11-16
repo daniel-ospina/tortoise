@@ -19,11 +19,14 @@ What each test is for, and why the naive version of it would prove nothing:
      by the declaration's content, not by the test's other machinery.
   4. **An approved method that does not exist fails, and is NAMED** — the mirror direction,
      with the same non-vacuity pattern. A gate tested in one direction permits the other.
-  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 119 live, 103
-     off the surface, 23 approved-but-absent — the split two disjoint retirement waves moved
-     it to: #12901's five off-surface names, then #4282 Phase 2's net -1). This is the honest reading of #4282; it goes
-     green when Phase 2 lands, not before — which is why the three live numbers carry an
-     explicit "update this premise" note instead of being restated from the declaration.
+
+  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 118 live, 96
+     off the surface, 17 approved-but-absent — the split the composition of two disjoint
+     retirement waves moved it to: #12901's five off-surface names, then #4282 Phase 2's
+     lane B (four retired, three delivered) and lane C (seven retired, six delivered)). This is
+     the honest reading of #4282; it goes green when Phase 2 lands, not before — which is why
+     the three live numbers carry an explicit "update this premise" note instead of being
+     restated from the declaration.
   6. **The CONTRACT half is green and is the required-CI invariant** — the declaration is
      still the owner's 40 — and it reds when the declaration is padded or a binding dropped.
   7. **The baseline document is generated, fresh, and says it is not the target.** The gap is
@@ -193,21 +196,29 @@ def test_the_absence_failure_is_NOT_vacuous():
 
 
 def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
-    """#4282's true state: 40 approved, 119 live. Not green, and not vague.
+    """#4282's true state: 40 approved, 118 live. Not green, and not vague.
 
-    The approved side has not moved: 17 of the 40 exist (16 live methods the
+    The approved side has not moved: 23 of the 40 exist (22 live methods the
     declaration names, plus row 1's `Tortoise(...)`, which resolves to the class
-    itself), 23 do not — 17 + 23 = 40, and the 16 live ones are why
-    `124 live − 16 approved-and-live = 108` off-surface. The LIVE side moved
+    itself), 17 do not — 23 + 17 = 40, and the 22 live ones are why
+    `118 live − 22 approved-and-live = 96` off-surface. The LIVE side moved
     150 → 124 on 2026-10-27, when the owner's ruling that the surplus methods nothing calls
     may be deleted (PR #10187) removed the 26 with no caller under `tortoise/**` — so the
-    off-surface gap falls 138 → 112 — and 124 → 125 on 2026-11-14 (#10015), when approved
-    row 28 `get_organisation_account` was IMPLEMENTED, which moves `absent` 27 → 26 without
-    touching the off-surface 112 (an approved name is not surplus). Nothing approved was
-    removed: the 26 are all off-surface surplus, which is why this premise and the 40 are
-    separate numbers. Then 125 → 120 on 2026-11-15 (#12901 wave 1), which retired the first
-    five off-surface methods with NO production caller, so the gap falls 112 → 107 without
-    moving `absent` (a surplus departure is not an approved name).
+    off-surface gap falls 138 → 112 — 124 → 125 on 2026-11-14 (#10015), when approved
+    row 28 `get_organisation_account` was IMPLEMENTED, which moves the resolved rows
+    13 → 14 and `absent` 27 → 26 without touching the off-surface 112 (an approved name is
+    not surplus) — 125 → 120 on 2026-11-15 (#12901 wave 1), which retired the first five
+    off-surface methods with NO production caller, so the gap falls 112 → 107 without
+    moving `absent` (a surplus departure is not an approved name) — 120 → 119 by #4282
+    Phase 2's WRITE/MUTATE lane (lane B: four public names retired into its containers,
+    three approved ones delivered, so resolved 14 → 16 and `absent` 26 → 23, gap
+    107 → 103) — and 119 → 118 by the SAME epic's SOURCES/MINE/SESSION lane (this PR:
+    seven advertised names retired into its containers, six approved ones delivered, so
+    resolved 16 → 22, `absent` 23 → 17, gap 103 → 96). Every one of those five literals is
+    MEASURED off the tree at this head (`tools/sdk_surface.py --check` and
+    `tools/sdk_surface_declaration.py`), which is the only place the two halves can be read
+    together. Nothing approved was removed: the 96 are all off-surface surplus, which is why
+    this premise and the 40 are separate numbers.
     """
     declared = _declaration()["__all__"]
     live = _live()
@@ -220,9 +231,10 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
     # verify nothing at all. Each literal carries its own premise note —
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    assert len(live) == 119, "the live surface moved — update this premise (it pins today's gap)"
-    assert len(off_surface) == 103, "the gap moved — update this premise (it pins today's gap)"
-    assert len(absent) == 23, "the gap moved — update this premise (it pins today's gap)"
+    assert len(live) == 118, "the live surface moved — update this premise (it pins today's gap)"
+
+    assert len(off_surface) == 96, "the gap moved — update this premise (it pins today's gap)"
+    assert len(absent) == 17, "the gap moved — update this premise (it pins today's gap)"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.
     assert sum(1 for p in problems if "NOT on the approved surface" in p) == len(off_surface)

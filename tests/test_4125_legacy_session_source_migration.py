@@ -105,7 +105,7 @@ def pre_4005_commit(sdk, sid: str, *, doc_id: str = "doc_x1",
     """
     psid = sid if point_session is _USE_SID else point_session
     dsid = sid if doc_session is _USE_SID else doc_session
-    sdk.create_source(basename, "agentSession",
+    sdk.register_source(basename, "agentSession",
                       contentHash=content_hash(basename),
                       provenance_spans=list(SPANS), is_episodic=True,
                       sourceDate="2026-01-01T00:00:00+00:00")
@@ -126,7 +126,7 @@ def post_4005_commit(sdk, sid: str, *, doc_id: str = "doc_x1",
                      raw: str = RAW) -> str:
     """The post-#4005 write for the SAME session (the canonical identity)."""
     canonical = derive_session_source_url(sid)
-    sdk.create_source(canonical, "agentSession", contentHash=content_hash(raw),
+    sdk.register_source(canonical, "agentSession", contentHash=content_hash(raw),
                       provenance_spans=list(SPANS), is_episodic=True,
                       source_path=LEGACY_URL,
                       sourceDate="2026-01-01T00:00:00+00:00")
@@ -144,7 +144,7 @@ def corpus_indexed_session_source(sdk, sid: str = "s1",
     indexed Event — a keyed, LIVE identity that is fully attributable and must
     never be treated as a pre-#4005 candidate (#8229 review, P1).
     """
-    sdk.create_source(url, "agentSession", provenance_spans=list(SPANS),
+    sdk.register_source(url, "agentSession", provenance_spans=list(SPANS),
                       is_episodic=True)
     g_of(sdk).query("MERGE (e:Event {id:$eid}) SET e.session_id=$sid",
                     params={"eid": event_id, "sid": sid})

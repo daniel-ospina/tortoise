@@ -99,12 +99,12 @@ def test_changed_source_write_emits_a_notice(sdk):
     Source, or reports anything other than the prior recorded read (``h1``) and
     the Source's current version (``h2``).
     """
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     first = sdk.create_point("statement", "the first fact", extractedFrom=DOC)
     # Nothing recorded yet to compare against: no notice on the first read.
     assert _notices(first) == []
 
-    sdk.create_source(DOC, "document", contentHash="h2")
+    sdk.register_source(DOC, "document", contentHash="h2")
     second = sdk.create_point("statement", "the second fact", extractedFrom=DOC)
 
     notices = _notices(second)
@@ -120,12 +120,12 @@ def test_notice_compares_against_the_most_recent_recorded_read(sdk):
     FAILS IF the notice compares the Source against an older read (``h1``)
     instead of the most recent one (``h2``).
     """
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     sdk.create_point("statement", "a", extractedFrom=DOC)
-    sdk.create_source(DOC, "document", contentHash="h2")
+    sdk.register_source(DOC, "document", contentHash="h2")
     sdk.create_point("statement", "b", extractedFrom=DOC)  # notice h1 -> h2
 
-    sdk.create_source(DOC, "document", contentHash="h3")
+    sdk.register_source(DOC, "document", contentHash="h3")
     third = sdk.create_point("statement", "c", extractedFrom=DOC)
 
     notices = _notices(third)
@@ -143,13 +143,13 @@ def test_unchanged_source_write_produces_no_notice(sdk):
     FAILS IF the key is present on an unchanged-source write (an empty-list
     notice is still a notice), or if a Source never read before is reported.
     """
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     sdk.create_point("statement", "one", extractedFrom=DOC)
     again = sdk.create_point("statement", "two", extractedFrom=DOC)
     assert NOTICE_KEY not in again
 
     # A never-before-read Source has no recorded read version -> silent.
-    sdk.create_source(OTHER, "document", contentHash="hZ")
+    sdk.register_source(OTHER, "document", contentHash="hZ")
     uncited = sdk.create_point("statement", "three", extractedFrom=OTHER)
     assert NOTICE_KEY not in uncited
 
@@ -160,7 +160,7 @@ def test_source_without_a_hash_is_silent(sdk):
     FAILS IF a blank/absent hash on either side is coerced into a comparison
     (the false-current class #5256 guards against).
     """
-    sdk.create_source(DOC, "document")  # no hash
+    sdk.register_source(DOC, "document")  # no hash
     sdk.create_point("statement", "first", extractedFrom=DOC)
     again = sdk.create_point("statement", "second", extractedFrom=DOC)
     assert NOTICE_KEY not in again
@@ -176,9 +176,9 @@ def test_notice_never_blocks_or_mutates_the_write(sdk):
     node (so a later read sees it), (c) changes the Source's stored version, or
     (d) changes the version the new Point records as its own read.
     """
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     sdk.create_point("statement", "first", extractedFrom=DOC)
-    sdk.create_source(DOC, "document", contentHash="h2")
+    sdk.register_source(DOC, "document", contentHash="h2")
 
     before = sdk._get_proj().g.query(
         "MATCH (p:Point) RETURN count(p)").result_set[0][0]
@@ -220,9 +220,9 @@ def test_notice_is_not_journaled_with_the_point(sdk, monkeypatch):
 
     monkeypatch.setattr(sdk, "_emit_event", _spy)
 
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     sdk.create_point("statement", "first", extractedFrom=DOC)
-    sdk.create_source(DOC, "document", contentHash="h2")
+    sdk.register_source(DOC, "document", contentHash="h2")
     second = sdk.create_point("statement", "second", extractedFrom=DOC)
 
     assert _notices(second), "precondition: this write must produce a notice"
@@ -240,10 +240,10 @@ def test_unchanged_source_with_inverted_createdat_is_silent(sdk):
     dated 2024 and ``h2`` dated 2015 while the Source holds ``h2``, a
     ``createdAt``-ordered choice reads ``h1`` and falsely reports a change.
     """
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     sdk.create_point("statement", "older-read", extractedFrom=DOC,
                      createdAt="2024-01-01T00:00:00+00:00")
-    sdk.create_source(DOC, "document", contentHash="h2")
+    sdk.register_source(DOC, "document", contentHash="h2")
     sdk.create_point("statement", "newer-read", extractedFrom=DOC,
                      createdAt="2015-01-01T00:00:00+00:00")
 
@@ -262,14 +262,14 @@ def test_revert_to_a_previously_read_version_is_silent(sdk):
     FAILS IF the decision is re-derived from a "most recent read" ordering
     instead of the order-independent recorded-set membership.
     """
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     sdk.create_point("statement", "read h1", extractedFrom=DOC)
-    sdk.create_source(DOC, "document", contentHash="h2")
+    sdk.register_source(DOC, "document", contentHash="h2")
     second = sdk.create_point("statement", "read h2", extractedFrom=DOC)
     assert _notices(second), "precondition: h1 -> h2 is a change"
 
     # The Source reverts to the version already recorded on the first read.
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     third = sdk.create_point("statement", "after revert", extractedFrom=DOC)
     assert NOTICE_KEY not in third
 
@@ -283,10 +283,10 @@ def test_previous_version_label_is_best_effort(sdk):
     DECISION is unaffected: once ``h2`` is recorded, later writes are silent even
     though the greatest-``createdAt`` prior read is ``h1``.
     """
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     sdk.create_point("statement", "h1 read, dated later", extractedFrom=DOC,
                      createdAt="2024-01-01T00:00:00+00:00")
-    sdk.create_source(DOC, "document", contentHash="h2")
+    sdk.register_source(DOC, "document", contentHash="h2")
     second = sdk.create_point("statement", "h2 read, dated earlier",
                               extractedFrom=DOC,
                               createdAt="2015-01-01T00:00:00+00:00")
@@ -311,10 +311,10 @@ def test_capture_receipt_carries_the_notice(sdk, monkeypatch):
     # The v2 point loop links each extracted point to the SESSION Source, so
     # that Source is the one whose change we stage.
     session_url = "session:s5516"
-    sdk.create_source(session_url, "agentSession", contentHash="h1")
+    sdk.register_source(session_url, "agentSession", contentHash="h1")
     sdk.create_point("statement", "a prior read of the session",
                      extractedFrom=session_url)
-    sdk.create_source(session_url, "agentSession", contentHash="h2")
+    sdk.register_source(session_url, "agentSession", contentHash="h2")
 
     content = "the session source changed since it was last read"
     pid = ev2._content_id("pt", content)
@@ -403,9 +403,9 @@ def test_a_failing_notice_computation_never_fails_the_write(
     FAILS IF an exception from the notice computation propagates out of
     ``create_point`` (the notice must be unable to take a committed write down).
     """
-    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.register_source(DOC, "document", contentHash="h1")
     sdk.create_point("statement", "first", extractedFrom=DOC)
-    sdk.create_source(DOC, "document", contentHash="h2")
+    sdk.register_source(DOC, "document", contentHash="h2")
 
     import tortoise.projection.edges as edges
 

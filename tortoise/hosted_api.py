@@ -22534,7 +22534,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # MERGE preserves a previously stored contentHash/version/title.
         anchor = next((ref.contentHash for ref in payload.provenance_refs
                        if ref.contentHash), None)
-        sdk.create_source(
+        sdk.register_source(
             session_url, "agentSession",
             contentHash=anchor,
             provenance_spans=session_spans, is_episodic=True,
@@ -22565,7 +22565,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # "" (no min_length), and an empty anchor is an absent one — the same
         # normalization the session-Source write applies via its
         # `next((ref.contentHash for ref in ... if ref.contentHash), None)`.
-        sdk.create_source(
+        sdk.register_source(
             u, src.sourceKind, tier=src.credibilityTier,
             contentHash=(src.contentHash or None), is_episodic=True,
         )
@@ -44342,7 +44342,7 @@ async def _run_docs_indexing(job_id: str, org_id: str, org: str,
                 totals["errors"].append(str(e))
                 break
             try:
-                ingest = org_sdk.index_directory(
+                ingest = org_sdk.index_sources_from_directory(
                     str(org_root), file_type="doc", extract_metadata=False,
                     corpus_name=f"{org}-docs")
             except Exception as e:
@@ -49785,7 +49785,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 186 tracked files (458 distinct
+# ABSOLUTE line number from 185 tracked files (457 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

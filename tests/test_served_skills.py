@@ -305,7 +305,7 @@ def sdk(tmp_path, force_sparse_tfidf):
 
 
 def _link_source(sdk: TortoiseSDK, pid: str, url: str) -> None:
-    sdk.create_source(url, "T1")
+    sdk.register_source(url, "T1")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}), (s:Source {url:$u}) "
         "CREATE (n)-[:extractedFrom]->(s)",

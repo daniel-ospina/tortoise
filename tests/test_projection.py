@@ -3341,7 +3341,7 @@ def test_5026_b6_retired_fields_do_not_survive_a_rebuild(tmp_path):
         # JOURNALS a SourceCreated, so the rebuild below re-materialises the
         # node — without that the absence assertions below would pass vacuously
         # against a node the wipe removed.
-        sdk.create_source(did, "document", documentKind="report",
+        sdk.register_source(did, "document", documentKind="report",
                           format="markdown")
 
         # (1) The BOUNDARY still refuses every retired spelling, so the only way
@@ -3404,7 +3404,7 @@ def test_5026_b6_promotion_scrubs_inherited_retired_fields(sdk_factory):
     refusal does not become a retired field when the node becomes a document.
     """
     sdk = sdk_factory()
-    sdk.create_source("doc/promo.md", "document")
+    sdk.register_source("doc/promo.md", "document")
     proj = sdk._get_proj()
     # The inherited value is seeded with raw Cypher — the shape a pre-ruling
     # deployment (or any direct graph writer) left behind. Ruling B on #3998
@@ -3531,7 +3531,7 @@ def test_5135_retired_registry_is_the_single_authority(sdk_factory, monkeypatch)
     # Door 3 — the promotion scrub: a node that inherited the key, then became
     # a document, must lose it. Seeded by raw Cypher because the write paths
     # no longer produce such a node.
-    sdk.create_source("corpus://reg3", "document")
+    sdk.register_source("corpus://reg3", "document")
     proj.g.query(
         f"MATCH (s:Source {{url:$u}}) SET s.{probe}='INHERITED'",
         params={"u": "corpus://reg3"})

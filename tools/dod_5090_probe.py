@@ -1292,9 +1292,14 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
     # names a table absent at top level. Re-measured: a real duplicate plus a 23-key decoy still
     # reds.)
     # Provenance and the carrier rationale are merged into this row so neither reading is lost.
-    "tortoise.sdk::create_source": (
+    # `#12948`: the public `create_source` was RETIRED into the SOURCES/MINE/SESSION
+    # containers, so the BODY (and therefore this census row) now lives at the private
+    # `_create_source`. The key follows the symbol the instrument finds: the retired
+    # public alias is no longer a writer, and a row keyed on it would be a declaration
+    # of nothing.
+    "tortoise.sdk::_create_source": (
         CENSUS_EXEMPT,
-        "`tortoise/sdk.py::create_source` — the instrument's ONE match is a REFUSAL MESSAGE, "
+        "`tortoise/sdk.py::_create_source` — the instrument's ONE match is a REFUSAL MESSAGE, "
         "not a store: the `#11858` marker family's error string says \u201cpass `embedding=` and it "
         "declares the truth\u201d, and `_EMBED_WRITE` reads raw SOURCE, so quoting the rejected "
         "keyword enrols the function — the same PROSE class as `tortoise.api::_emit` and "
@@ -1305,7 +1310,9 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`props` write), so the exemption rests on a guard ORDERED AHEAD of what it protects — "
         "not on the absence of a write. ⛔ What was measured is the ABSENCE OF A "
         "CYPHER LITERAL IN THIS FUNCTION'S OWN SOURCE: zero `.query(`, no `SET `, in 35,275 "
-        "CHARACTERS (35,541 bytes — the function carries 140 non-ASCII characters, so the character "
+        "CHARACTERS (35,541 bytes at the `#12182` head it was measured on; the SAME BODY "
+        "re-measures 35,672 characters / 35,940 bytes / 141 non-ASCII at the `#12948` head, the "
+        "delta being growth since that reading — the function carries non-ASCII characters, so the character "
         "count and the byte count differ and the figure must say which); its `MERGE`/`CREATE` "
         "spellings are ALL prose — docstring and `#` comments, none in executable code. The "
         "COUNT, with its tokenisation named because that is what two readers disagreed about "
@@ -1523,7 +1530,7 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.api::add_point": (
         ("tortoise/api.py", "add_point",
          'p["embedding"] = fields["embedding"]'),),
-    "tortoise.sdk::create_source": (
+    "tortoise.sdk::_create_source": (
         # ⛔ #11996 landed a DUPLICATE of this same evidence (byte-identical, so it
         # only shadowed) and `ruff check .` F601 caught it on main; its one distinct
         # sentence: deleting the guard (the `raise`) takes the needle AND the
@@ -1535,10 +1542,10 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
         # INDEPENDENT of it — it survives a raise-only deletion, so the two do not travel
         # together. ⛔ Re-derive both rather than assuming: re-deriving is re-deriving the
         # instrument's match, and a stale exemption must not outlive what it exempts.
-        ("tortoise/sdk.py", "create_source",
+        ("tortoise/sdk.py", "_create_source",
          "pass `embedding=` and it declares the truth"),
         # …and the guard that makes the class true (it refuses MARKERS; it writes none).
-        ("tortoise/sdk.py", "create_source", "_SERVER_MANAGED_EMBEDDING_MARKERS"),),
+        ("tortoise/sdk.py", "_create_source", "_SERVER_MANAGED_EMBEDDING_MARKERS"),),
     "tortoise.api::_int_is_float_exact": (
         # ⛔ The DOCSTRING's quoted REFUSAL is the entire reason this name is in
         # the population: `_EMBED_WRITE` reads raw SOURCE, so the measured example

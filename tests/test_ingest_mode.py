@@ -74,7 +74,7 @@ _CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
 # Per-run volatile props excluded from the isomorphism comparison (the
 # plan's "modulo batch_id" — extended to the other per-run-derived props:
 # ids (per-call ULIDs), timestamps (assigned at write — ``sdk.py::TortoiseSDK.create_point``
-# stamps ``createdAt``/``updatedAt``, ``sdk.py::TortoiseSDK.create_source`` stamps
+# stamps ``createdAt``/``updatedAt``, ``sdk.py::TortoiseSDK.register_source`` stamps
 # ``ingestedAt``), and source defaults). Deliberately NARROW: semantic payload
 # props (title / contentHash / externalId / version on Source nodes, content
 # on Points)
@@ -83,7 +83,7 @@ _CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
 _VOLATILE_PROPS = frozenset({
     "id", "batch_id", "createdAt", "updatedAt", "ingestedAt",
     # #3644: the `:Source` version WINDOW start — the instant the version was
-    # OBSERVED, minted per call by `create_source` on the same clock as
+    # OBSERVED, minted per call by `register_source` on the same clock as
     # `updatedAt` and written only through `_upsert_source`'s hash-diff gate.
     # It is the same class of value as the three timestamps above (a per-call
     # clock read, not a fact the caller asserted), so two ingest modes of the

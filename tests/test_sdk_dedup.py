@@ -134,7 +134,7 @@ class TestDedupHitAppliesAuthoredBaseline:
             1.0 + AUTHOR_ASSERTION_WEAK_PC)
         assert before.get("credibility") == "T0"
         # attach a REAL T1 source and run the inheritance/recompute
-        sdk.create_source("https://t1-dedup.example", "document", tier="T1",
+        sdk.register_source("https://t1-dedup.example", "document", tier="T1",
                           sourceDate="2024-01-01T00:00:00+00:00")
         sdk._get_proj()._link_source(pid, "https://t1-dedup.example")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
