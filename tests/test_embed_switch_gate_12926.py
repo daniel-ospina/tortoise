@@ -2786,3 +2786,173 @@ def test_a_trailing_guard_operator_is_consumed_by_the_next_statement():
         f"one after it is not — `env -i bash` prints V=[UNSET] E=[1]: {across_a_blank_line}"
     )
     assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
+
+
+# ── the seventh review's four findings (measured against bash, both directions) ───────────────
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        # the idiomatic multi-line spelling: the group is the RHS of the guard
+        '[ -n "${ARM:-}" ] && {\n'
+        "  export TORTOISE_VALUE_GATE=1\n"
+        "  export TORTOISE_EMBED_GATE=1\n"
+        "}\n",
+        # …and its one-line mirror
+        '[ -n "${ARM:-}" ] && { export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; }\n',
+        # a group inside a branch that never runs
+        "if false; then {\n"
+        "  export TORTOISE_VALUE_GATE=1\n"
+        "  export TORTOISE_EMBED_GATE=1\n"
+        "}\nfi\n",
+    ],
+)
+def test_a_group_behind_a_guard_is_never_credited(script):
+    """Review P1 (measured) — a group opened on the RHS of `&&` may never run.
+
+    A brace group runs in the CURRENT shell, which is why an unforked group is credited — but only
+    when it RUNS. The frame was pushed before the statement's guard was computed, so
+
+        [ -n "${ARM:-}" ] &&
+        {
+          export TORTOISE_VALUE_GATE=1
+          export TORTOISE_EMBED_GATE=1
+        }
+
+    credited both switches, exit 0, while `env -i bash` on the same script prints `V=UNSET
+    E=UNSET` (ARM is unset, so the group runs zero times). The same hole one-lined credited `EMBED`
+    and left `VALUE` ambiguous. The frame now carries its opener's `conditional`, and every
+    statement inside a conditional frame is `ambiguous` — the fail-closed verdict.
+
+    Mutation-proved: dropping the `group_conditional` arm reds all three rows; making EVERY group
+    conditional reds the unforked mirror in `test_an_UNFORKED_group_body_is_still_credited…`.
+    """
+    stated, ambiguous = gate._shell_assignments(script)
+    assert stated == {}, f"a guarded group may never run, so it states nothing: {stated}"
+    assert set(SWITCHES) <= ambiguous, ambiguous
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        # TWO openers on ONE statement, forked OUTER group
+        "{ { export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; }; } | tee -a /tmp/x\n",
+        # the multi-line nesting (was already correct — pinned so it stays)
+        "{\n {\n  export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\n }\n} | tee -a /tmp/x\n",
+        # forked INNER group inside a plain outer one
+        "{ { export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; } | tee; }\n",
+    ],
+)
+def test_NESTED_groups_keep_their_frames(script):
+    """Review P2 (measured) — the frame stack must follow the BRACES, not the statements.
+
+    The push was a boolean (`startswith("{")` → ONE frame) while every `}` statement pops one, so
+    `{ { export …=1; }; } | tee` desynced the stack: the outer group's fork was applied to a frame
+    that no longer existed and was silently dropped, leaving both switches `STATED`, exit 0, while
+    `env -i bash` on each of these scripts prints no `TORTOISE_*` (the piped group is a subshell).
+    Openers and closers are now both COUNTED.
+
+    Mutation-proved: pushing one frame per statement reds the first row (and only that one).
+    """
+    stated, _ambiguous = gate._shell_assignments(script)
+    assert stated == {}, f"no export in a piped group reaches the process: {stated}"
+
+
+@pytest.mark.parametrize(
+    ("trailer", "credited"),
+    [
+        # redirections do NOT make a group a subshell — bash keeps both switches
+        (">&2", True),
+        ("1>&2", True),
+        ("2>&1", True),
+        (">&", True),
+        (">| /tmp/f.log", True),
+        ("2>| /tmp/f.log", True),
+        ("> /tmp/f.log", True),
+        ("&> /tmp/f.log", True),
+        # …but a redirect followed by a PIPE does
+        ("> /tmp/f.log 2>&1 | tee -a /tmp/g.log", False),
+        ("2>&1 |& tee", False),
+    ],
+)
+def test_a_group_redirect_is_not_a_fork(trailer, credited):
+    """Review P2 (measured, BOTH directions) — redirects sit between the closer and the operator.
+
+    The first pattern spelled a redirect as `[0-9]*>>?[0-9]*\\s*`, which ate the fd digit of `N>&M`
+    and left the `&` to be read as the BACKGROUND operator. Two measured consequences:
+
+      * `{ …; } >&2` was REFUSED (`VALUE_GATE=MISSING`) although `env -i bash` keeps both switches
+        — a false refusal of an honest entrypoint;
+      * `{ …; } > f 2>&1 | tee` was CREDITED although bash runs the group in a subshell — the
+        fail-open, one redirect away from the shape the fork arm exists to catch.
+
+    `_group_is_forked` now strips redirection tokens (reusing `_SHELL_FORK_OPERATOR` for the
+    operator test) before asking whether a fork follows. Mutation-proved: the old single regex
+    reds both halves.
+    """
+    script = f"{{ export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; }} {trailer}\n"
+    stated, _ambiguous = gate._shell_assignments(script)
+    if credited:
+        assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+            f"a redirection is not a subshell — bash keeps both switches: {stated}"
+        )
+    else:
+        assert stated == {}, f"a redirect followed by a pipe IS a subshell: {stated}"
+
+
+def test_a_trailing_PIPE_makes_the_next_statement_a_subshell():
+    """Review P3 (measured) — a line ending in `|` continues the pipeline onto the next line.
+
+    `carried` only ever received a statement SEPARATOR, so the trailing-fork case the comment
+    claimed was not implemented: `echo hi |` / `  export K=1` / `export K2=1` credited BOTH, while
+    `env -i bash` prints `V=UNSET E=1` — only the pipeline's right-hand statement is the subshell,
+    and the next statement is a statement of its own.
+
+    Mutation-proved: dropping the `_SHELL_TRAILING_PIPE` arm reds the first half; carrying a
+    trailing `&` instead would red the second (bash: `export K=1 &` / `export K2=1` sets K2).
+    """
+    piped, ambiguous = gate._shell_assignments(
+        "echo hi |\n  export TORTOISE_VALUE_GATE=1\nexport TORTOISE_EMBED_GATE=1\n"
+    )
+    assert piped == {"TORTOISE_EMBED_GATE": "1"}, (
+        f"`env -i bash` on this script prints V=UNSET E=1: {piped}"
+    )
+    assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
+
+    backgrounded, ambiguous = gate._shell_assignments(
+        "export TORTOISE_VALUE_GATE=1 &\nexport TORTOISE_EMBED_GATE=1\n"
+    )
+    assert backgrounded == {"TORTOISE_EMBED_GATE": "1"}, (
+        f"a trailing `&` ends the statement; the NEXT statement is not a subshell: {backgrounded}"
+    )
+    assert "TORTOISE_VALUE_GATE" in ambiguous, ambiguous
+
+
+def test_the_code_ON_the_allman_body_brace_line_is_inside_the_body():
+    """Round 2's residual (measured) — the body brace shares its line with the body's first command.
+
+    `arm_gates()` / `{ export K=1 K2=1` puts code on the brace's own statement, and it was scanned
+    BEFORE `opened_fn` raised the depth, so a never-called helper stated BOTH switches on one export
+    line and the channel PASSED (exit 0) — `env -i bash` on it runs nothing. The split spelling
+    (`{ export K=1` then `  export K2=1`) was already refused because the second line read at
+    depth 1; it is pinned in the same test so a fix cannot trade one for the other.
+
+    Mutation-proved: dropping `allman_body` from `conditional` reds the first row only; the plain
+    brace GROUP mirror stays credited (a group runs in the current shell), so the two are told
+    apart by the HEADER, not by the brace.
+    """
+    for script in (
+        "arm_gates()\n{ export TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1\n}\n",
+        "arm_gates()\n{ export TORTOISE_VALUE_GATE=1\n  export TORTOISE_EMBED_GATE=1\n}\n",
+    ):
+        stated, ambiguous = gate._shell_assignments(script)
+        assert stated == {}, f"the helper is never called, so it states nothing: {stated}"
+        assert set(SWITCHES) <= ambiguous, ambiguous
+
+    group, _ = gate._shell_assignments(
+        "{ export TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1; }\n"
+    )
+    assert group == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+        f"the mirror — a brace GROUP runs in the current shell: {group}"
+    )
