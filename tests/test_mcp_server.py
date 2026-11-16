@@ -443,7 +443,10 @@ class TestToolFunctions:
         non-operator point must still return the canonical domain error — the
         typed-failure gate must not swallow it."""
         class _StubSDK:
-            def get_point(self, id):
+            # #12941: the double tracks the REAL signature — `get_point` grew an
+            # opt-in `served_out` sink, and `tortoise_get_operator` reads through
+            # the same caller-facing form `tortoise_get_point` does.
+            def get_point(self, id, *, served_out=None):
                 return {"id": id, "is_operator": False}
 
         monkeypatch.setattr(mcp_mod, "_get_org_sdk", lambda: _StubSDK())
