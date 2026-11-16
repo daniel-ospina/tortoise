@@ -7631,13 +7631,17 @@ def _record_health() -> dict:
         block["record_writes_applied"] = applied
         block["record_last_write_at"] = last_write_at
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
-    # this counter carries — SIX values, documented at
+    # this counter carries — SEVEN values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly
     # replay-healable, and naming four of them here sent operators to a replay
     # that could not exist for two:
     #
     #   ``write_failed``      the record was unreachable or the projection
     #                         refused the row — a REPLAY heals it.
+    #   ``journal_collision`` the position row was absorbed by a DIFFERENT
+    #                         record (#9318): a REPLAY DOES NOT HEAL IT — it
+    #                         re-raises. The remedy is journal identity in the
+    #                         key (#12894).
     #   ``no_tenant``         armed with no tenant in scope; heal the tenant
     #                         resolution, then replay.
     #   ``malformed_dsn``     the value is configured but unusable — fix the

@@ -952,6 +952,25 @@ class JournalPositionCollision(RecordProjectionError):
       names both possibilities every time; the appended reading is checkable
       against the payloads themselves.
 
+    ⚠️ THE OTHER RESIDUAL — WHAT THE VERDICT CANNOT SEE (#12904 review). The
+    residual above is a FALSE POSITIVE: a replay reported as a collision. This
+    one is the missing DETECTION, and it is reachable in the exact shape #9318
+    names. The verdict compares `event_type` and the DURABLE `payload`, and
+    `_journal_row` builds that payload by filtering `ENVELOPE_KEYS` out of the
+    record — `ts`, `event_id`, `initiated_by` and `projection_version` among
+    them. Two records that differ ONLY in those fields therefore bind identical
+    `event_type`/`payload` parameters, the `IS DISTINCT FROM` predicate matches
+    no row, and the second is absorbed exactly as a replay would be — SILENTLY.
+    That is two durable journals ingesting the SAME document (same type, same
+    payload, apart only in `ts`/`event_id`): the position row is still dropped
+    and layer 1 still under-records that journal. It is stated rather than
+    repaired because no comparison of the durable content can recover a field
+    the durable row does not carry; `#12894`'s journal IDENTITY in the key is
+    what removes it, exactly as for the residual above.
+    `test_an_ENVELOPE_only_difference_is_invisible_to_the_verdict` pins the
+    boundary so it is measured rather than implied, and reds when the key
+    carries the journal.
+
     What would remove the residual rather than describe it: a derivation-version
     discriminator INSIDE the durable payload (`projection_version` is stripped
     by `ENVELOPE_KEYS` today, so it is invisible to the row). That is a payload
@@ -6307,7 +6326,7 @@ _IDENTITY_SECTIONS: frozenset[str] = frozenset(_ENTITY_MATCH_COLUMNS)
 
 
 def _identity_pairs(payload: Any) -> list[tuple[str, str, str, Any]]:
-    """``(key, label, value)`` identity pairs the payload carries (#9318).
+    """``(key, scope, label, value)`` identity pairs the payload carries (#9318).
 
     TWO LEVELS, because the dominant shape is NESTED and a top-level-only read
     is blind to it: `PointAdded` carries its whole snapshot under `point`

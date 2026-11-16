@@ -549,6 +549,56 @@ def test_the_identity_keys_are_ids_only_and_a_subset_of_the_writers() -> None:
     assert "event_id" in rp.ENVELOPE_KEYS
 
 
+def test_an_ENVELOPE_only_difference_is_invisible_to_the_verdict() -> None:
+    """⚠️ PINNED RESIDUAL, not a behaviour this guard repairs (#12904 review).
+
+    The verdict compares `event_type` plus the DURABLE `payload`, and
+    `_journal_row` builds that payload by filtering `ENVELOPE_KEYS` out of the
+    record — `ts` and `event_id` among them. So two records that differ ONLY in
+    those fields bind IDENTICAL parameters for the conflict query, its
+    `IS DISTINCT FROM` predicate matches no row, and the second is absorbed as
+    though it were a replay: silently. That is the reachable shape #9318 names
+    — two durable journals ingesting the SAME document (same type, same
+    payload, apart only in `ts`/`event_id`) still under-record that journal.
+
+    Stated, not repaired: no comparison of the durable content can recover a
+    field the durable row does not carry. Removing it needs journal IDENTITY in
+    the key (#12894), the schema decision this detector deliberately does not
+    take. This leg makes the boundary MEASURED rather than implied — when
+    #12894 lands, the two rows stop being treated as one and this test reds,
+    and it is then deleted with the detector rather than "fixed".
+    """
+    first = dict(RECORD_A, ts="2026-11-15T00:00:00Z", event_id="evt-first")
+    second = dict(RECORD_A, ts="2026-11-16T09:30:00Z", event_id="evt-second")
+    assert first != second, (
+        "the two records must actually differ, or this leg is vacuous")
+
+    # The conflict query's bind parameters are
+    # `(org, graph, seq, event_type, payload)` — exactly `params[:5]`. Pin those,
+    # not a hand-built dict: a change to `_journal_row`'s filtering is what would
+    # move this boundary, and only the statement knows what it binds.
+    row_first = rp._journal_row(first, 1, ORG, GRAPH)
+    row_second = rp._journal_row(second, 1, ORG, GRAPH)
+    assert row_first.params[:5] == row_second.params[:5], (
+        "the durable content of two envelope-only-different records is no "
+        "longer identical — the guard can now SEE this difference, so this "
+        "pin's premise has moved and it should be deleted, not kept green")
+    assert row_first.params[5] != row_second.params[5], (
+        "the two records must differ SOMEWHERE — `ts` is the only field left "
+        "once the envelope is stripped, so it is what carried the difference")
+
+    # Same bound parameters ⇒ `IS DISTINCT FROM` matches no row ⇒ the stub
+    # returns no stored row ⇒ silent no-op, no counter, no exception.
+    conn = Absorbed(stored=None)
+    before = dict(monitoring.record_write_failure_counts())
+    report = rp.replay([second], conn, org_id=ORG, graph_id=GRAPH)
+    assert report.events == 1
+    assert conn.conflict_reads == 1, (
+        "the guard did not ask the collision question — this leg would then "
+        "pass by never exercising the code under test")
+    assert dict(monitoring.record_write_failure_counts()) == before
+
+
 def test_a_different_event_type_alone_is_a_collision() -> None:
     """The verdict does not hang on the payload being comparable.
 

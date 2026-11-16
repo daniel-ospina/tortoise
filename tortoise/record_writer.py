@@ -511,8 +511,8 @@ class RecordWrite:
     #: "nobody said whose turns these are", the other is "the caller said, and
     #: the answer was unusable" — and both count on the ``no_tenant`` COUNTER.
     #: So the closed list above is the refusal vocabulary and the counter set is
-    #: one word coarser: a consumer branching on this field must accept six
-    #: values, while an operator reading the metric sees five. Listing only the
+    #: one word coarser: a consumer branching on this field must accept seven
+    #: values, while an operator reading the metric sees six. Listing only the
     #: counter words here is what made a consumer's closed list miss a value the
     #: door actually returns (:func:`write_live_record`'s ``LIVE_WRITE_REFUSALS``
     #: declares them together, and that set is authoritative).
@@ -596,7 +596,7 @@ class RecordWrite:
 def _refused(refusal: str, seq: int | None) -> RecordWrite:
     """The LIVE door's refusal report for an ARMED call that did not write.
 
-    ONE constructor for all six refusal arms (#8447), for two reasons:
+    ONE constructor for all seven refusal arms (#8447), for two reasons:
 
     * the ARM decides the outcome, so no arm can drift back to ``return None``
       — the value this module reserves for NOT ARMED — by accident;

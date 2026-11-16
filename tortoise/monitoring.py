@@ -733,6 +733,12 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 #                             filed under a guessed tenant (#9192);
 #   ``write_failed``          the record was unreachable or the projection
 #                             refused the record;
+#   ``journal_collision``     the position row was absorbed by a DIFFERENT
+#                             record (#9318), detected by comparing the
+#                             surviving row's content. ⛔ Unlike ``write_failed``
+#                             a REPLAY CANNOT heal it — the replay re-raises —
+#                             so the remedy is journal identity in the key
+#                             (#12894), not a replay;
 #   ``circuit_open``          a connect to the record FAILED moments ago, so the
 #                             live door refused this write locally instead of
 #                             paying the connect timeout once per record
