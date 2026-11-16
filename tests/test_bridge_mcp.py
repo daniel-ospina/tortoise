@@ -19,6 +19,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+# Imported at COLLECTION, on purpose. `integrations.crm.twenty.bridge` captures
+# `Path.home()` / `expanduser("~")` into module constants at IMPORT time
+# (`CAL_STATE_FILE`, `CONFIG["review_queue_path"]`) — the capture-at-start class
+# `tortoise/mcp_client.py` deliberately avoids (#10605). `_no_ambient_store` below
+# redirects HOME per test, so a body-level import would freeze those constants into
+# another test's transient tmp path — pytest keeps its recent `tmp_path` basetemps for
+# the session, so those constants would outlive the test and point at a path that is
+# no longer this module's, for every later test in the same process. Collection-time
+# import under the ambient HOME is the construction
+# `tests/test_8491_cal_attendee_grounding.py` already uses; the bridge's own
+# capture-at-start bug is filed as #12968 rather than carried here.
+import integrations.crm.twenty.bridge as bridge
+
 SAMPLE_FRONTMATTER = {
     "title": "Test Meeting",
     "date": "2026-08-07",
@@ -133,9 +146,7 @@ class TestBridgePush:
         monkeypatch.setenv("TORTOISE_MCP_URL", daemon_url)
         monkeypatch.setenv("TORTOISE_API_KEY", "")
 
-        from integrations.crm.twenty.bridge import push_to_tortoise
-
-        result = push_to_tortoise(SAMPLE_FRONTMATTER)
+        result = bridge.push_to_tortoise(SAMPLE_FRONTMATTER)
         assert result["status"] == "ok"
         types = [p["type"] for p in result["points"]]
         assert types == ["meeting", "decision", "commitment"]
@@ -146,9 +157,7 @@ class TestBridgePush:
         monkeypatch.setenv("TORTOISE_MCP_URL", "http://127.0.0.1:1/mcp")
         monkeypatch.setenv("TORTOISE_API_KEY", "")
 
-        from integrations.crm.twenty.bridge import push_to_tortoise
-
-        result = push_to_tortoise(SAMPLE_FRONTMATTER)
+        result = bridge.push_to_tortoise(SAMPLE_FRONTMATTER)
         assert result == {"status": "skipped", "reason": "tortoise_unavailable"}
 
 
@@ -166,23 +175,172 @@ class TestPointIdExtraction:
         )
 
     def test_the_id_comes_from_the_payload_block_not_a_later_disclosure(self):
-        from integrations.crm.twenty.bridge import _point_id
-
         result = self._result(
             '{"id": "pt_1"}',
             "Graph: this write targeted the workspace default graph (default).",
         )
-        assert _point_id(result) == ("pt_1", None)
+        assert bridge._point_id(result) == ("pt_1", None)
 
     def test_a_non_dict_payload_stays_a_failure_and_never_raises(self):
         """A non-dict payload is `unparseable_result`. The trailing prose block
         must not turn it into an id, and must not raise out of the extractor."""
-        from integrations.crm.twenty.bridge import _point_id
-
         result = self._result(
             "[1, 2]", "Graph: this write targeted the workspace default graph."
         )
-        assert _point_id(result) == (None, "unparseable_result")
+        assert bridge._point_id(result) == (None, "unparseable_result")
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_store(monkeypatch, tmp_path):
+    """No test in this module may read a REAL credential store.
+
+    `tortoise.mcp_client.resolve_connection` falls back to the stores
+    `tortoise init` writes — `./.tortoise` (project-local) then
+    `~/.tortoise/credentials.json` (#1708 D5) — when no env KEY names one. These
+    tests declare the endpoint with `TORTOISE_MCP_URL` and set
+    `TORTOISE_API_KEY=""` (a blank value is deliberately ABSENT), so on a box
+    that has run `tortoise init` the STORE supplies the key — and by the #2369
+    D1.1 CO-SOURCE rule the store then supplies the HOST too, overriding the URL
+    the fixture just declared here. The push then probes the stored host instead
+    of this fixture's ephemeral daemon, the hermetic egress guard (#4387) blocks
+    the request, and `push_to_tortoise` returns `{"status": "skipped"}` — the
+    exact `assert 'skipped' == 'ok'` that reded `test (a)` on main at
+    bdda17dd22d0, from the HOST's state rather than from any diff.
+
+    Isolating HOME and CWD makes this module's result independent of who ran it
+    — the same fixture, for the same reason, as
+    `tests/test_mcp_client.py::_no_ambient_store`.
+    """
+    home = tmp_path / "ambient-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    # …and the PROJECT-LOCAL store `tortoise init --api-key` writes (`./.tortoise`),
+    # which is the other candidate in the same chain (#1708 D5).
+    (tmp_path / "cwd").mkdir()
+    monkeypatch.chdir(tmp_path / "cwd")
+    # …AND the ENV half, which isolating the stores does NOT cover. The tests below
+    # blank `TORTOISE_API_KEY` only; `resolve_connection()` reads BOTH names, in
+    # precedence order (`mcp_client._ENV_KEY_NAMES`), and `TORTOISE_MCP_API_KEY` is
+    # the fleet alias (#5200) that a CI cell exports. Left set, it ANSWERS — so the
+    # store branch is never reached and this module sends a REAL fleet key to the
+    # test daemon (measured on a cell: `sources == ('TORTOISE_API_KEY',
+    # 'TORTOISE_MCP_API_KEY')`, no store read). The store pin below still names a
+    # leaked store in that state — it reads `_credential_paths()` and stats each
+    # candidate directly, so it never consults env precedence — but the endpoint
+    # pin beside it measures the RESOLVED identity, so with the alias ambient it
+    # reds on the alias rather than on the store the module is meant to isolate.
+    # This is the `delenv` half of the recorded idiom —
+    # `docs/plans/1708-key-mint-idempotency/plan.md` step 5 prescribes setenv(HOME)
+    # + delenv(TORTOISE_API_KEY) + chdir. The sibling AUTouse STORE-ISOLATORS copied
+    # the other halves only: `tests/test_mcp_client.py:226` does HOME+chdir and
+    # `tests/test_mcp_bridge.py:410` does chdir alone. Both siblings DO carry a
+    # `delenv` half, but in a separate fixture their tests opt into
+    # (`test_mcp_client.py:292 isolated_home`, `test_mcp_bridge.py:439 home`) — an
+    # autouse isolator, which every test in the module inherits whether it asks or
+    # not, needs the `delenv` in its own body, which is what this fixture is.
+    #
+    # ⛔ The NAMES are ASKED OF THE CODE, for the same reason the store pin below
+    # asks `_credential_paths()` instead of restating today's two paths: a literal
+    # list is exactly the fail-open that grew once already (#5200 added the
+    # `TORTOISE_MCP_API_KEY` alias). A third name would answer ambiently, the store
+    # branch would never be reached, and this module would send a REAL fleet key to
+    # the test daemon. The STORE pin cannot see a name leak at all — it only stats
+    # the chain, so it never consults env precedence — which is why the ENDPOINT pin
+    # beside it is the one that reds, on a third name exactly as it does on the
+    # alias today; a store that IS reachable stays caught by the STORE pin, whether
+    # or not an env key answers first. That asymmetry is why the NAMES must come
+    # from the code rather than from a list here.
+    from tortoise.mcp_client import _ENV_KEY_NAMES
+
+    for name in _ENV_KEY_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
+class TestNoStoredCredentialDecidesTheEndpoint:
+    """Precondition pins for `_no_ambient_store` (#2369 D1.1).
+
+    These are PRECONDITIONS, not behaviour: they fail LOUD and name the cause
+    instead of letting the module pass on a clean box and quietly probe a live
+    host on a dirty one.
+    """
+
+    def test_no_credential_store_is_reachable_from_this_test(self):
+        """Ask the CODE where the stores are — a re-spelled list can hide a third.
+
+        The candidate chain is `mcp_client._credential_paths()`'s to own. A pin
+        that hard-codes today's two paths stays green the day a third candidate
+        is added, while this module reads that new real store and silently
+        measures a live host again — a fail-open inside the fail-loud guard.
+
+        `assert candidates` is safe here BECAUSE `_no_ambient_store` sets HOME to
+        a tmp dir: the two ways `_credential_paths()` legitimately loses a
+        candidate (an unresolvable `Path.home()`, e.g. a UID with no passwd
+        entry; a REMOVED `Path.cwd()`, e.g. a reaped worktree — both named in
+        its own docstring) cannot happen under this fixture, so an empty chain
+        means this pin measured nothing and must say so.
+        """
+        from tortoise.mcp_client import _credential_paths
+
+        candidates = list(_credential_paths())
+        assert candidates, (
+            "the credential-store chain resolved to NO candidates, so this pin "
+            "measured nothing — it is not a PASS"
+        )
+        found = [str(path) for path, _repo_controlled in candidates if path.is_file()]
+        assert not found, (
+            "an ambient credential store reached this test: "
+            f"{found}. This pin asks only whether a store is VISIBLE in the chain — "
+            "it never resolves, so it cannot tell which hazard the store carries. "
+            "Which one bites depends on the store and on whether an env key answers. "
+            "A store the resolver actually READS supplies the KEY, and #2369 D1.1 "
+            "makes it supply the HOST as well — so TORTOISE_MCP_URL below is "
+            "overridden and this module measures whatever host the store names. "
+            "If an ENV key answers first instead, the store is never read and this "
+            "module sends that REAL key to the test daemon. And a store the resolver "
+            "SKIPS is worse than neither: a git-TRACKED store is refused before it is "
+            "read (mcp_client.py:559, #10796), so it overrides nothing and supplies "
+            "nothing, yet this pin still reds — correctly, because a chain that can "
+            "carry a store committed by the repo is a chain this module must not "
+            "resolve from at all. "
+            "THIS IS NOT YOUR DIFF: `_no_ambient_store` is supposed to isolate every "
+            "store in that chain; if one is visible here, the fixture is gone or bypassed."
+        )
+
+    def test_the_declared_daemon_url_is_the_one_the_client_resolves(self, monkeypatch):
+        """`TORTOISE_MCP_URL` must be what the client actually talks to.
+
+        No `daemon_url` here ON PURPOSE: resolution needs no DAEMON — it reads the
+        env, and for the credential it may stat/read the stores (`_credential_paths`,
+        `_git_tracks`) — so a literal URL pins the identical property. Booting a
+        server only to produce a string would add a way for this precondition to
+        red as `daemon did not start`: an infrastructure failure wearing the name
+        of a credential-isolation one.
+        """
+        from tortoise.mcp_client import resolve_connection
+
+        declared = "http://127.0.0.1:9/mcp"
+        monkeypatch.setenv("TORTOISE_MCP_URL", declared)
+        monkeypatch.setenv("TORTOISE_API_KEY", "")
+
+        connection = resolve_connection()
+        assert connection.url == declared, (
+            f"the client resolved {connection.url!r} instead of the declared "
+            f"{declared!r} (sources read: {connection.sources})"
+        )
+        # ⛔ `source`, not `declared`: `declared` is `bool(env_url)` on the env arm
+        # AND on the no-key arm, and the store arm sets it from the store's own
+        # `api_url` — so it is `True` in every arm that can satisfy the assertion
+        # above, which makes it entailed and unable to tell an env-resolved
+        # identity from a store-resolved one (#2369 D1.1's whole question).
+        # `source` is the discriminating field: the env arm names the env KEY, the
+        # store arm names the store path, and "no credential anywhere" is `None` —
+        # which is the only state `_no_ambient_store` permits.
+        assert connection.source is None, (
+            f"this test resolved its identity from {connection.source!r} instead of "
+            f"from nothing at all (sources read: {connection.sources}). THIS IS NOT "
+            "YOUR DIFF: `_no_ambient_store` deletes both env key names and isolates "
+            "both stores, so no credential source may answer here."
+        )
 
 
 class TestNoEngineImports:
@@ -202,9 +360,15 @@ class TestNoEngineImports:
         import ast
         from pathlib import Path
 
-        root = Path("integrations")
+        root = Path(__file__).resolve().parents[1] / "integrations"
+        # ⛔ An ABSOLUTE root, and the gate must MEASURE something. `_no_ambient_store`
+        # changes CWD, and `rglob` on a path that is not there yields an empty list —
+        # so `Path("integrations")` would report zero offenders and pass VACUOUSLY
+        # (a false PASS in the exact shape this gate exists to catch).
+        scanned = list(root.rglob("*.py"))
+        assert scanned, f"the AST gate read NO files under {root} — this is not a PASS"
         offenders = []
-        for py in root.rglob("*.py"):
+        for py in scanned:
             tree = ast.parse(py.read_text())
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.module == "tortoise.sdk":
@@ -219,7 +383,12 @@ class TestNoEngineImports:
         import ast
         from pathlib import Path
 
-        src = Path("integrations/crm/twenty/bridge.py").read_text()
+        src = (Path(__file__).resolve().parents[1]
+               / "integrations/crm/twenty/bridge.py").read_text()
+        # The same non-vacuity guard as the gate above: an EMPTY source parses to a
+        # tree with no nodes, so `any(...)` would report "no mcp_client import" and
+        # fail for a reason that has nothing to do with the bridge.
+        assert src.strip(), "the bridge source read EMPTY — this is not a PASS"
         tree = ast.parse(src)
         assert any(
             isinstance(n, ast.ImportFrom) and n.module == "tortoise.mcp_client"
