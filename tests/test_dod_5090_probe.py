@@ -3830,13 +3830,19 @@ _UNSET_SHAPES = [
     ("export TORTOISE_EMBED_GATE=1\nunset -f TORTOISE_EMBED_GATE\n", "ON", "-f is a function"),
     ("export TORTOISE_EMBED_GATE=1\nunset -n TORTOISE_EMBED_GATE\n", "ON", "-n is a nameref"),
     # …CONTROLS: another name, a longer name the flag PREFIXES, and a non-builtin word.
-    # ⛔ An OPERATOR glued to the last name (`unset FLAG;`, `unset FLAG|cmd`) was split on
-    # whitespace only, so `FLAG;` matched nothing and the earlier arm stood — fail-OPEN,
-    # and inconsistent with the SPACED ` ;` which read correctly (fresh review PR #12474, P3).
+    # ⛔ An OPERATOR glued to the last name (`unset FLAG;`) was split on whitespace only,
+    # so `FLAG;` matched nothing and the earlier arm stood — fail-OPEN, and inconsistent
+    # with the SPACED ` ;` which read correctly (fresh review PR #12474, P3).
+    # ⛔ `|` is NOT in that class and expecting it to disarm was itself a FALSE ARM: a
+    # pipeline runs EVERY stage in a SUBSHELL, so the `unset` never reaches the parent
+    # environment — measured, `bash -c 'export FLAG=1; unset FLAG|cat; env'` still HAS
+    # FLAG. `_shell_commands` now ends the parent's view at a lone `|` / `&` (fresh
+    # review of #12902, P1).
     ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE;\n", "OFF", "glued ;"),
     ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE; exec python -m x\n", "OFF",
      "glued ; then a command"),
-    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE|cat\n", "OFF", "glued |"),
+    ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE|cat\n", "ON",
+     "glued | (pipeline subshell)"),
     ("export TORTOISE_EMBED_GATE=1\nunset TORTOISE_EMBED_GATE 2>/dev/null\n", "OFF",
      "redirect"),
     ("export TORTOISE_EMBED_GATE=1\nunset OTHER_VAR\n", "ON", "a different name"),
@@ -11769,6 +11775,26 @@ def test_12549_the_export_attribute_is_a_MOMENT_not_a_file_property(
         ("export F=1; then bare export",
          "export TORTOISE_EMBED_GATE=1;\nexport TORTOISE_EMBED_GATE\n", "ON"),
         ("export F=1& lands in a subshell", "export TORTOISE_EMBED_GATE=1&\n", "OFF"),
+        # ⛔ ONE LINE IS NOT ONE COMMAND, and a SUBSHELL operator ends the parent's view.
+        # `set -a; set +a;` runs BOTH, so the mode is OFF (answering from the first command
+        # published an ARM bash had already ended); `set -a &` and `set -a|cat` run the
+        # `set` in a SUBSHELL, so the parent is never armed at all. All measured against
+        # `bash -c '<line>\nFLAG=1\nenv'` (fresh review of #12902, P1 x3).
+        ("set -a; set +a;", "set -a; set +a;\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        ("set -a; and the assign on one line",
+         "set -a; TORTOISE_EMBED_GATE=1\n", "ON"),
+        ("set -a & runs in a subshell", "set -a &\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        ("set -a|cat runs in a pipeline", "set -a|cat\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        # …and the SPACED subshell operator after an export is the adjacent spelling of
+        # the glued `&` case above: the operator is its own word, so a per-word reader
+        # dropped it and published the value (`bash` exports nothing).
+        ("export F=1 & then bare export",
+         "export TORTOISE_EMBED_GATE=1 &\nexport TORTOISE_EMBED_GATE\n", "OFF"),
+        ("export F=1 |cat", "export TORTOISE_EMBED_GATE=1 |cat\n", "OFF"),
+        # …and a GLUED `;` before the NEXT command stays inside the command boundary:
+        # `export FLAG=1;export OTHER=2` exports FLAG (bash measured).
+        ("export F=1;export OTHER=2",
+         "export TORTOISE_EMBED_GATE=1;export OTHER=2\n", "ON"),
     ):
         (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
                                                 encoding="utf-8")

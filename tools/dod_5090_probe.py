@@ -3373,16 +3373,19 @@ _DOCKERFILE_ENV_PAIR = re.compile(
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)="
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s]*)")
 _SHELL_ASSIGN = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=")
-_SHELL_ALLEXPORT = re.compile(r"^\s*set\s+-[a-zA-Z]*a[a-zA-Z]*\s*$")
-#: `set +a` ENDS allexport — the same option, unset. Matched separately because a
-#: file-global flag would keep every later assignment "exported" after the mode is off.
-_SHELL_ALLEXPORT_OFF = re.compile(r"^\s*set\s+\+[a-zA-Z]*a[a-zA-Z]*\s*$")
+#: ⛔ REMOVED: the single-cluster `_SHELL_ALLEXPORT` / `_SHELL_ALLEXPORT_OFF` matchers are
+#: GONE. `_shell_set_allexport` reads every cluster, the long `-o allexport` form and a
+#: trailing operator, so a second matcher could only disagree with it on a line carrying
+#: several commands (`set -a; set +a;`), which is the shape `_shell_commands` now splits.
 #: A `set` line and its arguments, up to a command separator. ⛔ The SEPARATOR TERMINATES
 #: the command rather than anchoring the match: `set +a;` runs `set +a` and then ends, so
 #: an end-anchored matcher read it as "no `set` at all", the allexport state stayed armed,
 #: and an entrypoint that DISARMS the gate published `gate enabled by default: True` — a
 #: FALSE ARM (fresh review of #12902, P1).
-_SHELL_SET = re.compile(r"^\s*set\s+(?P<args>[^;&|]*?)\s*(?:[;&|].*)?$")
+#: ⛔ ONLY `;`, `&&` and `||` terminate: `set -a &` and `set -a|cat` run in a SUBSHELL, so
+#: the parent's allexport is untouched — accepting them here armed the parent's state from
+#: a command bash never runs there (measured: `bash -c 'set -a &; env'` has no FLAG).
+_SHELL_SET = re.compile(r"^\s*set\s+(?P<args>[^;&|]*?)\s*(?:(?:;|&&|\|\|).*)?$")
 #: A shell command SEPARATOR glued to a value (`FLAG=1;`, `FLAG="1"&&`).
 #: ⛔ `&` and a lone `|` are NOT in this set: bash runs `export FLAG=1&` and `…=1|cat` in
 #: a SUBSHELL, so the parent environment never receives the assignment. Stripping `&`
@@ -3392,7 +3395,24 @@ _SHELL_OPERATOR_TAIL = re.compile(r"(?:;|&&|\|\|)+$")
 
 
 def _shell_set_allexport(line: str) -> bool | None:
-    """Does this `set` line turn allexport ON (True) / OFF (False), or say nothing (None)?
+    """Does this LINE leave allexport ON (True) / OFF (False), or say nothing (None)?
+
+    ⛔ The LINE may carry SEVERAL parent-shell commands, and the LAST one wins:
+    `set -a; set +a;` leaves the mode OFF, and answering from the FIRST command
+    published an ARM bash has already ended (`bash -c 'set -a; set +a; FLAG=1; env'`
+    has no FLAG). A `&` / lone `|` boundary contributes nothing — that command runs in a
+    SUBSHELL, so it never reaches this shell's state (`_shell_commands`).
+    """
+    answer: bool | None = None
+    for command in _shell_commands(line):
+        change = _shell_set_cluster_allexport(command)
+        if change is not None:
+            answer = change
+    return answer
+
+
+def _shell_set_cluster_allexport(line: str) -> bool | None:
+    """One simple command: does it turn allexport ON (True) / OFF (False) / say nothing?
 
     ⛔ **EVERY option cluster on the line**, because bash accepts more than one: `set -eu
     -a` arms allexport, and a single-cluster matcher does not see it — so an entrypoint
@@ -3622,6 +3642,71 @@ def _shell_unset_values(line: str) -> set[str]:
             if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", word.strip("'\""))}
 
 
+def _shell_commands(line: str) -> list[str]:
+    """Split ONE shell line into the simple commands that run in the PARENT shell, in order.
+
+    ⛔ **A line is not one command.** `set -a; set +a;` runs BOTH, and reading only the
+    first left the allexport state ARMED where bash has already ended it — a FALSE ARM
+    (measured: `bash -c 'set -a; set +a; FLAG=1; env'` has no FLAG). `set -a; FLAG=1` is
+    the same root in the guarded direction: the assignment was skipped entirely, so a
+    genuinely exported value read as a plain shell variable.
+
+    ⛔ **A SUBSHELL operator ENDS the parent's view.** `set -a &` backgrounds the `set`
+    and `export FLAG=1 |cat` pipes it, so NEITHER reaches the parent environment — but
+    treating `&` / `|` as ordinary separators published the arm (`bash` has no FLAG).
+    The command BEFORE the operator is therefore DROPPED and the rest of the line is not
+    claimed: a real job/pipeline evaluation is the half a text reader cannot do, and
+    dropping is the conservative half it can honestly take.
+    """
+    commands: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    index = 0
+    length = len(line)
+    while index < length:
+        char = line[index]
+        if escaped:
+            current.append(char)
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            current.append(char)
+            escaped = True
+            index += 1
+            continue
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+        if char == ";":
+            commands.append("".join(current))
+            current = []
+            index += 1
+            continue
+        if char in "&|":
+            if line[index:index + 2] in ("&&", "||"):
+                commands.append("".join(current))
+                current = []
+                index += 2
+                continue
+            # A SINGLE `&` / `|`: the command so far runs in a SUBSHELL, so neither it
+            # nor anything after it is the parent's environment.
+            return commands
+        current.append(char)
+        index += 1
+    commands.append("".join(current))
+    return commands
+
+
 def _shell_export_states(text: str, flag: str) -> list[dict]:
     """The export state IN EFFECT at each line for ``flag``, one entry per line.
 
@@ -3666,68 +3751,68 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
     states: list[dict] = []
     for line in lines:
         states.append({"exported": exported, "publish": None, "unexport": False})
-        # ⛔ `set -a`/`set +a` are ORDERED, not a file-wide flag: allexport marks the
-        # variables *created or modified AFTERWARDS* (bash(1)), so an assignment BEFORE
-        # `set -a` is a plain shell variable, and `set +a` ends the mode. A file-global
-        # flag published `FLAG=1` followed by `set -a` as an ARM (fresh review, P2-2).
-        if _SHELL_ALLEXPORT.match(line):
-            allexport = True
-            continue
-        if _SHELL_ALLEXPORT_OFF.match(line):
-            allexport = False
-            continue
-        # (the two matchers above cover the single-cluster spelling; this one covers
-        # MULTI-cluster `set -eu -a` / `set +a -e`, which they cannot see.)
-        allexport_change = _shell_set_allexport(line)
-        if allexport_change is not None:
-            allexport = allexport_change
-            continue
-        parsed = _shell_export_args(line)
-        if parsed is not None:
-            names, assigned, options, values = parsed
-            if flag not in names:
+        # ⛔ ONE LINE IS NOT ONE COMMAND: `set -a; set +a;` runs BOTH, and reading only
+        # the FIRST left the allexport state ARMED where bash has already ended it — a
+        # FALSE ARM (measured: `bash -c 'set -a; set +a; FLAG=1; env'` has no FLAG).
+        # Each PARENT-shell command on the line is applied in ORDER; a `&` / lone `|`
+        # subshell boundary ends the parent's view (`_shell_commands`). `set -a`/`set
+        # +a` are ORDERED, not a file-wide flag: allexport marks the variables *created
+        # or modified AFTERWARDS* (bash(1)), so an assignment BEFORE `set -a` is a plain
+        # shell variable and `set +a` ends the mode.
+        for command in _shell_commands(line):
+            text = command.strip()
+            if not text:
                 continue
-            if "f" in options:
-                # ⛔ `-f` selects FUNCTIONS and OUTRANKS `-n`: `export -nf F` asks bash to
-                # remove the export attribute from a FUNCTION, so the VARIABLE stays
-                # exported. Testing `n` first published a DISARM (and a
-                # `unset_declarations` entry) for a line that changed nothing (fresh
-                # review, P2-5) — a cause the run did not measure.
+            allexport_change = _shell_set_allexport(text)
+            if allexport_change is not None:
+                allexport = allexport_change
                 continue
-            if "n" in options:
-                exported = False
-                states[-1]["unexport"] = True      # the value is RETAINED
-            else:
-                if flag in assigned:
-                    # `export FLAG=v` also SETS the variable: the value a later bare
-                    # `export FLAG` publishes is this one. ⛔ Read from the ARGUMENT
-                    # LIST, not from the line's leading token — `export OTHER=1 FLAG=0`
-                    # assigns FLAG on the same line, and a line-start-scoped value
-                    # dropped it, so no decision was appended and the earlier truthy
-                    # line published a FALSE ARM (fresh review, P1). `publish` carries
-                    # it because the caller prefers `_assigned_value`, which is
-                    # line-start-scoped and returns None for this spelling.
-                    value = values.get(flag)
-                    if value is not None:
-                        current = value
-                        states[-1]["publish"] = value
+            parsed = _shell_export_args(text)
+            if parsed is not None:
+                names, assigned, options, values = parsed
+                if flag not in names:
+                    continue
+                if "f" in options:
+                    # ⛔ `-f` selects FUNCTIONS and OUTRANKS `-n`: `export -nf F` asks bash to
+                    # remove the export attribute from a FUNCTION, so the VARIABLE stays
+                    # exported. Testing `n` first published a DISARM (and a
+                    # `unset_declarations` entry) for a line that changed nothing (fresh
+                    # review, P2-5) — a cause the run did not measure.
+                    continue
+                if "n" in options:
+                    exported = False
+                    states[-1]["unexport"] = True      # the value is RETAINED
                 else:
-                    states[-1]["publish"] = current
-                exported = True
-            continue
-        if flag in _shell_unset_values(line):
-            exported, current = False, None
-            states[-1]["unexport"] = True
-            continue
-        value = _assigned_value(line, flag)
-        if value is not None:
-            current = value
-            # `set -a`: an assignment RE-CONFERS the attribute, so THIS line is already
-            # exported — and the state recorded above (taken before the line ran) must
-            # say so, or the assignment reads as a plain shell variable.
-            if exported or allexport:
-                exported = True
-                states[-1]["exported"] = True
+                    if flag in assigned:
+                        # `export FLAG=v` also SETS the variable: the value a later bare
+                        # `export FLAG` publishes is this one. ⛔ Read from the ARGUMENT
+                        # LIST, not from the line's leading token — `export OTHER=1 FLAG=0`
+                        # assigns FLAG on the same line, and a line-start-scoped value
+                        # dropped it, so no decision was appended and the earlier truthy
+                        # line published a FALSE ARM (fresh review, P1). `publish` carries
+                        # it because the caller prefers `_assigned_value`, which is
+                        # line-start-scoped and returns None for this spelling.
+                        value = values.get(flag)
+                        if value is not None:
+                            current = value
+                            states[-1]["publish"] = value
+                    else:
+                        states[-1]["publish"] = current
+                    exported = True
+                continue
+            if flag in _shell_unset_values(text):
+                exported, current = False, None
+                states[-1]["unexport"] = True
+                continue
+            value = _assigned_value(text, flag)
+            if value is not None:
+                current = value
+                # `set -a`: an assignment RE-CONFERS the attribute, so THIS line is already
+                # exported — and the state recorded above (taken before the line ran) must
+                # say so, or the assignment reads as a plain shell variable.
+                if exported or allexport:
+                    exported = True
+                    states[-1]["exported"] = True
     return states
 
 
@@ -4353,7 +4438,21 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # deployment really gets a runtime default.
             shell_exports = (_shell_export_states(text, flag)
                              if posix.endswith(".sh") else None)
-            for number, line in enumerate(text.splitlines(), 1):
+            # ⛔ ONE LINE IS NOT ONE COMMAND (see `_shell_commands`): a shell line carrying
+            # `set -a; FLAG=1` exports FLAG, while `set -a; set +a;` ENDS the mode — read as
+            # a single command, the first spelling lost a REAL arm and the second published
+            # an arm bash had already ended (`bash -c 'set -a; set +a; FLAG=1; env'` has no
+            # FLAG). Each PARENT-shell command is scanned as its own line under the SAME
+            # source line number, so the per-line state (`shell_exports[number - 1]`) and
+            # the reported `file:line` remain the original ones.
+            scan_lines = (
+                [(number, command, raw)
+                 for number, raw in enumerate(text.splitlines(), 1)
+                 for command in _shell_commands(raw)]
+                if posix.endswith(".sh")
+                else [(number, raw, raw)
+                      for number, raw in enumerate(text.splitlines(), 1)])
+            for number, line, shown in scan_lines:
                 if number in bodies:
                     executed = (workflow
                                 and bodies[number] in EXECUTED_BLOCK_KEYS)
@@ -4381,20 +4480,20 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     target = _shell_unset_target(line, flag)
                     if target == "value":
                         unset_declarations.append(
-                            f"{posix}:{number}: {line.strip()[:90]}")
+                            f"{posix}:{number}: {shown.strip()[:90]}")
                         decisions.append((False,
-                                          f"{posix}: {line.strip()[:90]}",
-                                          f"{posix}:{number}: {line.strip()[:90]}"))
+                                          f"{posix}: {shown.strip()[:90]}",
+                                          f"{posix}:{number}: {shown.strip()[:90]}"))
                         continue
                     if target == "unknown":
                         # A computed name (`unset "$FLAG"`) may or may not be this flag:
                         # UNKNOWN holds the file UNMEASURED rather than leaving an arm.
                         indeterminate.append(
-                            f"{posix}:{number}: {line.strip()[:90]}")
+                            f"{posix}:{number}: {shown.strip()[:90]}")
                         surface_indeterminate.append(posix)
                         decisions.append((None,
-                                          f"{posix}: {line.strip()[:90]}",
-                                          f"{posix}:{number}: {line.strip()[:90]}"))
+                                          f"{posix}: {shown.strip()[:90]}",
+                                          f"{posix}:{number}: {shown.strip()[:90]}"))
                         continue
                 # ⛔ `export -n FLAG` REMOVES the export attribute (`help export`),
                 # so the environment loses the flag here exactly as it does at an
@@ -4404,16 +4503,16 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 if (posix.endswith(".sh") and shell_exports is not None
                         and shell_exports[number - 1]["unexport"]):
                     unset_declarations.append(
-                        f"{posix}:{number}: {line.strip()[:90]}")
+                        f"{posix}:{number}: {shown.strip()[:90]}")
                     decisions.append((False,
-                                      f"{posix}: {line.strip()[:90]}",
-                                      f"{posix}:{number}: {line.strip()[:90]}"))
+                                      f"{posix}: {shown.strip()[:90]}",
+                                      f"{posix}:{number}: {shown.strip()[:90]}"))
                     continue
                 if (shell_exports is not None
                         and not _shell_line_is_exported(
                             line, flag, shell_exports[number - 1]["exported"])):
                     if _assigned_value(line, flag) is not None:
-                        outside_runtime.append(f"{posix}:{number}: {line.strip()[:90]}")
+                        outside_runtime.append(f"{posix}:{number}: {shown.strip()[:90]}")
                     continue
                 # ⛔ A Dockerfile `ARG` is BUILD-TIME: it can feed a later `ENV`, but it
                 # never reaches the running container's environment on its own, so
@@ -4427,7 +4526,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
                         and re.match(r"^ARG[ \t]+" + re.escape(flag) + r"(?:[ \t=]|$)",
                                      line.strip(), re.IGNORECASE)):
                     outside_runtime.append(
-                        f"{posix}:{number}: {line.strip()[:90]} (build-time ARG)")
+                        f"{posix}:{number}: {shown.strip()[:90]} (build-time ARG)")
                     continue
                 value = _assigned_value(line, flag)
                 if value is None:
@@ -4441,7 +4540,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
                         continue
                 resolved, literal = _resolved_assignment(value, flag)
                 if not resolved:
-                    indeterminate.append(f"{posix}:{number}: {line.strip()[:90]}")
+                    indeterminate.append(f"{posix}:{number}: {shown.strip()[:90]}")
                     surface_indeterminate.append(posix)
                     # ⛔ A DEFERRED DECISION, not a `continue`: the value this line gives
                     # the flag is UNKNOWN, and it is the LAST assignment, so the file's
@@ -4452,14 +4551,14 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     # an unresolvable assignment holds the file UNMEASURED (fresh review
                     # of PR #12474, P2).
                     decisions.append((None,
-                                      f"{posix}: {line.strip()[:90]}",
-                                      f"{posix}:{number}: {line.strip()[:90]}"))
+                                      f"{posix}: {shown.strip()[:90]}",
+                                      f"{posix}:{number}: {shown.strip()[:90]}"))
                     continue
                 # ⛔ Deferred, never applied here: the FILE's state is its LAST
                 # runtime-relevant assignment (`is_truthy` is decided per line).
                 decisions.append((is_truthy(literal),
-                                  f"{posix}: {line.strip()[:90]}",
-                                  f"{posix}:{number}: {line.strip()[:90]}"))
+                                  f"{posix}: {shown.strip()[:90]}",
+                                  f"{posix}:{number}: {shown.strip()[:90]}"))
             # ── the file's effective value, once its lines are read (LAST WINS) ──
             if decisions:
                 effective_truthy, hit_text, plain_text = decisions[-1]
