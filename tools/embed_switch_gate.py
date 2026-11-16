@@ -153,7 +153,11 @@ _ENV_INSTRUCTION = re.compile(r"(?i)^\s*ENV\s+(?P<body>.+)$")
 #: A build-stage boundary. `ENV` is STAGE-SCOPED, so only the instructions after the last `FROM`
 #: reach the image that ships — crediting a builder stage would read a two-stage file as STATED
 #: while the final image says nothing (review P2).
-_FROM_INSTRUCTION = re.compile(r"(?i)^\s*FROM\s+\S")
+#: `FROM [--platform=…] <parent> [AS <name>]` — the stage boundary AND the inheritance edge: the
+#: parent names either an image reference or an earlier stage (`FROM build AS final`), which is
+#: what makes a builder stage's `ENV` reach the shipped image.
+_FROM_INSTRUCTION = re.compile(
+    r"(?i)^\s*FROM\s+(?:--\S+\s+)*(?P<parent>\S+)(?:\s+AS\s+(?P<name>[\w.-]+))?\s*$")
 #: The body of an `ENV` line that is NOTHING BUT `K=V` pairs (quotes honoured). Anything else is
 #: not tiled, so it is never parsed as a set of assignments.
 _ENV_PAIRS = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)\s*)+$")
@@ -173,11 +177,24 @@ _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s
 #: contribute (`exec` replaces the process). The model is deliberately small: an unmodelled form
 #: lands on `ambiguous`, never on a pass, because a false STATED is the direction that lets a
 #: config through.
+#: ⛔ `then`/`else`/`elif` are NEITHER an opener nor a closer: they sit INSIDE an `if`, and
+#: treating them as closers dropped the depth at the `then` line so the body after it read as top
+#: level — the exact fail-open this model exists to close, on the most ordinary multi-line
+#: `if`/`then`/`fi` in the language (review at `69ee7b1395`). Closers are `fi`/`done`/`esac` and a
+#: closing brace/paren only; openers are the block keywords ANYWHERE at line start (an INDENTED
+#: `  if false; then` is the shape that was missed) plus a trailing `do`/`{`/`(`.
 _SHELL_OPENERS = re.compile(
-    r"(^|[;&|]\s*)(?:if|then|else|elif|while|until|for|case|select|do)\b|\{\s*$|\(\s*$"
+    r"^\s*(?:if|while|until|for|case|select)\b|\bdo\s*$|\{\s*$|\(\s*$"
 )
-_SHELL_CLOSERS = re.compile(r"^\s*(?:fi|done|esac|then|else|elif)\b|^\s*\}\s*$|^\s*\)\s*$")
+_SHELL_CLOSERS = re.compile(r"^\s*(?:fi|done|esac)\b|^\s*\}\s*$|^\s*\)\s*$")
 _SHELL_TERMINATES = re.compile(r"^\s*(?:exit|exec)\b")
+#: Two ways a LATER line takes an earlier `export K=1` back, both of which must drop the literal
+#: from `stated` — Docker and the shell are last-assignment-wins, and `stated` outranks `ambiguous`
+#: in `switch_problem`, so a kept literal reports STATED for a value the process never receives
+#: (review at `69ee7b1395`): a bare `K=` (never exported), and `unset K` (removed from the
+#: environment).
+_SHELL_UNEXPORTED = re.compile(r"^\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
+_SHELL_UNSET = re.compile(r"^\s*unset\s+(?P<names>[\w\s-]+)\s*$")
 
 #: A trailing `#` comment (idiomatic after a shell assignment) is NOT part of the value — leaving
 #: it in made `export K=""  # off for now` read as a non-empty statement and skip the EMPTY-value
@@ -360,12 +377,31 @@ def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str]]:
     stated: dict[str, str] = {}
     ambiguous: set[str] = set()
     lines = _logical_lines(text)
-    # ⛔ ONLY the final build stage reaches the runtime image (review P2). Everything before the
-    # LAST `FROM` is stage-local and arms nothing that ships. A file with no `FROM` is read whole
-    # (there is no stage boundary to honour, and the caller discovered it as an image build file).
-    starts = [i for i, line in enumerate(lines) if _FROM_INSTRUCTION.match(line)]
-    if starts:
-        lines = lines[starts[-1] + 1 :]
+    # ⛔ ONLY the final build stage reaches the runtime image (review P2) — PLUS the NAMED stages
+    # it inherits from: `FROM build AS final` carries `build`'s `ENV` forward, so reading only the
+    # text after the last `FROM` falsely refuses a legitimate multi-stage file (review at
+    # `69ee7b1395`). Nothing else before that chain ships, and a file with no `FROM` is read whole
+    # (no stage boundary to honour, and the caller discovered it as an image build file).
+    stages = [
+        (index, match)
+        for index, line in enumerate(lines)
+        if (match := _FROM_INSTRUCTION.match(line))
+    ]
+    if stages:
+        named = {
+            match.group("name").lower(): index
+            for index, match in stages
+            if match.group("name")
+        }
+        first = stages[-1][0]
+        seen: set[int] = set()
+        while first not in seen:
+            seen.add(first)
+            parent = (_FROM_INSTRUCTION.match(lines[first]).group("parent") or "").lower()
+            if parent not in named or named[parent] in seen:
+                break
+            first = named[parent]
+        lines = lines[first:]
     for line in lines:
         match = _ENV_INSTRUCTION.match(line)
         if not match:
@@ -431,6 +467,18 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 continue
             if not conditional:
                 stated[key] = _unquote(value)
+            continue
+        unset = _SHELL_UNSET.match(line)
+        if unset:
+            for name in unset.group("names").split():
+                if name in SWITCHES:
+                    ambiguous.add(name)
+                    stated.pop(name, None)
+            continue
+        unexported = _SHELL_UNEXPORTED.match(line)
+        if unexported and unexported.group("key") in SWITCHES:
+            ambiguous.add(unexported.group("key"))
+            stated.pop(unexported.group("key"), None)
             continue
         if _SHELL_EXPORT_NAME.match(line):
             continue  # `export NAME` states no value; not an arm
