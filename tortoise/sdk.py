@@ -5271,6 +5271,19 @@ _JOURNAL_ENVELOPE_KEYS = (
 # every replay of it, since replay reads the same key. Unhealable by the one
 # repair the seam advertises. Stripped at intake like the other envelope names,
 # so a caller ``seq`` cannot forge a position.
+#
+# ⛔ AND THAT STRIP IS A CALLER-VISIBLE PROPS CHANGE, stated rather than
+# glossed (#12894 review cycle 10, P2). Before this reservation
+# ``create_point(kind, content, seq=42)`` PERSISTED ``properties(n).seq = 42``
+# and journalled it; now the value is dropped at intake with the usual
+# "ignoring client-supplied 'seq'" warning. No documented tenant prop, and no
+# caller or test in the tree, relies on it — but a caller that did would see the
+# property stop being written, so this is not byte-identical for that prop
+# class. The SDK's posture for envelope names is strip-and-ignore, and that
+# is kept here; `tortoise/api.py`'s `EventAPI._emit` REFUSES the same name
+# loudly (`_ENVELOPE_KEYS`) because on a POSITION a silent drop is the worse
+# posture for a caller that believes it set an ordinal. Two postures, each
+# documented at its own door.
 _RESERVED_ENVELOPE_PROPS = (
     "type", "point", "payload", "event_id", "ts", "recorded_ts",
     "initiated_by", "projection_version", "seq",

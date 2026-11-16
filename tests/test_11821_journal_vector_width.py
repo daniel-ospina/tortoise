@@ -1358,6 +1358,53 @@ def test_the_collision_guard_covers_the_keyword_bound_envelope_names(tmp_path):
     assert not journal.exists() or not journal.read_text().strip()
 
 
+def test_every_EventAPI_journal_door_refuses_a_caller_seq(tmp_path):
+    """`seq` is the record's ORDINAL, and `EventAPI._emit` is a SEPARATE live door.
+
+    #12894 review cycle 10 (P1, measured). Reserving `seq` in the SDK's
+    `_RESERVED_ENVELOPE_PROPS` closed that INTAKE only. `EventAPI._emit` is the
+    second live journal door — it builds `{"event_id", "ts", "type", …,
+    **payload}` and passes the result to `write_live_record` as the `record` —
+    and none of its key families named `seq`. So a caller prop landed on the
+    line's TOP level here and `record_projection._carried_position` read it as
+    the position, refusing the write AND every replay: `replay_plan` raises
+    while BUILDING the plan, so one forged `seq` makes the whole journal
+    un-replayable with no partial repair.
+
+    Measured before this fix (on a tree that ALREADY had the SDK reservation):
+
+        add_event(seq=42)    -> APPENDED {'type': 'EventRecorded', 'seq': 42}
+        add_object(seq=42)   -> APPENDED {'type': 'ObjectRegistered', 'seq': 42}
+        emit_belief(seq=42)  -> APPENDED {'type': 'SomeBelief', 'seq': 42}
+
+    Refused LOUDLY here rather than silently stripped (the SDK's posture): on a
+    POSITION a silent drop is the worse answer for a caller that believes it set
+    an ordinal. Same `_ENVELOPE_KEYS` refusal every other envelope name on this
+    door already gets, so it is one posture per door, not two new rules.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    events = tmp_path / "seq-door"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    for door, call in (
+        ("add_event", lambda: api.add_event("evt-1", "session", seq=42)),
+        ("add_object", lambda: api.add_object("Thing", seq=42)),
+        ("emit_belief", lambda: api.emit_belief("SomeBelief", seq=42)),
+    ):
+        with pytest.raises(ValueError, match="ENVELOPE") as refused:
+            call()
+        assert "seq" in str(refused.value), (
+            f"`{door}` refused, but not for `seq` — the message must name the "
+            f"offending key so an operator can act: {refused.value}")
+    assert not journal.exists() or not journal.read_text().strip(), (
+        "a door refused `seq` and still appended a line — the refusal must "
+        "precede the append, which is the commit point")
+
+
 def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     """#11948 F2: one class of malformed payload, ONE answer, at both doors.
 

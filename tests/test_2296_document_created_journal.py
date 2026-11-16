@@ -425,8 +425,16 @@ def test_a_caller_seq_prop_cannot_forge_a_journal_position(env):
     ``seq`` as an `_emit_event`-owned envelope key. This leg is what makes the
     SDK's strip enforce it.
 
-    RED before the fix: the create below carried ``seq=42`` top level on its
-    `PointAdded` line.
+    ⚠️ WHICH HALF IS RED, stated precisely (#12894 review cycle 10, P2 — an
+    earlier draft of this docstring over-claimed). Only the UPDATE half
+    discriminates on the line's TOP level: `update_point` splats caller props
+    through `**emit_props` into `event.update(extra)`. `create_point` hands them
+    through the ``point`` SNAPSHOT instead (`_emit_event("PointAdded", {...},
+    point=_intended)`), so pre-fix a caller ``seq`` was stored INSIDE
+    ``point`` — and on the node — while the line's top level stayed clean.
+    Measured on the pre-fix tree: `lines=2, lines_carrying_top_level_seq=1`, the
+    single hit being `PointRevised`. Both halves are asserted below because both
+    are wrong pre-fix, but only the update half is a top-level leak.
     """
     sdk, events = env
     point = sdk.create_point("observation", "seq must not survive",
@@ -441,6 +449,14 @@ def test_a_caller_seq_prop_cannot_forge_a_journal_position(env):
             "the write and every replay of it (#12894): "
             f"{line!r}"
         )
+        snapshot = line.get("point")
+        if isinstance(snapshot, dict):
+            assert "seq" not in snapshot, (
+                "a caller `seq` prop survived inside the record's `point` "
+                "snapshot, where replay's `{**ev, **ev['point']}` splice lifts "
+                "it over the envelope (#12894): "
+                f"{line!r}"
+            )
 
 
 def test_update_entity_source_refuses_reserved_props_loudly(env):

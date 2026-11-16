@@ -2993,9 +2993,20 @@ def write_live_record(record: Mapping[str, Any], *,
             # deliberately does NOT trip it — the connection was fine.
             _trip_live_breaker()
         _count_write_failure("write_failed")
+        # ⛔ THE REMEDY MUST MATCH THE ARM (#12894 review). On the ALLOCATED arm
+        # (`TORTOISE_RECORD_ALLOCATE=1`, which this change makes reachable in
+        # production) a plain enumerated replay is REFUSED by
+        # `record_projection._refuse_an_enumerated_replay` — the cursor ROW, not
+        # the mode, is the fact. So the unqualified "a replay heals the record"
+        # is false exactly where it now gets read most; the sibling allocator and
+        # `position_unverifiable` arms were fixed for this, and this arm is the
+        # one that catches every remaining failure on that path.
         _logger.warning(
             "the record write did not happen (write_failed) — the journal has "
-            "the record and a replay heals the record: record=%s %s: %s",
+            "the record; %s: record=%s %s: %s",
+            "repair it with an ALLOCATING replay (`replay(allocate=True)`), not "
+            "a plain one, which a cut-over graph refuses"
+            if allocate else "a replay heals the record",
             record.get("type"), _record_identity(record), exc,
         )
         return _refused("write_failed", seq)
