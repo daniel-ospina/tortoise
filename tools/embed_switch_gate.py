@@ -63,13 +63,27 @@ Usage::
 
 from __future__ import annotations
 
+import sys
+
+# #5128: the interpreter guard, FIRST after the docstring and `__future__` and BEFORE every other
+# import. `tomllib` below is 3.11+, and the documented invocation is a bare `python3
+# tools/embed_switch_gate.py` — on an older ambient interpreter that dies with an UNATTRIBUTED
+# `ModuleNotFoundError`, which reads as "the tool is broken" rather than "your interpreter is too
+# old". Same shape as every other entry point in this directory (D9, `tools/longmem_eval/run.py`),
+# and pinned by `tests/test_entry_point_python_guard.py`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/embed_switch_gate.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/embed_switch_gate.py`"
+    )
+
 import argparse
 import json
 import os
 import re
 import shutil
 import subprocess
-import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
