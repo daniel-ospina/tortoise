@@ -506,7 +506,7 @@ class RecordWrite:
     #: that names another event, which the record cannot fix while its key
     #: carries no journal identity (#12894).
     #:
-    #: ⛔ ``no_tenant_carried`` IS A SIXTH TOKEN ON PURPOSE (#10021 review P3).
+    #: ⛔ ``no_tenant_carried`` IS A SEPARATE TOKEN ON PURPOSE (#10021 review P3).
     #: The live door splits the nil tenant from a MALFORMED CARRIED pair — one is
     #: "nobody said whose turns these are", the other is "the caller said, and
     #: the answer was unusable" — and both count on the ``no_tenant`` COUNTER.

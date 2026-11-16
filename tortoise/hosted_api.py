@@ -8069,7 +8069,7 @@ async def health():
     return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"])
             else "degraded",
             # ⛔ Its OWN key, not `degraded_reasons` — that name is taken by
-            # `record.degraded_reasons` (a documented six-value vocabulary,
+            # `record.degraded_reasons` (a documented seven-value vocabulary,
             # `docs/infra-runbook.md`, pinned by `test_record_searchkeys_10620`).
             # Two schemas under one name is how a consumer reads the wrong one.
             "refusals": refusals,
