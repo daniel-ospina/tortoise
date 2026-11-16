@@ -459,10 +459,14 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
         cypher="a UNION of label-scoped, indexed id lookups (Point/Subject/"
                "Object/Source by id, Event by eventId, Source also by url), "
                "first hit wins — not a single MATCH",
-        reason="the BARE by-id door — `tortoise_get_entity(<id>)` and "
-               "`tortoise_get(<id>)` with no `type` (`mcp_server._get_auto_detect`) "
-               "— resolves a node id across FIVE labels with Point priority and "
-               "then an AgentSession lookup, all on the cache. It carries a "
+        reason="the RETIRED bare-by-id door `tortoise_get(<id>)` with no `type` "
+               "(`mcp_server._get_auto_detect`), which resolves a node id across "
+               "FIVE labels with Point priority and then an AgentSession lookup, "
+               "all on the cache. ⛔ The LIVE bare form is NOT this door: "
+               "`tortoise_get_entity(<id>)` routes to `TortoiseSDK.get_entity` "
+               "(`entity-accessor` above), because the tool only dispatches when a "
+               "`type` is given — so a lane closing the residual must decide about "
+               "BOTH. It carries a "
                "coordinate but not ONE label's, so a record answer would have to "
                "re-decide the resolution ORDER across labels before it could "
                "claim parity, and `node-by-key`'s parity is measured for `Point` "
@@ -477,11 +481,16 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
     "session-accessor": AnchoredRead(
         name="session-accessor",
         status=NOT_SERVED,
-        cypher="MATCH (e:Event {eventKind:'AgentSession'}) … WHERE a session_id "
-               "matches  (through `TortoiseSDK.get_session`)",
+        # ⚠️ NOT a query — words, for the reason `anchored-neighbours` gives: a
+        # `MATCH (` literal in this field is a #7948 census candidate, and this
+        # entry was added with one (#12941 review P2-2).
+        cypher="an AgentSession `:Event` addressed by `session_id`, plus (since "
+               "#3557) the durable `:Session` projection through "
+               "`TortoiseSDK._read_captured_session`",
         reason="the MCP tool `tortoise_get_entity(id, type=\"session\")` → "
-               "`tortoise_get_session` reads an AgentSession `:Event` by "
-               "`session_id`, on the cache. A session's record rows ARE read "
+               "`tortoise_get_session` reads a session on the cache, down TWO "
+               "lanes: the indexed AgentSession `:Event` by `session_id`, and the "
+               "durable `:Session` projection (`_read_captured_session`). A session's record rows ARE read "
                "already — by the capture and detail doors, through "
                "`record_read.session_turns` / `session_text` — so serving THIS "
                "tool means deciding which reader owns a session, a placement "

@@ -743,8 +743,18 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_get_operator",
         id="surface.get_operator",
-        description="Get an operator Point by ID. Returns all properties including "
-                    "annotation dimensions.",
+        # #12941: this door reads a Point by id, so an ARMED deployment
+        # (`TORTOISE_RECORD_SERVE`) changes what it can answer — a found operator
+        # names the store (`servedFrom`/`fallbackReason`), and an answer no
+        # reachable store could SEE carries `residency: "not-hot"` INSTEAD of the
+        # "not an operator" error, because an impairment is not a fact about the
+        # graph. ⚠️ RETIRED name (its LIVE entry is `tortoise_get_entity`), which
+        # is why this description is safe to edit while the canonical one is not.
+        description=("Get an operator Point by ID. Returns all properties including "
+                     "annotation dimensions (with TORTOISE_RECORD_SERVE armed: found "
+                     "answers name the store, and an answer the store could not see "
+                     "carries residency=\"not-hot\" instead of a not-an-operator "
+                     "error)."),
         risk="read",
         http_policy=True,
         sdk_method="get_point",  # get_operator uses get_point + is_operator check

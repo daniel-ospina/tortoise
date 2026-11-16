@@ -5704,7 +5704,16 @@ def tortoise_annotate_operator(id: str, bias: float, precision: float,
 def tortoise_get_operator(id: str) -> dict:
     """Get an operator Point by ID. Returns all properties including annotation dimensions.
     Raises error if the Point is not an operator.
-    Alias → get(id, type='operator') (epic #888 W3)."""
+    Alias → get(id, type='operator') (epic #888 W3).
+
+    ⚠️ ARMED MODES (`TORTOISE_RECORD_SERVE`) change TWO of those sentences (#12941):
+    a found operator also names the store that answered (`servedFrom` /
+    `fallbackReason`), and an answer no reachable store could SEE returns
+    `residency: "not-hot"` — which is an IMPAIRMENT, deliberately not the "not an
+    operator" error, because a store that could not see the node cannot establish
+    anything about the graph. A genuine non-operator Point still answers the plain
+    `{"error": "Point … is not an operator"}` dict, and an established absence is
+    still `{}`. With the flag unset the response is unchanged."""
     # #12941: this door reads a POINT by id, so it honours the record seam like
     # `tortoise_get_point` does — an operator written and then verified must not
     # read back ABSENT (the issue's own measured population: 5 operators in the

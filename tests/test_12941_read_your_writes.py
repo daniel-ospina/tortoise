@@ -102,8 +102,16 @@ def _sdk_class():
         def __init__(self, props, *, tenant=TENANT, **decl):
             self._g = _FakeG(props, **decl)
             self._record_tenant = tenant
+            # ⛔ THE HANDLE OPEN IS THE COSTLY, FAILING EVENT (#12941 review
+            # P1-1), so it is counted separately from the query: a cold open is a
+            # connect + index ensure, and on a stopped graph it RAISES before the
+            # record is ever asked. Asserting only "no query ran" left the
+            # mutation that hoists `self._get_proj()` to the top of `get_point`
+            # invisible — measured GREEN (23 passed) by mutation.
+            self.handle_opens = 0
 
         def _get_proj(self):
+            self.handle_opens += 1
             return _FakeProj(self._g)
 
     return _Stub
@@ -422,8 +430,11 @@ def test_SDK_a_RECORD_answered_absence_is_never_marked_not_hot(monkeypatch):
     # is not a cost question — on a stopped graph it is a hard failure before the
     # record is ever asked, re-introducible with a fully green suite until this
     # assertion existed (the reviewer proved that by mutation).
+    assert sdk.handle_opens == 0, (
+        f"record mode OPENED the cache graph handle ({sdk.handle_opens}×) — on a "
+        "stopped graph that raises before the record is asked")
     assert sdk._g.queries == [], (
-        "record mode opened the cache graph: "
+        "record mode queried the cache graph: "
         f"{sdk._g.queries}")
     assert props == {}, f"an armed absence must stay an absence — got {props!r}"
     assert served.get("servedFrom") == "record"
@@ -603,3 +614,4 @@ def test_the_three_modes_and_the_absent_verdict():
     assert cache_cannot_see.as_wire() == {
         "servedFrom": "cache",
         "fallbackReason": rs.FALLBACK_RECORD_UNAVAILABLE}
+
