@@ -19,7 +19,7 @@ except Exception as e:
     out["object_update"] = None
 
 # --- 2. The signed SOW as the document of record for the name variant.
-sow = sdk.create_source(
+sow = sdk.register_source(
     url="urn:document:northwind-logistics-sow",
     sourceKind="contract",
     documentKind="contract",

@@ -1370,7 +1370,7 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
         try:
             if sdk is None:
                 raise RuntimeError("no SDK write door available")
-            sdk.update_point(canonical_id, **to_write)
+            sdk.update_knowledge(canonical_id, **to_write)
         except Exception as e:
             out["reason"] = "slot_write_failed"
             out["blocked"] = (

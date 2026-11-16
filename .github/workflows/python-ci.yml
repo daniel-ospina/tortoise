@@ -536,11 +536,9 @@ jobs:
     #   * the tests still run, so a red run tells you about the code; and
     #   * a drift still fails loudly and still blocks the merge, because
     #     python-ci-gate (the required aggregate) lists this job in its needs.
-    # Cost: one extra job (~20s: checkout + setup-python + pyyaml), against a
-    # 25-minute suite that used to be silently withheld.
-    #
-    # Unconditional on every event (push/PR) — same as before. Needs
-    # pyyaml only: tools/ci_selection.py imports it locally.
+    # Cost: one extra job (~20s: checkout + setup-python + pyyaml + the `docker` CLI the new
+    # gate step resolves compose with — its absence REFUSES rather than skips), against a suite
+    # that used to be silently withheld. Unconditional on every event (push/PR) — same as before;
     #
     # timeout-minutes: this job now owns a network install (`pip install
     # pyyaml`) AND feeds the REQUIRED aggregate check — without a bound, a
@@ -561,6 +559,8 @@ jobs:
         # are drift-checked; tests/e2e/ is deliberately exempt
         # (welcome-e2e-monitor + legal-e2e + ENV_BROKEN_FILES cover those 17).
         run: python3 tools/ci_selection.py --integrity
+      - name: "Deployment config STATES both switches (#12926 — why: tools/embed_switch_gate.py)"
+        run: python3 tools/embed_switch_gate.py
       - name: "Mergify protection invariants (config guard, #5215)"
         # #5215 Task 4: the merge-throughput plan's safety contract is mechanical.
         # This runs the static clauses (i)-(viii) the plan's §3 asserts — exit 0
@@ -5061,13 +5061,34 @@ jobs:
           # that can run it (`pgvector/pgvector:pg16` above), which is why the
           # file is here and not merely registered on `core`: there it collects
           # and skips, and a skip on this job reds the leg gate below.
+          # #9318: the POSITION-KEY COLLISION's two acceptance legs. They
+          # need this job's DSN (the live door runs as the migration's own
+          # non-bypassing `tortoise_record_app` role), and this job's leg gate
+          # FAILS on any skip — which is what makes them run rather than pass by
+          # absence. Placed BEFORE the capstone for the reason every other entry
+          # is: D10's policy drill re-applies the tenancy migration last.
+          #
+          # #12894: BOTH cursor files. The `_live` one needs the DSN; the
+          # DB-FREE one is listed here for the ONE thing it cannot have on any
+          # other lane — `_fake_error`'s tie between the SQLSTATEs this suite
+          # names and the DRIVER's own registry (`psycopg2.errors.lookup`).
+          # `psycopg2-binary` is the optional `[postgres]` extra, so on the fast
+          # pool that ORACLE is skipped by absence of the driver (the
+          # classification and counter assertions run regardless — the exact
+          # split is in `_fake_error`'s docstring); THIS job installs
+          # `.[test,postgres]`, so the oracle executes here. Without this line
+          # it would run in no CI lane at all, which is the `#9551` "the leg
+          # that would catch it never ran" defect one layer down.
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
+            tests/test_9318_journal_collision.py \
             tests/test_9555_narrative_carrier.py \
             tests/test_9664_capstone_connector_to_record.py \
             tests/test_record_searchkeys_10620.py \
             tests/test_9881_rename_reaches_the_record.py \
             tests/test_11642_vector_move_live.py \
+            tests/test_12894_record_cursor_live.py \
+            tests/test_12894_record_cursor.py \
             tests/test_9558_record_write_cost.py \
             tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \

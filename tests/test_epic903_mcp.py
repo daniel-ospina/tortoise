@@ -42,12 +42,31 @@ class TestToolRegistration:
             ms._transport_mode.set(prev)
 
     def test_dream_tool_registered_with_mode_and_budget(self):
-        t = _tool("tortoise_dream")
-        assert t is not None
-        assert t.sdk_method == "dream"
+        """Epic 903's params survive the #4282 Phase 2 consolidation.
+
+        `tortoise_dream` retired into the `tortoise_refresh_confidence`
+        container (scope='dirty'|'full'), so the LIVE row is the container and
+        the epic-903 params (mode/budget) travel on the RETIRED row — which is
+        the row the #3883 shim still serves to a legacy caller. Both are pinned,
+        on the artifact a caller actually reaches.
+        """
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+
+        t = _tool("tortoise_refresh_confidence")
+        assert t is not None, "the dream container must be registered"
+        # A per-SCOPE dispatcher declares no single binding (#4337/#3904).
+        assert t.sdk_method == ""
+        for scope in ("dirty", "full"):
+            assert scope in t.description, (
+                f"the container's description does not advertise scope={scope!r}")
+
+        retired = next(x for x in RETIRED_TOOL_REGISTRY
+                       if x.name == "tortoise_dream")
+        assert retired.retired_use_instead.startswith(
+            "tortoise_refresh_confidence"), retired.retired_use_instead
         # The description advertises the epic-903 params (mode/budget).
-        assert "stale-first" in t.description
-        assert "budget" in t.description
+        assert "stale-first" in retired.description
+        assert "budget" in retired.description
 
     def test_no_registry_collision(self):
         """Additive surface: exactly one definition per name (no duplicate

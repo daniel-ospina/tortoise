@@ -71,7 +71,7 @@ fifth term, renames none, and does not change the boundary's mapping.
 
 **One write-path dimension this vocabulary does not name.** ``record_writer``'s
 LIVE door reports an ARMED call that did not write as ``REFUSED`` (#8447), and
-its ``refusal`` token is one of six. NONE of the six is exactly a term here:
+its ``refusal`` token is one of seven. NONE of the seven is exactly a term here:
 
 * ``circuit_open`` is the only LITERAL fit — a connect to the record failed, so
   the store is configured and was not reached, which is ``degraded`` exactly;
@@ -89,7 +89,18 @@ its ``refusal`` token is one of six. NONE of the six is exactly a term here:
   operator reading the metric set cannot see the split;
 * ``no_durable_journal`` is a healthy DECLINE (the M2 capture lane has no
   journal by design), counted on ``record_non_journal_skips`` rather than
-  ``record_write_failures``, so nothing a replay could restore is missing.
+  ``record_write_failures``, so nothing a replay could restore is missing;
+* ``journal_collision`` is the one CONFLICT-decided token (#9318): the record WAS
+  reached and refused to index this record under a journal position that is
+  NOT this write's — a different record type, a different capture instant, or a
+  `ts`-less write whose content moved. ⚠️ A payload re-derived at the SAME type
+  and the SAME capture is NOT this token: it is read as the record's own drift
+  and is SILENT (#12904 P0-1), so an operator hunting this counter for that
+  shape finds none. Nothing was
+  lost (the journal holds it) and nothing about the store is wrong, so it is an
+  impairment — ``degraded`` — and
+  its repair is a schema decision (journal identity in the key, #12894), not an
+  operator action on this deployment.
 
 ⛔ THE COUNT AND THIS LIST ARE INDEXED, NOT AUTHORITATIVE. The vocabulary is
 declared in ``record_writer`` — ``LIVE_WRITE_REFUSALS`` for the tokens the seam
@@ -101,8 +112,8 @@ calls itself the vocabulary's ONE home was not, so a consumer reading this map
 was told a set one value too small. A reader that needs the set MUST read
 ``record_writer`` — and if the two ever disagree again, the code is the answer.
 
-So the write path carries all six as ``degraded`` — the NEAREST recorded term
-for "not available", and not a measured outage for five of them — and keeps the
+So the write path carries all seven as ``degraded`` — the NEAREST recorded term
+for "not available", and not a measured outage for six of them — and keeps the
 reason in ``RecordWrite.refusal``, which is authoritative: a consumer must read
 ``refusal`` before calling a refusal an outage, a set-up gap, or an error.
 Recorded here for the same reason as the read-path dimension above — this

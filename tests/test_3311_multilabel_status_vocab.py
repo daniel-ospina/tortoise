@@ -107,7 +107,7 @@ def test_unrecognised_status_is_refused_and_writes_nothing(env, bad):
     before = _mutations(events, pid)
 
     with pytest.raises(ValueError, match="Invalid status"):
-        sdk.update_entity(pid, status=bad)
+        sdk.update_knowledge(pid, status=bad)
 
     assert _status(sdk, pid) == "draft", (
         "a refused status must not be written — validation must precede the "
@@ -136,7 +136,7 @@ def test_valid_status_is_journaled_against_point_and_survives_rebuild(env):
     sdk, events = env
     pid = _multilabel_point(sdk)
 
-    sdk.update_entity(pid, status="live")
+    sdk.update_knowledge(pid, status="live")
     assert _status(sdk, pid) == "live"
 
     recs = _mutations(events, pid)
@@ -165,7 +165,7 @@ def test_reference_fold_agrees_with_the_journaled_point_status(env):
 
     sdk, events = env
     pid = _multilabel_point(sdk)
-    sdk.update_entity(pid, status="live")   # #9649: a DECLARED transition
+    sdk.update_knowledge(pid, status="live")   # #9649: a DECLARED transition
 
     result = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
     assert result["ok"], (
@@ -237,7 +237,7 @@ def test_supersede_after_status_write_still_ends_superseded(env):
                            status="live")["id"]
     # #9649: a DECLARED transition (draft → live). The pre-#9649 fixture used
     # live → draft, which ONTOLOGY §5 does not declare and the door now refuses.
-    sdk.update_entity(old, status="live")
+    sdk.update_knowledge(old, status="live")
     sdk.supersede_point(old, new)
     assert _status(sdk, old) == "superseded"
 
@@ -297,7 +297,7 @@ def test_vocabulary_values_are_accepted_and_journaled(env, good):
     """
     sdk, events = env
     pid = _multilabel_point(sdk)
-    sdk.update_entity(pid, status=good)
+    sdk.update_knowledge(pid, status=good)
     assert _status(sdk, pid) == good
     recs = _mutations(events, pid)
     assert [r["op"] for r in recs] == ["restatus"]
@@ -322,7 +322,7 @@ def test_an_undeclared_transition_is_refused_as_a_TRANSITION(env, word):
     before = _mutations(events, pid)
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(pid, status=word)
+        sdk.update_knowledge(pid, status=word)
     text = str(exc.value)
     assert "transition" in text.lower(), (
         f"the refusal must be about the transition, not the vocabulary: {text!r}")

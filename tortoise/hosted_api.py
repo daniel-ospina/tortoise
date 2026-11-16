@@ -3612,7 +3612,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         # ⚠️ MEASURED, and it corrects an earlier claim here (review round 7, P2):
         # at DEBUG this line is NOT emitted in the hosted deployment. uvicorn's
         # `LOGGING_CONFIG` configures only the `uvicorn*` loggers and leaves root
-        # at WARNING, `Dockerfile.hosted:153` passes no `--log-level`, and nothing
+        # at WARNING, `Dockerfile.hosted:163` passes no `--log-level`, and nothing
         # in `tortoise/` or `entrypoint.sh` sets a level for `tortoise.*` — so
         # `tortoise.api` is effectively WARNING there and `Logger.isEnabledFor`
         # drops the record (reproduced under the real `dictConfig`). The PRODUCTION
@@ -7467,6 +7467,19 @@ def _record_health() -> dict:
         NON-ZERO value is the claim "a transaction committed here", not a row
         count — the runbook's SQL read is still the witness for how many rows
         landed.
+      * ``cache_leg_failures`` — **the CACHE half of the write (#12943)**, and a
+        FOURTH counter outside "the record counters" above: it does not describe
+        a record write at all, it describes a construction whose cache is not the
+        record's store (the record armed, no shared cache ⇒ the cache is a
+        process-local file and the record is in Postgres). ⚠️ Its unit is
+        **SDK constructions, not writes** — the store choice is made once per
+        construction and this read path serves reads too, so it is NOT comparable
+        with ``record_writes_applied`` beside it. ⛔ It does **NOT** move ``ok``
+        or ``status``: ``#10185`` ruled the verdict window-based over rows
+        actually dropped, and a split cache drops no rows — it strands them in a
+        store the record is not in. Read it as HISTORY, like
+        ``record_write_failures``, and read it on the process that PERFORMED the
+        write (a process with a shared cache reports ``{}`` by construction).
       * ``counters_error`` — why the counter snapshot could not be read, or ``None``.
         Kept distinct from ``error`` so the documented pairing
         (*``error`` non-null ⇔ set-but-unusable value*) stays true.
@@ -7521,6 +7534,7 @@ def _record_health() -> dict:
     try:
         from tortoise import record_writer
         from tortoise.monitoring import (
+            cache_leg_failure_counts,
             record_last_write_at,
             record_non_journal_skip_counts,
             record_position_unproven_count,
@@ -7539,6 +7553,9 @@ def _record_health() -> dict:
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
+                # Present-and-null for the same reason (#12943): a missing key
+                # must not read as "the cache is fine".
+                "cache_leg_failures": None,
                 # The POSITIVE pair is present-and-null here for the same reason:
                 # a consumer must not read a missing key as "no writes" (#9548).
                 "record_writes_applied": None, "record_last_write_at": None,
@@ -7561,6 +7578,13 @@ def _record_health() -> dict:
         "record_write_failures": None,
         "record_non_journal_skips": None,
         "record_position_unproven": None,
+        # #12943: seeded ``None`` for the same reason as the three above — this
+        # is the dict the `counters_error` arm PUBLISHES, so a key that is only
+        # assigned in the `else` arm is ABSENT exactly when the snapshot failed,
+        # and an absent key reads as "the cache is fine" (#9548 review P2's
+        # missing-key class). Caught by review cycle 2; the seeded arm had no
+        # test at all.
+        "cache_leg_failures": None,
         # The POSITIVE pair (#9548): committed writes, and when. Seeded ``None``
         # for the same reason as the three above — an unread counter is not a
         # zero, and a ``0`` here is exactly what a never-writing deployment
@@ -7618,6 +7642,12 @@ def _record_health() -> dict:
         # move the zero that means "no record row was lost" (#9231/#9307).
         skips = record_non_journal_skip_counts()
         unproven = record_position_unproven_count()
+        # #12943: the CACHE leg, read in the SAME snapshot so the block stays
+        # all-read or all-``None``. ``metrics()`` alone was not enough: the
+        # hosted app publishes THIS block and has no ``/metrics`` route, so a
+        # key that only existed there would have made the split visible to a
+        # scrape and invisible to ``/health`` — the surface an operator reads.
+        cache_leg = cache_leg_failure_counts()
         # The POSITIVE pair (#9548) rides the SAME snapshot for the same reason.
         applied = record_write_applied_count()
         last_write_at = record_last_write_at()
@@ -7630,14 +7660,21 @@ def _record_health() -> dict:
         block["record_position_unproven"] = unproven
         block["record_writes_applied"] = applied
         block["record_last_write_at"] = last_write_at
+        block["cache_leg_failures"] = cache_leg
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
-    # this counter carries — SIX values, documented at
+    # this counter carries — SEVEN values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly
     # replay-healable, and naming four of them here sent operators to a replay
     # that could not exist for two:
     #
     #   ``write_failed``      the record was unreachable or the projection
     #                         refused the row — a REPLAY heals it.
+    #   ``journal_collision`` the position row holds a record this write does not
+    #                         continue — a different record, or (with no `ts` to compare) a
+    #                         payload whose derivation moved (#9318): a REPLAY DOES NOT HEAL
+    #                         IT, it re-raises. Remedy = journal identity in the key (#12894).
+    #                         Same-capture drift is not this counter (#12904) — and neither,
+    #                         silently, is a DIFFERENT record there (`.JournalPositionCollision`).
     #   ``no_tenant``         armed with no tenant in scope; heal the tenant
     #                         resolution, then replay.
     #   ``malformed_dsn``     the value is configured but unusable — fix the
@@ -8065,7 +8102,7 @@ async def health():
     return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"])
             else "degraded",
             # ⛔ Its OWN key, not `degraded_reasons` — that name is taken by
-            # `record.degraded_reasons` (a documented six-value vocabulary,
+            # `record.degraded_reasons` (a documented seven-value vocabulary,
             # `docs/infra-runbook.md`, pinned by `test_record_searchkeys_10620`).
             # Two schemas under one name is how a consumer reads the wrong one.
             "refusals": refusals,
@@ -13875,6 +13912,22 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         ).result_set
         return dict(rows[0][0]) if rows else None
 
+    def _cache_sees_node() -> bool:
+        """Can the CACHE see this id at all, tombstone included? (#12941 P1-3)
+
+        `_cache_props` applies the endpoint's TOMBSTONE rule, so a cache that
+        holds a retracted point answers `None` — reading that as "the store
+        cannot see it" would mark a node the store can plainly see `not-hot`, a
+        FALSE impairment on a correctness-guaranteed 404. Only reached on the
+        residency-armed `off` 404 arm, which is why one extra bounded read is
+        acceptable here and nowhere else.
+        """
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id: $id}) RETURN properties(p)",
+            params={"id": point_id},
+        ).result_set
+        return bool(rows)
+
     served = None
     if mode != record_serve.MODE_OFF:
         tenant = _resolve_record_tenant(org)
@@ -14040,11 +14093,34 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         # the caller. ⚠️ OFF keeps the pre-#7970 detail EXACTLY — a plain string,
         # not a wrapper — so the default path stays byte-identical.
         if served is None:
+            # #12941: OFF consults no record, so it cannot establish absence at
+            # all — but the marker's OWN flag is what lets this door say so, and
+            # it is read BEFORE the marker does any work of its own
+            # (`residency_armed`), so an unarmed deployment pays no extra round
+            # trip and answers the same string. (The cache read above already
+            # happened — that is the pre-#7970 read itself, not a cost this flag
+            # adds.)
+            marker = None
+            if record_serve.residency_armed():
+                # `found` is the CACHE's own visibility, not the endpoint's
+                # tombstone-filtered answer (#12941 review P1-3): only a node the
+                # cache cannot see at ALL is outside the hot set.
+                marker = await _read_offload(
+                    lambda: record_serve.point_residency(
+                        sdk._get_proj().g, found=_cache_sees_node(),
+                        key=point_id),
+                    op="get_point.residency")
+            if marker:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"message": "Point not found", "residency": marker})
             raise HTTPException(status_code=404, detail="Point not found")
         absent: dict = {"message": "Point not found"}
-        # `as_wire` emits BOTH keys, `fallbackReason` as null when there was
-        # none — an omission would let a stored property masquerade.
-        absent.update(served.as_wire())
+        # `absent_wire` emits BOTH attribution keys (as `as_wire` does), plus
+        # `residency: "not-hot"` when the record could not be asked (#12941):
+        # a cache-only empty answer is "we cannot see it from here", and a
+        # plain "Point not found" here is the false absence §17.2 forbids.
+        absent.update(served.absent_wire())
         raise HTTPException(status_code=404, detail=absent)
     # The tombstone rule is the ENDPOINT's, not the store's: a retracted point
     # stays retrievable by get_point on the SDK but not here, whichever store
@@ -14057,7 +14133,7 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         if served is None:  # OFF keeps the pre-#7970 shape exactly
             raise HTTPException(status_code=404, detail="Point not found")
         retracted: dict = {"message": "Point not found"}
-        retracted.update(served.as_wire())
+        retracted.update(served.absent_wire())
         raise HTTPException(status_code=404, detail=retracted)
     props = dict(props)
     if served is not None:
@@ -22458,7 +22534,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # MERGE preserves a previously stored contentHash/version/title.
         anchor = next((ref.contentHash for ref in payload.provenance_refs
                        if ref.contentHash), None)
-        sdk.create_source(
+        sdk.register_source(
             session_url, "agentSession",
             contentHash=anchor,
             provenance_spans=session_spans, is_episodic=True,
@@ -22489,7 +22565,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # "" (no min_length), and an empty anchor is an absent one — the same
         # normalization the session-Source write applies via its
         # `next((ref.contentHash for ref in ... if ref.contentHash), None)`.
-        sdk.create_source(
+        sdk.register_source(
             u, src.sourceKind, tier=src.credibilityTier,
             contentHash=(src.contentHash or None), is_episodic=True,
         )
@@ -22742,7 +22818,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                     "(#3366)",
                     resolved_pid, _succ_state[0], _succ_state[1])
             else:
-                sdk.supersede_point(pr.existing_id, resolved_pid)
+                sdk.supersede_knowledge(pr.existing_id, resolved_pid)
         else:
             point_props = {}
             if pr.point.when:
@@ -31933,8 +32009,8 @@ _EXPORT_MAX_EVENTS = 5000  # event log is a rolling window (30d retention)
 # Internal bookkeeping excluded from exports/backups. Meta nodes are
 # key-scoped (#1625): the R2/R3 FTS-migration markers (point_fts_v2 /
 # event_fts_v2) are re-created on projection open, but Meta {key:
-# 'calibration_milestone'} is DATA (Gate B state, calibration_passed()
-# reads it) and MUST survive backup/restore.
+# 'calibration_milestone'} is DATA (Gate B state, read by the SDK's
+# calibration-milestone marker accessor) and MUST survive backup/restore.
 _EXPORT_SKIP_LABELS = {"GraphEventMeta", "TeamMeta", "EpMeta"}  # label-wide
 _EXPORT_SKIP_META_KEYS = frozenset({"point_fts_v2", "event_fts_v2"})
 
@@ -44266,7 +44342,7 @@ async def _run_docs_indexing(job_id: str, org_id: str, org: str,
                 totals["errors"].append(str(e))
                 break
             try:
-                ingest = org_sdk.index_directory(
+                ingest = org_sdk.index_sources_from_directory(
                     str(org_root), file_type="doc", extract_metadata=False,
                     corpus_name=f"{org}-docs")
             except Exception as e:
@@ -49709,7 +49785,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 183 tracked files (450 distinct
+# ABSOLUTE line number from 185 tracked files (457 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
@@ -49760,3 +49836,16 @@ def _session_list_conds(actor_filter: str | None) -> tuple[list[str], dict]:
         conds.insert(0, "s.actor_user_id = $uid")
         params["uid"] = actor_filter
     return conds, params
+
+# ── #12926: state the two embedding switches the process actually resolved ──
+# Module scope, not `_lifespan`: this is the process boot (`uvicorn
+# tortoise.hosted_api:app`), a lifespan may legally run more than once in a
+# process, and a boot record that repeated per lifespan would read as a state
+# change. The two switches read OPPOSITE ways when unset (`value_gate` ON,
+# `embed_gate` OFF — both modules record that, and changing either is a reopen of
+# `#11445`), so an unstated EMBED switch silently keeps a vector on every row;
+# the line makes the OFF direction visible instead of silent. A RECORD, never a
+# refusal: the pre-merge refusal is `tools/embed_switch_gate.py`.
+from tortoise.gate_visibility import report_effective_switches as _report_gates  # noqa: E402
+
+_report_gates()

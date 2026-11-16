@@ -542,8 +542,15 @@ def test_the_second_write_on_a_reused_handle_is_the_same_plan(monkeypatch):
     second_run = conn.executed[after_first:]
     expected = rp.replay_plan([_point(0)], org_id=ORG, graph_id=GRAPH,
                               start_seq=1, position=True)
+    # ⛔ THE #9190 COUNTER READ IS PART OF THE PROLOGUE, not of the plan. An
+    # ENUMERATED replay asks whether this graph's positions are already ISSUED
+    # before it numbers anything, so the prologue is three statements (set the
+    # tenant, verify it and the role, read the counter) and the plan follows
+    # unchanged — which is exactly the property this pin exists to state: REUSE
+    # changes the connection, never the write.
     assert [sql for sql, _params in second_run] == [
-        rp.TENANT_GUC_SQL, rp.TENANT_SCOPE_SQL, *[s.sql for s in expected]
+        rp.TENANT_GUC_SQL, rp.TENANT_SCOPE_SQL, rp.CURSOR_PRESENCE_SQL,
+        *[s.sql for s in expected]
     ], (
         "the reused handle did not execute the same prologue + plan as a fresh "
         f"one — the write order changed (#9558, surface S2): {second_run}")

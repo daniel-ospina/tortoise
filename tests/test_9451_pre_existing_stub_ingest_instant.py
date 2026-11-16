@@ -326,7 +326,7 @@ def test_a_legacy_capture_record_does_not_move_a_journalled_instant(prov):
     sdk, events, log_path = prov
     url = "session:S6"
     # 1. A JOURNALLED creator: T0 is in the journal, so replay can reproduce it.
-    sdk.create_source(url, "agentSession")
+    sdk.register_source(url, "agentSession")
     logged_t0 = _bag(sdk, url)["ingestedAt"]
     assert logged_t0, "guard: create_source journaled no ingest instant"
 

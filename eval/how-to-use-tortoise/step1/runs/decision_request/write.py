@@ -26,7 +26,7 @@ def edge(relation: str, frm: str, to: str) -> None:
 
 
 # ---- provenance -------------------------------------------------------------
-source = sdk.create_source(
+source = sdk.register_source(
     "tortoise://inbox/platform-team/2026-09-20-celery-to-temporal",
     "conversation",
     title="Decision request — platform team, 2026-09-20",

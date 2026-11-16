@@ -116,7 +116,7 @@ def _world(sdk, *, source: bool = False):
     obj = sdk.create_object("class4-object")
     ev = sdk.create_event("class4-event", eventKind="decision")
     if source:
-        sdk.create_source("https://class4.test/src", sourceKind="document")
+        sdk.register_source("https://class4.test/src", sourceKind="document")
     return {
         "p1": p1["id"], "p2": p2["id"],
         "subject": subj["id"], "object": obj["id"],

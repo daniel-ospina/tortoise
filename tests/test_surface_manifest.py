@@ -253,7 +253,11 @@ def test_the_rendered_list_agrees_with_the_manifest():
     # now-false sentence until an independent verifier regenerated it.
     for r in doc.get("retired") or []:
         assert f"`{r['name']}`" in text, f"{r['name']} missing from the retired section"
-        assert f"`{r['use_instead']}`" in text, f"{r['name']}'s replacement never renders"
+        # The renderer ESCAPES a literal `|` in a replacement signature
+        # (`scope="dirty"|"full"`), because an unescaped one ends the GFM cell and
+        # silently truncates the row. Compare the escaped form the renderer writes.
+        _escaped = str(r["use_instead"]).replace("|", "\\|")
+        assert f"`{_escaped}`" in text, f"{r['name']}'s replacement never renders"
     assert "Nothing warns a caller today" not in text, (
         "the legend claims nothing warns a caller, but retired names now warn (#3883)"
     )
@@ -624,8 +628,9 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
         "was deleted (which would exempt the row from this comparison instead of reding it) "
         f"or the two were reworded apart: {one_sided}"
     )
-    assert compared >= 40, (
-        f"only {compared} rows carry a comparable caller list (40 today) — this check "
+    assert compared >= COMPARABLE_CALLER_ROWS_FLOOR, (
+        f"only {compared} rows carry a comparable caller list "
+        f"({COMPARABLE_CALLER_ROWS_FLOOR} today) — this check "
         "has stopped reading the manifest's rows and would pass vacuously. The bound is "
         "the measured count, not one below it: a floor set one row short lets a single "
         "row leave the comparison unnoticed, which is the hole the one-sided arm above "
@@ -638,6 +643,26 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
     )
 
 
+#: The number of manifest rows that carry a caller list in BOTH derived columns — the
+#: measured coverage of the cross-check below, not a round floor.
+#:
+#: History, because this number MOVES with the surface and each move needs a reason:
+#:   41 -> 38 on 2026-11-15 (#12901 wave 1): three of the five retired rows
+#:   (`calibration_passed`, `list_relations`, `quarantine_batch`) each carried both lists,
+#:   so they left the comparison with the row. ⚠️ Their `callers: engine` came from
+#:   `scan_callers`' DOCUMENTED receiver-blind false positive (`registry.list_relations()`
+#:   and `from .mining import quarantine_batch` are name collisions, not calls on the
+#:   SDK) — which is why the manifest classified them `internal` while a receiver-aware
+#:   AST walk finds NO production caller. The over-inclusion is deliberate there (never
+#:   MISS a caller), so the precise instrument decision was taken on the precise scan.
+#:   38 -> 40 on 2026-11-16 (this re-cut): the merged tree is main's wave-1 removals PLUS
+#:   #11609's fourteen absorbed doors and six containers, and two rows that the merge
+#:   re-keys carry both columns again. The number is re-derived from the MERGED manifest,
+#:   never carried from either side — 38 was main's own measured count and was two short
+#:   here, which is exactly the allowance this floor exists to forbid.
+COMPARABLE_CALLER_ROWS_FLOOR = 40
+
+
 def test_the_reason_dependency_cross_check_can_fail():
     """Instrument check: a one-sided edit must red the pin above.
 
@@ -646,12 +671,20 @@ def test_the_reason_dependency_cross_check_can_fail():
     been burned by before.
     """
     doc = copy.deepcopy(_manifest())
-    row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
-    row["reason"] = "no MCP tool binds it; callers: engine, other-tooling, tenant-rest"
+    # A TWO-SIDED row — `_caller_lists` only compares a row that carries a caller list in
+    # BOTH columns — selected by that SHAPE rather than by a name a later batch may retire
+    # (`sdk:supersede_point` was this row until #11609 lane B retired it).
+    row = next(r for r in doc["rows"]
+               if str(r.get("name", "")).startswith("sdk:")
+               and "caller categories:" in str(r.get("dependency", ""))
+               and "callers:" in str(r.get("reason", "")))
+    row["reason"] = "no MCP tool binds it; callers: zzz_one, zzz_two"
     compared, mismatched, one_sided = _caller_lists(doc)
-    assert compared >= 40, f"the cross-check reads only {compared} rows on a doctored copy"
+    assert compared >= COMPARABLE_CALLER_ROWS_FLOOR, (
+        f"the cross-check reads only {compared} rows on a doctored copy"
+    )
     assert not one_sided, f"a two-sided row was reported as one-sided: {one_sided}"
-    assert [name for name, _dep, _reason in mismatched] == ["sdk:supersede_point"], (
+    assert [name for name, _dep, _reason in mismatched] == [row["name"]], (
         f"a one-sided edit to `reason` did not red the cross-check: {mismatched}"
     )
 
@@ -659,19 +692,25 @@ def test_the_reason_dependency_cross_check_can_fail():
     # on the absence of a list, the row left the comparison altogether, and the aggregate
     # floor still cleared at 41 -> 40 (measured before this pin).
     doc = copy.deepcopy(_manifest())
-    row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
+    row = next(r for r in doc["rows"]
+               if str(r.get("name", "")).startswith("sdk:")
+               and "caller categories:" in str(r.get("dependency", ""))
+               and "callers:" in str(r.get("reason", "")))
     row["reason"] = "no MCP tool binds it"
     compared, _mismatched, one_sided = _caller_lists(doc)
-    assert [entry.split(": ", 1)[0] for entry in one_sided] == ["sdk:supersede_point"], (
+    assert [entry.split(": ", 1)[0] for entry in one_sided] == [row["name"]], (
         "deleting the `callers:` clause from `reason` exempted the row instead of reding it: "
         f"one_sided={one_sided}, compared={compared}"
     )
 
     doc = copy.deepcopy(_manifest())
-    row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
+    row = next(r for r in doc["rows"]
+               if str(r.get("name", "")).startswith("sdk:")
+               and "caller categories:" in str(r.get("dependency", ""))
+               and "callers:" in str(r.get("reason", "")))
     row["dependency"] = "no caller categories recorded"
     _compared, _mismatched, one_sided = _caller_lists(doc)
-    assert [entry.split(": ", 1)[0] for entry in one_sided] == ["sdk:supersede_point"], (
+    assert [entry.split(": ", 1)[0] for entry in one_sided] == [row["name"]], (
         "deleting the `caller categories:` clause from `dependency` exempted the row "
         f"instead of reding it: one_sided={one_sided}"
     )
@@ -1250,11 +1289,12 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     """
     doc = _manifest()
     # The pin is set ONE BELOW the live count so the run must red: the property
-    # under test is "growth past the pin reds", not any particular number. The live count
-    # moved again after the merge — #4282's container (81 -> 77), #4282 Phase 3.2's
-    # `run_onboarding` retirement (77 -> 72) and #11609 batch 1's four archived
-    # no-destination tools (72 -> 68) — so the pin follows to 68 - 1.
-    doc["high_water_counts"] = {"tools": 67, "sdk_public_methods": 150}
+
+    # under test is "growth past the pin reds", not any particular number — so it is
+    # READ from the live count instead of being re-typed on every surface move (#11609
+    # lane B moved it 68 -> 60 and found this literal had been hand-carried twice).
+    doc["high_water_counts"] = {"tools": doc["counts"]["tools"] - 1,
+                                "sdk_public_methods": 150}
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "growth past the frozen pin did not red the gate"
     assert "high-water pin" in result.stdout, result.stdout
@@ -3251,7 +3291,13 @@ def test_the_exemption_control_is_usable_without_reding_the_drift_check(checker,
     `FAIL row 'sdk:annotate_ask_hits' was hand-edited — exemption: recorded {True}, derived {False}`.
     """
     doc = _manifest()
-    row = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    # A row that is NOT bound by a registered tool: `surface-guard` refuses an
+    # exemption on a bound row ("an exemption records a fact that is no longer
+    # true"), and #11609 lane B bound the first `sdk:` rows, so the population is
+    # selected by that property instead of by position.
+    row = next(r for r in doc["rows"]
+               if str(r["name"]).startswith("sdk:")
+               and "0 registered tool(s)" in str(r.get("dependency", "")))
     row["exemption"] = True
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 0, f"a recorded exemption is refused: {result.stdout}"
@@ -4810,22 +4856,45 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # live, since it carries the #8482 wrap-envelope repair). The pin moves with every
     # landed container batch until the approved 27 is reached. #4282 Phase 3.2 (main) then
     # removes the five `run_onboarding` tools — a disjoint name set — so the merged
+
     # surface is 72, not either side's own figure.
-    assert live["mcp"] == manifest["counts"]["tools"] == 68
+    # #11609 lane B (#4282 Phase 2): 68 -> 60 — fourteen WRITE/MUTATE doors retired into
+    # six approved containers (68 − 14 + 6). The retired names still ANSWER (#3883), so
+    # the SERVED surface is unchanged; this pin is the ADVERTISED one.
+    # #11609 lane C composes with lane B on this tree: 60 -> 59 (six SOURCES/MINE/SESSION
+    # containers in, seven advertised members retired into them; the 68 the branch started
+    # from is lane B's pre-wave number, so the merged arithmetic is 68 + 6 + 6 - 7 - 14).
+    assert live["mcp"] == manifest["counts"]["tools"] == 59
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
     # rationale beside it. 150 → 124 on 2026-10-27: the owner ruled the surplus methods
     # nothing calls may be deleted (PR #10187), and the 26 with no caller left the class.
     # 124 → 125 on 2026-11-14 (#10015): row 28 `get_organisation_account` was IMPLEMENTED.
+    # 125 → 120 on 2026-11-15 (#12901 wave 1): the first five off-surface methods with no
+    # production caller were retired (archived + recorded in `REMOVED_SDK_METHODS`), so the
+    # LIVE set shrank without touching the approved 40 or `high_water_counts` (150).
     # The approved 40 did not grow — the approval (`#10015` comment `6863608333`) delivers a
     # name that was already approved and unshipped, the same move PR #10053 made for three
     # rows — so `high_water_counts` (150) does not move; only the frozen ROW SET does.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 125
+
+    # 125 -> 119 in two DISJOINT retirement waves. #12901 (2026-11-15) retired five
+    # off-surface methods with no production caller (125 -> 120; none an approved row).
+    # #11609 lane B then took 120 -> 119, a NEGATIVE net by the batch's own rule that a
+    # container may not add surface without retiring at least as much of what it absorbs:
+    # THREE approved rows gained their `def` (`supersede_knowledge`, `write_question`,
+    # `record_decision`; `update_knowledge` already had one) and FOUR doors were retired
+    # (`supersede` -> `supersede_knowledge`, `update_entity` -> `update_knowledge`,
+    # `file_decision` -> `write_question`, `file_human_approval` -> `record_decision`).
+    # ⛔ `adjust_relationship` and `refresh_confidence` are NOT implemented rows: they are
+    # approved targets still ABSENT from the live class (see the 23 the declaration gate
+    # prints), so naming them as delivered here was false.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 118
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():
-    """That sentence's typed count has drifted once per rename: 150 → 149 → 147 → 150 → 124.
+    """That sentence's typed count has drifted once per rename: 150 → 149 → 147 → 150 → 124 →
+    125 → 120.
 
     #10053 review (P3): at that head it read 147 while the class and the manifest both
     said 150, so the doc that tells a reader where the canonical SDK list lives named a

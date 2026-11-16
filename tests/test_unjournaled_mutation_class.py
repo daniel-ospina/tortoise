@@ -273,7 +273,7 @@ class TestPropertyMutationRoundTrip:
         sdk, events = env
         oid = sdk.create_entity("object", name="Original",
                                 objectKind="opportunities")["node"]["id"]
-        sdk.update_entity(oid, **{prop: new})
+        sdk.update_knowledge(oid, **{prop: new})
         assert _props(sdk, "Object", oid, prop)[prop] == new
 
         recs = [r for r in _mutations(events) if r.get("id") == oid]
@@ -300,7 +300,7 @@ class TestPropertyMutationRoundTrip:
                                 )["node"]["id"]
         assert _has_prop(sdk, "Object", oid, "note")
 
-        sdk.update_entity(oid, note=None)
+        sdk.update_knowledge(oid, note=None)
         assert not _has_prop(sdk, "Object", oid, "note"), \
             "the LIVE write must remove the prop (else this row tests nothing)"
 
@@ -325,7 +325,7 @@ class TestPropertyMutationRoundTrip:
         sdk, events = env
         oid = sdk.create_entity("object", name="A", objectKind="k",
                                 confidence=0.5)["node"]["id"]
-        sdk.update_entity(oid, confidence=0.9)
+        sdk.update_knowledge(oid, confidence=0.9)
         rec = [r for r in _mutations(events) if r.get("id") == oid][-1]
         assert set(rec["state"]) == {"confidence"}, (
             "state must be the WRITE'S keys only; a snapshot would drag in "
@@ -342,7 +342,7 @@ class TestPropertyMutationRoundTrip:
         sdk, events = env
         oid = sdk.create_entity("object", name="A",
                                 objectKind="k")["node"]["id"]
-        sdk.update_entity(oid, status="archived", confidence=0.9,
+        sdk.update_knowledge(oid, status="archived", confidence=0.9,
                           objectKind="k2")
 
         rec = [r for r in _mutations(events) if r.get("id") == oid][-1]
@@ -367,7 +367,7 @@ class TestPropertyMutationRoundTrip:
         sdk, events = env
         oid = sdk.create_entity("object", name="A",
                                 objectKind="k")["node"]["id"]
-        sdk.update_entity(oid, confidence=Decimal("0.25"))
+        sdk.update_knowledge(oid, confidence=Decimal("0.25"))
 
         recs = [r for r in _mutations(events) if r.get("id") == oid]
         assert recs, "a non-JSON-native value silently dropped the record"
@@ -395,8 +395,8 @@ class TestPropertyMutationRoundTrip:
         sid = (sub.get("node") or sub)["id"]
         oid = sdk.create_entity("object", name="O",
                                 objectKind="k")["node"]["id"]
-        sdk.update_entity(sid, subjectKind="topic")
-        sdk.update_entity(oid, objectKind="k2")
+        sdk.update_knowledge(sid, subjectKind="topic")
+        sdk.update_knowledge(oid, objectKind="k2")
         labels = {r["label"] for r in _mutations(events)}
         assert labels == {"Object", "Subject"}
         _assert_round_trip(sdk, events, caplog)
@@ -418,7 +418,7 @@ class TestPropertyMutationRoundTrip:
         oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
         sdk._emit_event("ObjectSuperseded", id=oid, name="O",
                         supersedes_by="other", session_id="s", evidence="e")
-        sdk.update_entity(oid, status="archived")
+        sdk.update_knowledge(oid, status="archived")
         assert _props(sdk, "Object", oid, "status")["status"] == "archived"
 
         # Compares ONLY the property under test, not the whole map: the
@@ -449,7 +449,7 @@ class TestPropertyMutationRoundTrip:
         """
         sdk, events = env
         oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
-        sdk.update_entity(oid, status="archived")
+        sdk.update_knowledge(oid, status="archived")
         sdk._emit_event("ObjectSuperseded", id=oid, name="O",
                         supersedes_by="other", session_id="s", evidence="e")
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -469,8 +469,8 @@ class TestPropertyMutationRoundTrip:
         oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
         sdk._emit_event("ObjectSuperseded", id=oid, name="O",
                         supersedes_by="other", session_id="s", evidence="e")
-        sdk.update_entity(oid, status="archived")
-        sdk.update_entity(oid, objectKind="k2")
+        sdk.update_knowledge(oid, status="archived")
+        sdk.update_knowledge(oid, objectKind="k2")
         assert _props(sdk, "Object", oid, "status")["status"] == "archived"
 
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -500,7 +500,7 @@ class TestPropertyMutationRoundTrip:
         oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
         sdk._emit_event("ObjectSuperseded", id=oid, name="O",
                         supersedes_by="other", session_id="s", evidence="e")
-        sdk.update_entity(oid, status="archived")
+        sdk.update_knowledge(oid, status="archived")
         sdk.delete_entity(oid)
 
         caplog.clear()
@@ -518,7 +518,7 @@ class TestPropertyMutationRoundTrip:
                                   objectKind="k")["node"]["id"]
         sdk2._emit_event("ObjectSuperseded", id=oid2, name="O",
                          supersedes_by="other", session_id="s", evidence="e")
-        sdk2.update_entity(oid2, status="archived")
+        sdk2.update_knowledge(oid2, status="archived")
         sdk2._get_proj().rebuild_all(str(events2), confirm_destructive=True)
         assert _props(sdk2, "Object", oid2, "status")["status"] == "archived", (
             "control: without the delete the post-supersede op IS restored")
@@ -552,7 +552,7 @@ class TestPropertyMutationRoundTrip:
         before = len(_mutations(events))
         caplog.clear()
         with caplog.at_level("WARNING"):
-            sdk.update_entity(oid, name="B")
+            sdk.update_knowledge(oid, name="B")
 
         assert _props(sdk, "Object", oid, "name")["name"] == "B", \
             "the live write must apply"
@@ -592,7 +592,7 @@ class TestPropertyMutationRoundTrip:
                                 objectKind="k")["node"]["id"]
         caplog.clear()
         with caplog.at_level("WARNING"):
-            sdk.update_entity(oid, name="B", status="archived",
+            sdk.update_knowledge(oid, name="B", status="archived",
                               confidence=0.9)
         assert _props(sdk, "Object", oid,
                       "name")["name"] == "B", "live write still applies"
@@ -621,7 +621,7 @@ class TestPropertyMutationRoundTrip:
         sdk, _events = env
         caplog.clear()
         with caplog.at_level("WARNING"):
-            sdk.update_entity("no-such-id-at-all", name="B")
+            sdk.update_knowledge("no-such-id-at-all", name="B")
         msgs = " ".join(r.getMessage() for r in caplog.records)
         assert "#4769" not in msgs, (
             "nothing matched, so nothing will be reverted: " f"{msgs}")
@@ -631,7 +631,7 @@ class TestPropertyMutationRoundTrip:
         post-apply ordering contract."""
         sdk, events = env
         before = len(_mutations(events))
-        sdk.update_entity("obj-does-not-exist", name="ghost")
+        sdk.update_knowledge("obj-does-not-exist", name="ghost")
         assert len(_mutations(events)) == before
 
 
@@ -962,7 +962,7 @@ class TestJournalWriteFailure:
         with caplog.at_level("WARNING"):
             # A JOURNALED op — a `name` change is deliberately withheld now
             # (#3377/#4769), so it would never reach the append this row tests.
-            sdk.update_entity(oid, status="archived")
+            sdk.update_knowledge(oid, status="archived")
 
         # 1. LOUD — a silently dropped mutation is this class's own defect.
         msgs = [r.getMessage() for r in caplog.records]
@@ -1012,7 +1012,7 @@ class TestLegacyJournalShapes:
         sdk, events = env
         oid = sdk.create_entity("object", name="Legacy",
                                 objectKind="k")["node"]["id"]
-        sdk.update_entity(oid, status="archived")
+        sdk.update_knowledge(oid, status="archived")
         _append_raw(events, type="ObjectSuperseded", id=oid, name="Legacy",
                     supersedes_by="other", session_id="s", evidence="e")
 
@@ -1028,7 +1028,7 @@ class TestLegacyJournalShapes:
                                 objectKind="k")["node"]["id"]
         _append_raw(events, type="ObjectSuperseded", id=oid, name="Legacy",
                     supersedes_by="other", session_id="s", evidence="e")
-        sdk.update_entity(oid, status="archived")
+        sdk.update_knowledge(oid, status="archived")
 
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _props(sdk, "Object", oid, "status")["status"] == "archived", (
@@ -1059,7 +1059,7 @@ class TestRegressionGuards:
         # The generic surface's Point branch, for a non-status prop: also
         # journal-free (#3311 journals `status` only). This exercises the
         # branch the docstring above used to name without testing.
-        sdk.update_entity(pid, note="generic annotate")
+        sdk.update_knowledge(pid, note="generic annotate")
         assert not [r for r in _mutations(events) if r.get("id") == pid], (
             "a non-status prop on the generic Point branch must not journal")
         _assert_round_trip(sdk, events, caplog)

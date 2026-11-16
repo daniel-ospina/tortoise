@@ -269,7 +269,9 @@ relation's own declaration binds a runtime write path is a separate question, an
 told the answer rather than having to discover it from a silent drop. **Every declared relation gets a
 write-path verdict**, computed by one resolver (`tortoise/pack_registry.py::relation_write_verdict`) and
 reported in three places that therefore cannot disagree: a warning at pack load, the table `tortoise
-pack validate` prints, and `sdk.list_relations()` (`write_verdict` + `write_paths`).
+pack validate` prints, and `_get_kind_expander().list_relations()` (`write_verdict` +
+`write_paths`) — a `PackRegistry` method, not an SDK door (#12901 wave 1 retired the SDK
+`list_relations()`).
 
 **There are exactly two declared write paths.** A relation is `writable` when its declaration binds at
 least one of them:

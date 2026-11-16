@@ -1811,8 +1811,8 @@ is the record for:
   refusing the tail would cost the whole journal while recovering nothing. The R1 removal record
   (`EntityMutated` op=delete) stays REFUSED, because a tolerated torn delete is a resurrection.
 - **The tenant.** The store decision asks the tenant the SEAM will file under, not the ambient one:
-  `record_tenant_effective` (`tortoise/record_writer.py:889`) is **carried > scope > env pair**, and
-  `is_usable_tenant` (`tortoise/record_writer.py:922`) is the seam's own admissibility test, so the
+  `record_tenant_effective` (`tortoise/record_writer.py:920`) is **carried > scope > env pair**, and
+  `is_usable_tenant` (`tortoise/record_writer.py:953`) is the seam's own admissibility test, so the
   decision that picks the store and the write that fills it cannot disagree about who the row
   belongs to. A write the record cannot attribute keeps the turns in the graph, and a scratch buffer
   is not a journal.
@@ -2255,3 +2255,24 @@ and no MCP tool, SDK method or REST route reaches the module. **Only ONE derived
 occurrences stay **30**, because row 41's reach cell names no door and is not `customer-callable`;
 `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 states only the customer-callable and door figures, so it did not move.
 The gap at 36 stays a gap, and row 41 is appended rather than renumbering the tail.
+
+**2026-11-16 — `#12901`.** §13's read-site table lost **row 32**, `sdk.py::TortoiseSDK.backfill_v25`,
+in the same way it lost row 36 to `#4282`: the SDK method is retired by `#12901`'s first wave (125 → 120
+public methods), its body archived under
+`archive/sdk-methods/b2-sdk-retirement-wave-1/backfill_v25.py`, so the row's symbol stops resolving and
+the guard reds on it by design — the table's rule is that the SYMBOL is authoritative. The MCP twin
+`tortoise_backfill_v25` had already left at `#11609` batch 1, so this was the row's last door. It is
+retired rather than re-pointed because there is nothing to re-point it at: the unlabelled whole-graph
+count it handed back as `report["edge_count"]` now lives only in the ARCHIVE, which sits outside the
+census ROOT (`tortoise/`) — a declared boundary, not a new exclusion. Every derived figure moved with
+it: read sites 42 → **41**, customer-callable 18 → **17**, distinct doors 20 → **19** (SDK doors
+7 → **6**; MCP 9 and REST 4 unchanged), cell occurrences 29 → **28**. `EXTRACTOR-V4-ARCHITECTURE.md`
+§13.8 states the same figures, so it moved too — its four statements of the site count, its door total
+and breakdown, the `other FOURTEEN sites` enumeration (now thirteen, the backup-door block going from
+FIVE all-edge reads *and the backfill* to FOUR on the backup door), its `NINE all-edge walks` (now
+eight), and the list-closing marker. ⚠️ **The row and its `_NON_LITERAL` pin moved TOGETHER:** deleting
+only the row reds `test_every_computed_name_pin_owns_a_row` on the orphaned pin, and deleting only the
+pin reds the completeness arm — the register is held from BOTH sides on purpose. The empty-pattern
+derivation lost exactly one symbol key and one walk with it (28 keys / 42 rows → **27 / 41**), which is
+a re-derivation from the tree, not a retyped total. The gap at 32 is left as a gap rather than
+renumbering the tail, exactly as the gap at 36 was.

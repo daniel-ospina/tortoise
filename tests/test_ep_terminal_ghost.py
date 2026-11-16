@@ -386,7 +386,7 @@ def test_assess_source_superseded_assessment_no_strand(sdk, tmp_path):
     Mirrors test_retract_does_not_strand_terminal_dirty_root for the
     assess_source write surface."""
     url = "https://example.com/src-ghost"
-    first = sdk.assess_source(url, "agent-a", 0.9, "first assessment")
+    first = sdk.manage_source_trust(url=url, assessor="agent-a", score=0.9, rationale="first assessment")
     old_id = first["assessment_point_id"]
     # Wire the assessment into an EP neighborhood (assessment → claim).
     claim = sdk.create_point("statement", "assessed claim", status="live")["id"]
@@ -394,7 +394,7 @@ def test_assess_source_superseded_assessment_no_strand(sdk, tmp_path):
     sdk._dirty_roots.clear()
 
     # Second assessment from the same assessor supersedes the first.
-    second = sdk.assess_source(url, "agent-a", 0.1, "revised assessment")
+    second = sdk.manage_source_trust(url=url, assessor="agent-a", score=0.1, rationale="revised assessment")
     assert second["assessment_point_id"] != old_id
     assert sdk.get_point(old_id)["outdated"] is True
 
@@ -532,7 +532,7 @@ def test_assess_source_decays_superseded_assessment(sdk):
     """assess_source flags older same-(url, assessor) assessments outdated —
     the flagged assessment decays atomically (alias p)."""
     url = "https://example.com/src-2490-decay"
-    first = sdk.assess_source(url, "agent-a", 0.9, "first assessment")
+    first = sdk.manage_source_trust(url=url, assessor="agent-a", score=0.9, rationale="first assessment")
     old_id = first["assessment_point_id"]
     claim = sdk.create_point("statement", "assessed claim", status="live")["id"]
     op = sdk.create_operator("IMPL", old_id, [claim])["id"]
@@ -540,7 +540,7 @@ def test_assess_source_decays_superseded_assessment(sdk):
     run_ep(sdk, [op])
     assert posterior_mean(sdk, old_id) > 0.6, "assessment must be measured"
     # Second assessment from the same assessor supersedes (flags) the first.
-    sdk.assess_source(url, "agent-a", 0.1, "revised assessment")
+    sdk.manage_source_trust(url=url, assessor="agent-a", score=0.1, rationale="revised assessment")
     assert_vacuous(sdk, old_id, terminal_status=None, outdated=True)
     run_ep(sdk, [op])
     assert_vacuous(sdk, old_id, terminal_status=None, outdated=True)
@@ -823,7 +823,7 @@ def test_outdated_prop_rejected_on_all_write_surfaces(sdk, tmp_path):
 
     # _update_entity surface (routes through _sanitize_props label-loop)
     with pytest.raises(ValueError, match="outdated"):
-        sdk.update_entity(a, outdated=True)
+        sdk.update_knowledge(a, outdated=True)
 
     # MCP boundary parity: server-managed list rejects with ERR_INVALID shape
     from tortoise import mcp_server

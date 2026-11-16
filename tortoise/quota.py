@@ -953,7 +953,7 @@ def refuse_document_writer_demotion(g, doc_id: str, document_kind,
         f"direction through `{surface}` (#5140 — metering a node a caller can "
         f"un-meter is not a cap). Delete the document and re-ingest it if it "
         f"really is a transcript; to record that a source became unavailable, "
-        f"use `create_source(..., raw_state=...)`."
+        f"use `register_source(..., raw_state=...)`."
     )
 
 

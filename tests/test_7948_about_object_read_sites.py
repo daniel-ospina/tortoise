@@ -721,10 +721,14 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
         '"MATCH ()-[r]->() RETURN count(r)").result_set[0][0])',
         "dst_edges",
     ),
-    "sdk.py::TortoiseSDK.backfill_v25": (
-        'proj.g.query("MATCH ()-[r]->() RETURN count(r)")',
-        'report["edge_count"]',
-    ),
+    # ⛔ Row 32 (`sdk.py::TortoiseSDK.backfill_v25`) and its pin LEFT TOGETHER
+    # when #12901 retired the method: the all-edge count it handed back as
+    # `report["edge_count"]` now lives only in
+    # `archive/sdk-methods/b2-sdk-retirement-wave-1/backfill_v25.py`, which is
+    # outside the census ROOT (`tortoise/`) — a declared boundary, not a new
+    # exclusion. The pin cannot outlive the row: `_NON_LITERAL` is held from
+    # BOTH sides, so an orphaned pin reds `test_every_computed_name_pin_owns_a_row`
+    # exactly as a row with no pin reds the completeness arm.
     "sdk.py::TortoiseSDK._promote_incident_operators": (
         '"MATCH (o:Point {id:$oid})-[r]->(s) "',
         "epistemic_disjunction('s')",
@@ -3579,13 +3583,14 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # parser that produces `attributed`: a PARTIAL door-kind parse regression removes
     # entries from both sides, so the equality below cannot see it (the pre-#10226 arm
     # carried `>= 31` and this merge lost it). The numeral is HAND-COUNTED on purpose —
-    # a derived floor would inherit exactly the blindness it is here to catch. It is 29
+    # a derived floor would inherit exactly the blindness it is here to catch. It is 28
     # at this head: the table lost its SDK traversal row when that method was retired
-    # (31 -> 30), and #11609 batch 1 archived `tortoise_backfill_v25`, taking row 32's
-    # MCP door with it (30 -> 29). A table change moves this numeral with the table.
-    assert attributed >= 29, (
+    # (31 -> 30), #11609 batch 1 archived `tortoise_backfill_v25`, taking row 32's
+    # MCP door with it (30 -> 29), and #12901 retired the row's surviving SDK door
+    # `backfill_v25` itself (29 -> 28). A table change moves this numeral with the table.
+    assert attributed >= 28, (
         f"only {attributed} door attributions were attempted across the "
-        f"customer-callable rows, and this arm cross-checks against NO fewer than 29 "
+        f"customer-callable rows, and this arm cross-checks against NO fewer than 28 "
         f"hand-counted occurrences — a partial `_doors()` regression (one door KIND "
         f"resolving for only some of its rows) subtracts from `attributed` and "
         f"`expected` alike, so this floor is the only thing that reds on it"
@@ -3908,11 +3913,12 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
 _13_8_ENUMERATION = (
     "sites are customer-callable",
     # ⚠️ the marker follows the sentence that ACTUALLY starts the tail — it was re-worded to
-    # "Outside this eighteen, ..." to stop a re-verifier counting those five inside the
-    # enumeration. The numeral in it is a LOCATOR, not the figure under test: the figure is
+    # "Outside this seventeen, ..." to stop a re-verifier counting those five inside the
+    # enumeration (#12901 moved the numeral 18 -> 17 when it retired row 32, so this marker
+    # moves WITH it). The numeral in it is a LOCATOR, not the figure under test: the figure is
     # asserted in (a) from every "N ... customer-callable" statement, so this marker moving
     # with it cannot make a wrong count pass.
-    "Outside this eighteen, two are default-ON on the ingestion path",
+    "Outside this seventeen, two are default-ON on the ingestion path",
 )
 
 #: `` `token` `` — the unit §13.8 names a reader (or a door) with.
@@ -5508,8 +5514,12 @@ def test_the_module_filter_admits_a_split_traversal():
     # what proves none of them contributed a site — a module admitted and then
     # deriving nothing costs a parse, not a false claim.
     sites = census._empty_pattern_sites()
-    assert (len(sites), sum(len(lines) for lines in sites.values())) == (28, 42), (
-        "the empty-pattern derivation moved off 28 symbol keys / 42 site rows "
+    # ⛔ 28/42 -> 27/41 with #12901: `TortoiseSDK.backfill_v25` carried an
+    # untyped `MATCH ()-[r]->() RETURN count(r)`, so retiring the method (and the
+    # §13 row that owned it) removes exactly one symbol key and one walk. The
+    # move is re-derived from the tree, not retyped to match a hoped-for total.
+    assert (len(sites), sum(len(lines) for lines in sites.values())) == (27, 41), (
+        "the empty-pattern derivation moved off 27 symbol keys / 41 site rows "
         f"({len(sites)} keys, "
         f"{sum(len(lines) for lines in sites.values())} rows). The register's "
         "`sites` counts and BOTH completeness directions are stated against "

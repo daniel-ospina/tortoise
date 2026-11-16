@@ -747,15 +747,15 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     (`sdk._SERVER_MANAGED_EMBEDDING_MARKERS`). Measured at THIS head, with its
     own control:
 
-        TortoiseSDK.create_source("https://example.invalid/f16-probe", "web",
+        TortoiseSDK.register_source("https://example.invalid/f16-probe", "web",
                                   embedding_width="f16")
           -> ValueError: ['embedding_width'] are server-managed embedding
              journal fields and cannot be set by hand
-        TortoiseSDK.create_source(..., embedding=[0.1, 0.2],
+        TortoiseSDK.register_source(..., embedding=[0.1, 0.2],
                                   embedding_width="f32")
           -> ValueError  (the guard reads `ev`, so a width BESIDE A VECTOR —
              the state this funnel's `f32` arm exists for — is refused too)
-        TortoiseSDK.create_source("https://example.invalid/control", "web")
+        TortoiseSDK.register_source("https://example.invalid/control", "web")
           -> OK                                         (the control)
 
     `_emit_event` keeps no such guard BY DESIGN, and this note may not be read

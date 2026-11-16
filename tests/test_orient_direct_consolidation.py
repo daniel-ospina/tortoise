@@ -80,7 +80,7 @@ def _seed_graph(sdk: TortoiseSDK) -> dict:
     p1 = sdk.create_point("statement", "alpha claim", authoredBy="tester")
     p2 = sdk.create_point("decision", "beta decision", authoredBy="tester",
                           tags=["t1", "t2"])
-    src = sdk.create_source("https://w3.example.com/doc", "document")
+    src = sdk.register_source("https://w3.example.com/doc", "document")
     sdk.create_point("statement", "from source", extractedFrom=src["url"])
     subj = sdk.create_subject("W3 Team", "team")
     sdk.create_object("W3 Widget", "product", ownedBy=subj["id"])

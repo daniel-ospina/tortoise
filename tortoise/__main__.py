@@ -13558,10 +13558,10 @@ def _cmd_pack_validate(args) -> int:
     # #2766: the per-relation write-path verdict, from the ONE resolver pack
     # load warns with — so `validate` cannot report a relation as bound to a
     # path its own declaration does not bind. Enumerated from the registry
-    # directly rather than by calling the public SDK method `list_relations()`:
-    # that call would widen
-    # its surface-manifest caller categories and demand a human re-cut, and this
-    # is a CLI reporting view, not a new SDK reachability.
+    # directly, which is now the ONLY surface for it: the public SDK
+    # `list_relations()` door was retired in #12901 wave 1. This stays a CLI
+    # reporting view, not SDK reachability — the registry read widens no
+    # surface-manifest caller category, so it demands no human re-cut.
     from tortoise.pack_registry import RELATION_WRITABLE, relation_write_verdict
     relations = []
     for ns in sorted(reg.packs):
@@ -16567,7 +16567,7 @@ def _cmd_index_directory(args) -> int:
         else:
             sdk = TortoiseSDK(db_path=target)
         sdk._proj = _projection_for(target)
-        report = sdk.index_directory(
+        report = sdk.index_sources_from_directory(
             corpus_dir,
             extract_metadata=bool(args.metadata),
             corpus_name=args.corpus_name,
@@ -16912,7 +16912,7 @@ def _cmd_decide(args) -> int:
                 print(f"\n⚠ Calibration required — EP not run: {e}")
                 print("  Calibrate the graph first: run calibrate_summary() for "
                       "per-point guidance (set_point_baseline(), credibility on "
-                      "recreate, or set_source_tier() for sourced points), or "
+                      "recreate, or manage_source_trust(tier=...) for sourced points), or "
                       "pass require_calibration=False to explicitly opt out.")
                 # PR #1212: fail-closed — the calibration failure is NOT a
                 # successful run. Skip the "Done." summary and exit non-zero

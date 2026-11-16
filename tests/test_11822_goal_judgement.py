@@ -444,7 +444,7 @@ def test_goal_state_alone_never_moves_a_judgement(sdk):
     assert sdk.get_entity(goal["id"])["goalState"] == "met"
 
     # a human (or a script) overrides the CACHE
-    sdk.update_entity(goal["id"], goalState="unmet")
+    sdk.update_knowledge(goal["id"], goalState="unmet")
 
     judged = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                    target=target)
@@ -459,7 +459,7 @@ def test_unknown_writes_no_cache_over_a_humans_word(sdk):
     measured: `unknown` writes no `goalState` at all."""
     indicator, target_node, goal = _world(sdk)
     target = Target.from_node(target_node)
-    sdk.update_entity(goal["id"], goalState="blocked")  # a human's word
+    sdk.update_knowledge(goal["id"], goalState="blocked")  # a human's word
 
     result = judge_and_record(sdk, goal_id=goal["id"],
                               indicator_id=indicator["id"], target=target)
@@ -720,7 +720,7 @@ def test_the_unchanged_arm_still_reowns_the_cache(sdk):
                             target=target)
     assert first["goalState"] == "unmet"
 
-    sdk.update_entity(goal["id"], goalState="blocked")  # a human's word
+    sdk.update_knowledge(goal["id"], goalState="blocked")  # a human's word
     again = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                             target=target)
     assert again["written"] is False            # no new claim
@@ -1270,7 +1270,7 @@ def test_an_out_of_order_reading_drops_the_window_instant_not_the_supersession(s
     met = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                            target=target)
     # the predecessor's window is recorded by another writer
-    sdk.update_entity(met["point_id"], validFrom="2026-11-11T10:00:00Z")
+    sdk.update_knowledge(met["point_id"], validFrom="2026-11-11T10:00:00Z")
 
     late_judgement = Judgement(
         state="unmet", reason="state-flipped", target=target,

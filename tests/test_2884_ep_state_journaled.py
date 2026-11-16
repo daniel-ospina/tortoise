@@ -465,8 +465,8 @@ def test_f3_assess_source_decay_is_journaled(journaled):
     journaled for the rebuild to restore it."""
     _db, events, sdk = journaled
     url = "https://s.example"
-    first = sdk.assess_source(url, "alice", 0.4, "first")
-    sdk.assess_source(url, "alice", 0.9, "second")
+    first = sdk.manage_source_trust(url=url, assessor="alice", score=0.4, rationale="first")
+    sdk.manage_source_trust(url=url, assessor="alice", score=0.9, rationale="second")
     recs = [r for r in _records(events)
             if r["type"] == "ConfidenceChanged"
             and r["id"] == first["assessment_point_id"]]
@@ -747,8 +747,8 @@ def test_a5_assess_source_outdated_flag_survives_rebuild(journaled):
     superseded assessment as EP-active."""
     _db, events, sdk = journaled
     url = "https://s.example"
-    first = sdk.assess_source(url, "alice", 0.4, "first")
-    sdk.assess_source(url, "alice", 0.9, "second")
+    first = sdk.manage_source_trust(url=url, assessor="alice", score=0.4, rationale="first")
+    sdk.manage_source_trust(url=url, assessor="alice", score=0.9, rationale="second")
     oid = first["assessment_point_id"]
     assert _outdated(sdk, oid) is True
 

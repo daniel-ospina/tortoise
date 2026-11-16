@@ -444,3 +444,20 @@ def test_the_EMBED_flag_is_read_at_the_submission_seam_only():
     assert "embed_gate.embed_gate_enabled()" in seam, (
         "`encode_for_row` no longer consults the gate, so the predicate is "
         "enforced nowhere even though the flag is armed")
+
+    # ⛔ And the flag's NAME has exactly one reader outside the gate's own module: the startup
+    # diagnostic (`tortoise/gate_visibility.py`, #12926), which REPORTS the value the process
+    # resolved and gates nothing. That is a read, not an enforcement point — declared here so the
+    # invariant stays precise instead of being widened by accident: a second module spelling
+    # `embed_gate.ENV_FLAG` reds this arm until the declaration says why it exists (review at
+    # `e488f07816`, P3: the population above scans for the `embed_gate_enabled` spelling and could
+    # not see the qualified name).
+    qualified = sorted(
+        p.relative_to(_ROOT).as_posix()
+        for p in (_ROOT / "tortoise").rglob("*.py")
+        if "embed_gate.ENV_FLAG" in p.read_text(encoding="utf-8", errors="ignore")
+    )
+    assert qualified == ["tortoise/gate_visibility.py"], (
+        "the EMBED flag's name is read outside the one diagnostic that is allowed to report it: "
+        f"{qualified} — an enforcement read belongs at the submission seam, and a new reporter "
+        "has to say so here")

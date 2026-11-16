@@ -222,13 +222,42 @@ class TestEveryPointerResolvesInOneHop:
         replacement = RETIRED_USE_INSTEAD[name]
         assert replacement.startswith(CONTAINER + "("), replacement
 
-    @pytest.mark.parametrize("name", sorted(RETIRED_INTO_CONTAINER | set(REPOINTED)))
+    @pytest.mark.parametrize("name", sorted(RETIRED_USE_INSTEAD))
     def test_pointer_never_names_another_retired_name(self, name):
-        """Aliases do not chain: a replacement that is itself retired is a dead end."""
+        """Aliases do not chain: a replacement that is itself retired is a dead end.
+
+        Parameterized over the WHOLE `RETIRED_USE_INSTEAD` map, not over this batch's
+        member set. The narrower parametrization is what let #12948 ship two dead ends:
+        `tortoise_index_sessions` and `tortoise_ingest_corpus` were pointed at
+        `tortoise_index_files`, which the SAME batch retired a few lines below them, and
+        neither name was a member of this file's batch sets (`#12948` review F1). A
+        one-hop rule asserted only over the members a lane happened to add is a rule that
+        cannot see the pointer it breaks.
+        """
         replacement = RETIRED_USE_INSTEAD[name]
         target = replacement.split("(", 1)[0]
         assert target not in RETIRED_USE_INSTEAD, (
             f"{name} points at {target}, which is itself retired — two hops resolve nowhere")
+
+    @pytest.mark.parametrize("entry", RETIRED_TOOL_REGISTRY, ids=lambda t: t.name)
+    def test_no_retired_description_offers_a_retired_destination(self, entry):
+        """A retired entry's own `description` reaches the caller — so it cannot dead-end.
+
+        `tortoise/mcp_server.py` answers a retired call with
+        ``RETIRED — use {pointer}. {description}``, so the description is a POINTER, not
+        prose: `tortoise_index_sessions`'s still opened with "DEPRECATED — use
+        tortoise_index_files." — the retired name — directly after the shim had named the
+        live container (`#12948` review F1). A prefix naming a name the same message has
+        just retired sends the caller into a second hop that resolves nowhere.
+
+        Scoped to the "use <name>" DIRECTIVE form on purpose: a live description that says
+        it "absorbs" or "replaces" a retired name is correct and must keep doing so
+        (`tortoise_index_sources_from_directory` names all three it absorbed).
+        """
+        for retired_name in RETIRED_USE_INSTEAD:
+            assert f"use {retired_name}" not in entry.description, (
+                f"{entry.name}'s description directs the caller to {retired_name}, "
+                "which is itself retired — the message dead-ends one hop in")
 
     @pytest.mark.parametrize(
         "name,section",

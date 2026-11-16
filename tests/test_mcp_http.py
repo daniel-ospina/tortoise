@@ -1620,18 +1620,35 @@ class TestAdvertisedToolsAllServed:
         assert not unregistered, (
             f"registry entries never registered: {sorted(unregistered)}")
 
-    def test_session_capture_served_over_http(self, mcp_client):
-        """#2210 wire contract: tortoise_session_capture is registry-
-        advertised (HTTP_ALLOWED) — it must be REGISTERED and therefore
-        listed over the default HTTP surface (it was previously defined
-        after the mid-module register_all and never served at all: absent
-        from tools/list, 404-ish on call)."""
+    def test_every_advertised_tool_is_served_over_http(self, mcp_client):
+        """#2210 wire contract: a registry tool the HTTP filter ADVERTISES must
+        be REGISTERED and therefore listed over the default HTTP surface (it was
+        previously possible for a tool to be defined after the mid-module
+        register_all and never be served at all: absent from tools/list,
+        404-ish on call).
+
+        Retargeted off `tortoise_session_capture` by #4282 Phase 2 (#11609 lane
+        C): that container retired the name, and a retired name leaves
+        `TOOL_REGISTRY` entirely — it is served through the #3883 shim, not
+        advertised — so naming it as the witness would have measured nothing.
+        Rather than swap in another hardcoded witness for the next container to
+        retire, the population is now DERIVED: every live registry tool the HTTP
+        filter allows must appear in the HTTP listing. That is the property
+        #2210 was protecting, stated without a name to go stale.
+        """
+        from tortoise.tool_registry import TOOL_REGISTRY, get_http_allowed
+
         tc, _ = mcp_client
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
         assert r.status_code == 200, r.text
-        names = {t["name"] for t in _parse_sse_json(r)["result"]["tools"]}
-        assert "tortoise_session_capture" in names, (
-            "advertised tool missing from the HTTP listing")
+        listed = {t["name"] for t in _parse_sse_json(r)["result"]["tools"]}
+        advertised = {e.name for e in TOOL_REGISTRY} & get_http_allowed()
+        assert advertised, (
+            "the HTTP filter allows no live registry tool — the measured state "
+            "is unreachable, so this test would measure nothing")
+        missing = sorted(advertised - listed)
+        assert not missing, (
+            f"advertised registry tools missing from the HTTP listing: {missing}")
 
 
 # ── Graph name injection ────────────────────────────────────────────────────
@@ -2177,6 +2194,14 @@ class TestIntrospectiveQuotaCompleteness:
             ".create_entity", ".operator_action",
             ".update",  # consolidated update (also re-catches update_point/entity)
             ".supersede",  # consolidated supersede (also re-catches supersede_point)
+            # #4282 Phase 2 (#11609 lane C): the CONTAINER names. Without these the
+            # scan reads a merged write path as read-only and the completeness
+            # guarantee reports a clean sweep over an un-metered writer — the
+            # containers pass `_quota_gated` inside a registry-declared handler the
+            # old patterns never named.
+            ".register_source", ".manage_source_trust",
+            ".index_sources_from_directory", ".mine_knowledge_from_session",
+            ".mine_knowledge_from_directory",
         )
         bulk_only = (".ingest_corpus", ".index_sessions", ".backfill_v25")  # noqa: F841
 
@@ -2234,52 +2259,124 @@ class TestSC5IndexFilesSurface:
     """
 
     def test_index_files_registered_and_http_excluded(self):
-        """Registry entry exists, http_policy=False, absent from HTTP_ALLOWED."""
+        """The index surface exists, http_policy=False, absent from HTTP_ALLOWED.
+
+        Retargeted by #4282 Phase 2 (#11609 lane C): `tortoise_index_files` was
+        retired into `tortoise_index_sources_from_directory`, which carries the
+        SAME #329 posture (a server-filesystem walk with a caller-supplied path),
+        so the structural gate moves with the capability instead of pinning a
+        name that is now served only through the #3883 shim.
+        """
         from tortoise.mcp_auth import HTTP_ALLOWED
         from tortoise.tool_registry import TOOL_REGISTRY
 
         entry = next((t for t in TOOL_REGISTRY
-                      if t.name == "tortoise_index_files"), None)
-        assert entry is not None, "tortoise_index_files missing from TOOL_REGISTRY"
+                      if t.name == "tortoise_index_sources_from_directory"), None)
+        assert entry is not None, (
+            "tortoise_index_sources_from_directory missing from TOOL_REGISTRY")
         assert entry.http_policy is False, "must be http_policy=False (#329 filesystem walk)"
-        assert entry.sdk_method == "index_directory"
+        assert entry.sdk_method == "index_sources_from_directory"
         assert entry.annotations.readOnlyHint is False
         assert entry.annotations.destructiveHint is True
-        assert "tortoise_index_files" not in HTTP_ALLOWED
+        assert "tortoise_index_sources_from_directory" not in HTTP_ALLOWED
         # description carries the corpus_name guidance line (cycle-21)
         assert "corpus_name" in entry.description
         assert "unique corpus_name" in entry.description
-        # wrong-tool guidance: points at the absorbed legacy tools
-        assert "tortoise_index_sessions" in entry.description
-        assert "tortoise_ingest_corpus" in entry.description
+        # wrong-tool guidance: a caller holding one of the absorbed per-kind doors
+        # is told where the capability went (#3883's contract). ⛔ The CARRIER moved
+        # with the capability in #11609 lane C: this container is LIVE, and a live
+        # description naming retired tools is exactly the defect
+        # `test_9664::test_a_live_tool_description_never_recommends_a_retired_tool`
+        # pins against (a tool-grant client cannot call those names). So the
+        # redirect is carried by each retired entry's own `retired_use_instead`,
+        # which the registry derives from `RETIRED_USE_INSTEAD` — the machine-
+        # readable place a shim caller is actually sent. Asserting the names are in
+        # THIS prose would pin the superseded carrier AND re-grow the #9664 set.
+        assert "file_type='agent_session'" in entry.description
+        assert "file_type='doc'" in entry.description
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
+        for absorbed, arm in (
+            ("tortoise_index_sessions", 'file_type="agent_session"'),
+            ("tortoise_ingest_corpus", 'file_type="doc"'),
+            ("tortoise_index_files", "file_type=..."),
+        ):
+            assert absorbed in RETIRED_USE_INSTEAD, (
+                f"{absorbed} must be RETIRED into the container")
+            assert RETIRED_USE_INSTEAD[absorbed].startswith(
+                "tortoise_index_sources_from_directory("), (
+                f"{absorbed} must point at the container, not a dead end: "
+                f"{RETIRED_USE_INSTEAD[absorbed]!r}")
+            assert arm in RETIRED_USE_INSTEAD[absorbed], (
+                f"{absorbed} must name the {arm} arm that reproduces it: "
+                f"{RETIRED_USE_INSTEAD[absorbed]!r}")
 
     def test_index_files_quota_gated(self):
-        """tortoise_index_files MUST join _QUOTA_GATED (S8 pin, I25)."""
+        """The index surface MUST join _QUOTA_GATED (S8 pin, I25).
+
+        The retired `tortoise_index_files` keeps its entry — its shim reuses the
+        original handler, so that path is still metered — and its live
+        replacement is added by #11609 lane C, since the container creates the
+        same nodes and edges.
+        """
         import tortoise.mcp_server as ms
-        assert "tortoise_index_files" in ms._QUOTA_GATED, (
-            "index_files creates nodes AND edges — must be quota-gated")
+        for name in ("tortoise_index_files",
+                     "tortoise_index_sources_from_directory"):
+            assert name in ms._QUOTA_GATED, (
+                f"{name} creates nodes AND edges — must be quota-gated")
 
     def test_legacy_tools_deprecation_markers(self):
         """Both legacy tools are RETIRED (#3883): they keep the DEPRECATED
-        description naming the replacement, and stay http-excluded."""
-        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+        description naming the replacement, and stay http-excluded.
+
+        ⛔ Retargeted by #11609 lane C. The replacement this method used to pin
+        (`tortoise_index_files`) was itself RETIRED into
+        `tortoise_index_sources_from_directory`, so the old pin asserted a POINTER
+        AT A DEAD END — the very defect that finding B2 removed from the pointers
+        this PR re-cut. The marker must name a LIVE tool, and the pointer must be
+        the one the registry actually serves (derived from `RETIRED_USE_INSTEAD`,
+        never a typed copy that can drift with the suite green).
+        """
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, RETIRED_USE_INSTEAD, TOOL_REGISTRY
         by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+        live = {t.name for t in TOOL_REGISTRY}
         for legacy in ("tortoise_index_sessions", "tortoise_ingest_corpus"):
             d = by_name[legacy].description
             assert d.startswith("DEPRECATED"), f"{legacy} missing DEPRECATED marker: {d}"
-            assert "tortoise_index_files" in d, f"{legacy} marker must name the replacement"
+            assert "tortoise_index_sources_from_directory" in d, (
+                f"{legacy} marker must name the LIVE replacement: {d}")
             assert by_name[legacy].http_policy is False, f"{legacy} must stay http-excluded"
-            assert by_name[legacy].retired_use_instead == "tortoise_index_files(directory)"
+            # The pointer the shim serves IS the live map's value, and its target
+            # is a tool a client can actually call (B2: two hops resolve nowhere).
+            pointer = by_name[legacy].retired_use_instead
+            assert pointer == RETIRED_USE_INSTEAD[legacy], (
+                f"{legacy} pointer drifted from RETIRED_USE_INSTEAD: {pointer!r}")
+            target = pointer.split("(", 1)[0]
+            assert target in live, (
+                f"{legacy} points at {target}, which is not a LIVE tool")
 
     def test_index_files_absent_from_http_tools_list(self, mcp_client):
-        """E2E-17(e) structural half: the filesystem-walk tool is not
-        discoverable over tenant HTTP (http_policy=False, #329 posture)."""
+        """E2E-17(e) structural half: the filesystem walk is not discoverable
+        over tenant HTTP (http_policy=False, #329 posture).
+
+        ⛔ Retargeted onto the LIVE container by the #12948 review (P3-5). The
+        previous arm asserted only that the RETIRED name `tortoise_index_files`
+        was absent — a name-shaped no-op: `_RetiredToolTransform.list_tools`
+        strips retired names UNCONDITIONALLY, so no `http_policy` value, however
+        wrong, could make that assertion fail. What CAN fail is the live
+        container's own policy, so that is what this measures — plus the
+        non-vacuity guard that the listing under test is not empty (an empty
+        payload would satisfy a bare `not in` on its own).
+        """
         tc, _ = mcp_client
         r, body = _mcp_post(tc, {  # noqa: RUF059
             "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
         })
         names = {t.get("name") for t in body.get("result", {}).get("tools", [])}
-        assert "tortoise_index_files" not in names
+        assert names, f"the connector listing is empty — nothing was measured: {body}"
+        assert "tortoise_index_sources_from_directory" not in names, (
+            "the filesystem walk must not be advertised over tenant HTTP: "
+            f"{sorted(n for n in names if 'index' in n)}")
+        assert "tortoise_index_files" not in names  # retired; stripped by the transform
 
     def test_index_files_http_call_refused(self, mcp_client):
         """E2E-17(e): tools/call over HTTP → _http_excluded_error (-32004)."""
@@ -2695,7 +2792,11 @@ class TestToolCallAdmissionBoundary:
         # HTTP filter leaves out. The witness must be one of them (a retired or
         # re-listed name makes the measurement vacuous, so it is refused here).
         live_hidden = {e.name for e in TOOL_REGISTRY} - get_http_allowed()
-        hidden = "tortoise_mine_conversations"
+        # Retargeted a FOURTH time by #11609 lane C: `tortoise_mine_conversations`
+        # was retired into `tortoise_mine_knowledge_from_directory`, which
+        # carries the same transport guard. The derivation above is what named
+        # the replacement, which is why it is asserted rather than assumed.
+        hidden = "tortoise_mine_knowledge_from_directory"
         assert live_hidden, (
             "no live tool is outside HTTP_ALLOWED — the hidden state is "
             "unreachable, so this test would measure nothing")
@@ -2726,7 +2827,12 @@ class TestToolCallAdmissionBoundary:
                 "the fixture did not enter the hidden state")
             r, body = _mcp_post(tc, {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": hidden, "arguments": {}}})
+                # `directory` is REQUIRED on this container (the witness it
+                # replaced took only optional arguments), and argument validation
+                # runs before the handler — so an empty dict would measure the
+                # schema, not the transport filter. The path is never touched: the
+                # handler's FIRST statement is the HTTP exclusion.
+                "params": {"name": hidden, "arguments": {"directory": "/nonexistent"}}})
             assert r.status_code == 200, r.text
             # Dispatched normally: a tool RESULT (here its own transport
             # refusal), never an admission rejection.
