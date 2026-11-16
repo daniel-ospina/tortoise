@@ -222,12 +222,14 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
       bounds it is the store.  On the embedded lane that is a 10 s socket
       timeout, fail-closed by default and with no ``off`` opt-out (`:411`,
       `:620`-`:626`), plus one retry (`:477`) and a 2 s connect bound with a
-      sub-second backoff (`:410`, `:478`-`:479`) — so ≈ 4 × 2 × 10 s ≈ 80 s
-      typical and a little more at worst, either way PAST this 60 s bound.
+      sub-second backoff (`:410`, `:478`-`:479`) — over the four reads the
+      digest issues (`tortoise/sdk.py:40754`-`40776`) that is
+      ≈ 4 × 2 × 10 s ≈ 80 s typical and a little more at worst, either way
+      PAST this 60 s bound, which is the case `:756`-`:757` names.
       The `TORTOISE_DB_URI` arm of the same call differs on both counts: zero
-      retries (`:245`, `:293`) and a `TORTOISE_DB_SOCKET_TIMEOUT` an operator
+      retries (`:246`, `:293`) and a `TORTOISE_DB_SOCKET_TIMEOUT` an operator
       CAN switch off (`:126`-`:127`) — where it outlives the bound, it does so
-      without limit.  That is the case `:756`-`:757` names.
+      without limit.
       The BACKGROUNDED install-probe beacon (`:786`) is the other: not
       `nohup`-detached (`:767` says it does not join that fire-and-forget
       shape), but backgrounded.  Its network leg is bounded
