@@ -48885,7 +48885,17 @@ class TortoiseSDK:
                 f"supersededBy=<successor name>)`")
         verb = (f"`supersede({_refusal_repr(id_val)}, <successor id>)` {carrier_clause}")
         if carrier_cleared:
-            _shadow_only = any(isinstance(v, str) and v.strip()
+            # ⛔ BASE CONTENT, not `isinstance` (#12914 review P2, cycle 5):
+            # `isinstance` consults `__class__`, so a value declaring
+            # ``__class__ = str`` passed this test and `.strip()` then hit the
+            # OBJECT's attribute — measured, `update_entity(<live Object>,
+            # status='superseded', supersededBy=<impostor>)` raised
+            # `AttributeError: 'Impostor' object has no attribute 'strip'`
+            # where this very message's contract (reached by `None`, `''` and
+            # `123`) is a `ValueError`. Same root as the three sites this PR
+            # already bounds (`:5808`, `:22906`, `:48611`).
+            _shadow_only = any(issubclass(type(v), str)
+                               and str.__str__(v).strip()
                                for v in _name_values)
             if _shadow_only:
                 # A value IS supplied — under a spelling no reader resolves

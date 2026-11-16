@@ -95,7 +95,10 @@ What this suite pins (each row names the mutation that reds it):
   where a metaclass ANSWERS with a non-``str`` name (``RuntimeError: fmt-boom``),
   where a ``__repr__`` ANSWERS with a ``str`` whose ``__format__`` raises
   (``_refusal_repr`` bounds the ANSWER, and so do the carrier message's
-  ``status=`` and carrier-KEY operands), and at the exotic-key refusal that
+  ``status=`` and carrier-KEY operands), and where a non-``str`` CARRIER VALUE
+  reached a ``.strip()`` through ``isinstance`` on the word-keeping write
+  (``AttributeError`` for both successor spellings, #12914 review P2 cycle 5),
+  and at the exotic-key refusal that
   groups class names
   (``{type(k).__name__ for k in _exotic_keys}`` -> ``RuntimeError: name-boom``).
 
@@ -1327,3 +1330,47 @@ def test_an_exotic_key_whose_class_name_raises_is_still_a_refusal(sdk):
     assert _row(sdk, "Object", node) == before, (
         "a refused exotic-key write moved the row: "
         f"{before} -> {_row(sdk, 'Object', node)}")
+
+
+@pytest.mark.parametrize("spelling", ["supersededBy", "superseded_by"])
+def test_a_non_str_successor_on_a_word_keeping_write_is_the_clears_refusal(sdk, spelling):
+    """A carrier value that is not genuinely ``str`` is not a name — and not a crash.
+
+    Measured on this fix's fifth cut (#12914 review P2, cycle 5): the
+    word-keeping refusal decided "is a value supplied?" with
+    ``isinstance(v, str) and v.strip()`` — ``isinstance`` consults ``__class__``,
+    so an impostor passed it and ``.strip()`` raised
+    ``AttributeError: '…' object has no attribute 'strip'`` for BOTH spellings,
+    where ``None``, ``''`` and ``123`` answer the documented
+    "⛔ This call CLEARS ``supersededBy``" ValueError. Same root as the three
+    sites this PR already reads at base content (`:5808`, `:22906`, `:48611`):
+    the graph cannot encode the value, so it names nobody.
+
+    The snake spelling keeps its own branch for a GENUINE ``str`` value (the
+    shadow-column refusal, pinned by its own case); a non-``str`` there answers
+    the same ValueError from the clears branch, because it is not a name at all.
+
+    Mutation: ``isinstance(v, str) and v.strip()`` -> ``AttributeError`` (both rows).
+    """
+    node = _make(sdk, "Object", f"nonstr-successor-{spelling.lower()}")
+    before = _row(sdk, "Object", node)
+
+    for value in (_Impostor(), _ImpostorBoomRepr()):
+        with pytest.raises(ValueError) as exc:
+            sdk.update_entity(node, status="superseded", **{spelling: value})
+        msg = str(exc.value)
+        assert "CLEARS" in msg, (
+            f"a non-str successor must reach the clears refusal, not a crash: {msg!r}")
+        assert _row(sdk, "Object", node) == before, (
+            f"a refused {type(value).__name__} successor moved the row: "
+            f"{before} -> {_row(sdk, 'Object', node)}")
+
+    # The benign control: a GENUINE str under the shadow spelling keeps the
+    # shadow-column branch, so the bound did not swallow it.
+    if spelling == "superseded_by":
+        with pytest.raises(ValueError) as exc:
+            sdk.update_entity(node, status="superseded", superseded_by="v2")
+        assert "NO READER RESOLVES" in str(exc.value), str(exc.value)
+        assert _row(sdk, "Object", node) == before, (
+            f"a refused shadow-spelled write moved the row: "
+            f"{before} -> {_row(sdk, 'Object', node)}")
