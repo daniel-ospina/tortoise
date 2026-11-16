@@ -224,30 +224,45 @@ class TestNoStoredCredentialDecidesTheEndpoint:
     """
 
     def test_no_credential_store_is_reachable_from_this_test(self):
-        from pathlib import Path
+        """Ask the CODE where the stores are — a re-spelled list can hide a third.
 
-        candidates = (
-            Path.home() / ".tortoise" / "credentials.json",
-            Path.cwd() / ".tortoise",
+        The candidate chain is `mcp_client._credential_paths()`'s to own. A pin
+        that hard-codes today's two paths stays green the day a third candidate
+        is added, while this module reads that new real store and silently
+        measures a live host again — a fail-open inside the fail-loud guard.
+
+        `assert candidates` is safe here BECAUSE `_no_ambient_store` sets HOME to
+        a tmp dir: the one way `_credential_paths()` legitimately yields nothing
+        (an unresolvable `Path.home()`, e.g. a UID with no passwd entry) cannot
+        happen under this fixture, so an empty chain means this pin measured
+        nothing and must say so.
+        """
+        from tortoise.mcp_client import _credential_paths
+
+        candidates = list(_credential_paths())
+        assert candidates, (
+            "the credential-store chain resolved to NO candidates, so this pin "
+            "measured nothing — it is not a PASS"
         )
-        found = [str(c) for c in candidates if c.is_file()]
+        found = [str(path) for path, _repo_controlled in candidates if path.is_file()]
         assert not found, (
             "an ambient credential store reached this test: "
             f"{found}. It carries a KEY, and #2369 D1.1 makes the store that "
             "supplies the key supply the HOST as well — so TORTOISE_MCP_URL below "
             "is overridden and this module measures whatever host the store names. "
-            "THIS IS NOT YOUR DIFF: `_no_ambient_store` is supposed to isolate both "
-            "stores; if one is visible here, that fixture is gone or bypassed."
+            "THIS IS NOT YOUR DIFF: `_no_ambient_store` is supposed to isolate every "
+            "store in that chain; if one is visible here, the fixture is gone or bypassed."
         )
 
     def test_the_declared_daemon_url_is_the_one_the_client_resolves(self, monkeypatch):
         """`TORTOISE_MCP_URL` must be what the client actually talks to.
 
-        No `daemon_url` here ON PURPOSE: resolution is pure (env + stores, no
-        I/O), so a literal URL tests the identical property. Booting a server to
-        produce a string would only add a way for this precondition to red as
-        `daemon did not start` — an infrastructure failure wearing the name of a
-        credential-isolation one.
+        No `daemon_url` here ON PURPOSE: resolution needs no DAEMON — it reads the
+        env, and for the credential it may stat/read the stores (`_credential_paths`,
+        `_git_tracks`) — so a literal URL pins the identical property. Booting a
+        server only to produce a string would add a way for this precondition to
+        red as `daemon did not start`: an infrastructure failure wearing the name
+        of a credential-isolation one.
         """
         from tortoise.mcp_client import resolve_connection
 
