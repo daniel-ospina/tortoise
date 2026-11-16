@@ -1719,7 +1719,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_check_confidence
-  served_from: tortoise/mcp_server.py:507976eefced81ba
+  served_from: tortoise/mcp_server.py:2457694ae1e3fd91
   served_attributes: a6b8ec512e22a811
   family: memory
   family_rank: 1
@@ -2214,8 +2214,8 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_review_link_candidates
-  served_from: tortoise/mcp_server.py:f7d906eae7c40a3f
-  served_attributes: b3f10854ac3c51b7
+  served_from: tortoise/mcp_server.py:c00f5b1f175d3cc8
+  served_attributes: f6b160f62f0b2694
   family: reasoning
   family_rank: 3
   served: http
