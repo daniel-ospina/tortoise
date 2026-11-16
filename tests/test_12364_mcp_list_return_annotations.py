@@ -213,10 +213,14 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
                 f"TortoiseSDK.{passed_through} returns {sdk_kind!r}")
     # ── non-vacuity, DERIVED (never a literal floor) ─────────────────────
     # A count literal is the wrong instrument here: it reds on a CORRECT
-    # retirement (this file was 20 pass-throughs of the pre-#4282-Phase-2
-    # population and measures 19 after 14 doors became 6 containers — nothing
-    # broke, a reshaping container absorbed doors that used to pass through),
-    # while still going quiet when the scan stops READING wrappers. What the
+    # retirement — the pre-#4282-Phase-2 population measured 22 pass-throughs and
+    # this head measures 19, because three doors that USED to return the SDK value
+    # unwrapped (`tortoise_annotate_operator`, `tortoise_promote_point`,
+    # `tortoise_set_point_baseline`) were absorbed into reshaping containers, and
+    # nothing broke. (⛔ Not "20": that number is the old `>= 20` LITERAL re-read as
+    # a count — measured against origin/main with this file's own classifier:
+    # 61 rows, 22 pass-through, 39 reshaping.) Meanwhile a literal still goes quiet
+    # when the scan stops READING wrappers. What the
     # guard actually needs is that the scan is EXHAUSTIVE: every row that names
     # an SDK method is classified into exactly one of pass-through / reshaping,
     # and no row is dropped for an unreadable source or a missing SDK method.
