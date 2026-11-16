@@ -134,13 +134,21 @@ def schema():
         # the assertion below would then read a present meter as absent).
         cur.execute(
             "SELECT to_regclass('public.record_cursor'), "
-            f"to_regprocedure('public.{postgres_bytes.ROWS_RPC}(text,text,bigint[])'), "
-            f"has_function_privilege('tortoise_record_app', "
-            f"'public.{postgres_bytes.ROWS_RPC}(text,text,bigint[])', 'EXECUTE')")
+            f"to_regprocedure('public.{postgres_bytes.ROWS_RPC}(text,text,bigint[])')")
         row = cur.fetchone()
     assert row[0] is not None, "record_cursor was not created by the migrations"
     assert row[1] is not None, "the byte meter is absent — its assertions would lie"
-    assert row[2] is True, (
+    # ⛔ THE GRANT IS ASKED SEPARATELY, AND ONLY NOW. `has_function_privilege` on a
+    # signature that does not RESOLVE raises `undefined_function` (measured:
+    # `function "public.nope_fn(text,text,bigint[])" does not exist`), so folding
+    # it into the SELECT above made the absent-meter case die with a raw driver
+    # error — on exactly the container the assertion above exists to diagnose.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT has_function_privilege('tortoise_record_app', "
+            f"'public.{postgres_bytes.ROWS_RPC}(text,text,bigint[])', 'EXECUTE')")
+        granted = cur.fetchone()[0]
+    assert granted is True, (
         "the write role has NO EXECUTE on the byte meter, so the meter returns "
         "None and every armed write is charged 0 bytes — this is the state "
         "`20261116000001`'s guarded GRANT exists to remove, and it is skipped "
@@ -605,23 +613,42 @@ def test_a_cancelled_allocation_rolls_the_counter_back(schema, tenant, app):
     cancel) was not handled at all.
 
     This is a REAL cancellation: a 1 ms statement timeout on an allocation of
-    3,000 records. The class is NAMED, COUNTED, and raised retryable — and the
+    20,000 records. The class is NAMED, COUNTED, and raised retryable — and the
     increment is gone with the aborted transaction, so a retry starts from the
     same number.
+
+    ⛔ THE STATEMENT IS EXECUTED DIRECTLY, NOT THROUGH `execute_allocation`, and
+    that is not a shortcut. `execute_allocation` scopes the connection and reads
+    the isolation level INSIDE the same session that carries `SET LOCAL
+    statement_timeout = '1ms'`, so the 1 ms budget also covered those two tiny
+    statements — a scope statement slower than 1 ms raised a bare `QueryCanceled`
+    and reddened this leg for the wrong reason. The two mechanisms it would have
+    exercised have their own legs (`test_a_seed_without_the_guc_is_a_refusal_not_a_
+    divergence`, `test_a_serializable_transaction_is_refused_at_arm`); what THIS
+    leg is for is the `57014` classification on the allocation statement, so the
+    statement runs here on the already-scoped connection and is classified by the
+    module's own `raise_named` — the same call `execute_allocation` makes.
     """
     org, graph = tenant
     _seed_and_arm(app, org, graph, 0)
     rp.scope_connection(app, org)
     # The ALLOCATION statement alone, with a batch big enough to exceed 1 ms:
     # the class under test is the allocator's, so the timeout must land inside
-    # ITS statement (a 3,000-record `RecordWriter.write` cancels on statement 2
-    # of 6,001 — a layer mutation — which is a different path).
+    # ITS statement (a 20,000-record `RecordWriter.write` cancels on statement 2
+    # of 40,001 — a layer mutation — which is a different path).
     statement = ra.allocation_statement(
         org_id=org, graph_id=graph, records=_records(20_000))
     with app.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = '1ms'")
-    with pytest.raises(ra.RetryableAllocationFailure) as caught:
-        ra.execute_allocation(app, statement, org_id=org, graph_id=graph)
+        with pytest.raises(ra.RetryableAllocationFailure) as caught:
+            try:
+                cur.execute(statement.sql, statement.params)
+            except Exception as exc:
+                ra.raise_named(exc, where="the position allocation")
+                raise AssertionError(
+                    "the cancelled allocation was NOT classified as retryable "
+                    f"— raise_named returned instead of raising: {exc!r}"
+                ) from exc
     assert caught.value.sqlstate == "57014", caught.value
     assert ra.metrics()["query_cancelled"] >= 1
     app.rollback()

@@ -179,10 +179,11 @@ behind them. Everything else in the search path is unchanged.
 
 **What the move costs, stated so it is not discovered late:**
 
-- `public.point/source/event.embedding` is **`jsonb`** and **stays `jsonb`**, and **`pgvector` appears in 1 of 83
-  migrations** (`20261109000001_record_embedding_vector.sql`, `#11642`; the denominator is 83 at this head — `#11827`'s
-  `20261110000001_record_point_retire_as_of_11827.sql` added no vector, and neither does the 83rd, #12764's
-  `20261114000001_per_org_postgres_bytes.sql`) — so this WAS a full index build and a
+- `public.point/source/event.embedding` is **`jsonb`** and **stays `jsonb`**, and **`pgvector` appears in 1 of 84
+  migrations** (`20261109000001_record_embedding_vector.sql`, `#11642`; the denominator is 84 at this head — `#11827`'s
+  `20261110000001_record_point_retire_as_of_11827.sql` added no vector, and neither do the 83rd, #12764's
+  `20261114000001_per_org_postgres_bytes.sql`, nor the 84th, #12894's
+  `20261116000001_record_cursor_allocator.sql`) — so this WAS a full index build and a
   backfill, not a query edit. ⛔ **UPDATE AT THIS HEAD (`#11642`, measured on pgvector 0.8.7 / Postgres 16.15):**
   the payload column is deliberately NOT converted — a `jsonb → vector(384)` type change would rewrite the
   record's write and read seams and could not represent the caller-supplied embeddings of other widths that

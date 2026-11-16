@@ -373,10 +373,13 @@ def seed(conn: Any, *, org_id: str, graph_id: str,
     * already `active` — refused (never silently re-based);
     * re-seed of a `seeded`/`halted` row — allowed and MONOTONE.
 
-    The tenant GUC is the CALLER's obligation (:func:`record_projection.
-    scope_connection`), because this module does not own the transaction — but
-    an unset GUC is a REFUSAL (`42501`), never a divergence, and the seed runs
-    in the same transaction as that scope so the two cannot disagree.
+    The seed SETS AND VERIFIES the tenant GUC ITSELF (:func:`_scope`, the same
+    contract :func:`record_projection.scope_connection` implements), because a
+    seed on the app role with no `app.current_org_id` raises `42501` — and its
+    read-back then looks like a DIVERGENCE, which is the wrong remedy for the
+    wrong cause. It is safe to do here and not in the generic plan: the seed runs
+    in the caller's transaction, so the scope it sets and the scope the plan then
+    uses cannot disagree.
     """
     require_read_committed(conn)
     _scope(conn, org_id)
@@ -529,9 +532,13 @@ def allocation_statement(*, org_id: str, graph_id: str,
     """The ONE statement that allocates `len(records)` positions and inserts the
     rows carrying them, in plan order.
 
-    Returns a `record_projection.Statement` (imported lazily: that module
-    imports this one's constants and a module-level cycle would make the import
-    order load-bearing).
+    Returns a `record_projection.Statement`. ⛔ The import is NOT lazy in THIS
+    module: `record_allocator` imports `record_projection` at module level
+    (`_rp`, and the constants re-exported below come from it) and the cycle is
+    broken on the OTHER side — `record_projection.replay` imports THIS module
+    lazily, because `supabase/tests/pglite/validate.mjs` loads that file by path
+    and any relative import inside its functions breaks the schema drill
+    (measured). State the direction, so a lane does not "simplify" it away.
 
     ⚠️ THE PAYLOADS COME FROM `record_projection.journal_payload`, the SAME
     function `_journal_row` uses, so the allocated path and the replay path
@@ -573,8 +580,10 @@ def execute_allocation(conn: Any, statement: Any, *, org_id: str,
                        graph_id: str) -> Allocation:
     """Execute the allocation statement and return the block it produced.
 
-    ⛔ THE ISOLATION GUARD RUNS HERE TOO. `replay(allocate=True)` guards before it
-    builds the plan, but this is a PUBLIC entry point (the module's own tests call
+    ⛔ THE ISOLATION GUARD RUNS HERE TOO. `replay(allocate=True)` BUILDS the plan
+    first (`replay_plan` only emits statements, it executes none) and then guards
+    — so the refusal still lands before the first statement runs, which is the
+    property that matters. But this is a PUBLIC entry point (the module's own tests call
     it directly) and a caller that skips the guard on a SERIALIZABLE DSN would get
     `40001` per contended write instead of one arm-time refusal — with nothing on
     the path retrying it.
