@@ -39,8 +39,11 @@ Method, in the order the brief prescribes: `record_allocator.py` end to end, the
 `ALLOCATION_SQL`, then `tortoise/log.py::EventLog.append` — and then **outwards along the call graph**
 (call sites, not PR bodies), because the decisive question turned out to be a call site, not a module.
 
-What this lane did **not** do: it did not run a Postgres-backed suite (the DB-free suites below were
-run; `tools/record_wiring_check.py` is DB-free by design), and it did not modify product code. It also
+What this lane did **not** do: it did not run a Postgres-backed suite (the one DB-free gate below was
+run, `tools/record_wiring_check.py`, which is DB-free by design), it did not run the docs lint (the
+invocation exited **2** on its own missing required inputs — `--markdownlint-output`,
+`--markdownlint-expected-files`, `--lychee-output` — so it *never ran*; recorded in
+`WORKTREE-REPORT.md` as suite 2, exit 2, and **not** a clean result), and it did not modify product code. It also
 did not re-derive the discussion on `#12894`/`#12959` line by line — where a PR-body claim is quoted
 below it is marked as a claim and the code is what settles it.
 
@@ -128,8 +131,10 @@ The proof is a call-site census, not a reading of the PR body.
    tortoise/api.py tortoise/mining.py tortoise/selfhost_api.py` returns **no** `allocate` plumbing, and
    no env read names the allocator.
 7. Nothing in production ever calls `record_allocator.seed/arm/halt/reopen`: outside `tests/`, the only
-   references are `record_projection.py:7630` (the lazy import inside `replay`) and
-   `record_writer.py:2402` (`_allocator_refusal_cause` reading `record_allocator.metrics()`).
+   **imports** of the module are `record_projection.py:7630` (the lazy import inside `replay`) and
+   `record_writer.py:2402` (`_allocator_refusal_cause` reading `record_allocator.metrics()`) — every
+   other mention is prose in a docstring or a comment (`record_projection.py:6362,6401,6874,6876,6883,6889,6900`;
+   `record_writer.py:1586,2395,2665,2787`), and no call to any of the four entry points exists.
    `provision_graph_record` — the creation hook of `§A7.8` item 8 — **does not exist in the tree**
    (`rg -n 'provision_graph_record' --glob '!tests/**'` returns plan-document hits only).
 
@@ -301,8 +306,11 @@ does not carry it: measured with `git merge-base --is-ancestor e2a9eadb87 <ref>`
 `e2a9eadb87`, whose message records this as a
 measured P1 (the D3 legs of `tests/test_9567_record_capstone.py` measuring the meter's `_ensure_indexes()`
 DDL as *"mutating cache statements with no journal append and no APPLIED record behind them"*), fixed
-there by `_get_registry(no_schema_ddl=True)`. `#12959`'s body records the opposite attribution for the
-same red legs (*"reproduced identically on a pristine `origin/main` worktree"*, evidence on `#11477`).
+there by `_get_registry(no_schema_ddl=True)`.
+
+Against that, a **comment** on `#12959` (id `6906584678`) records the opposite attribution for the same
+red legs — *"reproduced identically on a pristine `origin/main` worktree"*, evidence on `#11477`. It is
+a comment and **not the PR body**, which contains neither "pristine" nor "11477" (measured).
 **Both statements are on the record and they are not obviously compatible.** What this lane verified is
 the *code shape* on `main`: the unguarded call is there. The measurement that it fires belongs to
 `#11477`.
@@ -350,7 +358,7 @@ it. `§A7.7` step numbers are the plan's.
    needs **its own decision on its own issue** and is *"a PRECONDITION of this sub-step, not of 6.3"*.
 6. **`#9318` — journal identity in the key** (*specified, open*). Until it lands, the guard must stay,
    and the guard's own docstring says leaving it past the key change *"converts legitimate old-journal
-   replays into refusals"* (`record_projection.py:6760-6766`). `#9318` is open because its acceptance
+   replays into refusals"* (`record_projection.py:6752-6753`). `#9318` is open because its acceptance
    needs identity in the key; `#12904` only made the conflict loud.
 7. **The JSONL becomes an EXPORT rather than the commit point** (`§A7.7` 6.4/6.5, `§A7.5.8` —
    *specified, unbuilt*). Today `sdk.py:16215-16217` still declares the append the commit point, and the
@@ -461,7 +469,10 @@ The honest comparison is `git log refs/pull/12959/head..<wip-ref>` plus a path-s
 
 ## 9. Commands used (verbatim, with counts)
 
-Every command whose output this document relies on was run through the lane's report tool:
+Every command whose output this document relies on was run through the lane's report tool. **One
+recorded suite did not run and is reported as red rather than omitted:** the docs-lint invocation exited
+`2` because the harness needs three outputs this lane did not produce, so the document was never
+linted by that tool — a gap in coverage, stated here rather than left to `WORKTREE-REPORT.md`:
 
 ```bash
 uv run python tools/worktree_report.py init --issue 12894
