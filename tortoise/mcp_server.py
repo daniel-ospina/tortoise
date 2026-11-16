@@ -9479,7 +9479,21 @@ def tortoise_session_capture(conversation: list[dict],
         # ERR_QUOTA code rather than making the caller interpret a bare status.
         # One mapping site covers every 402 this impl can raise, so REST and
         # MCP cannot drift on the class of a refusal.
-        out = _SafeError({"error": str(detail), "status": status})
+        #
+        # ⛔ A TYPED `detail` IS RENDERED AS ITS MESSAGE, NEVER AS A PYTHON
+        # REPR (#12992 review P2). The capture door's 429s became dicts — the
+        # capacity refusal in this PR, and ``ingest_rate_limited`` before it —
+        # so `str(detail)` reached this tool surface as
+        # `"{'code': 'capture_capacity_saturated', 'message': '…', …}"`: a repr,
+        # not JSON, with `'` quoting that an agent's parser cannot read, and the
+        # plain sentence the refusal was worded as lost inside it. This is the
+        # SAME rule `hosted_api._record_capture_last_error` already records for
+        # the dashboard sub-line ("a Python repr would leak structure.
+        # Stringify to the message") — one file, one convention, so the two
+        # consumers of one detail cannot disagree about it.
+        error_text = (str(detail.get("message") or detail)
+                      if isinstance(detail, dict) else str(detail))
+        out = _SafeError({"error": error_text, "status": status})
         if status == 402:
             out["code"] = ERR_QUOTA
         return out

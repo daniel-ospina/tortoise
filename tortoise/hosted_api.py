@@ -7384,9 +7384,20 @@ def _capture_health() -> dict:
             # still carries it, so this needs no guard beyond the outer except.
             workers = _CAPTURE_EXECUTOR._max_workers
     except Exception as exc:  # a health path must always answer
+        # ⛔ THE DEGRADED ARM PUBLISHES THE SAME KEYS AS THE HEALTHY ONE (#12992
+        # review P2). An ad-hoc short dict is the defect this file records 250
+        # lines below for `wait_bound_breaches` — "an ad-hoc `{"error",
+        # "refusing"}` dict is 2 of 13 keys, so a dashboard reading
+        # `refusals["share"]` … gets a `KeyError` on exactly the degraded path
+        # where it is looking for an answer", measured twice. The operator
+        # contract in `docs/infra-runbook.md` §4.1.1b documents ten keys, so a
+        # jq `.capture.retry_after` on this arm must not raise.
         return {"in_flight": None, "max_in_flight": None, "workers": None,
                 "refused_total": None, "last_refused_at": None,
-                "refusing": None, "error": str(exc)[:200]}
+                "refusing": None, "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
+                "code": _CAPTURE_CAPACITY_CODE,
+                "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+                "error": str(exc)[:200]}
     refusing = last is not None and (time.time() - last) <= _CAPTURE_REFUSAL_WINDOW_S
     return {
         "in_flight": in_flight,

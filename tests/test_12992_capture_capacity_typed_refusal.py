@@ -210,3 +210,44 @@ def test_a_saturated_gate_does_not_degrade_health_status(
     assert body["status"] == "ok", (
         "a saturated capture gate degraded liveness — a busy gate is not a dead "
         "process (#12992)")
+
+
+def test_the_degraded_arm_publishes_the_same_keys_as_the_healthy_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_capture_health()` has TWO arms and a reader must not get a `KeyError`.
+
+    MUTATION THAT REDS THIS: shrink the `except` arm back to the ad-hoc short
+    dict it was written as (7 keys, no `refusal_window_s` / `code` /
+    `retry_after`) -> the key-set equality below fails. That is not hypothetical
+    tidy: it is the class this same module already records 250 lines away for
+    `wait_bound_breaches` — "an ad-hoc `{"error", "refusing"}` dict is 2 of 13
+    keys, so a dashboard reading `refusals["share"]` … gets a `KeyError` on
+    exactly the degraded path where it is looking for an answer", measured twice
+    (#12992 review P2).
+
+    The degraded arm is REACHABLE — `_capture_health` reads
+    `_CAPTURE_EXECUTOR._max_workers` inside its `try`, and a pool whose executor
+    was already collected raises there — so the operator's `jq .capture` must
+    answer on it, with the runbook's §4.1.1b key set, not a shorter one.
+    """
+    healthy = ha._capture_health()
+
+    class _DeadPool:
+        @property
+        def _max_workers(self):
+            raise RuntimeError("capture pool is gone")
+
+    monkeypatch.setattr(ha, "_CAPTURE_EXECUTOR", _DeadPool())
+    degraded = ha._capture_health()
+
+    assert degraded["error"], "the degraded arm must say WHY it could not measure"
+    assert set(degraded) == set(healthy), (
+        "the degraded arm publishes a different key set than the healthy one — a "
+        "dashboard/jq reader gets a KeyError on exactly the path where it is "
+        "looking for an answer (#12992 review P2)")
+    # The capacity identity is still true on the degraded arm: these are constants,
+    # not measurements, so nothing about a dead pool makes them unknown.
+    assert degraded["code"] == healthy["code"]
+    assert degraded["retry_after"] == healthy["retry_after"]
+    assert degraded["refusal_window_s"] == healthy["refusal_window_s"]

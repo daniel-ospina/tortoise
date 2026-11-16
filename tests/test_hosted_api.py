@@ -14661,6 +14661,19 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         "cannot bound anything", "cannot be evaluated",
         "an unscoped cap would apply", "Import artifact exceeds the size cap",
         "Artifact exceeds the team graph size cap", "Session turn cap exceeded",
+        # ⚠️ `Too many registration attempts` is RETAINED while NO refusal's
+        # prose matches it any more (#12992 review P3, measured). The `/v1/register`
+        # 429 builds `detail={"code": "over_request_rate_limit_ip", "message": …}`
+        # and used to enter this universe on the KEY `over_request_rate_limit_ip`,
+        # which contains "limit" — the guard was asking its one question of a field
+        # name. Now that a dict's prose is its `message` value, that sentence names
+        # its next step and carries no `LIMIT_WORDS`, so the site is OUTSIDE the
+        # universe and this row exempts nothing. Kept rather than deleted because
+        # it is this registry's normal state for a THROTTLE (the seam-body row below
+        # is unmatched for the same reason) and because deleting it would silently
+        # re-arm: a future edit that gave that message limit prose would then be a
+        # RED demanding a fresh decision, which is the correct outcome, whereas an
+        # inert row plus this note is the one that a reader can audit.
         "Too many registration attempts", "Signup is rate-limited right now",
         # #3514: the demand surface's two THROTTLES. Each names its next step
         # ("retry shortly", plus the `Retry-After` header), so there is no
@@ -14768,7 +14781,18 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         return out
 
     @staticmethod
-    def _prose(val, consts):
+    def _render(node, consts):
+        """The string constants a node contributes, with `Name`s resolved."""
+        text = ""
+        for child in ast.walk(node):
+            if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                text += child.value
+            elif isinstance(child, ast.Name) and child.id in consts:
+                text += consts[child.id]
+        return text
+
+    @classmethod
+    def _prose(cls, val, consts):
         """The customer-facing PROSE of a ``detail=`` value.
 
         ⛔ FOR A DICT THE PROSE IS THE ``message`` VALUE — never every string
@@ -14781,28 +14805,34 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         sentence offer the human path) was asked of the field names (#12992:
         the capacity 429 in ``_reserve_capture_slot`` was reported as an
         uncompliant over-limit refusal, with its `detail` printed as its own
-        keys). A dict with NO ``message`` key falls back to the old
-        every-string-constant reading, so nothing previously visible stops
-        being visible.
+        keys).
+
+        ⛔ AND THE `message` READING MUST NOT BE ABLE TO MAKE A REFUSAL
+        INVISIBLE, which is why it is a PREFERENCE with a fallback and not a
+        substitution (measured, #12992 review P1). `_ingest_rate_limited`
+        (``hosted_api.py:10980``) builds ``"message": with_limit_contact(message)``
+        — a CALL, so the message-only reading resolves to the empty string and
+        the generic non-literal skip below swallowed the site ENTIRELY. It was
+        in-universe and COMPLIANT before (it entered on the keys and its source
+        segment carries the seam), i.e. the one shape that proves a dict refusal
+        CAN carry the human path stopped being checked at all — and a removal of
+        its `with_limit_contact` seam then stayed green. So: read the `message`
+        value when it yields prose; when it yields NOTHING (a call, a bare
+        variable, a nested expression) fall back to the whole subtree, which is
+        the reading that site had before. A dict with no ``message`` key takes
+        the same fallback.
 
         A ``Name`` is resolved through the module's own string constants (see
-        `_str_constants`); anything else contributes nothing and is left to the
-        non-literal skip.
+        `_str_constants`); anything else contributes nothing to `_render` and is
+        left to the non-literal skip.
         """
-        nodes = [val]
         if isinstance(val, ast.Dict):
-            keyed = [v for k, v in zip(val.keys, val.values, strict=True)
-                     if isinstance(k, ast.Constant) and k.value == "message"]
-            if keyed:
-                nodes = keyed
-        text = ""
-        for node in nodes:
-            for child in ast.walk(node):
-                if isinstance(child, ast.Constant) and isinstance(child.value, str):
-                    text += child.value
-                elif isinstance(child, ast.Name) and child.id in consts:
-                    text += consts[child.id]
-        return text
+            for k, v in zip(val.keys, val.values, strict=True):
+                if isinstance(k, ast.Constant) and k.value == "message":
+                    keyed = cls._render(v, consts)
+                    if keyed.strip():
+                        return keyed
+        return cls._render(val, consts)
 
     def _refusal_messages(self):
         """Yield (module, line, construct, text, compliant) per refusal."""
@@ -14854,6 +14884,43 @@ class TestOverLimitSurfacesOfferTheHumanPath:
                     seg = ast.get_source_segment(src, val) or ""
                     yield rel, node.lineno, construct, text, (
                         "with_limit_contact" in seg)
+
+    def test_the_message_reading_cannot_make_a_refusal_invisible(self):
+        """A dict's `message` may be an EXPRESSION — and then the reader must not go blind.
+
+        MUTATION THAT REDS THIS: make `_prose` return the `message` reading
+        unconditionally (i.e. drop the whole-subtree fallback) -> this assertion
+        fails on the first leg and, at tree level, the second leg loses
+        `_ingest_rate_limited` entirely. Measured on the intermediate state of
+        this very change (#12992 review P1): the site was IN-UNIVERSE and
+        COMPLIANT before, and became invisible — so removing its
+        `with_limit_contact` seam stayed GREEN, which is the one regression this
+        file exists to catch.
+
+        Why it happens: `_ingest_rate_limited` (``hosted_api.py:10980``) builds
+        ``"message": with_limit_contact(message)`` — a CALL, so `ast.walk`
+        yields no `Constant` and no resolvable `Name`, and the message-only
+        reading is the empty string that the generic non-literal skip discards.
+        """
+        import ast as _ast
+        # leg 1 — the SHAPE, in isolation: a dict whose message is a call.
+        call = _ast.parse(
+            'f(status_code=429, detail={"code": "ingest_rate_limited", '
+            '"message": with_limit_contact(m)})').body[0].value
+        val = next(kw.value for kw in call.keywords if kw.arg == "detail")
+        assert self._prose(val, {}) != "", (
+            "a dict detail whose `message` is a CALL resolved to empty prose — "
+            "the message-only reading must fall back to the whole subtree, or "
+            "the site is silently skipped as 'non-literal'")
+        # leg 2 — the REAL site, where the cost lands: it must still be found AND
+        # still be compliant (its source segment carries the seam).
+        ingest = [r for r in self._refusal_messages() if "ingest_rate_limited" in r[3]]
+        assert ingest, (
+            "the `429 ingest_rate_limited` refusal is no longer in the universe — "
+            "a dict detail whose message is an expression was made invisible "
+            "(#12992 review P1)")
+        assert all(ok for *_r, ok in ingest), (
+            f"a compliance check was LOST, not re-verdicted: {ingest}")
 
     def test_every_over_limit_refusal_offers_the_human_path(self):
         missed = [f"{rel}:{line} [{c}] {t[:66]!r}"
