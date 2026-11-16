@@ -486,6 +486,19 @@ def test_a_post_cutover_enumerated_replay_is_refused_not_duplicated() -> None:
     record at two positions — and the door's refusal text recommended exactly
     that replay as the remedy.
 
+    ⛔ THREE MODES, THREE ANSWERS, and a pin that only tested one of them hid a
+    P1 (review, measured): COUNTER-ROW PRESENCE is not the question — `seed()`
+    writes its row in `seeded` mode to record a coordinate it DERIVED
+    (`GREATEST(row_max, enumerated_floor)`), not one it ISSUED. So:
+
+    * `active`  — issued ⇒ refused (the ruling above);
+    * `halted`  — DID issue before it was halted ⇒ refused;
+    * `seeded`  — issued NOTHING ⇒ NOT refused, and the replay still writes.
+      That is the documented tail-heal: `SeedResult.healed_tail` is *"the
+      `None`-position tail that a later replay fills"*, and `seed()`'s own
+      docstring says it *"is REPORTED, not repaired here"*. Refusing it deleted
+      the recovery path a seed exists to prepare.
+
     ⛔ THE REFUSAL IS NARROW, and that is asserted in the same breath: the SAME
     replay on the SAME recorder, with no cursor row, still writes its position
     row. That is every graph before cutover, and it is what keeps the existing
@@ -545,19 +558,37 @@ def test_a_post_cutover_enumerated_replay_is_refused_not_duplicated() -> None:
             return [sql for sql, _ in self.executed
                     if sql.startswith(rp._JOURNAL_INSERT_PREFIX)]
 
-    # 1. CUT OVER — the counter holds a row, so the positions are ISSUED.
-    cut_over = _CounterConn((3, ra.MODE_ACTIVE))
-    with pytest.raises(rp.RecordProjectionError) as refused:
-        rp.replay(records, cut_over, org_id="o", graph_id="g", start_seq=9)
-    message = str(refused.value)
-    for needle in ("ENUMERATED replay is REFUSED", "ISSUED", "record_cursor",
-                   "mode='active'", "#9190", "allocate=True", "seed"):
-        assert needle in message, (
-            f"the refusal does not name {needle!r}, so an operator cannot tell it "
-            f"from a lost write or a driver fault: {message}")
-    assert cut_over.journal_statements() == [], (
-        "the refusal came AFTER a position write — the duplicate the guard exists "
-        f"to prevent was already stored: {cut_over.executed!r}")
+    # 1. CUT OVER — the counter holds a row and has ISSUED:
+    #    `active` refuses, `halted` refuses, `seeded` does NOT.
+    for refused_mode in (ra.MODE_ACTIVE, ra.MODE_HALTED):
+        cut_over = _CounterConn((3, refused_mode))
+        with pytest.raises(rp.RecordProjectionError) as refused:
+            rp.replay(records, cut_over, org_id="o", graph_id="g", start_seq=9)
+        message = str(refused.value)
+        for needle in ("ENUMERATED replay is REFUSED", "ISSUED", "record_cursor",
+                       f"mode='{refused_mode}'", "#9190", "allocate=True",
+                       "seed"):
+            assert needle in message, (
+                f"the refusal does not name {needle!r}, so an operator cannot tell "
+                f"it from a lost write or a driver fault: {message}")
+        assert cut_over.journal_statements() == [], (
+            "the refusal came AFTER a position write — the duplicate the guard "
+            f"exists to prevent was already stored: {cut_over.executed!r}")
+
+    # 1b. SEEDED — the counter row EXISTS but has issued NOTHING (its `seq` is
+    #     the record's own maximum, derived by `SEED_SQL`), so the replay is the
+    #     documented tail-heal and MUST still write. Pre-fix this raised the
+    #     "positions are ISSUED" refusal and the position row was never written.
+    seeded = _CounterConn((0, ra.MODE_SEEDED))
+    seeded_report = rp.replay(records, seeded, org_id="o", graph_id="g",
+                              start_seq=1)
+    assert seeded_report.events == 1, (
+        f"the seeded tail-heal did not apply the record: {seeded_report!r}")
+    seeded_writes = seeded.journal_statements()
+    assert len(seeded_writes) == 1, (
+        "a replay on a `seeded` counter stopped writing its position row, so "
+        "the `None`-position tail `SeedResult.healed_tail` reports can never be "
+        f"filled: {seeded.executed!r}")
 
     # 2. NOT CUT OVER — no cursor row, so the enumeration IS the coordinate and
     # the replay is byte-identical to what it was before the guard existed.
