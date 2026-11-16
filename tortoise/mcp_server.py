@@ -5712,9 +5712,11 @@ def tortoise_get_operator(id: str) -> dict:
     snapshotted into `config/surface-manifest.yml`'s `job:` field and compared by
     `tools/surface_manifest.py check`, and the served row's handler docstring is
     digested by `tools/surface-guard.py`. The retired row carries `use_instead`
-    and NEITHER a `job:` nor a `served_from`, so nothing reads this entry —
-    editing the live `tortoise_get_entity` text is the change that needs the
-    owner's approval and a manifest re-cut.
+    and NEITHER a `job:` nor a `served_from`, so nothing derives a GATE from this
+    entry's `description` — though its `use_instead`/`sdk_method`/`http_policy` ARE
+    still compared, and the description is still what the RETIRED shim advertises.
+    Editing the live `tortoise_get_entity` text is the change that needs the owner's
+    approval and a manifest re-cut.
 
     ⚠️ ARMED MODES (`TORTOISE_RECORD_SERVE`) change TWO of those sentences (#12941):
     a found operator also names the store that answered (`servedFrom` /
@@ -5723,7 +5725,13 @@ def tortoise_get_operator(id: str) -> dict:
     operator" error, because a store that could not see the node cannot establish
     anything about the graph. A genuine non-operator Point still answers the plain
     `{"error": "Point … is not an operator"}` dict, and an established absence is
-    still `{}`. With the flag unset the response is unchanged."""
+    still `{}`.
+
+    With `TORTOISE_RECORD_SERVE` unset the seam is never consulted and the answer is
+    the pre-#12941 one — BUT the residency marker is armed SEPARATELY: with
+    `TORTOISE_RESIDENCY` on, a cache that declares itself PARTIAL and does not cover
+    the id still answers `{"residency": "not-hot"}` here, exactly as on every other
+    point door (#7952). Neither flag is set by default."""
     # #12941: this door reads a POINT by id, so it honours the record seam like
     # `tortoise_get_point` does — an operator written and then verified must not
     # read back ABSENT (the issue's own measured population: 5 operators in the
