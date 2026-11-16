@@ -247,10 +247,11 @@ class TestNoStoredCredentialDecidesTheEndpoint:
         measures a live host again — a fail-open inside the fail-loud guard.
 
         `assert candidates` is safe here BECAUSE `_no_ambient_store` sets HOME to
-        a tmp dir: the one way `_credential_paths()` legitimately yields nothing
-        (an unresolvable `Path.home()`, e.g. a UID with no passwd entry) cannot
-        happen under this fixture, so an empty chain means this pin measured
-        nothing and must say so.
+        a tmp dir: the two ways `_credential_paths()` legitimately loses a
+        candidate (an unresolvable `Path.home()`, e.g. a UID with no passwd
+        entry; a REMOVED `Path.cwd()`, e.g. a reaped worktree — both named in
+        its own docstring) cannot happen under this fixture, so an empty chain
+        means this pin measured nothing and must say so.
         """
         from tortoise.mcp_client import _credential_paths
 
@@ -290,7 +291,20 @@ class TestNoStoredCredentialDecidesTheEndpoint:
             f"the client resolved {connection.url!r} instead of the declared "
             f"{declared!r} (sources read: {connection.sources})"
         )
-        assert connection.declared is True
+        # ⛔ `source`, not `declared`: `declared` is `bool(env_url)` on the env arm
+        # AND on the no-key arm, and the store arm sets it from the store's own
+        # `api_url` — so it is `True` in every arm that can satisfy the assertion
+        # above, which makes it entailed and unable to tell an env-resolved
+        # identity from a store-resolved one (#2369 D1.1's whole question).
+        # `source` is the discriminating field: the env arm names the env KEY, the
+        # store arm names the store path, and "no credential anywhere" is `None` —
+        # which is the only state `_no_ambient_store` permits.
+        assert connection.source is None, (
+            f"this test resolved its identity from {connection.source!r} instead of "
+            f"from nothing at all (sources read: {connection.sources}). THIS IS NOT "
+            "YOUR DIFF: `_no_ambient_store` deletes both env key names and isolates "
+            "both stores, so no credential source may answer here."
+        )
 
 
 class TestNoEngineImports:
