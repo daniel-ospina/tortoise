@@ -10165,7 +10165,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `239 + 1` and `238 + 2` at THIS tree, both equal to the `240` the pin re-derives
+    count: `243 + 1` and `242 + 2` at THIS tree, both equal to the `244` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
@@ -11604,6 +11604,130 @@ def test_12549_an_UNSET_interpolation_is_not_read_as_an_explicit_empty(
         "      TORTOISE_EMBED_GATE: \"\"\n", encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped
+
+
+def test_12549_an_EXPORTED_assignment_exports_its_name_too(tmp_path, monkeypatch):
+    """`#12549` defect 4: `export FLAG=1` then `FLAG=0` runs `0` — so it must read OFF.
+
+    ⛔ This is the FALSE-ARM direction, the class this instrument exists to remove, and
+    it survived the first conversion: the exported-name matcher accepted only the BARE
+    `export NAME` form, so `export FLAG=1` left the exported set empty, the later plain
+    `FLAG=0` was not a decision at all, and the file published `ON` while `bash -c
+    'export F=1; F=0; env'` holds `0` (measured, fresh review of `#12902`, P1).
+    """
+    (tmp_path / "Dockerfile").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=0\n'
+        'ENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\nTORTOISE_EMBED_GATE=0\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
+    # …and the arm is NOT over-collected: `export FLAG=1` with nothing overriding it is
+    # still the last decision, so a reader on the other side cannot be a blanket OFF.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped
+    # …and a MIXED `export A=1 B` argument list exports both names, so the same
+    # reassignment is still a decision.
+    (tmp_path / "entrypoint.sh").write_text(
+        "#!/bin/bash\nexport OTHER_VAR=1 TORTOISE_EMBED_GATE=1\n"
+        "TORTOISE_EMBED_GATE=0\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
+
+
+def test_12549_a_blank_gate_key_is_not_blamed_on_an_UNRELATED_unset_variable(
+        tmp_path, monkeypatch):
+    """The unset-interpolation signal is PER KEY, not per FILE (fresh review, P2).
+
+    ⛔ MEASURED before this: a literal `FLAG: ""` beside an unrelated
+    `OTHER: "${MISSING_VAR}"` in the SAME file was published as *"compose defaulted an
+    unset interpolation variable (MISSING_VAR) to a blank string — the file fixes no
+    value"*, and a MEASURED `OFF` became `UNMEASURED` — `#12549` defect 1's own class
+    (a cause the run did not measure), one layer in. The per-key question is answered by
+    re-resolving with the variable BOUND and comparing, so the literal blank stays a
+    measured `OFF`.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"\"\n"
+        "      UNRELATED: \"${MISSING_VAR}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "OFF"}, shipped
+    # …and the key that DOES lean on the variable still holds the row UNMEASURED, so the
+    # per-key narrowing cannot pass by never resolving an interpolation at all.
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${MISSING_VAR}\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    assert any("MISSING_VAR" in hit for hit in shipped["indeterminate"]), shipped[
+        "indeterminate"]
+
+
+def test_12549_a_PROFILED_blank_is_NOT_published_as_a_disarm(tmp_path, monkeypatch):
+    """The mirror half: the all-profiles pass never consulted the unset warning.
+
+    ⛔ MEASURED before this: the same `${MISSING}` shape inside a `profiles:`-gated
+    service was scored `''` and published as a DISARMING assignment, i.e. a value claim
+    about a value the resolver had just said it could not resolve. A deployment that
+    ENABLES that profile runs with whatever the variable is, so the file is
+    `UNMEASURED` — fail closed, and named as unresolved rather than as a `0`.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  debug:\n    image: alpine\n    profiles: [debug]\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"${MISSING_OTHER}\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "UNMEASURED"}, shipped
+    assert shipped["deployment"]["on"] is False, shipped["deployment"]
+    # …and a PROFILED literal blank is still a measured disarm (the narrowing is per
+    # key, not a blanket refusal to score profiled blanks).
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: alpine\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"1\"\n"
+        "  debug:\n    image: alpine\n    profiles: [debug]\n    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"0\"\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["files"] == {"docker-compose.yml": "DISAGREE"}, shipped
+
+
+def test_12549_row_ones_HOLD_note_splits_unreadable_from_unresolved(
+        tmp_path, monkeypatch):
+    """`#12549` defect 1 must be fixed in BOTH notes a reader reads, not just the gate's.
+
+    ⛔ MEASURED by the fresh review of `#12902` as the missing falsifier: reverting ROW
+    1's hold note to `unreadable {deployment['unmeasured']}` left the whole suite GREEN,
+    so the half of defect 1 a DoD reader actually reads could be undone silently. A file
+    the walk READ whose value it could not RESOLVE is named as such — and is never
+    called unreadable, which sends a reader to chase permissions on a file with none.
+    """
+    _fake_rule_tree(tmp_path)
+    (tmp_path / "Dockerfile.hosted").write_text(
+        'FROM python:3.12\nENV TORTOISE_EMBED_GATE=0\n'
+        'ENTRYPOINT ["/entrypoint.sh"]\n', encoding="utf-8")
+    (tmp_path / "entrypoint.sh").write_text(
+        '#!/bin/bash\nexport TORTOISE_EMBED_GATE="${SOME_OTHER_FLAG}"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["measured"] is False, shipped["deployment"]
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default UNMEASURED"))
+    assert "unreadable none" in hold, hold
+    assert "cannot RESOLVE" in hold and "entrypoint.sh" in hold, hold
+    assert "UNREADABLE deployment file(s)" not in hold, hold
 
 
 def test_12549_the_AMBIENT_environment_cannot_make_a_compose_default_read_armed(

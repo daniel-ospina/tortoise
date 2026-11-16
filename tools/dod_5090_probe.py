@@ -2591,8 +2591,14 @@ def _resolver_env() -> dict[str, str]:
     return env
 
 
-def _run_config_resolver(argv: list[str]) -> dict:
+def _run_config_resolver(argv: list[str], *, extra_env: dict[str, str] | None = None) -> dict:
     """Run one config resolver; ``{"ok", "stdout", "stderr", "reason", "argv"}``.
+
+    ⛔ ``extra_env`` is the ONLY way a caller may add to the resolver's environment, and
+    it exists for ONE question: *does this key's resolved value lean on a variable the
+    file left unset?* (`_compose_unset_dependent_scopes`). It is added to
+    `_resolver_env`'s allowlist, never to the ambient environment — the discipline that
+    keeps a lane's own exported flag out of a shipped default (`#10996`).
 
     ⛔ **Three-valued by construction.** A resolver that cannot run (no binary, a
     timeout, a non-zero exit) is `ok: False` WITH the reason from its own stderr —
@@ -2604,11 +2610,14 @@ def _run_config_resolver(argv: list[str]) -> dict:
     progress chatter before its error, and every earlier failure in this module has
     been blamed on the wrong line of a multi-line message.
     """
+    env = _resolver_env()
+    if extra_env:
+        env.update(extra_env)
     try:
         # Fixed argv, no shell (`shell=False` is the default): nothing here is
         # caller-supplied text, so there is no injection surface to guard.
         proc = subprocess.run(
-            argv, cwd=str(REPO_ROOT), env=_resolver_env(), capture_output=True,
+            argv, cwd=str(REPO_ROOT), env=env, capture_output=True,
             text=True, timeout=RESOLVER_TIMEOUT_S, check=False)
     except FileNotFoundError:
         return {"ok": False, "stdout": "", "stderr": "", "argv": argv,
@@ -2645,6 +2654,84 @@ _COMPOSE_UNSET_WARNING = re.compile(
 def _compose_unset_interpolation(stderr: str) -> set[str]:
     """The names compose defaulted to a blank string, out of its stderr."""
     return {m.group("name") for m in _COMPOSE_UNSET_WARNING.finditer(stderr or "")}
+
+
+#: The value the PER-KEY unset probe binds each unset interpolation variable to.
+#: ⛔ TRUTHY on purpose: a key that leans on the variable then resolves to a value that
+#: would ARM the gate — the loudest possible signal — while a key that does not lean on
+#: it cannot move at all. So the probe answers "did THIS key's blank come from the unset
+#: variable?" by comparison, not by inference from one stderr line.
+_COMPOSE_UNSET_PROBE_VALUE = "1"
+
+
+def _compose_blank_scopes(services: dict, flag: str) -> set[str]:
+    """The services whose RESOLVED ``flag`` value is the blank string."""
+    blank: set[str] = set()
+    for name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        env = service.get("environment") or {}
+        if isinstance(env, dict) and env.get(flag) == "":
+            blank.add(name)
+    return blank
+
+
+def _compose_unset_dependent_scopes(argv: list[str], flag: str, baseline: dict,
+                                   unset: set[str]) -> set[str] | None:
+    """WHICH services' ``flag`` value actually LEANS on an unset interpolation variable.
+
+    ⛔ The warning compose writes is a **FILE-level** fact and the blank it produces is a
+    **PER-KEY** one, so testing `literal == "" and unset` attributed the cause to EVERY
+    blank key in the file (measured, fresh review of `#12902`): a literal
+    `FLAG: ""` beside an unrelated `OTHER: "${MISSING}"` was published as *"compose
+    defaulted an unset interpolation variable (MISSING) to a blank string"* and a
+    MEASURED `OFF` became `UNMEASURED` — `#12549` defect 1's own class, one layer in.
+
+    The question is EMPIRICAL — *does this key's value change when the variable is
+    bound?* — so it is asked of the resolver (bind it, re-resolve, compare) rather than
+    answered from the stderr text. Returns the set of services whose value CHANGED (their
+    blank therefore came from the unset variable), or `None` when the probe could not
+    produce an answer at all — and `None` must be held UNRESOLVED by the caller, never
+    collapsed into either verdict.
+    """
+    probe = _run_config_resolver(
+        argv, extra_env={name: _COMPOSE_UNSET_PROBE_VALUE for name in unset})
+    if not probe["ok"]:
+        return None
+    try:
+        model = json.loads(probe["stdout"] or "{}")
+    except json.JSONDecodeError:
+        return None
+    services = (model.get("services") or {}) if isinstance(model, dict) else {}
+    if not isinstance(services, dict):
+        return None
+    changed: set[str] = set()
+    for name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        env = service.get("environment") or {}
+        before = baseline.get(name)
+        before = (before.get("environment") or {}) if isinstance(before, dict) else {}
+        if isinstance(env, dict) and env.get(flag) != before.get(flag):
+            changed.add(name)
+    return changed
+
+
+def _compose_unset_reason(unset: set[str], *, distinguished: bool) -> str:
+    """The row text for a blank whose blank-ness could not be resolved.
+
+    ⛔ Two sentences, because they are two different measurements: *this key leaned on
+    the unset variable* and *the probe could not tell* are not the same claim, and
+    publishing the second as the first is the cause-claim defect `#12549` defect 1
+    names.
+    """
+    names = ", ".join(sorted(unset))
+    if distinguished:
+        return (f"compose defaulted an unset interpolation variable ({names}) to a "
+                "blank string — the file fixes no value")
+    return (f"compose warned that an interpolation variable ({names}) is unset, and a "
+            "second resolve with it bound could not distinguish this key's blank from "
+            "a literal one — the file fixes no determinable value")
 
 
 def _resolved_script_tokens(value: object) -> set[str]:
@@ -2696,8 +2783,9 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
     duplicate collapse.) The old line reader DID report the superseded line, which is
     the reading that let a claim about it leak into the note — see `#12070` item 4.
     """
-    primary = _run_config_resolver(["docker", "compose", "-f", str(path),
-                                    "config", "--format", "json", "--no-consistency"])
+    primary_argv = ["docker", "compose", "-f", str(path),
+                    "config", "--format", "json", "--no-consistency"]
+    primary = _run_config_resolver(primary_argv)
     run = primary
     out: dict = {"channel": "compose", "resolver": COMPOSE_RESOLVER,
                  "ok": False, "reason": run["reason"], "scopes": {},
@@ -2734,6 +2822,17 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
                                  out=out)
         return out
     unset = _compose_unset_interpolation(run["stderr"])
+    # ⛔ The warning is FILE-level; the blank it produces is PER-KEY. Asking the stderr
+    # text (`literal == "" and unset`) attributed the cause to EVERY blank key in the
+    # file — a literal `FLAG: ""` beside an unrelated `OTHER: "${MISSING}"` published
+    # "compose defaulted an unset interpolation variable (MISSING) to a blank string"
+    # and a MEASURED `OFF` became `UNMEASURED`. So the per-key question is put to the
+    # resolver itself (bind the variable, re-resolve, compare) — and only when the file
+    # both warned and HAS a blank value, so the ordinary file costs no extra spawn.
+    # `None` = the probe could not answer, and then every blank is held UNRESOLVED.
+    leaning: set[str] | None = set()
+    if unset and _compose_blank_scopes(services, flag):
+        leaning = _compose_unset_dependent_scopes(primary_argv, flag, services, unset)
     out["ok"] = True
     out["reason"] = None
     for name, service in services.items():
@@ -2771,16 +2870,16 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
         else:
             literal = env[flag] if isinstance(env[flag], str) else str(env[flag])
             scope["value"] = literal
-            if literal == "" and unset:
+            if literal == "" and unset and (leaning is None or name in leaning):
                 # ⛔ `FLAG: "${OTHER}"` with `OTHER` unset: compose WARNS and writes
                 # `""`, which is indistinguishable from an explicit `""` in the
                 # model. The warning is the only surviving evidence that the file
                 # fixes no value, so it MUST hold the file UNMEASURED rather than
-                # read as an explicit OFF.
+                # read as an explicit OFF — and only for the key that actually leans
+                # on the variable, which is what `leaning` MEASURED.
                 scope["verdict"] = "UNRESOLVED"
-                scope["reason"] = ("compose defaulted an unset interpolation variable "
-                                   f"({', '.join(sorted(unset))}) to a blank string — "
-                                   "the file fixes no value")
+                scope["reason"] = _compose_unset_reason(
+                    unset, distinguished=leaning is not None)
                 out["unresolved"].append(name)
             elif is_truthy(literal):
                 scope["verdict"] = "ARMED"
@@ -2855,8 +2954,9 @@ def _compose_profiled_scopes(path: Path, flag: str, is_truthy, *, primary_servic
     Runs AFTER the verdict reduction on purpose: it can only add to the blocking
     buckets, so it must re-derive the verdict when it does.
     """
-    supp = _run_config_resolver(["docker", "compose", "--profile", "*", "-f", str(path),
-                                 "config", "--format", "json", "--no-consistency"])
+    supp_argv = ["docker", "compose", "--profile", "*", "-f", str(path),
+                 "config", "--format", "json", "--no-consistency"]
+    supp = _run_config_resolver(supp_argv)
     if not supp["ok"]:
         out["warnings"].append(
             f"`{COMPOSE_RESOLVER_ALL_PROFILES}` refused ({supp['reason']}), so services "
@@ -2874,6 +2974,17 @@ def _compose_profiled_scopes(path: Path, flag: str, is_truthy, *, primary_servic
     services = (model.get("services") or {}) if isinstance(model, dict) else {}
     if not isinstance(services, dict):
         return
+    # ⛔ THE MIRROR of the primary arm, and it was the part this pass never asked: a
+    # `FLAG: "${MISSING}"` inside a `profiles:`-gated service resolves to a blank, and
+    # the pass published it as `set to a non-truthy value ('')` — a DISARM claim about a
+    # value the resolver had just told it it could not resolve. The supplementary
+    # resolve carries its OWN stderr, because a profiled service's interpolation is only
+    # attempted when the profile is on.
+    supp_unset = _compose_unset_interpolation(supp["stderr"])
+    supp_leaning: set[str] | None = set()
+    if supp_unset and _compose_blank_scopes(services, flag):
+        supp_leaning = _compose_unset_dependent_scopes(supp_argv, flag, services,
+                                                        supp_unset)
     blocked = False
     for name, service in services.items():
         if name in primary_services:
@@ -2914,12 +3025,28 @@ def _compose_profiled_scopes(path: Path, flag: str, is_truthy, *, primary_servic
         else:
             literal = env[flag] if isinstance(env[flag], str) else str(env[flag])
             scope["value"] = literal
+            if literal == "" and supp_unset and (
+                    supp_leaning is None or name in supp_leaning):
+                # ⛔ Fail CLOSED and fail HONEST: an unresolvable value inside a
+                # profile-gated service blocks an arm (a deployment that enables the
+                # profile runs with whatever that value is) and is named as unresolved
+                # rather than called a `''` disarm.
+                scope["verdict"] = "UNRESOLVED"
+                scope["reason"] = _compose_unset_reason(
+                    supp_unset, distinguished=supp_leaning is not None)
+                out["unresolved"].append(name)
+                continue
             scope["verdict"] = "NOT_ARMED"
             scope["reason"] = (f"set to a non-truthy value ({literal!r}) in a "
                                f"profile-gated service (profiles: {list(profiles)})")
             out["falsy"].append(name)
             out["off"].append(name)
     # Re-derive: the supplementary pass may only have ADDED blocking declarations.
+    if out["unresolved"]:
+        out["verdict"] = "UNRESOLVED"
+        out["reason"] = "; ".join(
+            f"{svc}: {out['scopes'][svc]['reason']}" for svc in out["unresolved"])
+        return
     if blocked and out["armed"] and out["verdict"] in ("ARMED", "NOT_ARMED"):
         out["verdict"] = "DISAGREE"
         out["reason"] = ", ".join(
@@ -3141,8 +3268,10 @@ def _compose_build_refs() -> dict[str, list[str]]:
 #: The shell words that put an assignment INTO a child process's environment. A
 #: bare `FLAG=1` in a shell script is a shell variable, not an environment entry —
 #: `export FLAG=1` or a later bare `export FLAG` is what the executed process sees.
-_SHELL_BARE_EXPORT = re.compile(
-    r"^\s*export\s+(?P<names>[A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)\s*$")
+#: ⛔ ONE argument of an `export` command, in either spelling: `NAME` or `NAME=word`.
+#: The `=` tail is deliberately not parsed — only the NAME is what the walk needs, so a
+#: quoted value containing spaces cannot truncate the name.
+_SHELL_EXPORT_ARG = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:=|$)")
 _SHELL_ASSIGN = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=")
 _SHELL_ALLEXPORT = re.compile(r"^\s*set\s+-[a-zA-Z]*a[a-zA-Z]*\s*$")
 
@@ -3191,22 +3320,89 @@ def _shell_unset_target(line: str, flag: str) -> str | None:
     return "other"
 
 
+def _shell_words(text: str) -> list[str]:
+    """Split a shell command's argument text into WORDS the way the shell does.
+
+    Quotes and backslashes are honoured, so a value containing spaces stays inside its
+    word (`FLAG="a b"` is ONE word) and a trailing `#` comment ends the list. Only the
+    NAME half of each word is ever read, so the tokenizer does not need a full shell
+    grammar — but it does need to know where a word ends, which a regex cannot.
+    """
+    words: list[str] = []
+    word: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in text:
+        if escaped:
+            word.append(char)
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            word.append(char)
+            continue
+        if char in "\"'":
+            quote = char
+            word.append(char)
+            continue
+        if char in " \t":
+            if word:
+                words.append("".join(word))
+                word = []
+            continue
+        if char == "#" and not word:
+            break                      # a trailing comment ends the argument list
+        word.append(char)
+    if word:
+        words.append("".join(word))
+    return words
+
+
+def _shell_export_line_names(line: str) -> list[str] | None:
+    """The names one `export …` line puts into the environment; `None` = not an export.
+
+    ⛔ `export` is a shell BUILTIN, so it is matched CASE-SENSITIVELY — `EXPORT FLAG=1`
+    is a different (nonexistent) command, unlike the Dockerfile instructions, which are
+    case-insensitive. Both argument spellings are read: the shell exports `NAME=value`
+    exactly as it exports a bare `NAME`, and `export A=1 B` exports both.
+    """
+    stripped = line.strip()
+    if not re.match(r"^export[ \t]", stripped):
+        return None
+    names: list[str] = []
+    for word in _shell_words(stripped[len("export"):]):
+        match = _SHELL_EXPORT_ARG.match(word)
+        if match:
+            names.append(match.group("name"))
+    return names
+
+
 def _shell_exported_names(text: str) -> set[str] | None:
-    """The names a shell script EXPORTS by a bare `export NAME`, or `None` = all.
+    """The names a shell script EXPORTS, or `None` = all (`set -a`).
 
     `None` means the script turns on `set -a` (allexport), where every assignment is
     exported; the caller then treats every assignment as eligible. Returning a set
     is the normal case, and an unexported assignment is then correctly NOT a
     shipped environment entry — the shell's own variable never reaches the Python
     process that reads the flag.
+
+    ⛔ **`export FLAG=1` exports `FLAG` exactly as `export FLAG` does**, and the matcher
+    that accepted only the BARE form ignored it — so the exported set stayed empty, a
+    later plain `FLAG=0` was not a decision at all, and the file published `ON` while
+    bash runs `0` (`#12549` defect 4, measured: the false-ARM direction, i.e. the class
+    this instrument exists to prevent). Both spellings are read here.
     """
     exported: set[str] = set()
     for line in text.splitlines():
         if _SHELL_ALLEXPORT.match(line):
             return None
-        match = _SHELL_BARE_EXPORT.match(line.strip("\n"))
-        if match:
-            exported.update(match.group("names").split())
+        names = _shell_export_line_names(line)
+        if names:
+            exported.update(names)
     return exported
 
 
