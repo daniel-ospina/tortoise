@@ -2507,10 +2507,13 @@ class TestNonScalarStatus12869:
         live-without-durable class. The caller got the bare traceback #12869
         exists to replace. `dict` DOES have a JSON form and stays accepted.
 
-        FALSIFIABLE BY: dropping the `journals` argument from `add_object`, or
-        moving the encoder check below the `_value_ok` early return, reds every
-        arm (MEASURED: `TypeError: Object of type bytes is not JSON
-        serializable`).
+        FALSIFIABLE BY: deleting the `_refuse_unencodable_object_status(…)` call
+        at `tortoise/api.py` (the `from .sdk import` line and its call, which sit
+        BEFORE `entity_create_lock`), or moving that call below
+        `with entity_create_lock("Object", name):` — either one lets the raw
+        `TypeError: Object of type bytes is not JSON serializable` escape from
+        `EventLog.append` again (MEASURED; the ADOPT lane additionally leaves the
+        row id-bearing with zero journal lines).
         """
         from tortoise.api import EventAPI
         from tortoise.log import EventLog

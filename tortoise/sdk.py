@@ -8872,7 +8872,8 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     ``bytearray``, ``frozenset``, ``dict`` — is ACCEPTED and stored as ABSENT.
     Using that helper made all four REFUSE, an over-block (the ``#7925``
     round-4 class). ⚠️ But "dropped" is a claim about THIS write only, and the
-    review was right that it does not hold for the RECORD: see ``journals``.
+    review was right that it does not hold for the RECORD: the encoder question
+    is ``_refuse_unencodable_object_status``'s, above.
 
     ⛔ ONE KEY, OR NO ANSWER — the ambiguity refusal. ``lifecycle_props_by_rendering``
     is FIRST-wins over the renderer union (its own docstring), while the live map
@@ -8909,16 +8910,21 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     stamped an id onto an adopted holder. ``bytes``/``bytearray``/``frozenset``
     have no JSON form; ``dict`` does and stays accepted.
 
-    ⛔ AND THAT CHECK RUNS **ABOVE** ``lands``, not below it (review round 5, P1).
-    ``lands`` is a question about the NODE; the encoder is a question about the
-    RECORD, and the record is written on EVERY path. An earlier cut put the
-    encoder check below the ``lands`` early return and argued the landing test
-    protected it — true of the node, FALSE of the record: on MERGE, ADOPT and the
-    projection-less lane ``lands`` answers False, the helper returned, and the
-    encoder still raised. On ADOPT that ``TypeError`` FOLLOWED the id stamp, so a
-    refusal left a mutated row with zero journal lines (``#3590``). The check is
-    now unconditional for the doors that pass ``journals``, and pinned on all
-    three lanes.
+    ⛔ AND THAT CHECK IS **NOT IN THIS FUNCTION**, on purpose (review round 5,
+    P1; restated round 6). ``lands`` is a question about the NODE; the encoder is
+    a question about the RECORD, and the record is written on EVERY path. An
+    earlier cut of this helper carried a ``journals`` flag and asked the encoder
+    BELOW the ``lands`` early return — true of the node, FALSE of the record: on
+    MERGE, ADOPT and the projection-less lane ``lands`` answers False, the helper
+    returned, and the encoder still raised. On ADOPT that ``TypeError`` FOLLOWED
+    the id stamp, so a refusal left a mutated row with zero journal lines
+    (``#3590``). Moving the block above ``lands`` would still have been too late,
+    because the stamp happens in ``EventAPI.add_object`` BEFORE this helper is
+    called at all. So the encoder check is its own function —
+    :func:`_refuse_unencodable_object_status` — invoked by that door BEFORE the
+    lock and the id resolution, and it reads the props, not ``lands``.
+    ⛔ A FOURTH ``lands``-PASSING DOOR THAT NEEDS THE RECORD ANSWER MUST CALL
+    THAT FUNCTION TOO; this one will not give it.
 
     ⚠️ AND IT IS SCOPED TO THAT DOOR, because the mechanism is not general and
     the first cut of this paragraph claimed it was (review round 3, P2).
@@ -9000,9 +9006,10 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
         return                                      # the #7369 gate drops it
     # ⛔ FOR THIS REFUSAL, `lands` IS ALREADY SPENT ABOVE: the node-side landing
     # test runs before every NODE-side refusal, so a refusal here can never
-    # follow a write. (The RECORD-side `journals` check is the exception by
-    # design — it runs ABOVE the landing test, because the record is written on
-    # every path. See the block above.)
+    # follow a write. The RECORD-side encoder check is NOT here — it is
+    # `_refuse_unencodable_object_status`, called by the door before the lock and
+    # the id resolution, because a refusal that ran after `_registration_id`
+    # would have taken the lock for a write that cannot happen (`#11948`).
     # ⛔ `type(word)` would be fine here, but `type` is a PARAMETER name at one
     # of the three callers (`create_entity(type, …)`), so the shadow-free
     # spelling is used uniformly rather than per-caller.
