@@ -2514,10 +2514,13 @@ def write_live_record(record: Mapping[str, Any], *,
     a FAILURE never raises: it is counted
     (``monitoring.metrics()["record_write_failures"]``) and logged, because the
     journal already holds the record and a question about the derived record
-    must not fail a write that persisted. ``replay`` heals the gap — ⛔ ON THE
-    UNARMED ARM ONLY: on the ARMED arm an enumerated replay is REFUSED once the
-    graph is cut over (:func:`record_projection._refuse_an_enumerated_replay`),
-    so there the only repair is the allocator's operator path (see the
+    must not fail a write that persisted. ``replay`` heals the gap — ⛔ EXCEPT ON A
+    CUT-OVER GRAPH, and the condition is the ``record_cursor`` ROW, not the write
+    arm: ``_refuse_an_enumerated_replay`` refuses an enumerated replay by the ROW
+    (its docstring is explicit: "the row — not the mode — is the fact"), so an
+    enumerated replay heals nothing on any graph that has one, WHATEVER
+    ``allocate`` was on the write that failed. There the repair is an allocating
+    replay (``replay(allocate=True)``) or the allocator's operator path (see the
     ``position_unverifiable`` arm below). That
     contract is enforced, not just intended: every counter call goes through
     :func:`_count_write_failure`, which suppresses its own failures.
@@ -3004,9 +3007,24 @@ def write_live_record(record: Mapping[str, Any], *,
         _logger.warning(
             "the record write did not happen (write_failed) — the journal has "
             "the record; %s: record=%s %s: %s",
+            # ⛔ THE DISCRIMINATOR IS THE CURSOR ROW, NOT THE ARM. `allocate`
+            # says which write arm ran; `_refuse_an_enumerated_replay` refuses by
+            # the ROW, and the two are INDEPENDENT — a graph cut over and then
+            # left with `TORTOISE_RECORD_ALLOCATE` unset (the partial rollout
+            # `.env.example` documents)
+            # refuses on the enumerated arm and landed here, where the old
+            # `if allocate` branch told the operator "a replay heals the "
+            # "record" about a graph whose every replay is refused. The claim is
+            # now true in BOTH states instead of wrong in one: it names the row
+            # as the condition, so an operator on either arm can tell which case
+            # they are in. `record_allocator_cli.py status` reports the row.
+            "a replay heals the record UNLESS this graph has a `record_cursor` "
+            "row (cut over), in which case an enumerated replay is refused and "
+            "you need an ALLOCATING replay (`replay(allocate=True)`) or the "
+            "operator chain `halt` → `seed --journal` → `reopen` → `arm`"
+            if not allocate else
             "repair it with an ALLOCATING replay (`replay(allocate=True)`), not "
-            "a plain one, which a cut-over graph refuses"
-            if allocate else "a replay heals the record",
+            "a plain one, which a cut-over graph refuses",
             record.get("type"), _record_identity(record), exc,
         )
         return _refused("write_failed", seq)
