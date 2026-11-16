@@ -593,9 +593,11 @@ def test_a_trailing_comment_is_not_part_of_the_value():
     """Review round 6, P3: `export K=""  # off` must still hit the EMPTY-value refusal, and a
     switch named only in a trailing comment must not be credited.
 
-    Both readers strip a quote-aware trailing comment. `ENV HF_HUB_OFFLINE=1  #
-    TORTOISE_EMBED_GATE=1` is the dangerous shape: Docker folds that text into
-    `HF_HUB_OFFLINE`'s value, so crediting the switch would be a statement the file does not make.
+    Both readers strip a quote-aware trailing comment. In the SHELL that is right (`export K=1  # x`
+    ships `1`), and the dangerous shape there is a switch named only in the trailing text. In a
+    Dockerfile the `K=V` form has no trailing comment at all — Docker refuses the line — so the
+    reader must not strip it; the LEGACY `ENV K V` form is the one place Docker folds the text into
+    the value, and this reader reports that folded value rather than a tidied one.
     """
     stated, ambiguous = gate._shell_assignments('export TORTOISE_VALUE_GATE=""  # off for now\n')
     assert stated == {"TORTOISE_VALUE_GATE": ""} and ambiguous == set()
