@@ -126,8 +126,8 @@ class TestTheRiskAxis:
         #   (47 read + 3 maintenance -> 46 read + 2 maintenance). The other two left the
         #   writing side: `tortoise_backfill_v25` (destructive) and `tortoise_pack_install`
         #   (admin).
-        assert len(reading) == 48, sorted(reading)   # 46 read + 2 maintenance
-        assert len(served()) == 91, sorted(e.name for e in served())
+        assert len(reading) == 49, sorted(reading)   # 47 read + 2 maintenance
+        assert len(served()) == 97, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
@@ -176,6 +176,14 @@ class TestTheRiskAxis:
             # bulk re-ingest that rewrites an existing corpus' stored rows
             "tortoise_index_files", "tortoise_ingest_corpus",
             "tortoise_index_sessions", "tortoise_mine_conversations",
+            # #11609 lane C: the five containers the retired doors were absorbed
+            # into. Four inherit the destructive basis (each re-ingests / rewrites
+            # rows the call did not name); the fifth, `register_source`, is
+            # ADDITIVE and sits in the `write` pin below.
+            "tortoise_index_sources_from_directory",
+            "tortoise_mine_knowledge_from_directory",
+            "tortoise_mine_knowledge_from_session",
+            "tortoise_manage_source_trust",
         }, sorted(destructive)
 
     def test_the_admin_set_is_pinned_by_name(self):
@@ -222,6 +230,11 @@ class TestTheRiskAxis:
             "tortoise_ingest",
             "tortoise_onboarding_github_index",
             "tortoise_session_capture",
+            # #11609 lane C: the container that absorbs the retired `create_source`
+            # door. Additive — it stores the caller's own row and no row the call
+            # did not name; the trust/assessment half that DOES overwrite lives in
+            # `tortoise_manage_source_trust` (destructive, pinned above).
+            "tortoise_register_source",
         }, sorted(writes)
 
     def test_the_maintenance_tier_is_exactly_the_ruling(self):
@@ -362,6 +375,10 @@ class TestHintsCannotDrift:
             # clients read as `idempotentHint`.
             ("tortoise_create_point", True),
             ("tortoise_create_source", True),
+            # #11609 lane C: `create_source`'s absorbing container declares the same
+            # retry-safety as the door it replaces — a repeat call converges on the
+            # source row identified by (url, sourceKind) rather than minting a second.
+            ("tortoise_register_source", True),
             # ⛔ `tortoise_get_source_reliability` is pinned FALSE below, not omitted — it is a getter in
             # the write tier, and an earlier revision of this PR declared it
             # repeatable on "a repeat converges on the same value" — but the value
@@ -420,7 +437,12 @@ class TestHintsCannotDrift:
         # 45 -> 43: #11609 batch 1 removed two more writing tools, both ARCHIVED rather
         # than retired-forward (`tortoise_backfill_v25` (destructive) and
         # `tortoise_pack_install` (admin)).
-        assert len(expected) == 43, sorted(expected)  # census, hard-coded
+        # 43 -> 48: #11609 lane C added six registry entries, five of them writing
+        # tiers — four destructive containers (`index_sources_from_directory`,
+        # `mine_knowledge_from_directory`, `mine_knowledge_from_session`,
+        # `manage_source_trust`) and one additive (`register_source`). The sixth,
+        # `tortoise_check_connection`, is a read and is counted by the reading pin.
+        assert len(expected) == 48, sorted(expected)  # census, hard-coded
 
 
 class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
@@ -595,7 +617,12 @@ IDENTITY_UPSERT_OVERWRITERS = (
     "tortoise_create_subject",
     "tortoise_create_object",
     "tortoise_create_entity",
-    "tortoise_mine_conversations",
+    # ⛔ #11609 lane C RETIRED `tortoise_mine_conversations` into the mining
+    # containers, so the name is no longer in `_list_tools()` and cannot carry a
+    # client-facing hint assertion. The absorbing door that performs the same
+    # re-ingest-then-mine write is the live one, and it is the entry a client now
+    # sees, so it is what the hint must hold true for.
+    "tortoise_mine_knowledge_from_session",
 )
 
 

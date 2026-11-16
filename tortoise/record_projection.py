@@ -285,6 +285,30 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # `*_record_*.sql` glob ships it, so an unlisted file is invisible to
     # `tests/test_9231_record_migrations_trigger.py`'s reverse direction.
     "20261102000002_record_point_search_keys_text.sql",
+    # #12894 stage C — the ORDINAL ALLOCATOR: `public.record_cursor`, its
+    # tenancy policy, and the first record table granted UPDATE **without**
+    # DELETE (⛔ not "the first UPDATE grant": `20261025000001` grants
+    # SELECT/INSERT/UPDATE/DELETE to the app role on nine record tables; the
+    # one exception is `journal_event`, which is SELECT+INSERT only). It
+    # contributes no COLUMN the projection reads, so it is listed for the
+    # registry reason this tuple's header states (the filename is the only total
+    # partition of "is this the record's schema"), and because the BACKUP must
+    # carry the counter WITH the rows it numbers: a restore that returned a
+    # populated `journal_event` and a counter at 0 would restart the allocator
+    # at 1 and collide with every existing position (round-1 finding B3).
+    "20261116000001_record_cursor_allocator.sql",
+    # #12894 stage C — the byte meter's EXECUTE grant for `tortoise_record_app`,
+    # split OUT of the allocator file above. ⛔ THE SPLIT IS LOAD-BEARING: the
+    # allocator file is `creates`-conditional in `RECORD_REAPPLY_STEPS` (its
+    # policies take an ACCESS EXCLUSIVE lock on the counter table, the #12399
+    # deadlock), so after the first apply it is never re-applied and a grant at
+    # its tail could never fire on a container whose metering migration arrived
+    # later — measured as `has_function_privilege(… 'EXECUTE') = false`, a meter
+    # that raised `InsufficientPrivilege`, and an org charged 0 bytes. This file
+    # creates no table, so it is always re-applied (that is the whole point) and
+    # it is listed here for the registry reason this tuple's header states: the
+    # filename is the only total partition of "is this the record's schema".
+    "20261116000002_record_cursor_meter_grant.sql",
     # #11642 / #4051 V1 — the vector move: `CREATE EXTENSION vector`, the
     # `record_embedding_vector(jsonb)` converter, three GENERATED
     # `embedding_vec public.vector(384)` columns and their HNSW indexes. It
@@ -340,7 +364,8 @@ TENANT_GUC_SQL = f"SELECT set_config('{TENANT_GUC}', %s, true)"
 #: 4. TABLE OWNERSHIP (or membership of the owning role). Owners bypass RLS
 #:    unless `FORCE ROW LEVEL SECURITY` is set, which is exactly why the
 #:    `postgres` DSN in R1's documented pre-change shape was rejected — it is
-#:    the owner of every record table (`THE_RECORD_TABLES` — ten, since #9555).
+#:    the owner of every record table (`THE_RECORD_TABLES` — eleven since #12894 added `record_cursor`,
+#:    ten before it from #9555).
 #:
 #: `current_setting(...)` keeps the GUC read-back and the role posture in ONE
 #: statement rather than two round trips, so the seam executes exactly TWO
@@ -413,6 +438,14 @@ THE_RECORD_TABLES: tuple[str, ...] = (
     "subject",
     "point",
     "relation",
+    # #12894 stage C — the per-graph POSITION ALLOCATOR. Not a layer table, and
+    # not a node table: it is the record's own ordinal counter, and it is here
+    # because everything this tuple drives must know about it — the dump
+    # (`record_backup`), the manifest column pin, the pre-backup counts, the RLS
+    # posture read, and the tenancy census. Leaving it out is round-1 finding
+    # B3: a restore returns a populated `journal_event` with the counter at 1,
+    # so every new position collides and is swallowed.
+    "record_cursor",
     # NOT a node table: the §9.1 narrative home (#9555). It is here because
     # `table_columns()` parses `CREATE TABLE` only for the tables this tuple
     # names, and the narrative columns must be readable as COLUMNS (PRIMARY,
@@ -6170,6 +6203,26 @@ def _narrative_statements(
 # ════════════════════════════════════════════════════════════════════════════
 
 
+def journal_payload(record: Mapping[str, Any]) -> str:
+    """The `jsonb` text of a journal row's payload — the ONE definition.
+
+    Two paths write `public.journal_event`: the REPLAY path (:func:`_journal_row`,
+    which numbers by enumeration) and the ALLOCATED path
+    (:mod:`tortoise.record_allocator`, which numbers from the counter). If each
+    built its own payload they could disagree about what a consumed position
+    carries — which is exactly the divergence the allocator exists to remove —
+    so both call this.
+
+    `ENVELOPE_KEYS` are the keys `_emit_event` owns and the row stores as
+    COLUMNS (`type`→`event_type`, `ts`→`recorded_at`) or not at all
+    (`event_id`, `initiated_by`, `projection_version`, and `seq`, which IS the
+    key). Their absence from the payload is why a JSONL line cannot be
+    re-rendered from a row alone (round-1 finding M15) — stated here, in the
+    one place that decides it, rather than left to be rediscovered.
+    """
+    return json.dumps({k: v for k, v in record.items() if k not in ENVELOPE_KEYS})
+
+
 def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
                  graph_id: str) -> Statement:
     """The record of WHAT the record consumed — `public.journal_event`.
@@ -6187,6 +6240,16 @@ def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
     plan every replay, seam and PGlite caller materializes — and the `#9187`
     snapshot pin (`tests/test_record_writer_seam.py`) exists to notice exactly
     that. The verdict belongs beside the statement, not inside it.
+
+    ⛔ THE `DO NOTHING` IS CORRECT **HERE** AND IS REMOVED ON THE ALLOCATED
+    PATH, and the difference is not stylistic. This builder is the REPLAY path,
+    whose contract is idempotence (`#5285`: replay twice and compare the tables),
+    so re-offering a consumed position must be a no-op. The allocated path
+    (`record_allocator.ALLOCATION_SQL`) has no such excuse: its number is issued
+    exactly once, so a duplicate can only mean the counter is behind the table —
+    and absorbing THAT would advance the counter, drop the caller's payload
+    without an error, and leave the layer rows with no idempotency key
+    (round-1 finding B5).
     """
     return Statement(
         "INSERT INTO public.journal_event "
@@ -6195,7 +6258,7 @@ def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
         "ON CONFLICT (org_id, graph_id, seq) DO NOTHING",
         (
             org_id, graph_id, seq, record.get("type"),
-            json.dumps({k: v for k, v in record.items() if k not in ENVELOPE_KEYS}),
+            journal_payload(record),
             record.get("ts"),
         ),
     )
@@ -6540,13 +6603,135 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     )
 
 
+# ── the ordinal ALLOCATOR's statement (#12894) ──────────────────────────────
+#
+# ⛔ IT LIVES HERE, WITH EVERY OTHER PLAN STATEMENT, AND FOR A SECOND REASON: this
+# module is loaded BY FILE PATH by `supabase/tests/pglite/validate.mjs`, which
+# registers it as a package-less module — so any relative import inside
+# `replay_plan` raises `ImportError` and breaks the schema drill. MEASURED: the
+# first version of this change imported `tortoise.record_allocator` there and the
+# PGlite drill died at `#7969 record projection`. The operator flows (seed, mode
+# transitions, isolation guard, counters) live in `record_allocator`; the SQL and
+# its builder live here, and `replay(allocate=True)` imports the allocator only on
+# that arm.
+
+#: The table holding one row per graph: the LAST position the record allocated.
+RECORD_CURSOR_TABLE = "record_cursor"
+
+#: The allocator's states (`record_allocator` re-exports these).
+MODE_SEEDED = "seeded"
+MODE_ACTIVE = "active"
+MODE_HALTED = "halted"
+
+#: The graph's ISSUED position, or no row — and ⛔ THE SAME STATEMENT AS
+#: `record_allocator.READ_SQL`, not a second spelling of it (an equality pin in
+#: `tests/test_12894_record_cursor.py` holds the two together, for the reason
+#: `test_the_allocation_sql_has_one_definition` holds the allocation's copies).
+#:
+#: ONE statement, read after :func:`scope_connection` set the tenant GUC, so
+#: `record_cursor`'s RLS policy scopes it to the tenant this replay is about (a
+#: counter row another tenant holds is not visible, and could not be this
+#: graph's anyway — the pair is the key). It is ONE round trip on the live
+#: write path, which is why there is no `to_regclass` pre-probe in front of it:
+#: the derived door pays this on every record write (`#9558` is the cost
+#: register), and the counter table is a precondition this tree already assumes
+#: — `record_allocator.read_cursor` reads it with the same unguarded SELECT.
+CURSOR_PRESENCE_SQL = (
+    f"SELECT seq, mode FROM public.{RECORD_CURSOR_TABLE} "
+    "WHERE org_id = %s AND graph_id = %s"
+)
+
+#: The allocation, and the batch's payloads, in ONE statement.
+#:
+#: ⛔ `unnest(...) WITH ORDINALITY`, NOT `generate_series`: a series joined to a
+#: payload list emits THE SAME payload N times (round-2 finding). The ordinal is
+#: what pairs row i of the payload arrays with position `base + i`.
+#:
+#: ⛔ NO `ON CONFLICT … DO NOTHING` on this insert. The allocated number is unique
+#: by construction, so a duplicate is a DEFECT; absorbing it would advance the
+#: counter, suppress the insert without an error, and drop the caller's payload
+#: permanently (round-1 B5). A `23505` fails the transaction and the increment
+#: rolls back with it. (The REPLAY path keeps its `DO NOTHING` — see
+#: `_journal_row` — because a replay's contract is idempotence.)
+#:
+#: LOCK ORDER: this statement is appended LAST in a plan, after every layer
+#: mutation, so the counter's row lock is the last CONTENDED lock taken. The
+#: `journal_event` positions it then writes are not contended — each writer holds
+#: its own freshly issued `seq`.
+#:
+#: ⛔ `%s` PLACEHOLDERS ONLY. `to_dollar_placeholders` renumbers by splitting on
+#: `%s`, so a literal `$n` in the text would shift it.
+ALLOCATION_SQL = """WITH payloads AS (
+    SELECT p.event_type  AS event_type,
+           p.payload     AS payload,
+           p.recorded_at AS recorded_at,
+           p.ord         AS ord
+      FROM unnest(%s::text[], %s::jsonb[], %s::timestamptz[])
+           WITH ORDINALITY AS p(event_type, payload, recorded_at, ord)
+), allocated AS (
+    UPDATE public.record_cursor
+       SET seq = seq + %s::bigint,
+           updated_at = now()
+     WHERE org_id = %s AND graph_id = %s
+       AND mode = 'active'
+    RETURNING seq - %s::bigint AS base
+)
+INSERT INTO public.journal_event
+       (org_id, graph_id, seq, event_type, payload, recorded_at)
+SELECT %s, %s, allocated.base + payloads.ord, payloads.event_type,
+       payloads.payload, COALESCE(payloads.recorded_at, now())
+  FROM payloads CROSS JOIN allocated
+ ORDER BY payloads.ord
+RETURNING seq"""
+
+#: How an executor finds the allocation statement inside a plan without a second
+#: copy of its text. The constant IS the statement's first characters (a leading
+#: newline in the literal silently made `startswith` false once, so the allocation
+#: ran and its numbers were thrown away — measured before this shape).
+ALLOCATION_STATEMENT_PREFIX = "WITH payloads AS"
+
+
+def allocation_statement(*, org_id: str, graph_id: str,
+                         records: Sequence[Mapping[str, Any]]) -> Statement:
+    """The ONE statement that allocates `len(records)` positions and inserts the
+    rows carrying them, in plan order.
+
+    The payloads come from :func:`journal_payload` — the SAME function
+    :func:`_journal_row` uses — so the allocated path and the replay path cannot
+    disagree about what a journal row contains.
+    """
+    if not records:
+        raise RecordProjectionError(
+            "an allocation needs at least one record — an empty batch has no "
+            "position to allocate and must not move the counter")
+    event_types = [record.get("type") for record in records]
+    payloads = [journal_payload(record) for record in records]
+    recorded_at = [record.get("ts") for record in records]
+    n = len(records)
+    return Statement(
+        ALLOCATION_SQL,
+        (event_types, payloads, recorded_at, n, org_id, graph_id, n,
+         org_id, graph_id),
+    )
+
+
 @dataclass
 class ReplayReport:
-    """What a replay consumed. A report, never a substitute for the failure."""
+    """What a replay consumed. A report, never a substitute for the failure.
+
+    `first_seq`/`last_seq` are the positions this call ALLOCATED, and are `0`
+    for a replay that did not allocate (every caller before #12894, and every
+    `position=False` replay). They exist because the allocated number must
+    reach :class:`tortoise.record_writer.RecordWrite.last_seq` and the byte
+    meter: before this, both were derived from the CALLER's `first_seq`, so a
+    number the allocator produced could never reach them.
+    """
 
     events: int = 0
     statements: int = 0
     no_effects: list[str] = field(default_factory=list)
+    first_seq: int = 0
+    last_seq: int = 0
 
     def __str__(self) -> str:  # pragma: no cover - cosmetic
         return (f"replayed {self.events} journal records → {self.statements} "
@@ -6890,9 +7075,181 @@ def _statement_attribution(statement: Statement, index: int, total: int) -> str:
     return " ".join(parts)
 
 
+def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
+                                 graph_id: str) -> None:
+    """Refuse an ENUMERATED replay on a graph whose positions are ISSUED (#9190).
+
+    THE DEFECT THIS CLOSES. `replay()` numbers records by ENUMERATION —
+    `enumerate(records, start=start_seq)`, where `start_seq` is the journal's own
+    ordinal for `records[0]`. On a graph that has been cut over, the number is no
+    longer the journal's to give: `#9190` was reopened by owner ruling (2026-11-15,
+    comment 6902871297) — *"the record allocates the ordinal and the journal
+    record CARRIES it; replay READS the number instead of computing it."* So an
+    enumerated replay there is an answer to a question the record has already
+    answered, and it is WRONG in the one direction nothing could see: the same
+    journal event, replayed, lands its payload at a SECOND position. Neither
+    guard fires — `ON CONFLICT (org_id, graph_id, seq) DO NOTHING` keys on `seq`
+    and the enumerated `seq` is free, and :func:`_refuse_a_journal_collision`
+    only runs on an INSERT that was ABSORBED (this one affects a row). No error,
+    no counter, one record at two positions, and the door's own refusal text —
+    *"a replay heals the record"* — pointed an operator straight at it.
+
+    ⛔ IT IS A REFUSAL, NOT A HEAL. A cut-over graph's repair path is the
+    ALLOCATOR (`allocate=True`, which issues the number and carries it) or a
+    SEED, never a replay that renumbers from a coordinate the record no longer
+    uses. `RecordProjectionError` is the channel :func:`replay` already refuses
+    on (`start_seq`/`allocate` contradictions) — this is a fifth contradiction
+    of the same kind, not a new exception class and not a crash.
+
+    ⛔ NARROW BY CONSTRUCTION, and this is what keeps the whole existing suite
+    green: the refusal fires ONLY when the graph has a `record_cursor` ROW, and
+    the row — not the mode — is the fact. A graph with no row, which is every
+    graph before the cutover, replays exactly as it does today. `position=False`
+    never reaches here (it writes no position row, so there is no second position
+    to create), and neither does `allocate=True` (the counter issues the number).
+
+    ⛔ AND THE MODE MUST NOT BE PROMOTED OVER THE ROW: a `seeded` exemption was
+    tried and MEASURED WRONG (cycle-2 review, P1). It looked right against
+    §A7.5.5 step (0)'s *"a row in mode 'allocating' or 'halted' is cut over; a
+    row in 'seeded' is NOT"* — but that sentence is about RE-SEEDABILITY, and
+    §A7.7's `halted → seeded` ("abandoning the counter") is `REOPEN_SQL`:
+    `SET mode='seeded'`, KEEPING `seq`. A reopened graph's ordinals were issued
+    and consumed while its mode says `seeded`, and the exemption let the same
+    payload land at a SECOND position silently: measured, positions 1-4 with the
+    door's record at 4, then `halt()`+`reopen()` → `(4, 'seeded')`, then an
+    enumerated replay at 9 WROTE, leaving `journal_event` holding that record at
+    4 AND 9. `seq` does not separate the cases either: a first-cutover seed at
+    floor N leaves the counter at N, so an enumerated write at N+1 makes every
+    later allocation a `23505`. What IS true is the narrower claim cycle 1 made:
+    the refusal used to name two verbs a `seeded` graph cannot execute. The mode
+    therefore selects the REMEDY (see the arms below) and nothing else.
+
+    ⚠️ AND A `seeded` GRAPH IS NOT A DEAD END — `arm` is its writer.
+    `ALLOCATION_SQL`'s `AND mode = 'active'` refuses `allocate=True` while
+    `seeded`, which is deliberate (no position may be issued before the cutover
+    is armed), and the arming step (`seeded → active`) is what opens it. That
+    transition has exactly one writer and it is the cutover's own 6.3 step, so
+    the refusal names it.
+
+    ⛔ AND AN ARM THAT CANNOT ASK MUST NOT GO QUIET. One statement — no `seq`
+    row and no refusal; a read that FAILS is a refusal that names the migration
+    it needs (see the `except` below), never a silent "no cursor". The one
+    direction this guard may be quiet in is ABSENCE, because absence of a cursor
+    row is exactly the pre-cutover state it exists to leave alone.
+    """
+    try:
+        cursor.execute(CURSOR_PRESENCE_SQL, (org_id, graph_id))
+        row = cursor.fetchone()
+    except Exception as exc:
+        # ⛔ A FAILURE TO ASK IS NOT AN ANSWER — and it is not a crash either.
+        # The one shape that reaches here on a real deployment is a database the
+        # counter migration has not reached (`42P01`), and the remedy is a
+        # MIGRATION, not a retry of the replay; so the refusal names it rather
+        # than escaping as a bare driver error the caller would read as a lost
+        # write. Catching-and-continuing is not an option: a failed statement
+        # aborts the caller's transaction (`25P02`), so a "tolerated" miss would
+        # poison every statement after it.
+        raise RecordProjectionError(
+            f"an ENUMERATED replay could not be classified: reading "
+            f"public.{RECORD_CURSOR_TABLE} for org_id={org_id!r} "
+            f"graph_id={graph_id!r} failed ({_driver_fault(exc)}). Apply the "
+            f"ordinal-allocator migration (20261116000001_record_cursor_"
+            f"allocator.sql) to this database — this replay cannot tell a "
+            f"pre-cutover graph from an allocated one, and enumerating an "
+            f"allocated one would store the same record at a second position "
+            f"(#9190)"
+        ) from exc
+    if row is None:
+        return
+    seq, mode = ((row["seq"], row["mode"]) if isinstance(row, Mapping)
+                 else (row[0], row[1]))
+    # ⛔ A ROW IS THE FACT, NOT THE MODE (cycle-2 review, P1 — MEASURED). An
+    # exemption for `seeded` looked right against the plan's "a row in 'seeded'
+    # is NOT cut over" (§A7.5.5 step (0)), and that sentence is about
+    # RE-SEEDABILITY, not about this guard. §A7.7's `halted → seeded`
+    # ("abandoning the counter") is `REOPEN_SQL`: `SET mode='seeded'` and it KEEPS
+    # `seq`. So a reopened graph's ordinals WERE issued and consumed while its
+    # mode says `seeded`, and the exemption let the same payload land at a second
+    # position silently — measured: positions 1-4 with the door's record at 4,
+    # then `halt()`+`reopen()` → `(4,'seeded')`, then an enumerated replay at 9
+    # WROTE, leaving `journal_event` holding that record at 4 AND 9. `seq` does
+    # not separate the cases either: a first-cutover seed at floor N leaves the
+    # counter at N, so an enumerated write at N+1 makes the next allocation a
+    # `23505` on every subsequent write. The mode is therefore used for the
+    # REMEDY only — the refusal itself stays keyed on the row.
+    # The mode decides the REMEDY, never the verdict (see above). Each arm names
+    # a step that actually RUNS from this state — cycle 1 was right that the old
+    # single sentence named two verbs a `seeded` graph cannot execute, and the
+    # answer is the correct verb, not an exemption.
+    if mode == MODE_SEEDED:
+        # ⛔ NOT "never armed": a graph reached through `reopen` (`halted →
+        # seeded`) WAS armed and its `seq` is consumed, which is why the row
+        # guards this replay at all (cycle-2 P1). What is common to both holes
+        # here — a first-cutover seed and a reopened graph — is that the mode is
+        # not `active`, so nothing may be issued until `arm` runs. Naming `arm`
+        # is therefore correct for both, and the premise must not claim more.
+        remedy = (
+            f"this graph is SEEDED with the counter at {seq!r} and is not armed, "
+            f"so re-seed it first (`seed`, the cutover's 6.2 step — monotone "
+            f"`GREATEST`, so it is free when the counter is already right; a "
+            f"graph that resumed writing before arming is exactly the case that "
+            f"needs it) and then ARM it — the 6.3 arming step (`arm`, `seeded → "
+            f"{MODE_ACTIVE}`) — after which the door writes through the "
+            f"allocator (`allocate=True`), which refuses until then precisely "
+            f"because no position may be issued before the cutover is armed; a "
+            f"seed alone will not open this arm, and a replay never will"
+        )
+    elif mode == MODE_HALTED:
+        remedy = (
+            f"this graph is HALTED and its carried numbers were consumed, so the "
+            f"re-cut is explicit: `reopen` (`halted → {MODE_SEEDED}`), re-seed, "
+            f"arm — never a replay"
+        )
+    else:
+        # ⛔ THE `active` ARM, AND IT MAY ONLY NAME VERBS THAT RUN **IN ORDER**
+        # (fresh-context review, P2 ×2). Two defects were fixed here, and both
+        # were the same class this change exists to remove — a remedy naming a
+        # step that cannot execute:
+        #   · the old sentence ended "or a seed", and `SEED_SQL`'s conflict path
+        #     is `WHERE cursor_row.mode IN ('seeded','halted')`, so `seed` REFUSES
+        #     from `active`;
+        #   · the first correction named "`halt` … then re-seed and `arm`", and
+        #     `seed` sets ONLY `seq`/`updated_at` — it does not change `mode` — so
+        #     the graph is still `halted` afterwards and `ARM_SQL` (`AND mode =
+        #     'seeded'`) refuses. The chain stopped one step short of the state it
+        #     promised, and left the graph with no allocator at all.
+        # `reopen` is the step that makes `seeded` reachable from `halted`, so the
+        # chain is `halt → re-seed → reopen → arm` and every stage runs.
+        # `allocate=True` does NOT belong in the refusal list: `ALLOCATION_SQL` is
+        # scoped `AND mode = 'active'`, so it IS the write path here — it issues a
+        # NEW number, which is why it cannot RE-BASE a counter that is behind.
+        remedy = (
+            f"this graph is {MODE_ACTIVE}: the allocator is issuing this graph's "
+            f"positions, so `allocate=True` IS the write path (`ALLOCATION_SQL` "
+            f"is scoped to '{MODE_ACTIVE}') and it issues a NEW number. A repair "
+            f"`allocate=True` cannot express is a COUNTER repair, not a replay: "
+            f"`halt` it FIRST (`{MODE_ACTIVE} → {MODE_HALTED}`) — `seed` and "
+            f"`reopen` both REFUSE from '{MODE_ACTIVE}', so neither is the first "
+            f"step — then re-seed (monotone `GREATEST`), `reopen` "
+            f"(`{MODE_HALTED} → {MODE_SEEDED}`) and `arm` (`{MODE_SEEDED} → "
+            f"{MODE_ACTIVE}`). Never a replay"
+        )
+    raise RecordProjectionError(
+        f"an ENUMERATED replay is REFUSED for a graph whose positions are "
+        f"ISSUED: public.{RECORD_CURSOR_TABLE} holds (seq={seq!r}, "
+        f"mode={mode!r}) for org_id={org_id!r} graph_id={graph_id!r}, so this "
+        f"graph's ordinals are ALLOCATED and CARRIED by the journal rather than "
+        f"computed by this replay (#9190, owner ruling 2026-11-15: \"the record "
+        f"allocates the ordinal and the journal record CARRIES it; replay READS "
+        f"the number instead of computing it\"). Enumerating here would store "
+        f"the same record at a SECOND position with no error: {remedy}"
+    )
+
+
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str, start_seq: int = 1,
-           position: bool = True) -> ReplayReport:
+           position: bool = True,
+           allocate: bool = False) -> ReplayReport:
     """Replay a journal into the record, on the CALLER's transaction.
 
     `§3`: *"One transaction covers the journal and its projection — no dual
@@ -6935,6 +7292,17 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     ``position=seq is not None`` and layer 1 is populated by production traffic,
     not only by a replay. ``True`` (the default) keeps every caller that
     predates the parameter byte-identical.
+
+    ⛔ AND AN ENUMERATED REPLAY IS REFUSED ONCE THE GRAPH IS CUT OVER (#9190).
+    Before a single plan statement, and only when ``position`` is on and
+    ``allocate`` off, this asks whether the graph has a `public.record_cursor`
+    row — i.e. whether its positions are ISSUED. If they are, the replay is
+    refused by name: the ordinal is the allocator's to give and the journal's to
+    CARRY, so enumerating would store the same record at a second position with
+    no error (`ON CONFLICT … DO NOTHING` cannot see it, and the `#9318`
+    collision guard only fires on an ABSORBED insert). A graph with no row —
+    every graph before cutover — is unaffected; see
+    :func:`_refuse_an_enumerated_replay`.
 
     THE TENANT GUC (R6). The FIRST statement executed is
     :data:`TENANT_GUC_SQL` — ``set_config('app.current_org_id', $1, true)`` —
@@ -6989,18 +7357,55 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     with the wrong DSN now fails closed on the first write instead of silently
     turning RLS off.
     """
+    # ⛔ THE ALLOCATOR IS IMPORTED ONLY ON THE ARM THAT USES IT. `replay_plan` is
+    # loaded BY FILE PATH by the PGlite harness (`supabase/tests/pglite/
+    # validate.mjs`), where a relative import raises; this function is not on that
+    # path, but a package-less caller of `replay(position=…)` must not break
+    # either. The derived path — every production write today — needs NOTHING
+    # from the allocator, and neither does the harness.
+    ra = None
+    if allocate:
+        from . import record_allocator as ra
+
     plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
-                       start_seq=start_seq, position=position)
+                       start_seq=start_seq, position=position,
+                       allocate=allocate)
+    # ⛔ THE ISOLATION GUARD RUNS INSIDE THE CALLER'S TRANSACTION, before any
+    # statement: the allocator's "allocation order = commit order" is a READ
+    # COMMITTED property, and under REPEATABLE READ/SERIALIZABLE the counter's
+    # blocked UPDATE raises 40001 with no retry on this path. Reading
+    # `transaction_isolation` anywhere else would answer about a DIFFERENT
+    # transaction than the one about to allocate.
+    if allocate:
+        ra.require_read_committed(conn)
     # The tenant, before anything it scopes. NOT part of `plan`: the plan stays
     # the pure journal→record declaration, and this statement is the session
     # context the plan is applied in — plus the role gate that decides whether
     # the context can mean anything at all.
     cursor = scope_connection(conn, org_id)
+    # ⛔ AN ENUMERATED REPLAY ASKS FIRST WHETHER THE COUNTER HAS ALREADY ISSUED
+    # THIS GRAPH'S POSITIONS (#9190). `position=False` writes no position row and
+    # `allocate=True` IS the allocator's arm, so neither is asked; a graph with no
+    # cursor row replays unchanged. A `seeded` row is asked too — see
+    # :func:`_refuse_an_enumerated_replay` for why the mode is the REMEDY and the
+    # row is the fact.
+    if position and not allocate and records:
+        _refuse_an_enumerated_replay(cursor, org_id, graph_id)
     total = len(plan)
+    allocated: list[int] = []
     for index, statement in enumerate(plan, start=1):
+        is_allocation = statement.sql.startswith(ALLOCATION_STATEMENT_PREFIX)
         try:
             cursor.execute(statement.sql, statement.params)
+            if is_allocation:
+                allocated.extend(int(row[0]) for row in cursor.fetchall())
         except Exception as exc:
+            # A NAMED allocator failure keeps its own class (retryable /
+            # collision) so the caller can act on it — 40001/40P01/57014 are the
+            # caller's to retry, 23505 is a defect to investigate. Anything else
+            # keeps this module's attribution.
+            if is_allocation and ra is not None:
+                ra.raise_named(exc, where="the position allocation")
             # ⛔ ATTRIBUTION, NOT A BARE RE-RAISE (#10620). The caller's wrap
             # (`RecordWriter.write`) used to name only the exception CLASS, so
             # the record's own log could not say which statement, table or
@@ -7012,19 +7417,47 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
                     _driver_fault(exc),
                 )
             ) from exc
-        if _JOURNAL_INSERT_PREFIX in statement.sql:
+        if statement.sql.startswith(_JOURNAL_INSERT_PREFIX) and not is_allocation:
             # ⛔ THE ONE CALL SITE (#9318). Everything that writes layer 1 — the
             # live door, a full replay, the reconciler, the backfill tools —
             # executes its position row HERE, so the replay-vs-collision verdict
             # cannot be forgotten by a caller and cannot be spelled twice. It
             # costs one `rowcount` read on the insert path, and one extra
             # tenant-scoped SELECT only when the insert was ABSORBED.
+            #
+            # ⛔ `startswith`, NOT `in`, AND `not is_allocation` — MEASURED, and
+            # it cost an armed write. `#9318` matched the journal insert by
+            # SUBSTRING, and the ALLOCATION statement CONTAINS
+            # `INSERT INTO public.journal_event` too (it is the statement that
+            # writes the positions). The guard then unpacked
+            # `statement.params[:5]` — which for the allocation are
+            # `(event_types[], payloads[], recorded_at[], n, org_id)` — and its
+            # conflict SELECT compared `org_id = <text[]>`:
+            # `UndefinedFunction 42883: operator does not exist: text = text[]`,
+            # raised as a `RecordStatementError` on statement 3/3 of EVERY armed
+            # write. The allocation needs no guard anyway: its insert has no
+            # `ON CONFLICT DO NOTHING`, so a duplicate is a `23505` that fails
+            # the transaction and rolls the counter's increment back.
             _refuse_a_journal_collision(cursor, statement, index, total)
     report = ReplayReport(events=len(records), statements=0)
     for statement in plan:
         if _JOURNAL_INSERT_PREFIX in statement.sql:
             continue
+        if statement.sql.startswith(ALLOCATION_STATEMENT_PREFIX):
+            # The allocated statement WRITES the position rows, so it is not a
+            # projection mutation — counting it would make `statements`
+            # incomparable with every reader of this report (and with
+            # `ReplayReport.statements`' own documented meaning).
+            continue
         report.statements += 1
+    if allocate and records:
+        # ⛔ AN EMPTY BATCH IS A NO-OP, NOT A REFUSAL: `write([])` is APPLIED and
+        # allocates nothing, so `replay([])` must not report `CursorNotActive` —
+        # that would be a false diagnosis of a non-event.
+        block = ra.allocation_from_seqs(allocated, org_id=org_id,
+                                        graph_id=graph_id)
+        report.first_seq = block.first_seq
+        report.last_seq = block.last_seq
     return report
 
 
@@ -7035,7 +7468,8 @@ _JOURNAL_INSERT_PREFIX = "INSERT INTO public.journal_event"
 
 def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
                 graph_id: str, start_seq: int = 1,
-                position: bool = True) -> list[Statement]:
+                position: bool = True,
+                allocate: bool = False) -> list[Statement]:
     """Every statement a full replay emits, in order, WITHOUT executing any.
 
     The totality gate lives here: an undeclared record type raises before a
@@ -7069,9 +7503,36 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
             f"start_seq is the journal position of records[0] and must be >= 1 "
             f"(got {start_seq!r})"
         )
+    if allocate and start_seq != 1:
+        # ⛔ NOT SILENTLY IGNORED. `allocate=True` means the RECORD issues the
+        # number (`#9190`'s reopen), so a caller-supplied watermark has no
+        # meaning — and a plan that quietly dropped one would leave the caller
+        # believing it had positioned the batch.
+        raise RecordProjectionError(
+            f"allocate=True derives the position from the record's counter, so "
+            f"start_seq must be left at 1 (got {start_seq!r})"
+        )
+    if allocate and not position:
+        raise RecordProjectionError(
+            "allocate=True writes the position rows (that is what the number "
+            "is for), so position=False is contradictory"
+        )
     columns = table_columns()
     refused = refused_props_names()
     plan: list[Statement] = []
+    if allocate:
+        # LAYER MUTATIONS FIRST, the allocation LAST: the counter's row lock is
+        # the last CONTENDED lock the transaction takes, which is what keeps two
+        # writers from deadlocking on (layer rows, counter) vs (counter, layer
+        # rows). The positions the allocation then writes are not contended —
+        # each writer holds its own freshly issued seq.
+        for record in records:
+            plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
+                                      columns=columns, refused=refused))
+        if records:
+            plan.append(allocation_statement(
+                org_id=org_id, graph_id=graph_id, records=records))
+        return plan
     for seq, record in enumerate(records, start=start_seq):
         plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
                                   columns=columns, refused=refused))

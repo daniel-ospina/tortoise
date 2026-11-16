@@ -270,8 +270,29 @@ INTERNAL_PATH_READERS: frozenset[str] = frozenset({
 # other `_quota_gated` site must NOT.
 WEIGHT_BEARING_METHODS: frozenset[str] = frozenset({
     "create_point", "create_operator", "mitigate_operator", "file_decision",
-    "file_human_approval", "diary_write", "ingest", "checkpoint",
+    "file_human_approval", "diary_write", "ingest",
+    # #11609 lane C retires the PUBLIC `checkpoint` method; its still-served door
+    # wraps the SDK's private seam, and the weight is unchanged (the `filed`
+    # count), so the weight class follows the name the wrap site actually calls.
+    "_checkpoint",
+    # #11609 lane C: the mining container weights by the `filed` count its result
+    # carries — the same bulk-write shape `checkpoint` had (#4113's reason).
+    "mine_knowledge_from_session",
 })
+
+# #11609 lane C: four retired methods are still SERVED, through doors that call the
+# SDK's PRIVATE seam (`_checkpoint`, `_create_source`, `_assess_source`,
+# `_index_directory`). The wrap-site scan reads the attribute the code CALLS, so the
+# registry-binding arm needs to know which REGISTRY method that seam belongs to —
+# without this declaration the four legitimately-served doors read as "no registry
+# binding". Declared, not inferred from the leading underscore: an underscore is a
+# naming convention, and guessing would hide a genuinely unbound site.
+SDK_SEAM_ALIASES: dict[str, str] = {
+    "_checkpoint": "checkpoint",
+    "_create_source": "create_source",
+    "_assess_source": "assess_source",
+    "_index_directory": "index_directory",
+}
 
 # The DECLARED write surface: operation -> surface label.  This is the one
 # place a tool name is declared (not looked up) — the issue's inverse assertion
@@ -288,7 +309,7 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "invalidate_point": "tortoise_invalidate",
     "supersede": "tortoise_supersede",
     "retract_point": "tortoise_retract_point",
-    "checkpoint": "tortoise_checkpoint",
+    "_checkpoint": "tortoise_checkpoint",  # retired method, seam-wrapping door (#11609)
     "diary_write": "tortoise_diary_write",
     "create_entity": "tortoise_create_entity",
     "update": "tortoise_update",
@@ -297,12 +318,24 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "create_object": "tortoise_create_object",
     "create_event": "tortoise_create_event",
     "create_document": "tortoise_create_document",
-    "create_source": "tortoise_create_source",
-    "assess_source": "tortoise_assess_source",
+    # #11609 lane C: `create_source` / `assess_source` are RETIRED (`register_source` /
+    # `manage_source_trust` absorb them) and their doors wrap the private seams. The
+    # key is the wrap site's name; the label is the retired-but-served door, which the
+    # #3883 shim still resolves — so the binding stays checked rather than dropped.
+    "_create_source": "tortoise_create_source",
+    "_assess_source": "tortoise_assess_source",
     "update_entity": "tortoise_update_entity",
     "create_edge": "tortoise_create_edge",
     "ingest": "tortoise_ingest",
-    "index_directory": "tortoise_index_files",
+    "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door
+    # #11609 lane C's containers: each wraps its own SDK operation, so each is a
+    # declared write surface of its own (the forward arm would otherwise report them
+    # as unmapped wrap sites).
+    "index_sources_from_directory": "tortoise_index_sources_from_directory",
+    "mine_knowledge_from_directory": "tortoise_mine_knowledge_from_directory",
+    "mine_knowledge_from_session": "tortoise_mine_knowledge_from_session",
+    "register_source": "tortoise_register_source",
+    "manage_source_trust": "tortoise_manage_source_trust",
 }
 
 # Tenant-scoped control-plane labels: a registry mutation whose labels are
@@ -1446,7 +1479,12 @@ def wrap_site_violations(mcp_src: str | None = None) -> list[str]:
         if (method in WEIGHT_BEARING_METHODS) != has_weight:
             out.append(f"_quota_gated({method})@{lineno}: abuse_weight={has_weight}")
     wrapped = {s[0] for s in sites.sites}
-    for method in sorted(wrapped - set(by_method)):
+    for method in sorted(wrapped):
+        if method in by_method:
+            continue
+        alias = SDK_SEAM_ALIASES.get(method)
+        if alias is not None and alias in by_method:
+            continue  # a still-served door wrapping the SDK's private seam (#11609)
         out.append(f"wrap site for {method!r} has no registry binding")
     return out
 
