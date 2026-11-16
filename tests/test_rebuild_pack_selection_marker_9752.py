@@ -1522,9 +1522,79 @@ def _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts):
     monkeypatch.setattr(FalkorProjection, "rebuild_all",
                         lambda self, _dir, **kw: dict(counts))
 
+    # ⛔ #12962: the integrity verification must not open a REAL embedded graph.
+    # `migrate()` calls `migrate_db._count_nodes(target)` (the pre-marker node-ID
+    # check) and `_count_nodes(backup_path)`; each constructs a `FalkorProjection`,
+    # which STARTS an embedded redis server and blocks in
+    # `embedded_lifecycle._wait_for_server_start` for its ~60 s boot bound — on a
+    # `target`/`backup` this file has deliberately made FAKE (`embedded.db` is
+    # `b"not-a-real-rdb"` above, and `rebuild_all` is stubbed, so there is no
+    # graph to count and nothing the number could assert). Measured at #12962:
+    # the file cost **620.80 s wall against 9.8 s user + 5.7 s system**, with
+    # FIFTEEN `migrate`-route cases each at exactly 60.7-60.9 s — i.e. ~10 min of
+    # pure socket wait. That is what killed the required `test (j)` leg: the
+    # shard's whole 20 min watchdog, spent waiting on a server boot, twice in a
+    # row at the same nodeid, with ZERO attributable test failures.
+    # Pinned so a future edit that drops this line reds on TIME, not on a
+    # mysterious CI-only watchdog kill: `test_the_migrate_route_never_boots_an_
+    # embedded_server` below.
+    monkeypatch.setattr("tortoise.migrate_db._count_nodes", lambda _db: 0)
+
     from tortoise.migrate_db import migrate
 
     return migrate(force=True)
+
+
+def test_the_migrate_route_counts_nodes_without_booting_a_server(
+        tmp_path, monkeypatch):
+    """The `_count_nodes` stub in `_migrate_with_rebuild_counts` must stay LIVE.
+
+    `migrate(force=True)` verifies node-ID equality before it writes the marker,
+    so it calls `migrate_db._count_nodes` on the target AND on the backup. A REAL
+    call constructs a `FalkorProjection`, which starts an embedded redis server
+    and blocks in `embedded_lifecycle._wait_for_server_start` for its boot bound.
+
+    Measured while it did (#12962): this file cost **620.80 s wall against 9.8 s
+    user + 5.7 s system**, with fifteen `migrate`-route cases at exactly
+    60.7-60.9 s each — ~10 min of pure socket wait — and the required `test (j)`
+    leg was killed at its 20 min watchdog TWICE, at the same nodeid, with ZERO
+    attributable test failures. Its committed `durations` weight is `3.2`, which
+    is why no budget derivation could see it: the row is honest about the TEST
+    and the boot was never part of it.
+
+    This pin is deliberately about REACH, not timing (a wall-clock assertion is
+    flaky and would red under load): a refactor that stops calling `_count_nodes`
+    makes the stub dead weight, and one that bypasses the stub brings the ten
+    minutes back. Either reds here, locally, instead of as a mysterious CI-only
+    watchdog kill.
+    """
+    from tortoise.projection import FalkorProjection
+
+    calls = []
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 0, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_gap": 0, "pack_selection_state_unknown": False,
+              "pack_selection_conflict": False}
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tortoise_dir = tmp_path / ".tortoise"
+    (tortoise_dir / "events").mkdir(parents=True)
+    (tortoise_dir / "embedded.db").write_bytes(b"not-a-real-rdb")
+    monkeypatch.setattr(FalkorProjection, "rebuild_all",
+                        lambda self, _dir, **kw: dict(counts))
+    monkeypatch.setattr("tortoise.migrate_db._count_nodes",
+                        lambda db: (calls.append(db), 0)[1])
+
+    from tortoise.migrate_db import migrate
+
+    migrate(force=True)
+    assert calls, (
+        "`migrate(force=True)` no longer reaches `migrate_db._count_nodes`, so the "
+        "stub this file's `_migrate_with_rebuild_counts` installs is DEAD WEIGHT "
+        "— delete the stub, or re-point this pin at the new integrity-verify seam "
+        "(#12962: while the real call reached a server boot, this file cost 620 s "
+        "and killed the required `test (j)` leg twice)"
+    )
 
 
 def test_pack_selection_gap_warns_in_the_migrate_db_caller(
