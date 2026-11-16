@@ -148,10 +148,18 @@ ENTRYPOINT_GLOB = "entrypoint*.sh"
 #: failure ("mentions it but the assignment shape was not read"), never a silent pass.
 _ENV_ASSIGNMENT = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>\"[^\"]*\"|'[^']*'|\S*)")
 _ENV_INSTRUCTION = re.compile(r"(?i)^\s*ENV\s+(?P<body>.+)$")
+_FROM_INSTRUCTION = re.compile(
+    r"(?i)^\s*FROM\s+(?:--\S+\s+)*(?P<parent>\S+)(?:\s+AS\s+(?P<name>[\w.-]+))?\s*$")
 #: The body of an `ENV` line that is NOTHING BUT `K=V` pairs (quotes honoured). Anything else is
 #: not tiled, so it is never parsed as a set of assignments.
 _ENV_PAIRS = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)\s*)+$")
-_SHELL_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
+#: ⛔ `export` is REQUIRED (review round 8, P3). The entrypoint ends in `exec "$@"`, so a shell
+#: variable that was never exported does NOT reach the daemon: crediting a bare
+#: `TORTOISE_EMBED_GATE=1` would pass the gate while production runs the switch unset — the
+#: opposite of what this reader claims to read. A non-exported assignment of a switch is reported
+#: as unreadable rather than credited.
+_SHELL_ASSIGNMENT = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
+_SHELL_UNEXPORTED = re.compile(r"^\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
 _SHELL_EXPORT_NAME = re.compile(r"^\s*export\s+(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*$")
 
 #: A trailing `#` comment (idiomatic after a shell assignment) is NOT part of the value — leaving
@@ -325,16 +333,52 @@ def _logical_lines(text: str) -> list[str]:
     return lines
 
 
+def _final_stage_from_instructions(logical: list[str]) -> tuple[int, dict[str, int]]:
+    """``(index of the first line of the FINAL stage, {stage name: first line index})``.
+
+    ⛔ A Dockerfile is a SEQUENCE of stages and only the final one becomes the image, so an `ENV`
+    in a builder stage is not the shipped default (review round 8, P3). Crediting it would pass a
+    channel whose final stage says nothing — and both shipped Dockerfiles are single-stage, so the
+    alternative (ignoring stages) is exactly the shape that stays green when someone splits one.
+    """
+    starts: list[int] = []
+    names: dict[str, int] = {}
+    for index, line in enumerate(logical):
+        match = _FROM_INSTRUCTION.match(line)
+        if not match:
+            continue
+        starts.append(index)
+        if match.group("name"):
+            names[match.group("name").lower()] = index
+    return (starts[-1] if starts else 0), names
+
+
 def _dockerfile_env(text: str) -> tuple[dict[str, str], set[str]]:
-    """``ENV`` assignments in an image build file: ``{key: value}`` (last wins) + ambiguous keys.
+    """``ENV`` assignments in the IMAGE's stage: ``{key: value}`` (last wins) + ambiguous keys.
 
     Both Dockerfile forms are handled — ``ENV K=V K2=V2`` and the legacy ``ENV K V``. A line that
     names a switch in a shape neither form matches is reported as AMBIGUOUS rather than ignored,
     so a spelling this reader does not model fails the gate instead of passing it.
+
+    Only the FINAL stage (and the named stages it inherits from, by `FROM <name>`) counts — a
+    builder stage's `ENV` never reaches the shipped image.
     """
+    logical = _logical_lines(text)
+    final_start, names = _final_stage_from_instructions(logical)
+    # The final stage, plus every named ancestor it chains to (`FROM builder AS final`).
+    chain_start = final_start
+    while True:
+        match = _FROM_INSTRUCTION.match(logical[chain_start])
+        parent = (match.group("parent") if match else "") or ""
+        if parent.lower() not in names:
+            break
+        chain_start = names[parent.lower()]
+    live = range(chain_start, len(logical))
     stated: dict[str, str] = {}
     ambiguous: set[str] = set()
-    for line in _logical_lines(text):
+    for index, line in enumerate(logical):
+        if index not in live:
+            continue
         match = _ENV_INSTRUCTION.match(line)
         if not match:
             continue
@@ -378,6 +422,11 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
                 continue
             stated[key] = _unquote(value)
             continue
+        unexported = _SHELL_UNEXPORTED.match(line)
+        if unexported and unexported.group("key") in SWITCHES:
+            # A value with no `export`: it never reaches the process (see `_SHELL_ASSIGNMENT`).
+            ambiguous.add(unexported.group("key"))
+            continue
         if _SHELL_EXPORT_NAME.match(line):
             continue  # `export NAME` states no value; not an arm
         ambiguous.update(_mentioned_switches(line))
@@ -417,9 +466,16 @@ def _resolve_compose(path: Path, root: Path) -> tuple[dict | None, str]:
             "the `docker` CLI is not on PATH, so the compose project cannot be resolved — a text "
             "scan is a different question (see this module's docstring)"
         )
+    # ⛔ `--profile '*'` is load-bearing, not a convenience: compose FILTERS OUT every service
+    # gated behind `profiles:` and says nothing on stderr (measured, Compose 2.40.3), so a
+    # Tortoise service one `--profile` away would be invisible here and the gate would report
+    # "every channel states both" over a population that excluded it (review round 8, P2). The
+    # profile set is part of the deployment's surface, so every profile is resolved.
     argv = [
         "docker",
         "compose",
+        "--profile",
+        "*",
         "--env-file",
         os.devnull,
         "-f",

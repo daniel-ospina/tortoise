@@ -451,6 +451,59 @@ def test_the_resolution_is_per_service(tmp_path):
 # ── the two readers with no external resolver ───────────────────────────────────────────────
 
 
+@needs_docker
+def test_a_profiled_service_cannot_hide_from_the_gate(tmp_path):
+    """Review round 8, P2: compose FILTERS OUT services behind `profiles:` — silently.
+
+    Measured (Compose 2.40.3): without `--profile '*'` the resolved model contains only the
+    unprofiled services and nothing is written to stderr, so a Tortoise service one `--profile`
+    away would pass this gate unseen.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n"
+        "    build: .\n"
+        "    environment:\n"
+        '      TORTOISE_VALUE_GATE: "1"\n'
+        '      TORTOISE_EMBED_GATE: "1"\n'
+        "  worker:\n"
+        "    build: .\n"
+        '    profiles: ["prod"]\n'
+        "    environment:\n"
+        '      TORTOISE_DB_URI: "docker://:x@db:6379/g"\n'
+    )
+    channels, failures = gate.evaluate(tmp_path)
+    assert "docker-compose.yml: worker" in [c.channel for c in channels], (
+        f"the profiled service must be RESOLVED, not filtered out: {[c.channel for c in channels]}"
+    )
+    assert any("worker does not state" in f for f in failures), failures
+
+
+def test_the_shell_reader_requires_export():
+    """Review round 8, P3: the entrypoint `exec "$@"`s, so only an EXPORTED value reaches it."""
+    stated, ambiguous = gate._shell_assignments("TORTOISE_VALUE_GATE=1\n")
+    assert stated == {} and ambiguous == {"TORTOISE_VALUE_GATE"}
+    stated, ambiguous = gate._shell_assignments("export TORTOISE_VALUE_GATE=1\n")
+    assert stated == {"TORTOISE_VALUE_GATE": "1"} and ambiguous == set()
+
+
+def test_the_dockerfile_reader_credits_only_the_final_stage():
+    """Review round 8, P3: a builder stage's `ENV` never becomes the shipped image's default."""
+    stated, ambiguous = gate._dockerfile_env(
+        "FROM builder-base\nENV TORTOISE_VALUE_GATE=1 TORTOISE_EMBED_GATE=1\nFROM runtime-base\n"
+    )
+    assert stated == {} and ambiguous == set()
+    # …but a named stage the final one inherits from DOES count
+    stated, _ = gate._dockerfile_env(
+        "FROM a AS builder\nENV TORTOISE_VALUE_GATE=1\nENV TORTOISE_EMBED_GATE=1\n"
+        "FROM builder AS final\nCMD x\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}
+    # …and a single-stage file is unchanged
+    stated, _ = gate._dockerfile_env("FROM a\nENV TORTOISE_VALUE_GATE=1\nENV TORTOISE_EMBED_GATE=1\n")
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}
+
+
 def test_the_dockerfile_reader_reads_both_forms_and_fails_closed():
     stated, ambiguous = gate._dockerfile_env(
         "FROM x\n"
