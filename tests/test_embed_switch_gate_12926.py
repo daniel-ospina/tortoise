@@ -659,6 +659,149 @@ def test_the_entrypoint_reader_reads_defaults_and_ignores_a_valueless_export():
     assert len(problems) == 1 and "EMPTY value" in problems[0], problems
 
 
+def test_a_later_ambiguous_assignment_supersedes_an_earlier_literal_dockerfile():
+    """Review P2: last assignment wins, so `ENV K=1` then `ENV K=${X}` arms NOTHING.
+
+    Reporting the stale `1` is a fail-OPEN: the image resolves the switch empty (measured with
+    real Docker) while the gate says STATED. `switch_problem` gives `stated` precedence over
+    `ambiguous`, so the earlier literal has to be dropped rather than merely flagged.
+    """
+    stated, ambiguous = gate._dockerfile_env(
+        "FROM python:3.12\n"
+        "ENV TORTOISE_VALUE_GATE=1\n"
+        "ENV TORTOISE_EMBED_GATE=1\n"
+        "ENV TORTOISE_EMBED_GATE=${EMBED_FROM_BUILD_ARG}\n"
+    )
+    assert "TORTOISE_EMBED_GATE" not in stated, (
+        f"the superseded literal survived: {stated} — the gate would report STATED for a value "
+        "that resolves empty"
+    )
+    assert "TORTOISE_EMBED_GATE" in ambiguous
+    channel = gate.Channel("Dockerfile", "dockerfile", "Dockerfile ENV",
+                           stated=stated, ambiguous=ambiguous)
+    problems = channel.problems()
+    assert len(problems) == 1 and "does not state a value this gate can read" in problems[0], problems
+
+    # ...and the reverse order stays STATED: a literal AFTER the ambiguous line is the value
+    # Docker actually resolves, so it must not be thrown away.
+    stated, ambiguous = gate._dockerfile_env(
+        "FROM python:3.12\n"
+        "ENV TORTOISE_VALUE_GATE=1\n"
+        "ENV TORTOISE_EMBED_GATE=${EMBED_FROM_BUILD_ARG}\n"
+        "ENV TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert gate.Channel("Dockerfile", "dockerfile", "Dockerfile ENV",
+                        stated=stated, ambiguous=ambiguous).problems() == []
+
+
+def test_a_later_ambiguous_assignment_supersedes_an_earlier_literal_entrypoint():
+    """The same last-wins rule in the shell reader — `export K=1` then `export K=$X`."""
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        'export TORTOISE_EMBED_GATE=1\n'
+        'export TORTOISE_EMBED_GATE="${EMBED_FROM_CALLER}"\n'
+    )
+    assert "TORTOISE_EMBED_GATE" not in stated, f"the superseded literal survived: {stated}"
+    assert "TORTOISE_EMBED_GATE" in ambiguous
+
+    # a literal after the ambiguous line is the effective value again
+    stated, ambiguous = gate._shell_assignments(
+        "#!/bin/sh\n"
+        'export TORTOISE_EMBED_GATE="${EMBED_FROM_CALLER}"\n'
+        'export TORTOISE_EMBED_GATE=1\n'
+    )
+    assert stated == {"TORTOISE_EMBED_GATE": "1"}, stated
+
+
+def test_only_the_final_build_stage_states_a_switch():
+    """Review P2: `ENV` is STAGE-SCOPED, so a builder-stage assignment arms nothing that ships.
+
+    Crediting it would read a two-stage Dockerfile as STATED while the runtime image says
+    nothing — an unmodelled shape failing OPEN, which this gate's whole doctrine forbids.
+    """
+    both = (
+        "FROM python:3.12 AS build\n"
+        "ENV TORTOISE_VALUE_GATE=1\n"
+        "ENV TORTOISE_EMBED_GATE=1\n"
+        "FROM python:3.12-slim\n"
+        "CMD [\"python\", \"-c\", \"print(1)\"]\n"
+    )
+    stated, ambiguous = gate._dockerfile_env(both)
+    assert stated == {}, (
+        f"a builder-stage ENV was credited to the final image: {stated} — neither switch survives "
+        "into the image that ships"
+    )
+    assert gate.Channel("Dockerfile", "dockerfile", "Dockerfile ENV",
+                        stated=stated, ambiguous=ambiguous).problems()
+
+    # the final stage stating them IS the image stating them
+    final = (
+        "FROM python:3.12 AS build\n"
+        "ENV TORTOISE_VALUE_GATE=0\n"
+        "FROM python:3.12-slim\n"
+        "ENV TORTOISE_VALUE_GATE=1\n"
+        "ENV TORTOISE_EMBED_GATE=1\n"
+    )
+    stated, ambiguous = gate._dockerfile_env(final)
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+    assert gate.Channel("Dockerfile", "dockerfile", "Dockerfile ENV",
+                        stated=stated, ambiguous=ambiguous).problems() == []
+
+    # a single-stage file is read whole (no boundary to honour)
+    stated, _ = gate._dockerfile_env(
+        "FROM python:3.12\nENV TORTOISE_VALUE_GATE=1\nENV TORTOISE_EMBED_GATE=1\n"
+    )
+    assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, stated
+
+
+# ── the PROCESS VERDICT — the only thing CI consumes ────────────────────────────────────────
+
+
+def test_the_process_exit_code_is_what_ci_consumes_and_it_refuses(tmp_path):
+    """Review P1: nothing pinned `main()`/`render()`/`--json`.
+
+    Every other test goes through `evaluate()`, so a mutant that made `main()` never refuse
+    (`return 0`) left the whole suite green while CI went green over an unrefused omission —
+    an INERT ENFORCER. CI reads the exit code, so the exit code is what this pins. Docker-free
+    on purpose: an image-build channel is read by a pure-Python reader, so this arm runs on
+    every lane rather than skipping with the docker-marked ones.
+    """
+    complete = tmp_path / "complete"
+    complete.mkdir()
+    _dockerfile(complete)
+    assert gate.main(["--repo", str(complete)]) == 0, (
+        "a tree stating both switches must exit 0, or the check reds every honest PR"
+    )
+
+    omitting = tmp_path / "omitting"
+    omitting.mkdir()
+    _dockerfile(omitting, embed=False)
+    assert gate.main(["--repo", str(omitting)]) == 1, (
+        "an omission must exit 1 — this is the ONLY signal CI consumes, so a 0 here is an "
+        "inert enforcer however clearly the report printed the refusal"
+    )
+
+    # a path that is not a directory is a USAGE error, not a pass and not a refusal verdict
+    assert gate.main(["--repo", str(tmp_path / "does-not-exist")]) == 2
+
+
+def test_the_json_verdict_carries_the_failures(tmp_path, capsys):
+    """`--json` is a consumer surface: it must carry the same verdict, not a prettier one."""
+    import json
+
+    omitting = tmp_path / "omitting"
+    omitting.mkdir()
+    _dockerfile(omitting, value=False)
+    assert gate.main(["--repo", str(omitting), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failures"], "--json emitted a green payload for a refused tree"
+    assert any("TORTOISE_VALUE_GATE" in f for f in payload["failures"]), payload["failures"]
+    assert payload["channels"], "--json emitted no channel rows"
+    refused = [c for c in payload["channels"] if c.get("problems")]
+    assert refused, payload["channels"]
+
+
 # ── Visibility ───────────────────────────────────────────────────────────────────────────────
 
 
@@ -741,6 +884,37 @@ def test_the_pre_merge_check_runs_in_ci():
         "excuses such a leg when its failing ids are all main's, and a gate-step failure emits no "
         "test-id — so the required aggregate could read green with the omission unrefused"
     )
+
+    # ⛔ NON-DEFERRABLE IS NOT THE SAME AS REQUIRED (review P2). `DEFERRABLE_LEGS` only names the
+    # legs `ci-introduced-failure` may EXCUSE; a job outside it still gates nothing if the
+    # required aggregate does not `needs:` it — the step would run, refuse, and the green
+    # `python-ci-gate` would say nothing about it. So assert the wiring job is in the aggregate's
+    # own `needs:` list AND that its row in the aggregate's leg table is DECISIVE (selector `-`,
+    # not a `${{ … }}` selector that can decline the leg).
+    aggregate = (workflow.get("jobs") or {}).get("python-ci-gate")
+    assert aggregate, "`python-ci-gate` (the required aggregate) is missing from the workflow"
+    needs = set(aggregate.get("needs") or [])
+    assert jobs <= needs, (
+        f"the gate runs in a job the REQUIRED aggregate does not `needs:` ({sorted(jobs - needs)}): "
+        "it would run and refuse while `python-ci-gate` — the only required check — stays green, "
+        "so the refusal gates nothing"
+    )
+    rows = {}
+    for step in aggregate.get("steps") or []:
+        for line in str(step.get("run") or "").splitlines():
+            row = line.strip().split("|")
+            if len(row) == 3 and row[0] in needs:
+                rows[row[0]] = row[2].strip()
+    assert rows, (
+        "the aggregate's leg table (`name|result|selector` rows) was not found — this pin cannot "
+        "tell a decisive leg from a declinable one, so it must not pass"
+    )
+    for job in sorted(jobs):
+        assert rows.get(job) == "-", (
+            f"the aggregate's row for the gate's job `{job}` carries selector "
+            f"`{rows.get(job)}` instead of `-`: a selector can DECLINE the leg, which would leave "
+            "the required aggregate green with the omission unrefused"
+        )
 
 
 # ── this repository, resolved ───────────────────────────────────────────────────────────────
