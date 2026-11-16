@@ -786,10 +786,13 @@ def test_a_duplicate_position_is_not_retryable() -> None:
     assert "re-seed (or reconcile) before allocating again" not in message, (
         f"the precondition-free re-seed instruction survived, and it contradicts "
         f"the writer's halt-first remedy on the same WARNING line: {message}")
-    assert "Do NOT re-arm:" not in message, (
-        "the refusal forbids `arm` outright, and `arm` is the ONLY writer back "
-        f"to an allocating counter — every route out is closed: {message}")
-    # ⛔ PRESENCE IS NOT ENOUGH — THE TRANSITIONS MUST BE IN A RUNNABLE ORDER.
+    # ⛔ "Do NOT re-arm:" IS NOT ASSERTED HERE, because it would be VACUOUS
+    # (re-review, P2): that wording lives in `record_writer._ALLOCATOR_REMEDY`,
+    # NOT in `PositionCollision`'s text, so `"Do NOT re-arm:" not in message`
+    # passes on EVERY revision of the dict — including the dead-ending one it is
+    # meant to catch. The dict is pinned where it actually lives, in
+    # `test_every_allocator_remedy_chain_terminates_allocatable` below.
+    # ⛔ AND PRESENCE IS NOT ENOUGH — THE TRANSITIONS MUST BE IN A RUNNABLE ORDER.
     # A message naming all three arrows in the wrong order still reads as a
     # remedy and still satisfies every needle above. The chain is a PATH:
     # `active → halted` makes `halted` reachable, `halted → seeded` makes
@@ -802,6 +805,71 @@ def test_a_duplicate_position_is_not_retryable() -> None:
         f"the printed transition chain is out of order ({where}) — each step's "
         f"source state is the previous step's target, so a scrambled chain "
         f"cannot run: {message}")
+
+
+def test_every_allocator_remedy_chain_terminates_allocatable() -> None:
+    """⛔ RE-REVIEW P2: THE `_ALLOCATOR_REMEDY` TEXTS HAD NO TEST AT ALL.
+
+    `test_the_door_speaks_the_counters_vocabulary` only asserts that every
+    counter NAME has a remedy (key coverage), so ANY wording passed — including
+    the two that dead-ended:
+
+      · `duplicate_position` read "Do NOT re-arm: investigate, then re-seed and
+        reopen" — forbidding `arm`, the ONLY writer back to an allocating
+        counter, and stopping at `reopen` → `seeded`, where `ALLOCATION_SQL`
+        (`AND mode = 'active'`) matches nothing and allocation raises
+        `CursorNotActive`;
+      · `cursor_not_active` read "run the seed and then `arm` … a `halted` one
+        means a defect stopped it and `reopen` is the resume" — but `seed` does
+        not change `mode` (`SEED_SQL:233-235`), so on a `halted` counter the
+        seed runs, the mode stays `halted`, and `arm` (`AND mode='seeded'`)
+        REFUSES. `reopen` was a parenthetical, not a step.
+
+    These strings are printed on the SAME WARNING line as the exception
+    (`record_writer.py:2739-2744`), so a chain that cannot run is an operator
+    being walked into the state the guard exists to prevent. The chain must be a
+    PATH: each arrow's source state is the previous arrow's target, and the last
+    target must be `active` — the only mode `ALLOCATION_SQL` will allocate in.
+
+    Non-vacuity: restoring either pre-fix wording reds here — the first on the
+    absent `halt`/arrow needles, the second on the missing `halted → seeded`
+    arrow (and on the forbidding sentence, which only the first contains).
+    """
+    chains = {
+        # the counter is BEHIND the table: it is `active`, and every repair verb
+        # except `halt` refuses from there.
+        "duplicate_position": (
+            ("halt", "re-seed", "reopen", "arm"),
+            (f"{ra.MODE_ACTIVE} → {ra.MODE_HALTED}",
+             f"{ra.MODE_HALTED} → {ra.MODE_SEEDED}",
+             f"{ra.MODE_SEEDED} → {ra.MODE_ACTIVE}"),
+        ),
+        # the allocation was refused because the mode is not `active`: the
+        # `halted` branch needs reopen BETWEEN the seed and the arm.
+        "cursor_not_active": (
+            ("reopen", "re-seed", "arm"),
+            (f"{ra.MODE_HALTED} → {ra.MODE_SEEDED}",
+             f"{ra.MODE_SEEDED} → {ra.MODE_ACTIVE}"),
+        ),
+    }
+    for state, (needles, arrows) in chains.items():
+        remedy = rw._ALLOCATOR_REMEDY[state]
+        for needle in needles:
+            assert needle in remedy, (
+                f"the {state!r} remedy never names {needle!r}, so the printed "
+                f"chain cannot reach an allocating counter: {remedy}")
+        where = [remedy.index(a) for a in arrows]
+        assert where == sorted(where), (
+            f"the {state!r} remedy names its transitions out of order ({where}) "
+            f"— each step's source state is the previous step's target, so a "
+            f"scrambled chain cannot run: {remedy}")
+        assert arrows[-1].endswith(ra.MODE_ACTIVE), (
+            f"the {state!r} remedy does not end at {ra.MODE_ACTIVE!r}, which is "
+            f"the only mode `ALLOCATION_SQL` allocates in: {remedy}")
+        assert "Do NOT re-arm:" not in remedy, (
+            f"the {state!r} remedy forbids `arm` outright, and `arm` is the "
+            f"ONLY writer back to an allocating counter — every route out is "
+            f"closed: {remedy}")
 
 
 def test_the_door_speaks_the_counters_vocabulary() -> None:

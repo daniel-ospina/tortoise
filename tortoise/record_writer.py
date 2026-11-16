@@ -2328,10 +2328,23 @@ def _report_live_write_refusal(reason: str, record_type: Any,
 #: says "something in the record failed".
 _ALLOCATOR_REMEDY = {
     "cursor_not_active": (
-        "the counter has no row for this graph, or its mode is not 'active': run "
-        "the seed and then `arm` (a `seeded` cursor means the cut-over was never "
-        "armed; a `halted` one means a defect stopped it and `reopen` is the "
-        "resume)"),
+        # ⛔ THE `halted` HALF USED TO DEAD-END (re-review, P2). It read "run the
+        # seed and then `arm`, … a `halted` one means … `reopen` is the resume" —
+        # but `seed` does NOT change `mode` (`SEED_SQL` sets `seq`/`updated_at`
+        # only), so a `seed` on a `halted` counter leaves it `halted` and `arm`
+        # (`AND mode='seeded'`) refuses. `reopen` is not a parenthetical aside,
+        # it is a REQUIRED STEP, and the chain must name it in order.
+        # ⛔ THE NO-ROW AND `seeded` BRANCHES CARRY NO TRANSITION ARROW ON
+        # PURPOSE (re-review, P2): they are single-step, and an arrow there
+        # interleaved a `seeded → active` ahead of the halted chain's
+        # `halted → seeded`, which makes the message's arrows read out of order
+        # by any prefix-order check and invites the reader to run them that way.
+        "the counter has no row for this graph, or its mode is not 'active'. "
+        "With no row, run the seed and then `arm` — that arms it. A `halted` "
+        "cursor was stopped by a defect, and `seed` does NOT change the mode, so "
+        "it takes `reopen` (`halted → seeded`), re-seed, then `arm` "
+        "(`seeded → active`). A `seeded` cursor was never armed, so `arm` alone "
+        "finishes it"),
     "duplicate_position": (
         "the counter issued a position the record already holds — the counter is "
         "BEHIND the table (a restore that bulk-loaded `journal_event` without the "
