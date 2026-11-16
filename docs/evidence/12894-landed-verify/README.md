@@ -283,8 +283,9 @@ recounts, so it survives a seal; the *seed* and the *replay floor* do not. On to
 enumeration, because V2 — a seal on a graph with **no** `record_cursor` row is exactly the D-28 live
 trigger: the next append returns 1 again and collides with row 1, and each following append walks into
 rows 2..N the same way. That collision is now **loud** (guard, §4.1) unless the two records share
-`event_type` and `recorded_at` **and the write carries a `ts`** — a `ts`-less pair is loud instead, read
-as `capture_state="unknown"` (§4.1's fourth row). On a **cut-over** graph the
+`event_type` and `recorded_at` **and the write carries a `ts`** — a `ts`-less pair **whose payload also
+differs** is loud instead, read as `capture_state="unknown"` (§4.1's fourth row), while a `ts`-less
+payload-identical pair is a replay and returns silently at `record_projection.py:6812`. On a **cut-over** graph the
 same seal cannot reach that collision at all, because the enumerated-replay refusal pre-empts the insert
 (§4.5) — the write is refused before a row is written. Either way the journal's segment manifest is
 *designed* to make the reader count across segments (which is why the plan calls the trigger "one flip
@@ -454,7 +455,7 @@ had to be established by a call-site census rather than by the repo's own instru
 | the record allocates the ordinal (`record_cursor`, row-locked, transactional, allocation order = commit order) | **BUILT** — `record_allocator.py` (663 lines), `ALLOCATION_SQL` in `record_projection.py:6926`, two migrations |
 | the journal record CARRIES the ordinal | **BUILT on the class, not on the path** — the allocated number reaches `RecordWrite.last_seq` and the byte meter (`record_writer.py:1722-1742`); **no live caller enters the arm** |
 | replay READS the number instead of computing it | **BUILT for the refusal half** — an enumerated replay is REFUSED for a graph with a cursor row (`record_projection.py:7340-7510`); there is no carried-`seq` *read* yet, because nothing writes a `seq` onto the export line |
-| the duplicate position is a defect, not an absorption | **BUILT — loud for a DIFFERENT record, and still silent for one admitted pair**: `23505` → `PositionCollision` on the allocated insert; replay's `DO NOTHING` is interrogated by the `#9318` guard, which returns silently only when `event_type` **and** `recorded_at` agree **and the write carries a `ts`** (`record_projection.py:6847-6848`; a `ts`-less pair falls through to `capture_state="unknown"` and is loud, `:6849-6853`) — so two different records sharing a capture instant are still absorbed (§4.1) |
+| the duplicate position is a defect, not an absorption | **BUILT — loud for a DIFFERENT record, and still silent for one admitted pair**: `23505` → `PositionCollision` on the allocated insert; replay's `DO NOTHING` is interrogated by the `#9318` guard. Silence is decided first by whether the conflict query selects a row at all (`record_projection.py:6443-6446` — same `event_type` **and** same `payload`, with the capture arm inert when the write carries no `ts`), returning at `:6812`; past that, it returns silently only when `event_type` **and** `recorded_at` also agree **and** a `ts` exists (`:6847-6848`), while a `ts`-less pair whose payload *differs* computes `capture_state="unknown"` (`:6849-6850`) and raises (`:6858-6865`). So two different records sharing a capture instant are still absorbed (§4.1) — and so is a pair differing only in `event_id`, which `ENVELOPE_KEYS` strips (`:528-529`) |
 | the seed / cutover for existing graphs | **BUILT, UNREACHABLE** (no verb, no RPC, no runbook); zero-row case correct; **2b lifted contrary to plan** |
 | the live writer allocates (§A7.7 6.3) | **NOT DONE** |
 | the creation hook (§A7.7 6.6) | **ABSENT** |
