@@ -3377,6 +3377,32 @@ _SHELL_ALLEXPORT = re.compile(r"^\s*set\s+-[a-zA-Z]*a[a-zA-Z]*\s*$")
 #: `set +a` ENDS allexport — the same option, unset. Matched separately because a
 #: file-global flag would keep every later assignment "exported" after the mode is off.
 _SHELL_ALLEXPORT_OFF = re.compile(r"^\s*set\s+\+[a-zA-Z]*a[a-zA-Z]*\s*$")
+#: A `set` line and its arguments, up to a command separator.
+_SHELL_SET = re.compile(r"^\s*set\s+(?P<args>[^;&|]*)$")
+
+
+def _shell_set_allexport(line: str) -> bool | None:
+    """Does this `set` line turn allexport ON (True) / OFF (False), or say nothing (None)?
+
+    ⛔ **EVERY option cluster on the line**, because bash accepts more than one: `set -eu
+    -a` arms allexport, and a single-cluster matcher does not see it — so an entrypoint
+    that DOES arm the flag read `NOT_ARMED` and the row held over a deployment that is
+    armed (measured: walker `OFF` while `bash -c 'set -eu -a; FLAG=1; env'` has `FLAG=1`).
+    Conservative direction, so not a false PASS — but still a reading this walk published
+    without measuring, which is `#12549` defect 1 one layer in (fresh review of `#12902`,
+    P2). A later cluster wins, exactly as in bash.
+    """
+    match = _SHELL_SET.match(line)
+    if not match:
+        return None
+    answer: bool | None = None
+    for word in _shell_words(match.group("args")):
+        # `-`/`+` alone, or a word that is not an option cluster, says nothing about `a`.
+        if len(word) < 2 or word[0] not in "-+":
+            continue
+        if "a" in word[1:]:
+            answer = word[0] == "-"
+    return answer
 
 #: `unset NAME`, `unset -v NAME`, the multi-name form, and an OPTION CLUSTER. `unset` is
 #: a shell BUILTIN, so it is matched CASE-SENSITIVELY — `UNSET` is a different
@@ -3591,6 +3617,12 @@ def _shell_export_states(text: str, flag: str) -> list[dict]:
             continue
         if _SHELL_ALLEXPORT_OFF.match(line):
             allexport = False
+            continue
+        # (the two matchers above cover the single-cluster spelling; this one covers
+        # MULTI-cluster `set -eu -a` / `set +a -e`, which they cannot see.)
+        allexport_change = _shell_set_allexport(line)
+        if allexport_change is not None:
+            allexport = allexport_change
             continue
         parsed = _shell_export_args(line)
         if parsed is not None:

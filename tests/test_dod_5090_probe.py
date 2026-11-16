@@ -11715,6 +11715,15 @@ def test_12549_the_export_attribute_is_a_MOMENT_not_a_file_property(
         ("set -a re-confers", "set -a\nexport TORTOISE_EMBED_GATE=1\n"
                               "export -n TORTOISE_EMBED_GATE\n"
                               "TORTOISE_EMBED_GATE=1\n", "ON"),
+        # ⛔ EVERY option cluster counts, because bash accepts more than one: `set -eu -a`
+        # arms allexport and the single-cluster matcher did not see it, so an entrypoint
+        # that DOES arm the flag read NOT_ARMED (measured: walker OFF while
+        # `bash -c 'set -eu -a; FLAG=1; env'` holds FLAG=1) — a false HOLD, the
+        # conservative side, but still a reading published without measuring it.
+        ("set -eu -a", "set -eu -a\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        ("set -e -u -a", "set -e -u -a\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        # …and the unset side of the same spelling, so a later cluster still wins.
+        ("set +a -e", "set -a\nset +a -e\nTORTOISE_EMBED_GATE=1\n", "OFF"),
     ):
         (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
                                                 encoding="utf-8")
