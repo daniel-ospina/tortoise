@@ -32,6 +32,12 @@ from .live import (
     epistemic_disjunction,  # #7902 epistemic-label traversal clause
     is_terminal_status,  # #2498 shared terminal vocabulary
 )
+# #11824 S0: the ONE lifecycle write vocabulary — the Subject set below is the
+# same closed four words every knowledge kind uses, imported so the family
+# declarations cannot drift from the door that writes them.
+from .lifecycle_vocabulary import (
+    LIFECYCLE_STATUS_VALUES as _LIFECYCLE_STATUS_VALUES,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -102,26 +108,37 @@ _RECALL_OBJECT_EXCLUDED_STATUS = OBJECT_TERMINAL_STATUSES
 SUBJECT_TERMINAL_STATUSES = frozenset(
     {"superseded", "deprecated", "archived", "retracted"})
 
-# #1423 (review P1) — the DECLARED, WRITABLE Subject lifecycle, ONTOLOGY §4.2.
-# ``retracted`` is deliberately ABSENT: §4.2 declares no Subject retraction
-# verb, and adopting a vocabulary that a recorded decision does not carry is
-# not a fix (the contradiction test). The generic entity write surface
-# (``create_entity("subject", ...)`` and ``update_entity``) validates a
-# Subject ``status`` against THIS set and raises for anything else, so an
-# undeclared value (``"dead"``) can no longer be STORED and leak on every
-# read leg — the general hole the ``retracted`` observation is one instance
-# of. Points carry the same guard (``sdk.POINT_STATUS_VALUES``). The OBJECT
-# family STILL has no write-side vocabulary guard, and that is now a RECORDED
-# constraint rather than a to-do: ONTOLOGY §4.3 (Object) says *"pack-declared kinds
-# validate against their own declared words"*, and `packs/venture` exercises it
-# (`active`, `prospective`, `invested`, `prioritized`, `paused`, …), so a single
-# shared `OBJECT_STATUS_VALUES` would refuse real words and narrow the door.
-# Closing the vocabulary hole needs per-kind resolution; a shared set is
-# foreclosed. (#10371 keeps the vocabulary half open for that reason;
-# `tests/test_10371_nonpoint_lifecycle_guard.py` pins that the transition guard
-# does NOT become a vocabulary.)
-SUBJECT_STATUS_VALUES = frozenset(
-    {"draft", "live", "superseded", "deprecated", "archived"})
+# #1423 (review P1) — the DECLARED, WRITABLE Subject lifecycle.
+# #11824 S0: the Subject lifecycle is the SAME closed FOUR-word knowledge-kind
+# vocabulary every other knowledge kind uses (`lifecycle_vocabulary`), imported
+# rather than restated so the two cannot drift:
+#
+#     draft · live · deprecated · superseded
+#
+# ``retracted`` and ``outdated`` are gone from the WRITE set — a retraction or a
+# withdrawal is `deprecated` (ended, nothing replaced it), and `outdated` is
+# refused with the choice named. Both remain in the READ set
+# (``SUBJECT_TERMINAL_STATUSES`` above), which is the net that stays wider than
+# the door: stored rows keep whatever they hold (no backfill, #11824 §1), and a
+# read vocabulary answers "which STORED states are dead", not "which states a
+# writer may mint" (#2977).
+#
+# The generic entity write surface (``create_entity("subject", ...)`` and
+# ``update_entity``) validates a Subject ``status`` against the ONE lifecycle
+# door and raises for anything it refuses, so an undeclared value (``"dead"``)
+# can no longer be STORED and leak on every read leg.
+#
+# ⛔ #11824 S0 ALSO RETIRES the recorded foreclosure below: the OBJECT family now
+# has the same write-side vocabulary guard as Points and Subjects, and the
+# reason the old note gave — a pack's own words (`active`, `prospective`,
+# `invested`, …) would be refused — is answered by moving a pack's words onto
+# the POSITION axis (its pipeline stages) rather than by widening the status
+# list. A pack still validates against its own declaration; the declaration
+# changes axis (design §4.2, §8 `OVERRIDES` (2), approved on PR #12895).
+# `tests/test_10371_nonpoint_lifecycle_guard.py` still pins that the TRANSITION
+# guard does not become a vocabulary — and it still does not: the vocabulary
+# lives in `lifecycle_vocabulary`, one door, not in that guard.
+SUBJECT_STATUS_VALUES = frozenset(_LIFECYCLE_STATUS_VALUES)
 
 
 def _op_attr(op, name, default=None):

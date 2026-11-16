@@ -62,6 +62,16 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 # `_update_entity`. Imported so neither surface re-literals the vocabulary.
 from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .commit_ops import SUBJECT_TERMINAL_STATUSES as _SUBJECT_TERMINAL_STATUSES
+# #11824 S0: THE lifecycle write door for every knowledge kind — the four words
+# and their AX outcomes (re-spelling/synonym normalised silently, `outdated` and
+# the position words refused with a per-word repair). ONE home, imported by
+# every `status` door below, so the Point, Object and Subject arms cannot
+# disagree about what a value means.
+from .lifecycle_vocabulary import (
+    LIFECYCLE_STATUS_VALUES as _LIFECYCLE_STATUS_VALUES,
+    read_caller_status as _read_caller_status,
+    status_refusal_reason as _status_refusal_reason,
+)
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 # #12297: the fused-candidate rerank, imported at module scope because the read
 # path evaluates its gate on EVERY search. `rerank` is a light module (stdlib +
@@ -271,10 +281,26 @@ register_kind("evidence")  # used by file_decision (#133)
 register_kind("criterion")
 
 # Valid status values for Point nodes (used by update_point status validation)
-# #432: claim lifecycle vocabulary — draft → live → retracted → superseded
-# (plus outdated/archived). challenged is a DERIVED condition (NAND operator
-# edge on a live point), NOT a stored status.
-POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})
+# #11824 S0: the Point lifecycle is the FOUR-word knowledge-kind vocabulary
+# (draft → live → deprecated / superseded) — the same closed set every other
+# knowledge kind uses, because the rule that separates the two endings is one
+# rule: `superseded` names its successor, and if nothing replaced it the word is
+# `deprecated`.
+#
+# ⚠️ The PREVIOUS six (draft/live/retracted/superseded/outdated/archived) were
+# the #432 set plus the two words that were never lifecycle states: `outdated`
+# (the past name of "no longer counts", whose meaning `deprecated`/`superseded`
+# already carry) and `archived` (a collision of *this ended* with *do not show me
+# this* — design §3.2). Both are now REFUSED-and-repaired at the door; the pair
+# `retracted`/`archived` are declared SYNONYMS of `deprecated` and are stored as
+# it (see `tortoise/lifecycle_vocabulary.py`). `challenged` remains a DERIVED
+# condition (NAND operator edge on a live point), NOT a stored status.
+#
+# ⛔ The WRITE set narrowed; the READ set did NOT (`live.TERMINAL_EXCLUDED_STATUSES`
+# still names every legacy word, and it must — stored rows keep whatever they
+# hold, no backfill: #11824 §1 / design §8 "what a reader hides is wider than
+# what a writer may create").
+POINT_STATUS_VALUES = frozenset(_LIFECYCLE_STATUS_VALUES)
 
 # ── #2199 decide-part calibration + baseline provenance ────────────────
 # Decision parts filed through the decide tooling (create_point / commit_ops /
@@ -4623,7 +4649,7 @@ CROSS_LENS_ANN_TOP_K_MAX = 100
 
 # #432: declarative spec for the Point lifecycle — ONTOLOGY §5's transition
 # table in code, PLUS one code-review decision the doc does not carry: a DRAFT
-# may terminalize before it is ever live (``draft -> retracted/superseded``), so
+# may terminalize before it is ever live (``draft -> deprecated/superseded``), so
 # the map is a SUPERSET of §5's `draft` row and an exact match of its `live`
 # row. ``tests/test_claim_lifecycle.py`` cross-checks the terminal words and the
 # doc's declared transitions; the `draft` widening is pinned there as the #432
@@ -4634,26 +4660,37 @@ CROSS_LENS_ANN_TOP_K_MAX = 100
 # ⛔ IT IS CONSULTED, for the transition question, by `_update_entity`'s Point
 # `status` arm (#9649) — the generic tenant door, which had no transition check
 # at all: `update_entity(superseded_point, status='live')` resurrected a dead
-# claim and `status='archived'` minted a status ONTOLOGY declares reserved.
+# claim.
 # What that door consults is the DECLARED TARGET SET for a stored status — never
 # terminality, which stays in the shared predicate (#2498's
-# `live.is_terminal_status`, which also covers `deprecated` and the legacy
-# `outdated=true` flag, neither of which is a key here). A stored status with no
-# entry here (NULL/legacy) defers rather than being guessed at.
+# `live.is_terminal_status`, which also covers the legacy `outdated=true` flag,
+# not a key here). A stored status with no entry here (NULL/legacy) defers rather
+# than being guessed at.
+#
+# #11824 S0: the LIVE rows now offer `deprecated`, because it is a declared word
+# of the four-word vocabulary (it was absent from `POINT_STATUS_VALUES` before,
+# so the vocabulary gate raised before this table was ever read — the design §3
+# notes the change adds BOTH the word and the entry). The legacy spellings keep
+# TERMINAL rows rather than being deleted: they are READ deltas for stored rows
+# (no backfill, #11824 §1), and a stored word with no row would DEFER — i.e.
+# silently become transitionable — which is the opposite of terminal.
 _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
-    # P2 (code-review): guards allow draft→retracted/superseded (a draft point
+    # P2 (code-review): guards allow draft→deprecated/superseded (a draft point
     # can be terminal before ever going live); keep the declarative spec
     # aligned with the retract/supersede guards.
-    "draft": frozenset({"live", "retracted", "superseded"}),  # promote + terminal
-    "live": frozenset({"retracted", "superseded"}),    # via retract_point / supersede_point
-    "retracted": frozenset(),                            # terminal
+    "draft": frozenset({"live", "deprecated", "superseded"}),  # promote + terminal
+    "live": frozenset({"deprecated", "superseded"}),  # retract_point / supersede_point
+    "deprecated": frozenset(),                           # terminal
     "superseded": frozenset(),                           # terminal
-    # #2498: `outdated` is TERMINAL for the shared lifecycle guard
-    # (`live.TERMINAL_EXCLUDED_STATUSES` + the legacy `outdated=true` flag),
-    # so it has no outgoing transition. The pre-#2498 `{"retracted"}` entry
-    # diverged from the guard — a dead claim could be re-terminalized.
+    # ── legacy stored words: READ deltas, terminal, minted by no door ──
+    # `retracted` is what `retract_point`'s CAS still stores (the verb is not yet
+    # migrated to `deprecated` — a stated residual of #11824 S0, tracked on
+    # #11824); `outdated` is the retired Point word and `archived` the retired
+    # collision word. All three are terminal in the shared read predicate, and
+    # none may gain an outgoing transition.
+    "retracted": frozenset(),
     "outdated": frozenset(),
-    "archived": frozenset(),                             # terminal (reserved — no v1 write path)
+    "archived": frozenset(),
 }
 
 # Event types that write to the :GraphEvent store (#432). Other types
@@ -15262,19 +15299,21 @@ class TortoiseSDK:
         # EP-inert while converged=True is still reported), and so is every
         # other kind. An explicit status is honoured by the pop below.
         status = props.pop("status", "live")
-        # Fail-closed vocabulary validation (mirrors update_point): a
-        # non-canonical status (case variant, junk, non-str, typo) would
-        # otherwise be stored verbatim and treated as EP-LIVE by _live_only
-        # (which excludes 'draft' and terminal statuses/flag — #2422; junk
-        # outside the closed vocabulary is the residual EP-live surface) —
-        # a silent-promotion hole
-        # (PR #1073 review P0/P1). isinstance guard keeps the error a
-        # ValueError for unhashable values (list/dict) too.
-        if not isinstance(status, str) or status not in POINT_STATUS_VALUES:
-            raise ValueError(
-                f"Invalid status {status!r}. Valid statuses: "
-                f"{sorted(POINT_STATUS_VALUES)}"
-            )
+        # Fail-closed vocabulary validation (mirrors update_point): the FOUR-word
+        # lifecycle vocabulary is read through `lifecycle_vocabulary`,
+        # the ONE home (#11824 S0) — so a re-spelling (`'LIVE'`, `' Live '`) is
+        # normalised silently, a declared synonym (`archived` / `retracted`) is
+        # stored as `deprecated`, and `outdated` or a position word
+        # (`in_progress` / `completed` / `active` / `paused`) is REFUSED with a
+        # performable repair instead of being stored verbatim.
+        #
+        # The hole this closes is measured: a non-canonical status used to be
+        # stored and then treated as EP-LIVE by `_live_only` (which excludes
+        # 'draft' and the terminal statuses/flag — #2422), so junk outside the
+        # vocabulary was the residual EP-live surface (PR #1073 review P0/P1).
+        # The door now also raises for unhashable values (list/dict), because the
+        # guard's own first arm is a type test.
+        status = _read_caller_status(status, kind=":Point")
         # #2351 (epic #2349 E-derived): the claim class. Validated HERE, before
         # any graph write — an unknown class fails loud with nothing created
         # (the same fail-closed posture as the status vocabulary above and the
@@ -20833,13 +20872,12 @@ class TortoiseSDK:
                 "Context has been removed. See #49."
             )
 
-        # Validate status if present
-        if 'status' in props and (not isinstance(props['status'], str)
-                                  or props['status'] not in POINT_STATUS_VALUES):
-            raise ValueError(
-                f"Invalid status {props['status']!r}. "
-                f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
-            )
+        # Validate status if present — through the ONE lifecycle door, so a
+        # re-spelling is normalised (and stored normalised) and a synonym lands
+        # as `deprecated` (#11824 S0). The promote-only arm below then decides
+        # whether this door may write the resulting word at all.
+        if 'status' in props:
+            props['status'] = _read_caller_status(props['status'], kind=":Point")
 
         # #2351 (review P0): ``claimClass`` is a CREATE-time marker, NOT a
         # revision prop, and this door refuses it — through the SAME #7951
@@ -29171,31 +29209,37 @@ class TortoiseSDK:
         # above gives the flag, and the one the sibling `:Subject` arm inside
         # the endpoint loop could never provide.
         #
-        # `:Object` is deliberately NOT refused: its writer does not validate,
-        # it STORES the value (measured), so a refusal here would reject bundles
-        # the writer accepts — the over-rejection class this PR already fixed
-        # once. `:Event` is no longer in that sentence: since #11825 its door
-        # refuses the TERMINAL half, and the arm BELOW mirrors that refusal at
-        # Phase 1 for the same partial-mutation reason.
+        # `:Object` used to be deliberately EXEMPT ("its writer does not
+        # validate, it STORES the value"), so refusing it here would have
+        # rejected bundles the writer accepted. #11824 S0 closes that asymmetry:
+        # the Object writer validates against the SAME four-word lifecycle door
+        # as the Subject one, so both are checked here, through the SAME question
+        # (`_status_refusal_reason`) rather than a re-spelt vocabulary — a
+        # divergence between this phase and the writer is exactly the
+        # partial-mutation class. `:Event` is no longer in that sentence: since
+        # #11825 its door refuses the TERMINAL half, and the arm BELOW mirrors
+        # that refusal at Phase 1 for the same reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            if _ENTITY_ITEM_LABELS.get(_item_type_text(item)) != "Subject":
+            _item_label = _ENTITY_ITEM_LABELS.get(_item_type_text(item))
+            if _item_label not in ("Subject", "Object"):
                 continue
             _declares_status, own_status = _item_declared_status(
                 item, _item_flatten_depth(item, "entities"))
-            if not (_declares_status and (
-                    not isinstance(own_status, str)
-                    or own_status not in _SUBJECT_STATUS_VALUES)):
+            if not _declares_status:
+                continue
+            _status_refusal = _status_refusal_reason(
+                own_status, kind=f":{_item_label}")
+            if _status_refusal is None:
                 continue
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{own_status!r} for a :Subject — the writer "
+                           f"{own_status!r} for a :{_item_label} — the writer "
                            f"validates against the declared lifecycle and "
                            f"refuses it mid-write, so the bundle is "
-                           f"rejected at validation. Must be one of: "
-                           f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}",
+                           f"rejected at validation. {_status_refusal}",
             })
         # ── #11825: the `:Event` TERMINAL half, refused at Phase 1 ──
         # The same class as the `:Subject` vocabulary arm directly above, and
@@ -49056,16 +49100,25 @@ class TortoiseSDK:
                 # returned False on the non-serialisable value): a graph/record
                 # divergence. Every legitimate shape is exact-str here, because a
                 # real `str` subclass was just normalised to its exact content.
-                if type(_status) is not str or _status not in POINT_STATUS_VALUES:
-                    # Same refusal `update_point` issues (#3311 defect 1). The
-                    # raise precedes every write, so a refused status leaves
-                    # the node untouched. The operand is rendered through
-                    # `_refusal_repr` so a hostile `__repr__` cannot replace the
-                    # promised `ValueError` with its own class.
+                if type(_status) is not str:
+                    # Same refusal `update_point` issues (#3311 defect 1) for a
+                    # value that is not a word at all. The raise precedes every
+                    # write, so a refused status leaves the node untouched. The
+                    # operand is rendered through `_refusal_repr` so a hostile
+                    # `__repr__` cannot replace the promised `ValueError` with
+                    # its own class.
                     raise ValueError(
                         f"Invalid status {_refusal_repr(_status)}. "
                         f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
                     )
+                # #11824 S0: the WORD itself is read through the ONE lifecycle
+                # door — a re-spelling is normalised (and this arm writes the
+                # normalised word, not the caller's object), a declared synonym
+                # lands as `deprecated`, and `outdated` / a position word is
+                # REFUSED with a performable repair. The vocabulary test that
+                # used to sit here asked only "is it one of six words" and could
+                # not tell the caller what to do instead.
+                _status = _read_caller_status(_status, kind=":Point")
                 # ── #9649: the DECLARED transition, from `_ALLOWED_TRANSITIONS` ──
                 # The vocabulary check above asks whether `_status` is a Point
                 # status word; it never asked whether the ROW may become it. That
@@ -49507,6 +49560,7 @@ class TortoiseSDK:
                 for _np_key in list(keys_rendering_as(props, {"status"})):
                     if issubclass(type(props[_np_key]), str):
                         props[_np_key] = str.__str__(props[_np_key])
+            _np_lifecycle_checked = False
             for _np_label, _np_terminal, _np_section in (
                 ("Subject", _SUBJECT_TERMINAL_STATUSES, "§4.2"),
                 ("Object", _OBJECT_TERMINAL_STATUSES, "§4.3"),
@@ -49524,6 +49578,33 @@ class TortoiseSDK:
                 ).result_set[0]
                 if not _np_row or not _np_row[0]:
                     continue
+                # ── #11824 S0: THE LIFECYCLE WORD, on the family write door ──
+                # The Object family had NO write-side vocabulary guard, ever
+                # (`commit_ops` recorded that as a constraint, not a to-do):
+                # `status` is not server-managed and this method ends in
+                # `SET n += $props`, so `tortoise_create_entity` /
+                # `tortoise_update_entity` accepted `status='outdated'`,
+                # `'archived'` or `'garbage'` on an Object and a reader's
+                # exclusion list was the only thing standing between the junk
+                # word and a row that reads as CURRENT.
+                #
+                # It runs HERE — once, inside the loop, AFTER a mounted
+                # `:Subject`/`:Object` row is known to exist — and not at the top
+                # of the block: the same props bag also addresses `:Event`s, and
+                # an Event has no lifecycle (#11825 / the design's §8), so its
+                # writer-supplied `status` must stay untouched until S7 retires
+                # it. A lifecycle node's word is normalised (re-spelling,
+                # `archived`/`retracted` → `deprecated`) or refused with a
+                # performable repair (`outdated`, the position words), and EVERY
+                # key that renders as `status` is rewritten to the canonical word
+                # so the `SET n += $props` below cannot store the caller's
+                # spelling.
+                if not _np_lifecycle_checked:
+                    _np_lifecycle_checked = True
+                    _np_status = _read_caller_status(
+                        _np_status, kind=f":{_np_label}")
+                    for _np_key in list(keys_rendering_as(props, {"status"})):
+                        props[_np_key] = _np_status
                 # `collect` DROPS NULLs, so an empty list means every bound row
                 # holds no status — the legacy shape, which reads as live and is
                 # the backfill's business, not this guard's.
@@ -50265,6 +50346,23 @@ class TortoiseSDK:
                 "(#1934: an advisory never refuses a write).",
                 type(_layer_exc).__name__, _layer_exc)
             _layer_note = None
+        # ⛔ #11824 S0 — THE LIFECYCLE WORD, ONCE FOR BOTH KNOWLEDGE KINDS.
+        # The create surface had TWO different answers: a `:Subject` was
+        # validated against its declared set, and an `:Object` was not validated
+        # AT ALL (`create_object(..., status='outdated')` stored the word and the
+        # read families then treated the row as current). One closed set of four
+        # is correct for both now, so the door is ONE call: a re-spelling or a
+        # declared synonym is normalised into `props` (the value the fold
+        # stores), and `outdated` / a position word is refused with the repair
+        # named. `:event` is untouched — an Event has no lifecycle (#11825).
+        if t in ("subject", "object"):
+            _lifecycle_keys = list(keys_rendering_as(props, {"status"}))
+            if _lifecycle_keys:
+                _lifecycle_word = _read_caller_status(
+                    lifecycle_props_by_rendering(props, {"status"})["status"],
+                    kind=f":{t.capitalize()}")
+                for _lifecycle_key in _lifecycle_keys:
+                    props[_lifecycle_key] = _lifecycle_word
         if t == "subject":
             # #12047: a role Subject may DECLARE who holds it. The prop is a write
             # SHORTHAND for the sanctioned ``holdsRole`` edge (ONTOLOGY §3.6 —
@@ -50286,22 +50384,13 @@ class TortoiseSDK:
             # The PRE-FLIGHT's resolved holder id, kept (#12047 round-3 P1): the
             # self-edge refusal needs it, and it must run before the write.
             _holder_id = None
-            # #1423 (review P1): `status` arrives through `**props` below, so this
-            # surface is a SECOND door onto an undeclared Subject status.
-            # Validate against ONTOLOGY §4.2's declared lifecycle and fail closed,
-            # exactly as `_update_entity` does. #9974 R1: there is no defaulted
-            # `status` to override any more, so the door validates only a value
-            # the caller actually NAMED — an unnamed one is ABSENT on the node
-            # and reads LIVE, which is not a status to validate (hence the
-            # read-only sentinel below: it decides nothing the fold writes).
-            _subj_status = props.get("status", "live")
-            if (not isinstance(_subj_status, str)
-                    or _subj_status not in _SUBJECT_STATUS_VALUES):
-                raise ValueError(
-                    f"Invalid status {_subj_status!r} for a :Subject. "
-                    f"Must be one of: "
-                    f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
-                )
+            # ⛔ #1423's Subject VOCABULARY guard is now the shared lifecycle
+            # door above (#11824 S0): `SUBJECT_STATUS_VALUES` is the same four
+            # words as every other knowledge kind, and a re-spelling/synonym was
+            # already normalised INTO `props` there — so re-validating here would
+            # be a second spelling of one rule (and would refuse the un-named
+            # sentinel the old block validated for no reason). `roleHolder`
+            # validation below is unchanged and still runs before any write.
             if _role_holder is not None:
                 # #12047 review F5: pre-flight, so a refusal writes nothing.
                 # ⛔ The kind is compared through `named_kind` — the SAME
