@@ -142,6 +142,8 @@ from .entity_identity import (  # #3633 route-then-refuse identity resolution
     resolve_document_target_id, resolve_entity_id_same_entity)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
+from .live import first_terminal_row  # #12586 "which row made this terminal?", one picker
+from .live import terminal_row_marker  # …and ONE way to name it
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
@@ -6640,7 +6642,11 @@ def _raise_update_point_status_error(proj, id: str, *,
     (idempotent no-op), so apart from that window the only statuses that reach
     this error are the TERMINAL ones (``live.TERMINAL_EXCLUDED_STATUSES``:
     retracted / superseded / outdated / archived / deprecated) — a terminal
-    point is never resurrected by update_point. A ``live`` node CAN reach it
+    point is never resurrected by update_point. #12586: "terminal" here is the
+    SHARED predicate, so it includes the legacy ``outdated=true`` FLAG on a
+    point that carries no terminal status word; that shape gets its own
+    refusal (the #432 remedy would name a verb that refuses it too). A
+    ``live`` node CAN reach it
     too — the replay may land it live between the pre-write short-circuit and
     the guarded ``SET`` — and that case is only an idempotent success when the
     caller asked for NOTHING BUT the status (``status_only``). With other props
@@ -6669,9 +6675,88 @@ def _raise_update_point_status_error(proj, id: str, *,
     # reporting an illegal transition would contradict the door's own contract
     # — but ONLY for a status-only promote (see `status_only` above).
     status = proj.g.query(
-        "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": id},
+        LIFECYCLE_FANOUT_QUERY, params={"id": id},
     ).result_set
-    node_status = status[0][0] if status else None
+    # #12586: the terminality answer comes from the SHARED instruments, not a
+    # local scan of a local query — ``first_terminal_row`` for "which row made
+    # this terminal?" (the pair reaches the message, and a second picker is how
+    # the same fan-out gets explained two ways) and ``is_terminal_status``
+    # inside it, the Python mirror of the very ``_terminal_excluded`` the
+    # promote arm's WHERE now ANDs in. Over the WHOLE fan-out with a STABLE key,
+    # never ``rows[0]``: point ids are not unique and server row order is not a
+    # contract (#7822).
+    # ⚠️ The two readings agree on every IN-CONTRACT value. ``outdated`` is
+    # contractually a boolean (#2491, enforced by ``_sanitize_props`` and the
+    # journal fold); on a hand-edited numeric ``0``/``0.0`` or ``""`` the Cypher
+    # half excludes the row while ``is_terminal_status`` (``bool()``) calls it
+    # live, so such a row is refused with the #432 sentence instead of the flag
+    # one. That divergence is documented on both declarations (#7075) and no
+    # in-repo writer can produce it; the refusal is still fail-closed.
+    # ⛔ A ``live`` row does not answer THIS question, flag or no flag. It is the
+    # #1088 branch's answer: ``invalidate_point`` sets the flag and leaves the
+    # status alone, so ``live`` + flag is an ORDINARY shape, and a status-only
+    # promote of it is the idempotent NO-OP this function must keep returning
+    # ``True`` for (its docstring's "the ONE outcome that does not raise").
+    # So the rows offered to the picker are the ones whose STATUS is not
+    # ``live`` — per ROW, not per fan-out: carving out only the SELECTED row
+    # (an earlier cut of this) let ``{live+flag, retracted}`` fall through to the
+    # ``live`` branch and report SUCCESS for a promote that matched nothing
+    # beside a retracted sibling, purely because ``live`` sorts first. A fan-out
+    # whose dead rows are ALL ``live`` still falls through, which is correct —
+    # there is no dead claim to refuse.
+    # The fall-through raise at the end is NOT redundant with this block: on an
+    # OPERATOR fan-out ``classify_lifecycle_fanout`` reports the operator's own
+    # status, which may be ``live`` — so a fan-out with no non-live dead row
+    # skips this block by design, and one WITH such a row must be refused here
+    # rather than reported as success (pinned by
+    # `test_an_operator_fan_out_beside_a_dead_row_is_not_a_false_success` and
+    # `test_a_live_row_beside_a_dead_sibling_is_refused_in_either_order`).
+    dead = first_terminal_row([row for row in status if row[1] != 'live'])
+    if dead is not None:
+        _dead_status, _dead_flag = dead
+        if _dead_flag and _dead_status not in TERMINAL_EXCLUDED_STATUSES:
+            # The flag-ONLY shape: no terminal status word on the selected row,
+            # so the #432 sentence ("use retract_point()/supersede_point()")
+            # would name a verb that itself refuses the row — an unperformable
+            # repair. AX rule 2's three parts (#10183): what was refused, why,
+            # and a route the caller can actually take.
+            # WHICH row is selected is ``first_terminal_row``'s stable key, the
+            # same rule the rest of this file uses — NOT a status-word
+            # precedence invented here: on a mixed fan-out (a flag-dead `draft`
+            # beside a `retracted` sibling) the key picks the flag row, because
+            # `draft` sorts first. What decides the SENTENCE is the selected
+            # row's status, and for a single row that means: a terminal status
+            # WORD (including the `superseded` + flag row `supersede_point`
+            # actually writes) keeps the #432 sentence, while a NULL or `draft`
+            # row dead only by the flag gets the sentence above — which is the
+            # shape this arm exists to refuse.
+            raise ValueError(
+                f"update_point refused to promote Point {id!r} to "
+                f"status='live': its legacy `outdated=true` flag marks it "
+                f"terminal, and that flag is terminal on every read surface "
+                f"and for every lifecycle transition (ONTOLOGY §5), so the "
+                f"promote arm will not make a dead claim current — doing so "
+                f"would leave a claim that reads terminal to every reader "
+                f"while carrying status='live'. This door cannot repair the "
+                f"row: `outdated` is a server-managed lifecycle flag that every "
+                f"generic property bag refuses (#2491), so there is no "
+                f"`outdated=None` clear to pair with the status, and no "
+                f"un-invalidate/un-supersede path exists for a Point. If the "
+                f"claim still holds, mint it again with `create_point(...)` — "
+                f"a revived claim is a NEW Point, not an edit to the dead one."
+            )
+        # ⛔ This raise is NOT redundant with the fall-through one below, even
+        # though the sentence matches: on an OPERATOR fan-out
+        # `classify_lifecycle_fanout` reports the operator's own status, which
+        # may be `live` — falling through would then take the #1088 no-op branch
+        # and report SUCCESS for a promote that matched nothing beside a dead
+        # sibling. Pinned by
+        # `test_an_operator_fan_out_beside_a_dead_row_is_not_a_false_success`.
+        raise ValueError(_ILLEGAL_PROMOTE_STATUS_MSG)
+    # No terminal row: the classify verdict's representative state is the
+    # #1088 already-live answer's input. Read from the SAME rows and the SAME
+    # stable key (the classifier sorts a copy), not from a second statement.
+    node_status = classify_lifecycle_fanout(status)[1]
     if node_status == 'live':
         if status_only:
             return True
@@ -6683,10 +6768,7 @@ def _raise_update_point_status_error(proj, id: str, *,
             f"Point {id!r} is already live — the promote matched nothing, so "
             "the other properties were NOT applied; re-issue without "
             "`status` to update them")
-    raise ValueError(
-        f"Illegal status transition — update_point only promotes draft→live; "  # noqa: F541
-        f"use retract_point()/supersede_point() for lifecycle transitions"  # noqa: F541
-    )
+    raise ValueError(_ILLEGAL_PROMOTE_STATUS_MSG)
 
 
 class _WriteNotLanded(Exception):
@@ -10646,6 +10728,47 @@ _TEMPORAL_RESTAMP_PROPS = frozenset({
 # refusal covers (#9649 review 13).
 _GUARDED_LIFECYCLE_PROPS = frozenset({"status"}) | _TEMPORAL_RESTAMP_PROPS
 
+#: #12586 — the WHERE precondition BOTH of ``update_point``'s promote statements
+#: share (the ``:Point:Object`` arm and the ``:Point`` arm), spelled ONCE so the
+#: two arms cannot drift.
+#:
+#: The FIRST conjunct is the promote VOCABULARY (#432): only a NULL-status
+#: legacy point or an explicit draft is promotable. That is also the shape
+#: ONTOLOGY §5's backfill line produces — "CLI backfill promotes NULL-status
+#: legacy points to ``live`` (migration-only, not a drift)" — and a NULL-status
+#: point WITHOUT the flag must keep promoting here too. ⛔ Not because the
+#: backfill routes through this arm (it does not: `_cmd_backfill` and the repair
+#: sweep write raw Cypher), but because a legacy status-less row is CURRENT and
+#: this arm is the door a caller promotes one through.
+#:
+#: The SECOND conjunct is the fix. The legacy ``outdated=true`` flag is a
+#: TERMINALITY signal — §5's ``outdated`` row: "Terminal on every read surface
+#: and for every lifecycle transition" — and ``update_entity``'s guard already
+#: read it, so without this conjunct this door ACCEPTED a flag-dead point and
+#: stored ``status='live'`` beside the flag: a claim that reads terminal to
+#: every reader while carrying a live status. That is the two-facts-disagree
+#: state ``_assert_lifecycle_guard`` exists to prevent, reached through the one
+#: door that did not consult it (measured: #12586).
+#:
+#: ⛔ The composition is ``live._terminal_excluded`` — the SAME predicate
+#: ``retract_point``'s CAS and every read surface use — never a hand-written
+#: ``outdated`` comparison. One spelling of "dead" is the point of the
+#: #2498/#7822 instrumentation, and #7075 is what a second spelling costs. Its
+#: STATUS half is a no-op under the first conjunct (neither a NULL nor ``draft``
+#: is in ``TERMINAL_EXCLUDED_STATUSES``); it is kept because the predicate is
+#: COMPOSED from the shared declaration rather than split into a local flag
+#: test — the split is the second reading this constant exists to avoid.
+_PROMOTABLE_CLAUSE = (
+    "(n.status IS NULL OR n.status = 'draft') AND "
+    + _terminal_excluded("n.status"))
+
+#: #432's refusal for a promote the vocabulary does not allow, spelled ONCE: the
+#: diagnostic raises it from two points (a terminal row in the fan-out, and the
+#: fall-through), and two copies of one sentence is how a message drifts. It is a
+#: plain string, not an f-string — it interpolates nothing.
+_ILLEGAL_PROMOTE_STATUS_MSG = (
+    "Illegal status transition — update_point only promotes draft→live; "
+    "use retract_point()/supersede_point() for lifecycle transitions")
 
 def _shape_or_refuse_caller_end(props: dict) -> dict | None:
     """#9202: read the CALLER's end for intent on the way in — shape or refuse.
@@ -20841,12 +20964,28 @@ class TortoiseSDK:
         # journal append and every write, so a refused call journals nothing and
         # writes nothing.
         #
-        # Residual, unchanged by this fix: the promote arm's
-        # `WHERE (n.status IS NULL OR n.status = 'draft')` does not read the
-        # legacy `outdated=true` flag, so a flag-dead point with a NULL status
-        # can still be given `status='live'` (the flag keeps it terminal for
-        # readers, and the status then contradicts it). That predates this
-        # change; the promote contract and its message are #432's.
+        # CLOSED by #12586 (was: "Residual, unchanged by this fix"). The
+        # promote arm's guard now ANDs the SHARED terminal predicate's flag half
+        # into the statement (`_PROMOTABLE_CLAUSE`), so a point that is dead by
+        # the legacy `outdated=true` flag with a NULL status is REFUSED instead
+        # of being given `status='live'` beside the flag. The instrument is
+        # `live._terminal_excluded` in the WHERE and `live.is_terminal_status`
+        # in the diagnostic — one predicate, the same one `update_entity`'s
+        # guard already applied, so the two Point doors now agree on this row.
+        # ⚠️ The "CLI backfill" is NOT this arm, and this change does not touch
+        # it: `_cmd_backfill` and the repair sweep backfill with RAW Cypher
+        # (`MATCH (p:Point) WHERE p.status IS NULL SET p.status = 'live'`, no
+        # flag conjunct), so ONTOLOGY §5's "CLI backfill promotes NULL-status
+        # legacy points to `live`" holds because its statement is untouched —
+        # not because this arm behaves like it. What this arm must keep is the
+        # narrow version of the same property: a NULL-status point WITHOUT the
+        # flag still promotes (the flag conjunct is the only condition added),
+        # pinned by `test_the_cli_backfill_shape_still_promotes`. The bulk
+        # migration doors are a SEPARATE instance of this same root (#12586's
+        # thread carries the measurement: they lift flag-dead NULL-status rows
+        # in bulk, and changing them would rewrite a recorded §5 statement).
+        # History: the residual was recorded in `docs/ONTOLOGY-CHANGELOG.md`
+        # v3.35 when it came out of the model file.
         # ── #10119: the ABSENT arm takes no receipt, and now no WORK ──────────
         # Measured on the pre-fix tree: `update_point("no-such-point-9202",
         # confidence=0.5)` returned `{}` — the documented absent-id contract —
@@ -21227,8 +21366,8 @@ class TortoiseSDK:
         # write inside a statement (``n.version = coalesce(n.version, 0) + 1``)
         # cannot double-bump: it is safe for the did-not-land reason, NOT
         # because it is an absolute SET. The promote arms carry their guard INSIDE
-        # the statement, so a re-issue re-evaluates the same
-        # `status IS NULL OR status = 'draft'` predicate against the graph — it
+        # the statement, so a re-issue re-evaluates the same `_PROMOTABLE_CLAUSE`
+        # (the #432 vocabulary AND #12586's `outdated` conjunct) against the graph — it
         # cannot promote twice, and a legitimately-refused promote still yields
         # an empty result set (the caller's
         # ``_raise_update_point_status_error`` path gains a ``status_only``
@@ -21246,7 +21385,10 @@ class TortoiseSDK:
 
             - absent → False: keep retrying, the abort surfaces on exhaustion
               (``ValueError('No point …')`` here would abandon the window).
-            - ``None`` / ``draft`` → False: re-issuing matches.
+            - ``None`` / ``draft`` → False: re-issuing matches — UNLESS the
+              legacy ``outdated`` flag is set, which is terminal on its own
+              (#12586): a re-issue can never match that row either, so it takes
+              the documented ``ValueError`` instead of retrying out the window.
             - ``live`` → the #1088 idempotent success for a STATUS-ONLY promote;
               with other props nothing was applied, so the caller gets the SAME
               documented refusal the first-attempt route raises.
@@ -21255,13 +21397,12 @@ class TortoiseSDK:
             if result.result_set:
                 return True
             rows = proj.g.query(
-                "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": id},
+                "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
+                params={"id": id},
             ).result_set
             if not rows:
                 return False
-            status = rows[0][0]
-            if status is None or status == 'draft':
-                return False
+            status, outdated = rows[0]
             if status == 'live':
                 # #1088: already-live is an idempotent success for a
                 # STATUS-ONLY promote (the arm's post-check completes the
@@ -21278,6 +21419,15 @@ class TortoiseSDK:
                 # `_WriteNotLanded` docstring promises a refused promote takes.
                 _raise_update_point_status_error(
                     proj, id, status_only=False, present=True)
+            # #12586: `None`/`draft` is re-issuable ONLY while the row is not
+            # dead by the legacy flag — the WHERE column the re-issue evaluates
+            # now carries the same conjunct, so a flag-dead draft would retry
+            # a row that can never match and surface the graph abort instead of
+            # the refusal. The predicate is the shared mirror
+            # (`live.is_terminal_status`), never a second `outdated` test.
+            if (status is None or status == 'draft') and not is_terminal_status(
+                    status, bool(outdated)):
+                return False
             if _raise_update_point_status_error(
                     proj, id, status_only=len(_props_param) == 1,
                     present=True):
@@ -21340,10 +21490,12 @@ class TortoiseSDK:
                 # and makes live match the durable record (write == read).
                 # #7405: the property writes below ride the bounded write
                 # retry — explained once above the arm split.
+                # #12586: the promote arm's precondition is the SHARED clause —
+                # promotable vocabulary AND the legacy `outdated` flag clear.
                 res = self._graph_write_with_retry(
                     lambda: proj.g.query(
-                        "MATCH (n:Point:Object {id:$id}) "
-                        "WHERE (n.status IS NULL OR n.status = 'draft') "
+                        "MATCH (n:Point:Object {id:$id}) WHERE "
+                        + _PROMOTABLE_CLAUSE + " "
                         + _embed_clear
                         + "SET n.status = 'live', n.updatedAt = $now, "
                         "n.version = coalesce(n.version, 0) + 1, n += $props"
@@ -21397,10 +21549,11 @@ class TortoiseSDK:
                 # rides the same statement, so the journaled payload is the
                 # whole truth of this write. #7405: retried, like its :Object
                 # sibling above.
+                # #12586: same shared clause as the :Object arm above.
                 res = self._graph_write_with_retry(
                     lambda: proj.g.query(
-                        "MATCH (n:Point {id:$id}) "
-                        "WHERE (n.status IS NULL OR n.status = 'draft') "
+                        "MATCH (n:Point {id:$id}) WHERE "
+                        + _PROMOTABLE_CLAUSE + " "
                         + _embed_clear
                         + "SET n.status = 'live', n.updatedAt = $now, "
                         "n += $props" + _embed_set + " "
@@ -22302,19 +22455,16 @@ class TortoiseSDK:
             # Picked by the classifier's OWN stable key, never by position:
             # `classify_lifecycle_fanout` sorts a copy, so the rows here are
             # still in server order, and this value reaches both the refusal
-            # message and the dedup WARNING.
-            hit = min(((st, od) for _op, st, od in rows
-                       if is_terminal_status(st, od)),
-                      key=lambda r: (str(r[0] or ""), bool(r[1])),
-                      default=None)
+            # message and the dedup WARNING. The picker is
+            # `live.first_terminal_row` — ONE home, shared with
+            # `_raise_update_point_status_error`'s diagnostic (#12586).
+            hit = first_terminal_row(rows)
             if hit is None:
                 return None
             status, outdated = hit
         elif kind != "terminal":
             return None
-        return ("outdated" if outdated
-                and status not in TERMINAL_EXCLUDED_STATUSES
-                else (status or "live"))
+        return terminal_row_marker((status, outdated))
 
     def _assert_window_start_not_inverted(self, point_id: str, now: str,
                                           *, door: str = "invalidate_point") -> None:
@@ -24401,6 +24551,24 @@ class TortoiseSDK:
             return {"id": point_id, "status": "live", "promoted": False,
                     "blocked": False, "reason": "already_live"}
         # Terminal states cannot be promoted back to live.
+        # ⚠️ RESIDUAL, MEASURED, DELIBERATELY NOT FIXED HERE (#12586): the test
+        # below reads ``status`` ALONE, and the legacy ``outdated=true`` flag is
+        # terminal on its own (§5: "Terminal on every read surface and for every
+        # lifecycle transition"). A draft point invalidated before it was ever
+        # promoted (``invalidate_point`` leaves ``status='draft'`` and sets the
+        # flag; a pre-#9649 raw ``restatus`` after a supersede produces the same
+        # row — see ``test_6239_promote_after_supersede.py``, whose fixture
+        # writes exactly it. ``supersede_point`` itself writes
+        # ``status='superseded'`` + the flag, which this guard DOES block) is
+        # therefore promoted to
+        # ``['live', outdated=true]`` through THIS door — the same
+        # two-facts-disagree state #12586 closed on ``update_point``, measured on
+        # the same tree. It is NOT fixed in that change on purpose: this verb is
+        # a separate door with its own return contract (``blocked``, never a
+        # raise) and its own cross-engine parity pin
+        # (``test_6239_promote_after_supersede.py``, whose raw-restatus fixture
+        # writes exactly this row), so the fix belongs to its own change with its
+        # own evidence. #12586's thread carries the measurement.
         if status != "draft":
             return {"id": point_id, "status": status, "promoted": False,
                     "blocked": True, "reason": "not_draft"}
@@ -24587,17 +24755,19 @@ class TortoiseSDK:
                         "promote_point: temporal target %s for %s no longer "
                         "exists — skipping the wire", tgt, point_id)
                     continue
-                dead = sorted(
-                    ((r[1], bool(r[2])) for r in trows
-                     if is_terminal_status(r[1], bool(r[2]))),
-                    key=lambda s: (str(s[0] or ""), s[1]))
-                if not dead:
+                # #12586: the picker is `live.first_terminal_row` — the ONE
+                # home for "which row made this fan-out terminal?". This probe
+                # had the third hand-rolled copy of that `min`-by-stable-key
+                # (sorted(...)[0] selects the same element), which is how the
+                # same row comes to be named two ways in two messages.
+                hit = first_terminal_row(trows)
+                if hit is None:
                     live_targets.append(tgt)
                 else:
                     _logger.warning(
                         "promote_point: temporal target %s for %s is %s — "
                         "skipping the wire", tgt, point_id,
-                        dead[0][0] or "live")
+                        terminal_row_marker(hit))
         if live_targets and point.get("temporal_replacement"):
             for tgt in live_targets:
                 try:
@@ -48789,14 +48959,15 @@ class TortoiseSDK:
                     #
                     # ⛔ Review round 12d: the denial is scoped to a RECORDED
                     # terminal STATUS, not said absolutely. "No SDK door re-livens
-                    # a dead claim" was measured FALSE on the flag-dead shape the
-                    # same arm fires for (`status` NULL + legacy `outdated=true`):
-                    # `update_point(p, status='live')` stores `status='live'` on it,
-                    # because the promote arm's `WHERE n.status IS NULL OR … 'draft'`
-                    # does not read the flag — the residual recorded at this file's
-                    # own comment above `_promote_incident_operators`. The belief
-                    # layer still treats the node as dead (the flag), so nothing is
-                    # resurrected; the absolute sentence was just untrue.
+                    # a dead claim" was measured FALSE on the flag-dead shape
+                    # (`status` NULL + legacy `outdated=true`), where
+                    # `update_point(p, status='live')` stored `status='live'` and
+                    # the belief layer still treated the node as dead (the flag).
+                    # #12586 has since closed that door — see this file's comment
+                    # above `_promote_incident_operators` — so the sentence is
+                    # now true for it; it stays scoped because `promote_point`
+                    # still answers from the local `status != 'draft'` reading and
+                    # can re-liven a `draft` that carries the flag.
                     raise ValueError(
                         f"update_entity refused {_lifecycle_fields} on a dead "
                         f"claim: {_terminal_refusal}. A Point whose recorded "
@@ -48911,8 +49082,12 @@ class TortoiseSDK:
                 # status) given `status='live'` — is NOT carried over: the guard
                 # above reads the legacy flag, so that shape is REFUSED here
                 # (pinned by `test_the_legacy_outdated_flag_alone_makes_the_point_dead`).
-                # It is still live on `update_point`'s promote arm, recorded as a code
-                # lag in ONTOLOGY-CHANGELOG v3.35, not in the model file.
+                # It was the same lag on `update_point`'s promote arm; #12586
+                # closed it THERE. `promote_point` still decides from the local
+                # `status != 'draft'` reading, so a draft invalidated before it
+                # was ever promoted can still be re-livened through that door —
+                # a measured, recorded residual at that method (#12586's
+                # thread), not a decision that the shape is fine.
                 # The TERMINAL half is already answered above by the shared guard,
                 # which also covers what the map cannot (`deprecated`, the legacy
                 # `outdated=true` flag, an operator fan-out) — that is why this
