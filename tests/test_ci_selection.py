@@ -10542,7 +10542,20 @@ _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
     r"|\buntil\s+(?:the\s+)?(?:refresher|first\s+post-merge)"
     r"|\buntil\s+the\s+refresh\s+lands"
     r"|\buntil\s+a\s+(?:push-to-main\s+|CI\s+)?sweep\s+"
-    r"(?:includes|measures|covers|collects)",
+    r"(?:includes|measures|covers|collects)"
+    # …and the construction that names the sweep by its INSTRUMENT or its VERB
+    # rather than the word "sweep" (#12962 cycle 6). This is the map's DOMINANT
+    # spelling of the same claim, so the arms above read as total while missing it:
+    # three rows shipped `entered at the flat default … until a CI junit artifact
+    # carries the weight` and `at the default until \`tools/ci_timing.py
+    # --refresh-durations\` replaces it from junit`, each beside a tail citing the
+    # ALREADY-LANDED sweep — the same contradiction the two cycles above chased.
+    # Scoped to `until` + the instrument: the healed wording names the landed sweep
+    # ("it stayed at the default until the 2026-11-16 sweep replaced it"), whose
+    # `until the …` shape matches none of these.
+    r"|\buntil\s+(?:a\s+)?(?:CI\s+)?junit"
+    r"|\buntil\s+`?tools/ci_timing"
+    r"|\buntil\s+`?-*refresh-durations",
     re.IGNORECASE)
 
 
@@ -10884,6 +10897,38 @@ def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
         " the row" + basis)
     assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
         landed_sweep, quad) == []
+
+    # ── The INSTRUMENT/VERB spellings (#12962 cycle 6) ────────────────────────
+    # The map names the owed sweep by its TOOL or its VERB far more often than by the
+    # word "sweep", so the four arms above reported `[]` over three rows that each
+    # sat beside a tail citing the ALREADY-LANDED sweep — the same contradiction this
+    # guard exists to catch, one spelling over again. Pinned in both directions.
+    instrument_owing = (
+        "  test_a.py: 3.9  # a weight is a SHARD-LAYOUT input, so it stays at the"
+        " default until `tools/ci_timing.py --refresh-durations` replaces it from"
+        " junit" + basis + "\n"
+        "  test_b.py: 0.6  # entered at the flat default per the convention until a"
+        " CI junit artifact carries the weight" + basis + "\n"
+        "  test_c.py: 0.9  # flat default until a junit reading lands" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        instrument_owing, quad) == [("test_a.py", 3.9), ("test_b.py", 0.6),
+                                    ("test_c.py", 0.9)], (
+        "naming the sweep by its instrument (`junit`, `tools/ci_timing`) is the "
+        "map's DOMINANT spelling of this claim; an arm that reads only the word "
+        "`sweep` reports [] while three rows assert the owed basis")
+    # …and the healed wording — which names the LANDED sweep instead of an owed one,
+    # keeping the `from junit` clause the repair leaves behind — stays silent.
+    instrument_healed = (
+        "  test_a.py: 3.9  # a weight is a SHARD-LAYOUT input, so it stayed at the"
+        " default until the 2026-11-16 sweep replaced it from junit" + basis + "\n"
+        "  test_b.py: 0.6  # it entered at the flat default and the 2026-11-09 sweep"
+        " replaced it" + basis + "\n"
+        "  test_c.py: 0.9  # it opened at the flat default; the 2026-11-16 sweep"
+        " collected it" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        instrument_healed, quad) == [], (
+        "the fix IS the past tense — an arm that bit the healed wording would red "
+        "every corrected row on the committed map")
 
 
 _DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")
