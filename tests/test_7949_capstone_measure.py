@@ -6381,11 +6381,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # SITES (`tools/hosted_api_cite_census.py`, 24692 -> 24731, the same +39) and does
         # not read this range, so the pin caught it instead — again as
         # "the only failure was a stale TABLE ROW" on every parametrization, which is why
-        # that message says what it says. Measured at this head:
-        # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` ->
-        # `:14575`, `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14604` (inside the
-        # span), `grep -n 'max_nodes = org.get("max_points")'` -> `:14614` (inside it), and
-        # `:14652` is the blank line immediately before `return OrgInfoResponse(` at `:14653`.
+        # that message says what it says. ⛔ Those `:14575`/`:14604`/`:14614`/`:14652` figures are
+        # the `#12947` HEAD's, and the range has since moved AGAIN by a uniform +31 (main's
+        # `#12993`/`#12926`/`#12989` via the re-cut), so they are kept as history and NOT as this
+        # head's. Measured at THIS head, offset for offset (+29 `nodes_used`, +39 `max_nodes`,
+        # +78 `return`), which is what the row below pins:
+        # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:14606`,
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:14635` (inside the span),
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:14645` (inside it), and `:14683` is
+        # the blank line immediately before `return OrgInfoResponse(` at `:14684`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("14606", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
@@ -6514,7 +6518,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "leaves the document asserting two numbers for one `git grep` hit")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:14465-14542`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:14606-14683`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this

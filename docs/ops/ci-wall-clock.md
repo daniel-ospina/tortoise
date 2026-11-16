@@ -268,8 +268,9 @@ measured: `--emit-push-matrix` on the merged manifest reads 24 m, and it read 23
 base this branch first merged (`2c67c0cf99`). The three hand-added figures stay at 55.6 m / 83.4 m /
 6.6 m (the row above), which is the 1-decimal restatement of the terms' own total, 55.64 m, that
 `config/ci-surfaces.yml` already records for this same quantity — ⛔ NOT the sum of the four ROUNDED
-terms, which reads 55.7 m: the startup term is 7.26 m (3 m 02 s + 4 m 14 s − 12 s of embedder), not
-the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) instead of the 0.5 m S=10 had been clearing by. The cap was
+terms, which reads 55.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
+embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
+first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) instead of the 0.5 m S=10 had been clearing by. The cap was
 NOT moved — `#3239`'s stale-head exposure is what raising it re-opens, and the SUM rose from the
 POOL, not from the pre-suite terms.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
