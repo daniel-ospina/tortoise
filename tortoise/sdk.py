@@ -22777,10 +22777,13 @@ class TortoiseSDK:
           another's carrier, which no successor probe would ever match;
         * ``old_id != new_id`` (a self-replacement names itself as its own
           successor);
-        * the OLD row must not already be terminal — terminalization is one-way
-          (§5/#2498: a dead row is answered by minting a successor, never by
-          re-terminalizing it), the same refusal ``supersede_point`` makes for its
-          source;
+        * the OLD row must not already be terminal — ⛔ NOT because terminalization
+          is one-way (§5/#2498 is the POINT rule; DEAD -> DEAD stays legal for
+          these families, which the door states as a per-family delta), but as
+          THIS door's own fail-closed choice: a second supersede of a dead row
+          would silently REWRITE a recorded successor, and a recorded successor is
+          evidence. Nothing here needs it — a row already superseded has its
+          replacement, and a row retired with no successor is `archived`/`retracted`;
         * the SUCCESSOR must not be terminal, and must carry a name — a terminal
           successor buries the old row with nothing current to show, and a nameless
           successor cannot be named at all (the carrier is the name).
@@ -22790,7 +22793,12 @@ class TortoiseSDK:
         reporting a supersession that did not land.
         """
         proj = self._get_proj()
-        if old_id == new_id:
+        # Base content (#12592 cycle-8 P2): `==` is a METHOD LOOKUP on the
+        # caller's object, so a `str` subclass with `__eq__ -> False` slipped this
+        # gate and the write stored the row as its OWN successor — the successor
+        # then resolved to the row it replaced.
+        if (str.__str__(old_id) if isinstance(old_id, str) else old_id) == \
+                (str.__str__(new_id) if isinstance(new_id, str) else new_id):
             raise ValueError(
                 f"supersede: old_id and new_id must differ ({old_id!r}) — a "
                 f"row cannot be its own successor")
@@ -48458,6 +48466,52 @@ class TortoiseSDK:
             # the carriers; a retirement to `archived`/`deprecated` needs none).
             # §4.3's sentence is about the word, not about a clear.
             return
+        # ⛔ NO KEY OF A WORD-KEEPING WRITE MAY BE A CALLER-CONTROLLED RENDERER
+        # (#12592 cycle-8 P1). ⚠️ PLACED HERE ON PURPOSE, after the early return
+        # above: a write that moves the row OFF the word answers its own question
+        # elsewhere (the transition guard, the carrier guard), and those refusals
+        # are pinned — a blanket bound before this line took their message away
+        # (measured: 15 pins in `test_10371`/`test_9649` expected
+        # `'superseded' -> 'live'` and got this one instead). A read-then-write guard cannot answer a question about a
+        # value whose rendering CHANGES between the read and the write: measured
+        # with a `str` subclass key whose `__str__` answers `supersededBy` on the
+        # writer's later call and something harmless on this guard's calls, the
+        # guard read `carrier_cleared` False and `_name_keys` empty, so the write
+        # landed `status='superseded'` having REMOVED the graph's `supersededBy`
+        # — the row §4.3 defines away — while every read here looked innocent.
+        # Binding the renderings once is NOT a fix (the writer renders again,
+        # later), and normalising `props` for the whole door is a change to every
+        # prop path rather than to this invariant. So the input is bounded where
+        # this guard can bound it: a superseded write takes plain `str` keys. No
+        # real caller loses anything — `**props` is the only way to supply a
+        # subclass key and JSON/MCP cannot construct one — and it is the same
+        # exactness cycle 7 required of the VALUE, for the same reason: with an
+        # exact `str` there is no override, so guard, journal and wire agree by
+        # construction. (The ROOT cause — this door accepting caller-rendered keys
+        # at all — is recorded on #12592 rather than fixed inside one guard.)
+        # The STATUS key is exempt, on purpose: a rendered echo of the stored word
+        # (`status` reached through an adorned key) is #3305's declared-preserved
+        # read-modify-write, and where two keys render as `status` with different
+        # words `_status_write_is_ambiguous` already refuses the write with its own
+        # message (pinned in `test_10371`). This guard polices the keys that are
+        # NOT its sibling's business.
+        _exotic_keys = [
+            k for k in props
+            if type(k) is not str
+            and "status" not in (snake(str(k)), snake(str.__str__(k)))]
+        if _exotic_keys:
+            raise ValueError(
+                f"update_entity refused status='superseded' on {id_val!r}: "
+                f"{len(_exotic_keys)} property key(s) are not plain `str` "
+                f"({', '.join(sorted({type(k).__name__ for k in _exotic_keys}))}). "
+                f"A key whose RENDERING can differ between this check and the "
+                f"write cannot be checked at all — the write renders it again, "
+                f"later, and could store `{_SUCCESSOR_PROP}` after this guard saw "
+                f"a harmless name (measured). `'superseded'` MEANS replaced "
+                f"(ONTOLOGY §4.3), so the write either names the successor or it "
+                f"does not happen. Re-send with plain `str` keys — the only shape "
+                f"the wire, the journal and this guard all read the same way."
+            )
         # ⛔ A SUPPLIED CARRIER THAT NAMES NOTHING IS A **CLEAR**, and a clear in
         # the same breath as the word splits the pair (#12592 review P0 —
         # measured on the reviewed head: a coherent Object superseded with

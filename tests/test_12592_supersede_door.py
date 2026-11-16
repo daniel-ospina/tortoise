@@ -487,18 +487,23 @@ def test_a_status_only_lift_is_still_refused(sdk):
 # They are the difference between "supplies the missing half" and "mentions a
 # property called supersededBy", which is the only thing §4.3 forbids.
 
-def test_two_keys_naming_the_carrier_are_refused_as_conflicting(sdk):
-    """Two props landing on ONE property: which value survives is unknowable.
+def test_a_key_with_a_colliding_hash_is_refused_as_an_exotic_key(sdk):
+    """A `str` subclass overriding `__hash__` is a SECOND dict entry, same content.
 
-    A ``str`` subclass overriding ``__hash__`` is a SECOND dict entry with the
-    same content, so ``{K('supersededBy'): 'v2', 'supersededBy': None}`` passes a
-    per-KEY check while the live write applies both to ``supersededBy`` — a row
-    can end ``superseded`` naming nobody with the guard reporting satisfied.
-    Same asymmetry ``_status_write_is_ambiguous`` exists for on ``status``.
+    ``{K('supersededBy'): 'v2', 'supersededBy': None}`` passes a per-KEY check
+    while the live write applies both to ``supersededBy`` — a row could end
+    ``superseded`` naming nobody with the guard reporting satisfied, and the fold's
+    iteration order decides the winner. Since cycle 8 the guard is entered one
+    step earlier and refuses the CLASS: a superseded write takes plain `str`
+    keys, because a key's rendering can differ between the check and the write.
+    The same-content conflict between PLAIN keys is pinned separately by
+    ``test_a_snake_key_beside_the_camel_key_is_the_conflict``.
 
-    Mutation: drop the ``len(_carrier_keys) > 1`` refusal (restore
-    ``if _successor_named_by(props): return`` as the first check) -> this reds,
-    because the call is then ACCEPTED and stores a value nobody named.
+    Mutation: drop the ``type(k) is not str`` bound -> this reds (the call is
+    accepted, and which of the two values lands is not knowable here). The
+    CONFLICT refusal fires first on this shape, which is why the assertion below
+    expects that message — both are refusals, and the conflict is the more
+    specific of the two.
     """
 
     class _K(str):
@@ -717,8 +722,8 @@ def test_a_snake_key_beside_the_camel_key_is_the_conflict(sdk):
                           superseded_by=None)
 
 
-def test_a_key_whose_RENDERING_hides_the_column_is_still_the_split(sdk):
-    """The RECORD files the JOURNAL rendering, so the guard must read both.
+def test_a_key_whose_RENDERING_hides_the_column_is_refused_as_exotic(sdk):
+    """The RECORD files the JOURNAL rendering, so a key's two renderings can disagree.
 
     A `str` subclass whose CONTENT is `superseded_by` and whose `__str__` is
     something else is a carrier to `_split_properties` (`snake(prop)` on the
@@ -727,8 +732,12 @@ def test_a_key_whose_RENDERING_hides_the_column_is_still_the_split(sdk):
     status='superseded', **{K: None})` was ADMITTED — the graph kept the camel
     name while the record's column went NULL, so the record folded `live`.
 
-    Mutation: test only `snake(str(k))` (the live rendering) -> both halves red,
-    because the call is accepted and the conflict is merged into one key.
+    Mutation: test only `snake(str(k))` (the live rendering) -> the call is
+    accepted, the graph keeps its camel name while the record's column goes NULL,
+    and the two keys merge into one. Since cycle 8 the class is refused earlier
+    (a superseded write takes plain `str` keys — the same bound as the value
+    side), so both halves below assert THAT refusal; the rendering union stays in
+    the code because the record, not this guard, is what files the column.
     """
 
     class _K(str):
@@ -737,7 +746,7 @@ def test_a_key_whose_RENDERING_hides_the_column_is_still_the_split(sdk):
 
     node = _make(sdk, "Object", "renderhide")
     sdk.update_entity(node, status="superseded", supersededBy="renderhide-v2")
-    with pytest.raises(ValueError, match="CLEARS `supersededBy`"):
+    with pytest.raises(ValueError, match="not plain `str`"):
         sdk.update_entity(node, status="superseded", **{_K("superseded_by"): None})
     assert _row(sdk, "Object", node)[1] == "renderhide-v2", (
         "a refused write through the hidden rendering still moved the row")
@@ -826,3 +835,51 @@ def test_a_value_whose_rendering_blanks_the_wire_is_not_a_name(sdk):
             sdk.update_entity(node, status="superseded", supersededBy=value)
         assert _row(sdk, "Object", node) == [None, None, None], (
             f"a refused {name} value still moved the row")
+
+
+def test_a_key_whose_str_CHANGES_between_reads_cannot_be_checked_at_all(sdk):
+    """The TOCTOU case: a key that renders one way to the guard, another to the write.
+
+    Measured on the cycle-7 head: a `str` subclass whose `__str__` answered
+    `supersededBy` on the writer's later render and `harmless` on the guard's
+    reads made `carrier_cleared` False and `_name_keys` empty, so the write landed
+    `status='superseded'` having REMOVED the graph's `supersededBy` — the row
+    §4.3 defines away — while every read the guard made looked innocent.
+
+    Mutation: remove the `type(k) is not str` bound -> red (the call is accepted
+    and the carrier is stripped).
+    """
+    calls = {"n": 0}
+
+    class Flip(str):
+        def __str__(self):
+            calls["n"] += 1
+            return "supersededBy" if calls["n"] >= 8 else "harmless"
+
+    node = _make(sdk, "Object", "flip")
+    sdk.update_entity(node, status="superseded", supersededBy="flip-v2")
+    with pytest.raises(ValueError, match="not plain `str`"):
+        sdk.update_entity(node, status="superseded", **{Flip("zzz"): None})
+    assert _row(sdk, "Object", node)[1] == "flip-v2", (
+        "a refused flip-key write still stripped the carrier")
+
+
+def test_a_successor_with_a_lying_eq_is_still_the_same_row(sdk):
+    """`old_id == new_id` is a method lookup, so it is read at base content.
+
+    A `str` subclass with `__eq__ -> False` slipped the self-successor gate and
+    the row was recorded as its OWN successor (measured on the cycle-7 head).
+
+    Mutation: compare the caller's objects -> red.
+    """
+
+    class NeverEqual(str):
+        __eq__ = lambda s, other: False        # noqa: E731
+        __ne__ = lambda s, other: True         # noqa: E731
+        __hash__ = str.__hash__
+
+    node = _make(sdk, "Object", "selfeq")
+    with pytest.raises(ValueError, match="cannot be its own successor"):
+        sdk.supersede(NeverEqual(node), NeverEqual(node))
+    assert _row(sdk, "Object", node)[0] is None, (
+        "a refused self-supersede still moved the row")
