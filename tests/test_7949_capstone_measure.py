@@ -5995,39 +5995,45 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("19284", "relation_write = apply_relation_edges("),
+            # RE-DERIVED again at `#11609` Phase 2's head: the READ/QUERY wave adds
+            # its containers to `sdk.py` above this region (+123 there), so every
+            # number in this table moved with it — measured off THIS tree, never
+            # offset-copied (`grep -nF 'relation_write = apply_relation_edges('
+            # tortoise/sdk.py` -> 19407; the import is 19406; the `#10999` comment
+            # is 19394; the `_extract_session_v2` call is 17309).
+            ("19407", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("19283", "from tortoise.relation_write import apply_relation_edges"),
+            ("19406", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("19271", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("19394", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
         # one FILE and the consume pair was re-pointed in one document while the
         # definition stayed wrong in both.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
-            ("6659", "def subject_binding_available(graph) -> bool:"),
+            ("6661", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("10252", "subject_binding_available,"),
-            ("10305", "and not subject_binding_available(graph):"),
+            ("10334", "subject_binding_available,"),
+            ("10387", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("6659", "def subject_binding_available(graph) -> bool:"),
+            ("6661", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("10252", "subject_binding_available,"),
-            ("10305", "and not subject_binding_available(graph):"),
+            ("10334", "subject_binding_available,"),
+            ("10387", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18931", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("19054", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
@@ -6066,8 +6072,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2506", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("16730", "The v2 path reports"),
-            ("16731", '"extraction_mode": "llm:<route>"'),
+            ("16853", "The v2 path reports"),
+            ("16854", '"extraction_mode": "llm:<route>"'),
         ), "sdk"),
         # ...and THAT sentence names a second file, so its `.ts` pair takes its
         # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
@@ -6157,7 +6163,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("1174", 'env_flag("TORTOISE_S4_DELTA", True)'),
         ), "extractor_v2"),
         ("02-scope.md", "per-door `_honours` set", (
-            ("20077", "_honours: dict[str, frozenset[str]] = {"),
+            ("20200", "_honours: dict[str, frozenset[str]] = {"),
         ), "sdk"),
         ("A4-PER-LAYER.md", "compares `pkind.lower()` against", (
             # RE-DERIVED by CONTENT on the merged tree (main added this row, but this
@@ -6171,7 +6177,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("11686", '"pointKind": pkind,'),
         ), "extractor_v2"),
         ("04-plan.md", "operator / label path", (
-            ("25722", "declared = declared_relation_predicates()"),
+            ("25892", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # ⛔ THE RECONCILE APPENDIX'S OWN REPRODUCTION BLOCK (#12462 review round 2).
         # `RECONCILE-A1-A2-A5.md` is in NEITHER `_BUNDLE_DOCS` nor any sweep, so the
@@ -6190,12 +6196,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # on the other extractor and concludes the opposite of what §0 records, which is
         # why it is pinned by its ANCHOR and not merely by a number.
         ("RECONCILE-A1-A2-A5.md", "reaches it at", (
-            ("17186", "extracted, meta = self._extract_session_v2("),
+            ("17309", "extracted, meta = self._extract_session_v2("),
             # …and the CALL on the same line, so the appendix's second half of the
             # sentence has a reader too (#12462 review round 3: `:19012` was corrected
             # here and left unpinned, so it could re-stale silently while §0 stayed
             # right — the round-2 shape, one number short).
-            ("19284", "relation_write = apply_relation_edges("),
+            ("19407", "relation_write = apply_relation_edges("),
         ), "sdk"),
         # ⛔ THIS HIT IS STATED **THREE** TIMES IN THE DOCUMENT, and the row that reads
         # §0 (`:104`) embeds its number in its own PHRASE — `relation_write.py:7,
@@ -6206,7 +6212,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("7", "extractor_v2._assemble_relations"),
         ), "relation_write"),
         ("RECONCILE-A1-A2-A5.md", "relation_write.py:7, sdk.py:", (
-            ("19271", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("19394", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # ⛔ THE SAME HIT, IN THE REPRODUCTION BLOCK TWO SCREENS DOWN (#12462 review
         # round 4). The row above binds the appendix's SUMMARY line; the block that
@@ -6215,7 +6221,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # reverting every changed block individually. Two statements of one hit, one
         # reader, is how "one document asserts two numbers" comes back.
         ("RECONCILE-A1-A2-A5.md", "CONSUMER's docstring) and sdk.py:", (
-            ("19271", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("19394", "# `#10999` made the channel TRANSPORT ONLY"),
             # …and that block's `relation_write.py:7` half, keyed on ITS OWN source (#12569
             # review round 6: `:7` → `:9` here stayed GREEN — the two rows for this block
             # are both `sdk`-keyed, because a row carries ONE source key).
@@ -6269,12 +6275,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("19558", "if count + est > max_points:"),
         ), "hosted_api"),
         ("05-verify.md", "Measured at `9d790287af`", (
-            ("10225", "_registry_cache = PackRegistry(packs_dir)"),
+            ("10307", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
             # `:10063`/`:10116` stayed GREEN).
-            ("10252", "subject_binding_available,"),
-            ("10305", "and not subject_binding_available(graph):"),
+            ("10334", "subject_binding_available,"),
+            ("10387", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("05-verify.md", "Measured at `9d790287af`", (
             ("1186", '"sha256": sha, "turns": None'),
@@ -6289,7 +6295,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "extractor_v4_arch"),
         # ⛔ THE TWO THIS-HEAD NUMBERS TWO EARLIER CUTS LEFT UNREAD (#12569 review), and the
         # count that hid one of them. D5's row states NINE distinct this-head numbers: `19451`,
-        # `19558`, `10225`, `10252`, `10305`, `1186`, `1194`, `1400`, `1418` (the first two were
+        # `19558`, `10307`, `10334`, `10387`, `1186`, `1194`, `1400`, `1418` (the first two were
         # `19406`/`19519` before `#12947`'s +39 re-derivation moved them, and those two now
         # survive ONLY inside the document's history arrows — `19406→19412`, `19513→19519` — so
         # a count taken over the doc must read the current-tense pair). The
@@ -6504,8 +6510,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-tense one is re-pointed wrongly (measured: 413 passed). `:10064`/`:10117`
         # are stated twice, both "at this head", so a partial move leaves one stale.
         "`EXTRACTOR-V4-ARCHITECTURE.md:1400` is a **`Projection`** row here",
-        "`sdk.py:10252`/`:10305` at this head",
-        "(`:10252`/`:10305` at this head)",
+        "`sdk.py:10334`/`:10387` at this head",
+        "(`:10334`/`:10387` at this head)",
     ):
         assert _d5.count(_spelling) == 1, (
             f"05-verify.md D5 states one hit twice and this spelling now occurs "
