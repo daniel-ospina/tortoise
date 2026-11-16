@@ -1174,47 +1174,76 @@ def test_read_cursor_scopes_the_connection_before_it_reads() -> None:
 
 # ── the seed's JOURNAL READ: one file, or the whole layout ───────────────────
 
-def test_journal_floor_refuses_a_segmented_layout(tmp_path):
-    """A SEGMENTED journal is REFUSED, never half-counted (#12894 fresh review, P2).
+def test_journal_floor_refuses_a_segmented_layout(tmp_path, monkeypatch):
+    """A SEGMENTED journal is REFUSED, never half-counted (#12894 reviews, P2/P1).
 
-    `_journal_floor` counts ONE file (`EventLog(path).read_all`), while a replay
-    of a segmented layout enumerates EVERY present segment
-    (`journal_segments.read_all_segments`, the reader `rebuild_all` uses).
-    Counting one segment returns a floor BELOW the graph's real enumeration, and
-    the seed's own guard (`record_max <= enumerated_floor`) cannot tell the
-    difference: it would pass, arm a counter that is behind the journal, and the
-    FIRST armed write would diverge and refuse. That state does not self-heal, so
-    an under-count is not a slow degradation — it is a silent wedge of a healthy
-    graph's record path.
+    The PREMISE is built for real, not asserted: a seal renames the active
+    segment aside and starts a fresh `events.jsonl`, so the FILE-LOCAL index
+    restarts at 1 while the segment-spanning reader keeps counting. The control
+    leg below measures BOTH numbers on the same directory and requires them to
+    differ — that difference is what makes a single-file count dangerous, and a
+    leg that skipped it would pass on a fixture where the two happened to agree
+    (an earlier cut of this test did exactly that).
 
-    The MANIFEST is the layout's own record that segments exist, so its presence
-    is the fact to refuse on rather than a guess. The refusal happens before any
-    DSN is resolved, which is what makes it a guard rather than a warning — hence
-    this leg needs no database and lives in the DB-free half.
+    ⛔ THE ANCHOR IS THE LAYOUT, NOT THE MANIFEST FILE. `seal_active` renames the
+    segment FIRST and writes the manifest second, so a process killed between the
+    two leaves a sealed segment with no manifest. That state is still segmented —
+    and an anchor of `manifest.exists()` under-counted it silently, which is the
+    dangerous direction (the seed guard passes, the next file-local append agrees
+    with the allocation and is WRITTEN, while `rebuild_all` numbers those records
+    differently). The second half of this leg deletes the manifest and requires
+    the refusal to survive, so a manifest-only anchor fails here.
+
+    The refusal happens before any DSN is resolved, which is what makes it a
+    guard rather than a warning — hence this leg needs no database and lives in
+    the DB-free half.
     """
     from tools import record_allocator_cli as cli
     from tortoise import journal_segments
     from tortoise.log import EventLog
 
-    path = tmp_path / "events.jsonl"
-    log = EventLog(path)
-    for i in range(3):
-        log.append({"type": "PointAdded", "ts": "2026-11-16T00:00:00Z",
-                    "id": f"p-{i}",
-                    "point": {"id": f"p-{i}", "content": "c",
-                              "pointKind": "claim"}})
+    graph_dir = tmp_path / "journal"
+    graph_dir.mkdir()
+    active = graph_dir / journal_segments.ACTIVE_NAME
+    log = EventLog(active)
 
-    # Control: a plain single-file journal DOES count, so the refusal below is
-    # about the layout and not about the fixture.
-    assert cli._journal_floor(str(path)) == 3
+    def _rec(i):
+        return {"type": "PointAdded", "ts": "2026-11-16T00:00:00Z",
+                "id": f"p-{i}",
+                "point": {"id": f"p-{i}", "content": "c", "pointKind": "claim"}}
 
-    journal_segments.manifest_path(tmp_path).write_text(
-        '{"segments": [], "sealed_at": "2026-11-16T00:00:00Z"}')
+    assert log.append(_rec(0)) == 1
+    assert log.append(_rec(1)) == 2
+    monkeypatch.setenv(journal_segments.ENV_FLAG, "1")
+    journal_segments.seal_active(graph_dir)
+    # The seal restarts the FILE-LOCAL index; the layout keeps counting.
+    assert log.append(_rec(2)) == 1, (
+        "the seal did not restart the file-local index — this test's premise, "
+        "not the tool's, is wrong")
+
+    # ⛔ THE PREMISE, MEASURED. One file says 1; the layout says 3. This is the
+    # gap the refusal exists to stop, and it is asserted so the leg cannot go
+    # vacuous on a fixture where the two counts agree.
+    single_file = len(EventLog(active).read_all(salvage=True))
+    enumeration = len(journal_segments.read_all_segments(graph_dir, salvage=True))
+    assert single_file == 1 and enumeration == 3, (
+        f"the fixture no longer demonstrates the gap (single-file {single_file} "
+        f"vs enumeration {enumeration})")
+
     with pytest.raises(ValueError) as excinfo:
-        cli._journal_floor(str(path))
+        cli._journal_floor(str(active))
     message = str(excinfo.value)
     assert "SEGMENTED" in message and "--enumerated-floor" in message, (
         f"the refusal must name the LAYOUT and the REMEDY, not just fail: {message}")
+
+    # ⛔ A SEALED SEGMENT WITH NO MANIFEST IS STILL SEGMENTED. Anchor on the
+    # layout, not on the manifest file, or this state under-counts silently.
+    journal_segments.manifest_path(graph_dir).unlink()
+    with pytest.raises(ValueError) as excinfo:
+        cli._journal_floor(str(active))
+    assert "SEGMENTED" in str(excinfo.value), (
+        "a sealed segment whose manifest is missing was counted as ONE file — "
+        "the anchor is the manifest, not the layout")
 
     # The remedy the message names must EXIST, or the refusal sends an operator
     # to a door that is not there.

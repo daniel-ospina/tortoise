@@ -2867,7 +2867,12 @@ def write_live_record(record: Mapping[str, Any], *,
                     "refusing after `counter - floor` records, and each of them "
                     "SILENTLY LOSES ITS ROW; `seed --journal` refuses in that "
                     "state, so restore the journal or pass "
-                    "`--enumerated-floor` deliberately. record=%s %s",
+                    "`--enumerated-floor` deliberately. ON A SEALED graph "
+                    "(TORTOISE_JOURNAL_SEGMENTS=1) the `status --journal` form "
+                    "above REFUSES by design -- it will not half-count a segmented "
+                    "layout -- so measure that layout total with "
+                    "`journal_segments.read_all_segments` and pass it as "
+                    "`--enumerated-floor N`. record=%s %s",
                     seq, allocated_first, record.get("type"),
                     _record_identity(record),
                 )

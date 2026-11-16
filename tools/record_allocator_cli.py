@@ -115,22 +115,43 @@ def _journal_floor(path: str) -> int:
     # layout enumerates EVERY present segment. Counting one segment returns a
     # floor BELOW the graph's real enumeration, and the seed's guard
     # (`row_max <= floor`) cannot tell the difference: it would pass, arm a
-    # counter that is behind the journal, and the FIRST armed write would
-    # diverge and refuse — a state that does not self-heal, so one under-count
-    # would silently wedge the record path of a healthy graph. The manifest is
-    # the layout's own record that segments exist (`journal_segments.verify`
-    # reads it), so its presence is the fact to refuse on rather than a guess.
+    # counter that is behind the journal, and the next file-local append would
+    # AGREE with the allocation and be WRITTEN — while a `rebuild_all` over the
+    # same directory numbers those records differently. That is a silent split of
+    # the two coordinates the whole invariant exists to keep honest, so it must
+    # not be reachable.
+    #
+    # ⛔ THE ANCHOR IS THE LAYOUT, NOT THE MANIFEST FILE. An earlier cut tested
+    # only `manifest.exists()`, and that is wrong in the DANGEROUS direction: a
+    # sealed segment whose manifest is missing (`seal_active` renames the active
+    # file, then writes the manifest — a process killed between the two leaves
+    # exactly this) still IS a segmented layout, and `_journal_floor` would have
+    # counted one file and under-seeded. `journal_segments` already detects that
+    # state and refuses it, so the same facts are tested here: ANY sealed sibling
+    # (`SEALED_RE`), or a manifest that exists.
+    #
+    # A manifest that exists but cannot be parsed therefore refuses too, and that
+    # is DELIBERATE rather than collateral: `journal_segments.read_manifest`
+    # raises on it for the same reason — an unreadable manifest is not an
+    # "absent" one, and treating it as absent is how a recorded boundary gets
+    # laundered into a full-reconstruction claim. On such a directory the true
+    # enumeration is unknown to this tool, which is precisely what
+    # `--enumerated-floor N` is for.
     manifest = log_path.parent / journal_segments.MANIFEST_NAME
-    if manifest.exists():
+    sealed = sorted(p.name for p in log_path.parent.iterdir()
+                    if journal_segments.SEALED_RE.match(p.name))
+    if sealed or manifest.exists():
+        found = (f"sealed segment(s) {sealed}" if sealed
+                 else journal_segments.MANIFEST_NAME)
         raise ValueError(
-            f"journal {log_path} belongs to a SEGMENTED layout "
-            f"({journal_segments.MANIFEST_NAME} is present in {log_path.parent}), "
-            f"and this tool counts ONE FILE. A replay of that layout enumerates "
-            f"every present segment, so a single-file count would seed BELOW it "
-            f"and every later armed write would refuse. Pass the layout's true "
-            f"total with --enumerated-floor N (measure it with "
-            f"`journal_segments.read_all_segments(<graph dir>, salvage=True)`), "
-            f"or point --journal at a graph that has never sealed")
+            f"journal {log_path} belongs to a SEGMENTED layout ({found} in "
+            f"{log_path.parent}), and this tool counts ONE FILE. A replay of "
+            f"that layout enumerates every present segment, so a single-file "
+            f"count would seed BELOW it — and the seed's guard cannot see the "
+            f"difference. Pass the layout's true total with --enumerated-floor "
+            f"N (measure it with `journal_segments.read_all_segments(<graph "
+            f"dir>, salvage=True)`, which includes the active tail), or point "
+            f"--journal at a graph that has never sealed")
     return len(EventLog(log_path).read_all(salvage=True))
 
 
