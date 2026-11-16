@@ -223,7 +223,11 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     # fourteen WRITE/MUTATE doors into six containers, and the advertised population
     # moved 68 → 60 (13 of the 14 were `http_policy=True`; `tortoise_dream` was
     # stdio-only, so it was never in this population, while all six containers are
-    # served). A literal would have to be tuned again on the next batch.
+    # served). The SAME phase's READ/QUERY half (#11609 batch A) then retired nine READ
+    # doors into five containers — all nine doors were `http_policy=True`, and all five
+    # containers are served — which moved it 60 → 51 (the sixth READ container,
+    # `tortoise_graph_overview`, was already in this population: #10914 landed it). A
+    # literal would have to be tuned again on the next batch.
     #
     # ⛔ So the floor is DERIVED from the LIVE population, and it is kept ABSOLUTE —
     # an equality against the registry cannot stand in for it (review finding, #12915):
@@ -233,14 +237,15 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #
     #   this view is the HTTP-filtered one (`_reset_ip_rate_limits` imports
     #   `tortoise.hosted_api`, which registers the HTTP tool transform on the shared
-    #   `mcp` singleton — measured 60 unfiltered -> 55 filtered), and of the six
-    #   `GRAPH_ARGUMENT_EXCLUDED` names only three are in the filtered view
+    #   `mcp` singleton — measured 56 unfiltered -> 51 filtered at this head), and of the
+    #   six `GRAPH_ARGUMENT_EXCLUDED` names only three are in the filtered view
     #   (`tortoise_graph_set_recording`, `tortoise_list_graphs`, `tortoise_manage_sources`),
-    #   so 55 - 3 = 52 advertising tools.
+    #   so 51 - 3 = 48 advertising tools.
     #
     #   The SIBLING derivation in tests/test_ask_eval_only.py gives the same population
-    #   from the other direction: 63 - 13 + 5 = 55 filtered (`#4282` Phase 2 retires 13
-    #   http doors and adds 5 advertised containers). ⛔ The UNFILTERED total is a
+    #   from the other direction: 63 - 13 + 5 = 55 filtered at `origin/main`, then
+    #   55 - 9 + 5 = 51 after #11609 batch A (nine READ doors retired — all
+    #   `http_policy=True` — and five served containers added). ⛔ The UNFILTERED total is a
     #   DIFFERENT sum and must not reuse those terms: all fourteen doors were in
     #   `TOOL_REGISTRY` (`tortoise_dream` included — it was only `http_policy=False`)
     #   and all six containers joined it, so 68 - 14 + 6 = 60. The two formulas
@@ -248,9 +253,9 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #   reader who moves one set of terms to the other population gets the right total
     #   for the wrong reason, and the next batch's drift would be invisible. Both are
     #   stated so the next batch can re-derive either, in its own population.
-    assert len(advertising) >= 52, (
+    assert len(advertising) >= 48, (
         f"the advertising population collapsed to {len(advertising)} tool(s) — expected "
-        "at least 52 (55 HTTP-filtered live tools minus the 3 excluded names in that "
+        "at least 48 (51 HTTP-filtered live tools minus the 3 excluded names in that "
         "view); a lower number means the registry lost entries, not that a pin moved")
     # …and the served view must BE that population, name for name, so a name that is
     # registered-but-unserved is caught too (the floor above cannot see a substitution).
@@ -260,7 +265,7 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     assert set(advertised) <= http_population, (
         "the served list carries names the registry does not declare as http_policy — "
         f"served-only={sorted(set(advertised) - http_population)}")
-    assert len(http_population) >= 55, (
+    assert len(http_population) >= 51, (
         f"the registry's http_policy population collapsed to {len(http_population)}")
     for name in advertising:
         schema = advertised[name]
