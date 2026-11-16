@@ -124,5 +124,5 @@ def report_effective_switches(
     with contextlib.suppress(Exception):
         print(line, file=out)
     with contextlib.suppress(Exception):
-        (logger or _logger).info(line)
+        (logger or _logger).warning(line)
     return line

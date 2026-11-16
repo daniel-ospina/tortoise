@@ -389,6 +389,16 @@ _SHELL_FN_HEADER = re.compile(
 #: see (review P1, measured).
 _SHELL_GROUP_CLOSE = re.compile(r"^\s*\}(?![)}])")
 
+#: ⛔ A `}` that can close a GROUP, anywhere in the statement (review P2, measured at `ca57c755`):
+#: `{ { …; } } | tee` carries TWO closers and `_SHELL_GROUP_CLOSE` (anchored `^`) sees only the
+#: first, so only one frame was popped and the outer, piped group's credits survived — gate
+#: `ok … =1 =1`, exit 0, over a process bash leaves empty. Each closer pops its OWN frame, and the
+#: fork is read from that closer's TAIL: the inner group closes first, the outer one owns the pipe.
+#: The lookbehind mirrors `_SHELL_GROUP_OPEN`'s: brace EXPANSION (`{logs,cache}`) and a
+#: parameter expansion's tail (`${X}`) end with a `}` that closes nothing, and counting it
+#: popped a real group's frame early — the same phantom in the other direction.
+_SHELL_GROUP_BRACE = re.compile(r"(?<![\w${,])\}(?![})])")
+
 #: A brace GROUP's OPENER: a `{` at a WORD start that is followed by a COMMAND (or ends the
 #: statement), counted on the STRUCTURAL VIEW. Four spellings must NOT count, and each of them was
 #: a measured fail-OPEN when the count ran on the raw line (review round 3): `${VAR}` (parameter
@@ -408,10 +418,17 @@ _SHELL_GROUP_OPEN = re.compile(r"(?<![\w${])\{(?![A-Za-z0-9_.,])")
 #: `[0-9]*>>?[0-9]*\s*`, which consumed the fd digit of `N>&M` and left the `&` to be read as the
 #: BACKGROUND operator — `{ …; } >&2` was therefore REFUSED (a false refusal: bash keeps both
 #: switches), while `{ …; } > f 2>&1 | tee` passed a group that bash runs in a subshell (a
-#: fail-open). Order matters: `&>`/`&>>` is tried before a bare `>` so the `&` is not mistaken for a
-#: background operator, and `>&`/`<&` consume their fd target.
+#: fail-open). Order matters: the FD arms (`&>`, `>&`, `<&`) are tried BEFORE a bare `>`, and every
+#: target is bounded to a shell WORD — an unbounded `\S+` target swallowed the `|` after `2>&1`, so
+#: `} 2>&1|tee` read as "a redirect and then nothing" and the piped group was CREDITED (review P1,
+#: measured at `ca57c755`: `ok … =1 =1`, exit 0, while bash gave the process no `TORTOISE_*`; the
+#: same file with ONE SPACE before the pipe was refused, so the verdict flipped on whitespace).
 _SHELL_REDIRECT = re.compile(
-    r"(?:[0-9]*&>>?\s*\S+|[0-9]*(?:>>?\|?|>&|<&)\s*(?:[0-9-]+|\S+)|<>?\s*\S+|<<<?-?\s*\S+)"
+    r"(?:[0-9]*&>>?\s*(?:[0-9-]+|[^\s|&;<>]+)"
+    r"|[0-9]*(?:>&|<&)\s*(?:[0-9-]+|[\w./:@%+=-]+)"
+    r"|[0-9]*(?:>>?\|?)\s*(?:[0-9-]+|[^\s|&;<>]+)"
+    r"|<>?\s*[^\s|&;<>]+"
+    r"|<<<?-?\s*\S+)"
 )
 
 #: The operator that makes the statement it FOLLOWS run in a subshell. `&&`/`&>`/`>&` are
@@ -1657,7 +1674,6 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             closers = _SHELL_CLOSERS.findall(view)
             if group_open > 0 and _SHELL_GROUP_CLOSE.match(view):
                 closers = closers[1:]
-                group_open -= 1
             depth = max(0, depth - len(closers))            # ⛔ `depth > 0 or terminated` is NOT the whole population of statements the process
             # may never receive, and the gaps were all measured fail-OPEN (review):
             #
@@ -1830,24 +1846,31 @@ def _shell_assignments(text: str) -> tuple[dict[str, str], set[str]]:
             # BODY is open — a body's `}` is the same character, and `fn_body` is what tells them
             # apart (`opened_fn` is checked as well, for a body opened and closed on one line).
             # ⛔ COUNTED, mirroring the openers: one statement may close more than one group.
-            group_closers = len(_SHELL_GROUP_CLOSE.findall(content_view))
-            if group_frames and fn_body == 0:
-                for _ in range(min(group_closers, len(group_frames))):
-                    frame = group_frames.pop()
-                    group_conditional.pop()
-                    if _group_is_forked(content_view):
-                        # A FORKED group ran in a SUBSHELL: nothing it credited or retracted
-                        # reached the process, so every key it touched is put back as it was.
-                        for name, (was_stated, prior) in frame.items():
-                            if was_stated:
-                                stated[name] = prior
-                            else:
-                                stated.pop(name, None)
-                    elif group_frames:
-                        # An UNFORKED group runs in place: its changes stand, and its undo log is
-                        # merged outward so an enclosing forked group can still undo them.
-                        for name, entry in frame.items():
-                            group_frames[-1].setdefault(name, entry)
+            # ⛔ COUNTED, mirroring the openers: EVERY closer on the statement closes a frame, and
+            # each closer's OWN tail decides the fork (review P2, measured at `ca57c755`: `{ { …; }
+            # } | tee` left the outer, piped group's credits standing because only the first `}` was
+            # seen and its tail starts with another `}`).
+            for closer in _SHELL_GROUP_BRACE.finditer(content_view):
+                if group_open <= 0:
+                    break
+                group_open -= 1
+                if fn_body != 0 or not group_frames:
+                    continue
+                frame = group_frames.pop()
+                group_conditional.pop()
+                if _group_is_forked(content_view[closer.start() :]):
+                    # A FORKED group ran in a SUBSHELL: nothing it credited or retracted
+                    # reached the process, so every key it touched is put back as it was.
+                    for name, (was_stated, prior) in frame.items():
+                        if was_stated:
+                            stated[name] = prior
+                        else:
+                            stated.pop(name, None)
+                elif group_frames:
+                    # An UNFORKED group runs in place: its changes stand, and its undo log is
+                    # merged outward so an enclosing forked group can still undo them.
+                    for name, entry in frame.items():
+                        group_frames[-1].setdefault(name, entry)
             opened_fn = _function_body_braces(raw, view) + (1 if allman_body else 0)
             # ⛔ OPENERS are scanned on the PREFIX-STRIPPED view (review P1, measured):
             # `{ if false; then export …; fi; }` credited BOTH switches although bash ran

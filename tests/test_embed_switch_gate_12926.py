@@ -37,6 +37,7 @@ Each test below is a falsifier for one claim the check makes:
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sys
@@ -1528,6 +1529,27 @@ def test_the_startup_line_states_both_effective_values(capsys):
     assert "TORTOISE_EMBED_GATE=ON (stated '1')" in line
 
 
+def test_the_startup_record_survives_the_DEFAULT_root_level(caplog):
+    """Review P3 at `ca57c755` (measured) — the doc promised aggregators a record; the code said INFO.
+
+    `report_effective_switches` is documented (and follows `emit_off_box_backup_signal`) as
+    "printed to stderr **and** logged so a container log aggregator gets it". The record was emitted
+    at INFO, and nothing in `tortoise/` or `entrypoint.sh` sets a level for `tortoise.*` — so the
+    root default (WARNING) dropped it, and the documented half of the pair did not exist. Measured:
+    `_logger.isEnabledFor(logging.INFO) == False` on a default root.
+
+    Pinned at the level the DEFAULT root keeps, so a future edit back to INFO reds this rather than
+    silently re-emptying the aggregator arm. Mutation-proved: `.info` here reds it.
+    """
+    with caplog.at_level(logging.WARNING):
+        line = gate_visibility.report_effective_switches()
+    records = [r for r in caplog.records if line in r.getMessage()]
+    assert records, "the boot record did not survive the default root level"
+    assert all(r.levelno <= logging.WARNING for r in records), (
+        f"a record the default root drops is not a record: {[r.levelname for r in records]}"
+    )
+
+
 def test_the_startup_line_tracks_the_resolvers(monkeypatch):
     """A log that disagrees with the behaviour is worse than no log at all."""
     monkeypatch.setenv("TORTOISE_EMBED_GATE", "yes")
@@ -2928,6 +2950,16 @@ def test_NESTED_groups_keep_their_frames(script):
         # where the fork operator should be and a piped group was credited over a subshell.
         ("&> /tmp/f.log | tee", False),
         ("&>> /tmp/f.log | tee", False),
+        # ⛔ the UNSPACED spellings (review P1 at `ca57c755`, measured): `_SHELL_REDIRECT` tried
+        # `>>?|?` BEFORE `>&` and left the target unbounded, so `2>&1` matched as `2>` plus a
+        # target that swallowed the pipe — the piped group was CREDITED while bash gave the
+        # process no switch. One space before the pipe was refused, so the verdict flipped on
+        # whitespace alone.
+        ("2>&1|tee -a /tmp/g.log", False),
+        (">&2|tee", False),
+        ("2>&1|&tee", False),
+        ("> /tmp/f.log 2>&1|tee", False),
+        ("&>/tmp/f.log|tee", False),
     ],
 )
 def test_a_group_redirect_is_not_a_fork(trailer, credited):
@@ -2953,6 +2985,46 @@ def test_a_group_redirect_is_not_a_fork(trailer, credited):
         )
     else:
         assert stated == {}, f"a redirect followed by a pipe IS a subshell: {stated}"
+
+
+@pytest.mark.parametrize(
+    "label,script,credited",
+    [
+        # ⛔ TWO closers on ONE statement (review P2 at `ca57c755`, measured): `_SHELL_GROUP_CLOSE`
+        # is anchored `^`, so only the first `}` was seen, only one frame popped, and the outer,
+        # piped group's credits stood — `ok … =1 =1`, exit 0, over an empty environment.
+        (
+            "two groups on one line, piped",
+            "{ { export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; } } | tee /tmp/x\n",
+            False,
+        ),
+        (
+            "two groups on one line, backgrounded",
+            "{ { export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; } } & wait\n",
+            False,
+        ),
+        # …and the unforked mirror runs in the CURRENT shell, so it IS a statement
+        (
+            "two groups on one line, unforked",
+            "{ { export TORTOISE_VALUE_GATE=1; export TORTOISE_EMBED_GATE=1; } }\n",
+            True,
+        ),
+    ],
+)
+def test_two_group_closers_on_one_statement_close_two_frames(label, script, credited):
+    """Review P2 at `ca57c755` (measured both ways) — one statement may close TWO groups.
+
+    Every closer now pops its OWN frame and reads the fork from its own tail, so the inner group
+    closes first and the outer one owns the pipe. Mutation-proved: counting closers with the
+    anchored `findall` reds the two piped/backgrounded rows and leaves the mirror green.
+    """
+    stated, _ambiguous = gate._shell_assignments(script + 'exec "$@"\n')
+    if credited:
+        assert stated == {"TORTOISE_VALUE_GATE": "1", "TORTOISE_EMBED_GATE": "1"}, (
+            f"{label}: an unforked group runs in the current shell: {stated}"
+        )
+    else:
+        assert stated == {}, f"{label}: a forked outer group is a subshell: {stated}"
 
 
 def test_a_trailing_PIPE_makes_the_next_statement_a_subshell():
