@@ -6261,7 +6261,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("19583", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
-        # re-states `hosted_api.py:19454` as the same guard read at an older head, so it is
+        # re-states `hosted_api.py:19558` as the same guard read at an older head, so it is
         # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
         # merger to re-point line 82, which is exactly how 236 comes to assert the old
         # number while 82 moves. Unpinned until the review reverted it green. Only the

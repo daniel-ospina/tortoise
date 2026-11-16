@@ -2267,7 +2267,7 @@ def test_part_c4_evidence_names_every_phantom() -> None:
         )
 
 
-def test_part_c6_records_the_fold_for_exactly_the_three_rows() -> None:
+def test_part_c6_records_the_fold_for_exactly_the_two_rows() -> None:
     """P1-4: the fold-not-delete rows carry a destination and an AUTHORITY.
 
     The remaining w11 members are the only rows whose "Removed" clause says the
