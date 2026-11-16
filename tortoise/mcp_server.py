@@ -5706,6 +5706,15 @@ def tortoise_get_operator(id: str) -> dict:
     Raises error if the Point is not an operator.
     Alias → get(id, type='operator') (epic #888 W3).
 
+    ⚠️ Its registry `description` (see `tool_registry.py`) is safe to extend for
+    this door ONLY because `tortoise_get_operator` is a RETIRED name: the LIVE
+    entry is `tortoise_get_entity`, whose description is hashed by
+    `tools/surface-guard.py` (`co_consts`) and rendered into
+    `docs/product/bridge-table.md`, so editing THAT text moves a gate and a
+    generated artifact. The retired text still has to stay within its existing
+    line count, because `bridge-table`/`mcp-rename-table` publish a
+    `tool_registry.py:<line>` column that a reflow would rewrite for every tool.
+
     ⚠️ ARMED MODES (`TORTOISE_RECORD_SERVE`) change TWO of those sentences (#12941):
     a found operator also names the store that answered (`servedFrom` /
     `fallbackReason`), and an answer no reachable store could SEE returns
