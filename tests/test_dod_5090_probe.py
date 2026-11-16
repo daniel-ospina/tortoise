@@ -11630,13 +11630,24 @@ def test_12549_an_EXPORTED_assignment_exports_its_name_too(tmp_path, monkeypatch
         "#!/bin/bash\nexport TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["deployment"]["files"]["entrypoint.sh"] == "ON", shipped
-    # …and a MIXED `export A=1 B` argument list exports both names, so the same
-    # reassignment is still a decision.
+    # …and a MIXED `export A=1 B` argument list exports both names, and a quoted value
+    # with a space does not truncate the one beside it.
     (tmp_path / "entrypoint.sh").write_text(
-        "#!/bin/bash\nexport OTHER_VAR=1 TORTOISE_EMBED_GATE=1\n"
+        "#!/bin/bash\nexport OTHER_VAR=\"a b\" TORTOISE_EMBED_GATE=1\n"
         "TORTOISE_EMBED_GATE=0\n", encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", shipped
+    # ⏔ `export -n FLAG` REMOVES the export attribute and `export -f FLAG` exports a
+    # FUNCTION (a different namespace), so neither may ADD the name — reading either as a
+    # plain arm would be a NEW false arm, one option character over from defect 4.
+    for revoke in ("export -n TORTOISE_EMBED_GATE", "export -f TORTOISE_EMBED_GATE"):
+        (tmp_path / "entrypoint.sh").write_text(
+            "#!/bin/bash\n" + revoke + "\nTORTOISE_EMBED_GATE=1\n",
+            encoding="utf-8")
+        shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+        assert shipped["deployment"]["files"]["entrypoint.sh"] == "OFF", (revoke, shipped)
+        assert any("TORTOISE_EMBED_GATE=1" in hit
+                   for hit in shipped["outside_runtime"]), (revoke, shipped)
 
 
 def test_12549_a_blank_gate_key_is_not_blamed_on_an_UNRELATED_unset_variable(

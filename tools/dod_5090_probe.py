@@ -3366,46 +3366,74 @@ def _shell_words(text: str) -> list[str]:
     return words
 
 
-def _shell_export_line_names(line: str) -> list[str] | None:
-    """The names one `export …` line puts into the environment; `None` = not an export.
+def _shell_export_line_names(line: str) -> tuple[list[str], str] | None:
+    """``(names, option_cluster)`` for one `export …` line; `None` = not an export.
 
     ⛔ `export` is a shell BUILTIN, so it is matched CASE-SENSITIVELY — `EXPORT FLAG=1`
     is a different (nonexistent) command, unlike the Dockerfile instructions, which are
     case-insensitive. Both argument spellings are read: the shell exports `NAME=value`
     exactly as it exports a bare `NAME`, and `export A=1 B` exports both.
+
+    ⛔ The OPTIONS are returned, not discarded, because two of them invert the line:
+    `export -n NAME` REMOVES the export attribute (bash), and `export -f NAME` exports
+    a FUNCTION — whose name is in the same namespace question but is not a variable
+    this walk scores. Treating either as a plain arm is a false arm.
     """
     stripped = line.strip()
     if not re.match(r"^export[ \t]", stripped):
         return None
+    options = ""
     names: list[str] = []
     for word in _shell_words(stripped[len("export"):]):
+        if word.startswith("-") and not names:
+            options += word.lstrip("-")
+            continue
         match = _SHELL_EXPORT_ARG.match(word)
         if match:
             names.append(match.group("name"))
-    return names
+    return names, options
 
 
 def _shell_exported_names(text: str) -> set[str] | None:
     """The names a shell script EXPORTS, or `None` = all (`set -a`).
 
     `None` means the script turns on `set -a` (allexport), where every assignment is
-    exported; the caller then treats every assignment as eligible. Returning a set
-    is the normal case, and an unexported assignment is then correctly NOT a
-    shipped environment entry — the shell's own variable never reaches the Python
-    process that reads the flag.
+    exported; the caller then treats every assignment as eligible. Returning a set is
+    the normal case, and an unexported assignment is then correctly NOT a shipped
+    environment entry — the shell's own variable never reaches the Python process that
+    reads the flag.
 
     ⛔ **`export FLAG=1` exports `FLAG` exactly as `export FLAG` does**, and the matcher
     that accepted only the BARE form ignored it — so the exported set stayed empty, a
     later plain `FLAG=0` was not a decision at all, and the file published `ON` while
     bash runs `0` (`#12549` defect 4, measured: the false-ARM direction, i.e. the class
-    this instrument exists to prevent). Both spellings are read here.
+    this instrument exists to prevent). Both spellings are read here, and LAST WINS
+    then decides — the fix the issue itself names.
+
+    ⚠️ **Declared bound — this is a SET for the file, not a timeline, and that is
+    deliberate.** The set is what makes `FLAG=1` followed by a bare `export FLAG`
+    (this repo's entrypoint idiom) arm the file, which is how bash behaves: the export
+    publishes the value already assigned. The cost is an ordering the set cannot
+    express — `export FLAG=1`, then `unset FLAG` / `export -n FLAG`, then a plain
+    `FLAG=1` leaves the variable unexported while a set that still holds the name reads
+    the last line as a decision. Measured, pre-existing for the BARE spelling too
+    (nothing this conversion introduced), and tracked as `#12952` — the OPTION CLUSTER
+    is read here so `export -n`/`export -f` cannot ADD a name, which is the half that
+    would be a new false arm.
     """
     exported: set[str] = set()
     for line in text.splitlines():
         if _SHELL_ALLEXPORT.match(line):
             return None
-        names = _shell_export_line_names(line)
-        if names:
+        parsed = _shell_export_line_names(line)
+        if parsed is None:
+            continue
+        names, options = parsed
+        if "n" in options:
+            # `export -n NAME` REMOVES the export attribute (bash).
+            exported.difference_update(names)
+        elif "f" not in options:
+            # `export -f NAME` exports a FUNCTION — same name, different namespace.
             exported.update(names)
     return exported
 
