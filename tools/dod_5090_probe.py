@@ -2883,6 +2883,12 @@ def _compose_channel(path: Path, flag: str | None, is_truthy) -> dict:
                  "profiled_not_started": [],
                  "build_refs": [], "entrypoints": [], "warnings": []}
     if not run["ok"]:
+        # ⛔ THE RESOLVER ITSELF DECLINED — absent, crashed, timed out or exited
+        # non-zero. That is a DIFFERENT fact from "exited 0 and printed something this
+        # walk cannot read" (the three branches below), and only this one may be
+        # published as a refusal (fresh review of PR #12902, cycle 2, P2: `ok` alone
+        # cannot tell "said no" from "said something we could not read").
+        out["resolver_refused"] = True
         return out
     # ⛔ An EMPTY stdout is not a model (`#12902` review, P2, MEASURED): with
     # `or "{}"` it parsed into `services == {}` and the file was published as a
@@ -5035,16 +5041,33 @@ def _channel_reader_note(deployment: dict) -> str:
     refused = sorted({(reading.get("channel") or "?",
                        reading.get("resolver") or "?")
                       for reading in readings
-                      if reading.get("resolver") and not reading.get("ok")})
-    if not answered and not refused:
+                      if reading.get("resolver") and not reading.get("ok")
+                      and reading.get("resolver_refused")})
+    # ⛔ A THIRD STATE, because `ok` is false for two different events and only one of
+    # them is a refusal (fresh review, cycle 2, P2, measured): a resolver that EXITED 0
+    # and printed no model, an unparseable model, or a `services` value this walk cannot
+    # read all keep `ok: False`, and in every one of those the RESOLVER did its job —
+    # the WALK named the reason. Publishing those as "REFUSED" would be a claim wider
+    # than the measurement, in a note whose whole purpose is not to make one.
+    unreadable = sorted({(reading.get("channel") or "?",
+                          reading.get("resolver") or "?")
+                         for reading in readings
+                         if reading.get("resolver") and not reading.get("ok")
+                         and not reading.get("resolver_refused")})
+    if not answered and not refused and not unreadable:
         return declared
     text = declared
     if answered:
         text += "; answered for THIS tree by: " + ", ".join(
             f"{channel}={resolver}" for channel, resolver in answered)
     if refused:
-        text += "; ⛔ REFUSED (ran, and named a reason — scored UNRESOLVED, not answered) " \
+        text += "; ⛔ REFUSED (the resolver declined — absent, crashed or exited " \
+                "non-zero — scored UNRESOLVED, not answered) " \
                 + ", ".join(f"{channel}={resolver}" for channel, resolver in refused)
+    if unreadable:
+        text += "; ⛔ UNREADABLE OUTPUT (the resolver exited 0 but the walk could not " \
+                "read a model from it — scored UNRESOLVED, not answered) " \
+                + ", ".join(f"{channel}={resolver}" for channel, resolver in unreadable)
     warnings = [warning for reading in readings
                 for warning in (reading.get("warnings") or ())]
     if warnings:
@@ -5214,9 +5237,10 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
         f"assignments a deployed process never reads: "
         f"{shipped.get('outside_runtime') or 'none'}; "
         # ⛔ The no-value direction, named: a shell `unset`, or a compose entry with no
-        # value (which the resolver MEASURES as a pass-through from the ambient
-        # environment, so the FILE fixes no value) — this per-file reading scores it as
-        # the LAST word where it is last. ⛔ NOT "compose": both channels append here, and
+        # value — which the resolver MEASURES as `null`, so compose passes the AMBIENT
+        # value through when the deploying host exports one and REMOVES the image's `ENV`
+        # when it does not (both measured). This per-file reading scores it as the LAST
+        # word where it is last. ⛔ NOT "compose": both channels append here, and
         # a label that named one of them published a shell line as "compose declarations
         # that UNSET it" — a diagnostic naming a neighbour's state (fresh review of PR
         # #12474, P2).

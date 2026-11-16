@@ -442,7 +442,7 @@ a profile-gated ARM must not arm a file a default `up` does not start, and `comp
 (a compose DEFAULT filename) must be measured rather than invisible. Each was
 shown RED against the pre-fix tool. Also from the reviews of PR #12902, each shown RED
 against the pre-fix tool and each **counted inside the `33`/`9` groups below, not on top of
-them** (the two groups are exactly the 38 new tests this branch adds, so nothing named
+them** (the two groups are exactly the 42 new tests this branch adds — `33 + 9` — so nothing named
 here is an addition to the total): defect 4's own shape (`export FLAG=1` then `FLAG=0`
 — a FALSE ARM, because the exported-name matcher accepted only the bare form), the
 PER-KEY narrowing of the unset-interpolation signal (a literal `FLAG: ""` beside an

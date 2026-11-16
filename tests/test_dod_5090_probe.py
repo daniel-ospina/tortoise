@@ -10253,7 +10253,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `246 + 1` and `245 + 2` at THIS tree, both equal to the `247` the pin re-derives
+    count: `256 + 1` and `255 + 2` at THIS tree, both equal to the `257` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
@@ -12855,6 +12855,17 @@ def test_12549_a_FALSE_ARM_bound_is_never_published_as_cannot_see(
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     dockerfile = next(row for row in shipped["deployment"]["declared_bounds"]
                       if row["channel"] == "dockerfile")
+    # ⛔ THE PREMISE THE TEXT PUBLISHES, asserted here (fresh review, cycle 2, P2): the
+    # `reads_wrong` clause states a MEASUREMENT — `{'Dockerfile': 'ON'}`, `on: True`,
+    # every other bucket empty. Without this, `#12978` can change the walker and the
+    # bound will keep publishing that sentence as if it had measured it.
+    deployment = shipped["deployment"]
+    assert deployment["files"].get("Dockerfile") == "ON", deployment["files"]
+    assert deployment["on"] is True, deployment["on"]
+    assert deployment["armed"] == ["Dockerfile"], deployment["armed"]
+    assert not deployment["unmeasured"], deployment["unmeasured"]
+    assert not shipped["outside_runtime"], shipped["outside_runtime"]
+    assert not shipped["indeterminate"], shipped["indeterminate"]
     # The false-ARM shape must NOT be claimed as an under-report…
     assert "builder-stage" not in dockerfile["cannot_see"], dockerfile
     # …it must be named, with its direction, its measurement and its tracker.
@@ -12899,10 +12910,14 @@ def test_12549_a_VALUE_LESS_compose_entry_names_BOTH_directions(
         scope.get("reason", "")
         for scope in shipped["deployment"]["resolved"].values()
         for scope in (scope.get("scopes") or {}).values())
-    published = note + " " + scope_reason
-    assert "passes the ambient value through" in published, published
-    # …and the CLEARING half, which the previous text denied outright.
-    assert "CLEARS an inherited one" in published, published
+    # ⛔ ASSERTED PER SURFACE, never over a concatenation (fresh review, cycle 2, P2,
+    # measured): the identical phrases live in `per_file_scope_note`, so reverting only
+    # the per-scope `reason` left a joined assertion GREEN. One carrier may not mask
+    # another.
+    for surface, text in (("scope reason", scope_reason), ("per-file note", note)):
+        assert "passes the ambient value through" in text, (surface, text)
+        # …and the CLEARING half, which the previous text denied outright.
+        assert "CLEARS an inherited one" in text, (surface, text)
 
 
 def test_12549_a_REFUSED_resolver_is_never_published_as_having_ANSWERED(
@@ -12931,3 +12946,15 @@ def test_12549_a_REFUSED_resolver_is_never_published_as_having_ANSWERED(
     note = probe._channel_reader_note(deployment)
     assert "answered for THIS tree by: compose=" not in note, note
     assert "REFUSED" in note, note
+    # ⛔ AND A RESOLVER THAT EXITED 0 IS NOT A REFUSAL (fresh review, cycle 2, P2). The
+    # `ok is False` branches also cover "printed no model", an unparseable model and a
+    # non-dict `services` — in every one the RESOLVER did its job and the WALK named the
+    # reason, so publishing "REFUSED" would be a claim wider than the measurement.
+    monkeypatch.setattr(probe, "_run_config_resolver",
+                        lambda *a, **k: {"ok": True, "stdout": "", "stderr": "",
+                                         "argv": ["docker"], "reason": None})
+    shipped_unreadable = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    unreadable_note = probe._channel_reader_note(shipped_unreadable["deployment"])
+    assert "REFUSED" not in unreadable_note, unreadable_note
+    assert "UNREADABLE OUTPUT" in unreadable_note, unreadable_note
+    assert "answered for THIS tree by: compose=" not in unreadable_note, unreadable_note
