@@ -2747,15 +2747,21 @@ def write_live_record(record: Mapping[str, Any], *,
         # here rather than a row-less write: the counter would issue a number
         # nothing corroborates, and the one invariant this arm exists to keep —
         # the line and its row carry the same number — would be unverifiable for
-        # this record. Fail CLOSED: the journal holds the record and a replay
-        # heals it, so the cost is one refused record, not a lost write.
+        # this record. Fail CLOSED, and say what ACTUALLY repairs it: on the
+        # UNARMED arm a replay of the journal heals a row-less record, but on
+        # THIS arm the counter is the authority and an enumerated replay is
+        # REFUSED once the graph is cut over (`_refuse_an_enumerated_replay`) —
+        # so "a replay heals it" is false here and the remedy is the allocator's
+        # operator path.
         _count_write_failure("write_failed")
         _logger.warning(
             "the record write was REFUSED (position_unverifiable) — the journal "
             "holds the record but the append could not PROVE its position, so "
             "the ordinal allocator (`%s`) has nothing to check the number it "
-            "would issue against. One refused record, healed by a replay; "
-            "record=%s %s",
+            "would issue against. On the ALLOCATED arm a replay does NOT heal "
+            "this (an enumerated replay is refused on a cut-over graph); the "
+            "remedy is the allocator's operator path — `halt` -> "
+            "`seed --journal` -> `reopen` -> `arm`; record=%s %s",
             RECORD_ALLOCATE_ENV, record.get("type"), _record_identity(record),
         )
         return _refused("write_failed", seq)
@@ -2789,15 +2795,22 @@ def write_live_record(record: Mapping[str, Any], *,
         # puts the journal LINE at N and the position ROW at M for one record,
         # and a replay of the JSONL (which enumerates 1..N) can never reproduce
         # the row again — the two coordinates `#9318` exists to keep honest would
-        # be split by this door. That is reachable on three states that are all
+        # be split by this door. That is reachable on FOUR states that are all
         # real: a RESTORED or TRUNCATED journal (it reports a smaller position),
         # a SEALED one (`TORTOISE_JOURNAL_SEGMENTS=1` restarts the file-local
-        # index at 1), and a counter left behind by a refused write.
+        # index at 1), a counter left behind by a refused write, and CONCURRENT
+        # WRITERS — the journal is ordered by APPEND (the `sdk` site appends,
+        # then calls this door, holding no lock across the two) while the counter
+        # is ordered by ALLOCATION, so two in-flight writes can be numbered in
+        # the opposite order to their lines: the one that allocated first
+        # refuses (`allocated != its line`), the other applies, and the counter
+        # is left exactly one behind the journal.
         #
-        # ⛔ THE THIRD STATE IS NOT RARE, AND ITS COST IS NOT "one refused
-        # record" — say it here rather than let an operator discover it. Every
-        # refusal arm above appends its journal line and writes NO row, so the
-        # JOURNAL's position advances while the COUNTER's does not. The gap does
+        # ⛔ THE THIRD AND FOURTH STATES ARE NOT RARE, AND THE COST IS NOT "one
+        # refused record" — say it here rather than let an operator discover it.
+        # Every refusal arm above appends its journal line and writes NO row, so
+        # the JOURNAL's position advances while the COUNTER's does not (the
+        # concurrency inversion above leaves the same one-behind gap). The gap does
         # not close on its own (a replay writes rows, never the counter), so
         # every LATER armed write refuses for the same reason: once one record is
         # declined, this arm refuses every subsequent record until an operator

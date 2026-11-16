@@ -27,7 +27,16 @@ ways to give it, and the tool refuses to guess a third:
 
 * ``--journal PATH`` — the journal's OWN reader counts it
   (``EventLog.read_all(salvage=True)``, the same read the replay engines use, so
-  segments and torn tails are the reader's business, not this tool's);
+  a TORN TAIL is the reader's business, not this tool's).
+  ⛔ NOT SEGMENTS. ``EventLog`` reads ONE file; a replay of a segmented layout
+  enumerates every present segment (``journal_segments.read_all_segments``). A
+  single-file count would therefore seed BELOW the graph's real enumeration, and
+  the seed's own guard (``row_max <= floor``) cannot see the difference — it
+  would pass and arm a counter that is behind the journal, after which every
+  armed write diverges and refuses (#12894: a divergence does not self-heal). So
+  a path inside a segmented layout is REFUSED by name, and the operator states
+  the true total with ``--enumerated-floor N`` — the tool's other documented
+  input, and the only one that can be right for a layout this file cannot count;
 * ``--enumerated-floor N`` — stated by an operator who knows, for a journal this
   box cannot read (the volume belongs to another lane, or the graph is hosted).
 
@@ -92,6 +101,7 @@ def _journal_floor(path: str) -> int:
     writes then key on, so a second reader is a second answer to "how long is the
     journal".
     """
+    from tortoise import journal_segments
     from tortoise.log import EventLog
 
     log_path = Path(path)
@@ -100,6 +110,27 @@ def _journal_floor(path: str) -> int:
             f"journal {log_path} does not exist — a graph with no journal has "
             f"floor 0; pass --enumerated-floor 0 explicitly if that is the "
             f"intent, so a mistyped path cannot seed a live graph to 0")
+    # ⛔ A SEGMENTED JOURNAL IS NOT ONE FILE — REFUSE, never half-count (#12894
+    # review). `EventLog(path)` reads `path` ONLY, while a replay of a segmented
+    # layout enumerates EVERY present segment. Counting one segment returns a
+    # floor BELOW the graph's real enumeration, and the seed's guard
+    # (`row_max <= floor`) cannot tell the difference: it would pass, arm a
+    # counter that is behind the journal, and the FIRST armed write would
+    # diverge and refuse — a state that does not self-heal, so one under-count
+    # would silently wedge the record path of a healthy graph. The manifest is
+    # the layout's own record that segments exist (`journal_segments.verify`
+    # reads it), so its presence is the fact to refuse on rather than a guess.
+    manifest = log_path.parent / journal_segments.MANIFEST_NAME
+    if manifest.exists():
+        raise ValueError(
+            f"journal {log_path} belongs to a SEGMENTED layout "
+            f"({journal_segments.MANIFEST_NAME} is present in {log_path.parent}), "
+            f"and this tool counts ONE FILE. A replay of that layout enumerates "
+            f"every present segment, so a single-file count would seed BELOW it "
+            f"and every later armed write would refuse. Pass the layout's true "
+            f"total with --enumerated-floor N (measure it with "
+            f"`journal_segments.read_all_segments(<graph dir>, salvage=True)`), "
+            f"or point --journal at a graph that has never sealed")
     return len(EventLog(log_path).read_all(salvage=True))
 
 
@@ -237,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.journal is not None:
         try:
             args.floor = _journal_floor(args.journal)
-        except (FileNotFoundError, OSError) as exc:
+        except (FileNotFoundError, OSError, ValueError) as exc:
             print(f"record_allocator_cli: {exc}", file=sys.stderr)
             return EXIT_USAGE
 

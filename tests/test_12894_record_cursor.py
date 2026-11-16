@@ -1170,3 +1170,55 @@ def test_read_cursor_scopes_the_connection_before_it_reads() -> None:
     assert first_params == ("o",)
     assert ra.READ_SQL in [sql for sql, _ in conn.executed], (
         "the read itself is missing")
+
+
+# ── the seed's JOURNAL READ: one file, or the whole layout ───────────────────
+
+def test_journal_floor_refuses_a_segmented_layout(tmp_path):
+    """A SEGMENTED journal is REFUSED, never half-counted (#12894 fresh review, P2).
+
+    `_journal_floor` counts ONE file (`EventLog(path).read_all`), while a replay
+    of a segmented layout enumerates EVERY present segment
+    (`journal_segments.read_all_segments`, the reader `rebuild_all` uses).
+    Counting one segment returns a floor BELOW the graph's real enumeration, and
+    the seed's own guard (`record_max <= enumerated_floor`) cannot tell the
+    difference: it would pass, arm a counter that is behind the journal, and the
+    FIRST armed write would diverge and refuse. That state does not self-heal, so
+    an under-count is not a slow degradation — it is a silent wedge of a healthy
+    graph's record path.
+
+    The MANIFEST is the layout's own record that segments exist, so its presence
+    is the fact to refuse on rather than a guess. The refusal happens before any
+    DSN is resolved, which is what makes it a guard rather than a warning — hence
+    this leg needs no database and lives in the DB-free half.
+    """
+    from tools import record_allocator_cli as cli
+    from tortoise import journal_segments
+    from tortoise.log import EventLog
+
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    for i in range(3):
+        log.append({"type": "PointAdded", "ts": "2026-11-16T00:00:00Z",
+                    "id": f"p-{i}",
+                    "point": {"id": f"p-{i}", "content": "c",
+                              "pointKind": "claim"}})
+
+    # Control: a plain single-file journal DOES count, so the refusal below is
+    # about the layout and not about the fixture.
+    assert cli._journal_floor(str(path)) == 3
+
+    journal_segments.manifest_path(tmp_path).write_text(
+        '{"segments": [], "sealed_at": "2026-11-16T00:00:00Z"}')
+    with pytest.raises(ValueError) as excinfo:
+        cli._journal_floor(str(path))
+    message = str(excinfo.value)
+    assert "SEGMENTED" in message and "--enumerated-floor" in message, (
+        f"the refusal must name the LAYOUT and the REMEDY, not just fail: {message}")
+
+    # The remedy the message names must EXIST, or the refusal sends an operator
+    # to a door that is not there.
+    parsed = cli._parser().parse_args(
+        ["seed", "--org-id", "o", "--graph-id", "g", "--enumerated-floor", "3"])
+    assert parsed.floor == 3, (
+        "the refusal's named remedy (`--enumerated-floor N`) is not a real flag")
