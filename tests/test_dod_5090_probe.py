@@ -11739,6 +11739,17 @@ def test_12549_the_export_attribute_is_a_MOMENT_not_a_file_property(
         ("set -e -u -a", "set -e -u -a\nTORTOISE_EMBED_GATE=1\n", "ON"),
         # …and the unset side of the same spelling, so a later cluster still wins.
         ("set +a -e", "set -a\nset +a -e\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        # ⛔ The LONG spelling of the same option, and `--`: both were unread and both
+        # published a FALSE ARM (walker `ON` while `bash` leaves the assignment OUT of
+        # the process env), which is the direction that reaches row 1's `MET` (fresh
+        # review of #12902, P1 — measured: `set +o allexport; FLAG=1; env` has no FLAG,
+        # `set -- -a; FLAG=1; env` has no FLAG).
+        ("set -o allexport", "set -o allexport\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        ("set +o allexport", "set +o allexport\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        ("set -eo allexport", "set -eo allexport\nTORTOISE_EMBED_GATE=1\n", "ON"),
+        # `--` ENDS option processing, so the `-a` after it is a POSITIONAL parameter.
+        ("set -- -a", "set -- -a\nTORTOISE_EMBED_GATE=1\n", "OFF"),
+        ("set -- -o allexport", "set -- -o allexport\nTORTOISE_EMBED_GATE=1\n", "OFF"),
     ):
         (tmp_path / "entrypoint.sh").write_text("#!/bin/bash\n" + script,
                                                 encoding="utf-8")

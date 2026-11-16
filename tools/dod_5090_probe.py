@@ -3393,17 +3393,55 @@ def _shell_set_allexport(line: str) -> bool | None:
     Conservative direction, so not a false PASS — but still a reading this walk published
     without measuring, which is `#12549` defect 1 one layer in (fresh review of `#12902`,
     P2). A later cluster wins, exactly as in bash.
+
+    ⛔ **``--`` TERMINATES OPTION PROCESSING, and ``-o``/``+o`` take the NEXT WORD as the
+    option NAME.** Both were unread, and both were a FALSE ARM — the direction that
+    reaches row 1's ``MET``: ``set +o allexport`` (the long-form DISARM, the spelling a
+    save/restore idiom writes) left the state untouched so an entrypoint that turns the
+    gate OFF published ``gate enabled by default: True``; and ``set -- -a`` (POSITIONAL
+    parameters, an option to nothing) was read as ARMING, because ``-a`` after ``--`` is
+    still a bare ``-``-prefixed word. Measured against ``bash``: after ``set +o
+    allexport`` the assignment is absent from the process env, and after ``set -- -a`` it
+    is absent too — while the walker said ``ON`` for both (fresh review of `#12902`, P1).
+
+    The long form is resolved by the option NAME the ``o`` consumes, never by the rest of
+    its own cluster: measured, ``set -oallexport`` ARMS (via the ``a``) and then errors on
+    ``-l``, and ``set -eo allexport`` / ``set -oe allexport`` both arm, so ``o`` takes the
+    next WORD. ``set -o noallexport`` is NOT a disarm — ``bash`` rejects it as an invalid
+    option name — so only the NAME ``allexport`` is read.
     """
     match = _SHELL_SET.match(line)
     if not match:
         return None
     answer: bool | None = None
-    for word in _shell_words(match.group("args")):
+    words = _shell_words(match.group("args"))
+    index = 0
+    while index < len(words):
+        word = words[index]
+        # ⛔ `set -- …` ends option processing: everything after it is a POSITIONAL
+        # parameter, so `set -- -a` arms nothing (measured: `bash` leaves the assignment
+        # out of the environment).
+        if word == "--":
+            break
         # `-`/`+` alone, or a word that is not an option cluster, says nothing about `a`.
-        if len(word) < 2 or word[0] not in "-+":
-            continue
-        if "a" in word[1:]:
-            answer = word[0] == "-"
+        if len(word) >= 2 and word[0] in "-+":
+            sign_on = word[0] == "-"
+            cluster = word[1:]
+            for position, char in enumerate(cluster):
+                if char == "a":
+                    answer = sign_on
+                elif char == "o" and position == len(cluster) - 1:
+                    # The long spelling of the SAME option: `-o allexport` arms, `+o
+                    # allexport` disarms. ⛔ `o` takes the NEXT WORD **only when it ENDS
+                    # its own word** — measured: `set -oallexport` does NOT take the rest
+                    # as a name (it arms via the `a` and then errors on `-l`), while `set
+                    # -o allexport` does; and `set -oerrexit -o allexport` arms through
+                    # the SECOND `-o`, so the first `o` must not swallow it.
+                    if index + 1 < len(words):
+                        index += 1
+                        if words[index] == "allexport":
+                            answer = sign_on
+        index += 1
     return answer
 
 #: `unset NAME`, `unset -v NAME`, the multi-name form, and an OPTION CLUSTER. `unset` is
