@@ -162,6 +162,46 @@ def _imported_names(tree: ast.AST) -> set[str]:
     return names
 
 
+def _seam_alias_names(scope: ast.AST) -> dict[str, str]:
+    """Local names bound to a seam entry point, so `w = write_records; w(...)` is seen.
+
+    ⛔ WITHOUT THIS THE RULE HAS A BYPASS (review cycle 4, P2 — measured, and it
+    is the fail-open direction, so it is fixed rather than documented). A call
+    made through a local alias is invisible to `_call_name`, and the "calls no
+    seam entry point" red only fires when the call set is EMPTY — so a door with
+    one compliant call and one alias call was reported WIRED while the alias call
+    was refused at runtime (`allocate=True` + `position=False` →
+    `RecordProjectionError`). Two calls plus an alias is an ordinary shape for a
+    door that writes two records, so "unlikely" is not a defence.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(scope):
+        value: ast.expr | None = None
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            value, targets = node.value, list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            value, targets = node.value, [node.target]
+        # The value is usually an ATTRIBUTE (`record_writer.write_records`), not
+        # a Call — checking for a Call here missed the ordinary alias and left
+        # the hole open, which the construction below then showed (measured on
+        # the first attempt at this fix: still GREEN).
+        if isinstance(value, ast.Call):
+            name = _call_name(value)
+        elif isinstance(value, ast.Attribute):
+            name = value.attr
+        elif isinstance(value, ast.Name):
+            name = value.id
+        else:
+            name = None
+        if name not in _POSITION_NAMES:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                aliases[target.id] = name if isinstance(name, str) else ""
+    return aliases
+
+
 def _call_name(node: ast.Call) -> str | None:
     func = node.func
     if isinstance(func, ast.Name):
@@ -425,9 +465,10 @@ def live_door_writes_the_journals_position(
             "lives"
         ]
     problems: list[str] = []
+    seam_names = _POSITION_NAMES | _seam_alias_names(door)
     calls = [
         node for node in ast.walk(door)
-        if isinstance(node, ast.Call) and _call_name(node) in _POSITION_NAMES
+        if isinstance(node, ast.Call) and _call_name(node) in seam_names
     ]
     if not calls:
         return [
@@ -598,6 +639,13 @@ def position_problems_for_module(tree: ast.AST, rel: str) -> list[str]:
     green, #9231 review P2).
     """
     modules, functions = _record_bindings(tree)
+    # ⛔ ALIASES COUNT HERE TOO (review cycle 4, P2). `w = record_writer.
+    # write_records; w(…)` is invisible to `_resolve_record_call`, and this rule
+    # only reports what it can RESOLVE — so an aliased production call escaped the
+    # `position=False` requirement silently. Registered as if imported directly.
+    for alias, seam_name in _seam_alias_names(tree).items():
+        if seam_name:
+            functions.setdefault(alias, ("record_writer", seam_name))
     problems: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -691,6 +739,13 @@ def ordinal_argument_problems(tree: ast.AST, rel: str) -> list[str]:
     fire.
     """
     modules, functions = _record_bindings(tree)
+    # ⛔ ALIASES COUNT HERE TOO (review cycle 4, P2). `w = record_writer.
+    # write_records; w(…)` is invisible to `_resolve_record_call`, and this rule
+    # only reports what it can RESOLVE — so an aliased production call escaped the
+    # `position=False` requirement silently. Registered as if imported directly.
+    for alias, seam_name in _seam_alias_names(tree).items():
+        if seam_name:
+            functions.setdefault(alias, ("record_writer", seam_name))
     problems: list[str] = []
     for scope, call in _calls_by_scope(tree):
         owner, name = _resolve_record_call(call, modules, functions)

@@ -923,9 +923,65 @@ def test_a_mis_armed_counter_is_refused_with_a_remedy_that_applies(
     text = "\n".join(record.getMessage() for record in caplog.records)
     assert "ORDINAL ALLOCATOR refused" in text, (
         f"the log does not name the allocator: {text[-400:]!r}")
-    assert "seed" in text and "arm" in text, (
-        f"the remedy for a `seeded` cursor is seed-then-arm, not replay: "
-        f"{text[-400:]!r}")
+    # ⛔ THE REMEDY TEXT ITSELF, NOT ITS WORD "seed". An earlier assertion here
+    # was `"seed" in text and "arm" in text`, which passes with the mechanism
+    # REVERTED: the underlying `CursorNotActive` message already contains
+    # "seeded" and "halted", so an edit that deleted the remedy map stayed green
+    # (measured by a fresh-context review). Comparing against the map's own entry
+    # makes the leg discriminate, and cannot drift from the text the operator
+    # sees.
+    remedy = rw._ALLOCATOR_REMEDY["cursor_not_active"]
+    assert remedy in text, (
+        "the log does not carry the remedy for a `seeded` cursor — it must name "
+        f"seed → reopen → arm, not replay: {text[-500:]!r}")
     assert "a replay heals the record" not in text, (
         "the generic lost-write remedy was emitted for a mis-armed counter — a "
         "replay cannot arm a cursor")
+
+
+def test_every_allocator_remedy_is_a_real_metric_with_an_executable_order():
+    """FINDING (review cycle 4, P2 x2): the remedy map had drifted from the
+    module it describes, twice over.
+
+    * it keyed a collision as `position_collision`, which the allocator NEVER
+      counts (it counts `duplicate_position`), so an operator grepping the label
+      from the log found nothing;
+    * its collision remedy said "re-seed and `reopen`" about a state that is
+      `active`, where `seed()` refuses ("already 'active' … halt it first") and
+      `reopen()` refuses ("mode is 'active', not 'halted'") — advice that walks
+      into two refusals and ends with nothing allocating.
+
+    Both are pinned here: every key the door can report must be a metric
+    `record_allocator.metrics()` really publishes, and the map must be reachable
+    from every allocator refusal class — so a new refusal cannot be counted
+    without a remedy being written for it.
+    """
+    metrics = ra.metrics()
+    missing = [key for key in rw._ALLOCATOR_REMEDY if key not in metrics]
+    assert not missing, (
+        f"remedy key(s) {missing} are not metrics the allocator publishes: "
+        f"{sorted(metrics)}")
+
+    # Every refusal class the door can meet resolves to a key WITH a remedy.
+    refusals = {
+        ra.CursorNotActive("no position"): "cursor_not_active",
+        ra.PositionCollision("duplicate"): "duplicate_position",
+        ra.IsolationRefused("serializable"): "isolation_refused",
+        ra.RecordAllocatorError("not contiguous"): "non_contiguous_block",
+    }
+    for exc, expected in refusals.items():
+        got = rw._allocator_refusal_cause(exc)
+        assert got == expected, (type(exc).__name__, got, expected)
+        assert got in rw._ALLOCATOR_REMEDY, got
+
+    # A retryable failure is NOT an allocator-state refusal: its remedy is
+    # "retry the transaction", which the generic arm already gives.
+    assert rw._allocator_refusal_cause(
+        ra.RetryableAllocationFailure("cancelled", sqlstate="57014",
+                                      metric="query_cancelled")) is None
+
+    # The collision remedy names the ORDER that actually works, because the
+    # state it is emitted in refuses the first two steps otherwise.
+    order = rw._ALLOCATOR_REMEDY["duplicate_position"]
+    for step in ("halt", "re-seed", "reopen", "arm"):
+        assert step in order, (step, order)

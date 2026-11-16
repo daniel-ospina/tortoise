@@ -1085,6 +1085,30 @@ def test_the_live_door_rule_fires_when_the_ordinal_is_dropped(wiring):
             f"the gate blessed the ORDINAL pair beside `{spelling}` — "
             "`replay_plan` refuses an allocating call with a caller watermark, "
             "so this body writes nothing at cut-over")
+    # ⛔ A LOCAL ALIAS IS NOT AN ESCAPE (review cycle 4, P2 — it was one, and the
+    # failure is FAIL-OPEN: the "calls no seam entry point" red only fires on an
+    # EMPTY call set, so a door with one compliant call plus an alias call was
+    # reported WIRED while the alias call was refused at runtime). Two calls is an
+    # ordinary shape for a door that writes two records, so this is constructed
+    # rather than reasoned about.
+    aliased = (
+        "    w = record_writer.write_records\n"
+        "    a = record_writer.write_records([record], org_id='o', graph_id='g', "
+        "position=True if allocate else seq is not None, "
+        "first_seq=1 if allocate else seq if seq is not None else 1, "
+        "allocate=allocate)\n"
+        "    b = w([record], org_id='o', graph_id='g', position=False, "
+        "first_seq=seq, allocate=True)\n"
+        "    return b\n")
+    door_with_alias = (
+        "from tortoise import record_writer\n"
+        "def write_live_record(record, *, durable=False, seq=None, "
+        "allocate=False):\n" + aliased)
+    fired = module.live_door_writes_the_journals_position(door_with_alias)
+    assert fired, (
+        "the gate is blind to a seam call made through a LOCAL ALIAS — a door "
+        "with one compliant call and one aliased bad call reads WIRED while the "
+        "aliased call is refused at runtime")
     unbound = ("position=True if allocate else seq is not None, "
                "first_seq=seq if seq is not None else 1")
     fired = module.live_door_writes_the_journals_position(source % unbound)

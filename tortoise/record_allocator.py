@@ -95,6 +95,7 @@ _COUNTERS: dict[str, int] = {
     "seed_refused": 0,
     "seed_healed_tail": 0,
     "seed_burned": 0,
+    "non_contiguous_block": 0,
     "isolation_refused": 0,
     "cursor_not_active": 0,
     "duplicate_position": 0,
@@ -574,6 +575,10 @@ def allocation_from_seqs(seqs: Iterable[int], *, org_id: str,
         )
     first, last = min(positions), max(positions)
     if len(set(positions)) != len(positions) or last - first + 1 != len(positions):
+        # COUNTED, like every other refusal in this module: `record_writer`'s
+        # allocator arm keys its operator-facing remedy off these metric names,
+        # and a refusal that is not counted has no name to report.
+        _COUNTERS["non_contiguous_block"] += 1
         raise RecordAllocatorError(
             f"the allocation for {org_id}/{graph_id} returned {positions!r} — not "
             f"a contiguous block, so at least one row carries a position the "

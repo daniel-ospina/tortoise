@@ -2322,20 +2322,44 @@ def _report_live_write_refusal(reason: str, record_type: Any,
         f"{', '.join(LIVE_WRITE_REFUSALS)})")
 
 
-#: What to DO about each allocator refusal, keyed by the metric the allocator
-#: counted. The door cannot raise (its caller's append has already committed), so
-#: the remedy has to be in the log line or the operator is left with a token that
-#: says "something in the record failed".
+#: What to DO about each allocator refusal, keyed by THE METRIC THE ALLOCATOR
+#: ACTUALLY COUNTED. The keys are `record_allocator._COUNTERS`' own names, not a
+#: second vocabulary: an earlier cut used `position_collision`, which the module
+#: never counts (it counts `duplicate_position`), so the log's label matched no
+#: counter an operator could grep — the drift this map is supposed to prevent,
+#: introduced by the fix that added it. `tests/test_12894_record_cursor_live.py`
+#: asserts every key here is a real metric.
+#:
+#: ⛔ AND EVERY REMEDY HAS TO BE EXECUTABLE IN THE STATE THAT EMITS IT. The first
+#: version said "re-seed and `reopen`" for a collision, but that state is an
+#: `active` counter, where `seed()` refuses ("already 'active' … halt it first")
+#: and `reopen()` refuses ("mode is 'active', not 'halted'"). MEASURED by a
+#: fresh-context review, which walked the advice and ended stuck. The sequence
+#: that actually works is `halt → seed → reopen → arm`, and `reopen` lands on
+#: `seeded`, so `arm` is the step that RESUMES — a remedy that stops at `reopen`
+#: leaves nothing allocating.
 _ALLOCATOR_REMEDY = {
     "cursor_not_active": (
-        "the counter has no row for this graph, or its mode is not 'active': run "
-        "the seed and then `arm` (a `seeded` cursor means the cut-over was never "
-        "armed; a `halted` one means a defect stopped it and `reopen` is the "
-        "resume)"),
-    "position_collision": (
-        "the counter issued a position the record already holds — the counter is "
-        "BEHIND the table (a restore that bulk-loaded `journal_event` without the "
-        "counter). Do NOT re-arm: investigate, then re-seed and reopen"),
+        "the counter has no row for this graph, or its mode is not 'active'. Run "
+        "the seed, then `reopen` if it is `halted`, then `arm`: a `seeded` "
+        "cursor means the cut-over was never armed, and a `halted` one means a "
+        "defect stopped it. NOTHING allocates until it is `active`"),
+    "duplicate_position": (
+        "the counter issued a position the record already holds — it is BEHIND "
+        "the table (a restore that bulk-loaded `journal_event` without the "
+        "counter). Do NOT re-arm: investigate first, then `halt`, re-seed, "
+        "`reopen`, `arm` — in that order, because `seed` refuses an `active` "
+        "counter and `reopen` refuses one that is not `halted`"),
+    "isolation_refused": (
+        "the connection's transaction is not READ COMMITTED, so the counter's "
+        "lock ordering would not mean 'allocation order = commit order'. Fix the "
+        "DSN/session (`default_transaction_isolation=read committed`); a replay "
+        "does NOT help, and one that writes DERIVED positions under an allocating "
+        "counter is what creates the counter-behind-table collision"),
+    "non_contiguous_block": (
+        "the allocation returned positions that are not a contiguous block — a "
+        "defect in the statement or a concurrent re-base. Investigate; do not "
+        "retry blindly"),
 }
 
 
@@ -2346,14 +2370,30 @@ def _allocator_refusal_cause(exc: BaseException | None,
     Looked up by TYPE through the `from exc` chain, for the same reason
     :func:`_journal_collision_cause` is: a message match would fire on a record
     whose payload happens to contain the words. The return value is the metric
-    name the allocator counted, which is also the key into
-    :data:`_ALLOCATOR_REMEDY` — one vocabulary, so a new refusal cannot be
-    counted without a remedy being written for it.
+    name the allocator counted and the key into :data:`_ALLOCATOR_REMEDY` — one
+    vocabulary, and `tests/test_12894_record_cursor_live.py` asserts that every
+    key this function can return exists in that map AND is a metric
+    `record_allocator.metrics()` really reports, so a refusal cannot be counted
+    without a remedy the operator can act on.
     """
     from . import record_allocator as ra
 
-    kinds = {ra.CursorNotActive: "cursor_not_active",
-             ra.PositionCollision: "position_collision"}
+    # ⛔ MOST-SPECIFIC FIRST, AND `None` IS MEANINGFUL. Every one of these
+    # subclasses `RecordAllocatorError`, so the BASE class is the fallback for the
+    # non-contiguous block — and `RetryableAllocationFailure` also subclasses it,
+    # so without its own `None` entry a cancelled allocation was reported as
+    # "not a contiguous block" with a remedy telling the operator to investigate
+    # instead of RETRY (measured: the fallback returned
+    # `non_contiguous_block` for `RetryableAllocationFailure`). Its remedy is
+    # "retry the transaction", which the generic arm already gives correctly, so
+    # `None` hands it back.
+    kinds = {
+        ra.CursorNotActive: "cursor_not_active",
+        ra.PositionCollision: "duplicate_position",
+        ra.IsolationRefused: "isolation_refused",
+        ra.RetryableAllocationFailure: None,
+        ra.RecordAllocatorError: "non_contiguous_block",
+    }
     seen = 0
     while exc is not None and seen <= depth:
         for kind, metric in kinds.items():
@@ -2724,8 +2764,7 @@ def write_live_record(record: Mapping[str, Any], *,
                 "the record write was REFUSED (%s) — the journal holds the "
                 "record; the ORDINAL ALLOCATOR refused to issue a position. %s: "
                 "record=%s %s: %s",
-                allocator_state, _ALLOCATOR_REMEDY.get(
-                    allocator_state, "check record_allocator.metrics()"),
+                allocator_state, _ALLOCATOR_REMEDY[allocator_state],
                 record.get("type"), _record_identity(record), exc,
             )
             return _refused("write_failed", seq)
