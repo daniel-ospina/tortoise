@@ -5829,7 +5829,7 @@ _EPIC_CITE_DOCS = {
     # BEFORE it on the same markdown line ("…is STAMP-bound (`:1186` is the `corpus = {…}`
     # line here; the frozen literal is at `:1194`)"). Three are pinned on the two rows
     # below (`19341`/`19448` here, `sdk.py:10037` on its own row because a row carries ONE
-    # source key), `10064`/`10117` on their OWN `05-verify.md` row (round 6 — NOT by the
+    # source key), `10252`/`10305` on their OWN `05-verify.md` row (round 6 — NOT by the
     # `subject_binding_available` rows that predate this PR: those scope `00-plan.md` and
     # `03-test-design.md`, and a row resolves only against the `doc_label` it names, so they
     # cannot read this document — citing them as coverage is how a dropped row goes unseen),
@@ -6486,7 +6486,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ⛔ AND THE SAME TREATMENT FOR THE TWO OTHER HITS D5 STATES TWICE (#12462 review
         # cycle 3): `:1400` occurs as the current-tense `Projection` cite AND as the historical
         # "D6" cite, so a row that merely finds the number passes on the twin when the
-        # current-tense one is re-pointed wrongly (measured: 413 passed). `:10064`/`:10117`
+        # current-tense one is re-pointed wrongly (measured: 413 passed). `:10252`/`:10305`
         # are stated twice, both "at this head", so a partial move leaves one stale.
         "`EXTRACTOR-V4-ARCHITECTURE.md:1400` is a **`Projection`** row here",
         "`sdk.py:10252`/`:10305` at this head",
