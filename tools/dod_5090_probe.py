@@ -4133,7 +4133,17 @@ _SHELL_LEADING_KEYWORD = re.compile(
 #: landed in no bucket and a `case`-guarded export read `OFF` (measured). The pattern is
 #: only stripped when it is a single word-ish token, so a FUNCTION definition (`f() {`)
 #: is untouched: the parenthesis that opens the empty parameter list blocks the match.
-_SHELL_CASE_ARM_PATTERN = re.compile(r"^[^ \t(){};&]+\)[ \t]+")
+#: ⛔ ONE definition of a `case` PATTERN LIST: one alternative, or any number separated
+#: by `|` with optional spaces (`x)`, `x|y)`, `prod|staging|dev)`, `prod | staging )`).
+#: A two-element-unspaced-only form dropped the rest — 36 of this repo's tracked arms — and
+#: the arm then landed in NO bucket (fresh review of `#12902`, P2).
+_SHELL_CASE_ALTERNATIVE = r"[^ \t(){};&|)]+"
+_SHELL_CASE_SEPARATOR = r"[ \t]*\|[ \t]*"
+_SHELL_CASE_PATTERN_LIST = (r"" + _SHELL_CASE_ALTERNATIVE +
+                            r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*"
+                            r"[ \t]*\)")
+
+_SHELL_CASE_ARM_PATTERN = re.compile(r"^" + _SHELL_CASE_PATTERN_LIST + r"[ \t]+")
 
 #: ⛔ A `case` arm's SUBJECT and `in` sit between the keyword and the pattern, and the
 #: splitter hands the scanner all of it: `case x in x) export FLAG=1 ;; esac` becomes
@@ -4147,17 +4157,26 @@ _SHELL_CASE_ARM_PATTERN = re.compile(r"^[^ \t(){};&]+\)[ \t]+")
 #: `for x in a b` (a loop's word list) and a line bash refuses to parse (`echo in y) …`) are
 #: untouched.
 _SHELL_CASE_SUBJECT_PATTERN = re.compile(
-    r"^[^ \t(){};&|]+[ \t]+in[ \t]+[^ \t(){};&]+\)[ \t]*")
+    r"^[^ \t(){};&|]+[ \t]+in[ \t]+" + _SHELL_CASE_PATTERN_LIST + r"[ \t]*")
 
 #: ⛔ A PATTERN POSITION is where a `case` arm's pattern list begins: a single word, bare or
 #: after `case <subject> in`. It is what tells the splitter that a `|` is an ALTERNATION
 #: inside the pattern (`prod|staging)`) rather than the pipe operator.
 _SHELL_CASE_PATTERN_POSITION = re.compile(
-    r"^(?:case[ \t]+[^ \t(){};&|]+[ \t]+in[ \t]+)?[^ \t(){};&]+$")
+    r"^(?:case[ \t]+[^ \t(){};&|]+[ \t]+in[ \t]+)?" + _SHELL_CASE_ALTERNATIVE +
+    r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*$")
 
-#: ⛔ The rest of a pattern ALTERNATION: `|word)`, `|word|word)`, with the `)` that closes
-#: the arm. Matched against the line from the `|`, which is why it anchors at position 0.
-_SHELL_CASE_PATTERN_REST = re.compile(r"[ \t]*\|[^ \t(){};&|)]+\)")
+#: ⛔ The rest of a pattern ALTERNATION — `|word)`, `|word|word)`, `| word | word )` — with
+#: the `)` that closes the arm, ANY number of alternatives. It matched a TWO-element,
+#: unspaced alternation only, so `prod|staging|dev)` (36 occurrences in this repo's tracked
+#: shell) and `prod | staging)` fell through to the lone-`|` subshell return and were
+#: DROPPED — a definite verdict over a held shape, and MEASURED as a false `ON` where bash
+#: disarms (`E=prod / export FLAG=1 / case $E in prod|staging|dev) export FLAG=0 ;; esac`
+#: → reader `ON`, bash `0`; fresh review of `#12902`, P2). Matched against the line from the
+#: `|`, which is why it anchors at position 0.
+_SHELL_CASE_PATTERN_REST = re.compile(
+    r"[ \t]*\|[ \t]*" + _SHELL_CASE_ALTERNATIVE +
+    r"(?:" + _SHELL_CASE_SEPARATOR + _SHELL_CASE_ALTERNATIVE + r")*" + r"[ \t]*\)")
 
 
 def _shell_strip_leading_keywords(text: str) -> str:

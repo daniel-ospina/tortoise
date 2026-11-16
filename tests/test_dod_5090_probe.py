@@ -3180,6 +3180,16 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
             "case $ENV in prod|staging) export TORTOISE_EMBED_GATE=1 ;; esac\n",
             'case $ENV in "prod|staging") export TORTOISE_EMBED_GATE=1 ;; esac\n',
             "case $ENV in\n  prod|staging) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
+            # ⛔ …and an alternation with MORE THAN TWO elements, and one with SPACES around
+            # the bars: the first `|` rule matched the 2-element unspaced spelling only, so
+            # `prod|staging|dev)` (36 of them in this repo's tracked shell) and
+            # `prod | staging)` were DROPPED by the subshell return — a definite verdict over
+            # a held shape, and a MEASURED false `ON` where bash disarms (fresh review of
+            # `#12902`, P2).
+            "case $ENV in prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $ENV in prod | staging) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $ENV in prod | staging | dev ) export TORTOISE_EMBED_GATE=1 ;; esac\n",
+            "case $ENV in\n  prod | staging | dev ) export TORTOISE_EMBED_GATE=1 ;;\nesac\n",
     ):
         shipped = _shipped(script)
         assert shipped["per_surface"]["entrypoint"]["state"] == "UNMEASURED", (
@@ -3212,6 +3222,9 @@ def test_a_BRANCH_may_not_have_run_so_the_file_is_HELD(tmp_path, monkeypatch):
         "export TORTOISE_EMBED_GATE=1"
     assert probe._shell_commands(
         "case $ENV in prod|staging) export TORTOISE_EMBED_GATE=1 ;; esac")[0][0] == \
+        "export TORTOISE_EMBED_GATE=1"
+    assert probe._shell_commands(
+        "case $ENV in prod|staging|dev) export TORTOISE_EMBED_GATE=1 ;; esac")[0][0] == \
         "export TORTOISE_EMBED_GATE=1"
     # ── CONTROL: a pipe between two REAL commands still drops the line (subshell) ──
     assert probe._shell_commands("export TORTOISE_EMBED_GATE=1 |cat") == []
