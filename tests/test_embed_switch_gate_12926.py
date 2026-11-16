@@ -389,6 +389,25 @@ def test_a_pulled_service_that_runs_OUR_image_is_a_channel_not_a_sidecar(tmp_pat
     assert channels and not channels[0].noted
     assert failures, "a pulled Tortoise image must not pass as a sidecar"
 
+    # ⛔ And the built-image arm ALONE, on a name that does not contain "tortoise" — otherwise the
+    # name heuristic covers for it and the arm can be deleted with this test still green
+    # (measured: mutant M5 survived until this case existed).
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n"
+        "    build: .\n"
+        "    image: ghcr.io/acme/storefront:v1\n"
+        "    environment:\n"
+        '      TORTOISE_VALUE_GATE: "1"\n'
+        '      TORTOISE_EMBED_GATE: "1"\n'
+        "  staged:\n"
+        "    image: ghcr.io/acme/storefront:latest\n"
+    )
+    channels, failures = gate.evaluate(tmp_path)
+    staged = [channel for channel in channels if channel.channel.endswith("staged")]
+    assert staged and not staged[0].noted, [c.as_dict() for c in channels]
+    assert any("staged does not state TORTOISE_EMBED_GATE" in f for f in failures), failures
+
 
 @needs_docker
 def test_the_ambient_environment_cannot_arm_a_channel(tmp_path):
@@ -502,6 +521,12 @@ def test_an_interpolation_with_no_literal_fallback_is_refused():
         problems = channel.problems()
         assert any("does not state a value this gate can read" in p for p in problems), problems
 
+    # ⛔ `${X:+1}` / `${X+1}` are NOT a fallback: they expand to EMPTY exactly when X is unset —
+    # which is the shipped case (review round 6, P3).
+    for shape in ('"${TORTOISE_EMBED_GATE:+1}"', '"${TORTOISE_EMBED_GATE+1}"'):
+        stated, ambiguous = gate._shell_assignments(f"export TORTOISE_EMBED_GATE={shape}\n")
+        assert stated == {} and ambiguous == {"TORTOISE_EMBED_GATE"}, shape
+
     # a non-empty literal fallback IS a statement
     stated, ambiguous = gate._shell_assignments('export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-1}"\n')
     assert stated == {"TORTOISE_EMBED_GATE": "${TORTOISE_EMBED_GATE:-1}"} and ambiguous == set()
@@ -522,6 +547,29 @@ def test_a_non_scalar_fly_value_is_refused_rather_than_stringified():
     assert stated == {} and gate.Channel("fly.toml", "fly", "r", stated={}).problems()[0].endswith(
         "(r)"
     )
+
+
+def test_a_trailing_comment_is_not_part_of_the_value():
+    """Review round 6, P3: `export K=""  # off` must still hit the EMPTY-value refusal, and a
+    switch named only in a trailing comment must not be credited.
+
+    Both readers strip a quote-aware trailing comment. `ENV HF_HUB_OFFLINE=1  #
+    TORTOISE_EMBED_GATE=1` is the dangerous shape: Docker folds that text into
+    `HF_HUB_OFFLINE`'s value, so crediting the switch would be a statement the file does not make.
+    """
+    stated, ambiguous = gate._shell_assignments('export TORTOISE_VALUE_GATE=""  # off for now\n')
+    assert stated == {"TORTOISE_VALUE_GATE": ""} and ambiguous == set()
+    channel = gate.Channel("entrypoint.sh", "entrypoint", "r",
+                           stated={"TORTOISE_VALUE_GATE": "", "TORTOISE_EMBED_GATE": "1"})
+    assert "EMPTY value" in channel.problems()[0]
+
+    stated, ambiguous = gate._dockerfile_env("ENV HF_HUB_OFFLINE=1  # TORTOISE_EMBED_GATE=1\n")
+    assert stated == {"HF_HUB_OFFLINE": "1"} and ambiguous == set(), (
+        "a switch named in trailing text after an unrelated assignment is not a statement"
+    )
+    # ...and a switch named in a trailing comment with NO assignment is not credited either
+    stated, ambiguous = gate._dockerfile_env("ENV HF_HUB_OFFLINE=1  # TORTOISE_VALUE_GATE\n")
+    assert stated == {"HF_HUB_OFFLINE": "1"} and ambiguous == set()
 
 
 def test_the_entrypoint_reader_reads_defaults_and_ignores_a_valueless_export():
@@ -612,6 +660,20 @@ def test_the_pre_merge_check_runs_in_ci():
     assert any("docker compose config" in run for _job, run in wired), (
         "the gate belongs in the step that validates the compose file (the one #12926 extends); "
         f"it runs in {[job for job, _run in wired]} instead"
+    )
+    # ⛔ `if: always()` is load-bearing (review round 2, P2): `test-concurrency-falkor` is a
+    # `DEFERRABLE_LEGS` member, so an earlier failing step delegates the job to
+    # `ci-introduced-failure` — where a MAIN-owned red leaves the required aggregate green with
+    # this step never having run. Without the guard the check is skippable by a red neighbour.
+    steps_with_gate = [
+        step
+        for _job, job in (workflow.get("jobs") or {}).items()
+        for step in (job.get("steps") or [])
+        if "embed_switch_gate.py" in str(step.get("run") or "")
+    ]
+    assert all("always()" in str(step.get("if") or "") for step in steps_with_gate), (
+        "the gate's step must carry `if: always()` — a skipped step enforces nothing: "
+        + repr([step.get("if") for step in steps_with_gate])
     )
 
 
