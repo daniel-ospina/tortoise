@@ -725,7 +725,7 @@ If the pool grows, invariant 2 permits a larger cap — and that move is not fre
 `measured_pool` literal in the test is the one input that must be edited with the caps (below). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
 shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `3 × 10.5 m ≈ 31.5 m`,
-slow `2 × 8.9 m ≈ 17.8 m`, carve-out `1 × 8.8 m ≈ 8.8 m`) and compare each against that same
+slow `2 × 8.18 m ≈ 16.35 m`, carve-out `1 × 8.8 m ≈ 8.8 m`) and compare each against that same
 matrix's uncapped band before trusting the +17.9 m figure above.
 
 ⛔ **Re-measuring the pool is not only a reason to move a cap — it is an edit to the pin.**
