@@ -348,6 +348,7 @@ surfaces:
   # fake, so it needs no graph, no URI and no carve-out registration; the live
   # half is `test_record_serve_live.py`.
   - test_record_serve.py
+  - test_12941_read_your_writes.py    # #12941: dual: core
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -2456,6 +2457,15 @@ surfaces:
   # matrix run. Hermetic apart from the throwaway EMBEDDED engine the SDK-door
   # cases build under `tmp_path`: no docker, no Postgres, no network, no model.
   - test_11892_health_quota.py
+  # #12941: read-your-writes at every door. DUAL-REGISTERED with `api` for the
+  # route `test_11892_health_quota.py` above describes and for the same reason: the
+  # hosted point door lives in `tortoise/hosted_api.py`, an EXACT `api`
+  # SOURCE_PATTERNS match that REPLACES the `core` fallback, so a hosted-only diff
+  # would skip this file on the very change it guards. `core` here covers the
+  # `record_serve.py` / `mcp_server.py` / `sdk.py` subjects, where no SOURCE_PATTERN
+  # claims the diff. DB-free at the door level: every record is a fake and the SDK
+  # arm reuses `test_record_serve.py`'s recording doubles.
+  - test_12941_read_your_writes.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
   # (where `TIER_DISPLAY_NAMES` now lives) is a `core` source. The `tier1` row is
