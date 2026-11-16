@@ -53,19 +53,22 @@ is what *should* be shipped (presence, not policy — ``TORTOISE_*=0`` is a docu
 or anything about a **hand deploy**: the owner's ruling on ``#12926`` is *"a hand deploy is
 their problem, so let's not worry about it"*.
 
-⚠️ **And the CI bound, stated rather than implied (review round 6, P3).** This step lives in
-``test-concurrency-falkor``, a ``DEFERRABLE_LEGS`` member, so its red is adjudicated by
-``ci-introduced-failure`` — which attributes failures from the job log's test-id shaped entries.
-A *gate-step* red emits no such id, so in the narrow case where the SAME leg's live pytest step
-also reds for a main-owned reason, the leg's id set is entirely main's and the aggregate can read
-green over this step's red. ``if: always()`` closes "the step never ran"; it cannot close "the
-step's red is invisible to the id-based predicate". That residual is pre-existing for the compose
-parse check beside it and is not enlarged by this gate — but the guarantee is
-"a config omitting a switch is refused at PR time", **not** "it can never merge while another
-required leg is main-owned-red". Moving this to a non-deferrable leg would change the required
-check set, which is its own decision. ``.env.example`` is a template nothing deploys,
-so it is not a channel of this gate; the read-only instrument
-(``tools/dod_5090_probe.py``) is what scores it.
+``.env.example`` is a template nothing deploys, so it is not a channel of this gate; the
+read-only instrument (``tools/dod_5090_probe.py``) is what scores it.
+
+⚠️ **Where it runs, and why there (review round 7).** As its own step in ``manifest-integrity`` — a
+leg that is NOT in the required aggregate's ``DEFERRABLE_LEGS``, so its red is the PR's red. That
+placement IS the fix for the bound this check first carried: it grew out of the compose parse step
+in ``test-concurrency-falkor``, which is deferrable, and ``ci-introduced-failure`` excuses a
+deferrable leg when every failing id in its log is main's own — a *gate-step* failure emits no
+test-id at all, so where that leg's pytest step also redded for a main-owned reason the aggregate
+could read green over an unrefused omission. Three constraints shaped the wiring, each a property
+of this tree rather than a preference: the step is SEPARATE (that job's own pin refuses a shell
+operator on its ``--integrity`` command, ``#2656``/``#5373``, and rightly); ``python-ci.yml`` keeps
+its LINE COUNT, because it is cited by line number in ~20 pinned places, so the two lines the step
+adds are reclaimed from that job's own header comment — reworded, no claim dropped; and the switch
+names come from the gates' own modules, which import on a bare interpreter, because that job
+installs only ``pyyaml`` and nothing here may need the installed package.
 
 Usage::
 
