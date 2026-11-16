@@ -293,9 +293,10 @@ def test_gate_b_cli_reads_the_private_marker_seam(monkeypatch, capsys):
     different claims:
 
     * the SOURCE SHAPE — the seam is called, the retired accessor is not, EVERY store of
-      `calibration_passed` in `main()` is the seam call or a literal `False`, and the value
-      reaches `check_gates` as the bare name — from the AST, which cannot be satisfied by a
-      docstring, a comment, or a stale mention; and
+      `calibration_passed` in `main()` is the seam call or a literal `False`, the value
+      reaches `check_gates` as the bare name, and `check_gates` decides Gate B (its reason,
+      `gate_b_state`, and `blocked`) from that same bare name — from the AST, which cannot be
+      satisfied by a docstring, a comment, or a stale mention; and
     * the BEHAVIOUR — the marker's value IS the verdict — by DRIVING the CLI with the seam
       replaced and reading what it prints.
 
@@ -305,14 +306,22 @@ def test_gate_b_cli_reads_the_private_marker_seam(monkeypatch, capsys):
     alone is defeated by a third SOURCE that agrees with the three inputs it observes —
     measured the same day (`calibration_passed = calibration_passed or
     os.environ.get("…") == "1"`: Gate B `passed` with the marker ABSENT and this test
-    green). So the census is TOTAL-STORES (every form, not just `ast.Assign`) with an
-    allow-list, the kwarg must be the bare name, and three drives hold the value to the
-    verdict. A source the allow-list rejects cannot exist; a value that does not reach the
-    verdict cannot pass the drive.
+    green). And a `main()`-only census is defeated at the DECISION site, one function away
+    (`if not calibration_passed and os.environ.get("…") != "1":` in `check_gates`: marker
+    absent, `blocked` False, CLI exit 0, drives green). So the census is TOTAL (every store,
+    every form), it follows the value into `check_gates`'s three decision expressions, and
+    three drives hold the value to the verdict.
+
+    ⛔ WHAT THIS DOES NOT REACH, stated so nobody reads it as more: it is a pin on the Gate B
+    PATH of this module (store → kwarg → decision → printed verdict), not a proof that no
+    future line anywhere can unblock a gate. An override invented in a different function
+    after this review is a defect for the next review to find, not something this census can
+    enumerate in advance.
 
     FAILS IF gates.py goes back to a public accessor that no longer exists, if it stops
     carrying the seam's value into the Gate B verdict, or if anything OTHER than the seam
-    (and the `False` fallback) sources `calibration_passed`.
+    (and the `False` fallback) sources `calibration_passed` — at the store, at the kwarg, or
+    at any of `check_gates`'s three Gate B decision expressions.
     """
     import ast
     import inspect
@@ -427,6 +436,59 @@ def test_gate_b_cli_reads_the_private_marker_seam(monkeypatch, capsys):
         and kwarg.value.id == "calibration_passed", (
         "`check_gates` is not handed the `calibration_passed` VARIABLE — the verdict is "
         f"decided by an expression instead: {ast.unparse(gate_calls[0])}"
+    )
+    # ⛔ …AND THE DECISION SITE, because a census of `main()` pins where the value is STORED,
+    # not where the VERDICT is decided. Reviewed 2026-11-16: with every store above legal, one
+    # line in `check_gates` — `if not calibration_passed and os.environ.get("F") != "1":` —
+    # left `blocked` False and the CLI exit 0 with the marker ABSENT, all three drives green
+    # (they run with the escape disarmed). Three decision expressions are pinned, each as the
+    # BARE NAME, so an escape appended at any of them reds HERE instead of shipping:
+    gate_fn = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "check_gates"
+    )
+    gate_b_state = next(
+        n for n in ast.walk(gate_fn)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "gate_b_state" for t in n.targets)
+    )
+    assert isinstance(gate_b_state.value, ast.IfExp) \
+        and isinstance(gate_b_state.value.test, ast.Name) \
+        and gate_b_state.value.test.id == "calibration_passed", (
+        "`gate_b_state` is not decided by the bare `calibration_passed` name — an expression "
+        f"can pass Gate B with no marker: {ast.unparse(gate_b_state)}"
+    )
+    guard = next(
+        n for n in ast.walk(gate_fn)
+        if isinstance(n, ast.If)
+        and any(
+            isinstance(c, ast.Call)
+            and getattr(c.func, "attr", None) == "append"
+            and any(
+                isinstance(a, ast.Constant) and "gate b" in str(a.value).lower()
+                for a in c.args
+            )
+            for c in ast.walk(n)
+        )
+    )
+    assert isinstance(guard.test, ast.UnaryOp) \
+        and isinstance(guard.test.op, ast.Not) \
+        and isinstance(guard.test.operand, ast.Name) \
+        and guard.test.operand.id == "calibration_passed", (
+        "the Gate B reason is not guarded by the bare `not calibration_passed` — the marker "
+        f"can be absent while the gate reports nothing wrong: {ast.unparse(guard.test)}"
+    )
+    blocked = next(
+        n for n in gate_fn.body
+        if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)
+    )
+    blocked_srcs = [
+        ast.unparse(v)
+        for k, v in zip(blocked.value.keys, blocked.value.values)
+        if isinstance(k, ast.Constant) and k.value == "blocked"
+    ]
+    assert blocked_srcs == ["bool(reasons)"], (
+        "`blocked` is not sourced by `bool(reasons)` alone, so a second condition can unblock "
+        f"a gate that reported a reason: {blocked_srcs}"
     )
     # ⛔ …and BEHAVIOUR, which no census can substitute for: the marker's VALUE must be the
     # verdict. Replace the SDK seam, run the CLI, assert on the report it PRINTS.
