@@ -6573,28 +6573,60 @@ def tortoise_delete(id: str, dry_run: bool = False,
 
 
 def tortoise_operator_action(action: str, id: str, reason: str | None = None,
-                             strength: float = 0.5,
+                             strength: float | None = None,
+                             credibility: str | int | float | None = None,
                              bias: float | None = None,
                              precision: float | None = None,
                              consistency: float | None = None,
                              directness: float | None = None) -> dict:
     """Consolidated operator write action — action=mitigate|annotate.
 
-    mitigate: reason (required) + strength (0-1, default 0.5) — creates/updates
-    a CURRENT mitigation Point (idempotent only while it is current: a
-    re-assertion after withdrawal mints a NEW Point). annotate:
-    bias/precision/consistency/directness (all required, 0-1).
+    mitigate: reason (required) + strength (0-1, default 0.5) + credibility (an
+    optional validated label) — creates/updates a CURRENT mitigation Point
+    (idempotent only while it is current: a re-assertion after withdrawal mints
+    a NEW Point). annotate: bias/precision/consistency/directness (all
+    required, 0-1).
+
+    ⛔ `credibility` is CARRIED here, never dropped (#12915 review F4):
+    `mitigate_operator` takes it as a validated label, and this handler used to
+    accept it and silently discard it — the exact defect the
+    `tortoise_adjust_relationship` container header cites as the reason
+    `operator_action` was retired.
+
+    ⛔ AND ONE ARM PER CALL, here too (#12915 review, P2). This door is retired
+    but still SERVED through the #3883 shim, and the shim calls THIS function —
+    not the container — so fixing only the container left the two disagreeing:
+    a #3883 caller could still pass `bias=` to the mitigate arm and get success
+    with the dimension discarded. A keyword the chosen arm cannot record is now
+    refused here as well, naming the arm it belongs to.
     """
     if action == "mitigate":
         if not reason:
             return _SafeError({"error": "operator_action(action='mitigate') requires 'reason'"})
+        stray = [name for name, value in zip(
+            ("bias", "precision", "consistency", "directness"),
+            (bias, precision, consistency, directness)) if value is not None]
+        if stray:
+            return _SafeError({"error": (
+                f"operator_action(action='mitigate') cannot record "
+                f"{', '.join(stray)} — those belong to the 'annotate' arm. "
+                "ONE arm per call: a silent partial write is indistinguishable "
+                "from a full one.")})
         return _safe(_quota_gated(_get_org_sdk().mitigate_operator, "points", abuse_weight=1),
-                     id, reason, strength)
+                     id, reason, 0.5 if strength is None else strength, credibility)
     if action == "annotate":
         dims = (bias, precision, consistency, directness)
         if any(d is None for d in dims):
             return _SafeError({"error": "operator_action(action='annotate') requires "
                                          "bias, precision, consistency, directness"})
+        stray = [name for name, value in zip(
+            ("reason", "strength", "credibility"),
+            (reason, strength, credibility)) if value is not None]
+        if stray:
+            return _SafeError({"error": (
+                f"operator_action(action='annotate') cannot record "
+                f"{', '.join(stray)} — those belong to the 'mitigate' arm. "
+                "ONE arm per call.")})
         return _safe(_quota_gated(_get_org_sdk().annotate_operator, "points"),
                      id, *dims)
     return _SafeError({"error": f"operator_action: unknown action {action!r} — "
@@ -7478,10 +7510,39 @@ def tortoise_adjust_relationship(id: str,
             return _SafeError({
                 "error": "adjust_relationship(action='mitigate') requires 'reason'.",
                 "code": ERR_INVALID})
+        # ⛔ ONE arm per call — the SAME rule the fields-only spelling below
+        # enforces. A keyword the chosen arm cannot record is REFUSED here, not
+        # dropped: the `action=` spelling used to hand `credibility` (and
+        # `bias..directness` under 'mitigate', `reason`/`strength` under
+        # 'annotate') to `tortoise_operator_action`, which discarded whatever its
+        # single branch did not read and returned success (#12915 review F4).
+        if action == "annotate":
+            stray = [name for name, value in
+                     (("reason", reason), ("strength", strength),
+                      ("credibility", credibility)) if value is not None]
+        else:
+            stray = [name for name, value in zip(
+                ("bias", "precision", "consistency", "directness"), dims)
+                if value is not None]
+        if stray:
+            return _SafeError({
+                "error": (f"adjust_relationship(action={action!r}) cannot record "
+                          f"{', '.join(stray)} — that keyword belongs to the "
+                          f"{'mitigate' if action == 'annotate' else 'annotate'} "
+                          "arm. ONE arm per call: send them as two calls, "
+                          "because a silent partial write is indistinguishable "
+                          "from a full one."),
+                "code": ERR_INVALID})
+        if action == "mitigate":
+            return tortoise_operator_action(
+                action, id, reason=reason,
+                strength=0.5 if strength is None else strength,
+                credibility=credibility)
+        # The annotate arm takes the four dimensions and NOTHING else: `strength`
+        # has a mitigate-side default, so forwarding it here would hand the
+        # annotate branch a keyword it must refuse (#12915 review).
         return tortoise_operator_action(
-            action, id, reason=reason,
-            strength=0.5 if strength is None else strength,
-            bias=bias, precision=precision, consistency=consistency,
+            action, id, bias=bias, precision=precision, consistency=consistency,
             directness=directness)
 
     named_dims = [name for name, value in zip(("bias", "precision", "consistency",

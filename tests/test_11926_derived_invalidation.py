@@ -673,8 +673,15 @@ def test_the_PRECEDENCE_holds_in_the_POST_EXCEPTION_arm(sdk, monkeypatch):
     made = _judge(sdk, i, t, g1)
     g2 = _a_second_goal(sdk, "prec-post-exception-other")
 
-    def retired_by_a_PEER(point_id, **_kwargs):
-        sdk.update_knowledge(point_id, status="retracted")
+    # ⛔ THE PEER RETIRES IT THE WAY PRODUCTION DOES (#12915 review F3). A
+    # generic property write cannot model this: `update_knowledge` on a POINT
+    # dispatches to `update_point`, which REFUSES a lifecycle transition
+    # ("only promotes draft->live"), so the peer would never reach the terminal
+    # state this arm exists to re-read. `retract_point` is the SDK write for it.
+    real_retract = sdk.retract_point
+
+    def retired_by_a_PEER(point_id, **kwargs):
+        real_retract(point_id, **kwargs)
         raise ValueError("already terminal")
 
     monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
@@ -724,8 +731,14 @@ def test_a_claim_that_NAMES_NO_goal_falls_back_to_the_CALLERs(sdk, monkeypatch,
             params={"id": claim_id},
         )
     elif shape == "post-exception":
-        def retired_by_a_PEER(point_id, **_kwargs):
-            sdk.update_knowledge(point_id, status="retracted")
+        real_retract = sdk.retract_point
+
+        def retired_by_a_PEER(point_id, **kwargs):
+            # ⛔ The peer retires it the way production does (#12915 review F3):
+            # `update_knowledge` on a POINT dispatches to `update_point`, which
+            # REFUSES a lifecycle transition, so it cannot reach the terminal
+            # state this arm re-reads.
+            real_retract(point_id, **kwargs)
             raise ValueError("already terminal")
         monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
     else:
@@ -1569,7 +1582,7 @@ def test_an_ALREADY_TERMINAL_claim_also_reconciles_the_goal_word(sdk):
     i, t, g = _world(sdk, tag="terminal-reconciles")
     made = _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"]).get("goalState") == "met"
-    sdk.update_knowledge(made["point_id"], status="retracted")  # out of band
+    sdk.retract_point(made["point_id"])  # out of band (a Point lifecycle write)
 
     report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
                                           goal_id=g["id"],
@@ -1626,8 +1639,15 @@ def test_the_POST_EXCEPTION_terminal_arm_reconciles_too(sdk, monkeypatch):
     made = _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"]).get("goalState") == "met"
 
-    def retired_by_a_PEER(point_id, **_kwargs):
-        sdk.update_knowledge(point_id, status="retracted")
+    # ⛔ THE PEER RETIRES IT THE WAY PRODUCTION DOES (#12915 review F3). A
+    # generic property write cannot model this: `update_knowledge` on a POINT
+    # dispatches to `update_point`, which REFUSES a lifecycle transition
+    # ("only promotes draft->live"), so the peer would never reach the terminal
+    # state this arm exists to re-read. `retract_point` is the SDK write for it.
+    real_retract = sdk.retract_point
+
+    def retired_by_a_PEER(point_id, **kwargs):
+        real_retract(point_id, **kwargs)
         raise ValueError("already terminal")
 
     monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
@@ -1735,8 +1755,15 @@ def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
     def boom(*_args, **_kwargs):
         raise RuntimeError("graph read exploded")
 
-    def retired_by_a_PEER(point_id, **_kwargs):
-        sdk.update_knowledge(point_id, status="retracted")
+    # ⛔ THE PEER RETIRES IT THE WAY PRODUCTION DOES (#12915 review F3). A
+    # generic property write cannot model this: `update_knowledge` on a POINT
+    # dispatches to `update_point`, which REFUSES a lifecycle transition
+    # ("only promotes draft->live"), so the peer would never reach the terminal
+    # state this arm exists to re-read. `retract_point` is the SDK write for it.
+    real_retract = sdk.retract_point
+
+    def retired_by_a_PEER(point_id, **kwargs):
+        real_retract(point_id, **kwargs)
         raise ValueError("already terminal")
 
     monkeypatch.setattr(di, "latest_judgement", boom)
@@ -1878,18 +1905,18 @@ def test_a_failed_cache_reconcile_is_reported_and_the_retirement_still_lands(sdk
     finding = _only([v.invalidation for v in verdicts(sdk, goal_id=g["id"])
                      if v.invalidation])
 
-    real_update = sdk.update_entity
+    real_update = sdk.update_knowledge
 
     def failing(node_id, **props):
         if node_id == g["id"]:
             raise RuntimeError("transient write failure")
         return real_update(node_id, **props)
 
-    sdk.update_entity = failing
+    sdk.update_knowledge = failing
     try:
         retired = invalidate(sdk, finding)
     finally:
-        sdk.update_entity = real_update
+        sdk.update_knowledge = real_update
     assert retired["invalidated"] is True
     assert retired["cache"]["checked"] is False
     assert "transient write failure" in retired["cache"]["error"]
@@ -1908,18 +1935,18 @@ def test_a_failed_cache_write_counts_as_a_FAILED_sweep(sdk):
     i, t, g = _world(sdk, tag="cache-fail-count")
     _judge(sdk, i, t, g)
     sdk.update_knowledge(t["id"], threshold=8.0)
-    real_update = sdk.update_entity
+    real_update = sdk.update_knowledge
 
     def failing(node_id, **props):
         if node_id == g["id"]:
             raise RuntimeError("transient write failure")
         return real_update(node_id, **props)
 
-    sdk.update_entity = failing
+    sdk.update_knowledge = failing
     try:
         report = invalidate_stale(sdk, goal_id=g["id"])
     finally:
-        sdk.update_entity = real_update
+        sdk.update_knowledge = real_update
     assert report["counts"]["retired"] == 1
     assert report["invalidated"][0]["cache"]["checked"] is False
     assert report["counts"]["failed"] == 1, (
@@ -2121,7 +2148,7 @@ def test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_
 
     # OUT OF BAND: a direct status write retires the NEWEST claim, so no door runs
     # and no reconcile happens — the word still names the claim that just left.
-    sdk.update_knowledge(second["point_id"], status="retracted")
+    sdk.retract_point(second["point_id"])
     assert sdk.get_entity(g["id"])["goalState"] == "met"
 
     # Now the FIRST claim's own justification goes (its target's bar moved). The
@@ -2368,14 +2395,14 @@ def _lagging_word(sdk, indicator, target, goal):
     """
     _judge(sdk, indicator, target, goal, value=9.0)
     assert sdk.get_entity(goal["id"])["goalState"] == "met"
-    real_update = sdk.update_entity
+    real_update = sdk.update_knowledge
 
     def failing(node_id, **props):
         if node_id == goal["id"] and "goalState" in props:
             raise RuntimeError("cache write refused on the flip")
         return real_update(node_id, **props)
 
-    sdk.update_entity = failing
+    sdk.update_knowledge = failing
     try:
         _reading(sdk, indicator, 15.0, at="2026-11-11T11:00:00Z")
         with pytest.raises(RuntimeError):
@@ -2383,7 +2410,7 @@ def _lagging_word(sdk, indicator, target, goal):
                              indicator_id=indicator["id"],
                              target=Target.from_node(target))
     finally:
-        sdk.update_entity = real_update
+        sdk.update_knowledge = real_update
     assert sdk.get_entity(goal["id"])["goalState"] == "met", (
         "precondition: the refused flip leaves the PREVIOUS word in the cache")
     assert latest_judgement(sdk, goal_id=goal["id"])["judgementState"] == "unmet"
@@ -2420,7 +2447,7 @@ def test_ROUTE_B_a_claim_retired_OUT_OF_BAND_is_invisible_to_the_sweep(sdk):
     i, t, g = _world(sdk, tag="route-b")
     made = _judge(sdk, i, t, g)
     _derived_word_standing(sdk, g)
-    sdk.update_knowledge(made["point_id"], status="retracted")
+    sdk.retract_point(made["point_id"])
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["scanned"] == 0, report
     assert latest_judgement(sdk, goal_id=g["id"]) is None
@@ -2451,7 +2478,7 @@ def test_the_repair_sweep_clears_a_word_whose_claim_was_RETIRED_OUT_OF_BAND(sdk)
     i, t, g = _world(sdk, tag="sweep-route-b")
     made = _judge(sdk, i, t, g)
     _derived_word_standing(sdk, g)
-    sdk.update_knowledge(made["point_id"], status="retracted")
+    sdk.retract_point(made["point_id"])  # out of band
     report = reconcile_goal_states(sdk)
     assert report["counts"]["repaired"] == 1, report
     assert sdk.get_entity(g["id"]).get("goalState") is None
@@ -2492,17 +2519,17 @@ def test_the_repair_sweep_leaves_a_CONSISTENT_goal_alone_and_writes_NOTHING(sdk)
     _judge(sdk, i, t, g)
     _derived_word_standing(sdk, g)
     writes: list[tuple[str, dict]] = []
-    real_update = sdk.update_entity
+    real_update = sdk.update_knowledge
 
     def counting(node_id, **props):
         writes.append((node_id, dict(props)))
         return real_update(node_id, **props)
 
-    sdk.update_entity = counting
+    sdk.update_knowledge = counting
     try:
         report = reconcile_goal_states(sdk)
     finally:
-        sdk.update_entity = real_update
+        sdk.update_knowledge = real_update
     assert report["counts"]["repaired"] == 0, report
     assert report["counts"]["consistent"] == 1, report
     assert [w for w in writes if w[0] == g["id"]] == [], (
@@ -2782,18 +2809,18 @@ def test_a_goal_on_a_label_the_surface_CANNOT_RESOLVE_is_COUNTED_not_reported_GO
     # trade this bug for a silent coverage hole.
     sdk._get_proj().g.query(
         "CREATE (n:Event {id:'e-real-1', eventId:'e-real-1', goalState:'met'})")
-    real_update = sdk.update_entity
+    real_update = sdk.update_knowledge
     writes: list[tuple] = []
 
     def recording(node_id, **props):
         writes.append((node_id, tuple(sorted(props))))
         return real_update(node_id, **props)
 
-    sdk.update_entity = recording
+    sdk.update_knowledge = recording
     try:
         report = reconcile_goal_states(sdk)
     finally:
-        sdk.update_entity = real_update
+        sdk.update_knowledge = real_update
     assert report["counts"]["unaddressable"] == 3, (
         f"the sweep neither repaired nor counted an unaddressable shape: {report}")
     assert report["counts"]["gone"] == 0, (
@@ -2892,18 +2919,18 @@ def test_a_failed_reconcile_is_REPORTED_and_the_rest_of_the_sweep_survives(sdk):
         sdk.delete_entity(made["point_id"])
         worlds.append(g)
     doomed = worlds[0]["id"]
-    real_update = sdk.update_entity
+    real_update = sdk.update_knowledge
 
     def failing(node_id, **props):
         if node_id == doomed:
             raise RuntimeError("transient write failure")
         return real_update(node_id, **props)
 
-    sdk.update_entity = failing
+    sdk.update_knowledge = failing
     try:
         report = reconcile_goal_states(sdk)
     finally:
-        sdk.update_entity = real_update
+        sdk.update_knowledge = real_update
     assert report["counts"]["failed"] == 1, report
     assert report["counts"]["repaired"] == 1, report
     failed = _only([r for r in report["goals"] if r.get("error")])
@@ -2935,19 +2962,19 @@ def test_a_word_a_HUMAN_sets_mid_sweep_is_PRESERVED_and_reported(sdk):
         return real_get(node_id)
 
     writes: list[tuple[str, dict]] = []
-    real_update = sdk.update_entity
+    real_update = sdk.update_knowledge
 
     def counting(node_id, **props):
         writes.append((node_id, dict(props)))
         return real_update(node_id, **props)
 
     sdk.get_entity = racing
-    sdk.update_entity = counting
+    sdk.update_knowledge = counting
     try:
         report = reconcile_goal_states(sdk)
     finally:
         sdk.get_entity = real_get
-        sdk.update_entity = real_update
+        sdk.update_knowledge = real_update
     assert report["counts"]["preserved"] == 1, report
     assert report["counts"]["repaired"] == 0, report
     assert report["counts"]["cleared"] == 0, report
@@ -3000,7 +3027,7 @@ def test_a_probe_that_cannot_run_is_REPORTED_on_its_goal_and_the_sweep_survives(
     sdk.delete_entity(made["point_id"])
 
     real_get_proj = sdk._get_proj
-    real_update = sdk.update_entity
+    real_update = sdk.update_knowledge
     writes: list[tuple] = []
 
     def recording(node_id, **props):
@@ -3034,13 +3061,13 @@ def test_a_probe_that_cannot_run_is_REPORTED_on_its_goal_and_the_sweep_survives(
                 raise RuntimeError("transient probe failure")
             return self._proj.g.query(cypher, params=params, **kwargs)
 
-    sdk.update_entity = recording
+    sdk.update_knowledge = recording
     sdk._get_proj = lambda: _ProbeBoom(real_get_proj())
     try:
         report = reconcile_goal_states(sdk)
     finally:
         sdk._get_proj = real_get_proj
-        sdk.update_entity = real_update
+        sdk.update_knowledge = real_update
 
     # the probe failure is REPORTED, and in the module's own bucket for it
     assert report["counts"]["failed"] == 1, report
@@ -3130,17 +3157,17 @@ def test_a_dry_run_over_a_LAGGING_word_reports_would_rewrite_and_writes_nothing(
     i, t, g = _world(sdk, tag="sweep-dry-run-rewrite")
     _lagging_word(sdk, i, t, g)
     writes: list[tuple[str, dict]] = []
-    real_update = sdk.update_entity
+    real_update = sdk.update_knowledge
 
     def counting(node_id, **props):
         writes.append((node_id, dict(props)))
         return real_update(node_id, **props)
 
-    sdk.update_entity = counting
+    sdk.update_knowledge = counting
     try:
         report = reconcile_goal_states(sdk, dry_run=True)
     finally:
-        sdk.update_entity = real_update
+        sdk.update_knowledge = real_update
     assert report["counts"]["wouldRepair"] == 1, report
     assert report["counts"]["repaired"] == 0, report
     record = _only([r for r in report["goals"] if r["goalId"] == g["id"]])

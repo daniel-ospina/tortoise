@@ -17,7 +17,8 @@ The **current stage is state** on the Object (``pipelineStageId`` /
 ``pipelineSlot`` / ``pipelineOutcome`` / ``pipelineStageSince`` / ``isClosed``),
 so a query always returns one answer (#2792 indicator 5). **History is the
 journal**: a stage move is written through the generic entity write surface
-(``TortoiseSDK.update_entity``), which journals an ``EntityMutated`` record the
+(``TortoiseSDK.update_knowledge`` — named ``update_entity`` before #4282
+retired it), which journals an ``EntityMutated`` record the
 rebuild path replays, so the prior values are retained as dated history without
 a second lifecycle axis (the same doctrine ``Object.status`` follows).
 
@@ -807,9 +808,10 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
                   declared: dict | None = None) -> StageMove:
     """Apply one observed stage transition to an Object.
 
-    The write goes through ``sdk.update_entity`` — the ONE generic entity write
-    — so it is journaled (``EntityMutated``) and replayed on every rebuild, and
-    the history is the dated record sequence.
+    The write goes through ``sdk.update_knowledge`` — the ONE generic entity
+    write since #4282 retired ``update_entity`` — so it is journaled
+    (``EntityMutated``) and replayed on every rebuild, and the history is the
+    dated record sequence.
 
     Guards (the resurrection vector the design names):
     - **kind binding** — the pipeline key must equal the Object's namespaced
@@ -932,7 +934,7 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
     # The marker is also INDEPENDENT of the current stage: an Object the graph
     # records as closed with no resolvable stage (``isClosed`` is written
     # through the generic entity surface — ``create_object(..., isClosed=
-    # True)``, ``update_entity(id, isClosed=True)``, or the #2728 repair verb
+    # True)``, ``update_knowledge(id, isClosed=True)``, or the #2728 repair verb
     # that clears ``pipelineStageId`` while the marker remains) was reopened by
     # an ordinary later mention, because this check used to live inside
     # ``if cur_stage is not None``. That is the mirror of the

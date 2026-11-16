@@ -2284,7 +2284,12 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_update_entity": 'tortoise_update_knowledge(id, props=...)',
     # The retraction is a TEMPORAL FIELD on the container (Zep's shape,
     # `beta-sdk-surface.md`): `invalid_at`/`valid_until` is the instant the claim
-    # stopped holding, and omitting it retains the `now` default the old door had.
+    # stopped holding, and it MUST be passed — that field is what selects the
+    # retract arm. ⛔ Omitting it does NOT retain the old door's `now` default
+    # (#12915 review F7): with no temporal field and no `props` the call falls
+    # through to the PROPERTY arm (`tortoise_update(id, props=None)`), which is a
+    # different operation, not a smaller one. The pointer below passes
+    # `invalid_at=...` for exactly that reason.
     "tortoise_retract_point": 'tortoise_update_knowledge(id, invalid_at=...)',
     # `transfer_edges=False` is the INVALIDATE arm; it is named explicitly because
     # the default is the full supersede and the two differ in what they destroy.
@@ -2296,6 +2301,9 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
         'directness=...)',
     "tortoise_mitigate_operator":
         'tortoise_adjust_relationship(id, reason=..., strength=..., credibility=...)',
+    # `credibility` is carried by BOTH spellings of the mitigate arm — the
+    # `action='mitigate'` form forwards it to `mitigate_operator` rather than
+    # dropping it (#12915 review F4).
     "tortoise_operator_action": 'tortoise_adjust_relationship(id, action="mitigate"|"annotate", ...)',
     # `scope` names the arm: dream's two scopes, the reviewer-gated promotion, and
     # the Beta prior are DIFFERENT writes behind one verb, so the pointer names it.

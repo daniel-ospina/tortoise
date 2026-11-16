@@ -33126,6 +33126,27 @@ class TortoiseSDK:
         evidence prior, and unidirectional IMPL (``approvedBy``) edges to the
         approved claims. Returns
         ``{event_id, decision_point_id, impl_operator_ids, confidence_delta}``.
+
+        Args:
+            approver_id: Subject id (or name) of the human approving.
+            artifact_id: Object id, or the url of the document Source, of the
+                artifact approved (D10: a document is a ``:Source``, not a
+                ``:Document`` node).
+            point_ids: claim Point ids the approval covers (non-operator).
+            decision_content: optional content override for the decision Point
+                (default ``"Approved: <artifact>"``).
+
+        ⛔ THE ``Args`` BLOCK IS PART OF THE CONTRACT, not decoration (#12915
+        review F5). #5121/#5316 fixed the D10 wording *on the public verb* and
+        ``tests/test_taxonomy.py::TestRetiredDocumentLabelClaims`` pins it there —
+        the pin reads the phrase ``url of the document Source``. When this verb
+        absorbed ``file_human_approval`` the corrected wording stayed on the now
+        PRIVATE ``_file_human_approval`` and the public docstring was written
+        without it, so the fix was invisible on the surface a caller reads. It is
+        restored here rather than moving the pin onto a private name: the pin's
+        subject is "the public approval verb must say what a document IS", and
+        making the pin read a private helper would satisfy the letter of the test
+        while deleting the guarantee.
         """
         return self._file_human_approval(approver_id, artifact_id, point_ids,
                                          decision_content)

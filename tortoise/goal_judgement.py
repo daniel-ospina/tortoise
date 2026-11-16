@@ -1491,7 +1491,14 @@ def _write_goal_state_cache(sdk: Any, goal_id: str, state: str) -> str | None:
     """
     cached = GOAL_STATE_CACHE[state]
     if cached is not None:
-        sdk.update_entity(goal_id, goalState=cached)
+        # #12915 review F1: `update_entity` is RETIRED (#4282) and
+        # `TortoiseSDK.__getattr__` RAISES on it, so this call made every
+        # `met`/`unmet` judgement die inside the cache write — and
+        # `_cache_then_arrow` deliberately re-raises it. `update_knowledge` is
+        # the approved replacement (`sdk_retired.py`: `update_entity` →
+        # `update_knowledge`) and its property arm IS `update()`, the same body
+        # `update_entity` relayed to, so the written props are unchanged.
+        sdk.update_knowledge(goal_id, goalState=cached)
     return cached
 
 
@@ -1549,7 +1556,7 @@ def _cache_then_arrow(
     ORDER: the cache goes FIRST, and what that buys is bounded and exact — a
     failed ARROW leaves the cache already agreeing with the live claim (pinned by
     ``test_a_failed_arrow_leaves_the_cache_agreeing_with_the_claim``). It does NOT
-    make a refused ``update_entity`` harmless: on a flip the supersession has
+    make a refused ``update_knowledge`` harmless: on a flip the supersession has
     already happened, so a refused cache write leaves ``goalState`` on the PREVIOUS
     word under a live claim whichever of the two writes goes first. That
     staleness is repaired on the next pass — the unchanged arm re-writes the cache
@@ -1559,8 +1566,10 @@ def _cache_then_arrow(
     ⛔ BUT THE ARROW IS WRITTEN EITHER WAY, and that is the half a plain reorder
     gets wrong: with the two writes merely SEQUENCED, a refused cache write skips
     ``_ensure_judgement_edge`` entirely, so the judgement is live with NO belief
-    arrow (measured: with ``update_entity`` raising, the goal ended with ZERO IMPL
-    arrows while a live ``met`` judgement existed). Ordering two writes must
+    arrow (measured: with the cache write raising — the method was named
+    ``update_entity`` then, and is `update_knowledge` since #4282 — the goal
+    ended with ZERO IMPL arrows while a live ``met`` judgement existed). Ordering
+    two writes must
     therefore not make one a precondition of the other: the cache refusal is
     captured, the arrow is written regardless, and only then is the original
     exception re-raised so the caller still sees it. The asymmetry that IS real is

@@ -76,7 +76,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 58f904ccf7938105d08371bdc325c99ef03a0267
+cut_at_commit: 1340c397b6683a3dad81895995eb3e0e0d474f13
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -882,8 +882,8 @@ response_fields:
   unchanged_when_off: n/a — not flag-gated; the key is absent on every complete or unprovable read
 - response: tortoise_update_knowledge
   field: valid_to_shaped
-  emitted_through: 'the container''s PROPERTY/retract arm (#11609 lane B) — it delegates to
-    the same handlers this row used to name, so the receipt is unchanged'
+  emitted_through: the container's PROPERTY/retract arm (#11609 lane B) — it delegates to the same handlers this
+    row used to name, so the receipt is unchanged
   emitted_when: 'same field, same condition, on the UPDATE door (#9202): the caller''s validTo declared no date
     and was shaped into the canonical un-datable end. Emitted on every reply path of the door that WROTE the shaped
     end; a `status` that was already applied does not suppress it, because the props write still applies the shaping.
@@ -1959,7 +1959,7 @@ rows:
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_adjust_relationship
-  served_from: tortoise/mcp_server.py:a2f4b5ce6158f8b3
+  served_from: tortoise/mcp_server.py:217d4d0e40c93919
   served_attributes: 9f46e051e33934f2
   family: graph
   family_rank: 2

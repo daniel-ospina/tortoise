@@ -882,13 +882,13 @@ class TestGuardIntegrity:
             g = sdk._get_proj().g
             sdk.create_object("deal-park", objectKind=KEY)
             calls: list[dict] = []
-            real = sdk.update_entity
+            real = sdk.update_knowledge
 
             def _spy(oid, **kw):
                 calls.append(kw)
                 return real(oid, **kw)
 
-            sdk.update_entity = _spy
+            sdk.update_knowledge = _spy
             P.advance_stage(sdk, "deal-park", KEY, "vendor diligence",
                             at="2026-09-06", declared=DECL)
             assert calls, "the park must journal through the generic write"
@@ -950,13 +950,13 @@ class TestGuardIntegrity:
             g = sdk._get_proj().g
             sdk.create_object("deal-props", objectKind=KEY)
             written: dict = {}
-            real = sdk.update_entity
+            real = sdk.update_knowledge
 
             def _spy(oid, **kw):
                 written.update(kw)
                 return real(oid, **kw)
 
-            sdk.update_entity = _spy
+            sdk.update_knowledge = _spy
             P.advance_stage(sdk, "deal-props", KEY, "stg_discussion",
                             declared=DECL)
             cur = P.current_stage(g, "deal-props")
