@@ -86,14 +86,14 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 
 | | |
 |---|---|
-| Registry tools | **91** |
-| Absorbed into the 27 MCP targets | **88** |
+| Registry tools | **97** |
+| Absorbed into the 27 MCP targets | **94** |
 | Absorbed into a builder-only SDK method (not on the MCP) | **1** |
 | Tenancy (SDK/REST only) | **2** |
 | Retired | **0** |
 | MCP target tools | **27** |
 
-**The four bucket rows sum to 91.** (The last row is the target *surface*, not a bucket —
+**The four bucket rows sum to 97.** (The last row is the target *surface*, not a bucket —
 27 targets received those 88 absorbed tools many-to-one, so it is not part of the sum.)
 
 The **Retired** row fell **4 → 0** in #11609 **batch 1**: the last four
