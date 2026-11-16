@@ -48399,6 +48399,18 @@ class TortoiseSDK:
         Point-specific): a write that leaves ANY bound row naming nothing is the
         claim this guard exists to refuse.
         """
+        # ⛔ A CALL THAT WRITES `status` TWICE IS NOT THIS GUARD'S TO ANSWER
+        # (#12882 merge, measured). `_status_write_is_ambiguous` refuses it with
+        # its own pinned message — and that message is the one the caller is
+        # promised. Reading the first-wins value here instead pre-empted it: with
+        # `{<content 'superseded', __str__ 'status'>: 'superseded', 'status':
+        # 'live'}` this guard saw the word `superseded` and raised the
+        # successorless refusal, so `test_a_hostile_repr_cannot_replace_the_
+        # refusal` never reached the sibling door. Fail closed where the sibling
+        # does, and let it speak. (Same lesson as the off-word and non-`str`
+        # deferrals below.)
+        if _status_write_is_ambiguous(props):
+            return
         # ⛔ MORE THAN ONE KEY NAMING THE CARRIER IS NOT A CALL THIS GUARD CAN
         # ANSWER (#12592 review P1, and the class #12786 measured on `status`).
         # `_successor_named_by` decides per KEY, and the live write applies EVERY
@@ -48438,9 +48450,15 @@ class TortoiseSDK:
         # same-call clear through such a key was ADMITTED and nulled the record
         # column while the graph kept its camel name. This is the REFUSAL side, so
         # it widens to the union; `_successor_named_by` stays narrow on purpose.
+        # ⛔ NO `str.__str__` ON A NON-`str` (#12882 merge): the descriptor refuses
+        # an object that only CLAIMS `__class__ = str`, and a non-`str` key cannot
+        # file a property name anyway (`keys_rendering_as` returns None for one), so
+        # the journal rendering is simply absent for it. The exotic-key refusal
+        # below is what answers that key.
         _name_keys = [k for k in props
                       if _SUCCESSOR_COLUMN in (snake(str(k)),
-                                               snake(str.__str__(k)))]
+                                               snake(str.__str__(k))
+                                               if issubclass(type(k), str) else "")]
         _name_values = [props[k] for k in _name_keys]
         # ⛔ COUNTED BY KEY OBJECT, not by rendered name (#12592 cycle-4): a
         # `str` subclass with a colliding `__hash__` renders as the SAME name as
@@ -48452,7 +48470,7 @@ class TortoiseSDK:
         if len(_all_carrier_keys) > 1:
             raise ValueError(
                 f"update_entity refused a CONFLICTING successor write on "
-                f"{id_val!r}: this call writes the `{_SUCCESSOR_COLUMN}` column "
+                f"{_refusal_repr(id_val)}: this call writes the `{_SUCCESSOR_COLUMN}` column "
                 f"through more than one key "
                 f"({', '.join(sorted({str(k) for k in _all_carrier_keys}))}), and "
                 f"they land on ONE property, so which value survives is not "
@@ -48466,7 +48484,9 @@ class TortoiseSDK:
         # every bound row (``SET n += $props``), so no row is left nameless.
         if _successor_named_by(props):
             return
-        status_value = lifecycle_props_by_rendering(props, {"status"}).get("status")
+        _rendered_status = lifecycle_props_by_rendering(props, {"status"})
+        _status_supplied = "status" in _rendered_status
+        status_value = _rendered_status.get("status")
         # ⛔ THE WORD IS COMPARED AT ITS BASE CONTENT, never through the caller's
         # `__eq__`/`__ne__` (#12592 cycle-7 P1). `lifecycle_props_by_rendering`
         # hands back the CALLER'S OBJECT, and `!=` is a method lookup on it:
@@ -48477,8 +48497,30 @@ class TortoiseSDK:
         # forbids. `tortoise/live.py` states the seam's rule ("the VALUE keeps its
         # base content"), and the same normalisation is what #12907 pins for the
         # Point arm, so this is that rule applied to the comparison, once.
+        #
+        # ⛔ `issubclass(type(v), str)`, NOT `isinstance(v, str)` (#12882 merge).
+        # `isinstance` consults `__class__`, so an object that declares
+        # ``__class__ = str`` answers True while `str.__str__` REFUSES it with
+        # ``TypeError: descriptor '__str__' requires a 'str' object`` — measured
+        # as `test_a_str_subclass_cannot_forge_a_dead_word_or_crash_the_guard`
+        # escaping as a TypeError where the contract is a ValueError. The same
+        # idiom the status-entailment arm of this door already uses.
         status_word = (str.__str__(status_value)
-                       if isinstance(status_value, str) else status_value)
+                       if issubclass(type(status_value), str) else None)
+        if _status_supplied and status_word is None:
+            # ⛔ A NON-`str` TARGET NEVER ASKS FOR THE WORD, so this guard has no
+            # question to answer about it — and answering one anyway took a
+            # SIBLING'S refusal away (#12882 merge, measured: five pins in
+            # `test_status_projection.py` expected the transition guard's
+            # `is TERMINAL for a :Object` and got this guard's successorless
+            # message instead, on `status=None`/`_LyingEq()`/`_BoomRepr()`/
+            # `_Impostor()`). Those values reach a DEAD row, where #12882's
+            # terminal refusal is the governing rule; a non-`str` on a LIVE row
+            # is that issue's own disclosed vocabulary residual (#10371), not
+            # this invariant. So defer: this is the SAME lesson the exotic-key
+            # bound below records — a write this guard does not adjudicate must
+            # not pre-empt the guard that does.
+            return
         if status_word is not None and status_word != _SUPERSEDED_STATUS:
             # The call moves the row OFF the word (#12825's coherent lift CLEARS
             # the carriers; a retirement to `archived`/`deprecated` needs none).
@@ -48516,10 +48558,12 @@ class TortoiseSDK:
         _exotic_keys = [
             k for k in props
             if type(k) is not str
-            and "status" not in (snake(str(k)), snake(str.__str__(k)))]
+            and "status" not in (snake(str(k)),
+                                  snake(str.__str__(k))
+                                  if issubclass(type(k), str) else "")]
         if _exotic_keys:
             raise ValueError(
-                f"update_entity refused status='superseded' on {id_val!r}: "
+                f"update_entity refused status='superseded' on {_refusal_repr(id_val)}: "
                 f"{len(_exotic_keys)} property key(s) are not plain `str` "
                 f"({', '.join(sorted({type(k).__name__ for k in _exotic_keys}))}). "
                 f"A key whose RENDERING can differ between this check and the "
@@ -48687,7 +48731,7 @@ class TortoiseSDK:
                 "successor is 'retracted' (`retract_point`), and 'deprecated' is "
                 "an independent terminal state that needs none (`archived` is "
                 "RESERVED on Points — ONTOLOGY §5: no v1 write path). ")
-            retirement_word = f"`retract_point({id_val!r})`"
+            retirement_word = f"`retract_point({_refusal_repr(id_val)})`"
             retirement = f"or, if nothing replaced it, {retirement_word}."
             # ⛔ THE CARRIER CLAUSE IS LABEL-CONDITIONAL, because the carrier IS.
             # `supersede_point` writes `status`, `outdated`, the temporal stamps
@@ -48707,7 +48751,7 @@ class TortoiseSDK:
                 "That is not a supersession at all: a retirement with no "
                 "successor is 'archived', and 'deprecated' is an independent "
                 "terminal state that needs none. ")
-            retirement_word = f"`update_entity({id_val!r}, status='archived')`"
+            retirement_word = f"`update_entity({_refusal_repr(id_val)}, status='archived')`"
             retirement = f"or, if nothing replaced it, {retirement_word}."
             carrier_clause = (
                 "writes status, `supersededBy` (the successor's NAME, §4.2) "
@@ -48731,9 +48775,9 @@ class TortoiseSDK:
         # reviewed head: `update_entity(<archived Object>, status='superseded')`
         # led with `supersede(...)` and that raised. The explicit pair is
         # performable in both situations, so it is what a dead row is told.
-        pair = (f"`update_entity({id_val!r}, status='superseded', "
+        pair = (f"`update_entity({_refusal_repr(id_val)}, status='superseded', "
                 f"supersededBy=<successor name>)`")
-        verb = (f"`supersede({id_val!r}, <successor id>)` {carrier_clause}")
+        verb = (f"`supersede({_refusal_repr(id_val)}, <successor id>)` {carrier_clause}")
         if carrier_cleared:
             _shadow_only = any(isinstance(v, str) and v.strip()
                                for v in _name_values)
@@ -48757,7 +48801,7 @@ class TortoiseSDK:
                     f"stored replacement was WRONG, replace the NAME rather than "
                     f"remove it. To stop claiming a replacement at all, move the "
                     f"row OFF the word in the same call: "
-                    f"`update_entity({id_val!r}, status='live', "
+                    f"`update_entity({_refusal_repr(id_val)}, status='live', "
                     f"supersededBy=None, supersededAt=None)` is #12825's "
                     f"coherent un-supersede, and {retirement_word} is the "
                     f"successorless retirement; ")
@@ -48774,7 +48818,7 @@ class TortoiseSDK:
                 f"spelled out; {retirement} ")
         raise ValueError(
             f"update_entity refused status='superseded' on {labels} "
-            f"{id_val!r} with no successor: 'superseded' MEANS replaced "
+            f"{_refusal_repr(id_val)} with no successor: 'superseded' MEANS replaced "
             f"(ONTOLOGY {section}) — it names the successor, so a row that "
             f"says 'superseded' and names nothing asserts a replacement that "
             f"does not exist. {model_clause}"

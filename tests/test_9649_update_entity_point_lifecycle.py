@@ -195,12 +195,25 @@ def test_the_written_word_is_the_word_the_guard_approved(env):
     Mutant that reddens: drop the `str.__str__` normalisation in the Point arm
     and the stored status becomes `''` while the journal still says
     `superseded` — a graph/record divergence, not a refusal.
+
+    ⛔ #12592 merge: the call NAMES A SUCCESSOR, and that is not decoration.
+    This case's vehicle used to be a bare ``status='superseded'`` on a live
+    Point, which ONTOLOGY §4.3 now refuses at this door — *"`superseded` means
+    replaced: it names the successor"* — for every label, Points included
+    (`_assert_supersession_names_a_successor`). The pin's SUBJECT is the
+    normalisation, not the successorless shape, so it keeps its subject and
+    supplies the half §4.3 requires: the assertion, the mutant it names
+    (drop `str.__str__` -> the driver stores `''`) and the journal checks are
+    unchanged. §5 gives a Point's successor as the `CORRECTS` edge, but the
+    guard also reads a carried `supersededBy` property, which is the half a
+    single `update_entity` call can supply.
     """
     sdk, events = env
     pid = _live(sdk)
     assert _row(sdk, pid)["status"] == "live"
 
-    sdk.update_entity(pid, status=_LyingLen("superseded"))
+    sdk.update_entity(pid, status=_LyingLen("superseded"),
+                      supersededBy="successor-name")
 
     after = _row(sdk, pid)
     assert after["status"] == "superseded", (
