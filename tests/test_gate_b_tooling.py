@@ -312,16 +312,26 @@ def test_gate_b_cli_reads_the_private_marker_seam(monkeypatch, capsys):
     every form), it follows the value into `check_gates`'s three decision expressions, and
     three drives hold the value to the verdict.
 
-    ⛔ WHAT THIS DOES NOT REACH, stated so nobody reads it as more: it is a pin on the Gate B
-    PATH of this module (store → kwarg → decision → printed verdict), not a proof that no
-    future line anywhere can unblock a gate. An override invented in a different function
-    after this review is a defect for the next review to find, not something this census can
-    enumerate in advance.
+    ⛔ WHAT THIS PINS, as a DECLARED SURFACE (so nobody reads it as more): every store of
+    `calibration_passed` in `main()` (six forms) limited to the seam call or a literal
+    `False`; the bare name at the `check_gates` kwarg; NO store of the parameter inside
+    `check_gates` (it is an input); the three Gate B decision expressions as bare names
+    (`gate_b_state`'s IfExp test, the `not calibration_passed` guard, `bool(reasons)`); no
+    rebind or mutation of `reasons` after that guard; and three driven verdicts.
+
+    ⛔ WHAT NO TEST OF THIS SHAPE CAN PIN, stated instead of claimed: a third source keyed on
+    AMBIENT state — an environment variable, a file, the issue number — introduced anywhere
+    the drives do not exercise. The drives run in a clean process, so such a source agrees
+    with them by construction (measured: `if os.environ.get("…") == "1": calibration_passed
+    = True` defeats every arm here). That is not a hole in these assertions, it is the limit
+    of behavioural testing; the defence is that the surface above makes adding the source
+    visible in the diff, and review — not a seventh widening of this test.
 
     FAILS IF gates.py goes back to a public accessor that no longer exists, if it stops
     carrying the seam's value into the Gate B verdict, or if anything OTHER than the seam
-    (and the `False` fallback) sources `calibration_passed` — at the store, at the kwarg, or
-    at any of `check_gates`'s three Gate B decision expressions.
+    (and the `False` fallback) sources `calibration_passed` WITHIN THE SURFACE DECLARED ABOVE
+    — at `main()`'s stores, at the kwarg, at any of `check_gates`'s three Gate B decision
+    expressions, or by re-writing `reasons` after the guard.
     """
     import ast
     import inspect
@@ -371,22 +381,28 @@ def test_gate_b_cli_reads_the_private_marker_seam(monkeypatch, capsys):
         n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main"
     )
     SEAM = "_calibration_marker_recorded"
-    stores: list[tuple[str, ast.AST]] = []
-    for node in ast.walk(main_fn):
-        targets: list[ast.AST] = []
-        if isinstance(node, ast.Assign):
-            targets = list(node.targets)
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
-            targets = [node.target]
-        elif isinstance(node, (ast.For, ast.AsyncFor)):
-            targets = [node.target]
-        elif isinstance(node, (ast.With, ast.AsyncWith)):
-            targets = [i.optional_vars for i in node.items if i.optional_vars]
-        if not targets:
-            continue
-        stored = {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
-        if "calibration_passed" in stored:
-            stores.append((type(node).__name__, node))
+
+    def _stores(fn_node, name):
+        """Every store of `name` inside `fn_node`, in EVERY form that can bind it."""
+        out = []
+        for node in ast.walk(fn_node):
+            targets: list[ast.AST] = []
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                targets = [node.target]
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                targets = [node.target]
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                targets = [i.optional_vars for i in node.items if i.optional_vars]
+            if not targets:
+                continue
+            stored = {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+            if name in stored:
+                out.append((type(node).__name__, node))
+        return out
+
+    stores = _stores(main_fn, "calibration_passed")
 
     assert stores, (
         "no store of `calibration_passed` is visible in `gates.main()` — the census is "
@@ -446,11 +462,18 @@ def test_gate_b_cli_reads_the_private_marker_seam(monkeypatch, capsys):
     gate_fn = next(
         n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "check_gates"
     )
-    gate_b_state = next(
+    gate_b_states = [
         n for n in ast.walk(gate_fn)
         if isinstance(n, ast.Assign)
         and any(isinstance(t, ast.Name) and t.id == "gate_b_state" for t in n.targets)
+    ]
+    # EVERY assignment, not the first one that matches: a decoy that satisfies the shape
+    # earlier in the function must not shield the real decision from being read.
+    assert len(gate_b_states) == 1, (
+        "`gate_b_state` is assigned more than once, so a decoy can satisfy the shape while "
+        f"the real decision is escaped: {[ast.unparse(n) for n in gate_b_states]}"
     )
+    gate_b_state = gate_b_states[0]
     assert isinstance(gate_b_state.value, ast.IfExp) \
         and isinstance(gate_b_state.value.test, ast.Name) \
         and gate_b_state.value.test.id == "calibration_passed", (
@@ -489,6 +512,52 @@ def test_gate_b_cli_reads_the_private_marker_seam(monkeypatch, capsys):
     assert blocked_srcs == ["bool(reasons)"], (
         "`blocked` is not sourced by `bool(reasons)` alone, so a second condition can unblock "
         f"a gate that reported a reason: {blocked_srcs}"
+    )
+    # ⛔ …AND THE LIST IT READS. `bool(reasons)` is only as good as `reasons` AT THE RETURN:
+    # reviewed 2026-11-16, a rebind after the Gate B guard (`reasons = [r for r in reasons if
+    # "gate B" not in r]`, env-gated) left `blocked_srcs` exactly `['bool(reasons)']` and
+    # unblocked a gate that had just reported the missing marker. So nothing after the guard may
+    # rebind or mutate the list the return reads.
+    after = [n for n in ast.walk(gate_fn) if getattr(n, "lineno", 0) > guard.end_lineno]
+    reasons_rebound = [
+        f"{form}: {ast.unparse(node)}"
+        for form, node in _stores(gate_fn, "reasons")
+        if node.lineno > guard.end_lineno
+    ]
+    reasons_mutated = [
+        ast.unparse(n)
+        for n in after
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "reasons"
+        and n.func.attr in {
+            "append", "extend", "insert", "remove", "pop", "clear",
+            "sort", "reverse", "__setitem__", "__delitem__",
+        }
+    ] + [
+        ast.unparse(n)
+        for n in after
+        if isinstance(n, ast.Subscript)
+        and isinstance(n.value, ast.Name)
+        and n.value.id == "reasons"
+        and not isinstance(n.ctx, ast.Load)
+    ]
+    assert not reasons_rebound and not reasons_mutated, (
+        "something after the Gate B guard re-writes `reasons`, so the gate can report a reason "
+        "and still return `blocked: False` — the list `bool(reasons)` reads must be the one the "
+        f"guards appended to (rebound: {reasons_rebound}, mutated: {reasons_mutated})"
+    )
+    # ⛔ THE PARAMETER IS AN INPUT. `check_gates` receives `calibration_passed` from the CLI; a
+    # store of it INSIDE `check_gates` re-DECIDES that input, which is the round-5 defeat: an
+    # env-gated `calibration_passed = True` above the Gate B block passed every other pin in this
+    # test. There must be NO store at all — not a store from an allowed source (the parameter is
+    # not sourced here; it is handed in).
+    input_rebinds = [f"{form}: {ast.unparse(node)}" for form, node in _stores(gate_fn, "calibration_passed")]
+    assert not input_rebinds, (
+        "`check_gates` re-DECIDES its `calibration_passed` input — the parameter is handed in by "
+        "the caller and must not be stored here, or Gate B can pass with no marker: "
+        f"{input_rebinds}"
     )
     # ⛔ …and BEHAVIOUR, which no census can substitute for: the marker's VALUE must be the
     # verdict. Replace the SDK seam, run the CLI, assert on the report it PRINTS.
