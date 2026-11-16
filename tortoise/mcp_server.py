@@ -3095,7 +3095,20 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # declare `dry_run` — whose schema will REJECT that key — would be
         # recorded as a READ the caller never performed. Gate on the declared
         # preview set, not on key presence in untrusted input.
-        dry_run=name in _dry_run_tool_names() and bool((arguments or {}).get("dry_run")),
+        #
+        # ⛔ AND READ THE SPELLING THE WAY THE HANDLER WILL (`_coerces_to_true`),
+        # not with `bool()`: `bool("false")` is True while pydantic coerces
+        # `"false"` to False, so the raw-dict truthiness counted a call that
+        # WRITES as a preview read — the same raw-dict trap `_is_preview` and
+        # `_arguments_say_preview` each document. Pre-existing for the live
+        # `dry_run` tools and reachable for the three retired-but-answering ones
+        # this batch added to the set; one predicate closes both (measured:
+        # `dry_run="false"`/`"no"`/`"0"` took the WRITE branch and were metered
+        # as reads under `bool`).
+        dry_run=(
+            name in _dry_run_tool_names()
+            and _coerces_to_true((arguments or {}).get("dry_run"))
+        ),
     )
     status, error_kind, result_count = "ok", None, None
     # #8135: open the per-dispatch failure holder BEFORE the dispatch task is
@@ -3453,13 +3466,43 @@ _DRY_RUN_TOOLS: frozenset[str] | None = None
 
 
 def _dry_run_tool_names() -> frozenset[str]:
-    """Registry names whose served handler declares `dry_run` (computed once)."""
+    """Names whose handler declares `dry_run`, from BOTH registries (computed once).
+
+    ⛔ THE POPULATION IS "NAMES THAT STILL ANSWER", NOT "NAMES IN `tools/list`".
+    A retired name is not advertised, but `_RetiredToolTransform` resolves it on
+    `get_tool` and `build_retired_tools` builds its shim from the ORIGINAL module
+    handler — so `tools/call` on it runs that very handler, `dry_run` argument and
+    all. Reading only `TOOL_REGISTRY` therefore dropped the preview arm for every
+    retired door whose handler still previews: measured at the #11609 Phase-2
+    head, `tortoise_supersede`, `tortoise_invalidate` and `tortoise_retract_point`
+    are each retired, still answering, still declaring `dry_run`, and were each
+    missing — so a real preview of a destructive write was reported
+    `committed: "unknown"` + "this call is NOT safe to repeat", the exact
+    falsehood #10084/#10849 fix (the CI red was
+    `test_wait_bound_write_ack.py::test_a_COERCED_true_is_a_preview_and_a_coerced_false_is_not`,   # noqa: E501
+    whose subject is `tortoise_supersede`).
+
+    Widening is safe in the other direction too: membership only ever permits a
+    PREVIEW reading, and every reader of it still asks the ARGUMENT as well —
+    `_arguments_say_preview` (the refusal's `committed` cell) coerces the spelling
+    the way the handler will, `_is_preview` (the "nothing was written" receipt)
+    keeps its deliberately STRICTER `is True` identity read — so an uncoerced
+    spelling MISSES that disclosure rather than forging it, which is the
+    fail-closed direction — and the metering half
+    (`maybe_record_mcp_read`'s caller) uses the coercing predicate rather than
+    `bool()` — so a `dry_run="false"` call that takes the WRITE branch is never
+    labelled a preview and never counted as a preview read. Each member is
+    verified by its own signature (a retired name with no module handler, or one
+    that does not declare `dry_run`, is not added), so the #4057 gate ("a client
+    cannot move the read counter for a tool whose schema REJECTS the key") is
+    untouched too: every member accepts the key.
+    """
     global _DRY_RUN_TOOLS
     if _DRY_RUN_TOOLS is None:
-        from tortoise.tool_registry import TOOL_REGISTRY
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
         names = set()
-        for entry in TOOL_REGISTRY:
+        for entry in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY):
             fn = globals().get(entry.name)
             if fn is None:
                 continue

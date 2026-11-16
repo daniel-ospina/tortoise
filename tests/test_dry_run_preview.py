@@ -1299,6 +1299,31 @@ class TestDryRunIsMeteredAsARead:
             monkeypatch, "tortoise_delete", {"dry_run": True}
         ) == [("k1", "team-x")]
 
+    def test_the_SPELLING_of_false_is_not_metered_as_a_preview(
+            self, monkeypatch):
+        """`bool("false")` is True; pydantic's coercion of it is `False`.
+
+        ⛔ The metering reads the RAW pre-validation dict, so a truthiness test
+        counted `dry_run="false"` — a spelling the served schema ACCEPTS and
+        coerces to `False`, so the handler takes the WRITE branch — as a preview
+        read. The read counter then records a preview for a call that wrote.
+        The predicate is `_coerces_to_true`, on both halves: `"true"` is still a
+        preview (the reason the coercion exists at all), `"false"`/`"0"`/`"no"`
+        are not.
+
+        ⛔ `" true "` is absent ON PURPOSE: the coercion does not strip, so
+        pydantic REJECTS that spelling and the call never dispatches — metering
+        it either way would assert a behaviour no caller can reach.
+        """
+        for truthy in (True, "true", "TRUE", "1", 1):
+            assert self._dispatch_reads(
+                monkeypatch, "tortoise_delete", {"dry_run": truthy}
+            ) == [("k1", "team-x")], f"{truthy!r} is a preview"
+        for falsy in (False, "false", "0", "no", 0, None):
+            assert self._dispatch_reads(
+                monkeypatch, "tortoise_delete", {"dry_run": falsy}
+            ) == [], f"{falsy!r} takes the WRITE branch, so it is not a read"
+
 
 class TestPreviewToolSetIsDeclared:
     """`_dry_run_tool_names()` is the metering gate (#4057 review P2): the read
@@ -1308,7 +1333,11 @@ class TestPreviewToolSetIsDeclared:
 
     #: #11609 Phase 2: three of the six destructive doors were absorbed by a
     #: container, and the PREVIEW follows the capability rather than the name —
-    #: a retired door that is no longer advertised cannot own the metering gate.
+    #: the CONTAINER must declare `dry_run` (it does).
+    #: ⛔ But it does NOT follow that the retired door may be dropped from the
+    #: set: a retired name still ANSWERS (see
+    #: `test_a_RETIRED_door_that_still_ANSWERS_keeps_its_preview`), so it owns its
+    #: own preview reading while it does. Both halves are asserted below.
     CONTAINER_OF: ClassVar[dict[str, str]] = {
         "tortoise_supersede": "tortoise_supersede_knowledge",
         "tortoise_invalidate": "tortoise_update_knowledge",
@@ -1320,6 +1349,28 @@ class TestPreviewToolSetIsDeclared:
         names = m._dry_run_tool_names()
         live = {self.CONTAINER_OF.get(t, t) for t in DESTRUCTIVE_TOOLS}
         assert live <= names, sorted(live - names)
+
+    def test_a_RETIRED_door_that_still_ANSWERS_keeps_its_preview(self):
+        """`tools/call` on a retired name still runs the ORIGINAL handler.
+
+        ⛔ The `CONTAINER_OF` mapping above is right about ADVERTISING and wrong
+        about ANSWERING, and the difference is a false write-ack. A retired name
+        is absent from `tools/list`, but `_RetiredToolTransform` resolves it on
+        `get_tool` and `build_retired_tools` builds its shim from the ORIGINAL
+        module handler — so `dry_run=True` on the old door really does preview,
+        and a set derived from `TOOL_REGISTRY` alone called that preview
+        `committed: "unknown"` + "this call is NOT safe to repeat".
+
+        Measured at the #11609 Phase-2 head: all three mapped names above are
+        retired, still answering, still declare `dry_run`, and all three were
+        missing from the set — the CI red was
+        `test_wait_bound_write_ack.py::test_a_COERCED_true_is_a_preview_and_a_coerced_false_is_not`.
+        """
+        import tortoise.mcp_server as m
+        names = m._dry_run_tool_names()
+        missing = sorted(set(self.CONTAINER_OF) - names)
+        assert not missing, (
+            f"retired-but-answering preview doors missing from the set: {missing}")
 
     def test_a_write_tool_without_dry_run_is_not_in_the_set(self):
         import tortoise.mcp_server as m
