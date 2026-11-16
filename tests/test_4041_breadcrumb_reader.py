@@ -234,8 +234,9 @@ def _kill_hook_tree(proc: subprocess.Popen) -> str:
       (`urlopen(req, timeout=15)`, `tortoise/__main__.py:9724`) — a per-socket
       timeout, not a wall-clock deadline, and neither DNS resolution nor the
       CLI import ahead of it is covered — so it has usually exited by then, and
-      bash has already reaped it.  If `:801` is never reached its exit status
-      is simply never collected — not a zombie.
+      bash has already reaped it.  If `:801` is never reached the status bash
+      recorded is simply never READ — reaping and reading are two acts, and the
+      zombie is gone either way.
       None of them is guaranteed to be there: `_run_digest` spawns NOTHING
       when both its arms miss (`:687`-`:698` has no `else`, and a stall in the
       `-d` test at `:690` is already inside the function with no child yet),
