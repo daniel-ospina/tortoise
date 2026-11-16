@@ -4869,6 +4869,17 @@ _PROVEN_READS: set[tuple[str, str]] = {
     # through `_update_entity`, whose lane declaration is the door's own; the
     # read-side verdict blesses no undeclared write.
     ("tortoise/sdk.py", "TortoiseSDK._supersede_entity._rows"),
+    # #12592: the OUTER door's own reach — the hybrid-id guard's sibling probe,
+    # `f"MATCH (n:{_sibling} {{id:$id}}) RETURN count(n) AS hits"`. The label is
+    # interpolated from the guard's own variable, so the resolver reports
+    # '<unresolved>' and the census's over-report polarity counts it as a write.
+    # By hand it is a READ: `RETURN count(n)`, no SET/CREATE/MERGE/DELETE/REMOVE,
+    # no write procedure, appending no record. The door's WRITE is not in this
+    # function at all — it is delegated to `update_knowledge`, which relays
+    # through `_update_entity_any` to the apply-first door `_update_entity`,
+    # whose lane declaration covers it. So this read-side verdict blesses no
+    # undeclared write (pinned statement extent below).
+    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity"),
     ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"),
 }
 
@@ -4892,6 +4903,9 @@ _PROVEN_READ_STATEMENTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("tortoise/sdk.py", "TortoiseSDK._uncalibrated_ep_participants"): ("query",),
     # one `g.query`, resolving to `MATCH (n:{label} {id:$id}) RETURN count(n) …`
     ("tortoise/sdk.py", "TortoiseSDK._supersede_entity._rows"): ("query",),
+    # ONE, not two: the nested `_rows` probe takes its own key above; this
+    # function's only unresolved statement is the sibling probe's f-string label.
+    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity"): ("query",),
     # ONE, not three: `_assert_supersession_names_a_successor` issues three
     # `proj.g.query` calls and only the first is unresolved (the label loop's
     # f-string). The other two are literal statements the resolver flattens into
