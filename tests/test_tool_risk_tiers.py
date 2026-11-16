@@ -137,7 +137,6 @@ class TestTheRiskAxis:
         #   reads, so this batch raises it by exactly one.
         assert len(reading) == 49, sorted(reading)   # 47 read + 2 maintenance
         assert len(served()) == 103, sorted(e.name for e in served())
-        assert len(served()) == 97, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
