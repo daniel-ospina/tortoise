@@ -465,12 +465,26 @@ three things that would make the ruling true of the running system are V5 items 
 
 The dispatch brief asked for this claim to be checked rather than trusted, so:
 
-`git for-each-ref refs/wip/ | grep 12894` returns two cap-archives, both labelled *"not for merge"*:
+The cap-archives live on **`origin`** under `refs/wip/` — a *local* `git for-each-ref refs/wip/`
+returns nothing here, and a command in that namespace can never produce the listing below. The archive
+tool (agent-infra's `scripts/bg-rescue-wip.sh`, materialised in this repo as the gitignored `scripts/`
+pointer) writes `refs/wip-local/<slug>` locally at `:321` and only *pushes* to `origin refs/wip/<slug>`,
+fetching the remote copy back as `refs/wip-remote/<slug>` at `:336`. The command that reproduces is
+`git ls-remote`, quoted verbatim:
 
 ```text
-ec0bc91f6d  refs/wip/feat-12894-allocator-spike   (archived 2026-11-16T06:29:21Z)
-703613fa0c  refs/wip/issue-12894-allocator-spike  (archived 2026-11-16T10:08:08Z)
+$ git ls-remote origin 'refs/wip/*12894*'
+# real output separates the two fields with a TAB; shown with one space (MD010 forbids hard tabs)
+ec0bc91f6d8650105b4eb0f1a40c342c59451f14 refs/wip/feat-12894-allocator-spike
+703613fa0ca66b33813e8ab1c6da93e9603ba97a refs/wip/issue-12894-allocator-spike
 ```
+
+Both say **"not for merge"** in their commit subject, which also carries the archive timestamps
+(`2026-11-16T06:29:21Z`, `2026-11-16T10:08:08Z`) — **transcribed from those subjects, not from the
+listing above**: the subjects record when the archive ran, and the `issue-` commit's own date is
+`10:08:19`, nine seconds later. Locally the same objects surface as
+`refs/wip-local/issue-12894-allocator-spike` (`703613fa0c`) plus a stale
+`refs/wip-remote/issue-12894-allocator-spike` (`7d4e802fdf`).
 
 Relative to the merged `#12959` head (`acc9cbc035`), **only the `issue-` ref** carries a substantive
 commit — `e2a9eadb87` (`acc9cbc035..refs/wip/issue-12894-allocator-spike` = `703613fa0c`, `7d4e802fdf`,
@@ -603,8 +617,13 @@ for m in re.finditer('[\$][0-9]+', src):
 # => 266 $1 / 7570 $1 — both inside comments/docstrings, no live statement
 
 # §8 — which WIP ref carries the byte-meter fix
-git merge-base --is-ancestor e2a9eadb87 ec0bc91f6d || echo 'not in feat-ref'
-git merge-base --is-ancestor e2a9eadb87 703613fa0c && echo 'in issue-ref'
+# Self-checking on purpose: `git merge-base --is-ancestor` prints the fallback and exits 0 even when
+# the OBJECT is absent (measured: a bogus sha yields "not in feat-ref" and exit 0), so the object is
+# verified first — otherwise this line certifies nothing.
+git rev-parse --verify -q ec0bc91f6d^{commit} >/dev/null \
+  && { git merge-base --is-ancestor e2a9eadb87 ec0bc91f6d && echo 'in feat-ref' || echo 'not in feat-ref'; }
+git rev-parse --verify -q 703613fa0c^{commit} >/dev/null \
+  && git merge-base --is-ancestor e2a9eadb87 703613fa0c && echo 'in issue-ref'
 git grep -c no_schema_ddl 703613fa0c -- tortoise/    # metering.py:3  sdk.py:3
 ```
 
