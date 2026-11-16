@@ -129,7 +129,9 @@ RETIRED_LITERAL: dict[str, str] = {
     # #4282 Phase 2 (#11609 / #12915): fourteen WRITE/MUTATE doors retired into SIX
     # approved containers. The oracle below is TYPED on purpose — it is what makes a
     # registry-side edit red — so each container batch has to move it deliberately.
-    # 23 + 14 = 37; the container each name points at is one hop, never a chain.
+    # 23 + 14 = 37 after #4282 Phase 2's WRITE/MUTATE batch, then 46 after #11609
+    # Phase 2's READ/QUERY batch (37 + 9); the container each name points at is
+    # one hop, never a chain.
     "tortoise_annotate_operator":
         'tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., '
         'directness=...)',
@@ -152,6 +154,19 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_update": "tortoise_update_knowledge(id, props=...)",
     "tortoise_update_entity": "tortoise_update_knowledge(id, props=...)",
     "tortoise_update_point": "tortoise_update_knowledge(id, props=...)",
+    # #11609 Phase 2 (PR #12951): the NINE READ/QUERY doors retired into the six
+    # READ containers. Same rule as the block above — typed, so a registry-side
+    # edit reds. 37 + 9 = 46, which is also `RETIRED_TOOL_REGISTRY`'s size and
+    # the row count `docs/product/mcp-rename-table.md` renders.
+    "tortoise_belief_timeline": 'tortoise_check_confidence(topic=...)',
+    "tortoise_entity_profile": 'tortoise_explore_connections(node_id, hops=...)',
+    "tortoise_get_confidence": 'tortoise_check_confidence(claim_id=...)',
+    "tortoise_get_source_reliability": 'tortoise_list_knowledge(kind="source_reliability", url=...)',
+    "tortoise_list_dedup_candidates": 'tortoise_review_link_candidates(kind="dedup", candidate_type=...)',
+    "tortoise_list_topics": 'tortoise_list_knowledge(kind="topic", entity_id=...)',
+    "tortoise_provenance": 'tortoise_check_confidence(claim_id, include_provenance=True)',
+    "tortoise_review_connections": 'tortoise_review_link_candidates(kind="connections", mode=...)',
+    "tortoise_traverse": 'tortoise_explore_connections(node_id, hops=...)',
 }
 
 # The names whose 0.1 destination differs from the destination of their redirect.
@@ -556,13 +571,16 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     # into the container (and `tortoise_overview` itself into its target); 37 after
     # #4282 Phase 2 retired fourteen WRITE/MUTATE doors into six approved containers
     # (23 + 14 = 37 — the same arithmetic `config/surface-manifest.yml` derives as
-    # 68 live − 14 + 6 = 60, since every retired name stays SERVED through the shim).
+    # 68 live − 14 + 6 = 60, since every retired name stays SERVED through the shim);
+    # 46 after #11609 Phase 2 retired nine READ/QUERY doors (37 + 9 = 46 = the
+    # manifest's `counts.retired`, derived there as 68 − 9 + 5 − 14 + 6 = 56 live).
     # The pin moves with each landed container batch.
-    # 44 after #11609 lane C retired SEVEN SOURCES/MINE/SESSION doors into six
-    # containers on top of lane B's fourteen (23 + 7 + 14 = 44 — the same arithmetic
-    # `config/surface-manifest.yml` derives as 68 + 6 + 6 − 7 − 14 = 59 live).
-    assert len(RETIRED_LITERAL) == 44, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 44"
+    # 53 at THIS head, which composes ALL FOUR landed batches: 23 at the base
+    # + 14 (lane B's WRITE/MUTATE wave) + 9 (this PR's READ/QUERY wave) + 7 (lane C's
+    # SOURCES/MINE/SESSION wave) = 53, which is exactly `counts.retired` in
+    # `config/surface-manifest.yml` at this merge.
+    assert len(RETIRED_LITERAL) == 53, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 53"
     )
 
 

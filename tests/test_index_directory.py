@@ -749,7 +749,7 @@ def test_e2e1_list_sources_flat_rows_and_by_kind(corpus):
     sdk = _sdk()
     try:
         r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
-        rows = sdk.list_sources()
+        rows = sdk.list_knowledge("source")
         # list_sources is the PROVENANCE/corpus registry: 3 corpus Sources.
         # D10 (#5026): a document node is also a :Source, but it is NOT a
         # provenance source — it carries documentKind (and, since #5082, the
@@ -1099,7 +1099,7 @@ def test_e2e13_special_char_filenames_round_trip(tmp_path):
             assert unquote(parts.path).lstrip("/") in {
                 "my notes.md", "a#b.md", "q?.md", "x&y.md", "resumé.md"}
         # list_sources shows every file
-        assert len(sdk.list_sources()) == 5
+        assert len(sdk.list_knowledge("source")) == 5
         # recall_subgraph seeded with the ENCODED url resolves the node
         seed = "corpus://my%20corpus%231/my%20notes.md"
         sub = sdk.recall_subgraph(seed=seed, completeness="full")
@@ -1556,7 +1556,7 @@ def test_e2e7_summary_arithmetic_and_message_content(tmp_path):
         assert (r["indexed"] + r["updated"] + r["skipped"] + r["failed"]
                 == r["file_count"])
         # list_sources contains the indexed file exactly once, no failed file
-        urls = [row["url"] for row in sdk.list_sources()]
+        urls = [row["url"] for row in sdk.list_knowledge("source")]
         assert len(urls) == len(set(urls)) == 1
         # message-content leg (ii): every poison entry is actionable
         for e in r["errors"]:

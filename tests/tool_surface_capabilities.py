@@ -60,6 +60,20 @@ HTTP_EXCLUDED_SDK_METHODS: dict[str, str] = {
 READ_THROUGH_WRITE_METHODS: dict[str, str] = {
     "compute_confidence": "persists computed `SET n.confidence` (#1157/#4122)",
     "get_confidence": "lazy `dream(dirty_only=True)` writes n.confidence (#1157/#4122)",
+    # #11609 Phase 2 — the READ/QUERY containers. Each of these reaches a refresh that
+    # is ALREADY declared above or below; the container does not add a new writer, it
+    # aggregates reads that one of its arms performs. Named individually because the
+    # #4122 arm reads the HANDLER-reached set, and a container's arm is invisible to it.
+    # ⛔ `get_source_reliability` is deliberately NOT listed here: its own retired door
+    # declares `risk="write"` (it recomputes and caches), so it needs no read-through
+    # exemption — it IS a writer, and the ledger already sees it as one. What needs
+    # declaring is the READ container whose arm reaches it.
+    "list_knowledge": "kind='source_reliability' reaches the declared read-through "
+                      "writer `get_source_reliability` (#11609)",
+    "search_knowledge": "mode='full_text' delegates to `list_knowledge`, whose "
+                        "'source_reliability' arm is the read-through writer above (#11609)",
+    "check_confidence": "lazily reaches `get_confidence`, the declared read-through "
+                        "writer that `dream(dirty_only=True)` writes through (#11609)",
     # `get_tenant_packs` LEFT this set in #11609 batch 1 with its only MCP door
     # (`tortoise_packs_list`, ARCHIVED); the read-through posture it recorded is
     # unchanged on the REST twin `GET /v1/packs`. A future MCP door must re-add it —
@@ -119,7 +133,15 @@ NON_SDK_READ_OPERATIONS: dict[str, str] = {
 # `by_method` index, so the read-classification property must also be asserted
 # per TOOL NAME or it silently stops being checked (#4035 review).
 NON_SDK_READ_BINDINGS: dict[str, str] = {
-    # EMPTY since #11609 batch 1, with NON_SDK_READ_OPERATIONS above.
+    # #12951 review (P1): `tortoise_provenance` is handler-served (`sdk_method=""`)
+    # and its reach to the read-through writer `check_confidence` lives inside the
+    # `_check_confidence_provenance` HELPER, not in the handler body. Between the two,
+    # the op-keyed `by_method` arm above had no declaration to key on and the door was
+    # observed by NOTHING — so the maintenance tier it now carries was a comment: a
+    # later lane could demote it back to `read` (a `readOnlyHint: true` over a call that
+    # dreams a dirty root) and no arm would red. Declared by TOOL NAME so the tier arm
+    # below actually checks it.
+    "check_confidence": "tortoise_provenance",
 }
 
 # ── #9576: read-classified RETENTION housekeeping through another module ─────
@@ -433,6 +455,29 @@ NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
     "tortoise_entity_profile",
     # #3904: handler-served read (navigation.tortoise_traverse on sdk._get_proj())
     "tortoise_traverse",
+    # #11609 Phase 2 — the READ/QUERY containers and the doors that now answer through
+    # them. Each of these declares `sdk_method=""` because its handler dispatches on a
+    # discriminator (`section=`, `kind=`, `mode=`) rather than onto one SDK method; the
+    # container tools themselves carry their own binding (`sdk_method="list_knowledge"`
+    # etc.) so the write ledger can still see the methods they reach.
+    # ⛔ The five CONTAINERS are deliberately ABSENT: each declares its own
+    # `sdk_method` (`list_knowledge` etc.), so it is BOUND, not handler-served. The
+    # declarations below are the member DOORS that dispatch into them.
+    # …and the doors whose member SDK method was re-privatised behind its container
+    # (the public name is gone, so a non-empty `sdk_method` would not resolve).
+    "tortoise_taxonomy", "tortoise_list_pointkinds", "tortoise_list_tags",
+    "tortoise_list_sources", "tortoise_list_namespaces", "tortoise_status",
+    "tortoise_validate_domain", "tortoise_diary_read", "tortoise_search_sessions",
+    "tortoise_suggest_entry_points", "tortoise_expand_relationships",
+    # ⛔ NOT that reason: `tortoise_stale`'s member `stale_points` is STILL PUBLIC
+    # (`sdk_retired.py` says so explicitly, and the owner's narrow-alias row names the
+    # TOOL `stale`, not the method). Its binding is empty because the door answers
+    # through `graph_overview(section='stale')` — a discriminator dispatch, like the
+    # containers above (#12951 review P3).
+    "tortoise_stale",
+    # …and the RETIRED names the #3883 shim still serves, for the same reason: a
+    # retired name that still resolves is still checked here (#4170/#4035 precedent).
+    "tortoise_list_topics", "tortoise_provenance", "tortoise_list_dedup_candidates",
 })
 
 # #4474 removed `NON_HTTP_WRITER_TOOLS` — the last hand-maintained parallel name

@@ -25348,7 +25348,7 @@ class TortoiseSDK:
                 "deferred_live_prior": deferred,
                 "boundary_blocked": boundary_blocked}
 
-    def list_dedup_candidates(self, candidate_type: str = "content",
+    def _list_dedup_candidates(self, candidate_type: str = "content",
                               limit: int = 50) -> list[dict]:
         """Review queue for dedup candidates (plan §6.1, DE2E-3/DE2E-2).
 
@@ -27381,6 +27381,476 @@ class TortoiseSDK:
             served_out[RESIDENCY_FIELD] = RESIDENCY_NOT_HOT
             return {**(answer.props or {}), RESIDENCY_FIELD: RESIDENCY_NOT_HOT}
         return dict(answer.props) if answer.props else {}
+
+    # ── #4282 Phase 2 read/query containers (#11609) ──────────────
+    #
+    # The approved surface has ONE read verb per question, not a zoo of narrow
+    # ones (`docs/product/beta-sdk-surface.md` rows 3-10, owner-approved). Each
+    # container below is that verb: it dispatches on the discriminator
+    # `docs/product/bridge-table.md` Part A records for it, and every arm answers
+    # with what the narrow method it replaces returned. The container is a DOOR,
+    # never a second implementation — AIP-136 is the ruling: a custom method is
+    # for what the standard methods cannot express, and consolidating them must
+    # not change what the operation MEANS.
+
+    #: The `section=` values :meth:`graph_overview` dispatches on — THE home for the
+    #: container's approved set. Read by the dispatch and by the tests; the MCP door's
+    #: own list (`mcp_server._OVERVIEW_SECTIONS`) is this set PLUS its declared
+    #: transport-only sections, and the relationship is pinned in
+    #: `tests/test_11609_read_containers.py` in BOTH directions (#12951 review: the
+    #: comment here used to claim this tuple was read by "the MCP container's own list",
+    #: which was false — that list is an independent literal).
+    #:
+    #: ⛔ Do not add a section here to make the two sets match: the difference is exactly
+    #: `mcp_server._OVERVIEW_TRANSPORT_ONLY_SECTIONS` (`graphs`, `health`), and neither
+    #: belongs in this set — `graphs` is another container's source (bridge-table Part A
+    #: sends it to `tenancy:list_memory_graphs`) and `health` is a monitoring probe with
+    #: no SDK read behind it.
+    GRAPH_OVERVIEW_SECTIONS = (
+        "taxonomy", "structure", "structure_check", "pointkinds", "tags",
+        "sources", "namespaces", "topics", "status", "stale",
+        "validate_domain", "audit", "dream_health",
+    )
+    #: Sections whose argument is REQUIRED, so the combined (`section=None`) read
+    #: leaves them out rather than reporting them as refusals.
+    GRAPH_OVERVIEW_NEEDS_ARGUMENT = ("topics", "validate_domain")
+
+    def graph_overview(self, section: str | None = None, *,
+                       entity_id: str | None = None,
+                       days: int = 30,
+                       limit: int = 50,
+                       domain: str | None = None,
+                       point_kinds: list[str] | None = None) -> Any:
+        """What is in this memory graph and how it is shaped — ONE call (row 6).
+
+        The approved orientation container. ``section`` selects the view and
+        every value dispatches to the read it replaces, so the narrow door and
+        this one cannot disagree:
+
+          taxonomy | structure | structure_check | pointkinds | tags | sources |
+          namespaces | status | stale | validate_domain (`domain` required) |
+          audit (`point_kinds` optional) | dream_health | topics (`entity_id`)
+
+        Omit ``section`` → a combined dict of one entry per section that does not
+        require an argument, keyed by the section name. ⚠️ This is NOT the set the MCP
+        container folds: the transport's no-`section` summary is an OLDER envelope
+        (`mcp_server._OVERVIEW_DEFAULT_SUMMARY_KEYS`, kept byte-identical to what
+        `tortoise_overview` returned before the consolidation), so it keeps ``audit``
+        and ``dream_health`` OUT and carries its two transport-only sections
+        (``graphs``, ``health``) IN. Both folds are presentation; this one is the
+        container's. (#12951 review: the sentence here claimed the two were "the same
+        set", which they are not.)
+
+        ``structure_check`` keeps its own door live on purpose (#10914): that read
+        is the one member with a WRAP envelope (``list[dict]``) and the failure
+        repair that envelope carries cannot ride a ``-> Any`` container.
+        """
+        if section is None:
+            combined: dict[str, Any] = {}
+            for sec in self.GRAPH_OVERVIEW_SECTIONS:
+                if sec in self.GRAPH_OVERVIEW_NEEDS_ARGUMENT:
+                    continue
+                combined[sec] = self.graph_overview(
+                    sec, days=days, limit=limit, point_kinds=point_kinds)
+            return combined
+        if section == "taxonomy":
+            return self._taxonomy()
+        if section == "structure":
+            return self.summarize_structure()
+        if section == "structure_check":
+            return self.check_structure()
+        if section == "pointkinds":
+            return self._list_pointkinds()
+        if section == "tags":
+            return self._list_tags()
+        if section == "sources":
+            return self._list_sources()
+        if section == "namespaces":
+            return self._list_namespaces()
+        if section == "status":
+            return self._status()
+        if section == "stale":
+            return self.stale_points(days=days, limit=limit)
+        if section == "dream_health":
+            return self.dream_health_check()
+        if section == "validate_domain":
+            if not domain:
+                raise ValueError(
+                    "graph_overview(section='validate_domain') requires domain= "
+                    "— name the domain whose validators to run")
+            return self._validate_domain(domain)
+        if section == "audit":
+            return self.audit(point_kinds=point_kinds)
+        if section == "topics":
+            if not entity_id:
+                raise ValueError(
+                    "graph_overview(section='topics') requires entity_id= "
+                    "— name the entity whose topics to read")
+            return self._list_topics(entity_id)
+        raise ValueError(
+            f"graph_overview: unknown section {section!r}. Valid sections: "
+            f"{', '.join(self.GRAPH_OVERVIEW_SECTIONS)}")
+
+    #: The `mode=` values :meth:`search_knowledge` dispatches on.
+    SEARCH_KNOWLEDGE_MODES = (
+        "hybrid", "full_text", "tag", "sessions", "entry_points",
+        "issue_insight",
+    )
+
+    def search_knowledge(self, query: str | None = None, mode: str = "hybrid", *,
+                         kind: str | None = None,
+                         tag: str | None = None,
+                         entity_type: str = "point",
+                         limit: int | None = None,
+                         offset: int = 0,
+                         include_retracted: bool = False,
+                         min_confidence: float = 0.0,
+                         order_by: str = "relevance",
+                         threshold: float = 0.0,
+                         relationship_filter: str | None = None,
+                         traversal_path: str | None = None,
+                         agent: str | None = None,
+                         topics: list[str] | None = None,
+                         after: Any = None,
+                         before: Any = None,
+                         title: str | None = None,
+                         body: str | None = None,
+                         repo: str | None = None,
+                         **filters) -> Any:
+        """Find things by text — full-text and hybrid (row 3, `mode=`).
+
+        ONE search door. ``mode`` selects which question is being asked, and each
+        value answers with the rows its own read always returned:
+
+          hybrid (default) — meaning-ranked retrieval: RRF fusion of the FTS,
+              vector and structural legs, EP-annotated. Omitting ``query`` and
+              naming ``kind`` enumerates that kind instead (the full-scan mode).
+          full_text — exact matching with NO relevance ranking: pointKind and
+              property filters over a TOTAL order, so ``offset=`` walks the whole
+              population and the envelope carries ``total``/``hasMore``. The
+              engine has no standalone lexical leg (the RRF legs are fused, not
+              selectable), so "full text" here is the exact read, never a
+              vector-free hybrid — stated rather than implied.
+          tag — the Points reachable through one Tag. Sliced from a full scan, so
+              a walked tag page is approximate, not the complete set (#5346).
+              Retracted Points are excluded unless ``include_retracted=True`` —
+              the same tombstone contract as every other mode, applied here
+              because the accessor has no exclusion of its own.
+          sessions — indexed agent sessions, filtered by ``agent``/``topics`` and
+              bounded by ``after``/``before``.
+          entry_points — entity resolution: a natural-language query to matching
+              entities.
+          issue_insight — the "there is more in the graph" read for a would-be
+              issue (``title``, ``body``, ``repo``); call it BEFORE filing.
+
+        ``mode='full_text'`` is a DELEGATION to :meth:`list_knowledge` — the two
+        approved documents disagree about which container owns the exact claim
+        list (`docs/product/bridge-table.md` §D4 records it, and resolving it is
+        the owner's), so the read is implemented ONCE and both approved names
+        reach it.
+        """
+        mode = (mode or "hybrid").strip().lower()
+        if mode not in self.SEARCH_KNOWLEDGE_MODES:
+            raise ValueError(
+                f"search_knowledge: unknown mode {mode!r}. Valid modes: "
+                f"{', '.join(self.SEARCH_KNOWLEDGE_MODES)}")
+        if mode == "hybrid":
+            return self.tortoise_fts_query(
+                query=query, kind=kind, entity_type=entity_type,
+                min_confidence=min_confidence, order_by=order_by,
+                limit=10 if limit is None else limit, threshold=threshold,
+                relationship_filter=relationship_filter,
+                traversal_path=traversal_path,
+                include_terminal=include_retracted)
+        if mode == "full_text":
+            return self.list_knowledge(
+                "claim", point_kind=kind, limit=20 if limit is None else limit,
+                offset=offset, include_retracted=include_retracted, **filters)
+        if mode == "tag":
+            if not tag:
+                raise ValueError(
+                    "search_knowledge(mode='tag') requires tag= — name the Tag "
+                    "whose Points to read")
+            # #7983: `_record_reads=False` on the accessor, then record the page
+            # this call actually SERVES — this arm IS the paginated caller
+            # `query_points_by_tag`'s docstring warns about. Recording inside the
+            # accessor would count the WHOLE tag population for a call that
+            # receives one page of it, biased `f` HIGH (“the direction that must
+            # not happen”); recording nothing would leave the served rows
+            # unrecorded. The MCP tag arm performs the same two steps
+            # (`mcp_server.tortoise_query`), and the two must measure one thing.
+            rows = self.query_points_by_tag(tag, _record_reads=False)
+            # `query_points_by_tag` has no terminal-status exclusion of its own
+            # (it returns `properties(p)` for the whole tag population), so the
+            # `include_retracted=` this container DECLARES has to be applied
+            # here — the pre-existing door for the same question
+            # (`mcp_server.tortoise_query_points_by_tag`) filters
+            # `status != "retracted"` for exactly this reason (Epic #888).
+            # Unapplied, a caller who omitted the flag (every caller — the
+            # default is False) was served tombstones, and two live doors
+            # answering "the Points reachable through one Tag" would disagree
+            # about tombstones with no signal. Filtered BEFORE the slice, so
+            # `total`/`hasMore` describe the population the caller asked for.
+            if not include_retracted:
+                rows = [r for r in rows if r.get("status") != "retracted"]
+            page = rows[offset:offset + (limit or 100)]
+            _ledger_record("Point", page)  # #7983: the served page, not the tag
+            return {"results": page, "total": len(rows),
+                    "hasMore": offset + (limit or 100) < len(rows)}
+        if mode == "sessions":
+            if not query:
+                raise ValueError(
+                    "search_knowledge(mode='sessions') requires query= — the "
+                    "session search is text-driven")
+            return self._search_sessions(
+                query, agent=agent, topics=topics, after=after, before=before,
+                limit=10 if limit is None else limit, offset=offset)
+        if mode == "entry_points":
+            if not query:
+                raise ValueError(
+                    "search_knowledge(mode='entry_points') requires query= — "
+                    "entity resolution is text-driven")
+            return self._suggest_entry_points(
+                query, limit=5 if limit is None else limit, kind_filter=kind)
+        # mode == "issue_insight"
+        subject = title or query
+        if not subject:
+            raise ValueError(
+                "search_knowledge(mode='issue_insight') requires title= (or "
+                "query=) — the insight is matched against a would-be issue")
+        return self.issue_insight(
+            subject, body=body, repo=repo, limit=2 if limit is None else limit)
+
+    #: The `kind=` values :meth:`list_knowledge` dispatches on.
+    LIST_KNOWLEDGE_KINDS = (
+        "claim", "source", "source_reliability", "batch", "namespace",
+        "topic", "diary",
+    )
+
+    def list_knowledge(self, kind: str = "claim", *,
+                       point_kind: str | None = None,
+                       id: str | None = None,
+                       url: str | None = None,
+                       entity_id: str | None = None,
+                       agent: str | None = None,
+                       wing: str | None = None,
+                       limit: int = 20,
+                       offset: int = 0,
+                       include_retracted: bool = False,
+                       **filters) -> Any:
+        """One list method; ``kind=`` selects the collection (row 4).
+
+        Browse and filter WITHOUT a text search. ``kind`` is a closed set and
+        every value answers with the rows its own read returned:
+
+          claim (default) — Points by pointKind/property filters, paged over a
+              TOTAL order: ``{results, total, hasMore}``, so ``offset=`` walks it
+              to completion.
+          source — every PROVENANCE Source with its point count (the
+              ``documentKind IS NULL`` partition, D10).
+          source_reliability — one Source's derived reliability (``url=``
+              required). It is its own arm because the read RECOMPUTES and caches
+              the derivation, which is why the MCP door for it is not a read.
+          batch — with ``id=``: one bundle's stamped artifacts; without: the most
+              recent batch ids with their counts.
+          namespace — installed pack namespaces with kind counts.
+          topic — one entity's topic profile (``entity_id=`` required).
+          diary — an agent's recent diary entries, newest first.
+
+        Paging is a CONTRACT, not decoration (AIP-158, and this surface's own
+        row 4): a list that hits its cap must say so and hand back a way to
+        continue. ``claim`` publishes ``total``/``hasMore``; the tag read pages
+        through :meth:`search_knowledge` (``mode="tag"``), because ``tag`` is not
+        one of :data:`LIST_KNOWLEDGE_KINDS`. The
+        collections that are inherently whole-vocabulary (``source``,
+        ``namespace``, ``batch``) are bounded by ``limit`` and are documented as
+        capped where they are capped, never silently short.
+        """
+        kind = (kind or "claim").strip().lower()
+        if kind not in self.LIST_KNOWLEDGE_KINDS:
+            raise ValueError(
+                f"list_knowledge: unknown kind {kind!r}. Valid kinds: "
+                f"{', '.join(self.LIST_KNOWLEDGE_KINDS)}")
+        if kind == "claim":
+            return self.paginated_query(
+                kind=point_kind, skip=offset, limit=limit,
+                include_retracted=include_retracted, **filters)
+        if kind == "source":
+            return self._list_sources()
+        if kind == "source_reliability":
+            if not url:
+                raise ValueError(
+                    "list_knowledge(kind='source_reliability') requires url= "
+                    "— the reliability is derived for one Source")
+            return self.get_source_reliability(url)
+        if kind == "batch":
+            if id:
+                return self.list_batch(id)
+            return self.list_batches(limit=limit)
+        if kind == "namespace":
+            return self._list_namespaces()
+        if kind == "topic":
+            if not entity_id:
+                raise ValueError(
+                    "list_knowledge(kind='topic') requires entity_id= — the "
+                    "topic profile is per entity")
+            return self._list_topics(entity_id)
+        # kind == "diary"
+        if not agent:
+            raise ValueError(
+                "list_knowledge(kind='diary') requires agent= — the diary is "
+                "read per author")
+        return self._diary_read(agent, last_n=limit, wing=wing)
+
+    def check_confidence(self, claim_id: str | None = None, *,
+                         topic: str | None = None,
+                         session: bool = False,
+                         calibrate: bool = False,
+                         include_provenance: bool = False,
+                         limit: int = 50,
+                         require_calibration: bool | None = None) -> Any:
+        """How confident the graph is — the confidence view ONLY (row 5).
+
+        The container answers with the confidence VIEW; it never recomputes the
+        posterior (that is :meth:`compute_confidence`'s job, and the reason
+        `compute_confidence` stays its own entry). ⚠️ It is NOT write-free: the
+        ``claim_id`` arm reaches :meth:`get_confidence`, whose lazy-consistency
+        path dreams a DIRTY root (``self.dream(dirty_only=True, …)``) — a write
+        that PRE-DATES this container and is unchanged by it, which is also why
+        the MCP door for this row is tiered ``maintenance`` rather than ``read``.
+        Dispatch is by argument, as `docs/product/bridge-table.md` Part A
+        records for this target:
+
+          claim_id= — one claim's EP posterior ``{mean, variance, alpha, beta}``;
+              ``include_provenance=True`` adds the chain behind it.
+          topic= — the dated belief chain for a topic, oldest window first.
+          session=True — what happened last session, including its confidence
+              changes.
+          calibrate=True — the graph-wide calibration audit, per point.
+          (no selector) — the graph-wide calibration audit, which is the answer
+              to "how confident is this graph" rather than "how confident is
+              this claim".
+
+        ``require_calibration`` is forwarded verbatim to the EP read; ``None``
+        keeps the shared posture (default fail-closed, #344).
+        """
+        if claim_id:
+            view = self.get_confidence(
+                claim_id, require_calibration=require_calibration)
+            if not include_provenance:
+                return view
+            return {
+                "confidence": view,
+                "provenance": self._provenance(claim_id),
+            }
+        if topic:
+            return self.belief_timeline(topic, limit=limit)
+        if session:
+            return self.session_context()
+        # calibrate=True, and the no-selector default: the graph-wide view.
+        return self.calibrate_summary()
+
+    def explore_connections(self, node_id: str | None = None, *,
+                            query: str | None = None,
+                            hops: int = 2,
+                            include_content: bool = False,
+                            point_kind: str | None = None,
+                            confidence_min: float | None = None) -> Any:
+        """Walk outward from a node through its links (row 8).
+
+        Dispatch is by argument, as the bridge table records for this target:
+
+          node_id= — the entity-centric BFS from that node: its neighbours
+              categorised by layer.
+          node_id= + include_content=True — the EXPAND payload for one Point:
+              every neighbour's full text, not just its state entry (the
+              list/expand split, #1353).
+          query= — resolve a natural-language query to the nodes it names, then
+              walk from the best one. This is the capability `traverse` used to
+              provide and that had NO door at all after #4282 deleted the name
+              without landing its target: the walk is reachable from the SDK
+              again here.
+
+        ``hops`` bounds the BFS; the walk is the navigation module's, not a second
+        traversal implementation.
+        """
+        if not node_id and not query:
+            raise ValueError(
+                "explore_connections requires node_id= (walk from this node) or "
+                "query= (resolve a name, then walk from it)")
+        if not node_id:
+            hits = self._suggest_entry_points(query, limit=1)
+            if not hits:
+                return {"error": f"explore_connections: query {query!r} matched "
+                                 "no node to walk from", "results": []}
+            node_id = hits[0]["id"] if isinstance(hits[0], dict) else hits[0]
+            if node_id and isinstance(node_id, dict):  # pragma: no cover - shape guard
+                node_id = node_id.get("id")
+        if include_content:
+            return self._expand_relationships(node_id)
+        from .navigation import entityProfile
+        proj = self._get_proj()
+        return entityProfile(
+            proj.db,
+            getattr(proj, "graph_name", "tortoise"),
+            node_id, hops=hops, pointKind=point_kind,
+            confidenceMin=confidence_min)
+
+    #: The `kind=` values :meth:`review_link_candidates` dispatches on.
+    REVIEW_LINK_CANDIDATE_KINDS = ("connections", "dedup", "cross_lens")
+
+    def review_link_candidates(self, kind: str = "connections", *,
+                               mode: str = "both",
+                               scope: str | None = None,
+                               candidate_type: str = "content",
+                               limit: int | None = None,
+                               threshold: float | None = None) -> Any:
+        """Connections found but not made — READ-ONLY (row 10).
+
+        The review queue for links the graph has not asserted. Dispatch is by
+        argument, as the bridge table records for this target:
+
+          connections (default) — related-but-missing suggestions and illogical or
+              stale links (``mode`` selects add / prune / both; ``scope`` narrows
+              the pool to the retrieval-nearest points).
+          dedup — the deduplication review queue (``candidate_type`` selects the
+              content or entity queue).
+          cross_lens — unverified cross-source candidate pairs over the vector
+              index.
+
+        Nothing here writes. Accepting a candidate is
+        :meth:`link_entities` with its endpoints — never a side effect of reading
+        the queue (the candidates-never-write contract, #438).
+
+        ``limit`` bounds EVERY arm, not just ``dedup`` (#12951 review): the
+        parameter is advertised on the public door, so an arm that dropped it
+        answered with the callee's own bound while the caller believed it had
+        asked for N — the silently-dropped-argument failure this surface exists
+        to kill. ``None`` (the default) preserves each callee's bound exactly, so
+        a caller that does not pass it gets byte-identical behaviour to before
+        the fix: ``connections`` maps it onto ``add_limit``/``prune_limit``,
+        ``cross_lens`` onto ``max_candidates`` (and ``top_k``, capped at the ANN
+        pool), ``dedup`` onto its own ``limit``.
+        """
+        kind = (kind or "connections").strip().lower()
+        if kind not in self.REVIEW_LINK_CANDIDATE_KINDS:
+            raise ValueError(
+                f"review_link_candidates: unknown kind {kind!r}. Valid kinds: "
+                f"{', '.join(self.REVIEW_LINK_CANDIDATE_KINDS)}")
+        if kind == "connections":
+            extra = {} if limit is None else {
+                "add_limit": limit, "prune_limit": limit}
+            return self.review_connections(mode=mode, scope=scope, **extra)
+        if kind == "dedup":
+            extra = {} if limit is None else {"limit": limit}
+            return self._list_dedup_candidates(
+                candidate_type=candidate_type, **extra)
+        extra = {} if limit is None else {
+            "max_candidates": limit, "top_k": min(limit, CROSS_LENS_ANN_TOP_K)}
+        return self.get_cross_lens_candidates(
+            threshold=DEFAULT_THRESHOLD if threshold is None else threshold,
+            **extra)
+
     # ── Chain Integrity ───────────────────────────────────────────
 
     def check_structure(self) -> list[dict]:
@@ -27401,7 +27871,7 @@ class TortoiseSDK:
             "product-strategy", proj)
         return to_legacy_shape(violations)
 
-    def validate_domain(self, domain: str) -> dict:
+    def _validate_domain(self, domain: str) -> dict:
         """Run a domain's graph-surface validators (issue #405) — advisory,
         read-only, on-demand. Returns
         ``{domain, ok, violations, drift}`` where violations are enriched,
@@ -27514,12 +27984,12 @@ class TortoiseSDK:
 
     # ── Taxonomy ─────────────────────────────────────────────────
 
-    def taxonomy(self) -> dict[str, int]:
+    def _taxonomy(self) -> dict[str, int]:
         """Count entities by node label. Returns {Point: N, Event: N, ...}."""
         from .taxonomy import taxonomy as _taxonomy
         return _taxonomy(self._get_proj())
 
-    def list_pointkinds(self) -> list[dict]:
+    def _list_pointkinds(self) -> list[dict]:
         """All pointKinds present in the graph with counts. Returns [{kind, count, pack}].
 
         #2205: same non-operator predicate as summarize_structure (absence-or-
@@ -27544,7 +28014,7 @@ class TortoiseSDK:
             result.append({"kind": kind, "count": count, "pack": pack})
         return result
 
-    def list_sources(self) -> list[dict]:
+    def _list_sources(self) -> list[dict]:
         """All PROVENANCE Sources with point counts.
 
         Returns [{url, sourceKind, points}]. D10 (ONTOLOGY v3.15 §4.4): a
@@ -27569,7 +28039,7 @@ class TortoiseSDK:
             for row in rows
         ]
 
-    def list_tags(self) -> list[dict]:
+    def _list_tags(self) -> list[dict]:
         """All Tag names with count of tagged Points. Returns [{name, count}].
 
         Orphaned :Tag nodes (no TAGGED edges) are garbage-collected when
@@ -27606,7 +28076,7 @@ class TortoiseSDK:
             _ledger_record("Point", points)  # #7983: a product read of these keys
         return points
 
-    def list_namespaces(self) -> list[dict]:
+    def _list_namespaces(self) -> list[dict]:
         """Installed pack namespaces with kind counts. Returns [{namespace, name, kind_count}]."""
         registry = _get_kind_expander()
         packs = registry.list_packs()
@@ -27619,7 +28089,7 @@ class TortoiseSDK:
             for p in packs
         ]
 
-    def list_topics(self, entity_id: str) -> dict:
+    def _list_topics(self, entity_id: str) -> dict:
         """entityProfile lite for an entity. Returns {id, pointKind, context, neighbors, neighborCounts}."""
         from .taxonomy import list_topics as _list_topics
         return _list_topics(self._get_proj(), entity_id)
@@ -33822,7 +34292,7 @@ class TortoiseSDK:
             return None
         return raw_entry(rows[0][0], source_id=(rows[0][0] or {}).get("url"))
 
-    def provenance(self, point_id: str) -> dict:
+    def _provenance(self, point_id: str) -> dict:
         """Provenance chain — "Who decided this?" Point → Subject → delegation."""
         point = self.get_point(point_id)
         if not point:
@@ -40032,7 +40502,7 @@ class TortoiseSDK:
             props["wing"] = wing
         return self.create_point("diary", entry, **props)
 
-    def diary_read(self, agent_name: str, last_n: int = 10,
+    def _diary_read(self, agent_name: str, last_n: int = 10,
                    wing: str | None = None) -> list[dict]:
         """Read recent diary entries for an agent, newest first."""
         proj = self._get_proj()
@@ -40052,7 +40522,7 @@ class TortoiseSDK:
             ).result_set
         return [r[0] for r in rows]
 
-    def status(self) -> dict:
+    def _status(self) -> dict:
         """Graph health + entity counts + FalkorDB connectivity.
 
         Returns {connected, counts: {Point, Event, ...}, total_entities}.
@@ -40064,7 +40534,7 @@ class TortoiseSDK:
             connected = True
         except Exception:
             pass
-        counts = self.taxonomy()
+        counts = self._taxonomy()
         total = sum(counts.values())
         result = {"connected": connected, "counts": counts, "total_entities": total}
         if self._namespace:
@@ -40670,7 +41140,7 @@ class TortoiseSDK:
 
     # ── Entity Resolution (GAP-01 #6987) ──────────────────────
 
-    def suggest_entry_points(self, query: str, *, limit: int = 5,
+    def _suggest_entry_points(self, query: str, *, limit: int = 5,
                              kind_filter: str | None = None,
                              graph_ranker=None) -> list[dict]:
         """Entity resolution — NL query → matching entities from the graph.
@@ -44767,7 +45237,7 @@ class TortoiseSDK:
         merged.extend((pid, s) for pid, s in vector_hits if pid not in seen)
         return merged
 
-    def expand_relationships(self, point_id: str) -> list[dict]:
+    def _expand_relationships(self, point_id: str) -> list[dict]:
         """Full relationship payload for a single Point, incl. related_content (#1353 D14).
 
         The expand side of the list/expand split: search list view carries bounded
@@ -51478,7 +51948,7 @@ class TortoiseSDK:
         from .session_indexer import compute_session_embedding
         return compute_session_embedding(name, summary, keywords, topics)
 
-    def search_sessions(self, query: str, *, agent: str | None = None,
+    def _search_sessions(self, query: str, *, agent: str | None = None,
                         topics: list[str] | None = None,
                         after: "datetime | str | None" = None,  # noqa: F821, UP037
                         before: "datetime | str | None" = None,  # noqa: F821, UP037

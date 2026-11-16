@@ -1167,6 +1167,11 @@ def test_no_advertised_handler_names_the_workspace_default_itself():
     import re
 
     advertised = {t.name for t in asyncio.run(mcp_server.mcp.list_tools())}
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+    retired_names = {t.name for t in RETIRED_TOOL_REGISTRY}
+    #: served = live + retired shims — the population a client can still REACH via
+    #: the #3883 warning path, which is where the #11609 Phase 2 doors went.
+    served = {t.name for t in TOOL_REGISTRY} | retired_names
     helper_source = inspect.getsource(mcp_server._dispatch_graph_name)
     assert re.search(r'f"org_\{', helper_source), (
         "the detector no longer matches the sanctioned site — it cannot fail, "
@@ -1189,9 +1194,25 @@ def test_no_advertised_handler_names_the_workspace_default_itself():
     assert not offenders, (
         "these tools advertise `graph` and then name the workspace default "
         f"graph themselves, so the selection is silently ignored: {offenders}")
-    assert routed >= {"tortoise_entity_profile", "tortoise_traverse"}, (
+    # ⛔ #11609 Phase 2 retired `tortoise_entity_profile` and `tortoise_traverse`
+    # FORWARD into `tortoise_explore_connections`, so neither is ADVERTISED and the
+    # advertised arm above cannot see them. The doors still ANSWER (they are
+    # registry rows and `mcp_server` functions), so the pin moves to the SERVED
+    # population rather than being dropped: a retirement that also stopped the door
+    # reading `_dispatch_graph_name` would restore the workspace-default bug for
+    # every client still calling it.
+    served_routed: set[str] = set()
+    for name in sorted(served):
+        fn = getattr(mcp_server, name, None)
+        if fn is None or not inspect.isfunction(fn):
+            continue
+        if "_dispatch_graph_name(" in inspect.getsource(fn):
+            served_routed.add(name)
+    assert served_routed >= {"tortoise_entity_profile", "tortoise_traverse"}, (
         "a graph-naming handler stopped reading the dispatch's selection: "
-        f"{sorted(routed)}")
+        f"{sorted(served_routed)}")
+    assert served_routed - advertised <= retired_names, sorted(
+        served_routed - advertised - retired_names)
     # ⛔ `tortoise_analyze` was the third member and is ARCHIVED in #11609 batch 1 —
     # it is no longer advertised, so it cannot be an arm here. Its routing is pinned
     # against the frozen copy in `test_analyze_anchors_route_through_the_dispatch_

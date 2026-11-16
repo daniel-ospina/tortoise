@@ -929,14 +929,27 @@ def test_review_only_no_mutation(sdk_factory, tmp_path):
 # ── MCP / registry surface ───────────────────────────────────────────
 
 def test_registry_entry_readonly_and_sdk_method(sdk_factory, tmp_path):
-    """The MCP tool is registered as read-only with the SDK method wired."""
-    from tortoise.tool_registry import TOOL_REGISTRY
-    td = next(t for t in TOOL_REGISTRY if t.name == "tortoise_review_connections")
+    """The MCP tool is registered as read-only with the SDK method wired.
+
+    ⛔ #11609 Phase 2 RETIRED `tortoise_review_connections` FORWARD into
+    `tortoise_review_link_candidates(kind="connections", ...)`, so the door is in
+    `RETIRED_TOOL_REGISTRY` (still resolvable, off the advertised list) and the
+    LIVE row is the successor. Both halves are pinned here, because a retirement
+    that silently kept the old row live — or dropped the read-only posture on the
+    way — is exactly what this test exists to catch.
+    """
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+    td = next(t for t in RETIRED_TOOL_REGISTRY if t.name == "tortoise_review_connections")
     assert td.sdk_method == "review_connections"
     assert td.annotations.readOnlyHint is True
     assert td.annotations.destructiveHint is False
     assert td.http_policy is True
     assert td.group == "reasoning"
+
+    live = next(t for t in TOOL_REGISTRY if t.name == "tortoise_review_link_candidates")
+    assert live.sdk_method == "review_link_candidates"
+    assert live.annotations.readOnlyHint is True
+    assert live.annotations.destructiveHint is False
 
     from tortoise.mcp_server import tortoise_review_connections
     assert callable(tortoise_review_connections)
@@ -963,9 +976,21 @@ def test_mcp_description_states_the_same_document_exclusion():
     would conclude the whole capture door is excluded (see
     ``test_add_keeps_pairs_that_share_only_a_session_source``).
     """
-    from tortoise.tool_registry import TOOL_REGISTRY
-    td = next(t for t in TOOL_REGISTRY if t.name == "tortoise_review_connections")
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+    td = next(t for t in RETIRED_TOOL_REGISTRY if t.name == "tortoise_review_connections")
     desc = td.description
     assert "SAME DOCUMENT Source are EXCLUDED" in desc, desc
     assert "shared provenance is not a missing connection" in desc, desc
     assert "capture-session Source is a window, not a document" in desc, desc
+    # ⚠️ #11609 Phase 2 moved the DOOR into `tortoise_review_link_candidates`, whose
+    # registry description does NOT yet carry these three clauses — so the text an
+    # MCP client now reads under-describes add-mode, which is the #9923 defect this
+    # test was written against, one surface over. The clauses are asserted here on
+    # the record that still holds them; closing the client-facing half means editing
+    # the registry literal's `description`, which lands in the surface manifest's
+    # `job` cells and therefore needs the owner-gated re-cut. Reported, not silently
+    # re-pinned as if the live description were correct.
+    live = next(t for t in TOOL_REGISTRY if t.name == "tortoise_review_link_candidates")
+    assert "SAME DOCUMENT Source are EXCLUDED" not in live.description, (
+        "the successor's description now states the exclusion — delete the ⚠️ note "
+        "above and assert it HERE instead")

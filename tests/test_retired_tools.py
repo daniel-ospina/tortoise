@@ -47,7 +47,7 @@ class TestDeclaration:
             assert callable(handler), f"handler {spec.name}() was removed"
 
     def test_public_sdk_surface_is_unchanged(self):
-        """The SDK surface did not GROW: 119 public methods, as pinned today.
+        """The SDK surface did not GROW: 111 public methods, as pinned today.
 
         This used to read *"Only MCP tool NAMES are retired — every public SDK method
         stays"*, which #4282 phase 2 made false: `events_poll`/`restore_point_at`
@@ -55,9 +55,11 @@ class TestDeclaration:
         (#10053) implemented three approved-but-absent names, so the count
         moves by design and this test is the pin on where it lands. A retirement or
         an approved name gaining a `def` is an OWNER-APPROVED row in
-        `docs/product/beta-sdk-surface.md`, never this assertion. The 125 → 120 → 119 move is
-        #4282 **Phase 2**'s four-for-three name swap measured on a base that #12901 wave 1
-        had already taken to 120 (see the TWO-waves block below).
+        `docs/product/beta-sdk-surface.md`, never this assertion. The 125 → 120 → 112 → 111
+        move is #12901 wave 1's five off-surface retirements, then #4282 **Phase 2**'s
+        six READ/QUERY containers (net −8) and its four-for-three WRITE/MUTATE name swap
+        (net −1) — the two #11609 waves being disjoint, on a base wave 1 had already taken
+        to 120 (see the THREE-moves block below).
         The 150 → 124 move is
         #4282's owner-ruled deletion of the 26 surplus methods nothing called
         (2026-10-27, PR #10187); the 124 → 125 move is an owner-approved
@@ -76,7 +78,8 @@ class TestDeclaration:
         started, which is what makes this pin move DOWN and never up.
         #12521 (`8e4e335b05`) gave it its `def`, approved by daniel-ospina on 2026-11-14
         and recorded at `#10015` comment `6863608333`; `docs/product/beta-sdk-surface.md`
-        read *"40 methods against **125** today"* at that move and
+        read *"40 methods against **125** today"* at that move (it now reads **111**, moved
+        by #12901 wave 1 and then by #11609 Phase 2), and
         `config/surface-manifest.yml`'s `counts.sdk_public_methods` was `125`, so this
         assertion was then the one place still pinned to the pre-delivery number.
 
@@ -85,17 +88,22 @@ class TestDeclaration:
         excluded any name a `tool_registry` entry bound, live or retired; the four doors
         #11609 Phase 2 re-keys were live MCP tools at that time):
 
-        * #12901 (2026-11-15) 125 -> 120 — five OFF-SURFACE methods retired (archived
+        * #12901 (2026-11-15) 125 → 120 — five OFF-SURFACE methods retired (archived
           under `archive/sdk-methods/b2-sdk-retirement-wave-1/` and recorded in
           `tortoise/sdk_retired.py::REMOVED_SDK_METHODS`). The approved 40 did not move.
-        * #11609 Phase 2 (2026-11-16) 120 -> 119 — FOUR public names retired into
-          containers (`supersede` -> `supersede_knowledge`, `update_entity` ->
-          `update_knowledge`, `file_decision` -> `write_question`, `file_human_approval` ->
+        * #11609 Phase 2 (2026-11-15) 120 → 112 — six READ/QUERY containers landed, and the
+          fourteen read methods behind them went private (+6 −14). The approved 40 did not
+          move.
+        * #11609 Phase 2 (2026-11-16) 112 → 111 — FOUR public names retired into
+          containers (`supersede` → `supersede_knowledge`, `update_entity` →
+          `update_knowledge`, `file_decision` → `write_question`, `file_human_approval` →
           `record_decision`) and THREE added (`supersede_knowledge`, `write_question`,
           `record_decision`; `update_knowledge` already existed), a net -1.
 
-        `high_water_counts.sdk_public_methods` stays 150 — both moves are the cheap
-        direction, and the pin still refuses any UNAPPROVED growth above it.
+        `high_water_counts.sdk_public_methods` is **111** — this PR (#12951) LOWERED it from
+        the 150 it was pinned at on `main`, because a pin that keeps slack stops being a
+        growth pin. Every move is the cheap direction, and the pin still refuses any
+        UNAPPROVED growth above it.
         Re-derive it from `len(public)` at the head; never type a number ahead of the
         manifest.
 
@@ -139,13 +147,15 @@ class TestDeclaration:
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
 
-        # 118 is the number `config/surface-manifest.yml` derives
+        # 110 is the number `config/surface-manifest.yml` derives
         # (`counts.sdk_public_methods`, re-cut at this head) and the one
         # `tools/surface-guard.py` pins as the frozen baseline. Measured, not
-        # typed: `uv run python tools/sdk_surface.py --check` reads 118.
-        # The composition of the two #4282 Phase 2 waves: 125 -> 120 (#12901
-        # wave 1) -> 119 (lane B) -> 118 (this lane, +6 approved / -7 retired).
-        assert len(public) == 118, f"SDK surface changed: {len(public)} != 118"
+        # typed: `uv run python tools/sdk_surface.py --check` reads 110.
+        # The composition of all four #4282 Phase 2 waves: 125 -> 120 (#12901
+        # wave 1) -> 111 (this PR's READ/QUERY wave, 119 + 6 containers - 14
+        # re-privatised doors) -> 110 (the SOURCES/MINE/SESSION lane, +6
+        # approved / -7 retired, which composes on top of the 111).
+        assert len(public) == 110, f"SDK surface changed: {len(public)} != 110"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK
