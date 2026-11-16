@@ -603,13 +603,20 @@ def test_a_trailing_comment_is_not_part_of_the_value():
                            stated={"TORTOISE_VALUE_GATE": "", "TORTOISE_EMBED_GATE": "1"})
     assert "EMPTY value" in channel.problems()[0]
 
+    # ⛔ A Dockerfile has NO inline-comment form: Docker REFUSES `ENV K=1  # x` outright
+    # (`Syntax error - can't find = in "#"`, measured on Docker 29.1.3), so such a line can never
+    # ship. The reader therefore must not strip the comment and then report the value as STATED —
+    # the line is refused instead, which is the fail-closed direction (review at `3e2b944afd`).
+    stated, ambiguous, _ = gate._dockerfile_env("ENV TORTOISE_EMBED_GATE=1  # on\n")
+    assert stated == {}, stated
+    assert "TORTOISE_EMBED_GATE" in ambiguous, ambiguous
+    # A switch named only in that trailing text is not credited either.
     stated, ambiguous, _ = gate._dockerfile_env("ENV HF_HUB_OFFLINE=1  # TORTOISE_EMBED_GATE=1\n")
-    assert stated == {"HF_HUB_OFFLINE": "1"} and ambiguous == set(), (
-        "a switch named in trailing text after an unrelated assignment is not a statement"
-    )
-    # ...and a switch named in a trailing comment with NO assignment is not credited either
-    stated, ambiguous, _ = gate._dockerfile_env("ENV HF_HUB_OFFLINE=1  # TORTOISE_VALUE_GATE\n")
-    assert stated == {"HF_HUB_OFFLINE": "1"} and ambiguous == set()
+    assert stated == {}, stated
+    assert "TORTOISE_EMBED_GATE" in ambiguous, ambiguous
+    # A whole-line comment is still just a comment (Docker ignores it), not a mention.
+    stated, ambiguous, _ = gate._dockerfile_env("# ENV TORTOISE_EMBED_GATE=1\nENV TORTOISE_VALUE_GATE=1\n")
+    assert stated == {"TORTOISE_VALUE_GATE": "1"} and "TORTOISE_EMBED_GATE" not in ambiguous
 
 
 @pytest.mark.parametrize(
