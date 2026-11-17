@@ -474,6 +474,19 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # embedded-green), and neither the probe's `finally` nor the fixture's restore
     # lets the lane leak into a later docker-lane test.
     "test_12184_ranker_entity_signals.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
+    # #13158: `test_13034_currency_rule_reads_position.py` landed on `main` via #13096
+    # (`55ec2c71`) with NEITHER half of this pair — no `ci-surfaces` row (that half is
+    # #13144, which this branch already carries) and no declaration. Its shape is the
+    # same as the three entries above it: a module-level live-FalkorDB probe (set to
+    # `DB_URI`, restore `_OLD_URI` in the `finally`, pop when it was unset: 3 sites)
+    # plus an autouse per-test fixture that re-points the lane at THIS module's own
+    # graph and restores it (3 more). DELIBERATE_URI is the point: the claim under
+    # test is the currency RULE reading a point's position out of a REAL FalkorDB,
+    # which no pure-function test can observe. An unreachable lane degrades to
+    # `FALKORDB_AVAILABLE = False` (the live arms `skipif`, so they never run
+    # embedded-green), and neither the probe's `finally` nor the fixture's restore
+    # lets the lane leak into a later docker-lane test.
+    "test_13034_currency_rule_reads_position.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
