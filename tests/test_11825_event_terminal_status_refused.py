@@ -1657,5 +1657,11 @@ class TestTheGuardDoesNotOverBlock:
         from tortoise.lifecycle_vocabulary import read_caller_status
         for synonym in ("retracted", "archived"):
             assert read_caller_status(synonym) == "deprecated", synonym
-        with pytest.raises(ValueError, match="deprecated"):
+        # ⛔ `match="deprecated"` was NOT discriminating (#13143 review, finding
+        # 3): `_ACCEPTED_FORMS` quotes all four words into EVERY refusal, so the
+        # generic fall-through satisfied it and deleting the `outdated` arm
+        # shipped green. Only `_OUTDATED_REPAIR` names the two words it collapses
+        # and the successor route that makes the refusal performable.
+        with pytest.raises(ValueError, match=r"supersededBy.*supersede_point") as exc:
             read_caller_status("outdated")
+        assert "TWO different lifecycle words" in str(exc.value), str(exc.value)

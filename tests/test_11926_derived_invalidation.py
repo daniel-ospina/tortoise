@@ -324,8 +324,18 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_the_recall_lane(sdk, ret
     made = _judge(sdk, i, t, g)
     node = {"target": t, "indicator": i, "goal": g}[retire]
     # 1. no door may MINT the word any more (#11824 S0).
-    with pytest.raises(ValueError, match="outdated"):
+    #
+    # ⛔ THE PATTERN MUST BE THE `outdated` ARM'S OWN TEXT (#13143 review, finding
+    # 3). A `match="outdated"` proved NOTHING: `_render` interpolates the refused
+    # value into EVERY refusal, so the generic fall-through satisfied it and
+    # deleting the arm shipped green. `supersededBy` and `supersede_point` appear
+    # ONLY in `_OUTDATED_REPAIR`, and they are what makes the refusal PERFORMABLE
+    # (AX rule 2): the word names a choice — which of the two endings — so the
+    # door refuses it and hands the caller both routes rather than picking one
+    # for them.
+    with pytest.raises(ValueError, match=r"supersededBy.*supersede_point") as exc:
         sdk.update_knowledge(node["id"], status="outdated")
+    assert "TWO different lifecycle words" in str(exc.value), str(exc.value)
     # 2. the LEGACY population: write the stored word out of band, exactly as a
     #    pre-S0 graph holds it, and assert the sweep still retires on it.
     sdk._get_proj().g.query(
