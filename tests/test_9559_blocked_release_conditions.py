@@ -1697,8 +1697,24 @@ def test_the_refresh_keeps_its_fail_closed_arm():
     # that quotes this DDL therefore ADDS a candidate — which can only make the
     # gate assert over a newer, comment-only file and RED, never pass over a live
     # body it did not read.
+    #
+    # ⛔ AND ENUMERATING SPELLINGS IS A LOSING GAME, so the pattern is closed over
+    # the DEFINITION's spelling space instead of over the spellings seen so far. A
+    # second review round measured two more ways to write the same statement that an
+    # `OR REPLACE`-only pattern cannot see, each leaving this gate GREEN over a live
+    # body with no guard: an UNQUALIFIED name — precedent in this very directory,
+    # `0002_audit_events.sql:27`'s `CREATE OR REPLACE FUNCTION
+    # prevent_audit_mutation()`, which resolves through `search_path` to the same
+    # live object — and LOWERCASE keywords, legal and invisible to a case-exact
+    # pattern. What follows `CREATE [OR REPLACE] FUNCTION` is CLOSED: an optional
+    # schema qualifier, an optional quoted identifier, then the name — so
+    # qualification, quoting and case are all tolerated below. A file that merely
+    # MENTIONS the function is deliberately NOT a candidate: this matches a
+    # DEFINITION, which is what the body scan then reads.
     defs_rx = re.compile(
-        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+public\.postgres_residency_snapshot\b")
+        r"create\s+(?:or\s+replace\s+)?function\s+"
+        r"(?:\"?public\"?\s*\.\s*)?\"?postgres_residency_snapshot\b\"?",
+        re.IGNORECASE)
     candidates = [
         p for p in sorted((_REPO / "supabase" / "migrations").glob("*.sql"))
         if defs_rx.search(p.read_text(encoding="utf-8"))
