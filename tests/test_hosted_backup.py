@@ -22,6 +22,7 @@ import pytest
 
 from tortoise.hosted_backup import (
     DUMP_FORMAT,
+    _BOTOCORE_DEFAULT_MAX_POOL_CONNECTIONS,
     _LIST_MANIFEST_MAX_INFLIGHT,
     LockVerificationError,
     MemoryStorage,
@@ -2021,21 +2022,23 @@ def _seed_manifests(store: MemoryStorage, org_id: str, count: int) -> list[str]:
 
 
 def test_list_backups_fetches_manifests_concurrently():
-    """#13097: the per-manifest GETs overlap instead of costing one trip each."""
-    store = _SlowCountingStorage(delay=0.05)
+    """#13097: the per-manifest GETs overlap instead of costing one trip each.
+
+    ⛔ The overlap assertion IS the falsifier: on a serial implementation the
+    high-water mark is exactly 1. No wall-clock bound is asserted — an earlier
+    version of this test compared elapsed time against the serial cost and was
+    measured at 0.41 s against a 0.20 s bound on a loaded 10-core box (load avg
+    166), i.e. it reddened `main` whenever a lane saturated the host while proving
+    nothing `max_inflight` does not already prove.
+    """
+    store = _SlowCountingStorage(delay=0.01)
     org_id = "team_conc"
     _seed_manifests(store, org_id, 8)
 
-    started = time.monotonic()
     listed = list_backups(store, org_id)
-    elapsed = time.monotonic() - started
 
     assert len(listed) == 8  # completeness is unchanged by the pool
     assert store.max_inflight > 1  # ... and the GETs actually overlapped
-    # Strictly faster than the serial cost the bug was made of. A generous
-    # bound: the assertion that matters is the overlap above, this one only
-    # refuses a "pool" that serialised anyway.
-    assert elapsed < (8 * store.delay) / 2
 
 
 def test_list_backups_bounds_manifest_concurrency():
@@ -2048,6 +2051,20 @@ def test_list_backups_bounds_manifest_concurrency():
 
     assert len(listed) == 40
     assert 1 < store.max_inflight <= _LIST_MANIFEST_MAX_INFLIGHT
+
+
+def test_the_manifest_concurrency_bound_stays_under_the_client_pool():
+    """#13097: the bound is COUPLED to botocore's connection pool, not cosmetic.
+
+    `R2Storage._s3()` builds its client with no `Config`, so botocore's default
+    `MAX_POOL_CONNECTIONS` (10) is the real ceiling: an in-flight count above it
+    makes urllib3 close and discard the overflow connection on every wave — each
+    dropped connection re-pays TCP+TLS (the latency this change removes) and logs
+    a "Connection pool is full" warning. This test exists so raising the constant
+    requires either a matching client config or a deliberate edit here.
+    """
+    assert _LIST_MANIFEST_MAX_INFLIGHT <= _BOTOCORE_DEFAULT_MAX_POOL_CONNECTIONS
+    assert 1 < _LIST_MANIFEST_MAX_INFLIGHT < 100  # still a bound, still a fan-out
 
 
 def test_list_backups_propagates_a_storage_failure_rather_than_a_partial_list():

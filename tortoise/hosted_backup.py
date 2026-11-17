@@ -56,6 +56,7 @@ import math
 import os
 import re
 import secrets
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -1568,9 +1569,22 @@ class R2Storage:
                 "R2_SECRET_ACCESS_KEY, R2_BUCKET"
             )
         self._client = None
+        # #13097: the manifest pool makes 8 simultaneous first-callers routine, so
+        # this lazy init needs to be atomic. Without the lock a cold start builds
+        # up to one boto3 client PER THREAD (each with its own urllib3 pool), and
+        # since every thread then returns whatever `self._client` currently holds,
+        # several clients end up in concurrent use while the rest are dropped
+        # unclosed — splitting the connection budget and re-paying construction
+        # (credential chain + config load) on the first request after a deploy.
+        self._client_lock = threading.Lock()
 
     def _s3(self):
-        if self._client is None:
+        # Double-checked: the fast path (already built) must not take the lock.
+        if self._client is not None:
+            return self._client
+        with self._client_lock:
+            if self._client is not None:
+                return self._client
             try:
                 import boto3
             except ImportError as e:
@@ -2284,12 +2298,21 @@ def create_backup(
 # the issue: ~35 manifests/graph under the default retention, org-wide listing
 # ≈ 420 sequential GETs at 100-150 ms ≈ 42-63 s.
 #
-# ⛔ The bound is deliberately small and FIXED rather than "as many as there are
-# backups": this talks to R2/S3, and an unbounded pool converts a slow listing
-# into a burst that earns throttling — which would fail the same read, later and
-# less legibly. 16 is enough to turn 420 round trips into ~26 waves while staying
-# inside a single client's request budget.
-_LIST_MANIFEST_MAX_INFLIGHT = 16
+# ⛔ 8, and the number is COUPLED to the S3 client's connection pool, not chosen
+# for roundness. `botocore`'s default `MAX_POOL_CONNECTIONS` is 10 and
+# `R2Storage._s3()` passes no `Config`, so an in-flight count above 10 makes
+# urllib3 close and discard the overflow connection on every wave — each dropped
+# connection re-pays TCP+TLS, i.e. the exact latency this fixes, plus a
+# "Connection pool is full" warning per dropped connection. Staying under the
+# pool keeps every GET on a reused connection; the pool itself is per PROCESS and
+# per client, so this bound stays per invocation by design (a shared semaphore
+# would let one slow listing starve a peer request).
+# `test_the_manifest_concurrency_bound_stays_under_the_client_pool` pins the
+# coupling, so raising this number requires touching that test.
+_LIST_MANIFEST_MAX_INFLIGHT = 8
+
+# The botocore default this constant is coupled to (`_LIST_MANIFEST_MAX_INFLIGHT`).
+_BOTOCORE_DEFAULT_MAX_POOL_CONNECTIONS = 10
 
 
 def list_backups(storage: BackupStorage, org_id: str,
@@ -2310,7 +2333,14 @@ def list_backups(storage: BackupStorage, org_id: str,
       collected as an empty/short answer (see the comment in ``_fetch``).
     * **Only the unreadable/vanished class is skipped** — a corrupt manifest and a
       concurrently-pruned object are ordinary states of a live bucket, not an
-      outage, and they are logged (`logger.warning`) exactly as before.
+      outage, and on the SUCCESS path they are logged (`logger.warning`) exactly
+      as before. On the FAILURE path the behaviour differs only in that the keys
+      already submitted still run (and may still log), and `map`'s `with` block
+      waits for that in-flight batch before the exception reaches the caller —
+      so a decisive failure can arrive up to one download timeout later than the
+      serial loop, which never started the keys after the failing one. That wait
+      is deliberate: returning while workers still hold connections would move
+      the load onto a request that has already failed.
     """
     _validate_org_id(org_id)
     if graph_id is not None:
