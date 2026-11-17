@@ -40,8 +40,8 @@ resolves **7.82 pp**; 5 pp needs **~734 per arm** and 3 pp **~2,034 per arm** (t
 
 ⛔ **And the comparison was worse than underpowered — it was structurally blind, which the call site
 fixes and this control reproduces as a gate, not as a measured effect.** `entity_key_expansion` arms only
-when `entity_type == "point"` (`sdk.SDK.search_graph`: both halves sit behind
-`entity_key_expansion and entity_type == "point"`), and `tools/candidate_recall_11901.py` measures the
+when `entity_type == "point"` (`TortoiseSDK.tortoise_fts_query` in `tortoise/sdk.py`: both halves sit
+behind `entity_key_expansion and entity_type == "point"`), and `tools/candidate_recall_11901.py` measures the
 **OBJECT** leg. The control below ran the object arm on the same frozen corpus, same items, same box,
 back to back (`paired-object-60-control.json`, n = 60) — and its two switch states are one code path, so
 the tool flags the arm `structurally_blind: true` and **refuses** to publish its null as a result (exit 3,
@@ -52,10 +52,14 @@ artifact still written).
 ranked lists for the **point** arm only: both sides were `None`, so the "identical ranked list in both
 switch states" was `None == None` for every item — a constant no retrieval behaviour can move, published
 as a measurement (`#13267` F1). The identity is TRUE, and it is a **call-site fact**
-(`entity_key_expansion and entity_type == "point"` at `tortoise/sdk.py:44955` and `:45453`), not something
-that artifact measured. The artifact now records `identity_measured: false` with those counts `null`
-rather than a number, and the tool records each item's ranked list on **both** sides (with a per-side
-digest in the artifact) so the next run measures it instead of asserting it. Its minimum detectable
+(`entity_key_expansion and entity_type == "point"`, both halves of
+`TortoiseSDK.tortoise_fts_query` — cited by predicate and symbol, never by `file:line`, which had already
+drifted when this was re-reviewed, `#13267` F3), not something that artifact measured. The **committed**
+artifact carries `identity_measured: false` with those counts `null` rather than a number — a post-hoc
+annotation on a legacy run, not something a re-run would emit: the tool now emits `identity_measured`
+itself and records each item's ranked list on **both** sides (with a per-side digest in the artifact), so
+a re-run *measures* the identity (and reports `identity_measured: true`) instead of asserting it. Its
+minimum detectable
 effect is reported as **not estimable** (`nan`, with a `mde_note`) rather than `0` — an all-agree run
 carries no information about the difference, and an MDE of 0 beside a null reads as "infinitely powered",
 which is the opposite of what it means.
@@ -264,8 +268,10 @@ and its benefit are indistinguishable in size**, and neither is significant at n
 ## 7. The decision the evidence supports
 
 1. **The published before/after comparison is retired, not reinterpreted.** On the object-leg instrument
-   the lever's two switch states are one code path (60/60 items identical): that comparison measured
-   corpus drift and load, and no n would have fixed it.
+   the lever's two switch states are one code path (the call-site citation above: the object leg never
+   reaches `entity_key_expansion and entity_type == "point"`), so that comparison measured corpus drift
+   and load, and no n would have fixed it. ⛔ The retired identical-`count` is **not** evidence here —
+   it was `None == None` (`#13267` F1, and this restatement was `#13267` F4).
 2. **On the leg the lever arms, it helps on its own class** (+5.67 pp @15, p = 2 × 10⁻⁵) and **its cost is
    a re-rank of the same size** (+1.67 pp gain against 1.7 % of items losing their own best match in the
    short-query arm). Neither the benefit nor the cost is resolvable at k = 3 with n = 300.

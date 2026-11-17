@@ -29,9 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
-from tests import _live_utils
 from tools import paired_expansion_ab_2518 as P
-
 
 # ── 1. the statistics ────────────────────────────────────────────────────────
 
@@ -319,7 +317,9 @@ def test_point_ids_are_deterministic_and_canonical():
     assert a != P._point_id("q", "item-000003")
     head, tail = a.split("-")
     assert len(head) == 12 and len(tail) == 12
-    int(head, 16) and int(tail, 16)   # both halves are hex
+    # both halves are canonical lowercase hex — `int(part, 16)` alone would
+    # also accept `0x…`/uppercase, and a bare expression asserts nothing
+    assert all(c in "0123456789abcdef" for c in head + tail)
 
 
 def test_displacement_counts_ids_the_merged_pass_moved_out():
@@ -439,6 +439,32 @@ def test_allow_mixed_modes_excuses_only_window_mode_refusals(capsys):
     assert P._exit_code([inert], allow_mixed_modes=True) == 3
     assert P._exit_code([mixed, blind], allow_mixed_modes=True) == 3
     assert "REFUSED to publish a verdict" in capsys.readouterr().err
+
+
+def test_freeze_and_snapshot_cannot_select_two_corpora_at_once(tmp_path, capsys):
+    """⛔ `--freeze` + `--snapshot` composed into a digest for bytes never read.
+
+    The two options are independent in `main()`, and with both passed the manifest
+    — hence `snapshot.digest`, every per-file sha256 and
+    `population.snapshot_digest` — came from the `--freeze` target while
+    `read_records` read the `--snapshot` directory, on which `verify_snapshot`
+    never ran. The artifact then attested *"this corpus, byte for byte"* over a
+    corpus the run did not measure — the exact fail-open the tool's docstring
+    promises to refuse (`#13267` F2). `argparse`'s mutually exclusive group
+    refuses the composition BEFORE any copy happens.
+    """
+    src = tmp_path / "live"
+    _write_corpus(src, names=["the road bike repairs"])
+    with pytest.raises(SystemExit) as exc:
+        P.main(["--sessions-dir", str(src),
+                "--freeze", str(tmp_path / "snap"),
+                "--snapshot", str(tmp_path / "elsewhere")])
+    assert exc.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+    # it refused before touching either path — a copy here would have "frozen" a
+    # corpus the run then did not read
+    assert not (tmp_path / "snap").exists()
+    assert not (tmp_path / "elsewhere").exists()
 
 
 def test_the_dense_switch_refusal_fires_before_any_database_is_needed(
@@ -595,6 +621,49 @@ def _artifact(name: str) -> dict:
     return json.loads((_DOCS / name).read_text())
 
 
+_KNOBS = ("query_chars", "key_tokens", "min_query_tokens")
+
+
+def _assert_the_artifact_pins_hold(art: dict) -> None:
+    """The artifact-shape invariants this brief's figures lean on.
+
+    ⛔ Written to hold for the three COMMITTED artifacts *and* for an artifact the
+    committed tool produces. The pins used to spell the legacy shape out as a
+    REQUIREMENT — `assert "query_chars" not in construction`,
+    `art["construction_unrecorded"]["fields"]`, `obj["identity_measured"] is
+    False` — so a correct re-generation failed all three: the guard punished the
+    fix it documents (`#13267` F5). Each invariant below is the FACT those three
+    were proxying, and it is checkable on either shape.
+    """
+    construction = art["construction"]
+    unrecorded = (art.get("construction_unrecorded") or {}).get("fields", [])
+    for knob in _KNOBS:
+        # a treatment knob is EITHER recorded as a construction parameter OR
+        # named as unrecorded — never both (which claims the artifact records it
+        # and does not), never neither (a knob the run used and nobody can see)
+        assert (knob in construction) != (knob in unrecorded), (
+            f"{knob!r}: in construction={knob in construction}, "
+            f"in construction_unrecorded={knob in unrecorded}")
+    for arm, block in art["arms"].items():
+        measured = block["ranked_lists_compared"] > 0
+        # the identity is a MEASUREMENT exactly when ranked lists were compared:
+        # a number beside zero compared items is `None == None` dressed up as a
+        # measurement, and `null` beside a non-zero count is a measurement
+        # thrown away
+        assert (block["expansion_identical_items"] is None) is not measured, (
+            f"arm {arm!r}: ranked_lists_compared="
+            f"{block['ranked_lists_compared']} but "
+            f"expansion_identical_items={block['expansion_identical_items']!r}")
+        if "identity_measured" in block:
+            assert block["identity_measured"] is measured, (
+                f"arm {arm!r} says identity_measured="
+                f"{block['identity_measured']} with "
+                f"{block['ranked_lists_compared']} ranked list(s) compared")
+        if not measured:
+            assert "UNMEASURED" in (block.get("identity_note") or ""), (
+                f"arm {arm!r} reports an unmeasured identity with no note saying so")
+
+
 def test_the_brief_quotes_the_digests_and_the_loads_its_artifacts_hold():
     """The four evidence defects of `#13267` F1/F3/F5/F6, pinned as a doc drift.
 
@@ -637,21 +706,33 @@ def test_the_brief_quotes_the_digests_and_the_loads_its_artifacts_hold():
         assert "ids_match_all_arms: true" not in brief
         assert art["pairing"]["items_read_per_arm"]
 
-    # F1: the object arm's identity is a CALL-SITE fact in this generation
+    # F1/F5: the object arm's identity is a CALL-SITE fact in this generation,
+    # and the retired count cannot return in ANY of its spellings — the two pins
+    # that existed matched two phrasings only, and the brief kept a third
     obj = ctrl["arms"]["object"]
     assert obj["identity_measured"] is False
     assert obj["expansion_identical_items"] is None
     assert obj["ranked_lists_compared"] == 0
     assert "UNMEASURED" in obj["identity_note"]
-    assert "60 of 60 items, element-wise" not in brief
+    for retired in ("60 of 60 items, element-wise",
+                    "60 of 60 items returned the identical ranked list",
+                    "60/60 items identical",
+                    "60/60"):
+        assert retired not in brief, (
+            f"{retired!r} is the retired `None == None` count — a reader cannot "
+            "tell a measurement from a constant, so it is not evidence")
 
     # F5: the robustness arm is reproducible from the brief, and the artifacts
-    # say which knobs they did NOT record
+    # say which knobs they did NOT record. The shape invariants are asserted by a
+    # helper that a TOOL-PRODUCED artifact also satisfies, so regenerating the
+    # evidence cannot red this suite
     assert "--query-chars 200" in brief
     assert short["construction"]["read_limit"] != head["construction"]["read_limit"]
     for art in (head, short, ctrl):
+        _assert_the_artifact_pins_hold(art)
+        # the committed runs predate the tool recording the knobs — the artifacts
+        # name them as unrecorded, and the brief carries their values as prose
         assert "query_chars" in art["construction_unrecorded"]["fields"]
-        assert "query_chars" not in art["construction"]
 
     # F4: `git_head` never stands alone as the code identity again
     for art in (head, short, ctrl):
@@ -681,11 +762,62 @@ def test_the_docs_index_row_repeats_only_what_the_evidence_carries():
     assert rows, "the brief's index row is where a reader first meets these figures"
     row = rows[0]
     assert "60 of 60 items returned the identical ranked list" not in row
+    assert "60/60" not in row
     assert "ids_match_all_arms: true" not in row
     assert "id_digest 4d6899d3" not in row
     assert head["items"]["name_digest"][:8] in row
     for transposed in ("10.36", "10.27"):
         assert transposed not in row
+
+
+def test_a_regenerated_artifact_satisfies_the_same_doc_pins(_no_embedder_probe):
+    """⛔ The doc pins were assertions AGAINST the tool's own output (`#13267` F5).
+
+    The three committed artifacts are hand-annotated legacy runs:
+    `identity_measured` was written into them by hand, and
+    `construction_unrecorded` names the knobs that run did not record. A doc pin
+    that spells that legacy shape out as a requirement reds the suite on a correct
+    re-generation — measured: the tool emits `construction.query_chars`, has no
+    `construction_unrecorded`, and records BOTH arms' ranked lists, so
+    `identity_measured` is TRUE for the same blind arm the legacy control reports
+    as False.
+    """
+    same = {"item-000000": ["a"], "item-000001": ["b"]}
+    art, _ = _build_fake_artifact(point_off=same, point_on=same,
+                                  object_off=same, object_on=same)
+    _assert_the_artifact_pins_hold(art)
+    # the pre-fix pins, verbatim in shape, against the tool's own output: each one
+    # is what made a regeneration red, and each is REVERSED here so the defect
+    # cannot return quietly
+    assert "query_chars" in art["construction"]           # pin used `not in`
+    assert "construction_unrecorded" not in art           # pin indexed it
+    assert art["arms"]["object"]["identity_measured"] is True   # pin said `is False`
+    assert art["arms"]["object"]["ranked_lists_compared"] == 2
+    assert art["arms"]["object"]["expansion_identical_items"] == 2
+
+
+def test_the_briefs_call_site_citation_resolves_at_the_merge_target():
+    """⛔ `tortoise/sdk.py:44955` / `:45453` were stale at the merge target.
+
+    This PR does not touch `tortoise/`, so the lines the brief pinned drifted out
+    from under it: both numbers landed in unrelated code, on the one claim the
+    headline rests on, and no pin could see it (the doc pins cover the brief's
+    FIGURES, never its `file:line`s — `#13267` F3). A citation by predicate and
+    symbol cannot re-stale; this pins both halves of it.
+    """
+    sdk = (Path(__file__).resolve().parent.parent / "tortoise" / "sdk.py").read_text()
+    predicate = 'entity_key_expansion and entity_type == "point"'
+    assert sdk.count(predicate) >= 2, (
+        "the object arm is gated out only if BOTH halves sit behind the predicate")
+    assert "def tortoise_fts_query(" in sdk, (
+        "the predicate lives in TortoiseSDK.tortoise_fts_query — cite a symbol "
+        "that resolves, not `sdk.SDK.search_graph`")
+    brief = (_DOCS / "research-brief.md").read_text()
+    assert "TortoiseSDK.tortoise_fts_query" in brief
+    assert predicate in brief
+    for stale in ("sdk.py:44955", ":45453"):
+        assert stale not in brief, (
+            f"{stale} pinned a LINE, and the line moved — cite the predicate")
 
 
 # ── 3. the pair, live ───────────────────────────────────────────────────────

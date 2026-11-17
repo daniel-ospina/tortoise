@@ -12,8 +12,9 @@ is distinguishable from noise, and the truth was *we do not know*.
 
 ⛔ **And that comparison was not merely underpowered — it was structurally blind,
 which the call site says and this tool MEASURES.** `entity_key_expansion` arms
-only when `entity_type == "point"` (`sdk.SDK.search_graph`: the sparse half and
-the dense half both sit behind `entity_key_expansion and entity_type == "point"`),
+only when `entity_type == "point"` (`TortoiseSDK.tortoise_fts_query` in
+`tortoise/sdk.py`: the sparse half and the dense half both sit behind
+`entity_key_expansion and entity_type == "point"`),
 while `tools/candidate_recall_11901.py` measures the **OBJECT** leg. On the object
 arm the two switch states are the SAME code path, byte-identically. So the
 brief's two numbers differ by corpus drift, machine load and sampling noise only.
@@ -1131,6 +1132,12 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
         # identity must still be MEASURED — `_read_delta` guarantees that — or
         # this is a claim about the arm's name.
         structurally_blind = (arm != "point" and len(fired) == 0)
+        # ⛔ Whether the identity is a MEASUREMENT or a call-site assertion, said
+        # by the tool rather than inferred by a reader from a `null` count. The
+        # committed artifacts had to carry this field by hand because no version
+        # of this tool emitted it, which is how a re-generation came to fail the
+        # doc pins that documented it (`#13267` F5).
+        identity_measured = delta["compared"] > 0
         out_arms[arm] = {
             "structurally_blind": structurally_blind,
             "why": ("the two switch states produced the SAME ranked list for all "
@@ -1140,11 +1147,16 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
                     "so the identity is the GATE, not a null effect"
                     if structurally_blind else ""),
             "expansion_fired_items": len(fired),
-            "expansion_identical_items": len(identical),
+            "expansion_identical_items": len(identical) if identity_measured else None,
             "items_whose_read_grew": delta["items_whose_read_grew"],
             # How many items actually carry a compared ranked list — 0 would
             # mean the field above is not a measurement (see `_read_delta`).
             "ranked_lists_compared": delta["compared"],
+            "identity_measured": identity_measured,
+            "identity_note": "" if identity_measured else (
+                "UNMEASURED: at least one side recorded no ranked list, so "
+                "`expansion_identical_items` is null — the identity is a "
+                "call-site fact here, not something this run measured"),
         }
         out_arms[arm].update({
             "expansion_provenance_entries": {"off": prov_off, "on": prov_on},
@@ -1379,10 +1391,19 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--sessions-dir", default="~/.tortoise/session-events",
                    help="the LIVE corpus — read only by --freeze")
-    p.add_argument("--freeze", default=None,
-                   help="copy the live corpus here ONCE and record its manifest")
-    p.add_argument("--snapshot", default=None,
-                   help="reuse an already-frozen snapshot (verified, never re-read live)")
+    # ⛔ ONE input source. `--freeze` WRITES the snapshot and returns its manifest;
+    # `--snapshot` VERIFIES an existing one. They are mutually exclusive because
+    # the two used to compose: with both passed, the manifest (hence
+    # `snapshot.digest`, every per-file sha256 and `population.snapshot_digest`)
+    # came from the `--freeze` target while the records were read from the
+    # `--snapshot` directory — an artifact attesting "this corpus, byte for byte"
+    # over bytes the run never read (`#13267` F2). `argparse`'s documented remedy
+    # for two options feeding one decision, and it refuses BEFORE any copy.
+    corpus = p.add_mutually_exclusive_group()
+    corpus.add_argument("--freeze", default=None,
+                        help="copy the live corpus here ONCE and record its manifest")
+    corpus.add_argument("--snapshot", default=None,
+                        help="reuse an already-frozen snapshot (verified, never re-read live)")
     p.add_argument("--population-file", default=None,
                    help="the drawn sample; written on first run, reused after")
     p.add_argument("--population", type=int, default=1000)
