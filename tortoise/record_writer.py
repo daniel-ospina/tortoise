@@ -224,6 +224,7 @@ __all__ = [
     "NON_DURABLE_JOURNAL_REFUSAL",
     "POSITION_ORDINAL_SOURCE",
     "POSITION_UNPROVEN_WARN_SECONDS",
+    "RECORD_ALLOCATE_ENV",
     "RECORD_DSN_ENV",
     "RECORD_GRAPH_ENV",
     "RECORD_ORG_ENV",
@@ -240,6 +241,7 @@ __all__ = [
     "live_write_refusal",
     "record_dsn",
     "record_holds_turns",
+    "record_live_allocate",
     "record_tenant",
     "record_tenant_effective",
     "record_tenant_for",
@@ -1574,6 +1576,7 @@ class RecordWriter:
         conn: Any | None = None,
         position: bool = True,
         allocate: bool = False,
+        carried_positions: bool = False,
     ) -> RecordWrite:
         """Apply `records` to the record, on a transaction the CALLER owns.
 
@@ -1604,6 +1607,19 @@ class RecordWriter:
             graph's cursor must exist in mode `active`
             (:mod:`tortoise.record_allocator`); a `seeded`/`halted`/absent
             cursor raises `CursorNotActive` rather than inventing a number.
+        :param carried_positions: **which shape this batch is** (#13043 review
+            P1-3), passed straight through to
+            :func:`record_projection.replay`. ``False`` (the default, and what
+            every production caller wants) means a **journal-sourced** batch:
+            `first_seq` enumerates, and a top-level ``seq`` property on a record
+            is IGNORED rather than trusted — that property is residue from the
+            pre-reservation SDK or a `:Session` copy, and reading it made one
+            legacy line refuse its own record's live write AND the only repair
+            for it. ``True`` means a **record-sourced** batch (rows read from
+            `public.journal_event`, whose ``seq`` is a column): the carried
+            number is READ and a disagreement with the enumeration is a refusal.
+            ⛔ Do not set this to describe what the records happen to CONTAIN;
+            it describes where they CAME FROM.
 
         :raises RecordWriteError: the record was ARMED and the write did not
             happen (malformed DSN, unreachable record, totality refusal, or a
@@ -1665,6 +1681,7 @@ class RecordWriter:
             report = record_projection.replay(
                 records, target, org_id=org_id, graph_id=graph_id,
                 start_seq=first_seq, position=position, allocate=allocate,
+                carried_positions=carried_positions,
             )
         except Exception as exc:
             # Totality (an undeclared/refused record type raises before the
@@ -1873,6 +1890,7 @@ def write_records(
     position: bool = True,
     allocate: bool = False,
     writer: RecordWriter | None = None,
+    carried_positions: bool = False,
 ) -> RecordWrite:
     """One-call form of :meth:`RecordWriter.write` — the chokepoint's entry point.
 
@@ -1883,11 +1901,14 @@ def write_records(
     have to invent one.
 
     ``allocate`` is passed through unchanged: #12894's allocator is a property
-    of the WRITE, not of this convenience wrapper.
+    of the WRITE, not of this convenience wrapper. ``carried_positions`` is
+    passed through for the same reason — it describes the batch's ORIGIN
+    (journal or record), not this call (#13043 review P1-3).
     """
     return (writer or RecordWriter()).write(
         records, org_id=org_id, graph_id=graph_id, first_seq=first_seq,
         conn=conn, position=position, allocate=allocate,
+        carried_positions=carried_positions,
     )
 
 
@@ -2520,7 +2541,9 @@ def write_live_record(record: Mapping[str, Any], *,
     (its docstring is explicit: "the row — not the mode — is the fact"), so an
     enumerated replay heals nothing on any graph that has one, WHATEVER
     ``allocate`` was on the write that failed. There the repair is an allocating
-    replay (``replay(allocate=True)``) or the allocator's operator path (see the
+    replay (``replay(allocate=True)`` — ⛔ a CODE CALL, not a CLI verb: nothing
+    outside `tests/` invokes it, so an operator cannot run it from this tree's
+    tools; #13043 review P2-9) or the allocator's operator path (see the
     ``position_unverifiable`` arm below). That
     contract is enforced, not just intended: every counter call goes through
     :func:`_count_write_failure`, which suppresses its own failures.
@@ -2737,9 +2760,18 @@ def write_live_record(record: Mapping[str, Any], *,
         return _refused(refusal, seq)
     assert tenant is not None  # the verdict only clears with a resolved pair
     # ⛔ THE SWITCH (#12894). Read AFTER the refusals above, so an unarmed or
-    # refused write is byte-identical whatever the flag says. An explicit
-    # `allocate=True` from a caller still means what it said — the flag can only
-    # turn the arm ON, never override a caller's decision.
+    # refused write is byte-identical whatever the flag says.
+    #
+    # ⚠️ AND IT **CAN** OVERRIDE A CALLER'S `allocate=False` (#13043 review P2-6).
+    # The sentence here used to say the flag "can only turn the arm ON, never
+    # override a caller's decision", which is false of the line below it: `or`
+    # short-circuits on TRUTHY, so `allocate=False` falls through to the flag and
+    # an ON deployment allocates whatever the caller passed. That is deliberate —
+    # the flag describes the DEPLOYMENT (one graph cut over ⇒ every writer on it
+    # allocates) and a per-call veto would let one caller write an enumerated row
+    # onto a counter-issued graph, which is the split the cutover invariant exists
+    # to prevent. A caller that must stay enumerated halts the GRAPH, it does not
+    # pass `False` here.
     allocate = allocate or record_live_allocate()
     org_id, graph_id = tenant
     connection: Any | None = None
@@ -2773,7 +2805,9 @@ def write_live_record(record: Mapping[str, Any], *,
             "the journal consumed a position the counter did not — so EVERY "
             "later armed write refuses for the same reason until the gap is "
             "closed (an ARMED replay of the missing record closes it one record "
-            "at a time, once the caller commits). For the whole gap the remedy "
+            "at a time, once the caller commits — but that is a CODE call "
+            "(`record_projection`'s `replay(..., allocate=True)`); there is no "
+            "CLI verb for it in this tree). For the whole gap the remedy "
             "is the allocator's operator path: `halt` -> "
             "`seed --journal` -> `reopen` -> `arm`; record=%s %s",
             RECORD_ALLOCATE_ENV, record.get("type"), _record_identity(record),
@@ -2876,8 +2910,38 @@ def write_live_record(record: Mapping[str, Any], *,
             allocated_first = write.first_seq
             if allocated_first != seq:
                 if connection is not None:
-                    with contextlib.suppress(Exception):
+                    # ⛔ LOG THE SUPPRESSED EXCEPTION (#13043 review P2-7). The
+                    # WARNING below asserts, as a FACT, that the allocation was
+                    # rolled back — and a `suppress(Exception)` around the
+                    # rollback could make that sentence false with nothing
+                    # anywhere recording it. The rollback is the half that keeps
+                    # the position from being BURNED, so a failure here is the
+                    # one thing this branch must not swallow silently.
+                    #
+                    # ⚠️ UNASSERTED, and named so a later reader does not take
+                    # it for coverage (#12894 review cycle 2 mutation table):
+                    # this arm is reachable only when `rollback()` ITSELF raises,
+                    # which no fake in the suite produces — the DB legs drive a
+                    # real connection that rolls back cleanly. Added rather than
+                    # dropped because the cost of the log line is nil and the
+                    # alternative (a silent `suppress`) makes the WARNING below
+                    # assert something nobody checked. A test for it needs a
+                    # connection double that raises on `rollback`; that is a
+                    # fake the seam does not otherwise accept, so it is recorded
+                    # here instead of invented.
+                    try:
                         connection.rollback()
+                    except Exception as rollback_exc:  # noqa: BLE001, RUF100
+                        _logger.warning(
+                            "the divergence guard could NOT roll the allocation "
+                            "back (%s: %s) — the counter may be one ahead of "
+                            "the rows. `record_allocator_cli.py status` reads "
+                            "both sides; a counter that is ahead is the state "
+                            "that EATS rows, so halt the graph before "
+                            "continuing",
+                            type(rollback_exc).__name__,
+                            _bounded_cause(rollback_exc),
+                        )
                 _count_write_failure("write_failed")
                 _logger.warning(
                     "the record write was REFUSED (position_divergence) — the "
@@ -3022,10 +3086,12 @@ def write_live_record(record: Mapping[str, Any], *,
             "row (cut over), in which case an enumerated replay is refused — "
             "and the remedy is the one the refusal below names for the row's "
             "MODE, not a chain that assumes `active`: `replay(allocate=True)` "
-            "needs mode='active', `halt` is scoped to 'active', `reopen` to "
+            "needs mode='active' (and is a CODE call — no CLI verb ships), "
+            "`halt` is scoped to 'active', `reopen` to "
             "'halted'. Run `record_allocator_cli.py status` for the mode"
             if not allocate else
-            "repair it with an ALLOCATING replay (`replay(allocate=True)`), not "
+            "repair it with an ALLOCATING replay (`replay(allocate=True)`, a "
+            "CODE call — no CLI verb ships), not "
             "a plain one, which a cut-over graph refuses",
             record.get("type"), _record_identity(record), exc,
         )

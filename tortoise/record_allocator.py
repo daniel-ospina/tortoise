@@ -246,6 +246,48 @@ JOURNAL_MAX_SQL = (
     "WHERE org_id = %s AND graph_id = %s"
 )
 
+#: How many journal LINES the record holds for one graph — the FLOOR's own
+#: quantity, and NOT the same number as :data:`JOURNAL_MAX_SQL`.
+#:
+#: ⛔ THE TWO ARE DIFFERENT COORDINATES and the distinction is load-bearing for
+#: `record_allocator_cli.py sweep` (#13043 review: the sweep reported
+#: `floor_is_the_journals_count` while comparing the floor with `MAX(seq)`). A
+#: born-uncut graph has to be seeded with the journal's COUNT, because the count
+#: is how many positions already exist; `MAX(seq)` is the highest one issued.
+#: They agree on a dense axis and diverge in exactly ONE direction: a refused seq
+#: leaves a GAP, so `COUNT(*) < MAX(seq)`. The reverse is unrepresentable —
+#: `public.journal_event` has `PRIMARY KEY (org_id, graph_id, seq)` and
+#: `CHECK (seq > 0)` (`supabase/migrations/20261012000001_record_event_stream.sql`),
+#: so N distinct positive seqs with maximum M always satisfy N <= M, and deleting
+#: the tail lowers COUNT and MAX together instead of crossing them. A gap is the
+#: state the pre-flight exists to report, so answering one of them while naming
+#: the other is a false CLEAN.
+JOURNAL_COUNT_SQL = (
+    "SELECT COUNT(*) FROM public.journal_event "
+    "WHERE org_id = %s AND graph_id = %s"
+)
+
+#: Graphs this ORG that the RECORD has seen writing, and that have NO counter
+#: row — i.e. "born uncut", the state `#13043` review P1-1 named. The creation
+#: hook that would prevent it (`provision_graph_record`, the plan's §A7.8 item 8)
+#: is not in this tree, so this query is the reconciliation path that makes the
+#: state findable instead of merely documented.
+#:
+#: ⛔ IT READS `journal_event`, NOT `public.graphs`, and the reason is a GRANT,
+#: not a preference: `tortoise_record_app` has no privilege on `public.graphs`
+#: (the tenancy migration grants the record tables and nothing else), so a sweep
+#: over `graphs` would fail `InsufficientPrivilege` on exactly the role the CLI
+#: must connect as. The consequence is stated rather than hidden: a graph that
+#: has NEVER been written is invisible here — and it has also lost nothing yet,
+#: so the first write is the point at which this becomes actionable (and, for a
+#: born-uncut graph, the point at which its first line's row is lost).
+UNCUT_GRAPHS_SQL = (
+    "SELECT DISTINCT j.graph_id FROM public.journal_event j "
+    f"LEFT JOIN public.{RECORD_CURSOR_TABLE} c "
+    "       ON c.org_id = j.org_id AND c.graph_id = j.graph_id "
+    "WHERE j.org_id = %s AND c.graph_id IS NULL ORDER BY j.graph_id"
+)
+
 ARM_SQL = (
     f"UPDATE public.{RECORD_CURSOR_TABLE} SET mode = '{MODE_ACTIVE}', "
     "updated_at = now() WHERE org_id = %s AND graph_id = %s "
@@ -648,6 +690,21 @@ def _scope(conn: Any, org_id: str) -> None:
     (measured). State the direction, so a lane does not "simplify" the wrong one.
     """
     _rp.scope_connection(conn, org_id)
+
+
+def scope_tenant(conn: Any, org_id: str) -> None:
+    """Set the tenant GUC for a READER that is not seeding or allocating.
+
+    ⛔ A SWEEP WITHOUT THIS REPORTS A FALSE CLEAN (#13043 P1-1, measured):
+    `record_cursor` and `journal_event` carry policies that filter on
+    `app.current_org_id`, so an unscoped connection returns ZERO ROWS — and a
+    "which graphs are born uncut" query that returns zero rows reads as "none
+    are", which is the most dangerous possible answer for a pre-flight. The
+    tool's own reconciliation verb therefore scopes with the SAME prologue the
+    writer uses (public because it is a legitimate reader's need, not a test
+    hook).
+    """
+    _scope(conn, org_id)
 
 
 def _read_cursor(cursor: Any, org_id: str,
