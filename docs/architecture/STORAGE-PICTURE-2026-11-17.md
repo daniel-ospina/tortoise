@@ -1,366 +1,425 @@
 # The storage picture — where the layer is going, and where it hurts
 
-**Issue:** `#13232` · **Written:** 2026-11-17 · **Status:** point-in-time synthesis, not a decision record.
+**Issue:** `#13232` · **Written:** 2026-11-17 · **Read at:** `d1bfef778f` (branch `research/13232-storage-picture`)
+· **Status:** point-in-time synthesis, **not** a decision record.
 
-**What this is.** One picture of the storage layer: the destination the repo has already written down, the
-strands already walking toward it, and the one place where it currently hurts (~23 s on
-`POST /v1/subjects`, `#13224`). It exists so a fresh lane reads this instead of re-deriving the map.
+**What this is.** One picture of the storage layer: the destination the repo has already written down, the strands
+already walking toward it, and the one place it currently hurts (`~23 s` on `POST /v1/subjects`, `#13224`). It
+exists so a fresh lane reads this instead of re-deriving the map.
 
-**What this is NOT.** ⛔ It is not a design change, not a proposal to adopt, and not a measurement of the
-subject path. `#13224` owns the fix and its numbers; `#7879` owns the record; `#4051`'s search doc owns the
-vector move. Everything below is **read** from the tree at `2060c92fd3`, and every cell is sourced.
+**What this is NOT.** ⛔ Not a design change, not a proposal to adopt, and not this lane's measurement. `#13224` owns
+the subject path; `#7879` owns the record; `#4051`'s search doc owns the vector move; `#13220` owns the index
+question. Every cell below is **read** from the tree or an issue, and every claim about the latency is quoted
+from the lane that measured it.
 
-**How to read a proposal in this document.** Every proposal carries a **CONTRADICTION TEST** line. The test is
-run FIRST, before cost, fit or convergence, against the recorded decisions listed in §6. A proposal that
-contradicts one is **not a candidate** — it appears in §6 as a *reopen candidate* for the owner, never as an
-action. `#13232` is a lane that must not quietly pre-empt a decision another lane is already executing.
+**How to read a proposal here.** Every proposal carries a **CONTRADICTION TEST** line, run FIRST — before cost, fit
+or convergence — against the recorded decisions in §6. A proposal that contradicts one is **not a candidate**: it
+goes to §6b as a *reopen candidate* for the owner, never to the action list.
 
 ---
 
-## 1. The destination, in six sentences (cited, not paraphrased)
+## 1. The destination, in seven sentences (cited, not paraphrased)
 
 1. **Postgres is the system of record; FalkorDB is a derived hot cache.** Owner ruling 2026-10-08
    (`STORAGE-ARCHITECTURE.md` §2.0). FalkorDB is *demoted, not dropped* (§14.2). The correct sentence is
    *"authoritative in Postgres, cached in FalkorDB"* — never *"they left FalkorDB"* (§3's ⛔ authority box).
-2. **The vector index and the embedding payload move to Postgres (`pgvector`); traversal, writes and EP stay
-   in the graph.** Owner ruling 2026-11-07, V1 resolved (`STORAGE-ARCHITECTURE.md` §12.1c/§14.3;
-   `SEARCH-ARCHITECTURE.md` §3). The text index **does not** move — measured 8–23 nDCG@10 behind BM25
-   (`SEARCH-ARCHITECTURE.md` §6.2).
-3. **The cache stays COMPLETE through private-beta and becomes a bounded window only after the search doc's
-   M2 measures retrieval quality** (`STORAGE-ARCHITECTURE.md` §2.0's NARROWED clause; `SEARCH-ARCHITECTURE.md`
-   §1.5/§9). This is why §17.2/§17.3's residency router exists and does not yet fire.
-4. **Every write goes to the truth first, then projects to the cache** — journal → record → cache
-   (`STORAGE-ARCHITECTURE.md` §17.1). *"A derived cache that is also written to directly is not derived."*
-5. **The narrative and the raw turns live in Postgres, never in the graph** (`§9.1`, D1). The narrative's one
-   home is `public.session_narrative`; a turn row declares `public.point.cache_tier = 'record_only'`.
-6. **What earns a vector is decided by the TEXT, not the class** (`§12.2`), the rule set is the pack's
-   `memory_granularity` and the predicate is engine code (`§12.2a`), enforced at two points — `DISCARD`
-   (does the row exist?) and `EMBED` (does it carry a vector?).
+2. **The vector index and the embedding payload move to Postgres (`pgvector`); traversal, writes and EP stay in the
+   graph.** Owner ruling 2026-11-07, V1 resolved (§12.1c, §14.3; `SEARCH-ARCHITECTURE.md` §3). The **text index does
+   not move** — measured 8–23 nDCG@10 behind BM25 (`SEARCH-ARCHITECTURE.md` §6.2).
+3. **The cache stays COMPLETE through private-beta and becomes a bounded window only after M2 measures retrieval
+   quality** (§2.0's NARROWED clause; `SEARCH-ARCHITECTURE.md` §1.5/§9). This is why §17.2/§17.3's residency router
+   exists and does not yet fire.
+4. **Every write goes to the truth first, then projects to the cache** — journal → record → cache (§17.1).
+   *"A derived cache that is also written to directly is not derived."*
+5. **The narrative and the raw turns live in Postgres, never in the graph** (§9.1, D1); a turn row declares
+   `public.point.cache_tier = 'record_only'`.
+6. **⭐ NEWEST — capability-first placement (owner, 2026-11-16, `#13082`):** *"anything no graph query reads is
+   Postgres-only by default, and staying in the graph is something a shape must justify."* RAM is **~584× the price of
+   disk** ($73/GB-month vs $0.125/GB), so solo's storage line (30 % of $19) gives a **~78 MB of RAM per tenant**
+   ceiling. *"The window is derived from the budget — never from a calendar."*
+7. **⭐ NEWEST — index them, but in Postgres (owner, 2026-11-17, `#13220`):** *"if indexing improves search for
+   Object/Subject/Event of course we want that, and we just need it in Postgres and the search aligned with that and
+   everything armed and working"* … *"we should likely also index source also in postgres."* This answers §14.3's
+   **V3** (are `:Object`/`:Subject` indexed? **yes, in Postgres**) and **V2** (does a `Source` get a vector? **yes, in
+   Postgres**). ⚠️ It explicitly states that `#11901`'s *"not earned"* verdict was about **FalkorDB** indexes and does
+   **not** apply to a pgvector index.
 
-**One correction to how this is usually told, and it matters for every proposal below:** the removal half of
-V3 is **refused** — `:Object` and `:Subject` embeddings are **KEPT** and no pass may remove them or stop
-writing them (owner, 2026-11-10, `#11395` comment `6781921075`, cited at `§12.1c` and `§14.3`). What survives
-in V3 is whether those labels are **indexed**, which is now a *work item*, not a decision.
+**Two corrections to how this is usually told, and they matter for every proposal below:**
+
+- The **removal** half of V3 is **refused** — `:Object`/`:Subject` embeddings are **KEPT** and no pass may remove them
+  or stop writing them (owner, 2026-11-10, `#11395` comment `6781921075`, cited at §12.1c/§14.3). What survives is
+  *whether they are indexed* — and #13220 has now answered: yes, in Postgres.
+- **`#4997` is CLOSED** (`stateReason: COMPLETED`), superseded by **`#13220`**. A lane that reads the brief's `#4997`
+  reference as live work will rebuild a decision that has moved.
 
 ---
 
 ## 2. The map
 
-Columns: **layer** · **where it lives today** (with source) · **where the destination says it lives** ·
-**what is in flight** · **what nobody owns**.
+Columns: **layer** · **where it lives today** · **where the destination says** · **what is in flight** ·
+**what nobody owns**.
 
 | layer | today | destination | in flight | unowned |
 |---|---|---|---|---|
-| **The record** | Postgres (Supabase). `public.point`, `public.object`, `public.subject`, `public.event`, `public.source`, `public.relation`, `public.session`; 85 migrations, `pgvector` in 1 of them (`20261109000001_record_embedding_vector.sql`, `#11642`) — `SEARCH-ARCHITECTURE.md` §3 | same — Postgres is the record, *for every layer including epistemic* (`STORAGE-ARCHITECTURE.md` §3 authority box) | `#7879` (epic), `#11642` (pgvector column + HNSW build), `#13133` (dense leg bounded to the read budget), `#9721` (record-sourced `:Event` loses ON CREATE props) | — |
-| **The hot cache (graph)** | FalkorDB, written **directly** by 387 mutating Cypher sites across 211 functions in 32 files (`STORAGE-ARCHITECTURE.md` §17.1, measured 2026-10-08) | derived only; never authoritative (§2.0/§3) | `tortoise/cache_projection.py` (Interface B) projects record → cache; §17.1's eight declared unjournalled lanes | ⛔ **the chokepoint.** §17.1: *"'Point the write path at Postgres' is not one change"* — until a chokepoint exists the cache is written to directly. No issue owns it. |
-| **Embedding payload** | a graph node property (`embedding`) on `Point`, `Subject`, `Object`, `Event`, `Source`, `Document` — written synchronously on every create (`tortoise/projection/entities.py:4844` Subject, `:5031` Object, `:2927`, `:5392`, `:5760`) | moves to Postgres (`public.*.embedding` stays `jsonb`; ANN half is a GENERATED `embedding_vec vector(384)`) — §12.1c, `SEARCH-ARCHITECTURE.md` §3 | V1 **decided** 2026-11-07; the build is `#11642` (measured: backfill 20k rows 6.9 s, HNSW build 4.0–4.2 s) | the **payload** column move is not scheduled — the doc is explicit that the `jsonb` payload deliberately does **not** convert (`SEARCH-ARCHITECTURE.md` §3). That is a decision, not a gap — but nothing tracks the graph-side payload's retirement, either. |
-| **Vector index** | **exactly ONE** vector index in the whole graph — `Point.embedding` (HNSW). `Object`/`Event`/`Source`/`Subject`/`Document` have **none** (`§12.1b`, `CALL db.indexes()` 2026-09-24; `_ensure_indexes` hardcodes the literal `'Point'`) | pgvector HNSW in Postgres — **one filtered index** over a shared table, not five per-label indexes (§12.1c's per-label argument) | `#4997` (make index creation label-generic — the surviving V3 work), `#11642` (the pgvector index itself) | **the ordering between `#4997` and the pgvector cutover.** Building four more FalkorDB HNSW indexes now is RAM we are about to stop renting (§12.1c: *"four further resident HNSW index structures, five in total, vs one filtered index"*). Nobody owns that sequencing call. |
-| **Text index** | FalkorDB `db.idx.fulltext` on 5 labels (Point/Event/Subject/Object/Source) — `§12.1b` | **stays** in FalkorDB; the move is deferred behind M3 (`SEARCH-ARCHITECTURE.md` §3/§6.2) | M3 (measure our own BM25 gap) | M3 has no issue number in either doc. **Unknown, not unowned** — see §7. |
-| **What earns a vector (policy)** | `tortoise/embed_gate.py` — rule set **is** `value_gate.RULES`, one rule set two questions; flag-gated **off in code** (`TORTOISE_EMBED_GATE`) and **armed in the shipped template** (`.env.example`) — `§12.2a` | pack `memory_granularity` declares the policy; the engine owns the predicate — `§12.2a` | `#5008` (the EMBED gate), `#4899` (the shared rule set), `#11086` (the post-arming rate measurement) | ⛔ **the per-kind override block** — `§12.2a` names it *"still absent"*: no pack slot exists and no caller at the submission step holds the brief. So the owner's own meeting-vs-commit example cannot be declared today. |
-| **The write order** | journal → record → cache, enforced at three runtime doors (`§17.1`); eight named unjournalled lanes declared | same | `#9206` (apply-first lanes), `#9079`/`#9391` (handle doors) | ⛔ **a residual stated in §17.1 and owned by nobody:** *"a RAW vendor client this package did not build … carries no hook, so the runtime doors are guard rails, not a proof"*. §17.1's durable fix is `#7951`. |
-| **Residency / completeness marker** | `tortoise/residency.py` — two verdicts, `hot`/`not-hot`; exposed as a response field **off by default** (`TORTOISE_RESIDENCY`) — `§17.2` | fires once the cache is windowed (`§2.0` NARROWED; `§17.3`) | `#9189` (`record-reconcile` — the production trigger the comparison lacked) | — |
-| **Narrative + raw turns** | `public.session_narrative`; turn rows are `public.point` with `cache_tier='record_only'`; the graph keeps `:Session` + counters — `§9.1` | Postgres only, never the RAM-resident layer (§9.1, D1) | `#9555` (narrative carrier), `#10000`/`#10017` (turns), `#10070` (`cache_tier`) | — |
-| **Entity identity / linking** | `entity_identity.resolve_or_mint` (opaque id minted once; `name` is a mutable natural key); `entity_resolver` ladder (exact → alias → embedding similarity → adjudication → review) | unchanged by the storage move | `#12047` (entity resolver merged; `holdsRole`), `#12060` (kind guard), `#9964` (kind decides the layer) | — |
+| **The record** | Postgres (Supabase): `public.point`, `object`, `subject`, `event`, `source`, `relation`, `session`; 85 migrations, `pgvector` in 1 (`20261109000001_record_embedding_vector.sql`) — `SEARCH-ARCHITECTURE.md` §3 | same — Postgres is the record for **every** layer, epistemic included (§3's authority box) | `#7879` (epic); `#11642` (pgvector column + HNSW build); `#13133` (**merged** — dense leg bounded to the read's budget); `#9721` (record-sourced `:Event` loses 7 ON CREATE props); PR `#13210` (the record's runner + `apply`) | ⛔ **`#7879`'s hole 3 — *"wire new writes so a live tenant's record stops being empty"*.** PR `#13210` claims holes 1 and 2 and says so explicitly. **No PR, no issue, for hole 3.** |
+| **The hot cache (graph)** | FalkorDB, written **directly** by 387 mutating Cypher sites across 211 functions in 32 files (§17.1, measured 2026-10-08) | derived only, never authoritative (§2.0/§3); *"staying in the graph is something a shape must justify"* (`#13082`) | `cache_projection.py` (Interface B) projects record → cache; §17.1's eight declared unjournalled lanes; `#13083` (capability audit, census landed), `#13094` (`:GraphEvent` has no graph reader) | ⛔ **the chokepoint.** §17.1: *"'Point the write path at Postgres' is not one change."* No issue owns it. |
+| **Embedding payload** | a graph node property on `Point`/`Subject`/`Object`/`Event`/`Source`/`Document`, written **synchronously inside the fold** — five symmetric sites in `projection/entities.py:2927`, `:4844`, `:5031`, `:5392`, `:5760` | Postgres. `point`/`event`/`source` already have `embedding` + a GENERATED `embedding_vec vector(384)` + HNSW; **`object` and `subject` have NO embedding column at all** and the record *actively refuses* one (`chk_object_props_no_derived`, `chk_subject_props_no_derived`) — `#13220`'s measured table | `#13220` (owner ruling 2026-11-17) | ⛔ **all of `#13220`.** Zero comments, no PR, no branch. **This is the largest unowned piece in the landscape**, and its item 1 is the sharpest: `:Object`/`:Subject` fingerprints **exist only in FalkorDB**, so a record-based rebuild cannot restore them — a durability gap *against the decision that Postgres is the record*. |
+| **Vector index** | **exactly ONE** vector index in the graph — `Point.embedding` (HNSW). `Object`/`Event`/`Source`/`Subject`/`Document`: **none** (§12.1b, `CALL db.indexes()` 2026-09-24; `_ensure_indexes` hardcodes the literal `'Point'`) | **one filtered pgvector index in Postgres**, not five per-label HNSW structures (§12.1c's per-label argument); the index is transactional with the row | `#13220` (the ruling); `#11642` (the infra, built — `event`/`source` indexes exist but hold **0 rows**) | ⛔ **the graph-side copies' retirement** needs an explicit **reopen** of the 2026-11-10 KEEP ruling, and #13220 states it is *"out of scope without an explicit reopen"*. **No issue exists to hold that reopen** (§6b R1). |
+| **Text index** | FalkorDB `db.idx.fulltext` on 5 labels (§12.1b) | **stays** in FalkorDB; the move deferred behind **M3** (`SEARCH-ARCHITECTURE.md` §3/§6.2) | — | ⚠️ **M3 has no issue number in either architecture doc** (§7 U6). Not "unowned" so much as **unfiled**. |
+| **What earns a vector (policy)** | `tortoise/embed_gate.py` — rule set **is** `value_gate.RULES`, one rule set two questions; flag-gated **off in code** (`TORTOISE_EMBED_GATE`) and armed in the shipped template (§12.2a) | pack `memory_granularity` declares the policy; the engine owns the predicate (§12.2a) | `#5008`, `#4899`, `#11086` (post-arming rate measurement) | ⛔ **the per-kind override block** — §12.2a names it *"still absent"*: no pack slot exists, no caller at the submission step holds the brief. The owner's own meeting-vs-commit example cannot be declared today. |
+| **The write order** | journal → record → cache, enforced at three runtime doors (§17.1); eight named unjournalled lanes declared | same | `#9206`, `#9079`, `#9391` | ⛔ **a stated residual with no owner:** *"a RAW vendor client this package did not build … carries no hook, so the runtime doors are guard rails, not a proof"* (§17.1). The durable fix is `#7951`. |
+| **Residency / window** | cache is COMPLETE; `residency.py`'s marker exists but **cannot fire** on a complete cache (§17.2); `TORTOISE_RESIDENCY` off | a measurement-derived window (`#13082`) | `#13084` (arm the per-tenant RAM cap, PR `#13102`); `#13103` (**blocked by #13084**, *"filed so it is not lost"*); `#9189` (`record-reconcile` — the production trigger) | — |
+| **Dense retrieval leg** | the record leg is bounded (`#13133`, merged); the **graph** leg silently degrades to keyword-only under load — `#13108`: **45 % of eval windows lost the semantic half; recall@3 = 75.0 % is a floor measured with the leg missing**; PR `#13121` merged (mechanism measured, wasted index attempt removed) | record-first for similarity (§3), graph for traversal | `#13108` (reopens V3 *with numbers* — ⚠️ *"a reopen … not a local tweak"*), `#13156` (a budget-cancelled leg is indistinguishable from a slow store in the trace), `#13169` | — |
+| **Narrative + raw turns** | `public.session_narrative`; turn rows are `public.point` with `cache_tier='record_only'`; the graph keeps `:Session` + counters (§9.1) | Postgres only (§9.1, D1) | `#9555`, `#10000`, `#10017`, `#10070` | — |
+| **Identity / linking** | `entity_identity.resolve_or_mint` (opaque id minted once, `name` is a mutable natural key); `entity_resolver` ladder — exact/alias auto-resolve, fuzzy/semantic go to the **review queue** (`entity_resolver.py:56-64`) | unchanged by the storage move | `#12047`, `#12060`, `#9964` | — |
 
-**The one-line reading of the map:** every *storage* row has a decision and an owner. The rows with nobody on
-them are all **write-path discipline** (the chokepoint, the raw-client residual, the per-kind override), not
-storage placement. That asymmetry is the whole reason a local fix to the subject write path is the wrong move
-and a *write-path* framing is the right one.
+**The one-line reading of the map.** Every *storage row* has a decision and an owner — and on the two newest rows
+(`#13082`, `#13220`) the owner has just decided and **nobody has started**. Every row with nobody on it is
+**write-path discipline** (the chokepoint, the raw-client residual, the per-kind override), not storage placement.
+That asymmetry is the whole reason a local fix to the subject path is the wrong move and a *write-path* framing is
+the right one.
 
 ---
 
 ## 3. The latency verdict
 
-### 3.1 What is measured today
+### 3.1 What is measured
 
-`#13224` measured, 2026-11-17 on production `tortoise-y4mjjq` (app `0a827908936c`, `TORTOISE_RECORD_SERVE=prefer`,
-`TORTOISE_RECORD_DSN` present):
+`#13224` measured 2026-11-17 on production `tortoise-y4mjjq` (app `0a827908936c`, `TORTOISE_RECORD_SERVE=prefer`,
+`TORTOISE_RECORD_DSN` present): `POST /v1/subjects` **504 after 18.4 s**, retry **200 after 22.9 s**;
+`POST /v1/points` ~1.1 s; `POST /v1/objects` ~1.4 s.
 
-| call | result |
-|---|---|
-| `POST /v1/subjects` (`naturalPerson`), attempt 1 | **504 after 18.4 s** |
-| `POST /v1/subjects`, attempt 2 (5 s later) | **200 after 22.9 s** |
-| `POST /v1/points` (statement) | 200 after ~1.1 s |
-| `POST /v1/objects` (goal) | 200 after ~1.4 s |
+**The breakdown exists — and it is NOT on the issue.** `#13224` has **zero comments** and still says
+*"Cause: UNKNOWN"*. The diagnosis is in **PR `#13229`**'s body (open, MERGEABLE, self-described as the `#13224` fix):
 
-`#13224` has **zero comments** at the time of writing and no phase breakdown. **So there is no measured
-cause yet, and this document does not invent one.**
+| measurement | value | source |
+|---|---|---|
+| an **in-process** subject create, warm | **8–10 ms** | PR `#13229` |
+| the same create **inside the hosted handler**, 12k-node graph | **27–32 ms** | PR `#13229` |
+| `EmbeddingModel.get()`, warm model cache, no download | **13.5 s** | PR `#13229` |
+| the recorded cold load (`#1349`) | ~57 s | `embeddings.py:869` |
+| `_LOAD_TIMEOUT_S` | 90 s | `embeddings.py:869` |
+| a **warm** encode | 25–43 ms | PR `#13229` |
+| the transport wait bound that produced the 504 | 10 s | `mcp_auth._TRANSPORT_WAIT_BOUND_S` |
 
-### 3.2 What the code already settles — the paths are the SAME
+> **"The cause is not the write. … The stall is the cold embedding-model load, paid on the write path's own request
+> thread. … `Subject` was simply the door that arrived first; the same stall is reachable from any write."**
+> — PR `#13229`
 
-I read both paths end to end. **`POST /v1/subjects` and `POST /v1/objects` are stage-for-stage the same code**,
-and the only subject-only work on the create path is a branch that does not run for this call.
+Reproduction (hosted ASGI app, real FalkorDB, pre-warm in flight): before → `#1 10016 ms HTTP 504`,
+`#2 4796 ms`, `#3 205 ms`; after the fix → `#1 438 ms`, `#2 395 ms`, `#3 391 ms`. A/B over six creates inside one
+13.5 s cold window: **before p50 49.7 ms / p95 20,414.2 ms → after p50 266.7 / p95 267.8 ms.**
+
+`#2 > #1` before the fix is the **abandoned load thread**: the retry joins it and completes when the load lands —
+*"which is why production's retry took 22.9 s, longer than the 18.4 s timeout that preceded it."*
+
+### 3.2 This lane's independent check — the paths are the SAME
+
+Before the landscape lane found PR `#13229`, I traced both paths end to end. **`POST /v1/subjects` and
+`POST /v1/objects` are stage-for-stage the same code**, and the one subject-only block does not run for this call:
 
 | stage | subject | object | same? |
 |---|---|---|---|
-| hosted route | `hosted_api.py:13889` | `hosted_api.py:13808` | ✅ same shape: `_require_scope` → `_data_sdk_offloaded` (`:10303`, a **fresh per-request SDK**) → `_check_org_limit_off_loop(org, "points")` → `named_kind` → `_require_approved_kind` (`:13758`, **a WHOLE-GRAPH read**, documented O(nodes) and *"run per call"*) |
-| SDK alias | `create_subject` `sdk.py:54919` | `create_object` `sdk.py:54970` | ✅ both are thin relays to `create_entity` |
-| kind guard | `_apply_kind_guard` `sdk.py:54074-54080`, with `installed_provider=_graph_installed_namespaces(self)` (`:7361` → `pack_state.graph_installed_namespaces`, **whole-graph, O(nodes)**, `pack_state.py:1170`/`:1198`) | identical call site | ✅ |
-| layer note | `_kind_layer_note` | identical | ✅ |
-| subject-only | `roleHolder`/`role_holder` pops (`:54152ff`), `resolve_role_holder`, `refuse_role_self_edge`, `wire_holds_role` | — | ⚠️ **only when a caller supplies `roleHolder`.** `#13224`'s probe did not. These do not run. |
-| create lock | `entity_create_lock("Subject", name)` `sdk.py:54206` | `entity_create_lock("Object", name)` `:54229` | ✅ |
-| identity | `_entity_identity_for` → `resolve_or_mint` (`entity_identity.py:547`) → `_live_holders_same_entity` (two indexed reads) | identical | ✅ |
-| generic write | `_create_entity` `sdk.py:50428` → `_refuse_unapproved_kinds_in_props` (`:50368`, **another whole-graph read per kind prop**) → `_sanitize_props` → `_refuse_ending_dropped_by_a_re_mention` → `canonical_name` fold → event dict → `_emit_event` | identical funnel | ✅ |
-| journal | `SubjectAdded` (`:50772`) | `ObjectRegistered` (`:50633`) | ✅ same mirror shape, post-apply |
-| fold | `_upsert_subject` `projection/entities.py:4818` | `_upsert_object` `:5003` | ✅ |
-| **embedding** | `encode_for_row(name, self.required_embedding_dim)` — **SYNCHRONOUS, inside the fold** `entities.py:4844-4846` | the **same call** `:5031-5033` | ✅ **both embed on create** |
-| record schema | `public.subject`: `idx_subject_scope (org_id, graph_id)` (`20261012000002:106`), name index (`20261027000001:208`), RLS `subject_app_tenant` (`20261025000001:274`) | `public.object`: `idx_object_scope` (`:65`), name index (`:206`), RLS `object_app_tenant` (`:268`) | ✅ identical index and policy shape |
+| hosted route | `hosted_api.py:13888` | `:13820` | ✅ `_require_scope` → `_data_sdk_offloaded` (`:10303`, a **fresh per-request SDK**) → `_check_org_limit_off_loop(org,"points")` → `named_kind` → `_require_approved_kind` (`:13758`, a **whole-graph O(nodes) read**, *"documented to run per call"*, lines 13785–13787) |
+| SDK alias | `create_subject` `sdk.py:54919` | `create_object` `:54970` | ✅ thin relays to `create_entity` |
+| kind guard + layer note | `sdk.py:54073`/`:54092` | identical | ✅ `kind_guards.resolve` is pure and process-cached (`kind_guards.py:732-734`) |
+| **subject-only** | `roleHolder`/`role_holder` pops, `resolve_role_holder`, `refuse_role_self_edge`, `wire_holds_role` (`sdk.py:54161-54241`) | — | ⚠️ **gated on `roleHolder` being supplied** (`:54190`), and `CreateSubjectRequest` declares **only** `name`/`subjectKind` (`hosted_api.py:13881-13885`). **Does not run.** |
+| create lock + identity | `entity_create_lock("Subject", name)` `:54206` → `resolve_or_mint` (`entity_identity.py:547`) | `"Object"` `:54244`, same resolver | ✅ same predicate, same two indexed reads; `Subject`/`Object` both carry RANGE indexes on `name`/`canonical_name`/`resolved_from` (`projection/__init__.py:20298-20310`) |
+| generic funnel | `_create_entity` `sdk.py:50428` → `_refuse_unapproved_kinds_in_props` (`:50473`) → `_sanitize_props` → `canonical_name` → event dict → `proj.apply` (`:50710`) → `_emit_event` (`:50785` / `:50767`) → `write_live_record` | identical | ✅ |
+| fold | `_upsert_subject` `projection/entities.py:4818` | `_upsert_object` `:5003` | ✅ same three statements: conditional `clear_embedding`, one `MERGE`, `_persist_extra_props` (skipped when empty) |
+| **embedding** | `encode_for_row(name, dim)` — **synchronous, inside the fold** `entities.py:4843-4851` | the **same call** `:5030-5038`, identical comment | ✅ **both embed on create** |
+| record | `write_live_record` → `record_projection.replay` — ~**3.8 ms/record** warm, one pooled connection, `connect()` 0 (`record_writer.py:2779-2790`); **no embedding column is written by `record_writer.py` at all** | identical | ✅ |
+| record schema | `idx_subject_scope`, name index, RLS `subject_app_tenant` (`20261012000002:106`, `20261027000001:208`, `20261025000001:274`) | `idx_object_scope`, name index, RLS `object_app_tenant` (`:65`, `:206`, `:268`) | ✅ identical index and policy shape |
 
-**⇒ Conclusion about the code, stated as narrowly as the evidence allows:** there is **no subject-only stage**
-in the write path for this call. Any explanation of the 20× that rests on *"subjects do more work"* is already
-**falsified by reading** — and that is why the difference must be found by measurement, not by inspection.
+**The independent reading and the measurement agree.** A ~20× gap between two stage-identical paths is not
+explainable by anything the code branches on — and PR `#13229` says exactly that: it was *arrival order*, not path.
 
 ### 3.3 The verdict
 
-> **INCIDENTAL — not structural.** A cost we chose (synchronous embedding, record-first write, entity
-> linking, the kind guard) is paid by **both** paths, and the object path pays it in 1.4 s. A ~20× gap
-> between two stage-identical paths cannot be a decision we made. It is either a **plan/index/pool/runtime
-> property of one deployment** or a **data-shaped cost inside a stage both paths share** — and both of
-> those are incidental.
+> **INCIDENTAL.** The ~23 s is **not** a cost we chose. It is a **cold-start property of a dependency the write path
+> calls** — `EmbeddingModel.get()` loading `bge-small` while the request thread blocks on it — amplified by a
+> pre-warm that is a *daemon thread* and therefore does not gate readiness, and by a transport bound (10 s) shorter
+> than the load (13.5–57 s) so the first request is *guaranteed* to 504 on a cold process.
 
-⚠️ **The condition that would falsify this**, stated so it cannot be quietly dropped: if the breakdown in
-§3.4 shows the seconds inside a stage **only** the subject path executes, the code-symmetry claim above is
-wrong and the verdict flips to structural. §3.2 is a reading of one head (`2060c92fd3`); if a subject-only
-stage landed after it, the reading expires.
+**The structural/incidental split, stated precisely** — because `#13224`'s own framing offers *"synchronous
+embedding"* as a structural candidate and it is half-right:
 
-### 3.4 The single probe that settles it — for `#13224` to run, not this lane
+| | is it structural? | the deciding number |
+|---|---|---|
+| **the decision to embed synchronously on the write path** | **YES** — decided (§12.2a, `#5008`), and the destination **keeps** it (the model call stays on the write path after the vector move; only the *store* moves) | a **warm** encode costs **25–43 ms**. That is the price of the decision — an order of magnitude below the ticket's target, so **the decision is not what breaks the target.** |
+| **the 23 s** | **NO** | the same create is **8–10 ms in-process, 27–32 ms in the handler** (PR `#13229`). Everything above that is the cold load. |
 
-**One ablation, four calls.** Re-run exactly `#13224`'s four requests on the same box with
-`TORTOISE_RECORD_SERVE=off` (the seam is `tortoise/record_serve.py:589` — the accepted modes are `off`,
-`record`, `prefer`; the production run used `prefer`).
+**⇒ The sharpest sentence in this document:** *the destination neither keeps nor removes this cost.* Storage placement
+never had it. What removes it is **not blocking a write on model readiness** — which is orthogonal to whether the
+vector lives in FalkorDB or Postgres.
 
-| arm | `subject` | `object` | verdict |
-|---|---|---|---|
-| `prefer` (already measured) | 22.9 s | 1.4 s | the gap |
-| `off` | ? | ? | **if subject collapses toward object** → the seconds are in the **record leg** (Postgres plan / RLS / round-trips / pool) → incidental, and `#13224`'s fix is a DB-side or ordering fix, not a write-path redesign. **if subject stays ~20 s** → the cost is in the graph/journal/embedding path → the symmetry claim is falsified → escalate to a per-phase breakdown before any fix is chosen. |
+### 3.4 What `#13224` can act on without re-deriving
 
-**Why this probe and not a profiler first.** It is one env flip and four requests, it needs no instrumentation,
-and it partitions the entire space in two — a `py-spy dump` mid-create is the right *second* step (it names the
-frame) but the wrong first one, because it answers "where" without telling you whether the answer is inside a
-decision or inside an accident.
-
-**Two stages to watch, because they are the only whole-graph reads on the path and they are paid
-*twice-to-thrice* per create:** `_require_approved_kind` (`hosted_api.py:13758-13790`) and
-`_apply_kind_guard`'s `installed_provider` (`sdk.py:54079`), plus `_refuse_unapproved_kinds_in_props`
-(`sdk.py:50368`) in the funnel. Each runs `pack_state.graph_kind_namespaces` — and
-`pack_state.py:1198` says of its sibling: *"⚠️ This is a whole-graph read (it runs the per-property kind scans) …
-the scan runs per call"*. **This is a stage both paths share, so it cannot be the 20× on its own — but it is a
-plausible reason the BASELINE is 1.4 s rather than 200 ms, and it belongs in the same breakdown.**
-
-⚠️ **Not a proposal.** Reading this as "remove the approved-kind gate" would be a *bypass* (it is the gate that
-stops a write widening the graph's own pack approval set, `#5475`) — see §6.
-
-### 3.5 What `#13224` can act on without re-deriving
-
-- The write path is symmetric (§3.2, with citations). **Do not look for a subject-only stage in the SDK.**
-- `:Subject` gets a **synchronous embedding on create** (`entities.py:4844`) for a vector that **no index
-  serves** (§12.1b: `Subject` has no vector index) — the same is true of `:Object` (`:5031`). That is a real
-  cost with no retrieval benefit **today**; it is also **decided** (2026-11-10 keeps the writing — §6.3), so
-  it is not `#13224`'s fix. It is `#4997`'s.
-- The read path is not the subject path's problem: `#13093` owns the doors, `#13133` bounds the dense leg to
-  the read budget.
+1. **Do not look for a subject-only stage in the SDK.** §3.2's table is the reading; the four hypotheses that
+   assume a branch (entity linking, per-label dedup, a subject-only record write, a subject-only kind check) are
+   **rejected by code**, and PR `#13229` rejects them by measurement too (entity linking 1.5 ms @6 nodes → 4.7 ms
+   @2021, *"No curve"*; the kind guard 2.8–2.9 ms, *"identical for the Object door, which was fast"*).
+2. **The fix in PR `#13229` is the right *class* of fix** — bound the wait, never let a create exceed its budget by
+   two orders of magnitude. ⚠️ **But its trade is unowned — see §4 P2.**
+3. **A residual PR `#13229` states itself:** *"Readiness still does not wait for the embedder; a deploy can therefore
+   serve writes for the first seconds. This PR makes that window harmless rather than removing it."*
 
 ---
 
 ## 4. Proposals, ranked
 
-Each: **what it changes** · **the decision/design it serves** · **what it forecloses** · **rough cost** ·
-**class**. Class is `urgent` / `scheduled` / `do not do` (§6 carries the `do not do` list separately).
+Each: **what it changes** · **the decision it serves** · **what it forecloses** · **rough cost** · **class**.
 
-### P1 — Finish the `#13224` diagnosis before any fix, using §3.4's ablation — **urgent**
+### P1 — Relay PR `#13229`'s diagnosis onto `#13224` — **urgent**
 
-- **Changes:** nothing in the product. It produces the number `#13224`'s own O/I/T asks for and names which
-  half of the space the fix lives in.
-- **Serves:** `#13224` indicator 2 (*"a phase breakdown — where the ~20 s goes"*); this document's §3.3.
-- **Forecloses:** a local optimisation of a stage that is not the cause — the exact short-termist move
-  `#13232` was opened to prevent.
-- **Cost:** one env flip, four HTTP calls, ~1 minute of wall clock.
-- **CONTRADICTION TEST:** against `§2.0` ✅ (measures, changes no placement) · `§9.1` ✅ · `§12.1c` ✅ ·
-  `#4010` (no capture caps) ✅ · off-by-default rules ✅ · MCP/SDK surface ⛔ n/a (no surface change).
-  **No contradiction.**
+- **Changes:** nothing in the product. Posts the measured breakdown (and the five hypothesis verdicts) as a comment
+  on `#13224`.
+- **Serves:** `#13224`'s own indicator 2 (*"a phase breakdown — where the ~20 s goes"*) and its explicit rule
+  *"each must be ACCEPTED or REJECTED with a measurement"*. It is also the **DECISION RELAY** rule: an answer that
+  lives only in a PR body is invisible to the lane that reads the issue.
+- **Forecloses:** the failure where `#13229` closes unmerged and the measurement dies behind an issue that still reads
+  *"Cause: UNKNOWN"* — leaving the next lane to re-run it.
+- **Cost:** one comment. ~2 minutes.
+- **CONTRADICTION TEST:** `§2.0` ✅ (no placement touched) · `§9.1` ✅ · `§12.1c` ✅ · `#4010` (no capture caps) ✅ ·
+  off-by-default rules ✅ · MCP/SDK surface ✅ n/a. **No contradiction.** ⚠️ The only reason this is *urgent* rather
+  than *housekeeping* is that the artifact it protects is the one thing `#13232` was asked for.
 
-### P2 — Land `#4997` as *index creation becomes label-generic*, ordered AFTER the pgvector cutover decision point — **scheduled**
+### P2 — Make a vectorless row **observable and exactly repairable** before relying on the cold-window trade — **urgent**
 
-- **Changes:** `_ensure_indexes()` stops hardcoding the literal `'Point'` so a served label can carry a vector
-  index; the trace already reports `index`/`scan`, so the degradation stays observable.
-- **Serves:** `§12.1b`/`§12.1c` — the surviving V3 work item, explicitly the *indexing* question the owner left
-  open after refusing removal on 2026-11-10.
-- **Forecloses:** nothing, if it is ordered right. ⚠️ **It forecloses RAM headroom if it is ordered wrong** —
-  four more resident FalkorDB HNSW indexes (§12.1c: *"five in total, on the most expensive resource we
-  have"*) on a cache the destination bounds after M2.
-- **Cost:** the query side is already label-generic (`#172`); the index side is one function. The **cost that
-  matters is the sequencing**, not the code.
-- **CONTRADICTION TEST:** `§12.1c` ✅ **serves** the decision rather than pre-empting it (the decision moved
-  *where* the index lives; it did not answer *whether these labels are indexed*) · `§2.0` ⚠️ **this is the one
-  to watch** — building FalkorDB indexes for vectors that are scheduled to move to Postgres is a spend on a
-  store that is being demoted. **So P2's real deliverable is a sequencing statement, not an index:** *do not
-  build the four indices in FalkorDB; make the DDL label-generic so the same code serves a label that is
-  genuinely staying, and let pgvector carry the served set.* **No recorded decision forbids that reading**;
-  a lane that reads §12.1c as "build them now" contradicts §2.0's demotion and should stop.
+- **Changes:** `#13229` writes a row **without a vector** inside the cold window and relies on
+  `graph-scripts/backfill_embeddings.py` to restore it. Three measured facts make that reliance currently unsound:
+  1. **Nothing counts the gap.** A row with no vector is simply not returned by the dense leg; `#13156` records that a
+     leg cancelled by its own budget *"is indistinguishable from a slow store"* in the trace.
+  2. **The dense leg is already the weak half.** `#13108` measured it dropping to keyword-only in **45 %** of eval
+     windows, with **recall@3 = 75.0 %** *because of it*. A silently-unindexed row composes with that.
+  3. **⛔ The repair tool has an open correctness bug.** `#12570`: the backfill write addresses nodes by a
+     **non-unique** key — *"two `:Point` nodes with `id: 'dup'` … the last row's vector lands on both"*, and the
+     `MATCH` ignores `kind_pred` so a `Document`-surface row writes onto the provenance `:Source`. It is filed
+     **category A — silent destruction of a correct value**, and its pin is `xfail(strict=True)`.
 
-### P3 — Close the per-kind embedding override slot (§12.2a's named absence) — **scheduled**
+  So: **a vectorless-row count (or a reconciliation number) plus `#12570`'s fix, before the trade is load-bearing.**
+- **Serves:** §17.2's rule that *"truth == cache must be checkable, not assumed"* and that a gap must be *"OBSERVED,
+  not merely recoverable"* — the trade is a new way to create exactly that kind of gap.
+- **Forecloses:** a slow, silent recall regression that would be attributed to the model or to the embed gate rather
+  than to the write path.
+- **Cost:** a counter + a scheduled sweep. `#12570` is a bounded fix (address the row's own node, honour `kind_pred`).
+- **CONTRADICTION TEST:** `§17.2` ✅ **serves** it (observability of a divergence is the section's whole subject) ·
+  `§17.3` (a miss must never read as an absence) ✅ · `§2.0` ✅ · `#4010` ✅ · surface ✅ n/a. **No contradiction.**
+  ⚠️ **Do not "fix" it by making the write wait again** — that reverses `#13229` and re-creates the 504.
 
-- **Changes:** adds the pack slot `embedding.overrides[{kind, embed}]` and passes the brief to the submission
-  step, so the owner's own counterexample (a meeting with an authoritative calendar title earns a vector, a
-  commit hash does not) becomes declarable instead of hard-coded.
-- **Serves:** `§12.2`'s text rule and `§12.2a`'s *"the shape is BOTH"* (policy in the pack, predicate in the
-  engine) — the design the EMBED gate already implements for the general case.
-- **Forecloses:** nothing recorded. It is the declared remainder of a decided design.
-- **Cost:** one pack slot + threading the brief to `embeddings.encode_for_row`'s caller. Small code, real
-  design surface (a new pack clause needs the pack manifest's own review).
-- **CONTRADICTION TEST:** `§12.2a` ✅ **it IS the decision's remainder** · `§2.0` ✅ · `#4010` ✅ (this narrows
-  *embeddings*, never *capture* — a row still exists; only its vector is at stake) · off-by-default ✅
-  (the gate is flag-gated in code) · surface ⚠️ **it touches the pack manifest format, not the MCP/SDK
-  surface** — a pack-schema change is not the gated surface, but confirm that reading with the pack owner
-  before writing it. **No contradiction.**
+### P3 — Start `#13220`, beginning with the **durability** half — **scheduled (largest item here)**
 
-### P4 — Give the write-path chokepoint an owner — **scheduled** (the largest item here, and the least urgent)
+- **Changes:** gives the 2026-11-17 owner ruling an owner. Its own gaps, in the order they matter:
+  1. **`object`/`subject` have no embedding column** and the record refuses one (`chk_object_props_no_derived`) —
+     their fingerprints exist **only in FalkorDB**, so a record-based rebuild cannot restore them.
+  2. `event`/`source` columns and HNSW indexes exist but hold **0 rows** — the infra is bought, the data is not.
+  3. The search path does not read any of them from the record.
+- **Serves:** §2.0 itself — *Postgres is the system of record* — against a measured hole (item 1 is a **durability
+  gap**, not a performance one); plus `#13082`'s capability-first rule; plus V2 and V3's remaining halves, now
+  answered.
+- **Forecloses:** nothing recorded. ⚠️ It forecloses the *possibility* of a cheap retreat from item 1: adding the
+  columns is a migration, and the record's `chk_*_no_derived` CHECK constraints are deliberate (they keep EP/derived
+  scalars out of `props`). Widening them needs to distinguish "a vector" from "a derived scalar" — **that is the
+  design question this proposal's cost lives in**, not the migration.
+- **Cost:** a migration + the projection that writes the vector + the read leg. Item 2 is nearly free (write what the
+  graph already holds). Item 1 is the real work.
+- **CONTRADICTION TEST:** `#13220`'s owner ruling ✅ **it IS the decision** · `§2.0` ✅ · `§9.1` ✅ (vectors are not
+  narrative prose) · `§12.1c` ✅ (the index lives in Postgres — exactly what #13220 does) · KEEP ruling
+  2026-11-10 ✅ (writes continue; nothing is removed) · **⚠️ the one conflict #13220 itself flags:** retiring the
+  *graph-side* copies requires an explicit **reopen** — so P3 must **stop at "write and read them in Postgres"** and
+  leave the graph copies alone. **No contradiction, provided P3 does not over-reach into §6b R1.**
 
-- **Changes:** starts the work §17.1 says does not exist: *"⇒ 'Point the write path at Postgres' is not one
-  change — until a chokepoint exists, the cache is written to directly, and is therefore not derived."*
-  Measured: 387 mutating Cypher sites across 211 functions in 32 files.
-- **Serves:** `§17.1`'s write-path rule, and `§17.2`'s second divergence surface (Postgres ↔ FalkorDB), which
-  **has no designed mechanism at all** (*"No mechanism for the second surface is designed yet"*).
-- **Forecloses:** nothing — but it is **not** a prerequisite for the subject latency or the vector move, and
-  treating it as one would stall both.
-- **Cost:** the 387-site census is the estimate; the §17.1 ledger shows the shape of the work (one declared
-  lane per unjournalled writer), not its size.
-- **CONTRADICTION TEST:** `§17.1`/`§17.2` ✅ **it is the decision's own stated gap** · `§2.0` ✅ · off-by-default
-  ✅. **No contradiction.** ⚠️ **File it as a scope/owner question, not as a refactor.** A lane that starts
-  rewriting 387 sites has misread a diagnosis as a mandate.
+### P4 — State the sequencing in `STORAGE-ARCHITECTURE.md` §12.1b/§14.3: the index work is in **Postgres** — **scheduled, cheap**
 
-### P5 — Make the P2/`#4997` sequencing explicit in `STORAGE-ARCHITECTURE.md` §12.1b — **scheduled, cheap**
-
-- **Changes:** one sentence in `§12.1b` stating that the surviving V3 index work is *served by the pgvector
-  index for the labels that move*, so a lane reading the section cannot conclude "add four FalkorDB HNSW
-  indexes now". §12.1c already argues the per-label cost; the two sections do not yet say what a lane should
-  *do*.
-- **Serves:** `§12.1c`'s decision; `docs/00_index.md`'s own claim that `#4997` is *"the one candidate that is
-  a defect rather than a design question"*.
-- **Forecloses:** a lane spending RAM on indexes that are about to be unnecessary.
+- **Changes:** one paragraph making explicit what is currently only inferable: `#4997`'s *"make index creation
+  label-generic"* framing was **FalkorDB**-shaped, `#11901`'s *"not earned"* was **FalkorDB**-shaped, and both are
+  superseded by `#13220`'s Postgres ruling. A lane reading §12.1b today can still conclude *"add four FalkorDB HNSW
+  indexes"* — which §12.1c's own cost argument forbids.
+- **Serves:** §12.1c's decision; `#13082`'s placement rule; and the docs' own rule that a superseded citation must not
+  read as live work.
+- **Forecloses:** a lane spending RAM on four resident HNSW structures in a store we are actively trying to shrink
+  (`#13082`: *"the product cannot exist"* at ~1 GB/user).
 - **Cost:** one documentation edit, reviewed.
-- **CONTRADICTION TEST:** `§12.1c` ✅ · `§2.0` ✅ · nothing else is touched. **No contradiction.** ⚠️ This is a
-  category-B (documentation) item under our own A/B rule: **its consequence is real but narrow** — the failure
-  it prevents is *spend*, which is A-shaped (unrecoverable cost), so it clears admission.
+- **CONTRADICTION TEST:** `§12.1c` ✅ · `§2.0` ✅ · `#13082` ✅. **No contradiction.** Category **A** by our own A/B rule
+  — the failure it prevents is unrecoverable rental spend, not friction.
+
+### P5 — Close the per-kind embedding override slot (§12.2a's named absence) — **scheduled**
+
+- **Changes:** adds the pack slot `embedding.overrides[{kind, embed}]` and threads the brief to the submission step,
+  so a meeting with an authoritative calendar title earns a vector and a commit hash does not — declarable, not
+  hard-coded.
+- **Serves:** §12.2's text rule and §12.2a's *"the shape is BOTH"* (policy in the pack, predicate in the engine).
+- **Forecloses:** nothing recorded — it is the declared remainder of a decided design.
+- **Cost:** one pack slot + a caller-side carry. Small code, real design surface (a new pack clause needs the pack
+  manifest's own review).
+- **CONTRADICTION TEST:** `§12.2a` ✅ it is the decision's remainder · `§2.0` ✅ · `#4010` ✅ (narrows *embeddings*,
+  never *capture* — the row still exists) · off-by-default ✅ · surface ⚠️ pack manifest ≠ MCP/SDK surface, but
+  confirm that reading with the pack owner. **No contradiction.**
+
+### P6 — Give §17.1's chokepoint an owner — **scheduled, and the least urgent of the six**
+
+- **Changes:** starts the work §17.1 says does not exist. Measured: **387 mutating Cypher sites / 211 functions /
+  32 files**; and §17.2 adds that the Postgres↔FalkorDB divergence surface *"has no mechanism designed yet"*.
+- **Serves:** §17.1's write-path rule and §17.2's second surface.
+- **Forecloses:** nothing — but it is **not** a prerequisite for `#13220` or for the subject latency, and treating it
+  as one would stall both.
+- **Cost:** the 387-site census is the estimate; the §17.1 ledger shows the *shape* (one declared lane per
+  unjournalled writer), not the size.
+- **CONTRADICTION TEST:** `§17.1`/`§17.2` ✅ the decision's own stated gap · `§2.0` ✅ · off-by-default ✅.
+  **No contradiction.** ⚠️ File it as a **scope/ownership** question. A lane that starts rewriting 387 sites has
+  misread a diagnosis as a mandate.
+
+### P7 — The three write-path costs nobody owns, measured before they are optimised — **scheduled (diagnosis only)**
+
+Three per-create costs surfaced in this reading that **no decision, no issue and no metric covers**. None is
+subject-specific (§3.2), and none is the 23 s — they are offered because they are the *next* latencies, and because
+two of them have no instrumentation at all:
+
+| cost | where | what is known |
+|---|---|---|
+| **`_nudge_candidates`** — a 400-row `:Point` scan returning **full `content`**, then Python tokenisation of every row, on **every entity create** | `sdk.py:54860-54892`, called from the shared return at `:54604` | The product is an advisory field: *"Nudges are advisory only — surfaced in the write response, never enforced."* Gated only on the name having a ≥4-char token, so `create_subject("naturalPerson")` runs it. **Unbounded in bytes** (it returns `n.content`), and on a graph holding session-turn points that text is large. **No timer.** |
+| **the approved-kind whole-graph scan**, per write that names a **namespaced** kind | `hosted_api.py:13790`, `sdk.py:54079`, `sdk.py:50473` | Documented cost: *"a WHOLE-GRAPH scan (`graph_installed_namespaces`: 8 property scans, ~6 ms at 300 nodes, O(nodes)), ~8–27 ms per call at 5k nodes"* (`sdk.py:50256-50266`). Bare kinds skip it (`pack_state.py:600`); a namespaced kind pays it **twice per request**. |
+| **the per-request projection cold open** — every hosted request builds a fresh `TortoiseSDK`, whose `_get_proj()` runs `_schema_is_current()` and, when stale, `_ensure_indexes()` | `sdk.py:14804`, `projection/__init__.py:20410`/`20949` | `_schema_is_current()` is *"an unindexed label scan over `:Point` … paid on every fast-path probe. Measured: 1.4 ms @1k, 8.1 ms @30k, 26.9 ms @120k, 66.2 ms @300k"* (`:20446-20452`); the sweep it guards *"pays ~26 round-trips of already-satisfied DDL on every construction"* (`:20413-20414`). |
+
+- **Serves:** nothing recorded — and that is the point. It is the evidence a future decision would need.
+- **Forecloses:** guessing. ⚠️ **Do not "optimise" `_nudge_candidates` by deleting a product surface** (`#888 W2`'s
+  nudge is a deliberate feature) — the decision to keep or drop it belongs to its owner.
+- **Cost:** three timings on one graph. Tiny.
+- **CONTRADICTION TEST:** all five ✅ (it measures; it changes no placement, no cap, no surface). ⚠️ Two of the three
+  are **category A candidates** on their own reading (`_nudge_candidates` return an unbounded text payload; the kind
+  scan is 2× O(nodes)), and one of them (`_ensure_indexes` per request) is **directly served by the window** — a
+  bounded cache makes the probe cheaper — so P7 feeds `#13082`/`#13103` rather than competing with them.
 
 ---
 
 ## 5. What the destination says about the ~23 s — and what it does not
 
-Worth stating plainly, because it is the question the issue actually asks: **does the destination keep this
-cost or remove it?**
+The issue's own question, answered directly:
 
-| cost the subject create pays | kept by the destination? | why |
+| cost | kept by the destination? | why |
 |---|---|---|
-| **synchronous embedding on create** (`entities.py:4844`) | **KEPT** — but its *placement* moves. The vector payload moves to Postgres (`§12.1c`), and Postgres's index is an ordinary transactional index (pgvector README: *"ACID compliance"*, the index is maintained with the row). So the **model call** stays on the write path; the **cross-store coherence problem disappears**. | This is the one place the destination genuinely helps: today a graph-node vector and the record can disagree (§17.2's *"no mechanism for the second surface is designed yet"*); after the move there is one store. |
-| **record-first write order** (`§17.1`) | **KEPT** — it is the decision. | Not a cost to optimise away; it is *why* the cache is derived. |
-| **entity resolution / identity** (`resolve_or_mint`) | **KEPT**, unchanged by the storage move. | The resolver is not a storage mechanism. |
-| **the kind guard's whole-graph reads** (`pack_state.graph_installed_namespaces`) | **NOT ADDRESSED by any recorded decision.** | §12.2's embedding levers and §17's gaps say nothing about it. It is a per-call O(nodes) read on the write path, run 2–3× per hosted create. **This is the one genuinely unowned cost this document found** — and it belongs to `#13224`'s breakdown, not to a storage decision. |
-| **per-request SDK + `_ensure_indexes()` cold open** (`hosted_api.py:10303`, `projection/__init__.py:20949`) | **NOT ADDRESSED**. `selfhost.py:392` states the shape: *"~28 sequential round trips — scales with graph size"*, and `projection/__init__.py:21020` says the function *"is reached from the hosted PER-REQUEST path"*. | Same: the destination does not speak to it. If the baseline of 1.4 s for an object is mostly this, then the *destination's* win is that a windowed cache makes the sweep cheaper — but nothing states that. **Unknown, not decided.** |
+| **synchronous embedding on the write path** | **KEPT** — and its *placement* moves, not its *presence*. The model call stays on the write path (`encode_for_row`, one seam, five folds). | pgvector's index is an ordinary transactional index (pgvector README: *"ACID compliance, point-in-time recovery, JOINs"*), so after the move the **cross-store coherence problem disappears** — a real gain, and precisely the surface §17.2 says has *"no mechanism designed yet"*. The **latency** of a warm encode (25–43 ms) is unchanged. |
+| **the cold-load stall** | **NEITHER kept nor removed** — storage placement never had it. | It is removed by not blocking a write on model readiness (PR `#13229`), which is orthogonal to where the vector lives. **This is the sentence the issue needed.** |
+| **record-first write order** | **KEPT** — it is the decision. | ~3.8 ms/record warm (`record_writer.py:2779-2790`); not a candidate for optimisation, it is why the cache is derived. |
+| **entity resolution / identity** | **KEPT**, unchanged by the storage move. | Measured 1.5 ms @6 nodes → 4.7 ms @2021 — *"no curve"*. |
+| **the three costs in P7** | **NOT ADDRESSED** by any recorded decision. | See P7. |
 
 ---
 
 ## 6. Do not do — the plausible wins that contradict the destination
 
-Each names the decision it would reverse. These are **not** candidates; several are the first thing a lane
-would reach for.
+Each names the decision it would reverse.
 
 | # | the tempting win | the decision it contradicts | why it looks right and is not |
 |---|---|---|---|
-| **D1** | **"Add a vector index to `Subject`/`Object` now — it's one line."** | `§12.1c` (RESOLVED 2026-11-07: the vector index does **not** live in FalkorDB) + `§2.0`'s cache demotion | It is one line and it would work. It would also rent four more resident HNSW structures (§12.1c) in a store whose vector payload is scheduled to move. **Serve `#4997` instead** (P2/P5). |
-| **D2** | **"Make the subject create async — queue the embedding, return fast."** | `§17.1`'s write order + `§3`'s *derived = replay(journal)* | A deferred embedding means the write returns before the row carries its vector, so `derived == replay(journal)` becomes false for a window — and the record/vector would disagree with no reconciliation (§17.2's undesigned second surface). **Not a tuning flag; a change to what "written" means.** If the owner wants this, it is a **reopen** — argue it, don't ship it. |
-| **D3** | **"Drop the `Subject.embedding` write — nothing indexes it anyway."** | Owner ruling 2026-11-10 (`#11395` comment `6781921075`): `:Object`/`:Subject` embeddings are **KEPT**, no pass may remove them *or stop writing them*; `§12.1c`, `§14.3` V3 | The premise is true (no vector index serves `Subject`, `§12.1b`) and the conclusion is forbidden. This is the **exact** proposal the owner already refused. |
-| **D4** | **"Remove the approved-kind gate / the kind guard — they're whole-graph reads on a hot path."** | `#5475`'s gate (a write must not widen the graph's own pack approval set), `§12.2a`'s "policy lives in the pack" | The reads are genuinely expensive (P-none — see §5). Removing the gate is a **bypass**: an unvalidated `ns:kind` makes the whole pack writable (`hosted_api.py:13758-13766`). **The fix is caching or a cheaper invariant, never the gate's absence.** |
-| **D5** | **"Put the narrative / raw turns back on the node — it's just a property."** | `§9.1` (D1) — the narrative lives in Postgres, not the graph; `CACHE_FORBIDDEN_COLUMNS` | The graph can never unload it (`§2.1`) and no read path reads it back. §9.1's deny list exists because this was tried: seven routes are denied by name. |
-| **D6** | **"Point the read path at Postgres now — one store is simpler."** | `§2.0`: `#7970`'s anchored-read cutover stays **DEFERRED**; §14.2 | Explicitly named as still-deferred *by the same ruling that adopted the dual-store search path*. Not open. |
-| **D7** | **"Move the text index to Postgres too — one store."** | `SEARCH-ARCHITECTURE.md` §3/§6.2: the text index **stays**, measured 8–23 nDCG@10 behind BM25 | The vector move's momentum makes this look like the same change. It is not: it is a measured quality regression. |
-| **D8** | **"Cap capture / sample the writes to make the numbers look better."** | `#4010` — no capture caps | Named in the brief's contradiction list; listed because "write less" is §12.2b's lever 2 and it is easy to slide from *write less noise* into *capture less*. |
-| **D9** | **"Expose `residency` / a new tool so callers can see the cache is partial."** | ⛔ MCP/SDK surface change requires **Daniel's approval**; `§17.2` already exposes `residency` as a response field, **off by default** | The capability exists. Adding a *tool* is a surface change and is gated. |
+| **D1** | **"Add a vector index to `Subject`/`Object` in FalkorDB — it's one line."** | §12.1c (RESOLVED 2026-11-07: the index does **not** live in FalkorDB) + §2.0 + **`#13220`** (index them **in Postgres**) | It is one line and it would work. It would also rent four more resident HNSW structures (§12.1c) in a store `#13082` is trying to shrink from ~1 GB/user, for vectors `#13220` is moving. **The index work is real — its home is Postgres.** |
+| **D2** | **"Make the write wait for the embedder again — a vectorless row is worse than a 23 s create."** | PR `#13229`'s measured trade + §17.2's *"divergence must be OBSERVED"* | It reverses a measured fix (p95 20,414 → 268 ms) and re-creates a guaranteed 504 on every cold process. **The correct response to a vectorless row is to make it visible and repairable (P2), not to re-block the write.** |
+| **D3** | **"Drop the `Subject`/`Object` embedding write — nothing indexes it anyway."** | Owner 2026-11-10 (`#11395` comment `6781921075`): **KEPT**, no pass may remove them *or stop writing them*; and now **`#13220`** (index them in Postgres) | The premise is true today (`Subject`/`Object` have no vector index, §12.1b) and the conclusion is forbidden **twice** — the removal ruling, and the newer ruling that says index them. |
+| **D4** | **"Remove the approved-kind gate or the kind guard — they're whole-graph reads on a hot path."** | `#5475`'s gate (a write must not widen the graph's own pack approval set — an unvalidated `ns:kind` made a whole pack writable), §12.2a's "policy lives in the pack" | The reads are genuinely expensive (P7) and removing the gate is a **bypass**. **The fix is a cheaper invariant or a cache, never the gate's absence.** |
+| **D5** | **"Put the narrative / raw turns back on the node — it's just a property."** | §9.1 (D1) + `CACHE_FORBIDDEN_COLUMNS` | The graph can never unload it (§2.1), no read path reads it back, and seven routes are denied **by name** because this was tried. |
+| **D6** | **"Point the read path at Postgres now — one store is simpler."** | §2.0: `#7970`'s anchored-read cutover stays **DEFERRED**; §14.2 | Named still-deferred **by the same ruling** that adopted the dual-store search path. Not open. |
+| **D7** | **"Move the text index to Postgres too — one store."** | `SEARCH-ARCHITECTURE.md` §3/§6.2: the text index **stays** (8–23 nDCG@10 behind BM25) | The vector move's momentum makes this look like the same change. It is a measured quality regression. |
+| **D8** | **"Cap capture / sample writes to make the numbers look better."** | `#4010` — no capture caps | Listed because "write less" (§12.2b lever 2) slides easily from *write less noise* into *capture less*. |
+| **D9** | **"Expose `residency` / add a tool so callers can see the cache is partial."** | ⛔ MCP/SDK surface changes need **Daniel's approval**; §17.2 already exposes `residency` as a response field, **off by default** | The capability exists. Adding a *tool* is a surface change and is gated. |
+| **D10** | **"Treat `#4997`'s *make index creation label-generic* as the deliverable."** | **`#13220`** — the index goes in Postgres; `#11901`'s *"not earned"* was about **FalkorDB** | `#4997` is **CLOSED** and superseded. Re-implementing its FalkorDB framing would satisfy a ticket whose premise the owner has since replaced. |
 
-### 6b. Reopen candidates — put in front of the owner, not adopted
+### 6b. Reopen candidates — for the owner, not for adoption
 
-These contradict a recorded decision, so they are **not** proposals. They are recorded here because refusing an
-adoption is not a verdict on the finding.
+Refusing an adoption is not a verdict on the finding. Both below are **accurate and valuable**, and both would
+reverse a recorded decision — so they are routed, never adopted.
 
-**R1 — Defer the embedding off the write path (contradicts `§17.1` + `§3`'s replay invariant).** The external
-half of this research (rung 3, §8) shows at least one comparable system pays an inline extraction+embedding on
-ingest (Graphiti's `add_episode` builds node/edge embeddings inside the call — see
-`graphiti_core/graphiti.py`'s `create_entity_node_embeddings`/`create_entity_edge_embeddings` imports and use),
-so our synchronous embedding is **the common shape, not an outlier**. The argument *for* reopening is narrow and
-worth stating honestly: **Postgres's own answer to this is cheaper than ours** — an embedding written in the
-same transaction as the row means deferral is possible without a coherence problem, which it is not today
-(§17.2's undesigned second surface). *If* the owner wants sub-second creates, that is the decision to reopen, and
-the price is `derived == replay(journal)` for an interval. **Do not adopt; do not drop.**
+**R1 — Retire the graph-side `:Object`/`:Subject` vector copies.** `#13220` states it plainly: *"removing
+`:Object`/`:Subject` graph vectors **requires reopening the 2026-11-10 KEEP ruling**"*, and it declares that *"out of
+scope without an explicit reopen."* **No issue exists to hold the reopen.** The evidence for it is already in hand
+and it is strong: ~19 MB of Object/Event vectors + the `:Point` HNSW are *"paid for in RAM"* (§12.1b), `#13082` says
+a ~1 GB user *"cannot exist"* at $19, and once the vectors are written and indexed in Postgres the graph copies serve
+the traversal only by being *stored*, not by being searched. **The reason it is a reopen and not a proposal:** the
+2026-11-10 ruling was given against a *cheaper* argument (the vectors were unindexed and unread), and this argument is
+*different* (they will be indexed and read — in the other store). **A different argument does not make it not a
+reversal.** Let the owner rule.
 
-**R2 — Index only what is served, in one store (contradicts `§12.1c`'s ordered sequence, not its decision).**
-Not a reversal — a **sequencing** question the docs do not answer: pgvector's index is transactional, so a served
-label with an embedding could be queryable from Postgres *before* the FalkorDB index is retired. If that holds,
-`#4997`'s "make the DDL label-generic" may be work with no consumer. **This is a question for `#4997`'s owner,
-not a lane's call** — flagged because P2 and P5 both lean on it.
+**R2 — Defer the embedding off the write path entirely (a queue/outbox).** §17.1's order and §3's
+`derived = replay(journal)` both assume the write completes with its payload. PR `#13229` shows a **bounded** version
+is acceptable in practice (write without a vector, repair later), so the strict form is no longer unthinkable — and
+**Postgres makes it cheaper than it is today**: an embedding written in the same transaction as the row needs no
+cross-store reconciliation, whereas today deferral would create a window on a surface §17.2 says has *"no mechanism
+designed yet"*. **Do not adopt, do not drop.** The external half (§8) is relevant: synchronous embedding is the
+**common shape** among comparables, so the argument for deferral is ours to make on our own numbers, not industry
+convergence.
 
 ---
 
 ## 7. Unknown — what this picture cannot say, and what would settle each
 
-⛔ A confident synthesis of an incomplete picture is the failure this issue exists to prevent. These are the
-holes, stated as holes.
+⛔ A confident synthesis of an incomplete picture is the failure this issue exists to prevent.
 
 | # | unknown | what would settle it |
 |---|---|---|
-| **U1** | **Where the ~20 s actually goes.** `#13224` has no breakdown (0 comments at this head). §3.3's verdict is derived from *code symmetry*, not from a measurement of the gap. | §3.4's ablation; then a `py-spy dump` (or per-stage timers) inside the half it implicates. |
-| **U2** | **Whether the ~1.4 s object baseline is mostly the per-request `_ensure_indexes()` sweep.** `projection/__init__.py:21020` says the function is reached from the hosted per-request path; `selfhost.py:392` says it is ~28 sequential round trips that scale with graph size. **Nobody has measured its share of a hosted create.** | Time one `POST /v1/objects` with the projection cold-open hoisted out (or against a warm cached SDK). If the baseline is the sweep, the **window** (§2.0 NARROWED) is the lever, not any write-path code. |
-| **U3** | **Whether `graph_installed_namespaces` is 2 or 3 whole-graph scans per create.** I found three call sites on the path (`hosted_api.py:13790`, `sdk.py:54079`, `sdk.py:50368`); whether all three fire for one write depends on the guard's abstain path, which I did not trace to ground. | One traced create with a counter on `graph_kind_namespaces`. Cheap, and it is the *only* unowned cost in §5. |
-| **U4** | **The size and cost of that scan on the production graph.** It is O(nodes) over the per-property kind scans; no figure for the production graph exists in either doc. | Time `graph_kind_namespaces` against `tortoise-y4mjjq` (read-only). |
-| **U5** | **Whether the four `#4997` labels' vectors are actually payload-worth-indexing** — i.e. whether a `:Subject` similarity query is a modality anyone uses. §13's *"What remains UNKNOWN"* asks the analogous question about `belief_timeline`/`topic_summarize` and answers it *"unanswerable before launch"*. | Post-launch call volume on the entity vector leg. **This is why P2 is scheduled, not urgent.** |
-| **U6** | **M3 (our own BM25 gap) has no issue number** in either architecture doc. The text index's move is deferred behind it, and it is cited as a plan item with no ticket. | Either an issue, or a correction to `SEARCH-ARCHITECTURE.md` §3. **Unknown, possibly a documentation gap — I did not search the tracker exhaustively for it.** |
-| **U7** | **What the per-kind embedding override (P3) costs in pack-schema review.** `§12.2a` names the slot as absent but does not size it. | The pack manifest owner's read; not in scope here. |
-| **U8** | **Whether the raw-client residual in §17.1 is reachable in the hosted deployment** (a vendor client built outside `guarded_client`). The doc says the doors are *"guard rails, not a proof"*. | A grep census over the deployment's own entry points — `hosted_api`/`hosted_*` — for `FalkorDB(...)` constructions outside `guarded_client`. |
+| **U1** | **The measured cause of the ~23 s is in a PR body, not on the issue, and the PR is unmerged.** If `#13229` closes without merging, the number is lost behind *"Cause: UNKNOWN"*. | P1. Nothing else — this is a relay, not a measurement. |
+| **U2** | **Why the *first* request 504'd rather than merely being slow.** The load is 13.5–57 s and the transport bound is 10 s, so the 504 is *expected* — but whether the hosted lifespan pre-warm ran at all on that deploy (and why it had not finished) is not established in `#13229`. | A `EmbeddingModel.status()` reading at process start on the production image (`embeddings.py:1208`), or the deploy log's warm-up line. |
+| **U3** | **Whether `_nudge_candidates`' 400-row full-content scan is milliseconds or seconds** on the production graph. It is unbounded in bytes and has no timer. | One timing of `_nudge_candidates(name, …)` for a real name on `tortoise-y4mjjq` (read-only). |
+| **U4** | **How many whole-graph kind scans one hosted create actually pays** — I found three call sites (`hosted_api.py:13790`, `sdk.py:54079`, `sdk.py:50473`); the guard's abstain path decides whether all three fire, and I did not trace it to ground. It is also **payload-dependent** (bare kinds skip it). | One traced create with a counter on `graph_kind_namespaces`. |
+| **U5** | **Whether the `#13224` benchmark sent namespaced or bare kinds** — if the subject POST used `naturalPerson` (bare) and the object POST `goal` (bare), the scan fired for neither; if either was namespaced, it fired twice *for that call only*. **This is not in the ticket's recorded payloads.** | The three literal request bodies from that run. |
+| **U6** | **M3 (our own BM25 gap) has no issue number** in either architecture doc, yet the text index's move is deferred behind it. | Either an issue, or a correction to `SEARCH-ARCHITECTURE.md` §3. ⚠️ **I did not search the tracker exhaustively** — the tracker holds 2,356 open issues, so this is *"unfiled as far as I read"*, not *"unfiled"*. |
+| **U7** | **Whether the graph's required RANGE indexes are all present on the production graph.** An absent `Subject.canonical_name`/`resolved_from` would turn every create's identity read into a full label scan — a trap the code documents (`projection/__init__.py:20299-20303`). | `CALL db.indexes()` on the hosted graph compared against `_REQUIRED_RANGE_INDEXES`. |
+| **U8** | **What the per-kind embedding override (P5) costs in pack-schema review** — §12.2a names the slot absent but does not size it. | The pack manifest owner's read. |
+| **U9** | **Whether the raw-client residual in §17.1 is reachable in the hosted deployment.** The doc says the doors are *"guard rails, not a proof"*. | A census of `FalkorDB(...)` constructions outside `guarded_client` across the hosted entry points. |
+| **U10** | **The scale of the uncatalogued work.** 2,356 open issues against 11 open PRs (~214:1). Any claim here that something is *"unowned"* rests on keyword searches over a tracker that large. | Nothing in this lane's scope — but **read every "unowned" in §2 as "unowned as far as this reading reached"**, not as a census. |
 
 ---
 
-## 8. Research record — rungs taken and rungs that failed
+## 8. Research record — rungs taken, rungs that failed
 
-The external half was mandated to answer: how comparable systems place embeddings and vector indexes relative to
-the write path (synchronous vs deferred), what latency budget they hold for a single-entity create, and how they
-keep a vector index coherent with a relational record.
+The external half was mandated to answer: how comparable systems place embeddings and vector indexes relative to the
+write path (sync vs deferred), what latency budget they hold for a single-entity create, and how they keep a vector
+index coherent with a relational record.
 
 - **Rung 1 — UNAVAILABLE.** `mcp__seo-intelligence__perplexity_search` → `Unknown MCP server 'seo-intelligence'`.
-  That server is not declared on this box.
 - **Rung 2 — ATTEMPTED, UNAVAILABLE.** `web_search` with `model="sonar"` passed explicitly →
   `PERPLEXITY_API_KEY not set. Set it via PERPLEXITY_API_KEY env var, AGENT_MCP_ENV_PATH (path to .env file), or
-  $AGENT_INFRA_PATH/../.env`. ⚠️ **The key exists** (`~/.env` holds `PERPLEXITY_API_KEY`), but the tool resolves
-  it through `AGENT_MCP_ENV_PATH`, which is **unset in this process** — so the rung failed on a *configuration
-  gap in the harness*, not on a missing credential. Reported rather than worked around.
+  $AGENT_INFRA_PATH/../.env`. ⚠️ **The key exists** (`~/.env` holds `PERPLEXITY_API_KEY`), but the tool resolves it
+  through **`AGENT_MCP_ENV_PATH`, which is unset in this process** — so the rung failed on a *harness configuration
+  gap*, not a missing credential. Reported rather than worked around.
 - **Rung 3 — USED (primary sources, `web_fetch`).**
 
   | source | what it settles |
   |---|---|
-  | `pgvector/pgvector` README (`raw.githubusercontent.com/pgvector/pgvector/master/README.md`) | **The coherence answer.** pgvector advertises *"ACID compliance, point-in-time recovery, JOINs"* — the vector index is an ordinary Postgres index, maintained **in the same transaction** as the row. **This is the structural difference from our two-store layout:** after the V1 move there is no vector-vs-record divergence window, which is precisely the surface `§17.2` says has *"no mechanism designed yet"*. Also: an HNSW index *"can be created without any data in the table since there isn't a training step like IVFFlat"* — so the move's index build does not need a backfill ordering. |
-  | `getzep/graphiti` — `graphiti_core/graphiti.py` (+ README) | **The write-path placement answer.** Graphiti's ingestion (`add_episode`) builds node and edge embeddings **inside the ingest call** (`create_entity_node_embeddings`, `create_entity_edge_embeddings` imported and used there), i.e. **synchronous embedding is the common shape among comparables**, not an outlier we invented. Its README's framing (*"Everything traces back to episodes … the ground truth stream"*) is the same record-first posture as §3/§17.1. |
-  | `mem0ai/mem0` README | **The latency number, with a caveat.** Mem0 publishes **retrieval** p50 (0.88–1.09 s across LoCoMo/LongMemEval/BEAM) — **not** a write budget. So the widely-quoted "memory systems are ~1 s" figures are read-path figures and must not be used as a write budget. **Useful only as a negative result:** no comparable publishes a per-entity-create budget, so we have no external bar to hold ourselves to; `#13224`'s `p95 < 1 s` target is **ours**, and it is not contradicted by anything found. |
+  | `pgvector/pgvector` README | **The coherence answer.** *"ACID compliance, point-in-time recovery, JOINs"* — the vector index is an ordinary Postgres index maintained **in the same transaction** as the row. **This is the structural difference from our two-store layout**: after the V1 move there is no vector-vs-record divergence window, which is exactly the surface §17.2 says has *"no mechanism designed yet"*. Also: an HNSW index *"can be created without any data in the table since there isn't a training step like IVFFlat"* — the move's index build needs no backfill ordering. |
+  | `getzep/graphiti` — `graphiti_core/graphiti.py` (+ README) | **The write-path placement answer.** Graphiti's ingestion (`add_episode`) builds node and edge embeddings **inside the ingest call** (`create_entity_node_embeddings`, `create_entity_edge_embeddings`). **Synchronous embedding is the common shape among comparables**, not an outlier we invented. Its README frames the source stream as ground truth (*"Everything traces back to episodes"*) — the same record-first posture as §3/§17.1. |
+  | `mem0ai/mem0` README | **The latency number, with a caveat.** Mem0 publishes **retrieval** p50 (0.88–1.09 s across LoCoMo/LongMemEval/BEAM) — **not** a write budget. ⚠️ **The widely-quoted "memory systems are ~1 s" figures are read-path figures and must not be used as a write budget.** Useful as a negative result: no comparable publishes a per-entity-create budget, so `#13224`'s `p95 < 1 s` target is **ours** and is contradicted by nothing found. |
 
-⚠️ **What the external half does NOT establish:** no comparable publishes a single-entity-create latency SLO, and
-none of the three is a two-store record/cache split, so **none of them can tell us whether our 23 s is
-acceptable** — only that synchronous embedding is normal and that the coherence half of our problem is a
-consequence of *our* split, not of the design space. That is the honest limit of this rung.
+⚠️ **What the external half does NOT establish:** none of the three is a two-store record/cache split, so **none can
+tell us whether our latency profile is acceptable** — only that synchronous embedding is normal and that the
+coherence half of our problem is a consequence of *our* split, not of the design space.
 
 ---
 
 ## 9. What this document does not claim
 
-- It does **not** measure the subject path (§3.4 is a probe for `#13224` to run).
-- It does **not** propose a storage change. The map (§2) reports decisions already made.
-- It does **not** re-open V1, the hybrid, or the text index's home. §6/§6b name them as closed or as
-  owner-reopen-only.
-- It does **not** claim the code-symmetry in §3.2 survives the next merge. It is a reading at `2060c92fd3`.
+- It does **not** measure the subject path. The numbers in §3.1 are **PR `#13229`'s**, quoted; §3.2 is this lane's
+  independent code reading, and they agree.
+- It does **not** propose a storage change. §2 reports decisions already made, including two made in the last 48
+  hours.
+- It does **not** re-open V1, the hybrid, or the text index's home. §6/§6b name them as closed or owner-reopen-only.
+- It does **not** survive the next merge unexamined: §3.2 is a reading at `d1bfef778f`, and PR `#13229` is unmerged,
+  so §3.1's numbers describe a fix that is **not in `main`**.
+- Its **"unowned"** claims are bounded by a keyword search over 2,356 open issues (U10), not a census.
 
 **Sources.** `docs/architecture/STORAGE-ARCHITECTURE.md` §2.0, §2.1, §3, §9.1, §12.1b, §12.1c, §12.1d, §12.2,
 §12.2a, §12.2b, §13, §14.2, §14.3, §17.1, §17.2, §17.3 · `docs/architecture/SEARCH-ARCHITECTURE.md` §3, §6.2,
-§9, §10 · `docs/ONTOLOGY.md` §2, §3, §4 · `tortoise/hosted_api.py`, `tortoise/sdk.py`,
-`tortoise/projection/entities.py`, `tortoise/projection/__init__.py`, `tortoise/entity_identity.py`,
-`tortoise/pack_state.py`, `tortoise/record_serve.py`, `supabase/migrations/20261012000002_record_semantic.sql`,
-`20261025000001_record_tenancy_role_and_guc.sql`, `20261027000001_record_semantic_id_key.sql` ·
-issues `#7879`, `#5087`, `#11002`, `#7949`, `#4997`, `#4999`, `#9721`, `#12901`, `#13133`, `#13093`, `#13224`,
-`#13232`, `#11395`, `#4010`, `#5475`, `#7951`, `#8008`(see `#5008`), `#4899`, `#11086`, `#9189`, `#9206`,
-`#9079`, `#9391`, `#9555`, `#10000`, `#10017`, `#10070`, `#12047`, `#12060`, `#9964`, `#11642`, `#7970`,
-`#4051`.
+§9, §10 · `docs/ONTOLOGY.md` §2, §3, §4 · code: `tortoise/hosted_api.py` (routes 13820–13935, kind gate 13758–13901,
+SDK open 10138/10303, offload 12767), `tortoise/sdk.py` (create_entity 53975–54613, subject/object branches
+54205–54251, nudge 54860–54892, `_create_entity` 50428, `_refuse_unapproved_kinds_in_props` 50368, pack-gate cost
+50256–50266), `tortoise/projection/entities.py` (2927, 4818, 5003, 5392, 5760),
+`tortoise/projection/__init__.py` (index DDL 20949/20996, schema probe 20410–20476, required range indexes
+20298–20310), `tortoise/entity_identity.py` (547, 957–984, 1115), `tortoise/entity_resolver.py` (56–64, 175, 658),
+`tortoise/kind_layers.py`, `tortoise/kind_guards.py`, `tortoise/pack_state.py` (600, 711, 1170, 1198),
+`tortoise/record_writer.py` (2653, 2779–2790), `tortoise/record_serve.py` (589), `tortoise/embeddings.py` (869, 965,
+1097, 1208), `tortoise/embed_gate.py` (148), `tortoise/monitoring.py` (2076, 2143–2167) · migrations
+`20261012000002_record_semantic.sql`, `20261025000001_record_tenancy_role_and_guc.sql`,
+`20261027000001_record_semantic_id_key.sql`, `20261109000001_record_embedding_vector.sql` · issues `#7879`, `#4997`,
+`#4999`, `#5087`, `#7949`, `#9721`, `#11821`, `#11901`, `#12901`, `#13082`, `#13083`, `#13084`, `#13093`, `#13094`,
+`#13103`, `#13108`, `#13133`, `#13156`, `#13220`, `#13224`, `#13232`, `#11395`, `#12570`, `#4010`, `#5475`, `#7951`,
+`#4899`, `#5008`, `#11002`, `#11086`, `#9189`, `#9206`, `#9079`, `#9391`, `#9555`, `#10000`, `#10017`, `#10070`,
+`#12047`, `#12060`, `#9964`, `#11642`, `#7970`, `#4051`, `#12570` · PRs `#13229`, `#13210`, `#13121`, `#13102`,
+`#13247`.
