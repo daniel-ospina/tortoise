@@ -47,7 +47,9 @@ artifact actually measured: the index figures are INDEX-ONLY, while the store fi
 interchangeable either. `sizes_bytes.tg_docs` is `pg_total_relation_size` — **heap + every index on
 the table** — so the table's own bytes are **4.23 MB** (7.58 MB total − 3.13 MB BM25 index − 0.14 MB
 GIN − 0.08 MB pkey). Store-to-store, `ts_rank` is heap + its GIN ≈ **4.3 MB** against the FalkorDB
-graph's **7.73 MB** of `used_memory` for the same content + embeddings — **~44 % smaller**, because the
+graph's **7.73 MiB** of `used_memory` for the same content + embeddings — **≈ 8.11 MB** in the decimal
+units the Postgres figures use (Redis prints `used_memory_human` in 1024-based units, so `7.73M` is
+7.73 × 1 024² bytes), i.e. **~47 % smaller**, because the
 BM25 index is what made the Postgres row look as large as the graph. `pg_search` carries that index,
 so IT is the one that lands at ≈ **7.4 MB**, i.e. comparable to the graph. The saving for `ts_rank`
 is real but ordinary in size; the decisive part is the dependency (no extension, no preload, no
@@ -268,7 +270,8 @@ INDEX-ONLY, so index-to-index the GIN index is 48× smaller (64 KB vs 3.13 MB). 
 figures are `pg_total_relation_size`, which is **heap + every index on the table** — so they are not
 comparable to each other until the indexes are separated: the heap is **4.23 MB** (7.58 MB total −
 3.13 MB BM25 − 0.14 MB GIN − 0.08 MB pkey). Store-to-store, `ts_rank` is heap + GIN ≈ **4.3 MB**
-against the FalkorDB graph's **7.73 MB** `used_memory` for the same content + embeddings (~44 %
+against the FalkorDB graph's **7.73 MiB** `used_memory` for the same content + embeddings (≈ **8.11 MB**
+in decimal units — Redis prints `used_memory_human` 1024-based — hence ~47 %
 smaller), while `pg_search` — which carries the 3.13 MB index — lands at ≈ **7.4 MB**, comparable to
 the graph. The win for `ts_rank` is the dependency (no extension, no preload, no worker, no AGPL) and
 the index, not an order of magnitude of storage.

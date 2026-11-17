@@ -6337,7 +6337,12 @@ surfaces:
   # unlisted file is a `manifest-integrity` red (#1262) AND runs in no leg (#1349/#2938);
   # `core` because its subject `tools/text_gate_13099.py` is a `tools/` path that matches
   # no SOURCE_PATTERNS entry (and is in `CORE_ALSO`, so a tool-only diff selects `core`
-  # instead of taking the docs-only early return — the #1349/#3332 silent-drop class).
+  # instead of taking the docs-only early return). ⛔ NOT a "silent drop": MEASURED, a
+  # tool-only diff without the `CORE_ALSO` entry gives `surfaces: []` and the pin is
+  # STILL in `test_files` via the `tier1` row (99 files), so coverage never vanished —
+  # what was missing was the owning surface's own selection (with it: `surfaces:
+  # ['core']`, 879 files). The entry is for intent, not rescue; the same distinction
+  # `tools/ci_selection.py`'s entry for this file records.
   - test_text_gate_13099.py
   # #5140: the pending-extraction default (`tortoise/ingest.py`'s
   # `_document_is_pending` / `_discover_pending_documents`) and its
@@ -9919,11 +9924,16 @@ surfaces:
   # label here is invented (human or LLM). tests/test_text_gate_13099.py
   # imports them directly (corpus determinism, corpus shape, the verbatim query
   # reuse, the untouched grade function, the degeneracy of the question class),
-  # and a named-surface match REPLACES the `core` fallback — so before this row
-  # a corpus-generator-only diff ran those pins ZERO times on the one diff that
-  # can move the corpus they digest (measured at this head: `surfaces: ['eval']`,
-  # test_text_gate_13099.py ABSENT from `test_files`). The #2938/#1349
-  # silent-drop class. ⛔ This row claims ONLY what the file asserts: the
+  # and a named-surface match REPLACES the `core` fallback — so this row is what
+  # makes the OWNING surface select the corpus pins BY NAME. ⛔ It does NOT
+  # prevent a total silent drop, and an earlier cut of this row said it did
+  # ("ran those pins ZERO times", "ABSENT from `test_files`"): MEASURED at this
+  # head, `--changed-files benchmarks/synthetic_corpus.py` puts
+  # test_text_gate_13099.py in `test_files` WITH this row and WITHOUT it — via the
+  # `tier1` row below, which runs on every PR. What the row changes is which
+  # SURFACE owns the pins, not whether they run at all; that is the same
+  # distinction the `CORE_ALSO` entry for this file records. ⛔ This row claims
+  # ONLY what the file asserts: the
   # corpus pins (determinism, shape, verbatim query reuse, the untouched grade
   # partition) and the "builds without touching a graph" arm — NOT the README
   # pins, which are the `tier1` row's business below. Hermetic: no DB, no graph,

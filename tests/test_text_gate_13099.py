@@ -516,8 +516,15 @@ def test_the_like_for_like_store_comparison_is_quoted():
     sizes = art["corpus"]["postgres_seed"]["sizes_bytes"]
     heap_mb = _postgres_heap_bytes(art) / 1e6
     ts_rank_mb = (_postgres_heap_bytes(art) + sizes["tg_docs_tsv_en"]) / 1e6
-    graph_mb = float(
+    # ⛔ Redis prints `used_memory_human` in 1024-BASED units, so `7.73M` is
+    # 7.73 MiB = 8.11 MB in the decimal units the Postgres figures use. Reading it
+    # as 7.73 MB — what this pin used to do — made the quoted saving 44 % instead
+    # of 47 %, i.e. it compared MiB against MB while the paragraph beside it told
+    # the reader to compare like with like.
+    graph_mib = float(
         art["corpus"]["graph_seed"]["graph_memory_usage"]["used_memory_human"].rstrip("M"))
+    graph_mb = graph_mib * 1024 * 1024 / 1e6
+    saving_pct = (1 - ts_rank_mb / graph_mb) * 100
     readme = README.read_text()
 
     assert abs(heap_mb - 4.23) < 0.02, "the heap derivation moved — recheck the relation"
@@ -526,8 +533,14 @@ def test_the_like_for_like_store_comparison_is_quoted():
         "`tg_docs` as the store charges the BM25 index to ts_rank")
     assert f"{ts_rank_mb:.1f} MB" in readme, (
         f"§0 never quotes the ts_rank store figure (heap + its GIN = {ts_rank_mb:.1f} MB)")
-    assert f"{graph_mb:.2f} MB" in readme or f"{graph_mb:.1f} MB" in readme, (
-        "§0 never quotes the FalkorDB store figure from `used_memory`")
+    assert f"{graph_mib:.2f} MiB" in readme, (
+        "§0 never quotes the graph's own `used_memory_human` reading as MiB, so the "
+        "1024-based unit cannot be checked by the reader")
+    assert f"{graph_mb:.2f} MB" in readme, (
+        f"§0 never gives the graph figure in DECIMAL MB ({graph_mb:.2f}), the unit the "
+        "Postgres sizes are quoted in — the two are then compared across bases")
+    assert f"{saving_pct:.0f} %" in readme, (
+        f"§0's store-to-store saving is not the consistent-unit figure ({saving_pct:.1f} %)")
     assert f"{heap_mb + sizes['tg_docs_bm25'] / 1e6:.1f} MB" in readme, (
         "§0 never quotes the pg_search store (heap + BM25 index), so the reader "
         "cannot see that IT is the option comparable to the graph")
