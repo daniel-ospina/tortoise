@@ -365,7 +365,9 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 11c | `:OnboardingState` / `:OnboardingStep` | §2.7 | **yes** — `completed_steps()` walks `COMPLETED_STEP` | **graph** | the docstring is explicit: *"Canonical completed-step ids from the edge set (never a second store)"* — the edge IS the store |
 | 11b | `:Tag` | §2.5 | **yes** — `TAGGED` is how every tag is read | **graph** | the edge is the read; the node is its endpoint |
 | 12 | `_searchText` on a **non**-episodic `:Source` | FTS | **yes** | **graph** | the fulltext index's field set |
-| 13 | `Source.summary`/`_searchText` on an **episodic** Source | declined already (`#10853`) | **no** | **`record_only`** ✅ already shipped | §9.1's prose rule, per ROW |
+| 13 | `Source.summary` on an **episodic** Source | declined already (`#10853`) | **no** | **`record_only`** ✅ already shipped | §9.1's prose rule, per ROW — a display label behind `SESSION_SOURCE_SUMMARY_PREFIX`, not an index field |
+| 13b | `Source._searchText` on a **pre-`#10000`** episodic Source (the lexicon that IS the join) | declined per ROW by the record door (`cache_projection.py:2658-2660`) | **no** | **`record_only`** ✅ already shipped | a legacy row's `_searchText` is the join behind the display prefix, i.e. prose |
+| 13c | `Source._searchText` on a **post-`#10000`** episodic Source | FTS — `CALL db.idx.fulltext.queryNodes('Source', $query)` (`search_engine.py:3039`) over the index declared on `("Source", ["_searchText"])` (`projection/__init__.py:6831`), populated by the capture path (`sdk.py:19637`, `#3518`) | **yes** — fulltext index | **`graph`** | dropping it un-indexes a restored session (`cache_projection.py:2650-2651`); the index reads it for the whole label |
 | 14 | `Point.mentions` (the held-phrase JSON tail prop, `projection/entities.py:1206`) | `sdk.py:27210` (`get_point` — *"Returns dict of all properties"*, the whole-node read); `projection/__init__.py:22118-22120` — a **write-only** fold (the branch is computed in Python at `:22109` from the journal payload, so the `SET` reads no node; `none`); `sdk.py:18841` is **not** a reader of the stored shape — it reads the extractor PAYLOAD dict, `pt` bound at `:18769` | **no** | **`record_only`** ⛔ gated — the two test pins refuse the declaration (§5.1) | nothing walks, filters or indexes it, and it is **not** an embedding input (`sdk.py:15975` composes from `quote`/`content` only) — but the move is blocked |
 
 ⚠️ **Row 14 was corrected in review — twice, and the second correction is the instructive part.** It first
@@ -376,7 +378,7 @@ a node property — `projection/entities.py:2423` lists **`about_entities`, `abo
 *"handled as graph edges"*), and the edge it becomes is `aboutSubject`, already censused at §2.5, so the row
 double-counted a censused shape; (b) `mentions` **is** stored (`projection/entities.py:1206`,
 `_POINT_JSON_RECORD_PROPS`), but nothing needs a graph capability to read it, and the embedding text is
-`quote` + edge-derived names (`embed_compose.py:284`, called at `sdk.py:15975`) — neither half is an input.
+`quote` + edge-derived names (`embed_compose.py:284`, called at `sdk.py:15975`) — neither half is an input. ⚠️ Stated precisely: the ONE call site passes `props.get("quote"), content=content` and **no** `names=`, so the composed text at a write is the quote alone; the `names` arm exists in `embed_compose` and attaches at the recompose seam (`#11739`), which reads `aboutSubject` edges — already this row's §2.5 census, not a `mentions` reader.
 ⚠️ The FIRST correction then cited two things that are **not readers**: `sdk.py:18841` reads the extractor
 payload dict rather than a node, and `projection/__init__.py:22118-22120` is a write-only fold that its own
 definition of `RMW` (§2.7) does not cover. Both are replaced above by the real whole-node read, `sdk.py:27210`.
@@ -490,7 +492,7 @@ draft gave, and that draft's mechanism was wrong.** ⚠️ **An earlier draft sa
 `rebuild_all` DELETE the property from every legacy `:Point`. That is false.** `_POINT_DENY`
 (`projection/entities.py:2472`) has one operational consumer: it is passed as a skip set into
 `_persist_extra_props(…, self._POINT_HANDLED | self._POINT_DENY, …)` at `:3183-3192`, which **drops the key from
-the `SET n += $extra` map** — nothing is REMOVEd — plus a warning check at `:3201`. No code path derives a
+the `SET n += $extra` map** — nothing is REMOVEd — plus a warning check at `:3228`. No code path derives a
 `REMOVE`/`DELETE` from that set (`rg -n '_POINT_DENY' tortoise/` returns the definition, that call site, and
 comments).
 
@@ -561,7 +563,7 @@ eviction policy — that is `#13084` and P0-c.
 |---|---|---|
 | **no record table** → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the eleven other bookkeeping labels | a record home, then `cache_tier` (§5.2) |
 | **a policy pin** → the declaration is refused although the seam would honour it | `point.story_arc` | `#10429`: widen the completeness pin with a tail-only category (§5.1) |
-| **a record table but no tier COLUMN** → having a row is not having a tier | `:Session` telemetry row 7b (and every non-`:Point` label) | a `cache_tier` column on `public.session` (one migration per label, `cache_projection.py:3633`) |
+| **a record table but no tier COLUMN** → having a row is not having a tier | every non-`:Point` label whose move is **whole-label** (none in this census — rows 1/4/5/6/8 are `graph`) | a `cache_tier` column (one migration per label) **plus** the `if table == "point"` arm at `cache_projection.py:3633` widened; ⚠️ this does **not** unblock row 7b, which is a **property-level** move the row-level tier cannot express (§6.1) |
 
 None of these is a census failure. Each is the mechanism's **precondition**, named so the next slice is executable
 instead of another audit.
@@ -676,8 +678,11 @@ changes nothing.
   introduced (`#11758`: the price of record is a share of STORAGE, not a node count): this is *what may be
   resident*, never how many graphs or nodes a tenant may have.
 - **It does not delete.** No product code changed in this slice, so nothing was removed from any graph. ⚠️ The
-  destructive leg is **not** available to cite: `#10017` ("purge the pre-`#10000` turn nodes") was closed
-  **`NOT_PLANNED`** on 2026-11-06, so there is no shipped purge tooling to point at. The legacy copies this
+  destructive leg is **not** available to cite for THIS class: `#10017` ("purge the pre-`#10000` turn nodes")
+  was closed **`NOT_PLANNED`** on 2026-11-06, and the tool that does ship — `tools/purge_legacy_turns.py`, the
+  `DETACH DELETE` of legacy episodic turn `:Point`s — targets a different population and never names
+  `story_arc` (`grep -c story_arc tools/purge_legacy_turns.py` → `0`). So there is no shipped purge to point at
+  for this shape. The legacy copies this
   document declines to fold-delete therefore remain, which is a *stronger* reason for the §5.1 refusal, not a
   weaker one.
 - ⛔ **It is NOT a census of the whole database.** Row 18 of §1 lists the labels found but **not censused**
