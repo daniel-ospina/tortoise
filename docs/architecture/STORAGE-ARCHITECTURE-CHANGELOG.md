@@ -2382,8 +2382,8 @@ retirable once the record serves them.
 record:* `point` 33,873 rows carry a vector behind an HNSW index; `event` and `source` each already
 have a `vector(384)` generated column and an HNSW index **and zero rows carrying a vector** (`#11660`'s
 migration — the infrastructure is not new); **`object` and `subject` have no embedding column at all**
-and their props CHECK constraints refuse a derived field, so their fingerprints live only in FalkorDB
-today. That last row is the durability gap against *"Postgres is the system of record"*, and it is why
+and their props CHECK constraints refuse a derived field, so at that measurement their fingerprints
+lived only in FalkorDB. That last row is the durability gap against *"Postgres is the system of record"*, and it is why
 the ruling cannot be implemented by switching a read on.
 
 **What it changes in the design document — the regions listed below, and no figure moved.** ⚠️ **Beyond §14.3, every site that stated the KEEP ruling as an absolute refusal now reconciles with ruling 2**
