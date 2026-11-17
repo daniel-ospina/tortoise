@@ -51,6 +51,9 @@ def _install_fake_sdk(monkeypatch, resolved_name: str) -> dict:
         # that name — else the call raises AttributeError (:105) and the dry-run arm that
         # reads `sweep_dry_run` REDs; it does not pass vacuously.
         def _sweep_invite_ghost_memberships(self, *, dry_run=False):
+            # #12901 wave 2 PRIVATISED the public `sweep_invite_ghost_memberships`
+            # (sdk_retired.py); the script under test calls `_sweep_…`, so modelling
+            # the retired public name made this fake blind to the real caller.
             calls["sweep_dry_run"] = dry_run
             return {"found": 0, "ghosts": 0, "deleted": 0}
 

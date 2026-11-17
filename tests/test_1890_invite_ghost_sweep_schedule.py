@@ -33,13 +33,19 @@ class _FakeSDK:
 
     def __init__(self, calls: list[str], raises: Exception | None = None):
         self.calls = calls
+        self.dry_runs: list[bool] = []
         self._raises = raises
         self.sweeps = 0
 
-    # #12901 wave 2 PRIVATISED the door this caller reaches: `hosted_api` now calls
-    # `sdk._sweep_invite_ghost_memberships()`, so the fake must answer to that name — else the
-    # AttributeError is caught+logged, `calls` stays empty and the live-caller asserts RED.
-    def _sweep_invite_ghost_memberships(self) -> dict:
+    def _sweep_invite_ghost_memberships(self, *, dry_run: bool = False) -> dict:
+        # #12901 wave 2 (sdk_retired.py) PRIVATISED the public
+        # `sweep_invite_ghost_memberships` to `_sweep_invite_ghost_memberships`.
+        # The fake must model the LIVE surface — name AND keyword-only `dry_run`
+        # (sdk.py) — or it stops seeing the caller.
+        # ⛔ `dry_run` is RECORDED, not ignored: `_sweep_invite_ghosts` swallows every
+        # Exception into a warning, so a scheduler that started passing `dry_run=True`
+        # would delete nothing and still log "deleted 1" off this fake's fixed return.
+        self.dry_runs.append(dry_run)
         self.calls.append("_sweep_invite_ghost_memberships")
         self.sweeps += 1
         if self._raises is not None:
@@ -48,11 +54,16 @@ class _FakeSDK:
 
 
 def _patch(monkeypatch, calls, *, supabase=False, raises=None):
-    """Fake SDK factory + mode switch; returns the _make_sdk fetch counter."""
+    """Fake SDK factory + mode switch.
+
+    Returns the fake SDK; its `.fetches` is the `_make_sdk` fetch counter and its
+    `.dry_runs` records the `dry_run` each sweep was called with.
+    """
     from tortoise import supabase_control as sc
 
     fetches: list[int] = []
     sdk = _FakeSDK(calls, raises=raises)
+    sdk.fetches = fetches
 
     def _make_sdk(*_a, **_k):
         fetches.append(1)
@@ -60,17 +71,20 @@ def _patch(monkeypatch, calls, *, supabase=False, raises=None):
 
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: supabase)
     monkeypatch.setattr(ha, "_make_sdk", _make_sdk)
-    return fetches
+    return sdk
 
 
 def test_the_sweep_runs_on_the_registry_and_reports_what_it_deleted(
         monkeypatch, caplog):
     calls: list[str] = []
-    _patch(monkeypatch, calls)
+    sdk = _patch(monkeypatch, calls)
 
     with caplog.at_level(logging.INFO, logger="tortoise.hosted_api"):
         ha._sweep_invite_ghosts()
 
+    assert sdk.dry_runs == [False], (
+        "the live sweep must be a REAL sweep — a `dry_run=True` regression deletes "
+        "nothing while this fake still reports 'deleted 1', so it has to red here")
     assert calls == ["_sweep_invite_ghost_memberships"], (
         "the caller must reach the #1908 sweep — not re-implement it")
     assert any("invite ghost sweep deleted 1" in r.getMessage()
@@ -87,11 +101,11 @@ def test_supabase_mode_never_constructs_the_registry(monkeypatch):
     against the bug.
     """
     calls: list[str] = []
-    fetches = _patch(monkeypatch, calls, supabase=True)
+    sdk = _patch(monkeypatch, calls, supabase=True)
 
     ha._sweep_invite_ghosts()
 
-    assert fetches == [], "Supabase mode must not reach for the registry"
+    assert sdk.fetches == [], "Supabase mode must not reach for the registry"
     assert calls == [], "Supabase mode must not run the registry sweep"
 
 
@@ -123,7 +137,7 @@ def test_the_boot_runner_arms_the_sweep(monkeypatch):
     scheduled at all — which is exactly the defect.
     """
     calls: list[str] = []
-    _patch(monkeypatch, calls)
+    sdk = _patch(monkeypatch, calls)
 
     async def _inline(fn, *, name, timeout=None):  # no threads in this test
         return fn()
@@ -134,6 +148,8 @@ def test_the_boot_runner_arms_the_sweep(monkeypatch):
 
     asyncio.run(ha._run_boot_sweeps())
 
+    assert sdk.dry_runs == [False], (
+        "the boot runner must arm a REAL sweep, not a dry run")
     assert calls == ["_sweep_invite_ghost_memberships"], (
         "the boot runner did not arm the invite-ghost sweep — #1890 is that "
         "the sweep had no live caller")
@@ -147,7 +163,7 @@ def test_the_periodic_loop_also_arms_the_sweep(monkeypatch):
     reached from the loop as well.
     """
     calls: list[str] = []
-    _patch(monkeypatch, calls)
+    sdk = _patch(monkeypatch, calls)
 
     async def _inline(fn, *, name, timeout=None):  # no threads in this test
         return fn()
@@ -175,6 +191,8 @@ def test_the_periodic_loop_also_arms_the_sweep(monkeypatch):
 
     asyncio.run(_one_pass())
 
+    assert sdk.dry_runs == [False], (
+        "the hourly loop must arm a REAL sweep, not a dry run")
     assert calls == ["_sweep_invite_ghost_memberships"], (
         "the hourly retention loop did not arm the invite-ghost sweep — a "
         "boot-only sweep is the same one-shot shape as the operator script")
