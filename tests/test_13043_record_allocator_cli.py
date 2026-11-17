@@ -347,6 +347,59 @@ def test_the_sweep_does_not_assert_a_floor_it_never_counted() -> None:
     assert payload["floor_is_the_journals_count_reason"]
 
 
+def test_the_null_floor_flag_states_the_cause_it_actually_had() -> None:
+    """⛔ RE-REVIEW P2: the reason named a read the sweep DOES perform.
+
+    The `null` above has exactly one cause — no floor was handed in, so there
+    was nothing to compare — and that is what an operator needs told. The
+    shipped sentence said "`sweep` reads MAX(seq), not the journal's
+    enumeration — pass --journal … to have the count reported beside it", whose
+    premise is false: the verb reads `COUNT(*)` per graph and already reports it
+    as `journal_count`, so there is no count left for a flag to make it report.
+    (`--journal` IS a working remedy — `main` counts it into `args.floor` — but
+    what it supplies is the floor to compare against, not the count's
+    reporting.)
+
+    The mutant this reds: restoring that sentence (reason does not contain
+    "no floor was supplied"). Non-vacuity: the entry really does carry the
+    count the reason points the operator at.
+    """
+    conn = _SweepConn(["g"], max_seq=5)
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": None,
+                                    "journal": None})(), conn)
+    reason = payload["floor_is_the_journals_count_reason"]
+    assert "no floor was supplied" in reason, (
+        "the reason does not name the cause the flag actually had (the sentence "
+        f"names MAX(seq) and a --journal remedy instead): {reason!r}")
+    assert "reads MAX(seq), not the journal's enumeration" not in reason, (
+        f"the reason still claims the sweep does not read the count: {reason!r}")
+    assert payload["uncut_graphs"][0]["journal_count"] == 5, (
+        "the reason points at `journal_count`, but the entry does not carry it: "
+        f"{payload['uncut_graphs'][0]}")
+    assert "journal_count" in reason
+
+
+def test_a_sweep_with_no_uncut_graph_does_not_blame_a_missing_floor() -> None:
+    """The OTHER cause of the same `null`: with no uncut graph there is no
+    journal to count, so a "pass --enumerated-floor" remedy would be wrong too.
+
+    ⛔ And the absence is stated as what this verb READ, not as an org-wide fact:
+    `sweep` sees `journal_event` rows only, so a never-written graph is
+    invisible (the payload's own `cannot_see`).
+
+    Mutant: drop the `if not entries` branch → this reds on "no born-uncut graph".
+    """
+    conn = _SweepConn([], max_seq=5)
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": None,
+                                    "journal": None})(), conn)
+    assert payload["uncut_graphs"] == []
+    reason = payload["floor_is_the_journals_count_reason"]
+    assert "no born-uncut graph the record can see" in reason, (
+        f"the empty sweep over-claims an absence it did not read: {reason!r}")
+    assert "cannot_see" in reason, (
+        f"the reason does not name the blindness that lets this happen: {reason!r}")
+
+
 def test_the_sweep_reports_the_count_only_when_it_has_one() -> None:
     """Non-vacuity for the row above: with an enumeration it DOES answer."""
     conn = _SweepConn(["g"], max_seq=5)

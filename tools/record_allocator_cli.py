@@ -451,13 +451,36 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             "nothing yet"),
     }
     if payload["floor_is_the_journals_count"] is None:
-        # The NUMBER beside the flag is `MAX(seq)`, and nothing here counted the
-        # journal — so the reason is stated rather than left to be inferred from
-        # a `null`.
-        payload["floor_is_the_journals_count_reason"] = (
-            "unknown: `sweep` reads MAX(seq), not the journal's enumeration — "
-            "pass --journal <that graph's path> (or --enumerated-floor N) to "
-            "have the count reported beside it")
+        # ⛔ THE REASON MUST NAME THE CAUSE THE `null` ACTUALLY HAD (#13043
+        # re-review, P2). This sentence used to read "`sweep` reads MAX(seq), not
+        # the journal's enumeration — pass --journal … to have the count
+        # reported beside it". The premise is false as written: the verb reads
+        # `COUNT(*)` and reports it as `journal_count` beside `journal_max_seq`
+        # on EVERY entry, so it neither omits the count nor needs telling to
+        # report it. (`--journal` IS a working remedy — `main` counts it into
+        # `args.floor` — but what it supplies is the FLOOR to compare against,
+        # not the count's reporting, which is the part the sentence got
+        # backwards.) The flag is `null` because NO FLOOR was handed in to
+        # compare: name that, name what the verb already answered, and name the
+        # input that would answer it.
+        if not entries:
+            # ⛔ AND DO NOT OVER-CLAIM THE ABSENCE (#13043 re-review, P3): this
+            # verb reads `public.journal_event` only, so a born-uncut graph that
+            # has never been written leaves no row and is invisible — exactly
+            # what `cannot_see` below says. "none in this org" would be a read
+            # this sweep did not perform.
+            payload["floor_is_the_journals_count_reason"] = (
+                "unknown: no born-uncut graph the record can see in this org, "
+                "so there was no journal whose count could be compared with a "
+                "floor (a graph that has never been written leaves no "
+                "`journal_event` row — see `cannot_see`)")
+        else:
+            payload["floor_is_the_journals_count_reason"] = (
+                "unknown: no floor was supplied, so nothing was compared with "
+                "the journal's count — the count itself IS read and is "
+                "reported as `journal_count` beside `journal_max_seq`; pass "
+                "--enumerated-floor N (or --journal <that graph's path>) to "
+                "have the floor compared")
     return payload
 
 
