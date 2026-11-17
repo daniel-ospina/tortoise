@@ -1222,13 +1222,17 @@ The block's `grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/ → 0
 pre-R6 reading. R6's tenancy boundary now ships the GUC, so the same grep returns
 **2 lines at `ff6379eb2`** — `tortoise/record_projection.py:227` (`TENANT_GUC =
 "app.current_org_id"`) and its docstring at `:3269`, the offsets `c5cbcbb4f` (R6's tenancy boundary)
-introduced — and **16 lines at this head** (#11642's `tortoise/record_vector.py` added the thirteenth:
+introduced — and **19 lines at this head** (#11642's `tortoise/record_vector.py` added the thirteenth:
 its module docstring names the GUC when it explains why the searcher can never invent a tenant — the
 tripwire doing its job; and #12894 stage C's new `tortoise/record_allocator.py` added the last three,
 13 → 16 — its `seed()` and `read_cursor()` docstrings and a comment inside `execute_allocation` each
 name the GUC, because the counter's policy filters on it and the refusal they explain is an UPDATE
 that matches zero rows rather than an error, which is exactly the shape this tripwire exists to make
-visible): `54a3e7abe` (R9's backup role must BYPASS RLS) added three
+visible; and this head carries three MORE, 16 → 19 — a fourth docstring in that same
+`tortoise/record_allocator.py` (`:427`, the `ABOUT WHAT THAT PREVENTS` note) and two in
+`tools/record_allocator_cli.py` (`:370`'s `set_config` comment and `:372`'s rollback note, which names
+`current_setting('app.current_org_id', true)`), i.e. a new tool and a new note naming the GUC, the
+tripwire doing its job again): `54a3e7abe` (R9's backup role must BYPASS RLS) added three
 `tortoise/record_backup.py` mentions, #9555 (R7's narrative fetch) added three more —
 `tortoise/record_text.py` ×2 and `tortoise/__main__.py` ×1 — and #10017's copy added the ninth,
 in `tools/backfill_copy_turns.py`: the comment on its floor read that states why the read must go
