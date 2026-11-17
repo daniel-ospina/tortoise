@@ -411,15 +411,30 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     # 2c3c9acc, P3). Nothing read it: mutating all three numbers to 61 stayed green while every
     # other pin still agreed with itself, which is this wave's own defect class — a present-tense
     # claim with no machine behind it.
+    # ⛔ THE ANCHOR IS THE PHRASE, NOT ONE OF ITS SURFACE FORMS (#13052 review at ff2602f24, P3).
+    # Binding the tailed sentence ("… now <text> and it is still N of N verified") caught edits to
+    # THAT sentence and left a neighbouring statement of the same count unread — measured, a
+    # tail-less `The population is **61** now (after the door wave).` and a comma-form
+    # `The population is **61** now, and it is still 61 of 61 verified.` both stayed green while
+    # the doc asserted 60 and 61 at once. Every `The population is **N**` in the doc is therefore
+    # read for its NUMBER, whatever the sentence does afterwards; the tailed form additionally
+    # gets its `N of N verified` triple checked when it is present.
+    stated_now = [int(n) for n in re.findall(r"The population is\s+\*\*(\d+)\*\*", canonical)]
+    assert stated_now, (
+        "canonical-mcp-tools.md no longer states the retired population in present tense at "
+        "all (`The population is **N**`) — the amendment's SECOND statement of that count. Its "
+        "absence is a failure and not a vacuous pass: delete the sentence and the surviving "
+        "clause is the only statement left to check"
+    )
+    assert stated_now == [retired] * len(stated_now), (
+        f"canonical-mcp-tools.md states the retired population as {stated_now} across "
+        f"{len(stated_now)} present-tense statement(s), and the manifest's retired rows number "
+        f"{retired} — every statement of the count has to agree with the manifest, not just "
+        "the one this pin was written against"
+    )
     population_now = re.findall(
         r"The population is\s+\*\*(\d+)\*\* now .*?and it is still (\d+) of (\d+) verified",
         canonical, re.S)
-    assert population_now, (
-        "canonical-mcp-tools.md no longer states the retired population in present tense as "
-        "`The population is **N** now … and it is still N of N verified` — the amendment's "
-        "SECOND statement of that count. Its absence is a failure and not a vacuous pass: "
-        "delete the sentence and the surviving clause is the only statement left to check"
-    )
     for stated, of_verified, verified in population_now:
         assert (int(stated), int(of_verified), int(verified)) == (retired, retired, retired), (
             f"canonical-mcp-tools.md says the retired population is {stated} now and "
