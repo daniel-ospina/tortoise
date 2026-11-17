@@ -484,7 +484,7 @@ main-move cannot repeat it — which is step 1 of the procedure above enforced i
 Appendix A regenerated with `--markdown`.
 
 ⛔ **The two sites this cut adds are READ-side, and one of them is not statically resolvable.** The
-The `#8430` review's F2 fix asks the engine once whether any stored row is readable at the query vector's
+`#8430` review's F2 fix asks the engine once whether any stored row is readable at the query vector's
 width before it lets a zero-row scan report `empty_results`; that probe's statement interpolates the
 label and the seam expression, so it lands as a `plain`/`read` site marked **partial**. The #8429
 review's empty-cohort probe (`_index_yields_any_node`) resolves to nothing and lands in

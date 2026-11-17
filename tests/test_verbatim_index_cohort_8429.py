@@ -483,6 +483,55 @@ def test_the_cohort_graph_name_is_one_this_tree_can_reap():
         "carrying a whole-label DETACH DELETE (#13290 F1)")
 
 
+def test_the_live_fixture_teardown_drops_its_own_graph(monkeypatch):
+    """#13290 review — the DROP CALL is pinned, not only the reap-able NAME.
+
+    ``test_the_cohort_graph_name_is_one_this_tree_can_reap`` proves the graph is
+    reapABLE; it says nothing about anyone reaping it. Deleting the
+    ``drop_test_graph`` call from ``_cohort_sdk``'s teardown reddened NOTHING,
+    leaving a per-run graph leaked per lane and per CI run — the same leak the
+    name pin exists to prevent, one step earlier. This pins the call itself.
+
+    Hermetic: the SDK and the drop are both doubled, so no server is touched and
+    the fixture body runs end to end (construction, ``yield``, teardown).
+    """
+    import types
+
+    import tortoise.sdk as sdk_mod
+
+    module = sys.modules[__name__]
+    dropped: list[tuple[object, str]] = []
+    graph_name = "tortoise_test_abcdef1234"
+
+    monkeypatch.setattr(module, "_cohort_uri",
+                        lambda: (f"docker://probe/{graph_name}", graph_name))
+    monkeypatch.setattr(module, "_live_utils", types.SimpleNamespace(
+        drop_test_graph=lambda proj, *, name=None: dropped.append((proj, name))))
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            self.closed = False
+
+        def _get_proj(self):
+            return "THE-PROJECTION"
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+
+    with _cohort_sdk() as sdk:
+        assert isinstance(sdk, _FakeSDK), "premise: the doubled SDK was built"
+        assert dropped == [], "the graph was dropped BEFORE the fixture body ran"
+
+    assert dropped == [("THE-PROJECTION", graph_name)], (
+        "the fixture's teardown did not drop the graph it minted "
+        f"(drops seen: {dropped!r}) — deleting that call leaks a per-run graph "
+        "per lane and per CI run (#13290 review)")
+    assert sdk.closed is True, (
+        "the fixture's teardown did not close the SDK handle")
+
+
 # ── the COHORT: a real index drops the verbatim node (and now recovers) ─────
 
 def _raw_index_ids(graph, vec, limit: int = 10) -> list:

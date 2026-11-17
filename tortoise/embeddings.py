@@ -1760,7 +1760,7 @@ def _in_replay_scope() -> bool:
     try:
         from tortoise.projection import replay_window_open
         return replay_window_open()
-    except Exception:
+    except Exception:  # noqa: BLE001, RUF100 — a fail-safe probe must never
         return True
 
 
