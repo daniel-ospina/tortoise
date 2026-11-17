@@ -261,10 +261,16 @@ def _row_is_frozen(status, outdated) -> bool:
     # ARRAY `status` raises `TypeError: unhashable type`. ⚠️ NOT reachable through a
     # current door: `update_knowledge(id, status=['live'])`, `create_object(...,
     # status=['live'])` and `create_entity('Object', ..., status=['live'])` all
-    # REFUSE it (`lifecycle_vocabulary.py:279-286`; `sdk.py:53785-53791`). It is the
+    # REFUSE it (`lifecycle_vocabulary.py:279-286`; the refusing calls are
+    # `sdk.py:53803-53805` on the update door and `sdk.py:54851-54855` on the create
+    # door). ⛔ `sdk.py:53785-53791` is the WRONG place to check that — prose about
+    # where the check must sit, asserting the OLD behaviour ("a LIVE never-statused
+    # Object accepted `status=['live']` and stored the list verbatim"). It is the
     # LEGACY population — rows written before that door existed, which
     # `lifecycle_vocabulary.py:263-264` records explicitly ("`status=['live']` *used
-    # to be* STORED on an `:Object`") — and this repo deliberately keeps readers
+    # to be* STORED on an `:Object`") and `sdk.py:53808-53811` enumerates from the
+    # other side ("written by a pre-fix SDK, a raw Cypher producer, or a JSONL replay
+    # of either") — and this repo deliberately keeps readers
     # wider than the door (`live.py:100-108`). The FOLD tolerates it because its own
     # `excluded` is a LIST (an `==` scan, no hash). A raise here is not a quiet skip
     # of one row: `_project_issue` runs BEFORE the Object write and the exception
