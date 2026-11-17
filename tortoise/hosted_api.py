@@ -34745,7 +34745,10 @@ def _drop_org_acl_users(org_id: str) -> None:
     `LOWER BOUND` warning can fire. The sibling walk one statement later can
     still certify on its own retry, and then `_drop_org_graphs_strict` deletes
     EVERY graph and `purge_org_control_plane` cascades the rows away: every
-    `tenant_<gid>` credential of the org is orphaned, and nothing announced it.
+    `tenant_<gid>` credential of the org is orphaned. The only announcement is
+    that arm's own hedge that they "may be orphaned" — emitted before it can
+    know whether the sibling will certify — so nothing announces the LOSS once
+    it has happened.
     Same #13287, ten times the blast radius of the partial case, and strictly
     more likely. One enumeration (deriving the gids from the certified namespace
     list) closes both arms; until then the `except` arm is a fail-open and is
