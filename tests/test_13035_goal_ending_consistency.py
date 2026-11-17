@@ -1448,3 +1448,122 @@ def test_an_UNHASHABLE_goalState_reaches_the_documented_ValueError(sdk):
                              objectKind="goal",
                              goalState=_UnhashableWord("met"))
     assert sdk.get_entity(goal["id"])["goalState"] == "met"
+
+
+# ── 15. review round 15: the rendering split, and the supersede verb ──────────
+
+
+class _RenderingLie(str):
+    """A `str` whose CONTENT is honest and whose RENDERING lies (#12906's shape).
+
+    The guard grades ``str.__str__`` (base content, what the journal and the
+    record hold), but the DRIVER renders what it was given —
+    `falkordb.helpers.quote_string` calls ``len(v)`` and ``v.replace(...)`` on the
+    CALLER's object. So a subclass could be graded as one word and stored as
+    another. Retargeted at ``goalState`` by #13065 review round 15, finding 1.
+    """
+
+    _renders_as = "abandoned"
+
+    def replace(self, *args, **kwargs):
+        return self._renders_as
+
+
+class _LiveRenderingLie(_RenderingLie):
+    _renders_as = "live"
+
+
+def test_a_goalState_whose_RENDERING_lies_cannot_split_the_pair(sdk):
+    """#13065 review ROUND 15, finding 1 (P1) — grade what the WRITE SENDS.
+
+    MEASURED on the reviewed head: ``update_knowledge(goal,
+    goalState=<content 'active', replace()->'abandoned'>)`` was graded as the live
+    word ``active`` (correct) and then STORED as ``abandoned``, leaving
+    ``status='live', goalState='abandoned'`` — the issue's own headline pair and a
+    ``failures`` row under this suite's own acceptance predicate. The same through
+    ``create_object``, in both directions.
+
+    The fix rebinds the guarded values to the base content the guard graded, the
+    way `_update_entity`'s no-promote arm already does for ``status`` and
+    ``supersede_knowledge`` does for its operands (#12914 P1). So the pair stays
+    coherent AND the stored word is the one that was graded.
+    """
+    goal = _goal(sdk, tag="rendering-lie", goalState="active")
+    assert live.is_terminal_status(sdk.get_entity(goal["id"]).get("status")) is False
+
+    # (1) the content is a LIVE word, the rendering claims an ENDING: the write is
+    # a no-op on the ending, so it must not end the row
+    sdk.update_knowledge(goal["id"], goalState=_RenderingLie("active"))
+    node = sdk.get_entity(goal["id"])
+    assert node["goalState"] == "active", (
+        "the RENDERING was stored instead of the graded content: the pair is now "
+        f"split ({node.get('status')!r}/{node.get('goalState')!r})")
+    # ...and the PR's own acceptance predicate holds on the result: both surfaces
+    # read this goal the SAME way (it is live on both)
+    _retired = node["goalState"] in RETIRED_GOAL_STATES
+    _current = not live.is_terminal_status(node.get("status"),
+                                           bool(node.get("outdated")))
+    assert (_retired, _current) == (False, True), (
+        "the two surfaces disagree about the goal: "
+        f"{node.get('status')!r}/{node.get('goalState')!r}")
+
+    # (2) the same lie through the CREATE door
+    created = sdk.create_object("CI is fast [rendering-lie-create]",
+                                objectKind="goal", status="live",
+                                goalState=_RenderingLie("active"))
+    assert sdk.get_entity(created["id"])["goalState"] == "active"
+
+    # (3) and on the OTHER axis: a `status` whose rendering claims an ending while
+    # its content is a live word must not end the row either
+    sdk.update_knowledge(goal["id"], status=_LiveRenderingLie("live"))
+    node = sdk.get_entity(goal["id"])
+    assert node.get("status") == "live", (
+        f"the status RENDERING was stored ({node.get('status')!r}) over content 'live'")
+
+
+def test_the_family_Supersede_verb_aligns_a_GOALs_achievement_word(sdk):
+    """#13065 review ROUND 15, finding 2 (P2) — the shipped verb could not retire
+    a goal, and neither named repair was performable through it.
+
+    MEASURED on the reviewed head:
+    ``supersede_knowledge(<plan Object, goalState='active'>, <successor>)`` was
+    REFUSED ("status='superseded' ends the goal, but goalState='active' still
+    describes a live commitment"), because the verb writes
+    ``status``/``supersededBy``/``supersededAt`` and left ``goalState`` alone —
+    while ``supersede_knowledge`` and its MCP tool (the only public family
+    supersede route) have no ``goalState`` parameter, so neither repair in the
+    refusal could be taken. A row with NO achievement word superseded fine, which
+    is what made this a shipped-verb hole rather than a guard bug.
+
+    ``superseded`` is the one ending that keeps its spelling on both axes, so the
+    verb now aligns the pair in the same journaled write.
+    """
+    old = sdk.create_object("GOAL - plan v1 [supersede-verb]", objectKind="plan",
+                            status="live", goalState="active")
+    new = sdk.create_object("GOAL - plan v2 [supersede-verb]", objectKind="plan",
+                            status="live", goalState="active")
+
+    out = sdk.supersede_knowledge(old["id"], new["id"])
+    assert out["superseded"] is True, out
+    node = sdk.get_entity(old["id"])
+    assert node["status"] == "superseded", node
+    assert node["goalState"] == "superseded", (
+        "the verb ended the row on `status` and left the achievement word "
+        f"running: {node['goalState']!r}")
+    # the PR's own acceptance predicate, in the shape the acceptance test uses
+    # (retired, current) == (True, False): both surfaces say the goal is OVER
+    assert (node["goalState"] in RETIRED_GOAL_STATES,
+            not live.is_terminal_status(node.get("status"),
+                                        bool(node.get("outdated")))) == (True, False), node
+
+    # ⛔ a row that makes NO achievement claim is left making none — the verb
+    # aligns an existing word, it does not invent one
+    bare_old = sdk.create_object("PLAN - no claim [supersede-verb]",
+                                 objectKind="plan", status="live")
+    bare_new = sdk.create_object("PLAN - no claim v2 [supersede-verb]",
+                                 objectKind="plan", status="live")
+    sdk.supersede_knowledge(bare_old["id"], bare_new["id"])
+    bare = sdk.get_entity(bare_old["id"])
+    assert bare["status"] == "superseded", bare
+    assert bare.get("goalState") in (None, ""), (
+        f"the verb stamped an achievement word nobody claimed: {bare.get('goalState')!r}")

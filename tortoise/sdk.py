@@ -6189,6 +6189,24 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                         for key in keys_rendering_as(props, {name})}
         if len(contributing) < len(rendered):
             doubled = sorted(rendered)
+    # ⛔ #13065 review ROUND 15, finding 1 (P1): GRADE WHAT THE WRITE SENDS.
+    # Everything below grades BASE CONTENT (`str.__str__`, through
+    # `_is_lifecycle_word`), because that is the word the JOURNAL and the record
+    # hold — but the LIVE WIRE is rendered by METHOD LOOKUPS on the caller's
+    # object (`falkordb.helpers.quote_string` calls `len(v)` and `v.replace`). So
+    # a `str` subclass whose content is `active` and whose `replace()` answers
+    # `abandoned` was graded as `active` and STORED as `abandoned`. MEASURED, four
+    # writes on the reviewed head: `update_knowledge(goal,
+    # goalState=Rep0('active'))` left `status='live', goalState='abandoned'` — the
+    # issue's own headline pair, and a `failures` row under this suite's OWN
+    # acceptance predicate; the same through `create_object`, in both directions.
+    # This is the split `_update_entity`'s no-promote arm already closes for
+    # `status` (`props[_np_key] = str.__str__(props[_np_key])`, with the same
+    # measured rationale) and that `supersede_knowledge` closes for its operands
+    # (#12914 P1). `goalState` was the one column routed through a decision guard
+    # and left unbound. Rebinding is behaviour-neutral for an honest `str`: a
+    # plain subclass already stores its content today.
+    _rebind_guarded_words(props, rendered)
     if doubled:
         # ⛔ ONE WORDING WITH THE DOOR'S OWN CHECK (`update_entity`'s
         # `_status_write_is_ambiguous` refusal, #12786): a caller that trips this
@@ -6513,6 +6531,37 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             f"  2. if this is genuinely a NEW goal, give it its own id "
             f"instead of reusing the ended one."
         )
+
+
+def _rebind_guarded_words(props: dict, rendered: dict) -> None:
+    """Rewrite the two guarded values to the BASE CONTENT this guard graded.
+
+    #13065 review ROUND 15, finding 1 (P1). The guard's verdicts are taken from
+    ``str.__str__`` (base content, the word the journal and the record hold), and
+    the write used to send the caller's RENDERING instead — `falkordb`'s
+    `quote_string` calls `len(v)` and `v.replace`, both of which a `str` subclass
+    may override. That gap let a value whose content is ``active`` land as
+    ``abandoned``, i.e. the exact ``status``/``goalState`` divergence the whole
+    guard exists to refuse.
+
+    This closes it the way the file already closes it twice: `_update_entity`'s
+    no-promote arm rebinds the ``status`` rendering for the same measured reason,
+    and ``supersede_knowledge`` rebinds its operands at the entry (#12914 P1).
+    Every key that RENDERS as a guarded name is rewritten (a `str` subclass key is
+    filed by ``str(key)``, so the key and its rendering are separate facts), and a
+    value that is not genuinely ``str`` is left alone — the guard's own refusals
+    own that shape, and rewriting it would be a type change nobody asked for.
+
+    Behaviour-neutral for every honest value, including a plain ``str`` subclass:
+    its content is what the store holds today.
+    """
+    for name in ("status", "goalState"):
+        word = rendered.get(name)
+        if not issubclass(type(word), str):
+            continue
+        for key in keys_rendering_as(props, {name}):
+            if issubclass(type(props[key]), str):
+                props[key] = str.__str__(props[key])
 
 
 def _ending_key(value: object) -> str:
@@ -24311,18 +24360,22 @@ class TortoiseSDK:
             # unencodable round trip, and lets the impostor land on the same
             # documented ``no :<label> <id>`` / cross-family ValueError.
             if not issubclass(type(node_id), str):
-                return {"rows": 0, "statuses": [], "names": []}
+                return {"rows": 0, "statuses": [], "names": [], "goals": []}
+            # `goalState` is read for the pairing guard's sake (#13065 review
+            # ROUND 15, finding 2): the write below ends the row on `status`, so
+            # the achievement word has to move with it.
             rows = proj.g.query(
                 f"MATCH (n:{label} {{id:$id}}) "
                 "RETURN count(n) AS rows, collect(n.status) AS statuses, "
-                "collect(n.name) AS names",
+                "collect(n.name) AS names, collect(n.goalState) AS goals",
                 params={"id": node_id},
             ).result_set
             if not rows or not rows[0][0]:
-                return {"rows": 0, "statuses": [], "names": []}
+                return {"rows": 0, "statuses": [], "names": [], "goals": []}
             return {"rows": rows[0][0],
                     "statuses": list(rows[0][1] or ()),
-                    "names": list(rows[0][2] or ())}
+                    "names": list(rows[0][2] or ()),
+                    "goals": list(rows[0][3] or ())}
 
         dead = _SUPERSESSION_DEAD_SETS[label]
         old = _rows(old_id)
@@ -24428,6 +24481,30 @@ class TortoiseSDK:
                 f"unambiguous, then re-send."
             )
         successor_name = names[0]
+        # ⛔ THE ACHIEVEMENT WORD MOVES WITH THE STATUS (#13065 review ROUND 15,
+        # finding 2 (P2)). The write below ends the row on `status='superseded'`
+        # and names its successor, but it used to leave `goalState` alone — so on
+        # a goal carrying ANY achievement word it hit the two-field guard
+        # (`status` terminal, `goalState` a live word, or an ending spelled the
+        # other way), and the refusal's two named repairs were UNPERFORMABLE
+        # through this door: neither `supersede_knowledge(old, new,
+        # transfer_edges, valid_from, valid_to_precision)` nor its MCP tool has a
+        # `goalState` parameter, and `mcp_server` calls this "the only public
+        # route for a family supersede". MEASURED on the reviewed head:
+        # ``supersede_knowledge(<plan Object, goalState='active'>, <successor>)``
+        # -> REFUSED "status='superseded' ends the goal, but goalState='active'
+        # still describes a live commitment"; the same call on a row with no
+        # achievement word landed. A shipped verb that cannot retire the most
+        # common goal shape is the AX-rule-2 class (a repair the door rejects),
+        # so the door aligns the pair itself: `superseded` is the ONE ending that
+        # keeps its spelling on both axes, and this verb IS the replacement.
+        #
+        # Only a row that ALREADY carries an achievement word is aligned — a row
+        # that makes no claim is left making none, since stamping a word would
+        # invent a commitment the caller never stated.
+        _goal_words = sorted({str.__str__(g) for g in old["goals"]
+                              if issubclass(type(g), str) and str.__str__(g)})
+        _alignment = ({"goalState": _SUPERSEDED_STATUS} if _goal_words else {})
         from .projection import _now_iso
         instant = _now_iso()
         # ⛔ ``dry_run`` IS THE MCP PREVIEW'S DOOR, NOT A PUBLIC MODE (#12914
@@ -24457,7 +24534,7 @@ class TortoiseSDK:
                     "rows": old["rows"]}
         applied = self.update_knowledge(
             old_id, status=_SUPERSEDED_STATUS,
-            supersededBy=successor_name, supersededAt=instant)
+            supersededBy=successor_name, supersededAt=instant, **_alignment)
         if not applied:
             # The write path reports `{}` when it matched nothing. A supersession
             # that did not land must never be reported as one — the phantom-claim
