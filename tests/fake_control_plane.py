@@ -2016,6 +2016,24 @@ class FakeControlPlane:
         page = rows_all[:limit] if limit is not None else rows_all
         return page, None
 
+    def query_all(self, table: str, *, select: list[str] | None = None,
+                  filters: list[tuple[str, str, object]] | None = None,
+                  cursor: str = "id", page_size: int = 100,
+                  max_pages: int = 100, timeout: object | None = None,
+                  ) -> tuple[list[dict], bool]:
+        """#4038 shape: walk EVERY matching row and certify completeness.
+
+        The fake has no ``db-max-rows`` cap and no proxy in front of it, so a
+        full read IS the whole set — returning ``complete=True`` is the honest
+        double, not a claim the real client may make. A test that needs a
+        TRUNCATED or uncertifiable walk must override this method (the same rule
+        :meth:`query_with_total` states), which is the only way to exercise the
+        complete-vs-truncated decision.
+        """
+        del cursor, page_size, max_pages  # no paging: the fake is uncapped
+        return list(self.query(table, select=select, filters=filters,
+                               timeout=timeout)), True
+
     def _query_impl(self, table: str, *, select: list[str] | None = None,
                     filters: list[tuple[str, str, object]] | None = None,
                     method: str = "GET", json_body: dict | None = None,

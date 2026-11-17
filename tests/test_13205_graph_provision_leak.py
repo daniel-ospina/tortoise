@@ -135,11 +135,14 @@ class TestNoDoublePrefix:
 # ── 2. deleting an org deprovisions ALL of its graphs ────────────────────────
 
 class TestDeprovisionOnDelete:
-    def _fake_cp(self, rows, graphs=None):
+    def _fake_cp(self, rows, graphs=None, complete=True):
         """A control plane returning the given organization + graphs rows.
 
-        ``query`` answers by table, so the test drives the REAL enumerator rather
-        than a monkeypatched one — the safety filter is the thing under test.
+        ``query``/``query_all`` answer by table, so the test drives the REAL
+        enumerator rather than a monkeypatched one — the safety filter is the
+        thing under test. ``graphs`` is read through ``query_all`` (a single
+        page is silently capped at `max_rows`, so a truncated walk must be
+        refused rather than silently dropping the tail of the deprovision list).
         """
         class _CP:
             def query(self, table, **kw):
@@ -148,6 +151,9 @@ class TestDeprovisionOnDelete:
                 if table == "graphs":
                     return graphs or []
                 return []
+
+            def query_all(self, table, **kw):
+                return (graphs or []), complete
         return _CP()
 
     def test_every_graph_the_org_owns_is_in_the_deprovision_list(self, monkeypatch):
@@ -223,6 +229,26 @@ class TestDeprovisionOnDelete:
                             lambda: self._fake_cp(
                                 [{"id": "o1", "graph_name": "team_o1"}]))
         assert ha._org_graph_names("o1", "team_o1") == ["team_o1", "org_o1"]
+    def test_a_truncated_graphs_walk_REFUSES_rather_than_dropping_the_tail(self, monkeypatch):
+        """⛔ A single page is silently capped at the deployment's `max_rows`, so
+        an org owning more graphs than one page (reachable: `max_graphs` is None
+        on every tier, #10743) would lose the TAIL of its custom graphs from the
+        deprovision list — and `purge_org_control_plane` would then delete the
+        rows that named them, making them unnameable and unreapable forever
+        (#13205 review round 6). The walk is `query_all`, and an uncertified one
+        raises so the org row survives as the retry anchor."""
+        from tortoise import hosted_api as ha
+
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: self._fake_cp(
+                                [{"id": "o1", "graph_name": "org_o1"}],
+                                graphs=[{"id": "g_1", "namespace": "org_o1_g_1"}],
+                                complete=False))
+        with pytest.raises(RuntimeError, match="could not be certified complete"):
+            ha._org_graph_names("o1", "org_o1")
+
     def test_an_unreadable_enumeration_REFUSES_rather_than_erasing_a_subset(self, monkeypatch):
         """⛔ A failure to ask is not an answer (review round 4, P1).
 

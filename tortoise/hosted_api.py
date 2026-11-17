@@ -34590,10 +34590,24 @@ def _org_graph_names(org_id: str, graph_name: str | None = None) -> list[str]:
             is_supabase_enabled,
         )
         if is_supabase_enabled():
-            rows = get_control_plane().query(
-                "graphs", select=["namespace"],
-                filters=[("org_id", "eq", org_id)],
+            # ⛔ `query_all`, not `query` (review round 6). A single page is
+            # silently capped at the deployment's `max_rows` (1000) and cannot
+            # report its own truncation, so an org owning more graphs than one
+            # page — which is reachable, `max_graphs` is `None` on every tier
+            # (#10743) — would have its tail of custom graphs dropped from the
+            # deprovision list, and `purge_org_control_plane` would then delete
+            # the rows that named them: unnameable, unreapable, permanently
+            # resident. Exactly the partial erasure this function's raise exists
+            # to prevent. The cursor column must ride in `select`.
+            rows, complete = get_control_plane().query_all(
+                "graphs", select=["id", "namespace"],
+                filters=[("org_id", "eq", org_id)], cursor="id",
             )
+            if not complete:
+                raise RuntimeError(
+                    f"the graphs walk for org {org_id} could not be certified "
+                    f"complete — a truncated page would silently omit custom "
+                    f"graphs from the deprovision list")
             candidates += [r.get("namespace") for r in rows]
         else:
             nodes = _make_sdk(namespace="registry")._get_registry().query(
