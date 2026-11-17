@@ -313,8 +313,16 @@ def seed_graph(fg_host: str, fg_port: int, points: list[dict]) -> dict:
     from falkordb import FalkorDB
 
     from benchmarks.synthetic_corpus import seed_corpus
+    from tortoise.projection import _bounded_server_socket_kwargs
 
-    db = FalkorDB(host=fg_host, port=fg_port)
+    # ⛔ BOUNDED, and the bound is spread INLINE (not hoisted) so the
+    # tool-surface client gate sees it on the CALL (#3065/#8118: `falkordb`
+    # defaults `socket_timeout=None` and hands it to redis-py explicitly, so an
+    # unset one parks this measurement in `recv()` forever on a stalled engine
+    # and the hang is indistinguishable from "no results"). Same construction as
+    # `tools/cache_eviction_census.py`.
+    db = FalkorDB(host=fg_host, port=fg_port,
+                  **_bounded_server_socket_kwargs())
     g = db.select_graph(GRAPH_NAME)
     # A fresh graph has nothing to delete; either way the seed below is what
     # the measurement runs on, so a failing DROP is not a reason to abort.
@@ -480,7 +488,11 @@ class Arms:
         import psycopg
         from falkordb import FalkorDB
 
-        self.db = FalkorDB(host=fg_host, port=fg_port)
+        from tortoise.projection import _bounded_server_socket_kwargs
+
+        # Bounded and spread INLINE for the same reason as `seed_graph` above.
+        self.db = FalkorDB(host=fg_host, port=fg_port,
+                           **_bounded_server_socket_kwargs())
         self.g = self.db.select_graph(GRAPH_NAME)
         self.pg = psycopg.connect(pg_dsn, autocommit=True)
 

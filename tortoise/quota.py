@@ -464,12 +464,15 @@ class QuotaExceededError(Exception):
     """
 
     def __init__(self, message: str, *, resource: str | None = None,
-                 # ``used`` is `int | float` on purpose: the field carries the
-                 # figure the gate COMPARED, and a banded dimension compares at
-                 # a fractional hard stop (77 × 1.5 = 115.5). An integral reading
-                 # still arrives as an int, so existing payloads are unchanged
-                 # (#13102 round 5, P3: `int()` had silently floored it).
-                 used: int | float | None = None, limit: int | None = None,
+                 # ``used`` AND ``limit`` are `int | float` on purpose: both
+                 # carry the figures the gate COMPARED, and a banded dimension
+                 # compares at a fractional hard stop (77 × 1.5 = 115.5), so the
+                 # threshold reported is fractional too. Integral figures still
+                 # arrive as ints, so existing payloads are unchanged
+                 # (#13102: `int()` had silently floored `used`, and `limit`
+                 # reported the 1.0x cap while the gate refused at that stop).
+                 used: int | float | None = None,
+                 limit: int | float | None = None,
                  estimate: int | None = None,
                  estimated: bool | None = None,
                  code: str = QUOTA_REFUSAL_CODE) -> None:
