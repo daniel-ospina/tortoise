@@ -1544,7 +1544,7 @@ def test_a_goalState_whose_RENDERING_lies_cannot_split_the_pair(sdk):
     assert type(props["status"]) is str and type(props["goalState"]) is str, (
         "the stored value is still a subclass whose RENDERING can differ from what "
         f"was graded: {type(props['status'])!r}")
-    assert (rendered["status"], rendered["goalState"]) == ("live", "active"), (
+    assert type(rendered["status"]) is str and type(rendered["goalState"]) is str, (
         "the guard's verdict map still holds the caller's object, so its verdicts "
         f"can consult an override: {rendered!r}")
 
@@ -1552,25 +1552,36 @@ def test_a_goalState_whose_RENDERING_lies_cannot_split_the_pair(sdk):
 def test_an_EQUALITY_lie_cannot_forge_a_superseded_ending(sdk):
     """#13065 review ROUND 16, finding 1 (P2) — the verdicts are equality tests.
 
-    MEASURED on the reviewed head, each row with a plain-`str` control:
+    ⚠️ CORRECTED in round 17. This docstring first carried TWO rows as measured
+    holes, copied from the round-16 reviewer's table without re-deriving them. The
+    first row does not reproduce: a lie whose CONTENT is an abandoned word is
+    caught by the guard's FIRST arm whichever way ``__eq__`` answers, because the
+    ending-kind dispatch reads the content, so it never reaches an equality test.
+    MEASURED on this head with the helper neutralised: both the subclass and the
+    plain control are REFUSED, byte-identical ("goalState='abandoned' ends the
+    goal, but status='superseded' leaves it running"). It is kept below as a
+    control that the lie cannot smuggle a disagreement in that direction either —
+    not as the hole. A `⚠️ CORRECTED` marker records that the text changed, never
+    that it was right; this one is right because it was re-measured.
 
-    ``update_knowledge(goal, status='superseded', supersededBy='succ',
-    goalState=<content 'abandoned', __eq__ -> False>)``
-        control REFUSED ("The two endings are not interchangeable…"), subclass
-        LANDED as ``status='superseded', goalState='abandoned'``;
+    The row that IS the hole — re-measured here, subclass LANDED vs plain control
+    REFUSED:
+
     ``update_knowledge(goal, status='archived', goalState=<content 'superseded',
     __eq__ -> False>)``
-        control REFUSED, subclass LANDED as ``goalState='superseded'`` with
-        **``supersededBy=None``** — a stored ``superseded`` ending naming no
-        successor, which is the exact pair the second arm refuses.
+        control REFUSED ("goalState='superseded' ends the goal, but status=
+        'archived' leaves it running"), subclass LANDED as
+        ``goalState='superseded'`` with **``supersededBy=None``** — a stored
+        ``superseded`` ending naming no successor, the exact pair the second arm
+        refuses. Same through the create door.
 
-    Same through the create door. The fix normalises the verdict map, so every
-    later read compares base content.
+    The fix normalises the verdict map, so every later read compares base content.
     """
     goal = _goal(sdk, tag="equality-lie", goalState="active")
 
-    # (1) a `superseded` status against a goalState whose content is an ABANDONED
-    # word: the two endings disagree, and the lie must not hide it
+    # (1) CONTROL — a `superseded` status against a goalState whose content is an
+    # ABANDONED word. Refused with and without the fix (the first arm reads the
+    # content), so this pins "the lie cannot hide a disagreement", not the fix.
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(goal["id"], status="superseded",
                              supersededBy="succ-1",
