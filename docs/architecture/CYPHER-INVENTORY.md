@@ -24,7 +24,7 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **301** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **297** files scanned |
 | files carrying at least one statement site | **98** |
 | **statement sites (this census)** | **1309** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **857** (576 read, 281 write) |
@@ -98,7 +98,7 @@ door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
 1,620 occurrences of the door predicate across 107 files
-2,341 occurrences of the verb predicate across 143 files   (upper-bound shape, see below)
+2,339 occurrences of the verb predicate across 141 files   (upper-bound shape, see below)
 
 1,620  regex door-pattern occurrences
   −53  occurrences on a line carrying NO door call (comments and docstrings)
@@ -109,17 +109,17 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (301 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (297 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 301 files>` → **1,620** across **107** files: exactly the
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 297 files>` → **1,620** across **107** files: exactly the
 tool's number. A bare `rg … tortoise/` gives 1,626 / 108, the 6 extra occurrences living in
 `tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,620 / 107 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 301 files>` → **2,328** across **142** files, while the tool
-reports 2,341 / 143. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,326** across **140** files, while the tool
+reports 2,339 / 141. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
 concatenation leaves `MATCH` and its `(` on two lines, one occurrence to the tool and none to `rg`.
 (A bare case-sensitive `rg` gives 2,058, and `-i` without the exclusion 2,396 — which is why the
 number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
@@ -418,7 +418,7 @@ the order was fixed (`#13098` review F8).
 
 <!-- cypher-inventory:sites = 1309 -->
 <!-- cypher-inventory:files = 98 -->
-<!-- cypher-inventory:files_scanned = 301 -->
+<!-- cypher-inventory:files_scanned = 297 -->
 <!-- cypher-inventory:unresolved = 106 -->
 <!-- cypher-inventory:candidates = 576 -->
 <!-- cypher-inventory:shape_adjacency = 292 -->
