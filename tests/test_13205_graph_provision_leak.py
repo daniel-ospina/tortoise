@@ -712,6 +712,33 @@ class TestTheSharedDoubleDerivesItsCertificate:
             "breaks on `a >= b`, so `_org_graph_names` would refuse the purge "
             "while this double called it green")
 
+    def test_the_STATED_TOTAL_gate_counts_DISTINCT_CURSOR_VALUES(self):
+        """Gate 3 of the real certificate, which nothing exercised.
+
+        Production ends with ``complete = exhausted and (total is None or
+        len(seen) >= total)``, and ``seen`` is a SET OF CURSOR VALUES — not rows.
+        Measured: replacing the gate with ``return True`` left 554 tests green
+        across the six suites that use this fake, because the only call that
+        supplies a stated total in the whole corpus does so in a direction the
+        gate cannot refuse. That is the same "false PASS in the double that
+        decides a purge" class the earlier rounds fixed on the other two gates,
+        so all three rows are pinned here — unmet total, the distinct-cursor rule
+        (a DUPLICATE cannot satisfy a total of 2), and the met-total control that
+        stops the gate being satisfied by refusing everything.
+        """
+        from tests.fake_control_plane import FakeControlPlane
+
+        certifiable = FakeControlPlane._certifiable
+        assert certifiable([{"id": "g1"}], 2, "id") is False, (
+            "one row against a stated total of 2 must not certify — the walk did "
+            "not meet the total the server stated")
+        assert certifiable([{"id": "g1"}, {"id": "g1"}], 2, "id") is False, (
+            "the total counts DISTINCT CURSOR VALUES, not rows: two rows carrying "
+            "the same gid are one seen row, so a total of 2 is not met")
+        assert certifiable([{"id": "g1"}, {"id": "g2"}], 2, "id") is True, (
+            "…and a met total still certifies, so the gate cannot be satisfied by "
+            "refusing everything")
+
     def test_an_EMPTY_page_is_the_end_of_the_walk_and_CERTIFIES(self):
         cp = self._cp([])
         rows, complete = cp.query_all(
