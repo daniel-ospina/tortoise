@@ -852,11 +852,12 @@ def test_a_tokenizer_fallback_is_recorded_once_per_query_text(monkeypatch):
 # the second arm passed there. Measured, each mutant in a scratch worktree at
 # the same base:
 #   * pre-fix text (`with contextlib.suppress(Exception): g.delete()`) -> the
-#     TIMEOUT arm reds (1 failed, 23 passed): the seed runs over a graph the
-#     failed reset left populated.
-#   * no handler at all (bare `g.delete()`) -> the ABSENT-GRAPH arm reds
-#     (1 failed, 23 passed): a first run against a graph that was never created
-#     would abort, which is the over-correction this arm exists to stop.
+#     TIMEOUT arm reds: the seed runs over a graph the failed reset left
+#     populated. (Counts are deliberately NOT restated here — this file gains
+#     arms, and a number beside the set it counts goes stale on arrival.)
+#   * no handler at all (bare `g.delete()`) -> the ABSENT-GRAPH arm reds: a first
+#     run against a graph that was never created would abort, which is the
+#     over-correction this arm exists to stop.
 # Too wide reds the first; too narrow reds the second.
 
 
@@ -938,9 +939,15 @@ def test_a_wedged_docker_daemon_costs_a_recorded_error_not_the_run(monkeypatch):
     `seed_graph` shells out to `docker ps` / `docker exec … redis-cli INFO memory`
     for the graph's memory figure — a SIDE READING, not the seed. Without a
     `timeout=` a wedged daemon parks the call forever, which loses the run and
-    hangs this suite (the arm above reaches that code for real). Measured on the
-    pre-fix text: `subprocess.run` raised `TimeoutExpired` and `seed_graph`
-    propagated it, so the seed's own result was lost to a memory reading.
+    hangs this suite (the arm above reaches that code for real). What a missing
+    bound actually costs, measured on the pre-fix text: the tool's own
+    `except …: mem = {"error": …}` RECORDS the failure, so the seed's result
+    survives — but only because `docker ps` is what hung. `seed_graph` makes TWO
+    calls, and this arm must pin BOTH: `_hang` below therefore SUCCEEDS `docker
+    ps` (so the `docker exec … INFO memory` leg is reached) and hangs there. A
+    pin that hangs the FIRST call leaves the memory read unpinned, and a
+    regression on that leg is invisible (reviewer-measured: removing only the
+    second call's `timeout=` left this suite green).
     """
     import subprocess
 
@@ -949,6 +956,11 @@ def test_a_wedged_docker_daemon_costs_a_recorded_error_not_the_run(monkeypatch):
 
     def _hang(*args, **kwargs):
         assert kwargs.get("timeout"), "the docker probe must carry a bound"
+        # `docker ps` must SUCCEED so the `docker exec … INFO memory` leg is
+        # actually reached — that read is the one this arm exists to pin, and a
+        # hang on the FIRST call would leave it unexercised.
+        if list(args[0])[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(args[0], 0, stdout="fdb-x\n", stderr="")
         raise subprocess.TimeoutExpired(cmd="docker", timeout=kwargs["timeout"])
 
     monkeypatch.setattr(subprocess, "run", _hang)
