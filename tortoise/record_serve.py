@@ -78,9 +78,12 @@ in the same artifact is indistinguishable from an omission:
   separation.) ⚠️ The TYPED form ``tortoise_get_entity(id, type="point")`` is
   that route and DOES reach this accessor. ⛔ The BARE
   ``tortoise_get_entity(id)`` is a DIFFERENT read and it IS served, under
-  ``entity-union-by-id`` above (since #13093) — it is the one entry in this list
-  whose exclusion was retired, and the note is kept so a reader coming from the
-  pre-#13093 text does not re-file the same defect.
+  ``entity-union-by-id`` above (since #13093). What #13093 retired is THE BARE
+  DOOR'S OWN exclusion, which used to be folded into this accessor bullet — NOT
+  any entry of this list: ``entity-accessor`` and the typed form above remain
+  here, for the reasons each gives. The note is kept, and phrased this way, so a
+  reader coming from the pre-#13093 text does not re-file the same defect and
+  does not read it as licence to delete the accessor entry.
 * ``entity-accessor`` — ``TortoiseSDK._get_entity``, the SDK's INTERNAL accessor.
   It is NOT the bare door (that is ``entity-union-by-id``, served), and it DOES
   have a by-id coordinate — ``_resolve_entity(by_id=…, by_eventId=…, by_url=…)``
@@ -1800,8 +1803,11 @@ def serve_entity(*, tenant: tuple[str, str], id_val: str,
     absence for it. ⛔ WHAT AN ARMED MISS CARRIES DIFFERS BY MODE, and the
     difference is deliberate: in ``prefer`` the read FELL BACK, so the miss is
     NAMED AND COUNTED; in ``record`` nothing fell back — no cache branch, nothing
-    counted — so the miss carries NO ``fallbackReason`` at all and the coverage
-    gap is expressed by :func:`entity_absent_wire`'s ``residency: "not-hot"``. (An
+    counted — so the miss NAMES no fallback reason: the key is still emitted as
+    ``fallbackReason: None`` (``as_wire`` emits both names on any response that
+    reached a store, deliberately — an OMITTED null would let a prop of that name
+    ship a fake attribution), and the coverage gap is expressed by
+    :func:`entity_absent_wire`'s ``residency: "not-hot"``. (An
     earlier revision named the reason in both modes, which put a fallback
     attribution on a read where no fallback happened; #13353 review cycle 2.)
     ⛔ AND THE ``prefer`` REASON ITSELF FLIPS WITH COVERAGE — see
