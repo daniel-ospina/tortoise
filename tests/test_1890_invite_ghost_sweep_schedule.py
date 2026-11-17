@@ -36,8 +36,8 @@ class _FakeSDK:
         self._raises = raises
         self.sweeps = 0
 
-    def sweep_invite_ghost_memberships(self) -> dict:
-        self.calls.append("sweep_invite_ghost_memberships")
+    def _sweep_invite_ghost_memberships(self) -> dict:
+        self.calls.append("_sweep_invite_ghost_memberships")
         self.sweeps += 1
         if self._raises is not None:
             raise self._raises
@@ -68,7 +68,7 @@ def test_the_sweep_runs_on_the_registry_and_reports_what_it_deleted(
     with caplog.at_level(logging.INFO, logger="tortoise.hosted_api"):
         ha._sweep_invite_ghosts()
 
-    assert calls == ["sweep_invite_ghost_memberships"], (
+    assert calls == ["_sweep_invite_ghost_memberships"], (
         "the caller must reach the #1908 sweep — not re-implement it")
     assert any("invite ghost sweep deleted 1" in r.getMessage()
                for r in caplog.records), (
@@ -131,7 +131,7 @@ def test_the_boot_runner_arms_the_sweep(monkeypatch):
 
     asyncio.run(ha._run_boot_sweeps())
 
-    assert calls == ["sweep_invite_ghost_memberships"], (
+    assert calls == ["_sweep_invite_ghost_memberships"], (
         "the boot runner did not arm the invite-ghost sweep — #1890 is that "
         "the sweep had no live caller")
 
@@ -172,6 +172,6 @@ def test_the_periodic_loop_also_arms_the_sweep(monkeypatch):
 
     asyncio.run(_one_pass())
 
-    assert calls == ["sweep_invite_ghost_memberships"], (
+    assert calls == ["_sweep_invite_ghost_memberships"], (
         "the hourly retention loop did not arm the invite-ghost sweep — a "
         "boot-only sweep is the same one-shot shape as the operator script")

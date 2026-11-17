@@ -97,23 +97,25 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 
 | | |
 |---|---|
-| Registry tools | **103** |
-| Absorbed into the 27 MCP targets | **100** |
+| Registry tools | **108** |
+| Absorbed into the 27 MCP targets | **105** |
 | Absorbed into a builder-only SDK method (not on the MCP) | **1** |
 | Tenancy (SDK/REST only) | **2** |
 | Retired | **0** |
 | MCP target tools | **27** |
 
-**The four bucket rows sum to 103.** (The last row is the target *surface*, not a bucket —
-27 targets received those 100 absorbed tools many-to-one, so it is not part of the sum.)
+**The four bucket rows sum to 108.** (The last row is the target *surface*, not a bucket —
+27 targets received those 105 absorbed tools many-to-one, so it is not part of the sum.)
 
-> ⚠️ **This table predates #11609 family A (#12951) and its bucket rows have NOT been re-derived.**
-> The served population is **108** today (55 live + 53 retired shims, `tools/bridge_table.py
-> --check`), so the `103` above and the per-bucket split are one cut stale. The bucket counts have
-> no generator — `bridge_table.py` emits Part A/B/C but not this split — so re-deriving them means
-> re-bucketing by hand, which is why this is flagged rather than guessed at. The two numbers the
-> machine-checked claims read (`55 live` and `53 retired`) are correct everywhere else in this
-> document.
+> ⚠️ **These bucket rows are now the GENERATED split, not a hand cut.** They were re-derived on
+> 2026-11-17 from the headline `tools/bridge_table.py` emits into `docs/product/bridge-table.md`
+> (`Registry: 108 tools → 105 absorbed into the 27 MCP targets · 1 absorbed into a builder-only SDK
+> method · 2 tenancy · 0 retired`), and
+> `tests/test_bridge_table.py::test_vision_doc_buckets_match_generated_doc` fails if any row drifts
+> from it. The note that used to sit here — that the split had **no generator** and so could not be
+> re-derived without re-bucketing by hand — is false: the generator emits exactly this split. The
+> table still predates #11609 family A (#12951) in its *prose*, and the two numbers the
+> machine-checked claims elsewhere read (`55 live` and `53 retired`) remain correct.
 
 The **Retired** row fell **4 → 0** in #11609 **batch 1**: the last four
 no-destination tools — `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
