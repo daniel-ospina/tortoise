@@ -576,6 +576,11 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
         "a terminal STAGE with no slot prop written": (
             "SET o.pipelineStageId='done', o.pipelineSlot=null, o.isClosed=null"),
         "a legacy `outdated` flag with a live position": (
+            # ⚠️ NOT a fold REFUSAL: `outdated` is absent from the fold's set
+            # (`commit_ops.OBJECT_TERMINAL_STATUSES`), so the fold does not refuse
+            # this row — the CLOSE fold is never DISPATCHED for it (no live holder,
+            # `entities.py:6160-6168`). It belongs in this dict because the read must
+            # not call it OPEN, which is the dict's real contract.
             "SET o.outdated=true, o.pipelineStageId='in_progress', "
             "o.pipelineSlot='active', o.isClosed=false"),
         # ⛔ NOT a member: a truthy NON-boolean `isClosed` marker. It already read
@@ -598,7 +603,7 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
         mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
         assert mints == [0, 0, 0], (
             f"{why}: the row was read as OPEN, so every poll minted another close "
-            f"({mints}) while the fold refused to move it")
+            f"({mints}) while no fold can move it")
         # …and the CONTROL, on the same fixture: a row the fold WOULD move mints
         # exactly one close and then stops. Without this, a reader that never
         # answers "closed" at all would pass the loop above.
@@ -678,8 +683,10 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
         "a LATCH word AND an ended position": (
             "SET o.status='deprecated', o.pipelineStageId='done', "
             "o.pipelineSlot='terminal', o.isClosed=true"),
-        # Also latch terms, though the FOLD does not test them: the row is not
-        # live, so a CLOSING fold cannot even name it (see the docstring).
+        # ⚠️ These are NOT latch terms — the fold's set has no `outdated` member
+        # (see the docstring above). They are here because the CLOSE fold can never
+        # be DISPATCHED for such a row (no live holder), so the read must not call
+        # it OPEN either.
         "a legacy `outdated` FLAG with a live position": (
             "SET o.outdated=true, o.pipelineStageId='in_progress', "
             "o.pipelineSlot='active', o.isClosed=false"),
@@ -746,8 +753,9 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     CLOSED direction, and every shape in it fixes GitHub's state to `closed`. The
     mirror — GitHub says `open` for a row the projection refuses to move — is
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
-    term NO WRITER CAN CLEAR (`_upsert_object` writes `o.status` ON CREATE only,
-    `entities.py:5128-5130`), so each poll minted another `-reopened`
+    term the fold refuses in BOTH directions while it is set — not one "no writer
+    can clear" (a coherent un-supersede DOES clear `superseded`,
+    `sdk.py:54012-54021`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6228`).
@@ -1134,12 +1142,16 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
 def test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration(sdk):
     """#13289 review F2 (P2): absent key and unrecognised key are DIFFERENT questions.
 
-    `_declared_stage_slot`'s own docstring promises a pack key is *"stated at the
-    call site rather than guessed"*, but its `or` fallback fired for ANY key it
-    could not resolve — so a row folded against a PACK declaration was read
-    against CORE. A pack stage whose id collides with a core id of a different
-    slot (`done`, `cancelled`, …) then resolved to CORE's slot, and because this
-    arm only ever ADDS "closed" answers the failure mode is F1's loop.
+    `_declared_stage_slot`'s docstring promises a pack key is *"stated at the call
+    site rather than guessed"*, and the helper states the two questions separately.
+    ⚠️ MEASURED: that split is a CLARIFICATION, not a behaviour fix — the earlier
+    `_PIPELINE_DECLS.get(str(key or CORE_KEY))` already passed a PRESENT key through
+    verbatim and returned `None` for an unrecognised one, so no row was ever read
+    against CORE's declaration. This test therefore pins the CONTRACT (an
+    unrecognised key gets no opinion; an absent one resolves core) and cannot
+    redden on the pre-fix code — it is a pin of a rule that survived, not of a bug
+    that was fixed. The declaration arm's real discriminators are the stale-prop
+    and the armed rows below.
 
     Absent key → core (the fold resolves core too, `cur_key` falsy).
     Present-but-unrecognised key → no opinion on this arm. ⛔ And the caller does

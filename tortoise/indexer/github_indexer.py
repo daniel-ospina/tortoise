@@ -400,12 +400,17 @@ def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
     if stage_id is None:
         return None
     # ⛔ ABSENT key and PRESENT-BUT-UNRECOGNISED key are DIFFERENT questions
-    # (#13289 F2), and an `or` here conflates them: it fires for any key it cannot
-    # resolve, so a row folded against a PACK declaration was read against CORE.
-    # A pack stage whose id collides with a core id of a different slot (`done`,
-    # `cancelled`) then resolved to CORE's slot — an answer the fold that moved the
-    # row does not agree with, and (because this arm only ever ADDS "closed"
-    # answers) the same one-directional widening as F1.
+    # (#13289 F2), and the split below states them SEPARATELY so the refusal is
+    # visible at the point it happens. ⚠️ MEASURED, and it is NOT a behaviour
+    # change: the earlier `_PIPELINE_DECLS.get(str(key or CORE_KEY))` already passed
+    # a PRESENT key through VERBATIM, `.get` returned falsy for it, and the
+    # `if not decl: return None` below fired — so an unrecognised pack key never
+    # resolved against CORE, and the collision this comment used to narrate (a pack
+    # `done` read as CORE's `terminal`) could not occur. What the split buys is that
+    # the two questions are stated where they are answered; the contract itself is
+    # pinned by `test_a_pack_keyed_stage_is_not_resolved_against_the_core_
+    # declaration`, which — like any pin of unchanged behaviour — cannot redden on
+    # the pre-fix code, and says so.
     key = str(pipeline_key or "")
     if key:
         decl = _PIPELINE_DECLS.get(key)
@@ -1277,7 +1282,10 @@ class GitHubIndexer:
     def _object_state_to_issue_state(proj, obj_id: str) -> str | None:
         """Previous issue-state derived from the persisted Object's POSITION.
 
-        None = first ingest (Object absent or never folded on either axis).
+        None = "no opinion": the Object is ABSENT or was never folded on either
+        axis, OR it carries a guard the fold cannot get past (a latched word, an
+        unplaceable position) — `_project_issue` gates the transition mint on
+        `prev_state is not None`, so no transition is recorded in either direction.
 
         ⛔ #13143 (S0 reader sweep): this read `Object.status` ONLY, and S0 moved
         the connector folds off that axis — a close now folds the terminal STAGE
@@ -1340,18 +1348,24 @@ class GitHubIndexer:
         # mint-per-poll loop F1 removed, behind a different guard (measured
         # through the public door `update_knowledge(id, status="archived")`:
         # poll1/2/3 each `events_minted=1`, the row never moves). Reading that
-        # row as "closed" instead is NOT the fix: the word is permanent, so it
-        # loops in the other direction (below).
-        # ⛔ FIRST: a row whose answer can never move gets NO OPINION, never the
-        # other state (#13289 F1). A LATCHED word is permanent — see
-        # `_status_is_latched` — and `_fold_object_stage` refuses on it BEFORE any
-        # position test, in BOTH directions, so a GitHub `open` could never be
-        # reconciled against it: `issue_to_event` mints `-reopened`, the projection
-        # refuses, the next poll reads the same word again, and
-        # `_next_transition_id` mints `-reopened-2`, `-reopened-3`, … — one Event +
-        # one journal record per poll, without bound. Measured through the public
-        # door `update_knowledge(id, status="archived")` (stores `deprecated`) on an
-        # issue that stays OPEN on GitHub: `[1, 1, 1]` before this arm.
+        # row as "closed" instead is NOT the fix: the word STAYS SET — that is what
+        # the fold latches on — so it loops in the other direction (below).
+        # ⛔ FIRST: a row the fold refuses in BOTH directions gets NO OPINION, never
+        # the other state (#13289 F1). A LATCHED word makes `_fold_object_stage`
+        # refuse BEFORE any position test, in BOTH directions, and while the word is
+        # SET a GitHub `open` could never be reconciled against it: `issue_to_event`
+        # mints `-reopened`, the projection refuses, the next poll reads the same
+        # word again, and `_next_transition_id` mints `-reopened-2`, `-reopened-3`,
+        # … — one Event + one journal record per poll, without bound. Measured
+        # through the public door `update_knowledge(id, status="archived")` (stores
+        # `deprecated`) on an issue that stays OPEN on GitHub: `[1, 1, 1]` before
+        # this arm.
+        # ⚠️ "While set", not "for ever": a coherent un-supersede DOES clear
+        # `superseded` (`sdk.py:54012-54021`; the NOT-MONOTONE exception documented
+        # at `sdk.py:6030-6048`), so the earlier "permanent" wording was one claim
+        # too strong. It does not weaken the answer: this read derives from the
+        # STORED row, so it resumes on the write that clears the word, and until
+        # then `None` is the only answer that cannot mint without bound.
         # `None` is this module's "no opinion" value — `_project_issue` gates the
         # transition mint on `prev_state is not None` — so a latched row mints no
         # transition in EITHER direction, which is the only stable answer while the
