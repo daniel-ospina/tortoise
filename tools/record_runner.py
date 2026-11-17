@@ -102,10 +102,30 @@ EXIT CODES — `record_allocator_cli`'s contract, so a chain reads one way
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below. A module-level
+# 3.11+-only import raises ImportError before a later guard could run, so the
+# guard is the first statement after the docstring — which is what
+# `tests/test_entry_point_python_guard.py` asserts over every `tools/**/*.py`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # #4053: an old interpreter is an ENVIRONMENT failure, not this tool's own
+    # verdict. Exit 1 is REFUSED, which a consumer reads as "the record must not
+    # be applied" — a claim about the record, when the truth is about the box.
+    # `main()` never returns 2 (only `_UsageParser.error` raises EXIT_USAGE), so
+    # 2 is the one code in this tool's set that cannot wear a verdict. The
+    # constants are defined below the imports, hence the literal here.
+    print(
+        f"record_runner: requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/record_runner.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)  # EXIT: USAGE — not 1 (REFUSED, the tool's own verdict)
+
 import argparse
 import contextlib
 import json
-import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -540,6 +560,22 @@ def batch_slices(total: int, *, start_at: int = 0, batch_size: int,
 
 
 @dataclass
+class WriteLedger:
+    """What THIS RUN executed against the record — the plan's falsifier, measured.
+
+    ``plan`` opens no connection, so its ledger stays empty; the zeros it reports
+    are READ FROM HERE rather than printed as literals. That distinction is the
+    whole point (review P2): an expected value that is a constant outside the
+    code under test cannot be perturbed by any mutant of the write path, so an
+    assertion on it is true even for a `plan` that wrote rows. ``apply`` fills the
+    same type from the fold's own report, so the counter is proven reachable.
+    """
+
+    rows_written: int = 0
+    statements_executed: int = 0
+
+
+@dataclass
 class PlanReport:
     org_id: str
     graph_id: str
@@ -552,6 +588,9 @@ class PlanReport:
     totals: dict[str, Any] = field(default_factory=dict)
     #: True when the run was GIVEN a record (a DSN), whether or not it read one.
     record_armed: bool = False
+    #: The run's own write accounting. A planner never touches it; that it is
+    #: empty is a MEASUREMENT, and a renderer that ignored it would be caught.
+    executed: WriteLedger = field(default_factory=WriteLedger)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -565,9 +604,10 @@ class PlanReport:
             "events_to_consume": self.events_to_consume,
             "batches": self.batches,
             "totals": self.totals,
-            # The falsifier, stated by the tool rather than by the operator.
-            "rows_written": 0,
-            "statements_executed": 0,
+            # The falsifier, MEASURED by the tool's own accounting rather than
+            # printed as a constant — see `WriteLedger`.
+            "rows_written": self.executed.rows_written,
+            "statements_executed": self.executed.statements_executed,
         }
 
 
@@ -633,6 +673,9 @@ class ApplyReport:
     last_seq: int = 0
     checkpoint_after: dict[str, Any] | None = None
     events_by_type: dict[str, int] = field(default_factory=dict)
+    #: Filled from the fold's own report on every COMMITTED batch — the same
+    #: counter a plan reports as empty, so its zero is a measurement.
+    executed: WriteLedger = field(default_factory=WriteLedger)
 
     @property
     def wrote(self) -> bool:
@@ -737,6 +780,8 @@ def apply_batches(*, journal: Journal, org_id: str, graph_id: str,
         report.committed += 1
         report.consumed += result.events
         report.statements += result.statements
+        report.executed.rows_written += result.events
+        report.executed.statements_executed += result.statements
         types.update(planned.events)
         # ⛔ THE ALLOTTED RANGE COMES FROM THE FOLD (review P1): on the allocation
         # arm the numbers are the COUNTER's, and `ReplayReport` reports them
@@ -817,7 +862,8 @@ def _render_plan(report: PlanReport) -> str:
     lines.append(f"TOTAL: {t['events']} events → {t['statements']} statements + "
                  f"{t['position_rows']} position row(s) (the position rows are the "
                  f"record's own ledger; `statements` is comparable to a run's report)")
-    lines.append("rows_written: 0 · statements_executed: 0  "
+    lines.append(f"rows_written: {report.executed.rows_written} · "
+                 f"statements_executed: {report.executed.statements_executed}  "
                  "(the plan path opens no connection unless asked for the checkpoint)")
     if report.events_to_consume:
         lines.append("")
