@@ -92,6 +92,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import collections
+import hashlib
 import json
 import os
 import statistics
@@ -640,6 +641,47 @@ def stop_external_load(procs: list[subprocess.Popen]) -> None:
 
 # ── main ────────────────────────────────────────────────────────────────────
 
+def worktree_state() -> dict:
+    """The tree the figure was measured ON, not just the commit it names.
+
+    ⛔ `code_head` alone is not provenance: a run against an UNCOMMITTED draft
+    records the last commit, and the artifact then says the measurement predates
+    the very fix it measures (`#13121` review round 4, F3 —
+    `fix-8000-paired.json` names `d93c4c99e9`, a commit with no
+    `vector_indexed_labels`, while its `hint` arm demonstrably ran one). Recording
+    the dirty flag and a digest of the tracked diff makes that question
+    answerable from the artifact instead of from a reviewer's forensics.
+
+    Never raises: a figure is worth more than its provenance label, and an
+    unreadable `git` is reported as UNMEASURED, never as clean.
+    """
+    def _git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(REPO_ROOT), *args],
+                              capture_output=True, text=True,
+                              check=False).stdout
+
+    status = _git("status", "--porcelain")
+    diff = _git("diff", "HEAD")
+    if not status and not diff:
+        # An EMPTY status is only meaningful if `git` actually answered; a
+        # failed invocation also returns ''. Distinguish them by asking for the
+        # head again, which we already have, so use the return codes.
+        probe = subprocess.run(["git", "-C", str(REPO_ROOT), "status",
+                                "--porcelain"], capture_output=True,
+                               text=True, check=False)
+        if probe.returncode != 0:
+            return {"dirty": None, "reason": f"git status exited "
+                    f"{probe.returncode}: {probe.stderr.strip()[:200]}"}
+    dirty = bool(status.strip() or diff.strip())
+    return {
+        "dirty": dirty,
+        "changed_paths": sorted({line[3:].strip() for line in
+                                 status.splitlines() if line.strip()}),
+        "diff_sha256": (hashlib.sha256(diff.encode()).hexdigest()[:16]
+                        if dirty else None),
+    }
+
+
 def run(args: argparse.Namespace) -> int:
     uri = os.environ.get("TORTOISE_DB_URI") or ""
     if not uri.startswith(("docker://", "redis://")):
@@ -793,9 +835,20 @@ def run(args: argparse.Namespace) -> int:
         "code_head": subprocess.run(
             ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
             capture_output=True, text=True, check=False).stdout.strip(),
+        # #13121 review round 4 (F3): a head is not the tree it was measured on.
+        "worktree": worktree_state(),
         "uri_graph": args.graph or sdk._graph_name,
         "config": {
-            "population": args.population,
+            # #13121 review round 4 (F4): the `--population` ARGUMENT, which is
+            # NOT the population measured on a `--no-seed` run over an
+            # already-seeded graph. Four artifacts said `population: 1000`
+            # beside their own `census` of 8,000 for exactly this reason; the
+            # reading below is the one to quote.
+            "population_arg": args.population,
+            "population_measured": {
+                label: (census.get("labels", {}).get(label) or {}).get("stored")
+                for label in args.labels
+            },
             "reads": args.reads,
             "concurrency": list(args.concurrency),
             "limit": args.limit,

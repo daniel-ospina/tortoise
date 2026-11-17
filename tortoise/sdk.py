@@ -34736,9 +34736,15 @@ class TortoiseSDK:
                                     # #13108: the store's own measured index
                                     # inventory, so an unindexed label skips the
                                     # doomed queryNodes attempt (`None` = not
-                                    # measured → attempt as before).
+                                    # measured → attempt as before). ⚠️ The
+                                    # BEHAVIOURAL half, not the reporting one:
+                                    # `_vector_indexed_labels` reports
+                                    # "measured-but-unparseable" as an empty
+                                    # set, and a reader must never skip an
+                                    # index attempt on that evidence.
                                     vector_indexed_labels=getattr(
-                                        proj, "_vector_indexed_labels", None))
+                                        proj, "_vector_indexed_labels_for_reads",
+                                        None))
             for nid, _score in hits:
                 if nid == pid or nid not in pool:
                     continue
@@ -42866,7 +42872,14 @@ class TortoiseSDK:
             # two round trips that can only be REFUSED — measured at ≈58 % of an
             # unindexed `:Object` read's store time. `None` (the inventory's
             # not-measured lane) is forwarded as None, i.e. attempt as before.
-            vector_indexed_labels=getattr(proj, "_vector_indexed_labels", None),
+            # ⛔ The BEHAVIOURAL half (`…_for_reads`), never
+            # `_vector_indexed_labels`: the reporting half collapses "the
+            # catalogue was returned but unparseable" into an empty set, and
+            # skipping on that evidence would demote every dense read —
+            # `:Point` included — to a full scan after an engine catalogue
+            # reshape.
+            vector_indexed_labels=getattr(
+                proj, "_vector_indexed_labels_for_reads", None),
             excluded_statuses=() if include_terminal else None,
             leg_trace=status_trace,
             # A1 (#2070): the ask-lane numeric-token policy threads into the
@@ -45206,9 +45219,10 @@ class TortoiseSDK:
                 is_embedded=getattr(proj, "_is_embedded", True),
                 entity_type="point",
                 vector_index_api=getattr(proj, "_vector_index_api", None),
-                # #13108: the same measured inventory the shipped leg gets.
+                # #13108: the same measured inventory the shipped leg gets —
+                # the BEHAVIOURAL half (see the `degradation_chain` call site).
                 vector_indexed_labels=getattr(
-                    proj, "_vector_indexed_labels", None),
+                    proj, "_vector_indexed_labels_for_reads", None),
                 excluded_statuses=excluded_statuses,
                 leg_trace=_exp_trace,
                 min_similarity=min_similarity,

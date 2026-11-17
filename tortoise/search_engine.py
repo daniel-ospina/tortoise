@@ -3630,11 +3630,22 @@ def run_vector_query(
 
     vector_indexed_labels (#13108) — the labels the STORE has already been
     MEASURED to carry a VECTOR index for
-    (``FalkorProjection._vector_indexed_labels``, filled by
+    (``FalkorProjection._vector_indexed_labels_for_reads``, filled by
     ``_record_vector_index_inventory``: the declared served set intersected with
     the engine's own catalogue). When this is supplied and the read's label is
     NOT in it, the two ``queryNodes`` attempts below are skipped and the read
     goes straight to the brute-force scan.
+
+    ⛔ **SUPPLY THE BEHAVIOURAL HALF, NOT THE REPORTED PAIR.** The supplier must
+    hand over ``_vector_indexed_labels_for_reads``, never
+    ``_vector_indexed_labels``. The reporting half deliberately collapses "the
+    catalogue was returned but nothing in it parsed" into an EMPTY set (#11087's
+    pinned semantic, and the right one for a message); acting on that same value
+    would read an engine catalogue reshape as "this store indexes nothing" and
+    demote every dense read — ``:Point`` included, the label the product ships
+    indexed — to a full scan, with only an INFO pair as the signal. The
+    behavioural half is ``None`` in that lane, so the read attempts as before.
+    The two sets are equal in every other lane.
 
     ⛔ WHY. On an unindexed label both attempts can only be REFUSED, and this
     engine does not even say so distinctly — ``Invalid arguments for

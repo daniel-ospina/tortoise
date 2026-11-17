@@ -282,8 +282,29 @@ absent from it skips the doomed `queryNodes` attempt and goes straight to the sc
 |---|---|---|---|
 | `:Object` c=1, **1,000** nodes (100 reads each, at rest, paired) | p50 **34.78 ms** | p50 **13.26 ms** | **−62 %** |
 | `:Object` c=1, **8,000** nodes (60 reads each, paired) | p50 **65.73 ms** | p50 **47.47 ms** | **−28 %** |
-| eval windows under load ~130, 8,000 nodes | p50 17.31 s | p50 14.89 s | **−14 %** end-to-end |
+| eval windows under load ~130, 8,000 nodes | p50 **15.41 s** | ⚠️ **not measured** | ⚠️ **withdrawn** — see the note below |
 | the `#11901` eval, 1,000 names, end-to-end | 442.4 s, `{hybrid: 4396, keyword_only: 0}` | **304.5 s**, `{hybrid: 4396, keyword_only: 0}` | **−31 %** wall clock, **same mode split**, recall@3 300/300 both sides (⚠️ between-run — see §3.3) |
+
+⚠️ **The end-to-end window row is WITHDRAWN, not carried (`#13121` review round 4, F2).**
+An earlier version of this table read `p50 17.31 s → 14.89 s (−14 % end-to-end)`. No committed
+artifact contains those figures (`grep -o '17\.31\|14\.89' *.json` → nothing), and no PAIRED
+8,000-node window run exists: both paired artifacts (`fix-1000-paired-at-rest.json`,
+`fix-8000-paired.json`) carry `"windows": {}`, and the one 8,000-under-load window artifact
+(`windows-8000-under-load-timeout.json`, single arm, `reads: 0`) reports p50 **15,412.62 ms**.
+The single-arm reading is what the row now carries; the paired **:Object** rows stand on their
+own artifacts. ⛔ The rule this correction applies is §3.3's own: a paired claim must come from
+ONE process on ONE population under ONE load, and where that did not happen the artifact says so
+rather than the table rounding it into a delta.
+
+⚠️ **`fix-8000-paired.json` predates the fix commit, and says so now only in this note (`#13121`
+review round 4, F3).** Its `code_head` is `d93c4c99e970`, which does not contain
+`vector_indexed_labels` (`git show d93c4c99e9:tortoise/search_engine.py | grep -c
+vector_indexed_labels` → 0); the fix landed at `a2fe16beb8`. So that pair was measured against an
+UNCOMMITTED draft of the fix, the tool recorded no working-tree state, and "was the 8,000 pair
+measured on the fix?" was unanswerable from the artifact. The tool now records `worktree.dirty`
++ a diff digest beside `code_head` so the next run cannot be ambiguous; the figure is otherwise
+sound (both arms `scan_fallback`, `hint` 47.47 ms vs `nohint` 65.73 ms p50), and re-running the
+pair at the merged head is the way to remove the qualification entirely.
 
 Why this one and not the alternatives:
 
