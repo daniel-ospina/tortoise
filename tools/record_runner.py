@@ -911,14 +911,20 @@ def cmd_plan(args: argparse.Namespace, *, echo) -> int:
     if args.from_checkpoint:
         conn = open_record(args.org_id, dsn=args.dsn, timeout_ms=args.timeout_ms)
         try:
+            # ⛔ THE CURSOR IS READ FIRST, because the CHECKPOINT'S MEANING
+            # depends on it: on an allocated graph the first position is the
+            # allocator's seed floor, so `min(seq) > 1` is NOT a gap. Reading the
+            # checkpoint first and passing `allocated=False` would report a
+            # phantom unconsumed prefix on every correctly-seeded graph.
+            cursor_state = read_cursor_state(conn, args.org_id, args.graph_id)
             cp = read_checkpoint(conn, args.org_id, args.graph_id,
-                                 allocated=False)
+                                 allocated=cursor_state is not None)
             # ⛔ THE CURSOR IS READ HERE TOO (review P2). `report.cursor` used to
             # be hardcoded `None`, so the `cutover:` line and the JSON field were
             # UNREACHABLE from the CLI — this tool would hand an operator an
             # `events to consume` count and an acknowledgement number for a graph
             # whose only possible outcome is `apply` refusing with CUT OVER.
-            cursor = read_cursor_state(conn, args.org_id, args.graph_id)
+            cursor = cursor_state
             conn.rollback()   # read-only: nothing was written, so nothing commits
         finally:
             _quietly(conn.close)
@@ -926,11 +932,25 @@ def cmd_plan(args: argparse.Namespace, *, echo) -> int:
                       "first_gap": cp.first_gap, "next_seq": cp.next_seq,
                       "min_seq": cp.min_seq, "contiguous": cp.contiguous}
         start_at = max(0, cp.next_seq - 1)
-        if cp.next_seq - 1 > len(journal.records):
+        # ⛔ THIS IS A JOURNAL-COORDINATE CHECK, so it may not run on the ALLOCATED
+        # arm: there `high_seq` is an ordinal the counter issued, not an index
+        # into this journal, and comparing the two refused a correctly-seeded
+        # graph with "they are not the same journal" — a wrong diagnosis of a
+        # healthy store (the coordinate confusion behind review P1.3).
+        if cursor is None and cp.next_seq - 1 > len(journal.records):
             raise RunnerError(
                 f"the record holds positions up to {cp.high_seq} but the journal "
                 f"has only {len(journal.records)} records — they are not the same "
                 f"journal. Refusing to plan a fold over a shorter one")
+        if cursor is not None:
+            # ⛔ ON THE ALLOCATED ARM THE CHECKPOINT IS NOT IN JOURNAL
+            # COORDINATES, so it cannot position a journal plan at all: `high_seq`
+            # is an ordinal the counter issued. Planning from it made
+            # `batch_slices` refuse a correctly-seeded graph with "they are not
+            # the same journal". The plan therefore describes the WHOLE journal,
+            # and the printed `cutover:` line carries the verdict that matters —
+            # an enumerated fold does not apply to this graph.
+            start_at = 0
     report = build_plan(journal=journal, org_id=args.org_id,
                         graph_id=args.graph_id, start_at=start_at,
                         batch_size=args.batch_size, limit=args.limit,
@@ -1014,12 +1034,11 @@ def cmd_apply(args: argparse.Namespace, *, echo) -> int:
                              allocated=cursor is not None)
         conn.rollback()       # read-only: nothing was written, so nothing commits
         start_at = max(0, cp.next_seq - 1)
-        if start_at > len(journal.records):
-            raise RunnerError(
-                f"the resume point is seq {cp.next_seq} but the journal holds "
-                f"only {len(journal.records)} records — the record is longer than "
-                f"this journal, so they are not the same journal. Refusing rather "
-                f"than folding a short journal over a longer record")
+        # ⛔ THE CUT-OVER VERDICT COMES FIRST (review P1.3). On an allocated graph
+        # the record's positions are the COUNTER's, so the length comparison below
+        # is between two different coordinates — and it fired first, telling the
+        # operator "they are not the same journal" about a healthy cut-over store
+        # whose real state is "the fold does not apply here".
         if cursor is not None and not args.allocate:
             raise RunnerError(
                 f"this graph is CUT OVER (record_cursor seq={cursor[0]}, "
@@ -1032,6 +1051,12 @@ def cmd_apply(args: argparse.Namespace, *, echo) -> int:
                 f"`--allocate` is refused on a write because it issues fresh "
                 f"ordinals rather than the journal's")
 
+        if cursor is None and start_at > len(journal.records):
+            raise RunnerError(
+                f"the resume point is seq {cp.next_seq} but the journal holds "
+                f"only {len(journal.records)} records — the record is longer than "
+                f"this journal, so they are not the same journal. Refusing rather "
+                f"than folding a short journal over a longer record")
         consumable = len(journal.records) - start_at
         if args.limit is not None:
             consumable = min(consumable, args.limit)
