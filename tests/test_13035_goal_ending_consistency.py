@@ -1347,8 +1347,7 @@ def test_the_SNAKE_successor_spelling_does_not_name_anybody(sdk):
     The live write applies `SET n += $props` literally, so the snake key stores a
     property that every camel-keyed reader of the successor ignores (#12782); the
     merged `#12914` helper rejects it for that measured reason, and this axis must
-    not accept it either. The read side is asserted too: a stored blank does not
-    name anybody.
+    not accept it either.
     """
     with pytest.raises(ValueError) as exc:
         sdk.create_object("GOAL - snake successor", objectKind="goal",
@@ -1356,14 +1355,39 @@ def test_the_SNAKE_successor_spelling_does_not_name_anybody(sdk):
                           superseded_by="v2")
     assert "successor" in str(exc.value), str(exc.value)
 
-    # the STORED half applies the same rule (`_stored_goal_ending_view`)
-    goal = _goal(sdk, tag="stored-blank-successor")
-    sdk._get_proj().g.query(
-        "MATCH (n {id:$id}) SET n.supersededBy = '   '", params={"id": goal["id"]})
-    with pytest.raises(ValueError) as exc:
-        sdk.update_knowledge(goal["id"], goalState="superseded",
-                             status="superseded")
-    assert "successor" in str(exc.value), str(exc.value)
+
+def test_the_STORED_half_reads_a_blank_successor_as_NOBODY(sdk):
+    """F1 (P2), the stored half — `_stored_goal_ending_view`'s `successor`.
+
+    The view carried the same looser test (`carrier not in (None, "")`), so a
+    stored `supersededBy="   "` named a successor there and nowhere else.
+
+    ⛔ Asserted at the VIEW, not through a door, and the reason is measured: on
+    an UPDATE door the merged `#12914` door masks a blank stored value (it refuses
+    a `superseded` write that names nothing in the BAG), and on the create funnel
+    the guard's stored probe is absent (round 16, finding 2) — so an end-to-end
+    assertion here would pass on the pre-fix code and prove nothing. The view is
+    the place the rule decides, and the value it returns is what the guard and the
+    conflict key both read.
+    """
+    from tortoise.sdk import _stored_goal_ending_view
+
+    # ⛔ ONE row on purpose: the view answers from `rows[0]` (the conflict key is
+    # what makes a multi-row verdict order-independent), so a two-row fixture
+    # would pass on the pre-fix code whenever the bare row sorted first — the
+    # vacuous shape this suite has had to fix twice before.
+    g = sdk._get_proj().g
+    blank = "blank-successor-13035"
+    g.query("CREATE (:Point {id:$id, name:'bs-blank', status:'live', "
+            "goalState:'active', supersededBy:'   '})", params={"id": blank})
+    view = _stored_goal_ending_view(sdk._get_proj(), blank)
+    assert view["successor"] is None, view      # a blank names nobody
+    # ⛔ The SNAKE spelling is NOT asserted here: on the STORED side both
+    # renderings are ONE record column (`record_projection.snake`, #12592
+    # cycle-4), which is why the view reads `coalesce(supersededBy,
+    # superseded_by)`. Rejecting the snake spelling on the STORED side would
+    # reverse that recorded decision; the write-side rejection above is the
+    # #12914 rule, where the shadow property is what gets written.
 
 
 def test_a_RE_MENTION_create_on_DUPLICATE_disagreeing_ids_refuses(sdk):
