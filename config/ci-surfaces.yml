@@ -3127,6 +3127,41 @@ surfaces:
   # provisions `pgvector/pgvector:pg16` and lists this file — and that job fails
   # on ANY skip (#9551), so the armed run cannot pass by absence.
   - test_11642_vector_move_live.py
+  # #11691: the record dense leg is bound by the READ's budget, not the door's.
+  # `core` because every subject matches the `core` fallback and nothing else:
+  # `tortoise/record_vector.py` and `tortoise/record_serve.py` have no
+  # `SOURCE_PATTERNS` entry (`--changed-files tortoise/record_serve.py` ->
+  # `['core']`, measured), so a diff to the budget threading — the one change
+  # that can silently re-open the 15 s statement inside a 500 ms read — collects
+  # this file only through a `core` row. (`tortoise/sdk.py` is a SHARED_MODULES
+  # path and resolves `full: true`, so the suite is already in that selection;
+  # this row is what covers the record-only diffs.) Registered here because an
+  # unregistered test file is a case NO shard is told to run — the
+  # #1349/#2938/#3154/#4367 silent-drop class this block records twice above.
+  # DB-free: the fake record door applies the `statement_timeout` it was handed
+  # and blocks for it, so the read must answer from the graph inside its budget
+  # with a named `scan_fallback`. No DSN, no graph, no key, no model.
+  - test_11691_vector_leg_budget.py
+  # #13034: the ONE currency rule (lifecycle word AND position axis) and its
+  # five consumers. `core` for the same reason as the rows above —
+  # `tortoise/live.py`, `tortoise/pipeline.py` and
+  # `tortoise/derived_invalidation.py` all resolve the `core` fallback and none
+  # is a named surface (`--changed-files tortoise/live.py` -> `['core']`,
+  # measured).
+  # ⛔ THIS ROW IS A REPAIR OF DRIFT ALREADY ON `origin/main`, not a new
+  # registration by the lane that authored the test: the file landed in #13043
+  # with no manifest row, so `tools/ci_selection.py --integrity` refuses the
+  # tree on `origin/main` itself — measured at `2390101f68`: `manifest drift:
+  # ['test_13034_currency_rule_reads_position.py']` — and every PR's merge ref
+  # inherits it. Filed as #13139 (unclaimed when this row was written); if that
+  # issue lands the same row first, DELETE one of the two rather than resolving
+  # the merge by keeping both — a duplicate entry is the #11210/#11211/#11222
+  # recurrence this file records beside `test_percent_value_11915.py` (three
+  # lanes, three rows, red `main`).
+  # Its `ep` half (a superseded claim's stored prior in the hydrated evidence
+  # set) also needs a live FalkorDB; the predicate-matrix and census classes are
+  # pure Python and run in the fast matrix.
+  - test_13034_currency_rule_reads_position.py
   # #9192: the production caller of the record's tenant scope + the arming
   # gate. `core` is load-bearing for `tortoise/record_writer.py` (no
   # SOURCE_PATTERN → the `core` fallback); the companion `api` arm above is
@@ -3274,6 +3309,7 @@ surfaces:
   # `manifest drift: ['test_13108_dense_leg_index_skip.py']` (measured at
   # `7ec7e65be5`, the head that added the file unregistered), and `fast_pool()` is
   # manifest-derived, so these pins would run in NO leg.
+  # manifest-derived, so the nine pins would run in NO leg.
   - test_13108_dense_leg_index_skip.py
   # #10687: `tools/attest_census.py` owns its own suite — the hermetic arms pin the
   # RESTORE/RE-REVIEW partition (repair separated from fabrication), the 0/2-never-1
@@ -5364,7 +5400,10 @@ surfaces:
   # ⛔ Both registrations buy SELECTION, not EXECUTION: the `api` row's motivating arm is a
   # method of the `@_needs_db` `TestAClosedObjectIsNeverCurrent`, so neither row makes it run
   # — the docker seam above does.
-  - test_13034_currency_rule_reads_position.py
+  # ⛔ THE `core` ROW IS NOT REPEATED HERE (#13139 landed it first, at the `#13034` block above):
+  # the merge that brought `origin/main`'s repair into this branch kept BOTH `core` rows, which
+  # is exactly the duplicate the block above warns about (`--integrity`: "duplicate entry … at
+  # .surfaces.core[]"). One row per surface, deleted here rather than resolved by keeping both.
   - test_10893_read_stage_attribution.py  # #10893: the stage attribution a breach publishes — `read_stages.py` matches no SOURCE_PATTERN (→ `core`), the seams are in `hosted_api.py`/`mcp_server.py` (→ `api`) and the marks are in `sdk.py` (dual: api)
   - test_10602_wait_bound_breach_visible.py  # #10602: the breach channel itself — `wait_bound_breaches` on `/health`, the counter family in `tortoise/monitoring.py` (which selects `core`) plus the two emit sites in `hosted_api.py`/`mcp_server.py` (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file

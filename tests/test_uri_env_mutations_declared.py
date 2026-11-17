@@ -1350,6 +1350,41 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
         r'^os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$'],
+    # ── test_13098_cypher_inventory.py — DELIBERATE_URI, one SET site ──────
+    # The SET site in
+    # `test_the_store_targets_are_named_never_inherited_from_the_environment`:
+    #     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379")
+    # PERMITTED, and deliberately so: the ambient URI IS this test's input. The
+    # case is parametrised per axis (#13098 review F13) and its whole point is
+    # that the differential harness must REFUSE an inherited target — it returns
+    # 2 ("could not run") BEFORE either store is touched, with `seed_graph` and
+    # `seed_record` stubbed to fail loudly. An URI that is never read cannot flip
+    # a lane, which is the vacuity vector this register exists to catch; here the
+    # mutation is what makes the refusal observable at all. `monkeypatch.setenv`
+    # also RESTORES at teardown, and the restoration guard
+    # (`_restoration_violations`) skips fixture-param sites entirely because
+    # pytest undoes them, so nothing leaks here.
+    #
+    # ⛔ ONE SITE, LITERAL-ANCHORED. #13140 (`6652917489`) landed with this site
+    # untriaged — while the six `test_13034` sites above were being triaged,
+    # 22 seconds earlier on the same day, which is #12631's class landing
+    # again: each PR green against the base it was reviewed on, the tip
+    # carrying both. Without this row the register reds on EXACTLY that one
+    # site and passes with it (no counts pinned here: they move with every
+    # merge to this file, and a stale number in a guard's own justification is
+    # the same defect the guard exists to catch). For the same reason the test
+    # and the guard helper above are named rather than numbered: a line citation
+    # rots on the next edit, and the hosted-run evidence lives on #13158 /
+    # #12631, not in this comment. The dict
+    # KEY is what scopes a declaration to one module
+    # (`_is_declared` looks up the `tests/`-relative key and there is deliberately
+    # no bare-name fallback — that was removed as cross-file laundering); WITHIN
+    # this module the `^`…`$` literal anchor is what narrows it to the one
+    # measured target, so a changed literal, a trailing-comma rewrite, or a
+    # COMMENTED-OUT copy of the spelling reds instead of riding along.
+    "test_13098_cypher_inventory.py": [
+        r'^monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"\s*,\s*'
+        r'"docker://:pw@127\.0\.0\.1:6379"\s*\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
