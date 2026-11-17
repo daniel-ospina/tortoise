@@ -2027,21 +2027,46 @@ def props_ban_events(text: str) -> list[PropsBanEvent]:
     that scanner is pinned there too.
     """
     clean = record_projection._strip_sql_comments(text)
+    # ⛔ STATEMENT BOUNDARIES COME FROM THE SCANNER, NOT FROM `rfind(";")`. The
+    # scanner KEEPS literals, so a `;` inside one is DATA: a `DEFAULT 'a;b'` before
+    # a `CHECK (…)` made the constraint's own prefix start at `b',` and the whole
+    # declaration vanished from the read (measured — it fell back to an older,
+    # superseded body, which is F8 through a fourth vehicle). `_scan_sql` says
+    # which characters are CODE, so a terminator inside a literal is not one and
+    # an event inside a literal is not an event.
+    code_spans = [
+        (start, end) for start, end, kind in record_projection._scan_sql(clean)
+        if kind == "code"
+    ]
+
+    def is_code(position: int) -> bool:
+        return any(start <= position < end for start, end in code_spans)
+
+    def statement_start(position: int) -> int:
+        """Index just past the last `;` that is CODE before `position`."""
+        best = 0
+        for start, end in code_spans:
+            if start >= position:
+                break
+            found = clean.rfind(";", start, min(end, position))
+            if found != -1:
+                best = max(best, found + 1)
+        return best
 
     def declared_on(position: int) -> str | None:
         """The table this event's own STATEMENT targets, or None if it is not one."""
-        prefix = clean[clean.rfind(";", 0, position) + 1:position]
+        prefix = clean[statement_start(position):position]
         target = _PROPS_BAN_STMT_RE.match(prefix)
         return target.group(1) if target is not None else None
 
     headers = [
         m for m in _PROPS_BAN_PIN_HEADER_RE.finditer(clean)
-        if declared_on(m.start()) is not None
+        if is_code(m.start()) and declared_on(m.start()) is not None
     ]
     others = [
         m for m in list(_PROPS_BAN_DROP_RE.finditer(clean))
         + list(_PROPS_BAN_RENAME_RE.finditer(clean))
-        if declared_on(m.start()) is not None
+        if is_code(m.start()) and declared_on(m.start()) is not None
     ]
     events: list[PropsBanEvent] = []
     for index, match in enumerate(headers):
@@ -2500,6 +2525,19 @@ def test_legal_sql_spellings_cannot_false_pass_the_props_ban():
 
 
 
+
+    # ROUND 7 vehicle — a `;` inside a LITERAL is not a statement terminator, so a
+    # `DEFAULT 'a;b'` earlier in the same CREATE TABLE must not hide the constraint.
+    semicolon_in_literal = (
+        "CREATE TABLE public.subject (\n"
+        "  id bigint,\n"
+        "  note text DEFAULT 'a;b',\n"
+        "  CONSTRAINT chk_subject_props_no_derived CHECK (NOT (props ?| ARRAY['embedding','status']))\n"
+        ");\n")
+    kind, names = props_ban_in_force(semicolon_in_literal, "subject")
+    assert (kind, names) == ("declare", frozenset({"embedding", "status"})), (
+        "a `;` inside a string literal was read as a statement terminator and hid "
+        f"the declaration: {(kind, sorted(names))}")
 
     # ROUND 6 vehicle G — DDL-shaped text inside DATA is not executed DDL.
     history_note = (
