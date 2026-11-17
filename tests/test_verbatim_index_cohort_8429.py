@@ -42,6 +42,8 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -120,24 +122,51 @@ class _CohortGraph:
     probe exists for — a POPULATED cohort whose rows the predicate excluded.
     """
 
-    def __init__(self, index_rows, scan_rows, probe_rows=None):
+    def __init__(self, index_rows, scan_rows, probe_rows=None, burn_s=0.0):
         self.index_rows = list(index_rows)
         self.scan_rows = list(scan_rows)
         self.probe_rows = (list(index_rows) if probe_rows is None
                            else list(probe_rows))
         self.queries: list[str] = []
+        #: ``(cypher, timeout)`` per call, in order. The two #13290 review F2
+        #: pins read this: both NEW `#11691` budget guards are visible ONLY here.
+        self.calls: list[tuple[str, int | None]] = []
+        self.burn_s = burn_s
 
     def query(self, cypher, params=None, timeout=None):
         self.queries.append(cypher)
+        self.calls.append((cypher, timeout))
         if "queryNodes" not in cypher:
             return _Result(self.scan_rows)
         if "LIMIT 1" in cypher:  # the cohort probe, never the answer
             return _Result(self.probe_rows)
+        if self.burn_s:
+            # The index attempt SPENDS read budget. Without this a remainder is
+            # arithmetically indistinguishable from a whole budget on a fast
+            # double, which is why the pre-fix code could be reverted with every
+            # assertion here still green (#13290 review F2).
+            time.sleep(self.burn_s)
         return _Result(self.index_rows)
+
+    def timeouts_for(self, needle: str) -> list[int | None]:
+        """The ``timeout`` handed to every call whose cypher carries ``needle``."""
+        return [t for q, t in self.calls if needle in q]
 
 
 def _vec(n: int = 8) -> list[float]:
     return [0.1] * n
+
+
+#: The read budget and the time the INDEX attempt spends before answering zero
+#: rows — the two numbers the #13290 review F2 pins below measure against. The
+#: burn is a REAL sleep, the technique `test_11691_vector_leg_budget` uses: a
+#: remainder is only distinguishable from a whole budget if the leg actually
+#: spent some of the read first.
+_BUDGET_MS = 500
+_INDEX_BURN_S = 0.08
+#: The least the index attempt must have spent for the remainder to read as one.
+#: Below the sleep, with room for a slow runner's own accounting.
+_BURN_FLOOR_MS = 50
 
 
 def test_a_zero_row_index_answer_falls_back_to_the_scan():
@@ -228,6 +257,79 @@ def test_a_non_empty_index_answer_does_not_scan():
     assert entry["mechanism"] == MECHANISM_INDEX
 
 
+def test_the_fallthrough_scan_is_handed_what_is_left_of_the_read():
+    """#13290 review F2 — the round-1 F3 bound was fixed with NO assertion.
+
+    ``search_engine.py:4281`` hands the scan ``remaining_read_ms(...)`` so a slow
+    index cannot buy the recovery a SECOND full budget. Reverting it to
+    ``timeout_ms`` reddened no row in the tree: the finding was raised in round 1
+    ("the fall-through scan got a fresh full budget"), fixed, and left unpinned —
+    the same shape #11691's record leg had.
+
+    The failure is invisible on a fast store, which is why no existing pin saw it:
+    the scan gets a fresh 500 ms, `degradation_chain` collects past its own
+    deadline, records ``reason="timeout"`` and DISCARDS the recovered rows —
+    precisely on the slow-index regime this fallback exists for.
+
+    RED if the scan is handed the whole budget again: 500 is not <= 450.
+    """
+    reset_circuit_breakers()
+    graph = _CohortGraph(index_rows=[], scan_rows=[("hidden", 0.97)],
+                         burn_s=_INDEX_BURN_S)
+    trace: list[dict] = []
+
+    hits = run_vector_query(graph, _vec(), limit=5, is_embedded=False,
+                            leg_trace=trace, timeout_ms=_BUDGET_MS)
+
+    assert dict(hits) == {"hidden": 0.97}, (
+        "premise: the zero-row index answer fell through to the scan")
+    handed = graph.timeouts_for("vec.euclideanDistance")
+    assert handed, "premise: the scan ran — nothing to pin otherwise"
+    assert max(handed) <= _BUDGET_MS - _BURN_FLOOR_MS, (
+        f"the fall-through scan was handed {max(handed)} ms of a {_BUDGET_MS} ms "
+        f"read AFTER the index attempt had already spent ~{_INDEX_BURN_S * 1000:.0f} "
+        "ms of it — the remainder is not being handed over, so the recovery can "
+        "outlive the read and the collector discards its rows as `timeout` "
+        "(#11691's rule, round-1 F3)")
+    assert min(handed) >= 1, (
+        f"the scan was handed timeout={min(handed)}: 0 means NO TIMEOUT to the "
+        "driver, which is the unbounded leg this bound exists to close")
+
+
+def test_the_cohort_probe_is_handed_what_is_left_of_the_read():
+    """#13290 review F2 — the round-2 probe bound was fixed with NO assertion.
+
+    ``search_engine.py:4199-4200`` bounds ``_index_yields_any_node()`` by what is
+    LEFT of the read: a full ``timeout_ms`` there lets a zero-row answer spend the
+    leg's whole budget and then a second one, so the recovery is lost exactly when
+    the index is slow. No row in the tree read that argument — the probe's own
+    double accepted ``timeout`` and never looked at it.
+
+    RED if the probe is handed the whole budget again: 500 is not <= 450.
+    """
+    reset_circuit_breakers()
+    graph = _CohortGraph(index_rows=[], scan_rows=[("must-not-appear", 0.99)],
+                         probe_rows=[("in-cohort",)], burn_s=_INDEX_BURN_S)
+    trace: list[dict] = []
+
+    hits = run_vector_query(graph, _vec(), limit=5, is_embedded=False,
+                            leg_trace=trace, timeout_ms=_BUDGET_MS,
+                            excluded_statuses=("retired",))
+
+    assert hits == [], (
+        "premise: a POPULATED cohort filtered to zero rows is not the #8429 gap")
+    handed = graph.timeouts_for("LIMIT 1")
+    assert handed, "premise: the cohort probe ran — nothing to pin otherwise"
+    assert max(handed) <= _BUDGET_MS - _BURN_FLOOR_MS, (
+        f"the cohort probe was handed {max(handed)} ms of a {_BUDGET_MS} ms read "
+        f"AFTER the index attempt had already spent ~{_INDEX_BURN_S * 1000:.0f} ms "
+        "of it — a zero-row answer can then spend the read twice over, which is "
+        "the budget leak the round-2 F bound exists to close")
+    assert min(handed) >= 1, (
+        f"the probe was handed timeout={min(handed)}: 0 means NO TIMEOUT to the "
+        "driver, which is the unbounded leg this bound exists to close")
+
+
 class _StubSDK:
     """The whole surface ``_index_leg`` touches: a graph handle it never uses."""
 
@@ -275,31 +377,62 @@ def test_the_settle_retry_actually_fires(monkeypatch):
     assert "settled" in hits, "the retried read's rows must be the ones returned"
 
 
-def _cohort_uri() -> str:
-    """A DEDICATED graph on the seam the PROBE proved (never a second guess).
+def _cohort_graph_name() -> str:
+    """A PER-RUN graph name this tree can OWN and REAP (#13290 review F1).
 
-    The population must be exactly this test's: an indexed neighbour left in a
-    shared graph would fill the index cohort and hide the very case measured,
-    and the fixture deletes every ``:Point`` it finds.
+    * the prefix is ``tortoise_test``, inside ``tests/_embedded.py``'s
+      ``_SERVER_WIPE_PREFIXES``, so the session sweep sees it;
+    * the suffix is ``_<10 lowercase hex>``, matching
+      ``tests/_live_utils.py::_PER_RUN_GRAPH_NAME_RE``, so ``drop_test_graph``
+      admits it instead of REFUSING a fixed/shared spelling.
+
+    ⛔ The name is MINTED per call rather than fixed at ``tortoise_cohort_8429``.
+    A fixed name failed BOTH arms above (``"tortoise_test".startswith(...)`` is
+    False and a 4-hex ``8429`` is below the 8-character floor), so every lane and
+    CI job would share one graph and each would run the whole-label ``DETACH
+    DELETE`` over the others' ``:Point`` nodes — a false red that reads as a
+    #8429 regression — while the graph itself was unreachable by any cleanup and
+    leaked forever. ``test_the_cohort_graph_name_is_one_this_tree_can_reap``
+    pins the vocabulary; the literal this replaced is its mutant.
+    """
+    return f"tortoise_test_cohort_8429_{uuid.uuid4().hex[:10]}"
+
+
+def _cohort_uri() -> tuple[str, str]:
+    """A DEDICATED, PER-RUN graph on the seam the PROBE proved.
+
+    Returns ``(uri, graph_name)``. The POPULATION must be exactly this test's —
+    an indexed neighbour left in a shared graph would fill the index cohort and
+    hide the very case measured — and the name must be one this tree can own and
+    reap, which is ``_cohort_graph_name``'s rule.
     """
     assert _PROBE_URI, "no live FalkorDB seam was probed — the tests skip"
+    name = _cohort_graph_name()
     head, _sep, _tail = _PROBE_URI.rpartition("/")
-    return f"{head}/tortoise_cohort_8429" if head else _PROBE_URI
+    assert head, f"the probed URI carries no graph path: {_PROBE_URI!r}"
+    return f"{head}/{name}", name
 
 
 @contextlib.contextmanager
 def _cohort_sdk():
-    """An SDK on the dedicated graph.
+    """An SDK on a dedicated, PER-RUN graph — and the graph is reaped here.
 
     ``TortoiseSDK(<uri>)`` treats a positional as a PATH (rejected as relative),
     and the SDK reads ``TORTOISE_DB_URI`` at construction — so the URI is
     installed for exactly the construction and restored immediately, leaving no
     lane-wide env change behind. The SDK has already captured it by then.
+
+    The teardown DROPS the graph through ``_live_utils.drop_test_graph``, whose
+    fail-closed gate (prefix + mint shape) admits this per-run name and would
+    refuse a fixed one. Leaving it to the session sweep would be a second owner
+    for the same policy; leaving it to nothing is the leak #13290 review F1
+    measured.
     """
     from tortoise.sdk import TortoiseSDK
 
+    uri, graph_name = _cohort_uri()
     old = os.environ.get("TORTOISE_DB_URI")
-    os.environ["TORTOISE_DB_URI"] = _cohort_uri()
+    os.environ["TORTOISE_DB_URI"] = uri
     try:
         sdk = TortoiseSDK()
     finally:
@@ -310,7 +443,44 @@ def _cohort_sdk():
     try:
         yield sdk
     finally:
+        # The graph is OUR per-run mint, so it is reaped here rather than left to
+        # the session sweep — one owner for the policy. `drop_test_graph` never
+        # raises by contract; the suppress is for the SDK handle itself.
+        with contextlib.suppress(Exception):
+            _live_utils.drop_test_graph(sdk._get_proj(), name=graph_name)
         sdk.close()
+
+
+def test_the_cohort_graph_name_is_one_this_tree_can_reap():
+    """#13290 review F1 — a FIXED name is invisible to BOTH cleanup arms.
+
+    The live fixture opens with a whole-label ``MATCH (p:Point) DETACH DELETE p``,
+    so the graph it runs against must be per-run and owned. The name that shipped
+    first, ``tortoise_cohort_8429``, satisfied neither arm of this tree's
+    graph-name policy:
+
+    * ``"tortoise_cohort_8429".startswith(("test_", "tortoise_test"))`` is
+      ``False`` — the session-end sweep keys on exactly those prefixes, so it
+      could never drop the graph;
+    * ``_PER_RUN_GRAPH_NAME_RE`` requires a ``_<8+ lowercase hex>`` suffix —
+      ``8429`` is 4 characters, so ``drop_test_graph`` REFUSED the name by its own
+      fail-closed gate and the graph leaked once per lane and CI run.
+
+    RED on that literal (the first two assertions), GREEN on the mint. Hermetic —
+    it reads the policy's own declarations, so it needs no server.
+    """
+    from tests._embedded import _SERVER_WIPE_PREFIXES
+
+    name = _cohort_graph_name()
+    assert name.startswith(_SERVER_WIPE_PREFIXES), (
+        f"{name!r} is outside the session sweep's prefix family "
+        f"{_SERVER_WIPE_PREFIXES} — nothing would ever drop it (#13290 F1)")
+    assert _live_utils._PER_RUN_GRAPH_NAME_RE.match(name), (
+        f"{name!r} is not a per-run MINT shape, so `drop_test_graph` refuses to "
+        "delete it and the graph leaks (#13290 F1)")
+    assert name != _cohort_graph_name(), (
+        "the name must be minted per RUN — a stable spelling is a shared graph "
+        "carrying a whole-label DETACH DELETE (#13290 F1)")
 
 
 # ── the COHORT: a real index drops the verbatim node (and now recovers) ─────
@@ -359,7 +529,6 @@ def _index_leg(sdk, query, limit=10, want: str = MECHANISM_INDEX):
     ``MECHANISM_INDEX`` premise assert un-retried and redded on a loaded runner.
     ``test_the_settle_retry_actually_fires`` pins that the poll can fire.
     """
-    import time
     deadline = time.monotonic() + _INDEX_SETTLE_TIMEOUT_S
     entry = None
     hits: list = []
