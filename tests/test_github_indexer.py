@@ -865,7 +865,7 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
         mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
         assert mints == [0, 0, 0], (
             f"{why}: the row was read as OPEN, so every poll minted another close "
-            f"({mints}) while no fold can move it")
+            f"({mints}) while the close fold cannot reach it")
         # …and the CONTROL, on the same fixture: a row the fold WOULD move mints
         # exactly one close and then stops. Without this, a reader that never
         # answers "closed" at all would pass the loop above.
@@ -899,9 +899,12 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
     The mirror of the pin above. `_fold_object_stage` returns BEFORE
     `apply_stage_fold` when the Object's `status` is in the fold's OWN latch set
     (`entities.py:6218-6220`, `excluded = _terminal_object_statuses()` =
-    `commit_ops.OBJECT_TERMINAL_STATUSES`), and NO fold path clears `status` or the
-    legacy `outdated` flag (`_STAGE_CLEAR_PROPS` is the pending trio only), so such a
-    row is frozen for ever. A reader answering `"closed"` for it therefore
+    `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
+    clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
+    coherent un-supersede does clear `superseded` (`sdk.py:54012-54021`), and this
+    read resumes then because it derives from the stored row. So while the word is
+    set the row cannot be moved in either direction, and a reader answering
+    `"closed"` for it therefore
     disagreed with GitHub on EVERY poll of an OPEN issue — the same unbounded-journal
     class this change exists to remove, one state over. Measured against the
     pre-fix reader (this dict, at head `f64fd15fa1b`): `1/1/1` on every shape below,

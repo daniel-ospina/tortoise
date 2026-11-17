@@ -1307,9 +1307,11 @@ class GitHubIndexer:
         """Previous issue-state derived from the persisted Object's POSITION.
 
         None = "no opinion": the Object is ABSENT or was never folded on either
-        axis, OR it carries a guard the fold cannot get past (a latched word, an
-        unplaceable position) — `_project_issue` gates the transition mint on
-        `prev_state is not None`, so no transition is recorded in either direction.
+        axis, OR one of the guards below applies — a latched word, an unplaceable
+        position, or a WIDE (`outdated`) term, whose CLOSE fold is never dispatched
+        because such a row has no live holder — `_project_issue` gates the transition
+        mint on `prev_state is not None`, so no transition is recorded in either
+        direction.
 
         ⛔ #13143 (S0 reader sweep): this read `Object.status` ONLY, and S0 moved
         the connector folds off that axis — a close now folds the terminal STAGE
