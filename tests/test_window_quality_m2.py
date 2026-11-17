@@ -892,6 +892,22 @@ def test_the_object_only_scope_is_stated_wherever_the_identity_is(artifact):
         assert f"`{meets[0]}`" in text, (
             f"{name} no longer names the one `:Point` arm the equality coincides "
             f"at (`{meets[0]}`) — the exception is what makes the scope checkable")
+    # ⛔ §9.1 states the scope TWICE (`:599` "That equality is `:Object`-only." as
+    # the lead-in to the `52.7 % -> 41.0 %` paragraph, and `:676` inside the
+    # exception block). `_scope_bound` was called once, anchored at the second, so
+    # flipping the FIRST to `:Point`-only left 58 green (#13126 round 8) — the
+    # "also present elsewhere is not present here" blind spot that function's own
+    # docstring was written about. Both are bound, and the occurrence count is
+    # asserted so a THIRD statement cannot land unbound.
+    arch_91 = _section(ARCH.read_text(encoding="utf-8"), "### 9.1 M2")
+    assert _flat(arch_91).count("`:Object`-only") == 2, (
+        f"§9.1 states the `:Object`-only scope "
+        f"{_flat(arch_91).count('`:Object`-only')} time(s); two are pinned here — "
+        f"extend this test for a third rather than leaving it unread")
+    assert _scope_bound(arch_91, "That equality is", "`:Object`-only"), (
+        "§9.1's FIRST scope statement (:599, the lead-in to the `:Point` figures) "
+        "no longer scopes the identity to `:Object`")
+
     # The count of short arms, SPELLED in §9.1 — the figure scan cannot see it
     # (`eight of the ten` carries no unit), so `nine` could become `eight` green.
     spell = {7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven"}
@@ -1865,6 +1881,77 @@ def test_the_record_quotes_the_current_wording_of_the_honesty_item():
             "the README still asserts the retired absolute 'unmeasured anywhere' "
             "without marking it as retired — §9 is that measurement"
         )
+
+
+def test_the_measured_findings_are_stated_and_cannot_be_inverted_green(artifact):
+    """The measured half of the verdict — the same class, and it was wide open.
+
+    ⛔ `test_the_arming_decision_…` pinned what the numbers DECIDE; the sentences
+    stating what the run MEASURED had no reader at all (#13126 round 8). Measured
+    at 58 green, each inversion applied ALONE:
+
+        README verdict        "with nothing compensating" -> "and other legs compensate for it"
+        README Finding 1      "nothing compensates" (heading) -> "…and other legs compensate"
+        §9.1 headline         "and nothing compensates" -> "and other legs compensate"
+        §9.1                  "The loss carries no signal." -> "…carries a signal."
+        README Finding 5      "is SILENT — §5 Q2 is violated" -> "is LABELLED — …satisfied"
+        changelog title       "and it is silent" -> "and it is labelled"
+        changelog body        "nothing compensates" -> "the ranking leg compensates for it"
+        README verdict        "never told a store was partial" -> "always told"
+        README verdict        "never handed back as a candidate" -> "still handed back"
+        README verdict        "different claim rather than an empty answer" -> reversed
+        README Finding 3      "It is **not** a figure about the fused production read" -> "It is"
+        README verdict        "not a guarantee the shipped path makes" -> "a guarantee"
+
+    "Nothing compensates" is the whole reason §7 cannot be armed on the grounds
+    that another retrieval leg recovers the loss, and it is stated in FOUR places;
+    the silence half is why route 3 must label demotions and why §5's Q2 is
+    violated. An inversion of any of these changes what a reader decides.
+    """
+    readme = README.read_text(encoding="utf-8")
+    arch = ARCH.read_text(encoding="utf-8")
+    changelog = CHANGELOG.read_text(encoding="utf-8")
+
+    # the facts, re-derived before the prose is required to state them
+    obj = _arms(artifact, "object")
+    assert obj["tail@0.5"]["found_deep_of_demoted"] == 0.0
+    assert artifact["signal"] == {"capture_prior_read_status": False,
+                                  "capture_prior_truncation": False,
+                                  "residency_marker_armed": False}
+
+    stated = [
+        # "nothing compensates" — all four sites
+        (readme, "**the eviction itself, with nothing compensating**"),
+        (readme, "EXACTLY its eviction share — nothing compensates"),
+        (arch, "**The cost is exactly the eviction, and nothing compensates.**"),
+        (changelog, "the cost is exactly the eviction share and nothing compensates"),
+        # the silence half
+        (arch, "**The loss carries no signal.**"),
+        (readme, "Every one of those losses is SILENT — §5 Q2 is violated"),
+        (changelog, "the window's cost is its eviction, and it is silent"),
+        (readme, "the caller is never told a store was partial"),
+        # the shape of the harm, and the scope of the leg
+        (readme, "**different claim** rather than an empty answer"),
+        (readme, "**That zero is this configuration's, not a guarantee the shipped path makes**"),
+        (readme, "It is **not** a figure about the fused production read"),
+    ]
+    flat = {}
+    for doc, frag in stated:
+        key = id(doc)
+        flat.setdefault(key, _flat(doc))
+        assert frag in flat[key], (
+            f"a measured finding is no longer stated: {frag!r} — this is the "
+            f"substance of the verdict, not a figure to be edited")
+
+    inverted = ("other legs compensate", "legs compensate for it", "carries a signal",
+                "is LABELLED", "and it is labelled", "always told a store was partial",
+                "still handed back as a candidate", "Q2 is satisfied",
+                "empty answer rather than a different claim",
+                "It is **a figure about the fused production read**",
+                "configuration's, a guarantee the shipped path")
+    corpus = _flat(readme) + " " + _flat(arch) + " " + _flat(changelog)
+    found = [frag for frag in inverted if frag in corpus]
+    assert not found, f"a measured finding is stated INVERTED: {found}"
 
 
 def test_the_arming_decision_is_stated_and_cannot_be_inverted_green(artifact):
