@@ -23007,7 +23007,7 @@ class TortoiseSDK:
         of what they asked.
 
         Returns ``{invalidated, id, corrected_by}`` (+ ``edges_transferred`` when
-        ``transfer_edges=True``) for a Point, and
+        the supersede arm ran) for a Point, and
         ``{superseded, id, label, superseded_by, superseded_at}`` for an Object
         or a Subject. Raises ``ValueError`` on missing/self/terminal/cross-family
         input (both Point legs route through the ONE shared lifecycle guard, #2498).
@@ -23417,16 +23417,30 @@ class TortoiseSDK:
         from .projection import _now_iso
         instant = _now_iso()
         # ⛔ ``dry_run`` IS THE MCP PREVIEW'S DOOR, NOT A PUBLIC MODE (#12914
-        # round-3 finding 2). It runs EVERY guard above and skips only the write,
-        # so the preview cannot accept what the write refuses (the divergence the
-        # finding measured in the other direction: ``dry_run=True`` refused a
-        # family supersede the write accepted). Nothing above this line touches
-        # the graph, which is what makes the claim checkable. The ``supersededAt``
-        # it reports is the instant the write WOULD stamp — the real write mints
-        # its own, so a caller must not reserve it.
+        # round-3 finding 2). It runs EVERY guard above and skips only the write.
+        # The ``supersededAt`` it reports is the instant the write WOULD stamp —
+        # the real write mints its own, so a caller must not reserve it.
+        #
+        # ⛔ ITS GUARDS ARE THIS FUNCTION'S, NOT THE WRITE DOOR'S — the residual
+        # #12914 round-4 P1 measured, reported here instead of papered over. The
+        # write below goes through ``update_knowledge`` -> ``_update_entity``, and
+        # THAT door runs label-surface guards this one does not: the
+        # ``refuse_terminal_event_state`` probe (an ``:Event`` row cannot take a
+        # terminal ``status``) and the ``:Source`` closed-surface refusal (D30).
+        # Measured on the round-4 head: for the HYBRID shapes ``:Object:Event``,
+        # ``:Subject:Event``, ``:Object:Source`` and ``:Subject:Source`` the
+        # preview answers ``would supersede`` and the write REFUSES. Before this
+        # PR both arms refused, so the divergence is this change's. It is
+        # FAIL-CLOSED — the refusal happens before any row is touched, and the
+        # common (single-label) path is unaffected — which is why it is filed
+        # rather than fixed here: closing it means threading a dry-run through
+        # ``_update_entity``'s write phase, a change to the core update door that
+        # does not belong in a re-cut of this PR. The preview's ``rows`` below is
+        # keyed the same way for the same reason: report what this door knows.
         if dry_run:
             return {"superseded": True, "id": old_id, "label": label,
-                    "superseded_by": successor_name, "superseded_at": instant}
+                    "superseded_by": successor_name, "superseded_at": instant,
+                    "rows": old["rows"]}
         applied = self.update_knowledge(
             old_id, status=_SUPERSEDED_STATUS,
             supersededBy=successor_name, supersededAt=instant)

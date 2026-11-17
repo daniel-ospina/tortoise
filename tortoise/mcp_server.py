@@ -5977,15 +5977,20 @@ def tortoise_invalidate(id: str, corrected_by_id: str,
 
 def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool | None = None,
                        dry_run: bool = False) -> dict:
-    """Atomically replace old Point with new — CORRECTS edge + outdated flag.
+    """Replace a node with a successor, keeping the history — the arm follows the OLD node's label.
+
+    A Point gets the full supersede: CORRECTS edge + outdated flag + edge transfer.
+    An Object/Subject gets the family supersede: status + successor NAME + instant,
+    with no edge transfer.
 
     transfer_edges=None (default, NOT SUPPLIED): the SDK picks the arm by the
-    OLD node's label — a full supersede for a Point, the family supersede for an
-    Object/Subject. transfer_edges=True: full supersede — all edges move from
+    OLD node's label. transfer_edges=True: full supersede — all edges move from
     old to new. transfer_edges=False: invalidate behavior — mark old outdated
-    with a CORRECTS edge only (no edge transfer). Absorbs tortoise_invalidate.
+    with a CORRECTS edge only (no edge transfer). Both explicit values are
+    POINT-ONLY and are REFUSED on an Object/Subject. Absorbs tortoise_invalidate.
     Returns {invalidated, id, corrected_by} (+ edges_transferred when the
-    supersede arm ran).
+    supersede arm ran) for a Point, {superseded, id, label, superseded_by,
+    superseded_at} for an Object/Subject.
 
     ⛔ The default is `None`, not `True` (#12914 review P3 + re-review finding 2):
     passing `True` is a CALLER CHOICE the Object/Subject arm cannot honour, so it
@@ -5993,8 +5998,9 @@ def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool | None = N
     manufacture that choice on the caller's behalf by defaulting to it. It passes
     the value through UNCHANGED; the SDK owns the one dispatch rule.
 
-    dry_run=True previews exactly which edges would transfer and changes
-    nothing; dry_run=False (default) applies the supersede.
+    dry_run=True previews what would change — same arm, same refusals, nothing
+    written — and reports the node count the write would touch. dry_run=False
+    (default) applies the supersede.
     """
     if dry_run:
         return _safe(_preview_supersede, _get_org_sdk(),
@@ -10971,12 +10977,20 @@ def _preview_family_supersede(sdk, label: str, old_id: str, new_id: str) -> dict
     """Preview the `:Object`/`:Subject` arm of `tortoise_supersede` (#12914).
 
     The guards are NOT restated here: this calls ``_supersede_entity(dry_run=True)``,
-    which runs every family-arm check — same family, not self, source not already
+    which runs every FAMILY-ARM check — same family, not self, source not already
     terminal, successor current + named + unambiguous, no stranded sibling label —
     and skips only the write. A preview that restated them would be the second
     source of truth this lane exists to remove, and a preview that restated them
     WRONG is exactly what the round-3 finding measured (it refused a supersede the
     write accepted).
+
+    ⛔ RESIDUAL (#12914 round-4 P1, filed not fixed): the family WRITE continues
+    into ``update_knowledge`` -> ``_update_entity``, whose label-surface guards
+    (``refuse_terminal_event_state`` on an ``:Event`` row, the ``:Source``
+    closed-surface refusal) are NOT part of ``_supersede_entity``'s own checks. On
+    the HYBRID shapes ``:Object:Event`` / ``:Subject:Event`` / ``:Object:Source`` /
+    ``:Subject:Source`` this preview therefore answers `would supersede` and the
+    write refuses. Fail-closed (nothing is written), single-label rows unaffected.
 
     ``superseded_at`` is the instant the write WOULD stamp; the real write mints its
     own, so a caller must not reserve this value.
@@ -10986,7 +11000,12 @@ def _preview_family_supersede(sdk, label: str, old_id: str, new_id: str) -> dict
         "tortoise_supersede", f"family supersede ({label}: status + successor name)",
         found=True, superseded=True, label=label,
         target={"id": old_id, "superseded_by": out["superseded_by"]},
-        nodes_affected=1, edges_removed=0, edges_added=0,
+        # ⛔ NOT a hardcoded 1 (#12914 round-4 P2): the family write is a bare
+        # `MATCH (n:<label> {id:$id}) SET n += $props`, which binds EVERY row the
+        # id names — the same fan-out the Point preview above mirrors instead of
+        # hardcoding. Measured on the round-4 head: two `:Object` rows sharing one
+        # id, preview said `nodes_affected: 1`, and the write terminalized BOTH.
+        nodes_affected=out["rows"], edges_removed=0, edges_added=0,
         superseded_at=out["superseded_at"],
     )
 

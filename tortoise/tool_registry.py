@@ -2714,9 +2714,12 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # migrating caller lands on the same body, not a re-implementation.
     #
     # Arguments are shown where the door took them (`props=`, `days=`,
-    # `point_kinds=` precedent): a caller who drops `transfer_edges=False` gets a
-    # FULL supersede — it moves every edge — which is a different operation, not a
-    # smaller one.
+    # `point_kinds=` precedent). ⛔ Dropping `transfer_edges` does NOT select the
+    # full supersede any more (#12914): the arm follows the OLD node's label — a
+    # Point gets the full supersede (every edge moves), an Object/Subject gets the
+    # family supersede (status + successor name, no edge transfer). An explicit
+    # `True` is POINT-ONLY and is REFUSED on an Object/Subject, so the pointer
+    # passes the caller's value rather than a default.
     "tortoise_update": 'tortoise_update_knowledge(id, props=...)',
     "tortoise_update_point": 'tortoise_update_knowledge(id, props=...)',
     "tortoise_update_entity": 'tortoise_update_knowledge(id, props=...)',
@@ -2729,8 +2732,11 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # different operation, not a smaller one. The pointer below passes
     # `invalid_at=...` for exactly that reason.
     "tortoise_retract_point": 'tortoise_update_knowledge(id, invalid_at=...)',
-    # `transfer_edges=False` is the INVALIDATE arm; it is named explicitly because
-    # the default is the full supersede and the two differ in what they destroy.
+    # `transfer_edges=False` is the INVALIDATE arm. It is still named explicitly
+    # because it differs in what it destroys — but it is POINT-ONLY: on an
+    # Object/Subject an explicit `False` is REFUSED, while OMITTING the keyword
+    # takes the label's arm (Point: full supersede, every edge moves;
+    # Object/Subject: family supersede, no edge transfer) (#12914).
     "tortoise_supersede": 'tortoise_supersede_knowledge(old_id, new_id, transfer_edges=...)',
     "tortoise_invalidate":
         'tortoise_supersede_knowledge(id, corrected_by_id, transfer_edges=False)',
