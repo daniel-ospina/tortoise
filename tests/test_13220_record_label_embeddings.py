@@ -381,6 +381,61 @@ def test_the_journal_copy_of_the_record_is_VERBATIM():
                       "name": "Acme Corp"}, "the caller's record was mutated"
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# 4b. The SEAM that joins the two halves — `RecordWriter.write` → `replay`
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_the_live_seam_threads_the_derived_columns_into_replay(encoder, monkeypatch):
+    """The join between the halves, pinned on its own (review of #13265, P2).
+
+    ⛔ WHY THIS EXISTS SEPARATELY FROM EVERYTHING ABOVE. Every other test here
+    exercises ONE half in isolation — `derived_embedding_columns(...)` called
+    directly, or `replay_plan(..., derived={0: …})` fed by hand. So the three
+    lines in `RecordWriter.write` that JOIN them
+    (`won = derived_embedding_columns(record)` / `derived[index] = won.columns` /
+    `derived=derived or None`) could be deleted with this whole file still green,
+    and the outcome would be two declared, HNSW-indexed columns that nothing
+    fills — the state `20261117000001` itself calls worse than an absence. This
+    drives the REAL seam and spies the ONE projection call it makes, so deleting
+    the join reds HERE instead of shipping silently.
+
+    No database: the connection is the sibling seam suite's recording fake and
+    `position=False`, so the byte meter (`_measure_written_bytes` skips a replay
+    by its own correctness gate — metering a re-materialisation would double the
+    org's figure) never reaches a driver.
+    """
+    from tests.test_record_writer_seam import FakeConnection
+
+    seen: dict[str, object] = {}
+
+    def _spy(records, conn, **kwargs):
+        seen["records"] = list(records)
+        seen["derived"] = kwargs.get("derived")
+        # The REAL report type, not a fake: `write` reads `.events`,
+        # `.statements`, `.first_seq` and `.last_seq` off it, so a stand-in here
+        # would rot silently the day that contract grows a field.
+        return rp.ReplayReport(events=1, statements=1, first_seq=1, last_seq=1)
+
+    monkeypatch.setattr(rw.record_projection, "replay", _spy)
+    rw.RecordWriter(dsn="postgresql://record/db",
+                    connect=lambda _dsn: FakeConnection()).write(
+        [{"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"}],
+        org_id="org", graph_id="g", position=False)
+
+    assert seen["records"] == [
+        {"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"}], (
+        "the spy did not receive the caller's record — the assertion below would "
+        "pass over a call that never happened")
+    derived = seen["derived"]
+    assert derived is not None, (
+        "the seam passed `derived=None`: `derived_embedding_columns`' result is "
+        "computed and then DROPPED, so the two fingerprint columns would never "
+        "be filled on the live path")
+    assert set(derived) == {0}, derived
+    assert derived[0] == {"embedding": [0.125] * 384}, derived
+
+
 def test_a_label_with_no_rule_binds_no_embedding_column():
     """Without `derived`, the plan is byte-identical to `main`'s."""
     record = {"type": "ObjectRegistered", "id": "obj-1", "name": "Acme Corp"}

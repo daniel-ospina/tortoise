@@ -376,7 +376,17 @@ def test_the_recency_key_is_the_CASE_not_a_bare_coalesce(schema, point_rows):
 # ── the armed/unarmed contract, on a real server ───────────────────────────
 
 def test_an_unserved_label_answers_None_not_empty(schema):
-    """`object`/`subject` have no column, so the leg must NOT claim to have looked.
+    """`object`/`subject` answer `None`, so the leg must NOT claim to have looked.
+
+    ⚠️ The reason is NOT "the record has no column" any more — #13220 gave both
+    tables `embedding` + a generated `embedding_vec` + an HNSW index, so that
+    premise is false at this head. What still keeps them off `LABEL_SERVED` is
+    the `#689` TERMINAL-STATUS CAGE: `search_engine._STATUS_FILTERED_LABELS`
+    drops superseded/deprecated/archived/retracted from both graph branches, while
+    the record holds no `status` for these labels (a projection-owned cache,
+    refused in the props tail) and its procedural fold knows only
+    `live`/`superseded`. Serving them from the record would return entities the
+    graph leg hides. See `record_vector.LABEL_SERVED`.
 
     `[]` means "served, asked, the filter selects nothing"; the caller takes its
     graph branch on `None`. Conflating them turns the label's real path (a
@@ -390,3 +400,113 @@ def test_an_unserved_label_answers_None_not_empty(schema):
         scope, "object", _unit(0), 10, record_dsn=dsn) is None
     assert record_vector.vector_search(
         scope, "subject", _unit(0), 10, record_dsn=dsn) is None
+
+
+# ── #13220: object/subject carry their fingerprints, and the index is real ──
+
+def test_the_two_fingerprints_are_columns_on_object_and_subject(schema):
+    """#13220's APPLIED half — on the only leg that can apply the migration.
+
+    ⛔ WHY THIS FILE. The PGlite drill has exactly one runner
+    (`supabase/tests/pglite/validate.mjs`) and it cannot provide pgvector, so it
+    SKIPS both `20261109000001` and `20261117000001` — which is why the #13220
+    block in `supabase/tests/20261012000001_record_schema.sql` is guarded on
+    `to_regprocedure('public.record_embedding_vector(jsonb)')` and is therefore
+    SILENT on PGlite. This test is the UNGUARDED arm: here the migrations are
+    applied for real on `pgvector/pgvector:pg16`, and `test-record-postgres`
+    fails the job on ANY skip (#9551), so this cannot pass by absence.
+
+    The functional half is the point. The hazard #13220 exists to avoid is two
+    declared, HNSW-indexed columns that nothing fills, so this asserts the
+    GENERATED column actually DERIVES from a carried payload and stays NULL for
+    one that is not a 384-long all-numeric array — the contract #11642's
+    `test_a_non_384_embedding_is_stored_but_not_ann_indexed` pins for `point`.
+    """
+    bad = [0.0] * DIM
+    bad[3] = None
+    rows = {
+        ("Object", "fp-object-ok"): _vec(0),
+        ("Object", "fp-object-bad"): json.dumps(bad),
+        ("Subject", "fp-subject-ok"): _vec(0),
+        ("Subject", "fp-subject-bad"): json.dumps(bad),
+    }
+    with schema.cursor() as cur:
+        for (label, key) in rows:
+            cur.execute(
+                "INSERT INTO public.node_identity "
+                "(org_id, graph_id, node_label, node_key) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                (ORG, GRAPH, label, key))
+        # `chk_*_node_key_is_contract_key` requires `name IS NOT NULL AND
+        # id IS NOT NULL AND node_key = id` (read off the LIVE constraint; a bare
+        # `node_key = name` insert is refused — measured while writing this test),
+        # so `id` is written explicitly beside `name`.
+        for (label, key), payload in rows.items():
+            table = label.lower()
+            cur.execute(
+                f"INSERT INTO public.{table} "
+                "(org_id, graph_id, node_key, id, name, embedding) "
+                "VALUES (%s, %s, %s, %s, %s, %s::jsonb)",
+                (ORG, GRAPH, key, key, key, payload))
+
+        # 1. the four columns, and only `embedding_vec` is GENERATED
+        cur.execute(
+            "SELECT table_name, column_name, is_generated "
+            "FROM information_schema.columns WHERE table_schema='public' "
+            "AND table_name IN ('object','subject') "
+            "AND column_name IN ('embedding','embedding_vec') "
+            "ORDER BY table_name, column_name")
+        cols = cur.fetchall()
+        assert {(t, c) for t, c, _ in cols} == {
+            ("object", "embedding"), ("object", "embedding_vec"),
+            ("subject", "embedding"), ("subject", "embedding_vec")}, cols
+        for table, column, generated in cols:
+            expected = "ALWAYS" if column == "embedding_vec" else "NEVER"
+            assert generated == expected, (table, column, generated)
+
+        # 2. both HNSW indexes exist, on the cosine opclass the leg orders by
+        cur.execute(
+            "SELECT indexname, indexdef FROM pg_indexes "
+            "WHERE schemaname='public' AND indexname IN "
+            "('idx_object_embedding_vec_hnsw','idx_subject_embedding_vec_hnsw')")
+        idx = dict(cur.fetchall())
+        assert set(idx) == {
+            "idx_object_embedding_vec_hnsw",
+            "idx_subject_embedding_vec_hnsw"}, idx
+        for name, definition in idx.items():
+            assert "USING hnsw" in definition, (name, definition)
+            assert "vector_cosine_ops" in definition, (name, definition)
+
+        # 3. the GENERATED column DERIVES — an indexed column nothing fills is the
+        #    state the migration itself calls worse than an absence.
+        for table in ("object", "subject"):
+            prefix = "fp-object" if table == "object" else "fp-subject"
+            cur.execute(
+                f"SELECT node_key, embedding_vec IS NOT NULL, "
+                f"       vector_dims(embedding_vec) FROM public.{table} "
+                "WHERE org_id=%s AND graph_id=%s ORDER BY node_key",
+                (ORG, GRAPH))
+            derived = [(k, notnull, dims) for k, notnull, dims in cur.fetchall()
+                       if k.startswith(prefix)]
+            assert derived == [
+                (f"{prefix}-bad", False, None),
+                (f"{prefix}-ok", True, DIM),
+            ], (table, derived)
+
+        # 4. the props refusal is NOT relaxed by the column: the fingerprint's
+        #    home is the COLUMN, and a payload cannot smuggle the name into the
+        #    open tail. Asserted as a NEGATIVE CONTROL, not as a string.
+        for table in ("object", "subject"):
+            cur.execute(
+                f"SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                f"WHERE conname = %s", (f"chk_{table}_props_no_derived",))
+            row = cur.fetchone()
+            assert row and "embedding" in row[0], (table, row)
+        with pytest.raises(Exception) as excinfo:
+            cur.execute(
+                "INSERT INTO public.object "
+                "(org_id, graph_id, node_key, id, name, props) "
+                "VALUES (%s, %s, 'fp-object-tail', 'fp-object-tail', "
+                "        'fp-object-tail', '{\"embedding\": [0.0]}'::jsonb)",
+                (ORG, GRAPH))
+        assert "chk_object_props_no_derived" in str(excinfo.value), excinfo.value
