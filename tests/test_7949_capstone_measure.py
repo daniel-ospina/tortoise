@@ -6671,16 +6671,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "leaves the document asserting two numbers for one `git grep` hit")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:14606-14683`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:14708-14785`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:14645` (both needles are the file's only occurrences —
-    # `:14635` and `:14645` — so a later end cannot change the sum). Ends below `:14645` fail
+    # true for any end at or beyond `:14747` (both needles are the file's only occurrences —
+    # `:14737` and `:14747` — so a later end cannot change the sum). Ends below `:14747` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:14606`-`:14644` gives a non-empty window that lacks the second needle, and an
-    # end below `:14606` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:14708`-`:14746` gives a non-empty window that lacks the second needle, and an
+    # end below `:14708` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
