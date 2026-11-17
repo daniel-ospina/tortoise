@@ -867,9 +867,18 @@ def test_judge_records_that_the_scenario_could_not_be_verified(tmp_path):
     p = tmp_path / "p.json"
     p.write_text(json.dumps(bad))
     out = tmp_path / "o"
-    args = type("A", (), {"packet": str(p), "verdicts": str(
-        ROOT / "docs" / "evidence" / "13038-capstone" / "verdicts-baseline.json"
-    ), "judge_cmd": None, "out": str(out)})()
+    args = type(
+        "A",
+        (),
+        {
+            "packet": str(p),
+            "verdicts": str(
+                ROOT / "docs" / "evidence" / "13038-capstone" / "verdicts-baseline.json"
+            ),
+            "judge_cmd": None,
+            "out": str(out),
+        },
+    )()
     assert cap.cmd_judge(args) == 0
     board = json.loads((out / "run-local.json").read_text())
     assert board["header"]["judge"]["scenario_check"] == "unverified"
@@ -889,17 +898,34 @@ def test_render_refuses_a_document_that_is_not_a_scoreboard(tmp_path):
         assert cap.cmd_render(type("A", (), {"run": str(p), "write": None})()) == 2
     # …and rendering the committed board INTO the bundle is refused too: a re-render is not
     # a producer, so it must not touch the baseline even when its content is identical.
-    assert cap.cmd_render(
-        type("A", (), {"run": str(ROOT / "docs" / "evidence" / "13038-capstone"
-                                / "run-local.json"),
-                       "write": str(cap.DEFAULT_OUT / "scoreboard-local.md")})()
-    ) == 2
+    assert (
+        cap.cmd_render(
+            type(
+                "A",
+                (),
+                {
+                    "run": str(ROOT / "docs" / "evidence" / "13038-capstone" / "run-local.json"),
+                    "write": str(cap.DEFAULT_OUT / "scoreboard-local.md"),
+                },
+            )()
+        )
+        == 2
+    )
     # The committed board still renders (and to a scratch path, not the bundle).
     out = tmp_path / "r.md"
-    assert cap.cmd_render(
-        type("A", (), {"run": str(ROOT / "docs" / "evidence" / "13038-capstone"
-                                / "run-local.json"), "write": str(out)})()
-    ) == 0
+    assert (
+        cap.cmd_render(
+            type(
+                "A",
+                (),
+                {
+                    "run": str(ROOT / "docs" / "evidence" / "13038-capstone" / "run-local.json"),
+                    "write": str(out),
+                },
+            )()
+        )
+        == 0
+    )
     assert out.read_text().startswith("#")
 
 
@@ -1161,3 +1187,73 @@ def test_the_verdicts_file_write_creates_its_directory(tmp_path):
         target, {"Q1": {"verdict": "right"}}, packet_path=tmp_path / "p.json", mode="fresh", meta={}
     )
     assert target.exists() and json.loads(target.read_text())["Q1"]["verdict"] == "right"
+
+
+# ── 8. the eighth review's two un-pinned promises ───────────────────────────────
+
+
+def test_cut_redacts_BEFORE_it_truncates():
+    """The order is load-bearing, and was only pinned at a call site (#13303 cycle 8).
+
+    A 210-character password truncated to 160 leaves a 141-character PREFIX that neither
+    the `scheme://user:pass@` regex nor a literal replace can match — and truncation eats
+    the `@`, so redaction can never run afterwards.
+    """
+    secret = "J" * 210
+    cut = cap._cut(f"docker://alice:{secret}@host:6379/db", 160)
+    assert "J" * 20 not in cut, "a truncated prefix of the secret survived: redact AFTER cut"
+    assert "<redacted>@" in cut
+    assert len(cut) <= 160
+
+
+def test_cut_does_not_rewrite_PRODUCT_text_or_the_readers_prose():
+    """`_cut` now redacts, but the judge packet must carry the product's words verbatim."""
+    for text in (
+        "password rotation policy was superseded",
+        "the goal token: quarterly-review was recorded",
+    ):
+        assert cap._cut(text, 400, redact=False) == text, (
+            "the credential patterns matched ordinary product prose — the reader would be "
+            "scoring a payload the instrument had already altered"
+        )
+    # …while credential-bearing text keeps the default
+    assert "hunter2" not in cap._cut("docker://:hunter2@host/db", 160)
+
+
+def test_the_scenario_check_reaches_the_artifact(tmp_path):
+    """A comment promised an unverifiable packet 'is judged with a note'; nothing wrote one.
+
+    Pinned BEHAVIOURALLY through `cmd_judge` — deleting the block must red this.
+    """
+    packet = {
+        "schema": "capstone-state-value-judge-packet/v1",
+        "issue": 13038,
+        "questions": [
+            {
+                "id": "Q1",
+                "question": "What are we currently committed to?",
+                "what_a_wrong_answer_means": "x",
+            }
+        ],
+        "product_answers": [
+            {"question": "Q1", "status": "answered", "calls": [], "payload": {}, "signals": []}
+        ],
+        "rubric": "",
+        "header": {
+            "target": "local",
+            "narrative": "/nope/not-this-repo/narrative.json",
+            "narrative_frozen": "2026-11-16",
+        },
+    }
+    p = tmp_path / "packet.json"
+    p.write_text(json.dumps(packet))
+    v = tmp_path / "verdicts.json"
+    v.write_text(json.dumps({"Q1": {"verdict": "right", "because": "x"}}))
+    out = tmp_path / "out"
+    rc = cap.main(["judge", "--packet", str(p), "--verdicts", str(v), "--out", str(out)])
+    assert rc in (0, 1)
+    board = json.loads((out / "run-local.json").read_text())
+    assert board["header"]["judge"]["scenario_check"] == "unverified", (
+        "an unverifiable packet was accepted and the artifact does not say so"
+    )
+    assert any("scenario" in n.lower() for n in board["header"]["notes"])
