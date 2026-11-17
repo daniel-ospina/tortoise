@@ -301,6 +301,79 @@ class TestThePlanPipeline:
                            params={"n": f"liar {label}"}
                            ).result_set[0][0] == 0, label
 
+    def test_an_UNKNOWN_STAGE_ID_names_the_stage_repair_not_the_key(self, sdk):
+        """`unresolvable` has two causes and they need different repairs.
+
+        Telling an agent to repair the KEY when the STAGE ID is the unknown one
+        prescribes a no-op — and promising "still open" for a cleared key beside a
+        terminal stage id is simply false.
+        """
+        g = sdk._get_proj().g
+        typo = PO.create_plan(sdk, "stage typo")
+        g.query("MATCH (p:Object {id:$p}) SET p.pipelineStageId='Held'",
+                params={"p": typo["id"]})
+        with pytest.raises(ValueError) as exc:
+            PO.settle_plan(sdk, typo["id"], PO.STAGE_MISSED)
+        message = str(exc.value)
+        assert "pipelineStageId" in message and "declared stage id" in message
+        assert "already settled" not in message
+        # the NAMED repair must be performable, and must be the right one
+        sdk.update_knowledge(typo["id"], pipelineStageId="scheduled")
+        PO.settle_plan(sdk, typo["id"], PO.STAGE_MISSED)
+        assert _stage(sdk, typo["id"])["stageId"] == "missed"
+
+    def test_a_cleared_key_beside_a_TERMINAL_stage_says_ENDED(self, sdk):
+        """The key arm must not report the stale `pipelineSlot` prop as "the stage
+        itself", nor call an ended plan "still open".
+
+        `pipelineStageId='held'` resolves TERMINAL; the slot PROP may still say
+        `active`. Reporting the prop told the caller the plan was open, and the
+        next call refused it as settled.
+        """
+        plan = PO.create_plan(sdk, "terminal then key cleared")
+        sdk.update_knowledge(plan["id"], pipelineStageId="held")
+        sdk.update_knowledge(plan["id"], pipelineStageKey=None)
+        with pytest.raises(ValueError) as exc:
+            PO.settle_plan(sdk, plan["id"], PO.STAGE_MISSED)
+        message = str(exc.value)
+        assert "resolves TERMINAL" in message, message
+        assert "still open" not in message and "already settled" not in message
+        assert "pipelineStageKey" in message
+
+    def test_an_open_plan_with_a_cleared_key_says_open_and_the_repair_works(
+            self, sdk):
+        plan = PO.create_plan(sdk, "open then key cleared")
+        sdk.update_knowledge(plan["id"], pipelineStageKey=None)
+        with pytest.raises(ValueError) as exc:
+            PO.record_occurrence(sdk, plan["id"])
+        assert "still open" in str(exc.value)
+        sdk.update_knowledge(plan["id"], pipelineStageKey=PO.PLAN_PIPELINE_KEY)
+        assert PO.record_occurrence(sdk, plan["id"])["move"].applied is True
+
+    def test_a_colliding_caller_prop_is_a_named_refusal(self, sdk):
+        """`record_occurrence(aboutObject=…)` must not crash with a TypeError —
+        and a key that only RENDERS as one of its kwargs must be refused too."""
+        class _KeyHash(str):
+            def __hash__(self):
+                return 0
+
+            def __eq__(self, other):
+                return False
+
+            __ne__ = __eq__
+
+        plan = PO.create_plan(sdk, "collide")
+        with pytest.raises(ValueError, match="set by `record_occurrence` itself"):
+            PO.record_occurrence(sdk, plan["id"],
+                                 **{_KeyHash("aboutObject"): "elsewhere"})
+        with pytest.raises(ValueError, match="set by `record_occurrence` itself"):
+            PO.record_occurrence(sdk, plan["id"], aboutObject="elsewhere")
+        with pytest.raises(ValueError, match="set by `record_occurrence` itself"):
+            PO.record_occurrence(sdk, plan["id"], eventKind="meeting")
+        assert sdk._get_proj().g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 0
+
     def test_a_nested_props_map_cannot_park_a_position_at_creation(self, sdk):
         """`create_entity` flattens `props={...}`, so the guard must read the map
         the DOOR writes — not the kwargs shape."""

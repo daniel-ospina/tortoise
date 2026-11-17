@@ -615,9 +615,14 @@ _EVENT_LIFECYCLE_STATE_REFUSAL = (
     "pass `status=None` to the UPDATE door (`update_knowledge`) — ⛔ it is the "
     "one door that REMOVES a property; the record doors (`add_event`, "
     "`emit_belief`) drop a null on the way to the fold, so a clear sent there "
-    "writes nothing. On a :Point:Event HYBRID that door refuses `None` (the "
-    "Point vocabulary has no null word), so clear the hybrid through its Point "
-    "door: `update_point(id, status='live')`."
+    "writes nothing. On a :Point:Event HYBRID there is NO status door that "
+    "un-marks a terminal word: `update_knowledge` refuses `None` (the Point "
+    "vocabulary has no null word) and refuses a dead claim, `update_point` only "
+    "promotes draft->live, and the retraction verbs refuse a node carrying "
+    ":Event. A hybrid's non-terminal `status` is that Point's own currency "
+    "(`update_point(id, status='live')`), never an Event state; to correct what a "
+    "dated fact says, write a NEW :Event — a dated fact is corrected by a later "
+    "fact, not by a status flip."
 )
 
 

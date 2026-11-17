@@ -220,9 +220,24 @@ def plan_position(stage_id, slot=None, outcome=None, *,
         bound_elsewhere = (pipeline_key is None
                            or str.__str__(pipeline_key) != PLAN_PIPELINE_KEY)
     unresolvable = bool(stage_id) and (stage is None or bound_elsewhere)
+    # ⛔ WHICH input failed, because the repairs differ: an unknown STAGE ID is
+    # fixed by writing a declared id, a bad KEY by repairing the binding. One
+    # message for both prescribed a no-op repair for the first and promised "still
+    # open" to a plan that had already ended (a cleared key beside a terminal
+    # stage id).
+    if not unresolvable:
+        unresolvable_cause = None
+    elif stage is None:
+        unresolvable_cause = "stage"
+    else:
+        unresolvable_cause = "key"
     return {
         "stageId": stage_id,
-        "slot": stage.slot if stage is not None and not bound_elsewhere else slot,
+        # ⛔ THE RESOLVED SLOT, never the stored prop: the prop is a cache a
+        # generic-door ending leaves stale, and reporting it as "the stage itself
+        # resolves to …" told a caller an ENDED plan was "still open (active)"
+        # while the row resolved terminal. None = it does not resolve.
+        "slot": stage.slot if stage is not None else None,
         # ⛔ An UNRESOLVABLE row must not report a stale outcome: `ended: False`
         # beside `outcome: 'lost'` is the same mixed-cache contradiction round 3
         # removed from `ended`, one field over.
@@ -234,6 +249,7 @@ def plan_position(stage_id, slot=None, outcome=None, *,
                                      and not bound_elsewhere
                                      and stage.is_terminal),
         "unresolvable": unresolvable,
+        "unresolvable_cause": unresolvable_cause,
     }
 
 
@@ -355,19 +371,32 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
             f"dated fact stands on its own; to correct the plan, that is a new "
             f"plan, not a stage flip on a settled one.")
     if pos["unresolvable"]:
-        # ⛔ NOT "already settled": the plan is OPEN (its stage may read
-        # `scheduled`) and the only thing wrong is the stored key, which one
-        # supported call repairs. Folding the two preconditions into one sentence
-        # told an agent the plan had ended — and sent it off to mint a duplicate.
-        raise ValueError(
-            f"Refused: the plan {plan_ref!r} sits at stage "
-            f"{pos.get('stageId')!r}, but its stored `pipelineStageKey` "
-            f"({cur.get('pipelineKey')!r}) is not this pipeline's "
-            f"{PLAN_PIPELINE_KEY!r}, so no stage move can be validated. WHAT TO "
-            f"DO: repair the binding first — "
-            f"`update_knowledge(<id>, pipelineStageKey={PLAN_PIPELINE_KEY!r})` — "
-            f"then record the occurrence; the plan itself is still open.")
+        # ⛔ NOT "already settled": the plan has not ended. WHICH repair is
+        # prescribed depends on which input failed — a bad STAGE ID is not fixed
+        # by repairing the key, and "still open" may not be true at all.
+        raise ValueError(_unresolvable_message(plan_ref, pos, cur))
 
+    # ⛔ A caller prop that collides with one of this helper's OWN kwargs would
+    # reach `create_entity` as a duplicate keyword and surface as a bare
+    # `TypeError` — an unnamed 500-class with no remedy (and, worse, one that
+    # looks like this helper is broken rather than the call).
+    _owned = {"eventKind", "aboutObject"}
+    if at is not None:
+        _owned.add("startedAt")
+    # The RENDERER UNION again, not a literal-name intersection: a `str` subclass
+    # key that lies about `__hash__`/`__eq__` slips past `set.intersection` while
+    # `create_entity` files it under the name — measured, and the resulting node
+    # carried a prop contradicting its own edge.
+    from .live import lifecycle_props_by_rendering
+
+    collided = sorted(lifecycle_props_by_rendering(event_props, _owned))
+    if collided:
+        raise ValueError(
+            f"Refused: {', '.join(collided)} is set by `record_occurrence` "
+            f"itself — the Event's kind and its link to the plan are this "
+            f"helper's contract, not caller props. WHAT TO DO: pass "
+            f"`event_kind=` / the plan reference instead, and drop "
+            f"{', '.join(collided)} from the props.")
     event_name = name or cur.get("name") or plan_id
     created = sdk.create_entity(
         "event", event_name, eventKind=event_kind,
@@ -435,14 +464,7 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
             f"{' (closed marker set)' if cur.get('isClosed') else ''}. WHAT TO "
             f"DO: a plan ends once; a new plan is a new record.")
     if pos["unresolvable"]:
-        raise ValueError(
-            f"Refused: the plan {plan_ref!r} sits at stage "
-            f"{pos.get('stageId')!r}, but its stored `pipelineStageKey` "
-            f"({cur.get('pipelineKey')!r}) is not this pipeline's "
-            f"{PLAN_PIPELINE_KEY!r}, so no stage move can be validated. WHAT TO "
-            f"DO: repair the binding first — "
-            f"`update_knowledge(<id>, pipelineStageKey={PLAN_PIPELINE_KEY!r})` — "
-            f"then settle the plan; the plan itself is still open.")
+        raise ValueError(_unresolvable_message(plan_ref, pos, cur))
     move = pipeline.advance_stage(
         sdk, plan_id, PLAN_PIPELINE_KEY, stage, at=at,
         declared=PLAN_PIPELINE_DECL, reason=reason, source="settle",
@@ -457,6 +479,47 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
             f"already-terminal plan is settled, and a stale date needs the "
             f"ending recorded at or after `pipelineStageSince`.")
     return {"planId": plan_id, "move": move}
+
+
+def _unresolvable_message(plan_ref, pos: dict, cur: dict) -> str:
+    """The refusal for a plan whose stored position cannot be validated.
+
+    ONE home, so the two writers cannot drift, and so the sentence names the
+    input that ACTUALLY failed: telling an agent to repair the key when the STAGE
+    ID is unknown prescribes a no-op, and promising "still open" for a cleared
+    key beside a terminal stage id is simply false.
+    """
+    stage_id = pos.get("stageId")
+    if pos.get("unresolvable_cause") == "stage":
+        return (
+            f"Refused: the plan {plan_ref!r} stores pipelineStageId "
+            f"{stage_id!r}, which is not a stage of the "
+            f"{PLAN_PIPELINE_KEY!r} pipeline, so no stage move can be validated "
+            f"(the writer refuses it as unresolvable). WHAT TO DO: write a "
+            f"declared stage id — one of "
+            f"{', '.join(s['id'] for s in PLAN_PIPELINE_DECL['stages'])!s} — to "
+            f"`pipelineStageId`, or leave the plan alone: nothing has been "
+            f"changed here.")
+    repair = (f"repair the binding first — "
+              f"`update_knowledge(<id>, pipelineStageKey="
+              f"{PLAN_PIPELINE_KEY!r})`")
+    ended_by_stage = pos.get("slot") == "terminal"
+    if ended_by_stage:
+        # The stage RESOLVES and is terminal, so the plan has ended: the key
+        # repair only makes a stage write able to validate that. Saying "still
+        # open" here sent the caller to repair-then-be-refused-as-settled.
+        return (
+            f"Refused: the plan {plan_ref!r} sits at stage {stage_id!r}, which "
+            f"resolves TERMINAL (outcome {pos.get('outcome')!r}), and its stored "
+            f"`pipelineStageKey` ({cur.get('pipelineKey')!r}) is not this "
+            f"pipeline's {PLAN_PIPELINE_KEY!r}. The plan has ENDED — {repair} "
+            f"only so a stage write can validate it; nothing else is owed here.")
+    return (
+        f"Refused: the plan {plan_ref!r} sits at stage {stage_id!r}, but its "
+        f"stored `pipelineStageKey` ({cur.get('pipelineKey')!r}) is not this "
+        f"pipeline's {PLAN_PIPELINE_KEY!r}, so no stage move can be validated. "
+        f"WHAT TO DO: {repair} — then call this again. The plan is still open "
+        f"(its stage resolves to {pos.get('slot')!r}).")
 
 
 def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
