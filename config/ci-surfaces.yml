@@ -1056,20 +1056,20 @@ surfaces:
   # guarantees SELECTION, not EXECUTION — that arm runs where a FalkorDB is reachable (the
   # matrix legs provision one and export `TORTOISE_TEST_DOCKER_PORT`) and SKIPS on the
   # embedded carve-out lane (measured: `TORTOISE_TEST_CARVE_OUT=1` -> 23 passed, 90 skipped).
-  # ⛔ NOT on "any URI-less leg": with no `TORTOISE_DB_URI`, or an unreachable one, the
-  # conftest session gates REFUSE the run before a test starts UNLESS
-  # `TORTOISE_TEST_CARVE_OUT` is set — the tier-2 legs and the carve-out job BOTH set it, so
-  # the refusal is the DEFAULT lane's shape, not every URI-less one
-  # (`tests/_embedded.py::_assert_p4_uri_required` returns early via `_carve_out_opted_in()`,
-  # and its own docstring names "carve-out job, tier-2 legs, e2e surfaces"). MEASURED on the
-  # default lane with no opt-in: 113 errors,
-  # `Failed: default pytest requires TORTOISE_DB_URI` / `no … database could be reached` —
-  # so the refusal is the DEFAULT lane's shape, NOT what a URI-less leg always does. ⛔ And
-  # the skip is not the carve-out JOB's private shape either: this file is not in the
-  # `carve_out` set, yet every non-`full` PR leg sets the flag and runs it URI-less, so the
-  # TIER-2 legs are where the 23-passed/90-skipped reading comes from — green-with-skips by
-  # design (#1436's skip half, whose
-  # container half is #5084 — the pair this file already uses for
+  # ⛔ NOT on "any URI-less leg": the two URI conditions part company here. With NO
+  # `TORTOISE_DB_URI` the P4 session gate REFUSES the run before a test starts UNLESS
+  # `TORTOISE_TEST_CARVE_OUT` is set — and the tier-2 legs and the carve-out job BOTH set it
+  # (`tests/_embedded.py::_assert_p4_uri_required` returns early via `_carve_out_opted_in()`;
+  # its docstring names "carve-out job, tier-2 legs, e2e surfaces"). MEASURED on the default
+  # lane with no opt-in: 113 errors, `Failed: default pytest requires TORTOISE_DB_URI`.
+  # ⛔ With a SET-BUT-UNREACHABLE URI it refuses REGARDLESS of the flag: the gate that fails
+  # there is `_assert_configured_db_answers`, which returns early only on
+  # `not _uri_set_supported() or not will_connect` and never consults the opt-in (its own
+  # message offers "unset `TORTOISE_DB_URI`" as the carve-out route). ⛔ The skip is not the
+  # carve-out JOB's private shape either: this file is not in the `carve_out` set, yet every
+  # non-`full` PR leg sets the flag and runs it URI-less, so the TIER-2 legs are where the
+  # 23-passed/90-skipped reading comes from — green-with-skips by design (#1436's skip half,
+  # whose container half is #5084 — the pair this file already uses for
   # `test_live_storage_fail_closed.py` below; ⛔ NOT #1349, which is this file's silent-DROP
   # citation, not its skip one).
   # The SECOND pin is `tortoise/mcp_auth.py`: the tag-arm fixture binds `_current_org_id` /
@@ -5216,16 +5216,18 @@ surfaces:
   # embedded carve-out lane (`TORTOISE_TEST_CARVE_OUT=1`) they SKIP rather than fail
   # (measured: 23 passed, 90 skipped), and a `durations` row is exactly what a verifier
   # reads INSTEAD of the test (the reason `test_consent_key_runbook_10488.py`'s row
-  # documents itself). ⛔ Not "any URI-less leg": with no `TORTOISE_DB_URI`, or an
-  # unreachable one, the conftest session gates REFUSE the run UNLESS
+  # documents itself). ⛔ Not "any URI-less leg", and the two conditions part company: with
+  # NO `TORTOISE_DB_URI` the P4 session gate REFUSES the run UNLESS
   # `TORTOISE_TEST_CARVE_OUT` is set — the tier-2 legs and the carve-out job BOTH set it
   # (`tests/_embedded.py::_assert_p4_uri_required` returns early via `_carve_out_opted_in()`);
   # measured on the default lane with no opt-in: 113 errors,
-  # `Failed: default pytest requires TORTOISE_DB_URI` — so the refusal is that DEFAULT
-  # lane's shape, not every URI-less one. ⛔ The skip is not the carve-out JOB's private
-  # shape: this file is not in `carve_out`, yet every non-`full` PR leg opts in by flag and
-  # runs it URI-less, so those TIER-2 legs read it green-with-skips BY DESIGN (measured 23
-  # passed / 90 skipped), and the full legs are where the four DB arms execute.
+  # `Failed: default pytest requires TORTOISE_DB_URI`. ⛔ With a SET-BUT-UNREACHABLE URI it
+  # refuses REGARDLESS of the flag — that failure is `_assert_configured_db_answers`, which
+  # returns early only on `not _uri_set_supported() or not will_connect` and never consults
+  # the opt-in. ⛔ The skip is not the carve-out JOB's private shape: this file is not in
+  # `carve_out`, yet every non-`full` PR leg opts in by flag and runs it URI-less, so those
+  # TIER-2 legs read it green-with-skips BY DESIGN (measured 23 passed / 90 skipped), and
+  # the full legs are where the four DB arms execute.
   # The predicate-matrix and census classes are pure Python. The weight below is still the
   # flat default, and the reading shows COST, never the skip.
   # ⛔ Neither registration makes the DB half EXECUTE: the `api` row's motivating arm is a
