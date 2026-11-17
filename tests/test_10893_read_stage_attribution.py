@@ -316,30 +316,78 @@ def test_every_return_after_the_retrieval_mark_reaches_the_terminal_stage():
             "returned"
         )
 def test_the_terminal_mark_never_covers_a_graph_round_trip():
-    """#10893 review F4: ``response`` claims "every stage finished, the answer is
-    late" — so it must not cover a graph fetch, or the instrument reports the
-    work as DONE at the moment the store is the blocking call.
+    """#10893 review F4: ``response`` claims "every marked stage finished … the
+    work is done, the answer is late" — so it must not cover a graph fetch, or
+    the instrument reports the work as DONE exactly when the store is the
+    blocking call.
 
-    Round 3 put the mark before ``_decorate_fallback_hits(...)`` inside a return
-    expression, which is evaluated AFTER the preceding statement: the whole
-    decoration fetch (``fetch_point_epistemic_state`` + the
-    ``subject_binding_available`` probe) ran with ``response`` open. Pinned
-    structurally: between each terminal mark and the NEXT ``return`` there must be
-    no ``graph`` token at all.
+    ⛔ THE PIN IS AST-SHAPED, AND THAT IS THE POINT. Round 4 shipped a STRING
+    window here (``source[start:source.find("return ", start)]``) and round 5
+    showed it was VACUOUS on the very defect it names: a ``return``'s expression
+    is evaluated AFTER the preceding statement, so in
+
+        _mark_read_stage(STAGE_RESPONSE)
+        return _with_read_status(_decorate_fallback_hits(snap_hits, graph))
+
+    the window stops at the ``return`` token and is whitespace only — the graph
+    call it is supposed to exclude sits *inside* the expression, past where the
+    scan ends. Measured: that string pin reported 0 failures on the surgically
+    reverted source. A pin that cannot fail on its own defect is worse than none.
+
+    So: for every ``STAGE_RESPONSE`` mark, take the NEXT statement in its own
+    enclosing block. If that statement is a ``return``, nothing reachable from its
+    value may mention ``graph`` — no ``Attribute``/``Name`` reference anywhere in
+    the expression tree. That is exactly the "decorate first, then mark" rule.
     """
-    source = _SDK.read_text(encoding="utf-8")
-    marks = [i for i in range(len(source))
-             if source.startswith("_mark_read_stage(STAGE_RESPONSE)", i)]
-    assert marks, "no terminal mark found — this pin would be vacuous"
-    for start in marks:
-        nxt = source.find("return ", start)
-        assert nxt != -1, "a terminal mark with no following return"
-        window = source[start:nxt]
-        assert "graph" not in window, (
-            "a graph round trip sits between the terminal mark and the return "
-            f"({window.strip()!r}) — a breach blocked in the store would be "
-            "published as 'the work is done, the answer is late'"
+    found, fn = _post_retrieval_returns()  # reuse the parse, ignore the returns
+    assert found, "tortoise_fts_query must parse for this pin to mean anything"
+
+    def is_terminal_mark(stmt):
+        return (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "_mark_read_stage"
+            and stmt.value.args
+            and isinstance(stmt.value.args[0], ast.Name)
+            and stmt.value.args[0].id == "STAGE_RESPONSE"
         )
+
+    def mentions_graph(expr):
+        for node in ast.walk(expr):
+            if isinstance(node, ast.Name) and node.id == "graph":
+                return True
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
+                    and node.value.id == "graph":
+                return True
+        return False
+
+    checked = 0
+    offenders = []
+    for node in ast.walk(fn):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            for i, stmt in enumerate(block):
+                if not is_terminal_mark(stmt):
+                    continue
+                nxt = block[i + 1] if i + 1 < len(block) else None
+                if not isinstance(nxt, ast.Return):
+                    continue
+                checked += 1
+                if nxt.value is not None and mentions_graph(nxt.value):
+                    offenders.append(nxt.lineno)
+    assert checked >= 4, (
+        f"only {checked} terminal-mark-then-return sites found — this pin is only "
+        "meaningful while the degraded arms exist"
+    )
+    assert not offenders, (
+        f"the :class:`Return` at line(s) {offenders} run a graph round trip with "
+        "`response` already open — a breach blocked in the store would be "
+        "published as 'the work is done, the answer is late'"
+    )
+
 
 
 
