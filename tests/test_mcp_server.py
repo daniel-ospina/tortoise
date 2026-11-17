@@ -1218,12 +1218,15 @@ class TestStdioEntrypointToolRegistration:
             # lanes that landed on main since compose as
             #   68 - 14 + 6 = 60   (lane B, WRITE/MUTATE containers)
             #   60 -  7 + 6 = 59   (lane C, SOURCES/MINE/SESSION)  = origin/main @ d741bd4
-            #   59 -  9 + 5 = 55   (THIS PR, READ/QUERY)           = measured at this head
-            # ⛔ Not the HTTP-filtered view: that one is 50 at this head
+            #   59 -  9 + 5 = 55   (READ/QUERY, #12951)            = origin/main @ 486f5ca2
+            #   55 -  7 + 0 = 48   (THIS PR, lane E's seven-door retirement: seven doors
+            #                       retired with NO container row added — their
+            #                       destinations were already live)
+            # ⛔ Not the HTTP-filtered view: that one is 43 at this head
             # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it), and
             # the two differ by the five `http_policy=False` rows. Writing one view's
             # base with the other's head lands on a number no population has.
-            assert len(names) >= 55, f"expected >=55 tools, got {len(names)}"
+            assert len(names) >= 48, f"expected >=48 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
             # #3883: tortoise_health is RETIRED — the consolidator is advertised
             # and the retired name still answers, with a warning, off the list.

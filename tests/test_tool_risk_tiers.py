@@ -159,8 +159,10 @@ class TestTheRiskAxis:
         #   reading-tier (`tortoise_search_knowledge`, `tortoise_list_knowledge`,
         #   `tortoise_check_confidence`, `tortoise_explore_connections`,
         #   `tortoise_review_link_candidates`; `tortoise_graph_overview` was already live),
-        #   so 49 + 5 = 54 here, and the served census is 55 live + 53 retired = 108 (the
-        #   retired doors stay SERVED as shims and keep their tier).
+        #   so 49 + 5 = 54 here, and the served census is 48 live + 60 retired = 108 (the
+        #   retired doors stay SERVED as shims and keep their tier, so a retirement MOVES a
+        #   row between these two halves and leaves the TOTAL unchanged — which is why the
+        #   total cannot notice a stale split, and this line has to state both halves).
         assert len(reading) == 54, sorted(reading)
         assert len(served()) == 108, sorted(e.name for e in served())
 
@@ -702,6 +704,21 @@ IDENTITY_UPSERT_OVERWRITERS = (
     "tortoise_mine_knowledge_from_session",
 )
 
+#: The ADVERTISED subset of the family, for the assertions read back off the SERVED
+#: `tools/list`. `_list_tools()` cannot answer for a retired-forward name — it is not
+#: in the listing — so a client-facing hint assertion must name the entry a client
+#: actually receives. #11609 door-retirement wave retired `tortoise_create_subject` /
+#: `tortoise_create_object` FORWARD into `tortoise_create_entity` (the same write path,
+#: same `destructive` tier), which is exactly the replacement lane C recorded when it
+#: retired `tortoise_mine_conversations` into its mining container. The two retired
+#: aliases keep their tier/hint/permission assertions in the tuple above: they are
+#: still SERVED (#3883), and "is the tier right" and "what does the listing say" are
+#: different questions that this file asks separately.
+IDENTITY_UPSERT_OVERWRITERS_LISTED = (
+    "tortoise_create_entity",
+    "tortoise_mine_knowledge_from_session",
+)
+
 
 class TestTheIdentityUpsertFamilyKeepsItsConfirmation:
     """A repeat call applies values over an existing node, so these may not claim
@@ -738,7 +755,7 @@ class TestTheIdentityUpsertFamilyKeepsItsConfirmation:
 
         tools = asyncio.run(_tools())
         assert tools, "served tool list is empty — the check would be vacuous"
-        for name in IDENTITY_UPSERT_OVERWRITERS:
+        for name in IDENTITY_UPSERT_OVERWRITERS_LISTED:
             ann = tools[name].annotations
             assert ann is not None, f"{name}: no annotations on the served tool"
             assert ann.destructiveHint is True, (

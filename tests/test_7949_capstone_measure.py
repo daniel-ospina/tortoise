@@ -5980,9 +5980,9 @@ _EPIC_CITE_DOCS = {
     # is "numbers rot" was itself the one block in this PR nothing read. ⛔ NINE IS A CELL
     # COUNT, NOT A SENTENCE COUNT: eight are in the `Measured at` sentence and `:1194` is in the sentence
     # BEFORE it on the same markdown line ("…is STAMP-bound (`:1186` is the `corpus = {…}`
-    # line here; the frozen literal is at `:1194`)"). Three are pinned on the two rows
-    # below (`19341`/`19448` here, `sdk.py:10037` on its own row because a row carries ONE
-    # source key), `10353`/`10406` on their OWN `05-verify.md` row (round 6 — NOT by the
+    # line here; the frozen literal is at `:1194`)"). Two are pinned on the rows below
+    # (`19584`/`19691` here), and the `sdk.py` three (`10506`/`10533`/`10586`) sit on their
+    # OWN `05-verify.md` row (round 6 — NOT by the
     # `subject_binding_available` rows that predate this PR: those scope `00-plan.md` and
     # `03-test-design.md`, and a row resolves only against the `doc_label` it names, so they
     # cannot read this document — citing them as coverage is how a dropped row goes unseen),
@@ -6236,17 +6236,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
         # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`, the
         # Pi leg's unrecorded-outcome stamp) then added 16 lines above both `def`s
-        # (`:1007` -> `:1023`), and `#13039`'s `7520c6dafd` added 7 more (`-> :1030`), neither
-        # re-deriving a cite, so the pair is **`:1030`/`:1022`** here — measured at this head
-        # (`grep -nF 'export function postCapture(' …`) and re-measured at the head this
-        # de-conflict merges at (`0449273b`), which still reads `:1023`/`:1015`; repaired
+        # (`:1007` -> `:1023`), and `#13039`'s `7520c6dafd` added 7 more (`-> :1030`);
+        # neither re-derived a cite, so `:1023`/`:1015` is the pair's value at
+        # `0449273b` and the pin HERE is **`:1030`/`:1022`**, re-derived by CONTENT on
+        # this tree (`grep -n 'export function postCapture(\|export function postInstallProbe('
+        # tortoise/pi-hooks/tortoise-capture.ts` -> 1030 / 1022, still 8 apart); repaired
         # at this head rather than carried, because a red on `main` blocks every head.
-        # ⛔ THAT REPAIR IS PAIR-SCOPED: it re-points the `pi_hooks` pair only, and the
-        # rows above it are pins on files under `tortoise/` (`sdk.py`, `search_engine.py`,
-        # `pack_registry.py`), which this branch does not touch — `git diff --stat`
-        # `origin/main...HEAD -- tortoise/` is EMPTY. Read "repaired" as "this pair is
-        # re-pointed", never as a claim about any other row. (Written at `b6003e180e`,
-        # when the `sdk` rows sat one line behind; `main` re-derived them — GREEN here.)
+        # ⛔ THAT REPAIR IS PAIR-SCOPED: it re-points the `pi_hooks` pair only; the rows
+        # above pin `tortoise/sdk.py`, `search_engine.py`, `pack_registry.py` — THOSE THREE,
+        # not the directory: `git diff --stat origin/main...HEAD -- <those>` is EMPTY (so is
+        # `-- tortoise/` since the merge took `main`'s identical `tool_registry.py` fix).
+        # "Repaired" means this pair is re-pointed, never a claim about any other row.
         # The two `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
@@ -6254,9 +6254,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `6916a6cd89` `:957` is a comment and that list is at `:1009`. Re-open the
         # line; the row is held by CONTENT, so a wrong pair reds rather than
         # silently resolving.
-        # RE-DERIVED by CONTENT on the merged tree (the de-conflict of `main` into
-        # `#12295`): `grep -n 'export function postCapture(\|export function postInstallProbe('
-        # tortoise/pi-hooks/tortoise-capture.ts` -> 1030 / 1022, still 8 apart at `main`. The
+        # RE-DERIVED by CONTENT on the merged tree (re-measured at THIS head):
+        # `grep -n 'export function postCapture(\|export function postInstallProbe('
+        # tortoise/pi-hooks/tortoise-capture.ts` -> 1030 / 1022, still 8 apart. The
         # `:1007`/`:999` pair above is this pin's own head-bound record of `6916a6cd89`
         # and is RED here, measured: main's tortoise-capture.ts carries +23 lines above
         # both `def`s that neither of that row's two sides moved.
@@ -6403,7 +6403,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("19716", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
-        # re-states `hosted_api.py:19589` (`19558` when this note was written, the same guard read at an older head), so it is
+        # re-states `hosted_api.py:19691` (`19558` when this note was written, the same guard read at an older head), so it is
         # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
         # merger to re-point line 82, which is exactly how 236 comes to assert the old
         # number while 82 moves. Unpinned until the review reverted it green. Only the
@@ -6441,8 +6441,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("1418", "| **D6** | **Two distinct connection sets**"),
         ), "extractor_v4_arch"),
         # ⛔ THE TWO THIS-HEAD NUMBERS TWO EARLIER CUTS LEFT UNREAD (#12569 review), and the
-        # count that hid one of them. D5's row states NINE distinct this-head numbers: `19482`,
-        # `19589`, `10326`, `10353`, `10406`, `1186`, `1194`, `1400`, `1418` (an earlier cut
+        # count that hid one of them. D5's row states NINE distinct this-head numbers: `19584`,
+        # `19691`, `10506`, `10533`, `10586`, `1186`, `1194`, `1400`, `1418` (an earlier cut
         # listed a pre-move `sdk.py` triple instead — `10225`/`10252`/`10305` — which the doc no
         # longer states anywhere: `grep -c` over `05-verify.md` -> 0 for each. A count taken over
         # the doc must read the current values off the pins, not off this list). The

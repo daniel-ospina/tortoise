@@ -77,6 +77,133 @@ def _decode(messages: list) -> dict:
     return json.loads(messages[-1]["body"].decode())
 
 
+def _fts_query_fn():
+    """``ast.FunctionDef`` for ``tortoise_fts_query`` in ``tortoise/sdk.py``.
+
+    Both store-window pins parse the same function; parsing it in one place keeps
+    them from drifting into different notions of what the read path IS.
+    """
+    tree = ast.parse(_SDK.read_text(encoding="utf-8"))
+    return next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "tortoise_fts_query")
+
+
+def _mentions_store(node) -> bool:
+    """Does ``node`` contain a reference that can reach FalkorDB?
+
+    Two shapes, both live in ``tortoise_fts_query`` today::
+
+        _decorate_fallback_hits(snap_hits, graph)   # the `graph` handle
+        points = self.query(kind=kind, ...)         # a handle-based call
+
+    The first cut of the terminal pin matched only the ``graph`` handle, which
+    left the second shape a silent blind spot (round-9 review P3: a mutant that
+    inserted ``self.query(kind="Point")`` between a terminal mark and its return
+    left every pin GREEN). Matching the ATTRIBUTE name ``query`` — on ANY base,
+    so ``self.query(...)`` and ``graph.query(...)`` are both caught — closes it.
+
+    ⛔ THIS IS SHARED BY BOTH store-window pins (round-10 review P3, #13174).
+    The fusion pin below was written with a literal ``"graph.query(" in window``
+    test, so the same defect re-introduced through ``self.query(...)`` inside the
+    fusion window was invisible to it while its sibling pin caught that spelling.
+    One detector for both pins, or the next hand-based spelling gets a pass in
+    exactly one of them.
+
+    NOT covered, and stated so a green run is not read as complete: an alias
+    binding (``g = graph``) and a store call made inside a callee the span merely
+    hands a handle to — a name-based walk can resolve neither.
+    """
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id == "graph":
+            return True
+        if isinstance(child, ast.Attribute):
+            if isinstance(child.value, ast.Name) and child.value.id == "graph":
+                return True
+            # `self.query(...)` / `graph.query(...)` — a store round trip however
+            # the handle was obtained.
+            if child.attr == "query":
+                return True
+    return False
+
+
+def _mark_args_name(stmt) -> str | None:
+    """The stage NAME of a ``_mark_read_stage(STAGE_X)`` statement, else None."""
+    if (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Call)
+        and isinstance(stmt.value.func, ast.Name)
+        and stmt.value.func.id == "_mark_read_stage"
+        and stmt.value.args
+        and isinstance(stmt.value.args[0], ast.Name)
+    ):
+        return stmt.value.args[0].id
+    return None
+
+
+def _enclosing_path(root, target):
+    """``[(block, index, container)]`` from OUTERMOST down to ``target``.
+
+    ``container`` is the statement holding the block (``None`` for the outermost
+    entry), which is what lets a caller walk back OUT through the blocks a
+    statement is nested in.
+    """
+    path: list = []
+
+    def walk(node, prefix):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            for i, stmt in enumerate(block):
+                if stmt is target:
+                    path.extend([*prefix, (block, i, None)])
+                    return True
+                if walk(stmt, [*prefix, (block, i, stmt)]):
+                    return True
+        return False
+
+    walk(root, [])
+    return path
+
+
+def _span_until_next_mark(fn, mark_name: str) -> list:
+    """Statements that run AFTER ``_mark_read_stage(<mark_name>)``, up to but not
+    including the next ``_mark_read_stage(...)`` in PROGRAM ORDER.
+
+    Program order crosses block boundaries: the fusion mark sits inside an
+    ``if`` arm whose block ENDS while ``fusion`` is still open, and the mark that
+    closes it is a sibling of that ``if``. A same-block scan would therefore see
+    a whitespace-only window and read as green — the round-4 blindness, one layer
+    down. So the walk continues in each ENCLOSING block after the statement that
+    contains the mark.
+
+    Deliberately NOT a full control-flow model, and stated so a green run is not
+    read as more than it is: a ``_mark_read_stage`` nested inside a deeper block
+    does not terminate the span (the span keeps going, so the failure mode is
+    MORE store calls in the window, never fewer), and statements reachable only
+    through a branch are not descended into.
+    """
+    sites = [n for n in ast.walk(fn) if _mark_args_name(n) == mark_name]
+    assert len(sites) == 1, (
+        f"expected exactly one `_mark_read_stage({mark_name})` in tortoise_fts_query, "
+        f"found {len(sites)} — this pin cannot say which window is the stage"
+    )
+    path = _enclosing_path(fn, sites[0])
+    assert path, "the mark site must be reachable from the function node"
+
+    after: list = list(path[-1][0][path[-1][1] + 1:])
+    for depth in range(len(path) - 2, -1, -1):
+        block, index, _container = path[depth]
+        after.extend(block[index + 1:])
+
+    span: list = []
+    for stmt in after:
+        if _mark_args_name(stmt) is not None:
+            return span
+        span.append(stmt)
+    return span
+
+
 # ── 1. the shared-mutable-object property (the load-bearing one) ────────────
 
 def test_a_mark_inside_a_copied_context_reaches_the_transport_seam():
@@ -187,19 +314,270 @@ def test_the_graph_ordering_branch_still_reaches_the_terminal_stage():
     assert source.index("_mark_read_stage(STAGE_ORDERING)") < branch
 
 
+def _post_retrieval_returns():
+    """``(returns, fn)`` — every ``return`` in ``tortoise_fts_query``, paired with
+    the nearest ``_mark_read_stage`` in **its own block**, plus the function node.
+
+    The CALLER filters to the post-retrieval ones (a line comparison against the
+    ``retrieval`` mark): the pre-retrieval returns are the argument guards and
+    carry no retrieval work.
+
+    The block matters (round-3 review F3 discipline): a global "nearest preceding
+    mark" scan passes when a *different arm's* terminal mark sits earlier in the
+    function, so deleting one arm's mark still read as green. A return's own
+    enclosing block is what actually decides which stage is open when it runs.
+
+    Nested functions are excluded: a ``return`` inside a closure is not a return
+    of the read path.
+    """
+    tree = ast.parse(_SDK.read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "tortoise_fts_query")
+
+    def mark_name(stmt):
+        if isinstance(stmt, ast.Expr):
+            call = stmt.value
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id == "_mark_read_stage" and call.args
+                    and isinstance(call.args[0], ast.Name)):
+                return call.args[0].id
+        return None
+
+    def enclosing_block(stmt, parent):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(parent, field, None)
+            if isinstance(block, list) and any(s is stmt for s in block):
+                return block
+        return None
+
+    found: list[tuple[int, str | None]] = []
+
+    def visit(node):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if isinstance(child, ast.Return):
+                block = enclosing_block(child, node)
+                before = [mark_name(s) for s in (block or [])[: (block.index(child) if block else 0)]]
+                before = [name for name in before if name]
+                found.append((child.lineno, before[-1] if before else None))
+            visit(child)
+
+    visit(fn)
+    return found, fn
+
+
 def test_the_post_retrieval_ordering_pass_has_its_own_stage():
-    """The graph rerank reads the graph, so it cannot be charged to a stage that
-    already returned (review F1). ``ep_annotation`` must close before it."""
-    assert STAGE_ORDERING in STAGE_SET
-    assert STAGE_ORDERING != STAGE_EP_ANNOTATION
-    timeline = begin()
-    with request_stages(timeline):
-        mark(STAGE_EP_ANNOTATION)
-        mark(STAGE_ORDERING)
-        spent = timeline.spent_ms()
-    assert STAGE_EP_ANNOTATION in spent, "the annotation read must be closed by the ordering mark"
-    assert STAGE_ORDERING not in spent
-    assert timeline.current() == STAGE_ORDERING
+    """The ordering pass is bracketed BETWEEN ``ep_annotation`` and the graph
+    branch, not merely somewhere in the function (round-3 review F3).
+
+    Round 2 pinned only ``index(ORDERING) < index('if order_by == "graph":')``,
+    which holds equally if ``ordering`` is marked where ``ep_annotation`` is —
+    i.e. the ordering RELATIONSHIP between them, the entire content of finding
+    F1, was unpinned. Swapping the two marks (reintroducing the defect) left
+    every row green; this pin reddens.
+    """
+    source = _SDK.read_text(encoding="utf-8")
+    annotation = source.index("_mark_read_stage(STAGE_EP_ANNOTATION)")
+    ordering = source.index("_mark_read_stage(STAGE_ORDERING)")
+    branch = source.index('if order_by == "graph":')
+    assert annotation < ordering < branch, (
+        "ep_annotation must close before the ordering pass opens, and the "
+        "ordering pass must be open before the graph branch returns"
+    )
+
+
+def test_fusion_brackets_only_the_rrf_call_and_no_graph_round_trip():
+    """#10893 review F1: ``fusion`` is documented as PURE CPU.
+
+    At round 2 it was opened and left open across ~10 graph round trips (recency
+    weights, kind/status/claim filters, the echo fold, the rerank pool fetch), so
+    a breach inside the ``exclude_status`` query published ``stage=fusion`` with
+    ``retrieval`` already closed and healthy — the operator rules out the graph
+    and blames the CPU. The window is pinned structurally: between the fusion
+    mark and the next mark it must contain ``rrf_fusion(`` and NO store round
+    trip.
+
+    ⛔ THE WINDOW IS AST-SHAPED AND USES THE SHARED DETECTOR (round-10 review P3,
+    #13174). It was a string window with a literal ``"graph.query(" in window``
+    test, so the same defect re-introduced through ``self.query(...)`` — a live
+    spelling in this very function, ``sdk.py:43880`` — stayed GREEN. The sibling
+    terminal pin was hardened against exactly that spelling in round 9; this one
+    was not. Both now go through ``_mentions_store``, so a hand-based call cannot
+    be invisible to one pin and caught by the other.
+    """
+    fn = _fts_query_fn()
+    span = _span_until_next_mark(fn, "STAGE_FUSION")
+    assert span, (
+        "nothing runs between the fusion mark and the next mark — the RRF call "
+        "itself is not bracketed by `fusion` any more"
+    )
+    assert any(
+        isinstance(n, ast.Name) and n.id == "rrf_fusion"
+        for stmt in span for n in ast.walk(stmt)
+    ), "fusion must bracket the RRF call itself"
+    offenders = [stmt.lineno for stmt in span if _mentions_store(stmt)]
+    assert not offenders, (
+        f"a store round trip runs with `fusion` already open at line(s) {offenders} "
+        "— a breach there would be published as 'the CPU fusion is stuck' while "
+        "`retrieval` reads closed and healthy"
+    )
+
+
+def test_every_return_after_the_retrieval_mark_reaches_the_terminal_stage():
+    """#10893 review F2: ``response``'s contract says EVERY return path reaches it.
+
+    Round 2 marked only the graph branch, so four degraded/failure returns
+    (relevance floor, TF-IDF snapshot tier, legacy fallback, no_fallback) left
+    ``retrieval`` open — a stage that had already returned (``degradation_chain``
+    is above them). Those arms are reachable in the incident class this PR is
+    about: they are entered when every leg failed, which is what a store stall
+    or a per-leg deadline produces.
+
+    The pin is block-scoped: each post-retrieval return must carry a
+    ``STAGE_RESPONSE`` mark in its OWN enclosing block. A global nearest-mark
+    scan would pass on a mutant that deletes one arm's mark, because another
+    arm's mark sits earlier in the function — verified: that weaker version
+    stayed green, this one reddens.
+    """
+    found, fn = _post_retrieval_returns()
+    retrieval_mark = min(
+        n.lineno for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "_mark_read_stage" and n.args
+        and isinstance(n.args[0], ast.Name) and n.args[0].id == "STAGE_RETRIEVAL"
+    )
+    post = [(line, name) for line, name in found if line > retrieval_mark]
+    assert len(post) >= 4, (
+        "expected the degraded/failure returns behind the retrieval mark; found "
+        f"only {post} — this pin is only meaningful while they exist"
+    )
+    for line, name in post:
+        assert name == "STAGE_RESPONSE", (
+            f"tortoise_fts_query returns at line {line} with {name!r} in its own "
+            "block — a breach there would be blamed on a stage that had already "
+            "returned"
+        )
+
+
+def test_the_terminal_mark_never_covers_a_graph_round_trip():
+    """#10893 review F4: ``response`` claims "every marked stage finished … the
+    work is done, the answer is late" — so it must not cover a graph fetch, or
+    the instrument reports the work as DONE exactly when the store is the
+    blocking call.
+
+    ⛔ THE PIN IS AST-SHAPED, AND THAT IS THE POINT. Round 4 shipped a STRING
+    window here (``source[start:source.find("return ", start)]``) and round 5
+    showed it was VACUOUS on the very defect it names: a ``return``'s expression
+    is evaluated AFTER the preceding statement, so in
+
+        _mark_read_stage(STAGE_RESPONSE)
+        return _with_read_status(_decorate_fallback_hits(snap_hits, graph))
+
+    the window stops at the ``return`` token and is whitespace only — the graph
+    call it is supposed to exclude sits *inside* the expression, past where the
+    scan ends. Measured: that string pin reported 0 failures on the surgically
+    reverted source. A pin that cannot fail on its own defect is worse than none.
+
+    So: for every ``STAGE_RESPONSE`` mark, take everything from the NEXT statement
+    in its own enclosing block up to and including the statement that LEAVES that
+    block (a ``return``/``raise``). Nothing in that span may mention ``graph`` —
+    no ``Attribute``/``Name`` reference anywhere in its expression tree. That is
+    exactly the "decorate first, then mark" rule.
+
+    ⛔ THE SPAN, NOT THE RETURN'S VALUE. Checking only a ``return`` that
+    *immediately* follows the mark leaves a second blind spot of the same family:
+
+        _mark_read_stage(STAGE_RESPONSE)
+        graph.query("RETURN 1")
+        return _with_read_status(hits)
+
+    is GREEN under a value-only check (the next statement is not a ``Return``, so
+    the site is skipped), while it publishes ``response`` over a store round trip
+    just as surely as the round-3 shape did. Round 4's string window happened to
+    catch it; the AST rewrite must not trade one blind spot for another, so the
+    whole mark-to-exit span is walked.
+
+    ⛔ A MARK THAT CLOSES ITS BLOCK IS NOT A COVERED SITE, AND IS NOT SILENTLY
+    SKIPPED. When a ``STAGE_RESPONSE`` mark is the LAST statement of a block,
+    execution continues in the ENCLOSING block with ``response`` still open, so
+    the time it covers is real — this pin just does not model that shape (the
+    span it walks has no next statement to start from). A bare ``continue``
+    would make that a blind spot of exactly the family the rounds above closed:
+    a shape the pin cannot see, reading as ``green``. So the sites are counted
+    and asserted empty, naming their lines — no site has that shape today (all
+    six mark-then-leave), and if one appears this reddens for a human to extend
+    the walk instead of under-covering it.
+
+    ⛔ WHAT THE ROUND-TRIP TEST RECOGNISES, AND WHAT IT DOES NOT (round-9 review
+    P3, measured). It matched only a ``Name``/``Attribute`` rooted at the local
+    ``graph`` parameter, but the method also reaches the store through
+    ``self.query(...)`` — so the SAME defect re-introduced through a handle-based
+    call would have stayed green. Both shapes are now recognised: a mutant that
+    inserts ``self.query(kind="Point")`` between a terminal mark and its return
+    is GREEN under the graph-only test and RED under this one. The detector is
+    now ``_mentions_store`` at module scope — the SIBLING fusion pin uses the
+    same one (round-10 review P3, #13174), so the two cannot disagree about what
+    a store round trip is — and the shapes it still cannot resolve are stated
+    there, once.
+    """
+    found, fn = _post_retrieval_returns()  # reuse the parse, ignore the returns
+    assert found, "tortoise_fts_query must parse for this pin to mean anything"
+
+    def is_terminal_mark(stmt):
+        return _mark_args_name(stmt) == "STAGE_RESPONSE"
+
+    checked = 0
+    block_closing = []
+    offenders = []
+    for node in ast.walk(fn):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            for i, stmt in enumerate(block):
+                if not is_terminal_mark(stmt):
+                    continue
+                nxt = block[i + 1] if i + 1 < len(block) else None
+                if nxt is None:
+                    # Last statement of its block: the mark DOES cover time (the
+                    # enclosing block keeps running with `response` open), but
+                    # this pin has no span to walk from here. Record the site and
+                    # redden below rather than skipping it silently.
+                    block_closing.append(stmt.lineno)
+                    continue
+                # Every statement between the mark and the block's EXIT runs with
+                # `response` open — the exit's argument list included, because a
+                # `return`'s expression is evaluated after the mark. `exit_at`
+                # bounds the span; without an exit the tail of the block is the
+                # span (the time is still charged to `response`).
+                exit_at = next(
+                    (j for j in range(i + 1, len(block))
+                     if isinstance(block[j], (ast.Return, ast.Raise))),
+                    None,
+                )
+                span = block[i + 1: (exit_at + 1 if exit_at is not None else len(block))]
+                if isinstance(nxt, ast.Return):
+                    checked += 1  # the population guard counts the export arms
+                if any(_mentions_store(s) for s in span):
+                    offenders.append(nxt.lineno)
+    assert checked >= 4, (
+        f"only {checked} terminal-mark-then-return sites found — this pin is only "
+        "meaningful while the degraded arms exist"
+    )
+    assert not block_closing, (
+        f"the STAGE_RESPONSE mark at line(s) {block_closing} is the LAST statement "
+        "of its block — `response` stays open in the enclosing block, so this pin "
+        "cannot see the span that follows. Extend the walk to the enclosing "
+        "block's exit instead of letting the site be skipped"
+    )
+    assert not offenders, (
+        f"the block exiting at line(s) {offenders} runs a graph round trip with "
+        "`response` already open — a breach blocked in the store would be "
+        "published as 'the work is done, the answer is late'"
+    )
+
+
 
 
 def test_the_fold_guard_is_observable_while_the_restage_is_still_open():
@@ -245,6 +623,15 @@ def test_the_vocabulary_is_a_closed_set_of_named_stages():
     # non-member is a silent no-op, which is exactly how an instrument dies.
     assert {STAGE_PRE_HANDLER, STAGE_EMBED_GET, STAGE_EMBED_ENCODE,
             STAGE_RETRIEVAL, STAGE_RESPONSE} <= STAGE_SET
+    # The two stages this PR's review rounds added, each for a defect the
+    # original vocabulary could not express: `ordering` (the graph rerank is a
+    # read, not annotation) and the correction that the EP decoration read is
+    # not the last graph round trip. A stage that is not a member is a silent
+    # no-op at its call site, so membership is asserted, not assumed.
+    assert STAGE_ORDERING in STAGE_SET
+    assert STAGE_EP_ANNOTATION in STAGE_SET
+    assert STAGES.index(STAGE_EP_ANNOTATION) < STAGES.index(STAGE_ORDERING) \
+        < STAGES.index(STAGE_RESPONSE), "the timeline order is the read order"
 
 
 # ── 3. the boundary: nothing bound ⇒ nothing changes ───────────────────────
