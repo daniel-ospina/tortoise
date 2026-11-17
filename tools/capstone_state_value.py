@@ -409,6 +409,27 @@ class TargetRefused(RuntimeError):
     """The target cannot be used. Never scored as a product defect."""
 
 
+def _served_row(r: dict) -> dict:
+    """One served row, projected for the record — in ONE place so the rule can be pinned.
+
+    `redact=False` is load-bearing (#13303 cycle 8/9): this text is the PRODUCT's own answer
+    and it travels into the judge packet, where the credential patterns match ordinary
+    business prose (`password rotation policy was superseded` → `password <redacted> …`).
+    A reader would then score a payload the instrument had already altered. It is a function
+    because the alternatives — a pin that inspects `search()`'s source, or one that builds a
+    `Call` by hand — prove nothing.
+    """
+    return {
+        "id": r.get("id"),
+        "what": _cut(r.get("content") or r.get("snippet") or "", 120, redact=False),
+        "kind": r.get("point_kind"),
+        "status": r.get("status"),
+        "score": (r.get("scores") or {}).get("rrf"),
+        "match": r.get("match_source"),
+        "supersedes": [s.get("id") for s in (r.get("supersedes") or [])],
+    }
+
+
 class LocalTarget:
     """A local instance of the product: the SDK against a throwaway FalkorDB.
 
@@ -626,7 +647,7 @@ class LocalTarget:
         served = [
             {
                 "id": r.get("id"),
-                "what": _cut(r.get("content") or r.get("snippet") or "", 120, redact=False),
+                "what": _served_row(r)["what"],
                 "kind": r.get("point_kind"),
                 "status": r.get("status"),
                 "score": (r.get("scores") or {}).get("rrf"),
@@ -2212,8 +2233,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     # flag-keyed guard let the documented reproduction command replace the committed
     # baseline with a non-result while the README said that could not happen. Measured:
     # `--judge fresh` with `--judge-cmd true` changed all three committed files.
-    # A board that carries real `blocked` rows is still publishable: `blocked` is a measured
-    # outcome, `unjudged` is not.
+    # `blocked` is refused ALONGSIDE `unjudged`, deliberately (#13303 cycle 9): `blocked`
+    # means the run could not ask a question, so the board is not a baseline a later run can
+    # be compared against. An earlier comment here said the opposite ("a board that carries
+    # real `blocked` rows is still publishable") and contradicted the code three lines below
+    # it — `may_publish` delegates to `exit_code`, which returns 1 when `blocked > 0`. The
+    # code, this comment and the README now state one rule.
     publishing = out_dir.resolve() == DEFAULT_OUT.resolve()
 
     # WHERE the verdicts go is decided HERE, before any bundle write (#13303 cycle 10):
@@ -2264,11 +2289,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not may_publish(board, out_dir):
         if not args.json:
             print(render_markdown(board))
+        if args.drop_graph:
+            # Otherwise a refused run leaves the graph it just ingested behind.
+            print(f"capstone: cleanup — {target.drop()}", file=sys.stderr)
         print(
             f"\ncapstone: REFUSING to publish this board into the evidence bundle "
-            f"{DEFAULT_OUT} — the tally is {board['tally']}, so it is not a usable "
-            "baseline. Nothing was written; point --out at a scratch directory to "
-            "inspect it.",
+            f"{DEFAULT_OUT} — the tally is {board['tally']}, so it is not a complete "
+            "baseline. NOTHING was written into the bundle; point --out at a scratch "
+            "directory to inspect it.",
             file=sys.stderr,
         )
         return 1
