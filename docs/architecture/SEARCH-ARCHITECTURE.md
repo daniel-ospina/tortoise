@@ -618,19 +618,19 @@ of a demoted node by design; what it cannot do is mint one as a candidate). So t
 invalidation hook (Finding 6, `#13123`), not proof that no compensating leg could ever exist. The
 stronger reading would need a run in which a demotion is performed WITHOUT that invalidation.
 
-**No static eviction policy protects the quality — and recency is UNTESTED here.** The cold-tail policy is
-**not separated from a seeded random control** by this measurement — recall@3 46.0 vs 46.3 at 0.50 and
-81.0 vs 81.7 at 0.90 — because a demoted node is unretrievable whatever reason selected it. ⚠️ The two
-are not identical at the low coverages (20.3 vs 25.3 at 0.25, 8.7 vs 12.0 at 0.10), where the realized
-resident share differs too, so "agree at every coverage" overstates it; the verdict does not rest on
-that agreement but on `recall@k <= resident_share` and `found_deep_of_demoted == 0`, which hold in every
-arm of both policies.
+**No static eviction policy is a lever — and recency is UNTESTED here.** A smarter static ranking recovers
+only a few percent of what the window costs: the orders differ by at most 5.0 points on any gated metric
+(recall@3 46.0 vs 46.3 at 0.50; 81.0 vs 81.7 at 0.90), the cold-tail order is **ahead** on some cells
+(`found_deep` 51.7 vs 49.7 at 0.50) and **behind** where the resident set is small (20.3 vs 25.3 at 0.25)
+— against a 42.3-to-47.3-point collapse, so the choice of static order moves nothing that matters.
+⛔ Do not read that as "the orders are indistinguishable": they are not, and "agree at every coverage"
+was an error this record carried for several revisions.
 
 ⛔ **The order tested is not recency.** On this corpus the cold-tail policy is a **static popularity
 count** — there is no read ledger to build a recency policy from — so §7's actual claim, that *recency*
 beats static degree ranking, was **NOT re-tested by M2** and this section does not overturn it on the
-retrieval axis. What the measurement bounds is the **static** axis: no smarter static ranking buys back
-quality. (The policy table's hit-rate result is a separate matter; recency's own effect on retrieval
+retrieval axis. What the measurement bounds is the **static** axis: no static re-ranking recovers more
+than a few percent of the loss. (The policy table's hit-rate result is a separate matter; recency's own effect on retrieval
 quality remains open, and is M3/M5's.)
 
 **The loss carries no signal.** `extractor_v2._fts_rows` — the capture path — requests neither

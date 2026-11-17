@@ -539,26 +539,38 @@ def test_the_half_coverage_row_matches_the_record(artifact):
     assert half["found_deep"] == pytest.approx(half["resident_share"], abs=5e-4)
 
 
-def test_the_policy_does_not_protect_quality(artifact):
-    """§9.1: the cold-tail order never BUYS quality back from a random control.
+def test_the_policy_choice_is_not_a_lever(artifact):
+    """No static order recovers more than a few percent of what the window costs.
 
-    ⛔ The claim is not equality. `tail` and `random` DO diverge where the
-    resident set is small — an earlier cut of the record said "indistinguishable
-    at every coverage", and this test asserted only the 0.50 cell, so it could
-    not catch that the sentence was false. What the conclusion needs is that the
-    two orders never separate by enough to change it: the divergence is a
-    handful of points at every coverage, against gaps an order of magnitude
-    larger.
+    ⛔ This pin was green on the exact claim it was named for, and that claim was
+    FALSE. It read only `recall@3` with a 0.06 tolerance — the largest `recall@3`
+    divergence is 5.0 pp, inside it — and never read `found_deep`, `recall@10` or
+    `recall@15`, which is where `tail` is AHEAD of `random`: +2.00 pp on
+    `found_deep` at 0.50 (that metric's band is 0.33 pp) and +2.33 pp on `:Point`
+    `recall@10` at 0.90. "Never buys back" is false; what is true, and what the
+    verdict needs, is that the largest difference between the orders is a small
+    fraction of the collapse both of them suffer.
     """
+    metrics = ("found_deep", "recall@3", "recall@5", "recall@10", "recall@15")
+    cap = 0.06
+    worst = 0.0
     for pop in ("object", "point"):
         arms = _arms(artifact, pop)
         for cov in ("0.9", "0.75", "0.5", "0.25", "0.1"):
-            tail = arms[f"tail@{cov}"]["recall@3"]
-            rand = arms[f"random@{cov}"]["recall@3"]
-            # 6 points is generous against the observed spread and still far
-            # below any divergence that would make "the policy is not a lever"
-            # false: a re-ranking that bought back ~10 points reds this.
-            assert abs(tail - rand) <= 0.06, (pop, cov, tail, rand)
+            for m in metrics:
+                d = abs(arms[f"tail@{cov}"][m] - arms[f"random@{cov}"][m])
+                worst = max(worst, d)
+                # a re-ranking that bought back any material share reds here
+                assert d <= cap, (pop, cov, m, d)
+    # …and the thing that DOES dwarf it, which is what the verdict rests on.
+    # Measured: the largest divergence is 5.0 pp against a 48.3-point collapse —
+    # just over a tenth — so 15 % is the ceiling and a re-ranking reaching a
+    # quarter of the loss would red this.
+    complete = _arms(artifact, "object")["complete"]
+    half = _arms(artifact, "object")["tail@0.5"]
+    collapse = complete["found_deep"] - half["found_deep"]
+    assert collapse >= 0.42, collapse
+    assert worst < 0.15 * collapse, (worst, collapse)
 
 
 def test_a_demoted_claim_query_returns_another_claim_not_an_empty_answer(artifact):
@@ -682,6 +694,18 @@ def _derived_figures(artifact: dict) -> set[str]:
     out.add(f"{tail['recall@3'] / tail['resident_share'] * 100:.1f}")
     # the claim leg's unreachable share, complete
     out.add(f"{(1 - artifact['populations']['point']['arms']['complete']['found_deep']) * 100:.1f}")
+    # ⛔ The tail-vs-random divergences the record quotes in either direction.
+    # A cross-arm difference is a figure the artifact IMPLIES just as much as the
+    # vs-`complete` deltas above. The record now compares the two orders
+    # explicitly — including where `tail` is AHEAD, which is what makes "never
+    # buys back" false — so these are derived rather than whitelisted.
+    for pop in ("object", "point"):
+        arms = artifact["populations"][pop]["arms"]
+        for cov in ("0.9", "0.75", "0.5", "0.25", "0.1"):
+            for m in ("found_deep", "recall@3", "recall@5", "recall@10", "recall@15"):
+                d = abs(arms[f"tail@{cov}"][m] - arms[f"random@{cov}"][m]) * 100
+                out.add(f"{d:.1f}")
+                out.add(f"{d:.2f}")
     return out
 
 

@@ -227,12 +227,11 @@ nodes the graph holds, and the record does not serve set-shaped reads — `recor
 work on for a demoted candidate. The vector leg escapes this once it moves to Postgres (§3); the text leg
 does not, because §6.2's decision item 2 keeps it in the graph.
 
-**Two things the measurement changed that are not numbers.** A smarter *static* eviction policy buys back
-no retrieval quality — the cold-tail order and a random control are **not separated at the mid
-coverages** (recall@3 46.0 vs 46.3 at 0.50, 81.0 vs 81.7 at 0.90), and at the low coverages they
-diverge (20.3 vs 25.3 at 0.25 — a 5.0-point gap, 5× the artifact's own 1.0 pp `recall@k` band) because
-the realized resident share differs too. So a static ranking is not a lever: a demoted node is
-unretrievable whatever selected it. ⛔ That
+**Two things the measurement changed that are not numbers.** The choice of *static* eviction order is not
+a lever: the two orders differ by at most 5.0 points on any gated metric, in either direction (recall@3
+46.0 vs 46.3 at 0.50; the cold-tail order ahead on some cells and **worse by 5.0 points at 0.25**),
+against a 42.3-to-47.3-point collapse — so neither re-ranking moves the ceiling, which is what the verdict needs
+and is *not* the stronger claim that the orders are indistinguishable. ⛔ That
 order is a **static popularity** count, not recency (this corpus has no read ledger), so §7's *recency*
 claim was **not** re-tested and is not overturned here. And a
 demotion must invalidate `fallback_snapshot`, whose 60 s

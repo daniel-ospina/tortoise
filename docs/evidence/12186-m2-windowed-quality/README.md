@@ -229,17 +229,19 @@ two rates *are* informative.
 
 ### 4. No eviction policy protects retrieval quality
 
-`tail` (evict the least-referenced/most-boilerplate first) never **buys back** quality against
-`random`: recall@3 **46.0 vs 46.3** at 0.50 and 81.0 vs 81.7 at 0.90. It is **not separated** from the
-control at those coverages — and ⚠️ it is **not** "at any coverage", which an earlier cut of this
-record claimed: the two
-diverge by more at the LOW coverages, where the realized resident share itself differs: 20.3 vs 25.3 at
-0.25 and 8.7 vs 12.0 at 0.10, i.e. a 5.0-point gap that is 5× the artifact's own `recall@k`
-reproducibility bound of 1.0 pp. Per resident query the two policies are 87.1 % vs 100.0 % at 0.25, so
-the point stands where the verdict needs it: **a demoted node is unretrievable whatever reason selected
-it**, and `recall@k` is bounded by the resident share in every arm of both policies. What the numbers do
-**not** license is the stronger sentence "the policies agree at every coverage" — see the
-direction-only discipline the reproducibility bound imposes.
+`tail` (evict the least-referenced/most-boilerplate first) is **not a lever**, and the honest form is a
+**comparison of scales**, not a claim that the two never differ. On every metric this record gates on,
+the two orders stay within **5.0 points** of each other (recall@3 **46.0 vs 46.3** at 0.50; 81.0 vs
+81.7 at 0.90), and `tail` is the **worse** of the two where the resident set is small — **20.3 vs 25.3**
+at 0.25, **8.7 vs 12.0** at 0.10, that 5.0-point gap being 5× the 1.0 pp `recall@k` band.
+⛔ **It is NOT true that `tail` never buys anything back, and an earlier cut of this record said so.**
+It is ahead on a few cells by more than the noise: up to **2.00 pp on `found_deep` at 0.50** (that
+metric's band is 0.33 pp) and **2.33 pp on `:Point` `recall@10` at 0.90**. What makes the policy choice
+irrelevant is the SCALE of the alternative, not an absence of difference: both orders lose **42.3 to
+47.3 points** to the eviction, so a 5.0-point edge is barely a tenth of the loss and changes nothing
+about whether a demoted node is retrievable — it is not, whichever reason selected it. Per resident
+query the two are 87.1 % vs 100.0 % at 0.25, and `recall@k` is bounded by the resident share in every
+arm of both policies.
 
 ⛔ **What `tail` actually orders on, stated precisely, because it bounds this finding.** It is a
 **static popularity count**, not recency: for an `:Object`, the number of session records its name
@@ -248,11 +250,12 @@ appeared in; for a `:Point`, the number of query-relevant tokens in its content.
 finding is therefore about the *static* axis — which is the axis §7 says recency beats. The honest
 conclusion is narrower than "the policy does not matter":
 
-- **a smarter *static* ranking cannot buy back quality** — the two static orders (referenced-first vs
-  random) are **bounded by the same ceiling**: what the window keeps it can still find, and *a demoted
-  node is unretrievable whatever reason selected it*. They coincide at the mid coverages and are
-  **not** one curve at the low ones (20.3 vs 25.3 at 0.25; 8.7 vs 12.0 at 0.10 — the tail order is the
-  worse of the two), so read this as "neither re-ranking moves the ceiling", never as "the two agree";
+- **a smarter *static* ranking cannot recover what the window costs** — the two static orders
+  (referenced-first vs random) are **bounded by the same ceiling**: what the window keeps it can still
+  find, and *a demoted node is unretrievable whatever reason selected it*. They differ by at most a few
+  points in either direction — `tail` ahead on some cells, **worse by 5.0 points at 0.25** — against a
+  42.3-to-47.3-point collapse, so read this as "neither re-ranking moves the ceiling by more than a
+  fraction of the loss", never as "the two are the same" and never as "the two agree";
 - **§7's actual claim — that *recency* beats static ranking — was NOT re-tested here** and this record
   does not overturn it on the retrieval axis. It refines it: recency may well pick a better 50 % to
   keep, and the curve above says the *kept* half then still loses exactly the evicted half. Whether
