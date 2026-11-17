@@ -452,6 +452,158 @@ NDCG_K = 10
 RERANK_POOLS: tuple[int, ...] = (15, 40)
 
 
+# ── ARM 6 (#12184) — the ENTITY-ROW ranker over the SAME candidates ───────
+#
+# Why an arm and not a sentence: the brief for #12184 asks for the past_k case
+# set to be MEASURED before the fix and the ordering to be proven to move, and
+# the only honest way to do that is on the population the recall number already
+# comes from. This arm is paired on ONE pool per mention — the fused rows the
+# read returned at width P — so `gained`/`lost` are counterfactual and cannot
+# be explained by a population difference.
+#
+# ⛔ WHAT THIS ARM CAN AND CANNOT SEE, declared here so the artifact is not read
+# as more than it measures. The eval's graph is a NAME CORPUS: one `:Object`
+# per name, no claims, so every row answers `degree: 0` and
+# `confidence: null` — the entity ranker's GRAPH terms are inert on it BY
+# CONSTRUCTION. `signals_informative` (recorded below) is the field that says
+# so rather than letting a constant graph term pass as a graph judgement. What
+# the arm therefore measures is the entity ranker's IDENTITY dimension plus the
+# fused relevance, on a real name distribution; the graph-position half of the
+# entity signal set needs a graph whose entities are REFERRED TO, and is
+# measured by `tests/test_12184_ranker_entity_signals.py` on a live one.
+
+
+def _case_record(query: str, rows: list[dict], gold: str, before_rank,
+                 after_rank, signals: dict, out_rows: list[dict]) -> dict:
+    """ONE past_k case: which row was correct, its ranks, and what it carried."""
+    ann = {r["id"]: (r.get("graph_ranking") or {}) for r in out_rows}
+    return {
+        "query": query,
+        "gold_id": gold,
+        "before_rank_1based": (None if before_rank is None else before_rank + 1),
+        "after_rank_1based": (None if after_rank is None else after_rank + 1),
+        "moved": (before_rank is not None and after_rank is not None
+                  and after_rank < before_rank),
+        "rows": [
+            {
+                "id": r["id"],
+                "name": r.get("name") or "",
+                "is_gold": r["id"] == gold,
+                # The signals the row ACTUALLY carried — the brief's
+                # "what signals it carried", not an inference from the rank.
+                "degree": (signals.get(r["id"]) or {}).get("degree", 0),
+                "confidence": (signals.get(r["id"]) or {}).get("confidence"),
+                "identity_match": bool(
+                    (ann.get(r["id"]) or {}).get("identity_match")),
+                "final_score": (ann.get(r["id"]) or {}).get("final_score"),
+            }
+            for r in rows
+        ],
+    }
+
+
+def build_entity_arm(sample, window, variants, projection, pools=(15,)) -> dict:
+    """ARM 6 — ``GraphRanker`` with the ENTITY signal set over the same pool."""
+    from tortoise.ranking import GraphRanker
+
+    out: dict = {
+        "applied": True,
+        "arm": "entity_rerank",
+        "ranker": "GraphRanker(entity_type='object')",
+        "weights": {"similarity": 0.4, "graph_boost": 0.3, "recency": 0.3},
+        "identity_dimension": (
+            "exact normalised-name equality (entity_resolver's fold) sorts "
+            "ahead of the score for entity rows only"),
+        "graph_terms_on_this_population": (
+            "INERT BY CONSTRUCTION: the eval graph holds one :Object per name "
+            "and no claims, so every row answers degree 0 / confidence null — "
+            "read `signals_informative` rather than assuming the graph moved "
+            "anything"),
+    }
+    for pool in pools:
+        key = str(pool)
+        exact = {"mentions": 0, "recall_3_before": 0, "recall_3_after": 0,
+                 "gained": 0, "lost": 0, "moved_up": 0,
+                 "informative_rows": 0, "rows_carried": 0}
+        row_variant = {"pairs": 0, "in_window_3_before": 0,
+                       "in_window_3_after": 0, "gained": 0, "lost": 0}
+        cases: list[dict] = []
+        for row in sample:
+            name = row["name"]
+            rows = window(name, pool)
+            gold = row["id"]
+            if not rows or not any(r["id"] == gold for r in rows):
+                continue
+            ranker = GraphRanker(projection)
+            ids = [r["id"] for r in rows]
+            signals = ranker._fetch_signals(ids, "object") or {}
+            cands = [{"id": r["id"], "name": r.get("name") or "",
+                      "scores": r.get("scores") or {}} for r in rows]
+            after = ranker.rerank(cands, entity_type="object", query=name)
+            exact["mentions"] += 1
+            exact["informative_rows"] += sum(
+                1 for sig in signals.values()
+                if (sig.get("degree") or 0) > 0 or sig.get("confidence") is not None)
+            exact["rows_carried"] += len(signals)
+            before_rank = next(i for i, r in enumerate(rows) if r["id"] == gold)
+            after_ids = [r["id"] for r in after]
+            after_rank = (after_ids.index(gold) if gold in after_ids else None)
+            for name_k, rank in (("before", before_rank), ("after", after_rank)):
+                if rank is not None and rank < TOP_K_RERANK_CUT:
+                    exact[f"recall_3_{name_k}"] += 1
+            in_before = before_rank < TOP_K_RERANK_CUT
+            in_after = after_rank is not None and after_rank < TOP_K_RERANK_CUT
+            exact["gained"] += int(in_after and not in_before)
+            exact["lost"] += int(in_before and not in_after)
+            # A `past_k` case is the CLASS this issue exists for: the gold is
+            # in the pool and ranked past the cut. Only those are recorded as
+            # the case set — a gold already at rank 1 is not evidence of a fix.
+            if not in_before:
+                exact["moved_up"] += int(after_rank is not None
+                                         and after_rank < before_rank)
+                cases.append(_case_record(name, rows, gold, before_rank,
+                                          after_rank, signals, after))
+
+            # The VARIANT population on the SAME ranker: `lost` here is the
+            # displacement falsifier — a surface variant's canonical must not be
+            # pushed out of the top 3 by an identity match on a DIFFERENT name.
+            for _vclass, surface in variants(name, row["cls"]):
+                vrows = window(surface, pool)
+                if not vrows or not any(r["id"] == gold for r in vrows):
+                    row_variant["pairs"] += 1
+                    continue
+                ranker_v = GraphRanker(projection)
+                vcands = [{"id": r["id"], "name": r.get("name") or "",
+                           "scores": r.get("scores") or {}} for r in vrows]
+                vafter = ranker_v.rerank(vcands, entity_type="object",
+                                         query=surface)
+                row_variant["pairs"] += 1
+                vb = next(i for i, r in enumerate(vrows) if r["id"] == gold)
+                va = next((i for i, r in enumerate(vafter) if r["id"] == gold),
+                          None)
+                for name_k, rank in (("before", vb), ("after", va)):
+                    if rank is not None and rank < TOP_K_RERANK_CUT:
+                        row_variant[f"in_window_3_{name_k}"] += 1
+                inb = vb < TOP_K_RERANK_CUT
+                ina = va is not None and va < TOP_K_RERANK_CUT
+                row_variant["gained"] += int(ina and not inb)
+                row_variant["lost"] += int(inb and not ina)
+
+        n = exact["mentions"] or 1
+        exact["recall_pct_before"] = round(100.0 * exact["recall_3_before"] / n, 1)
+        exact["recall_pct_after"] = round(100.0 * exact["recall_3_after"] / n, 1)
+        exact["signal_coverage"] = (
+            round(exact["informative_rows"] / exact["rows_carried"], 4)
+            if exact["rows_carried"] else None)
+        exact["signals_informative"] = bool(exact["informative_rows"])
+        exact["past_k_cases_recorded"] = len(cases)
+        exact["past_k_cases_moved_up"] = exact["moved_up"]
+        # ⛔ NO CAP AND NO HEAD-SLICE: the case set IS the deliverable, and a
+        # `[:N]` would silently turn "the past_k class" into "its first N".
+        out[key] = {"exact": exact, "variant": row_variant, "cases": cases}
+    return out
+
+
 def build_rerank_arm(args, sample, window, variants) -> dict:
     """The ``--rerank`` arm, built from the model the RESOLVER names.
 
@@ -1360,8 +1512,15 @@ def run(args: argparse.Namespace) -> int:
                 window_modes["keyword_only"] += 1
             else:
                 window_modes["hybrid"] += 1
+            # #12184: the fused `scores` ride along (additive — every other
+            # arm compares ids). ARM 6 needs them because `GraphRanker` reads
+            # its similarity from `scores.rrf`; without them the ranker would
+            # see every row as equally similar and any reorder it reported
+            # would be an artefact of the instrument, not of the ranker.
             return [{"id": r.get("id", ""), "name": r.get("content", ""),
-                     "kind": r.get("point_kind", "")} for r in (rows or [])]
+                     "kind": r.get("point_kind", ""),
+                     "scores": dict(r.get("scores") or {})}
+                    for r in (rows or [])]
 
         # STRATIFIED, not head-sliced: ``build_population`` emits class by class,
         # so ``pop[:n]`` would sample one class only and report its recall as the
@@ -1989,6 +2148,15 @@ def run(args: argparse.Namespace) -> int:
         #   lost    gold sat inside the top-3 and the rerank moved it out —
         #           the failure a rerank-only story hides, and the reason the
         #           net is reported beside both components.
+        # ── ARM 6 (#12184): the ENTITY-ROW ranker over the same candidates.
+        # Opt-in like ARM 5, and for the same reason: it is a MEASUREMENT of a
+        # ranker, not a shipped path change, and every artifact committed
+        # before it must stay byte-identical.
+        if getattr(args, "entity_rerank", False):
+            arms["entity_rerank"] = build_entity_arm(
+                sample, window, variants, proj,
+                pools=tuple(args.rerank_pool or (15,)))
+
         if args.rerank:
             arms["rerank"] = build_rerank_arm(args, sample, window, variants)
 
@@ -2116,6 +2284,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default=None)
     # ── #12297: the cross-encoder rerank arm. DEFAULT OFF, so every existing
     # invocation — and every committed artifact — is byte-identical.
+    p.add_argument("--entity-rerank", action="store_true",
+                   help="ARM 6 (#12184): the entity-row GraphRanker over the "
+                        "SAME fused candidates (paired before/after + the "
+                        "recorded past_k case set). Default off.")
     p.add_argument("--rerank", action="store_true",
                    help="also measure arm 5: the cross-encoder rerank over the "
                         "same fused candidates at each --rerank-pool width. "

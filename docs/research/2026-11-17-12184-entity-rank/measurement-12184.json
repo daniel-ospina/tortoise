@@ -1,0 +1,2728 @@
+{
+ "arms": {
+  "blocking": {
+   "fts_only": {
+    "candidate_set": "pooled union over a capture's derived queries (max_queries=15); the per-query window is `k` candidates per mention",
+    "candidates_mean_per_mention": {
+     "10": 10,
+     "15": 15,
+     "3": 3,
+     "5": 5
+    },
+    "in_window": {
+     "10": 422,
+     "15": 422,
+     "3": 412,
+     "5": 420
+    },
+    "pair_completeness": {
+     "10": 1.0,
+     "15": 1.0,
+     "3": 0.9763,
+     "5": 0.9953
+    },
+    "pooled_candidates_per_capture": 42.9,
+    "pooled_candidates_per_mention": 2.86
+   },
+   "index_stats": {
+    "blocks": 8384,
+    "key_memberships": 11026,
+    "max_block_size": 113,
+    "members": 1000,
+    "oversized_skipped": {},
+    "query_candidate_cap": 200
+   },
+   "multikey": {
+    "candidates_max": 175,
+    "candidates_mean_per_mention": 35.3,
+    "in_block": 422,
+    "k_independent": true,
+    "pair_completeness": 1.0,
+    "reduction_ratio": 0.0316
+   },
+   "pairs": 422,
+   "population": 1000
+  },
+  "duplicate_rate": {
+   "pairs": 422,
+   "prior_off": {
+    "attached": 0,
+    "definition": "no prior: every mention mints (not measured)",
+    "minted": 422,
+    "rate": 1.0
+   },
+   "prior_on_norm_only": {
+    "attached": 0,
+    "minted": 422,
+    "rate": 1.0
+   },
+   "prior_on_shipped_folded": {
+    "attached": 204,
+    "minted": 218,
+    "rate": 0.5166
+   },
+   "window_k": 3
+  },
+  "entity_rerank": {
+   "15": {
+    "cases": [
+     {
+      "after_rank_1based": 1,
+      "before_rank_1based": 4,
+      "gold_id": "obj-11901000918",
+      "moved": true,
+      "query": "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+      "rows": [
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.65,
+        "id": "obj-11901000951",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "evidence/7949-capstone/probes/capstone_run.py"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5693,
+        "id": "obj-11901000930",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "docs/evidence/7949-capstone/preregistration.json"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.554,
+        "id": "obj-11901000917",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "evidence/7949-capstone/probes/capstone_measure.py"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.527,
+        "id": "obj-11901000918",
+        "identity_match": true,
+        "is_gold": true,
+        "name": "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.515,
+        "id": "obj-11901000938",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4854,
+        "id": "obj-11901000920",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "docs/evidence/7949-capstone/README.md"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2984,
+        "id": "obj-11901000953",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "docs/epics/2026-11-04-5090-vector-layer/S3-VECTOR-CENSUS.md"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.266,
+        "id": "obj-11901000905",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "tests/test_7949_capstone_measure.py"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2552,
+        "id": "obj-11901000940",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "docs/evidence/7949-capstone/E1-E5-PROOFS.md"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2404,
+        "id": "obj-11901000908",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "docs/00_index.md"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2286,
+        "id": "obj-11901000973",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "tests/test_extractor_v4_citation_rot.py"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2097,
+        "id": "obj-11901000932",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2053,
+        "id": "obj-11901000922",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "docs/evidence/7949-capstone/PRE-REGISTRATION.md"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.1731,
+        "id": "obj-11901000201",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the test suite"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.15,
+        "id": "obj-11901000947",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "tests/test_7949_capstone_verdict_check.py"
+       }
+      ]
+     },
+     {
+      "after_rank_1based": 1,
+      "before_rank_1based": 4,
+      "gold_id": "obj-11901000073",
+      "moved": true,
+      "query": "the review",
+      "rows": [
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.65,
+        "id": "obj-11901000020",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the reviewer"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5073,
+        "id": "obj-11901000574",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review file"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4827,
+        "id": "obj-11901000255",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review comment"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4815,
+        "id": "obj-11901000073",
+        "identity_match": true,
+        "is_gold": true,
+        "name": "the review"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4578,
+        "id": "obj-11901000344",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review in full"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4429,
+        "id": "obj-11901000158",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the reviewed head"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3149,
+        "id": "obj-11901000129",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review findings"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2999,
+        "id": "obj-11901000377",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the full review"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2864,
+        "id": "obj-11901000504",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review findings and current"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2538,
+        "id": "obj-11901000329",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review skill"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2441,
+        "id": "obj-11901000430",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review gate"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2266,
+        "id": "obj-11901000153",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review findings and checking"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2179,
+        "id": "obj-11901000523",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review skill and gathering"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2151,
+        "id": "obj-11901000389",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review findings and the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.15,
+        "id": "obj-11901000244",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the review discipline"
+       }
+      ]
+     },
+     {
+      "after_rank_1based": 1,
+      "before_rank_1based": 4,
+      "gold_id": "obj-11901000078",
+      "moved": true,
+      "query": "the merge",
+      "rows": [
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.65,
+        "id": "obj-11901000394",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge base"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.613,
+        "id": "obj-11901000395",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge commit"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6033,
+        "id": "obj-11901000362",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge-base"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5921,
+        "id": "obj-11901000078",
+        "identity_match": true,
+        "is_gold": true,
+        "name": "the merge"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5324,
+        "id": "obj-11901000306",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merged"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.527,
+        "id": "obj-11901000014",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge chain reads"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4804,
+        "id": "obj-11901000274",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge rail"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4654,
+        "id": "obj-11901000233",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge sha"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4553,
+        "id": "obj-11901000262",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge loop starts"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.398,
+        "id": "obj-11901000587",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge result keeps main"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3921,
+        "id": "obj-11901000264",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge work behind 16"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3313,
+        "id": "obj-11901000263",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge that nobody"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3312,
+        "id": "obj-11901000229",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merged head"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2484,
+        "id": "obj-11901000135",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merged tree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.15,
+        "id": "obj-11901000056",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge-gate audit artifact"
+       }
+      ]
+     },
+     {
+      "after_rank_1based": 1,
+      "before_rank_1based": 4,
+      "gold_id": "obj-11901000079",
+      "moved": true,
+      "query": "the worktree and reading the",
+      "rows": [
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.65,
+        "id": "obj-11901000525",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree report"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.634,
+        "id": "obj-11901000047",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.615,
+        "id": "obj-11901000449",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree state and reading"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5871,
+        "id": "obj-11901000079",
+        "identity_match": true,
+        "is_gold": true,
+        "name": "the worktree and reading the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5373,
+        "id": "obj-11901000016",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree being reaped"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.522,
+        "id": "obj-11901000488",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the reading"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5208,
+        "id": "obj-11901000189",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree state"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5092,
+        "id": "obj-11901000390",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the state of this worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4751,
+        "id": "obj-11901000159",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the state of the worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4259,
+        "id": "obj-11901000221",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the git worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4102,
+        "id": "obj-11901000457",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree state and the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.319,
+        "id": "obj-11901000303",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the read"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2691,
+        "id": "obj-11901000484",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the head and reading the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.1813,
+        "id": "obj-11901000354",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the repo and reading the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.15,
+        "id": "obj-11901000014",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the merge chain reads"
+       }
+      ]
+     },
+     {
+      "after_rank_1based": 1,
+      "before_rank_1based": 4,
+      "gold_id": "obj-11901000111",
+      "moved": true,
+      "query": "the exact",
+      "rows": [
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.65,
+        "id": "obj-11901000583",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the exact text"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6214,
+        "id": "obj-11901000460",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the exact string"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6186,
+        "id": "obj-11901000481",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the exact command"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6167,
+        "id": "obj-11901000111",
+        "identity_match": true,
+        "is_gold": true,
+        "name": "the exact"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6119,
+        "id": "obj-11901000228",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the exact line"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5917,
+        "id": "obj-11901000428",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the exact head"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.589,
+        "id": "obj-11901000452",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the exact file"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5692,
+        "id": "obj-11901000416",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the exact fix"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5687,
+        "id": "obj-11901000508",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the exact required shape"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.2532,
+        "id": "obj-11901000259",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the exact blocking reason"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.1868,
+        "id": "obj-11901000164",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the full"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.179,
+        "id": "obj-11901000199",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the actual"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.1715,
+        "id": "obj-11901000503",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the identical"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.157,
+        "id": "obj-11901000107",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the real"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.15,
+        "id": "obj-11901000487",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the per"
+       }
+      ]
+     },
+     {
+      "after_rank_1based": 1,
+      "before_rank_1based": 8,
+      "gold_id": "obj-11901000159",
+      "moved": true,
+      "query": "the state of the worktree",
+      "rows": [
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.65,
+        "id": "obj-11901000525",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree report"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6276,
+        "id": "obj-11901000189",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree state"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6173,
+        "id": "obj-11901000047",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.6052,
+        "id": "obj-11901000390",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the state of this worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5996,
+        "id": "obj-11901000449",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree state and reading"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5778,
+        "id": "obj-11901000457",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree state and the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5679,
+        "id": "obj-11901000016",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree being reaped"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5654,
+        "id": "obj-11901000159",
+        "identity_match": true,
+        "is_gold": true,
+        "name": "the state of the worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.5255,
+        "id": "obj-11901000221",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the git worktree"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.4624,
+        "id": "obj-11901000079",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the worktree and reading the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3715,
+        "id": "obj-11901000114",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the current state of the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3614,
+        "id": "obj-11901000434",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the actual state of the"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.3229,
+        "id": "obj-11901000116",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the current state"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.1546,
+        "id": "obj-11901000230",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "the repo state"
+       },
+       {
+        "confidence": null,
+        "degree": 0,
+        "final_score": 0.15,
+        "id": "obj-11901000962",
+        "identity_match": false,
+        "is_gold": false,
+        "name": "extensions/main-worktree-guard/sanctioned-scripts.pin.json"
+       }
+      ]
+     }
+    ],
+    "exact": {
+     "gained": 6,
+     "informative_rows": 0,
+     "lost": 0,
+     "mentions": 300,
+     "moved_up": 6,
+     "past_k_cases_moved_up": 6,
+     "past_k_cases_recorded": 6,
+     "recall_3_after": 300,
+     "recall_3_before": 294,
+     "recall_pct_after": 100.0,
+     "recall_pct_before": 98.0,
+     "rows_carried": 4500,
+     "signal_coverage": 0.0,
+     "signals_informative": false
+    },
+    "variant": {
+     "gained": 8,
+     "in_window_3_after": 420,
+     "in_window_3_before": 412,
+     "lost": 0,
+     "pairs": 422
+    }
+   },
+   "applied": true,
+   "arm": "entity_rerank",
+   "graph_terms_on_this_population": "INERT BY CONSTRUCTION: the eval graph holds one :Object per name and no claims, so every row answers degree 0 / confidence null \u2014 read `signals_informative` rather than assuming the graph moved anything",
+   "identity_dimension": "exact normalised-name equality (entity_resolver's fold) sorts ahead of the score for entity rows only",
+   "ranker": "GraphRanker(entity_type='object')",
+   "weights": {
+    "graph_boost": 0.3,
+    "recency": 0.3,
+    "similarity": 0.4
+   }
+  },
+  "exact": {
+   "3": {
+    "attached": 294,
+    "in_window": 294,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 6,
+    "rank_sum": 327,
+    "rows_zero": 0
+   },
+   "5": {
+    "attached": 299,
+    "in_window": 299,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 1,
+    "rank_sum": 347,
+    "rows_zero": 0
+   },
+   "10": {
+    "attached": 300,
+    "in_window": 300,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 0,
+    "rank_sum": 355,
+    "rows_zero": 0
+   },
+   "15": {
+    "attached": 300,
+    "in_window": 300,
+    "miss_absent_at_max_k": 0,
+    "miss_past_k": 0,
+    "rank_sum": 355,
+    "rows_zero": 0
+   }
+  },
+  "exact_by_class": {
+   "definite": {
+    "10": {
+     "in_window": 180,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "15": {
+     "in_window": 180,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "3": {
+     "in_window": 175,
+     "n": 180,
+     "rows_zero": 0
+    },
+    "5": {
+     "in_window": 179,
+     "n": 180,
+     "rows_zero": 0
+    }
+   },
+   "ident": {
+    "10": {
+     "in_window": 90,
+     "n": 90,
+     "rows_zero": 0
+    },
+    "15": {
+     "in_window": 90,
+     "n": 90,
+     "rows_zero": 0
+    },
+    "3": {
+     "in_window": 90,
+     "n": 90,
+     "rows_zero": 0
+    },
+    "5": {
+     "in_window": 90,
+     "n": 90,
+     "rows_zero": 0
+    }
+   },
+   "path": {
+    "10": {
+     "in_window": 30,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "15": {
+     "in_window": 30,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "3": {
+     "in_window": 29,
+     "n": 30,
+     "rows_zero": 0
+    },
+    "5": {
+     "in_window": 30,
+     "n": 30,
+     "rows_zero": 0
+    }
+   }
+  },
+  "exact_misses": [
+   {
+    "cls": "path",
+    "gated": false,
+    "name": "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+    "returned": 3,
+    "siblings_2tok": 38,
+    "signal_tokens": 13,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "evidence/7949-capstone/probes/capstone_run.py",
+     "docs/evidence/7949-capstone/preregistration.json",
+     "evidence/7949-capstone/probes/capstone_measure.py",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+     "docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the review",
+    "returned": 3,
+    "siblings_2tok": 19,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the reviewer",
+     "the review file",
+     "the review comment",
+     "the review",
+     "the review in full"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the merge",
+    "returned": 3,
+    "siblings_2tok": 11,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the merge base",
+     "the merge commit",
+     "the merge-base",
+     "the merge",
+     "the merged"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the worktree and reading the",
+    "returned": 3,
+    "siblings_2tok": 22,
+    "signal_tokens": 2,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the worktree report",
+     "the worktree",
+     "the worktree state and reading",
+     "the worktree and reading the",
+     "the worktree being reaped"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": true,
+    "name": "the exact",
+    "returned": 3,
+    "siblings_2tok": 9,
+    "signal_tokens": 1,
+    "tokens": 2,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the exact text",
+     "the exact string",
+     "the exact command",
+     "the exact",
+     "the exact line"
+    ]
+   },
+   {
+    "cls": "definite",
+    "gated": false,
+    "name": "the state of the worktree",
+    "returned": 3,
+    "siblings_2tok": 22,
+    "signal_tokens": 2,
+    "tokens": 5,
+    "tokens_kept_numeric": false,
+    "wide_returned": 15,
+    "wide_top": [
+     "the worktree report",
+     "the worktree state",
+     "the worktree",
+     "the state of this worktree",
+     "the worktree state and reading"
+    ]
+   }
+  ],
+  "exact_misses_recorded": 6,
+  "exact_misses_total": 6,
+  "gate": {
+   "shipped": {
+    "gated": 75,
+    "gated_and_missed": 0,
+    "names": 300,
+    "noise_rows_freed": 6,
+    "suppressed_correct_by_k": {
+     "15": 75,
+     "3": 73
+    },
+    "suppressed_correct_k_sum": 148
+   },
+   "zep_full_name": {
+    "gated": 13,
+    "gated_and_missed": 0,
+    "names": 300,
+    "noise_rows_freed": 0,
+    "suppressed_correct_by_k": {
+     "15": 13,
+     "3": 13
+    },
+    "suppressed_correct_k_sum": 26
+   }
+  },
+  "gate_by_class": {
+   "definite": {
+    "shipped": {
+     "gated": 62,
+     "names": 180,
+     "suppressed_correct_k_sum": 122
+    },
+    "zep_full_name": {
+     "gated": 0,
+     "names": 180,
+     "suppressed_correct_k_sum": 0
+    }
+   },
+   "ident": {
+    "shipped": {
+     "gated": 13,
+     "names": 90,
+     "suppressed_correct_k_sum": 26
+    },
+    "zep_full_name": {
+     "gated": 13,
+     "names": 90,
+     "suppressed_correct_k_sum": 26
+    }
+   },
+   "path": {
+    "shipped": {
+     "gated": 0,
+     "names": 30,
+     "suppressed_correct_k_sum": 0
+    },
+    "zep_full_name": {
+     "gated": 0,
+     "names": 30,
+     "suppressed_correct_k_sum": 0
+    }
+   }
+  },
+  "gate_gated_names": [
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the diff",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "diff"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the tool",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tool"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#2258",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "2258"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the model",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "model"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#2981",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "2981"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the rung in the",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "rung"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#3484",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "3484"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the end",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "end"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#3442",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "3442"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the head",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "head"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the repo",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "repo"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the file",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "file"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#7949",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "7949"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the issue",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "issue"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#3175",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "3175"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the check",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "check"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the code",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "code"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the fix",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "fix"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the open",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "open"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10000",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10000"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the tree",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tree"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#709",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "709"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the brief",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "brief"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the pin",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "pin"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the body",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "body"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#5128",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "5128"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the lane",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "lane"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the gate",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "gate"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the guard",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "guard"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10114",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10114"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the new",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "new"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the suite",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "suite"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the work",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "work"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the test",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "test"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the doc",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "doc"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the merge",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "merge"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the sha",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "sha"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#9548",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "9548"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#10017",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "10017"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the rail",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "rail"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "ident",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "#1484",
+    "predicates": [
+     "shipped",
+     "zep_full_name"
+    ],
+    "signal_tokens": [
+     "1484"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the row",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "row"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the claim",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "claim"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the delta",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "delta"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the real",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "real"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the owner",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "owner"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": false
+    },
+    "name": "the exact",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "exact"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the peer",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "peer"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the line",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "line"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the diff of",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "diff"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the three",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "three"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the arm",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "arm"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the run",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "run"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the prose",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "prose"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the fixes",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "fixes"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the probe",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "probe"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the tests",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "tests"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the count",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "count"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the old",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "old"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the log",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "log"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the four",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "four"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the pre",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "pre"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the false",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "false"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the block",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "block"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the files",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "files"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the live",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "live"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the base",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "base"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the table",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "table"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the full",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "full"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the entry",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "entry"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the fold",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "fold"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the graph",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "graph"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the list",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "list"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the loop",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "loop"
+    ],
+    "wide_rows": 15
+   },
+   {
+    "cls": "definite",
+    "in_window_by_k": {
+     "15": true,
+     "3": true
+    },
+    "name": "the repo at",
+    "predicates": [
+     "shipped"
+    ],
+    "signal_tokens": [
+     "repo"
+    ],
+    "wide_rows": 15
+   }
+  ],
+  "gate_variant": {
+   "shipped": {
+    "gated_pairs": 137,
+    "in_window_before": 132,
+    "pairs": 422,
+    "would_attach_before": 70,
+    "would_attach_before_any_k": 75
+   },
+   "zep_full_name": {
+    "gated_pairs": 72,
+    "in_window_before": 67,
+    "pairs": 422,
+    "would_attach_before": 67,
+    "would_attach_before_any_k": 72
+   }
+  },
+  "pooled": {
+   "3": {
+    "captures": 20,
+    "set_max": 45,
+    "set_min": 40,
+    "set_sum": 858
+   },
+   "5": {
+    "captures": 20,
+    "set_max": 75,
+    "set_min": 63,
+    "set_sum": 1370
+   },
+   "10": {
+    "captures": 20,
+    "set_max": 138,
+    "set_min": 119,
+    "set_sum": 2581
+   },
+   "15": {
+    "captures": 20,
+    "set_max": 200,
+    "set_min": 165,
+    "set_sum": 3688
+   }
+  },
+  "pooled_coverage": {
+   "names_in_sample": 300,
+   "names_measured": 300,
+   "names_reached": 300,
+   "skipped_singleton": 0,
+   "truncated": false
+  },
+  "pooled_gate": {
+   "shipped": {
+    "15": {
+     "gated": 75,
+     "lost": 61,
+     "rescued_by_union": 14,
+     "unreachable_regardless": 0
+    },
+    "3": {
+     "gated": 75,
+     "lost": 70,
+     "rescued_by_union": 3,
+     "unreachable_regardless": 2
+    }
+   },
+   "zep_full_name": {
+    "15": {
+     "gated": 13,
+     "lost": 13,
+     "rescued_by_union": 0,
+     "unreachable_regardless": 0
+    },
+    "3": {
+     "gated": 13,
+     "lost": 13,
+     "rescued_by_union": 0,
+     "unreachable_regardless": 0
+    }
+   }
+  },
+  "variant": {
+   "3": {
+    "attached": 204,
+    "attached_folded": 382,
+    "attached_norm_only": 0,
+    "in_multikey_block": 422,
+    "in_window": 412,
+    "in_window_not_attached": 208,
+    "pairs": 422
+   },
+   "5": {
+    "attached": 211,
+    "attached_folded": 390,
+    "attached_norm_only": 0,
+    "in_multikey_block": 422,
+    "in_window": 420,
+    "in_window_not_attached": 209,
+    "pairs": 422
+   },
+   "10": {
+    "attached": 212,
+    "attached_folded": 392,
+    "attached_norm_only": 0,
+    "in_multikey_block": 422,
+    "in_window": 422,
+    "in_window_not_attached": 210,
+    "pairs": 422
+   },
+   "15": {
+    "attached": 212,
+    "attached_folded": 392,
+    "attached_norm_only": 0,
+    "in_multikey_block": 422,
+    "in_window": 422,
+    "in_window_not_attached": 210,
+    "pairs": 422
+   }
+  },
+  "variant_by_class": {
+   "article-drop": {
+    "10": {
+     "attached": 180,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "15": {
+     "attached": 180,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "3": {
+     "attached": 172,
+     "attached_folded": 172,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 172,
+     "pairs": 180
+    },
+    "5": {
+     "attached": 179,
+     "attached_folded": 179,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 179,
+     "pairs": 180
+    }
+   },
+   "basename-only": {
+    "10": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    },
+    "15": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    },
+    "3": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    },
+    "5": {
+     "attached": 0,
+     "attached_folded": 0,
+     "attached_norm_only": 0,
+     "in_multikey_block": 30,
+     "in_window": 30,
+     "pairs": 30
+    }
+   },
+   "hash-dropped": {
+    "10": {
+     "attached": 13,
+     "attached_folded": 13,
+     "attached_norm_only": 0,
+     "in_multikey_block": 13,
+     "in_window": 13,
+     "pairs": 13
+    },
+    "15": {
+     "attached": 13,
+     "attached_folded": 13,
+     "attached_norm_only": 0,
+     "in_multikey_block": 13,
+     "in_window": 13,
+     "pairs": 13
+    },
+    "3": {
+     "attached": 13,
+     "attached_folded": 13,
+     "attached_norm_only": 0,
+     "in_multikey_block": 13,
+     "in_window": 13,
+     "pairs": 13
+    },
+    "5": {
+     "attached": 13,
+     "attached_folded": 13,
+     "attached_norm_only": 0,
+     "in_multikey_block": 13,
+     "in_window": 13,
+     "pairs": 13
+    }
+   },
+   "hyphen-to-space": {
+    "10": {
+     "attached": 19,
+     "attached_folded": 19,
+     "attached_norm_only": 0,
+     "in_multikey_block": 19,
+     "in_window": 19,
+     "pairs": 19
+    },
+    "15": {
+     "attached": 19,
+     "attached_folded": 19,
+     "attached_norm_only": 0,
+     "in_multikey_block": 19,
+     "in_window": 19,
+     "pairs": 19
+    },
+    "3": {
+     "attached": 19,
+     "attached_folded": 19,
+     "attached_norm_only": 0,
+     "in_multikey_block": 19,
+     "in_window": 19,
+     "pairs": 19
+    },
+    "5": {
+     "attached": 19,
+     "attached_folded": 19,
+     "attached_norm_only": 0,
+     "in_multikey_block": 19,
+     "in_window": 19,
+     "pairs": 19
+    }
+   },
+   "space-to-hyphen": {
+    "10": {
+     "attached": 0,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "15": {
+     "attached": 0,
+     "attached_folded": 180,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 180,
+     "pairs": 180
+    },
+    "3": {
+     "attached": 0,
+     "attached_folded": 178,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 178,
+     "pairs": 180
+    },
+    "5": {
+     "attached": 0,
+     "attached_folded": 179,
+     "attached_norm_only": 0,
+     "in_multikey_block": 180,
+     "in_window": 179,
+     "pairs": 180
+    }
+   }
+  }
+ },
+ "code_head": "8b9355b285746e1b5d04aa9a2cf3bcb6d229482b",
+ "config": {
+  "fused_rerank_gate_armed": false
+ },
+ "corpus": {
+  "dir": "/home/cmux/.tortoise/session-events",
+  "elapsed_s": 440.0,
+  "files": 22,
+  "graph": "recall12184_1794880952",
+  "harvested_distinct": {
+   "definite": 139398,
+   "ident": 12921,
+   "path": 4970
+  },
+  "input": {
+   "files": 22,
+   "lines": 13221,
+   "parse_errors": 4,
+   "records_without_text": 0
+  },
+  "population": 1000,
+  "population_digest": "29f1c9131f6e933b",
+  "sample": 300,
+  "sample_by_class": {
+   "definite": 180,
+   "ident": 90,
+   "path": 30
+  }
+ },
+ "issue": 11901,
+ "ks": [
+  3,
+  5,
+  10,
+  15
+ ],
+ "measured_at": "2026-11-17T02:09:52Z",
+ "measured_for": 12295,
+ "pooled_budget_note": "a pooled group is `max_queries` (15) names, which is the production BUDGET CAP, not the typical capture \u2014 a capture with 5 entities issues 5 object queries",
+ "retrieval": {
+  "has_embedder": true,
+  "legs_seen": {
+   "fts": true,
+   "structural": true,
+   "vector": true
+  },
+  "note": "hybrid",
+  "uniform_windows": true,
+  "window_modes": {
+   "hybrid": 5110,
+   "keyword_only": 0
+  }
+ }
+}
