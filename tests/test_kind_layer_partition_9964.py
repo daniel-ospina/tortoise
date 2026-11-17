@@ -613,6 +613,13 @@ def test_an_unhashable_status_is_refused_not_a_crash_in_the_routing_guard(sdk):
         "MATCH (n) WHERE n.name = 'Q3' RETURN count(n)",
     ).result_set == [[0]], "a refused write must land nothing"
 
+    # ── 2. #12869: the unhashable shape is a REFUSAL, never a crash ─────
+    with pytest.raises(ValueError, match="refused a non-string status"):
+        sdk.create_object("Q3b", objectKind="core:team", status=["active"])
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object {name:'Q3b'}) RETURN count(n)").result_set[0][0] == 0, (
+        "the refused create left an Object row behind")
+
 
 def test_two_disagreeing_spellings_never_drop_the_caller_s_kind(sdk):
     """Two spellings of ONE property disagreeing must be REPORTED, not resolved.
