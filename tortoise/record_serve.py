@@ -36,6 +36,14 @@ consumer must NOT hard-code this list):
   coordinate the residency router already mints
   (``cache_projection.declared_key``), which is what a ``fetch-record`` repair
   is handed.
+* ``entity-union-by-id`` — the BARE by-id entity door
+  (``tortoise_get_entity(<id>)`` -> ``TortoiseSDK.get_entity``), #13093. It is a
+  UNION over the five labels a bare value can name in the cache
+  (``ENTITY_UNION_JURISDICTION``), so it has no ONE coordinate — and it is served
+  only for ``ENTITY_UNION_LABELS`` (the labels whose record row reproduces the
+  cache node), abstaining with ``residency: "not-hot"`` for the rest through
+  :func:`entity_absent_wire`'s coverage rule. Its absence verdict is therefore
+  CONSERVATIVE on purpose: see :data:`ENTITY_UNION_ADDRESS_RESIDUALS`.
 
 **Not served, with the reason** — a decision that does not name its exclusions
 in the same artifact is indistinguishable from an omission:
@@ -68,12 +76,17 @@ in the same artifact is indistinguishable from an omission:
   because an MCP call carries no hosted org credential to resolve a record
   tenant from. (#8877 names the same internal/caller-facing
   separation.) ⚠️ The TYPED form ``tortoise_get_entity(id, type="point")`` is
-  that route and DOES reach this accessor; the BARE ``tortoise_get_entity(id)``
-  reaches ``TortoiseSDK.get_entity`` — a different read with its own coordinate,
-  excluded under ``entity-accessor`` below rather than folded in here.
-* ``entity-accessor`` — ``TortoiseSDK.get_entity``. A different coordinate (a
-  name/alias resolution), not a node id, so a record answer would have to
-  re-decide the resolution order to claim parity.
+  that route and DOES reach this accessor. ⛔ The BARE
+  ``tortoise_get_entity(id)`` is a DIFFERENT read and it IS served, under
+  ``entity-union-by-id`` above (since #13093) — it is the one entry in this list
+  whose exclusion was retired, and the note is kept so a reader coming from the
+  pre-#13093 text does not re-file the same defect.
+* ``entity-accessor`` — ``TortoiseSDK._get_entity``, the SDK's INTERNAL accessor.
+  It is NOT the bare door (that is ``entity-union-by-id``, served), and it DOES
+  have a by-id coordinate — ``_resolve_entity(by_id=…, by_eventId=…, by_url=…)``
+  is an index-backed, per-label UNION, not a name/alias resolution. It is
+  cache-only because the write echoes and the internal read paths call it
+  mid-write, not because it lacks a coordinate (#12941 review P2-1).
 * ``selfhost-endpoint`` — the self-host server's point route. It carries no
   hosted org credential either, so there is no record tenant to scope the read
   to; serving it would answer ACROSS tenants.
@@ -435,7 +448,14 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
         name=READ_NODE_BY_KEY,
         status=SERVED,
         cypher="MATCH (n:<Label> {<key_property>:$key}) RETURN properties(n)",
-        coordinate=("Label", "interface-E key"),
+        # ⛔ `None`, for the same reason the union read has none: this read is a
+        # TEMPLATE over labels, and the pair it used to carry —
+        # `("Label", "interface-E key")` — is two placeholders, not a coordinate.
+        # `"Label"` is not a `node_label` (`public.node_identity` restricts that
+        # column to the six real labels), so `declared_key(*coordinate)` would mint
+        # `Label:interface-E key`: a coordinate no store resolves. Stating one rule
+        # twice is how a registry starts lying in one place (#13353 review, c3 F3).
+        coordinate=None,
         parity="tortoise.record_serve.parity_difference",
         reason="a served CAPABILITY with no consumer wired yet: it answers any "
                "record label by its interface-E coordinate, which is the shape "
@@ -1225,12 +1245,15 @@ def entity_coverage_complete() -> bool:
     production:
 
       * the falsy ``{}`` arm of :func:`entity_absent_wire` is UNREACHABLE today,
-        so every absent id on an armed deployment answers a TRUTHY
-        ``{"residency": "not-hot", …}``. A verifier written ``if out:`` reads that
-        as success — the exposure #12941 P0-1 exists to prevent — so
+        so every absent NAMED id on an armed deployment answers a TRUTHY
+        ``{"residency": "not-hot", …}``. (An EMPTY key names nothing and answers
+        ``{}`` in the armed modes — ``TortoiseSDK.get_entity`` short-circuits it
+        before any store.) A verifier written ``if out:`` reads the marker as
+        success — the exposure #12941 P0-1 exists to prevent — so
         ``TortoiseSDK.get_entity``'s own docstring states it at the door;
-      * ``FALLBACK_RECORD_MISS`` is not emitted by this door; every miss is
-        ``record-label-not-served``;
+      * ``FALLBACK_RECORD_MISS`` is not emitted by this door. The only miss this
+        door NAMES is ``record-label-not-served``, and only in ``prefer`` (where a
+        fallback really happened): a ``record``-mode miss names no reason at all;
       * ``{}`` becomes reachable when BOTH facts hold — #9721 lands ``Event``
         parity AND the Source addressing residual is retired.
 
@@ -1758,15 +1781,23 @@ def serve_entity(*, tenant: tuple[str, str], id_val: str,
     label it does not serve (`Event`, `Source` — #9721), so its `no row`
     settles only those labels. :func:`entity_absent_wire` holds that rule; this
     function's job is to answer honestly and never to decide the caller's
-    absence for it — which is why an armed miss here carries
-    :data:`FALLBACK_RECORD_LABEL_NOT_SERVED` where :func:`serve_point` carries
-    nothing.
+    absence for it. ⛔ WHAT AN ARMED MISS CARRIES DIFFERS BY MODE, and the
+    difference is deliberate: in ``prefer`` the read FELL BACK, so the miss names
+    :data:`FALLBACK_RECORD_LABEL_NOT_SERVED` and is counted; in ``record`` nothing
+    fell back — no cache branch, nothing counted — so the miss carries NO
+    ``fallbackReason`` at all and the coverage gap is expressed by
+    :func:`entity_absent_wire`'s ``residency: "not-hot"``. (An earlier revision
+    named the reason in both modes, which put a fallback attribution on a read
+    where no fallback happened; #13353 review cycle 2.)
 
     ``record`` mode does NOT raise on a miss (it raises on an OUTAGE, exactly as
     :func:`serve_point` does). Raising here would turn every Event read into a
     500 in a `record`-armed deployment — an answer that cannot be attributed
-    does not become more honest by being an error, and this answer CAN be
-    attributed: to a declared coverage gap, named on the response.
+    does not become more honest by being an error. This answer IS attributable,
+    but by ``servedFrom``/``residency`` on the wire rather than by a
+    ``fallbackReason``: the store that answered is named, and the coverage gap is
+    named as the ``not-hot`` verdict, which is the fact that makes the answer
+    what it is.
     """
     mode = mode if mode is not None else serve_mode()
     if mode not in MODES:
@@ -1808,10 +1839,12 @@ def serve_entity(*, tenant: tuple[str, str], id_val: str,
         single-label read (which has settled its whole coordinate) and FALSE
         here while any label this union can be handed is unserved (#9721): the
         id may name an `Event` or a `Source`, which the record holds and this
-        door cannot answer at parity. Naming it `record-label-not-served` is
-        what keeps the verdict honest in BOTH armed modes, and the two reasons
-        have different repairs (a backfill vs the parity work), so folding them
-        would also send an operator to the wrong one.
+        door cannot answer at parity. In ``prefer``, naming it
+        `record-label-not-served` is what keeps the verdict honest — and the two
+        reasons have different repairs (a backfill vs the parity work), so folding
+        them would also send an operator to the wrong one. ⚠️ This helper is
+        therefore called from the ``prefer`` arm ONLY: a ``record``-mode miss
+        reached no fallback and must not name one (#13353 review cycle 2/3).
         """
         return (FALLBACK_RECORD_MISS if entity_coverage_complete()
                 else FALLBACK_RECORD_LABEL_NOT_SERVED)

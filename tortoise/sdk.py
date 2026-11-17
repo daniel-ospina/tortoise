@@ -59224,9 +59224,14 @@ class TortoiseSDK:
         store a write has not finished projecting. Serving it would also hand
         them a TRUTHY ``{"residency": …}`` where they test ``or MISSING`` / ``or
         {}`` and read it as a found node. This is the same internal-vs-caller
-        split ``get_point``'s opt-in ``served_out`` sink makes; here it is a
-        method split because a bare ``get_entity`` caller carries no parameter by
-        which a mid-write one could be told apart.
+        split ``get_point``'s opt-in ``served_out`` sink makes; here it is the
+        ``cache_only=True`` keyword, declared AT THE CALL SITE rather than by a
+        second method name — the internal-reader arms are pinned by intercepting
+        this method BY NAME, and their contract says that interception must hold
+        regardless of how the call is spelled (``test_11926_derived_invalidation``).
+        ⚠️ The flag is a DEFAULT, not a structural guarantee: a new internal caller
+        that forgets it gets the seam (a bounded record round trip on the caller's
+        thread, and in ``record`` mode a raise inside the write).
         """
         if cache_only:
             return self._get_entity(id_val)
