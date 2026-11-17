@@ -675,13 +675,16 @@ _EVENT_KEY_CHECK = "(event_id is not null and node_key = event_id)"
 #: constraint that is not this one.
 _EVENT_KEY_NAME_RE = r"[\"']?" + _EVENT_KEY_CONSTRAINT + r"[\"']?(?![A-Za-z0-9_$])"
 
-#: ONE statement that touches the constraint, in file order — a re-declaration
-#: (`CONSTRAINT <name> CHECK (…)`, in the landed `CREATE TABLE` or behind a
-#: forward `ADD CONSTRAINT`), a `DROP CONSTRAINT`, or a `RENAME CONSTRAINT`.
-#: The `[^;]*?` body runs to the statement boundary, so a nested paren in a
-#: re-keyed expression still reaches the real closing paren; a trailing quote is
-#: allowed before the terminator because the house style for conditional DDL is
-#: `DO $$ … EXECUTE 'ALTER TABLE …' … $$`
+#: A `DROP CONSTRAINT` of this name — that half of the statement set has no body.
+_EVENT_KEY_DROP_RE = re.compile(
+    r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?" + _EVENT_KEY_NAME_RE,
+    re.IGNORECASE)
+#: ONE re-declaration (`CONSTRAINT <name> CHECK (…)`, in the landed `CREATE TABLE`
+#: or behind a forward `ADD CONSTRAINT`), in file order. The body alternative
+#: `(?:[^;']|'(?:[^']|'')*')*?` IS what lets a `;` sit inside the expression's own
+#: string literal while a nested paren still reaches the real closing paren; a
+#: trailing quote is allowed before the terminator because the house style for
+#: conditional DDL is `DO $$ … EXECUTE '…' … $$`
 #: (`20261025000001_record_tenancy_role_and_guc.sql:113,142`), where the literal
 #: ends `'` before the `;`.
 #: ⚠️ The corpus's `EXECUTE '…'` bodies are `CREATE ROLE` / `ALTER ROLE`
@@ -690,9 +693,7 @@ _EVENT_KEY_NAME_RE = r"[\"']?" + _EVENT_KEY_CONSTRAINT + r"[\"']?(?![A-Za-z0-9_$
 #: (`20261023000002_blog_author_backfill_atomic.sql:91,109`) — no migration has
 #: declared a CHECK through `EXECUTE` yet, so the arm that covers it is
 #: forward-robustness rather than a spelling the tree already contains.
-_EVENT_KEY_DROP_RE = re.compile(
-    r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?" + _EVENT_KEY_NAME_RE,
-    re.IGNORECASE)
+#:
 #: ⛔ THE BODY MAY CROSS A `;` INSIDE A LITERAL, and the modifier list is not just
 #: `NOT VALID`: `CHECK (node_key = 'a;b')` and a re-declaration carrying
 #: `NO INHERIT` are ordinary DDL, and the first spelling of this pattern answered
@@ -721,11 +722,18 @@ _EVENT_KEY_RENAME_RE = re.compile(
 #: the row GREEN on a constraint the record no longer enforced).
 _EVENT_KEY_TABLE_RE = r'(?:"?public"?\s*\.\s*)?"?event"?(?![A-Za-z0-9_$])'
 
+#: ⛔ `COLUMN` IS OPTIONAL IN POSTGRES, AND THE KEYWORD LIST MUST MIRROR THE
+#: GRAMMAR: `ALTER TABLE … DROP [COLUMN] node_key` drops the column — and the
+#: CHECK with it — without the keyword. Measured before this pattern accepted it:
+#: `ALTER TABLE public.event DROP node_key CASCADE` answered the HISTORICAL
+#: expression while the record enforced nothing (a false green, the same class
+#: this reader exists for). `DROP TABLE a, b` is likewise a comma LIST, so the
+#: table may not be the first element.
 _EVENT_KEY_OWNER_GONE_RE = re.compile(
-    r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?" + _EVENT_KEY_TABLE_RE
+    r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\S+\s*,\s*)*" + _EVENT_KEY_TABLE_RE
     + r"|ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?"
     + _EVENT_KEY_TABLE_RE
-    + r'[^;]*?DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?"?node_key"?(?![A-Za-z0-9_$])',
+    + r'[^;]*?DROP\s+(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?"?node_key"?(?![A-Za-z0-9_$])',
     re.IGNORECASE | re.DOTALL)
 
 #: A statement that MOVES the premise's owner without touching the constraint —
@@ -738,7 +746,8 @@ _EVENT_KEY_OWNER_MOVE_RE = re.compile(
     r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?"
     + _EVENT_KEY_TABLE_RE
     + r'\s*RENAME\s+(?:TO\s+(?P<table>\S+?)'
-    + r'|COLUMN\s+"?node_key"?\s+TO\s+(?P<column>\S+?))(?=[\s;,]|$)',
+    + r'|(?:COLUMN\s+)?"?node_key"?\s+TO\s+(?P<column>\S+?))'
+    + r'(?=[\s;,)]|["\']|$)',
     re.IGNORECASE | re.DOTALL)
 
 
@@ -877,7 +886,7 @@ def _effective_event_node_key_check(sql: str) -> str | None:
     renames properly is more machinery than this one premise needs, and a raise
     cannot be mistaken for a fact, which the silence it replaced could.
     """
-    events: list[tuple[int, str, str | None]] = []
+    events: list[tuple[int, str, str | None, str | None]] = []
     # ⛔ COMMENTS ARE NOT DDL, and this corpus WRITES DDL IN COMMENTS: a
     # commented `ALTER TABLE` is house style
     # (`20261023000002_blog_author_backfill_atomic.sql:7,10`), and
@@ -889,20 +898,22 @@ def _effective_event_node_key_check(sql: str) -> str | None:
     # exactly the class this reader exists for).
     sql = _strip_sql_comments(sql)
     for match in _EVENT_KEY_DROP_RE.finditer(sql):
-        events.append((match.start(), "drop", None))
+        events.append((match.start(), "drop", None, None))
     for match in _EVENT_KEY_DECL_RE.finditer(sql):
-        events.append((match.start(), "decl", match.group("expr")))
+        events.append((match.start(), "decl", match.group("expr"), None))
     for match in _EVENT_KEY_OWNER_GONE_RE.finditer(sql):
-        events.append((match.start(), "drop", None))
+        events.append((match.start(), "drop", None, None))
     for match in _EVENT_KEY_OWNER_MOVE_RE.finditer(sql):
-        moved = match.group("table") or f"column node_key -> {match.group('column')}"
-        events.append((match.start(), "rename", f"table event -> {moved}"
-                       if match.group("table") else moved))
+        moved = (f"table `public.event` -> `{match.group('table')}`"
+                 if match.group("table")
+                 else f"column `node_key` -> `{match.group('column')}`")
+        events.append((match.start(), "rename", moved, "owner-move"))
     for match in _EVENT_KEY_RENAME_RE.finditer(sql):
         old = match.group("old").strip('"').lower()
         new = match.group("new").strip('"').lower()
         if _EVENT_KEY_CONSTRAINT in (old, new):
-            events.append((match.start(), "rename", f"{old} -> {new}"))
+            events.append((match.start(), "rename", f"{old} -> {new}",
+                           "constraint-rename"))
     events.sort(key=lambda event: event[0])
 
     assert events, (
@@ -913,14 +924,25 @@ def _effective_event_node_key_check(sql: str) -> str | None:
         "reported by its own assertion below.)")
 
     expr: str | None = None
-    for _pos, kind, body in events:
+    for _pos, kind, body, cause in events:
+        # ⛔ THE MESSAGE NAMES THE CAUSE THAT ACTUALLY HAPPENED. A table or column
+        # rename is not a constraint rename, and sending a lane to "the renamed
+        # constraint" sends it to something that does not exist.
         assert kind != "rename", (
-            f"a migration RENAMEs `{_EVENT_KEY_CONSTRAINT}` ({body}) — this "
-            "reader does not follow renames, so the expression enforced under "
-            "this name can no longer be read from the statements carrying it. "
-            "If the constraint was renamed BACK, teach this reader to follow the "
-            "rename; otherwise re-derive ENTITY_UNION_ADDRESS_RESIDUALS against "
-            "the renamed constraint")
+            (
+                f"a migration MOVED the premise's owner ({body}) — `public.event` "
+                "/ `node_key` is no longer the table/column `read_entity` "
+                "addresses, and the expression the record enforces can no longer "
+                "be read from the statements carrying this name: re-derive "
+                "ENTITY_UNION_ADDRESS_RESIDUALS"
+            ) if cause == "owner-move" else (
+                f"a migration RENAMEs `{_EVENT_KEY_CONSTRAINT}` ({body}) — this "
+                "reader does not follow renames, so the expression enforced under "
+                "this name can no longer be read from the statements carrying it. "
+                "If the constraint was renamed BACK, teach this reader to follow "
+                "the rename; otherwise re-derive "
+                "ENTITY_UNION_ADDRESS_RESIDUALS against the renamed constraint"
+            ))
         if kind == "drop":
             expr = None
             continue
@@ -931,13 +953,27 @@ def _effective_event_node_key_check(sql: str) -> str | None:
         # swallows the TABLE's `)` too — measured as a false red on an unchanged
         # expression. A balance check, not a tighter body, because the same
         # tolerance is what lets a nested-paren expression read correctly.
+        # ⛔ LITERAL-AWARE, because a literal can carry an unbalanced paren:
+        # `CHECK (payload <> ')')` and `CHECK (node_key = '(ev')` both defeated a
+        # plain depth count — the first was cut INSIDE the literal, the second
+        # re-attached the table's `)` (measured; both false reds).
         depth = 0
+        in_literal = False
         for idx, ch in enumerate(body):
-            depth += ch == "("
-            depth -= ch == ")"
-            if depth == 0:
-                body = body[:idx + 1]
-                break
+            if in_literal:
+                if ch == "'":
+                    in_literal = False
+                continue
+            if ch == "'":
+                in_literal = True
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    body = body[:idx + 1]
+                    break
         normalised = " ".join(body.split()).lower()
         normalised = re.sub(r"\(\s+", "(", normalised)
         expr = re.sub(r"\s+\)", ")", normalised)
@@ -1121,7 +1157,12 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
                  # ⛔ a QUOTED, schema-qualified name is the SAME table; measured
                  # before the table atom accepted quotes, this left the row green.
                  '\nDROP TABLE "public"."event";\n',
-                 '\nALTER TABLE "public"."event" DROP COLUMN node_key CASCADE;\n'):
+                 '\nALTER TABLE "public"."event" DROP COLUMN node_key CASCADE;\n',
+                 # `COLUMN` is OPTIONAL (`DROP [COLUMN]`), and `DROP TABLE` takes
+                 # a comma LIST — the table need not be first. Both measured green
+                 # on the historical expression before the patterns accepted them.
+                 "\nALTER TABLE public.event DROP node_key CASCADE;\n",
+                 "\nDROP TABLE public.foo, public.event;\n"):
         assert _effective_event_node_key_check(landed + gone) is None, (
             f"`{gone.strip()}` removes the constraint without naming it, and the "
             "reader still reported an expression the record no longer enforces")
@@ -1130,9 +1171,16 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
     #     premise's owner, so the reader must RAISE (as it does for a constraint
     #     rename), never answer the historical expression and never `None`. The
     #     repo writes re-keys this way (`20260915000001_tenancy_team_to_org.sql:50-51`).
+    #     ⛔ AND THE MESSAGE NAMES THE CAUSE THAT HAPPENED: a table/column move is
+    #     not a constraint rename, and "the renamed constraint" sends a lane to
+    #     something that does not exist.
     for moved in ("\nALTER TABLE public.event RENAME TO event_v2;\n",
-                  "\nALTER TABLE public.event RENAME COLUMN node_key TO key;\n"):
-        with pytest.raises(AssertionError, match="RENAMEs"):
+                  "\nALTER TABLE public.event RENAME COLUMN node_key TO key;\n",
+                  # `COLUMN` is OPTIONAL in PostgreSQL — measured before the
+                  # pattern accepted it, this spelling answered the historical
+                  # expression (a false green).
+                  "\nALTER TABLE public.event RENAME node_key TO key;\n"):
+        with pytest.raises(AssertionError, match="MOVED the premise's owner"):
             _effective_event_node_key_check(landed + moved)
 
     # 1i. A `CREATE TABLE` that declares the constraint as its LAST element: the
@@ -1147,6 +1195,25 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
     assert _effective_event_node_key_check(recreated) == re_keyed_expr, (
         "a re-declaration whose CHECK is the LAST element of the CREATE TABLE "
         "was read with the table's closing paren attached")
+
+    # 1j. THE BALANCED-CLOSE TRUNCATION IS LITERAL-AWARE, because a literal can
+    #     carry an UNBALANCED paren. Measured with a plain depth count: an
+    #     expression was cut INSIDE the literal (`(payload <>)`), and the
+    #     last-element shape re-attached the table's `)` — both false reds.
+    unbalanced = landed + (
+        f"\nALTER TABLE public.event DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n"
+        f"ALTER TABLE public.event ADD CONSTRAINT {_EVENT_KEY_CONSTRAINT} "
+        "CHECK (payload <> ')');\n")
+    assert _effective_event_node_key_check(unbalanced) == "(payload <> ')')", (
+        "a `)` inside a literal closed the expression early")
+    recreate_literal = landed + (
+        "\nCREATE TABLE public.event (event_id text NOT NULL, "
+        "node_key text NOT NULL, "
+        f"CONSTRAINT {_EVENT_KEY_CONSTRAINT} CHECK (node_key = '(ev'));\n")
+    assert _effective_event_node_key_check(recreate_literal) == (
+        "(node_key = '(ev')"), (
+        "a `(` inside a literal stopped the depth count from ever reaching zero "
+        "— the table's closing paren got attached again")
 
     # 2. A forward DROP with no re-declaration. The constraint is GONE, so no
     #    expression is enforced and the premise is not merely different — it is
