@@ -8852,6 +8852,19 @@ surfaces:
   # files read with `Path.read_text` (two calls per row), no DB, no graph, no
   # network, no subprocess — dual-registered with `tier1`.
   - test_12184_shifted_cites.py
+  # #12855: the stored-rows rewrite — `tools/rewrite_object_status.py` plus its
+  # suite, which drives the SDK's journaled update path and the `assembly` filter
+  # pin. ⛔ THE `tools/` HALF IS NOT CLOSED BY THIS ROW: `tools/` is a flat
+  # `NON_PYTHON_PREFIXES` entry, so a tool-only diff takes the docs-only early
+  # return and NO surface is selected — measured before the fix:
+  # `--changed-files tools/rewrite_object_status.py` → `surfaces: []`, suite
+  # absent. What closes it is the `CORE_ALSO` entry in `tools/ci_selection.py`
+  # (the same hole the purge tool has); after it, that diff selects `core` and
+  # this row is what carries the suite. DUAL-REGISTERED `core` + `sdk` because the
+  # suite also pins `tortoise/assembly.py`, whose diff takes the `core` fallback,
+  # while a `tortoise/retrieval.py`-class diff selects `sdk` and a named-surface
+  # match REPLACES the `core` fallback — one row would sleep through the other.
+  - test_12855_outdated_rewrite.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
@@ -10092,6 +10105,7 @@ surfaces:
   # cheap. Pinned by
   # `tests/test_ci_selection.py::test_the_2684_census_is_selected_on_every_surface_that_moves_it`.
   - eval/write_path/test_value_span_census_2684.py
+  - test_12855_outdated_rewrite.py  # #12855: dual-registered with `core` (see the `core` row) — an `sdk`-selecting diff (e.g. `tortoise/retrieval.py`) REPLACES the `core` fallback, so the suite needs its own `sdk` row
   classify:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
@@ -14069,6 +14083,7 @@ durations:
   test_9350_capture_provenance_journalled.py: 9.7  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 17.6
   test_9548_record_arming_health.py: 0.1
   test_12943_cache_leg.py: 5.1  # needs a graph (P4 refuses URI-less, so NOT DB-free); no Postgres except two skip-if-absent convergence legs
+  test_12855_outdated_rewrite.py: 17.0  # needs a graph (P4 refuses URI-less, so NOT DB-free); measured 2026-11-17 locally
   test_9555_narrative_carrier.py: 2.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 3.4
   test_backfill_references_5141.py: 0.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.2
   test_bm25_lexical_8488.py: 13.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 9.8
