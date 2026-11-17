@@ -904,7 +904,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.entity_profile",
         description="Multi-hop BFS from an entity with optional filters (pointKind, "
                     "confidenceMin) — full neighborhood categorized by node type. Use for deep "
-                    "entity analysis; for a fast neighbor list use tortoise_list_topics.",
+                    "entity analysis; for a fast neighbor list use "
+                    'tortoise_list_knowledge(kind="topic", entity_id=...).',
         risk="read",
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (calls navigation.entityProfile)
@@ -1111,7 +1112,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.list_topics",
         description="Fast one-hop neighbor enumeration for an entity — quick discovery and "
                     "navigation. Use for shallow context; for multi-hop filtered BFS use "
-                    "tortoise_entity_profile.",
+                    "tortoise_explore_connections(node_id, hops=...).",
         risk="read",
         http_policy=True,
         sdk_method="",  # #11609: the SDK method retired into graph_overview(section=\'topics\'); the handler answers through it

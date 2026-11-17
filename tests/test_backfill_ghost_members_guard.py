@@ -45,7 +45,12 @@ def _install_fake_sdk(monkeypatch, resolved_name: str) -> dict:
         def _get_registry(self):
             return SimpleNamespace(name=resolved_name)
 
-        def sweep_invite_ghost_memberships(self, *, dry_run=False):
+        # #12901 wave 2 PRIVATISED the door this script reaches:
+        # `graph-scripts/backfill_invite_ghost_members.py` now calls
+        # `sdk._sweep_invite_ghost_memberships(dry_run=...)`, so the fake must answer to
+        # that name or the sweep reaches nothing and the `--yes` arm under test passes
+        # VACUOUSLY (the same defect the #1890 schedule test carried).
+        def _sweep_invite_ghost_memberships(self, *, dry_run=False):
             calls["sweep_dry_run"] = dry_run
             return {"found": 0, "ghosts": 0, "deleted": 0}
 
