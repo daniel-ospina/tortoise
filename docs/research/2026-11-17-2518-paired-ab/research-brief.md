@@ -118,7 +118,11 @@ model named explicitly on every request (`"model": "sonar"`; never `sonar-deep-r
 ⇒ **McNemar's exact two-sided test** on the discordant pairs (b = miss→hit, c = hit→miss). Exact, not
 χ², because the discordant totals here are 5–17. Beside it: a **seeded paired bootstrap** (2,000 resamples,
 same seed as the draw) for a CI on the recall delta, the **measured** outcome correlation, and the **MDE for
-the n actually used** — stated before any verdict.
+the n actually used** — **reported beside** the exact test, at every k, and **not** pre-stated: π is this
+run's own discordant share, so it does not exist until both arms have been read (`#13267` review 4 F3, which
+found "stated before any verdict" contradicted by the tool's own *"discordance is measured, not assumed"*).
+What is fixed in advance is `n`; the MDE says what that `n` could resolve at 80 % power, so a delta **below**
+it is an observation the design was not powered to resolve, and no such `k` is called a winner.
 
 **Contradiction test.** Measurement only: no retrieval behaviour, window, index or expansion parameter is
 changed; `entity_key_expansion` keeps `False`, `TORTOISE_ENTITY_KEY_DENSE` keeps OFF (the tool **refuses**
@@ -180,13 +184,18 @@ arms in one process (`items.with_item = 300`) · **the discriminating digest is 
 from one drawn sample, and that digest is what pins WHICH names it was. ⛔ `items.id_digest`
 `4d6899d3d0b62543…` is **not** pairing evidence and was cited as if it were: it digests the synthetic
 `item-NNNNNN` ids every draw assigns, so it is the constant for ANY 300-item sample (`9eeb9c4f…` for the
-60-item control) — `#13267` review 2, finding 1. Expansion demonstrably fired on **293 of 300** items;
-repeat of the OFF side returned the **identical** outcome for every item (determinism check).
+60-item control) — `#13267` review 2, finding 1. Expansion demonstrably fired on **293 of 300** items.
+⛔ **There is NO determinism result for the committed runs, and an earlier revision of this sentence said
+there was** (`#13267` review 4 F2): the `repeat` arm was compared on each item's **target rank**, which is
+null on both sides for every point-arm item because the target is selected to be lexically unreachable —
+`None == None` 300 times, a constant. Both point artifacts now carry `repeat_identical: null` and a
+`repeat_check` block saying what was actually compared; the tool compares per-side **ranked-list digests**
+so a re-run measures the read, not the target's presence.
 
 | k | OFF hits | ON hits | b (miss→hit) | c (hit→miss) | McNemar exact p | paired Δ | 95 % bootstrap CI | **MDE at this n** |
 |---|---|---|---|---|---|---|---|---|
 | **3** | **0/300** | **5/300** | 5 | 0 | 0.0625 | **+1.67 pp** | [+0.33, +3.33] | **2.08 pp** |
-| **5** | 0/300 | 6/300 | 6 | 0 | **0.0313** | +2.00 pp | [+0.67, +3.67] | 2.28 pp |
+| **5** | 0/300 | 6/300 | 6 | 0 | 0.0313 | +2.00 pp | [+0.67, +3.67] | 2.28 pp |
 | 10 | 0/300 | 13/300 | 13 | 0 | **0.00024** | +4.33 pp | [+2.33, +6.67] | 3.35 pp |
 | **15** | 0/300 | **17/300** | 17 | 0 | **0.00002** | **+5.67 pp** | [+3.33, +8.33] | 3.84 pp |
 
@@ -199,18 +208,22 @@ repeat of the OFF side returned the **identical** outcome for every item (determ
   was designed for on the class it targets, and says nothing about the product's recall on real questions.
   `#11901` declared the same residual for its generated variant arm.
 - **The k = 3 delta is BELOW this n's MDE.** Observed +1.67 pp against a 2.08 pp minimum detectable effect
+- **The k = 3 delta is BELOW this n's MDE.** Observed +1.67 pp against a 2.08 pp minimum detectable effect
   ⇒ **no winner at k = 3 is claimable**. ⚠️ The TOOL does not decide that — `_print_summary` prints the
   point estimate (`delta=`) beside both recalls, the CI and both MDEs, and emits no winner verdict at all;
-  the MDE rule is this brief's, and it is applied to every row below rather than to k = 3 alone.
-- **MDE stated before the verdict, per k**: 2.08 / 2.28 / 3.35 / 3.84 pp — and it **rises with k**,
-  because the discordant count rises with k (b = 5 → 6 → 13 → 17), so this design is *most* powered at
-  low k. At n = 300 the run **can** resolve a 3 pp effect at k = 3 and k = 5 (MDE 2.08 / 2.28 pp) and
-  **cannot** at k = 10 or k = 15 (MDE 3.35 / 3.84 pp).
+  the MDE rule is this brief's.
+- **MDE at the n used, reported per k BESIDE the exact test — and NOT pre-stated**: 2.08 / 2.28 / 3.35 /
+  3.84 pp. ⛔ π is this run's own discordant share, which does not exist until both arms have been read, so
+  the figure cannot have been fixed before the outcome; only `n` is fixed in advance (`#13267` review 4 F3).
+  The MDE **rises with k**, because the discordant count rises with k (b = 5 → 6 → 13 → 17), so this design
+  is *most* powered at low k: at n = 300 the run **can** resolve a 3 pp effect at k = 3 and k = 5 (MDE
+  2.08 / 2.28 pp) and **cannot** at k = 10 or k = 15 (MDE 3.35 / 3.84 pp).
 - **The winner rule, applied to every row.** A winner is claimable only where the *observed* delta clears
   its **own** MDE: k = 10 (4.33 > 3.35) and k = 15 (5.67 > 3.84) do; k = 3 (1.67 < 2.08) does **not**, and
-  **neither does k = 5 (2.00 < 2.28)** — even though its exact p is 0.0313 and is bolded above. The
-  p-value and the MDE answer different questions; the rule this brief declares is the MDE one, and it is
-  applied to all four rows rather than to k = 3 alone.
+  neither does k = 5 (2.00 < 2.28). Those two rows are therefore also the only two whose p-values are
+  printed in **bold** above — the table's bold means "clears its own MDE", not "p < 0.05", so a reader
+  cannot mistake a low-power observation for a resolved effect (`#13267` review 4 F3: the rule was invoked
+  at k = 3 alone and k = 5's p was bolded with no caveat).
 
 ### 4.1 The harm side — measured, and one arm where it is measurable
 
@@ -266,10 +279,9 @@ with no interval and no test attached. ⚠️ The 5 is `seed_lost_from_window` 3
 | **the corpus snapshot exists with its digest and file list; both arms read it** | **MET** | `corpus-snapshot-manifest.json`: digest `18ab6174e440f7b38dbd49b00b519409cedaacef58647f2cf29532b825f325d0`, **23 files**, 14,225 lines, 78,571,361 bytes, per-file sha256/bytes/lines. `verify_snapshot` re-derives and **refuses** on any byte change (pinned by `test_a_tampered_snapshot_is_refused_never_renamed`). |
 | **the same sampled items are used in both arms** | **MET** (structural + digest) | One `--population-file` (`population-300.json`, seed 20261117) is read by both arms in ONE process — the pairing is a property of that construction, not a predicate to assert. The discriminating record is **`items.name_digest = 06373b442bc93182…`, equal to `population.names_sha256`** in both point artifacts. ⛔ `items.id_digest` (`4d6899d3…`) is a function of the sample SIZE and settles nothing — the `ids_match_all_arms` predicate this row used to cite was `True` for every reachable input (`#13267` F6) and is now a `pairing` block that says so. A population drawn against another snapshot is **refused** (pinned). |
 | **the result is paired, with the test named and its p-value** | **MET** | McNemar exact two-sided per k: **p = 0.0625** (@3), **0.0313** (@5), **0.00024** (@10), **0.00002** (@15); paired bootstrap CI (2,000 resamples, seed 20261117) reported beside each. |
-| **the detectable effect size for n is stated before the conclusion** | **MET** | MDE @ n=300: **2.08 / 2.28 / 3.35 / 3.84 pp** for k = 3/5/10/15 — the MDE **rises** with k. The winner rule is the MDE one applied to every row: k = 10 (+4.33 against 3.35) and k = 15 (+5.67 against 3.84) clear their own MDE; k = 3 (+1.67 < 2.08) and k = 5 (+2.00 < 2.28, p = 0.0313) do **not**, and neither is reported as a win. The published comparison's independent MDE at p̄=0.865 is **7.82 pp** ⇒ ~734/arm for 5 pp and **~2,037/arm** for 3 pp, which replaces an earlier estimate of ~755/~2,100 (quoted
-rather than derived, and published nowhere this repo can point to). |
-| **`window_modes` recorded per arm; any contamination named** | **MET** | `keyword_only` 300/300 in both arms (no embedder on this box) ⇒ uniform, no contamination, and **not** reported as a hybrid measurement. `load 13.09 → 12.55` (Δ −0.54) across both arms in one process — the artifact's own `environment` block, not a transcription (`#13267` F3: an earlier revision quoted a trace that appears in NO committed artifact, and the load moves between runs, so a trace is only ever valid for the artifact it came from — the pin in `tests/test_paired_expansion_ab_2518.py` compares this number against the artifact); `repeat` of the OFF side returned identical outcomes for all 300 items. |
-| **⛔ no retrieval behaviour changed** | **MET** | `git diff --name-only origin/main...HEAD` touches exactly these paths: `tools/paired_expansion_ab_2518.py`, `tests/test_paired_expansion_ab_2518.py`, `MEMORY.md`, `config/ci-surfaces.yml`, `docs/00_index.md`, and the brief plus its four artifacts under `docs/research/2026-11-17-2518-paired-ab/`. No change to `tortoise/`, no index, no `TOOL_REGISTRY`, no public SDK method; the tool **refuses** when `TORTOISE_ENTITY_KEY_DENSE` is armed. ⛔ The **`git diff --stat` insertion/deletion tally is deliberately not quoted**, and neither is a total file count: both move whenever the evidence itself is committed and whenever `main` is merged in, so a quoted tally is stale on the very next commit while the touched-path set is not — the previous revision of this cell quoted one, and the head already prints a different number. The **path set is the falsifier**, because that is what "no retrieval behaviour changed" means, and it is reproducible with the command at the head of this cell; a tally that cannot be reproduced is not a falsifier. (`#13267` F3, three generations on: a 3-file list the tree does not produce, then a `--stat` tally that went stale on the next commit, now the set itself — the pin in `tests/test_paired_expansion_ab_2518.py` keeps this cell to the path set.) |
+| **the detectable effect size for the n used is reported beside every k, and no k whose delta is below it is called a winner** | **MET** | MDE @ n=300: **2.08 / 2.28 / 3.35 / 3.84 pp** for k = 3/5/10/15 — the MDE **rises** with k, each figure beside its own exact p. The winner rule is the MDE one applied to every row: k = 10 (+4.33 against 3.35) and k = 15 (+5.67 against 3.84) clear their own MDE; k = 3 (+1.67 < 2.08) and k = 5 (+2.00 < 2.28, p = 0.0313) do **not**, and neither is reported as a win. ⛔ **The MDE is reported, not pre-stated** (`#13267` review 4 F3): π is this run's own discordant share, so the figure cannot exist before both arms are read — only `n` is fixed in advance. The published comparison's independent MDE at p̄=0.865 is **7.82 pp** ⇒ ~734/arm for 5 pp and **~2,037/arm** for 3 pp — the brief's ~755/~2,100, reproduced from the formula, which replaces an earlier estimate of ~755/~2,100 (quoted rather than derived, and published nowhere this repo can point to). |
+| **`window_modes` recorded per arm; any contamination named** | **MET** | `keyword_only` 300/300 in both arms (no embedder on this box) ⇒ uniform, no contamination, and **not** reported as a hybrid measurement. `load 13.09 → 12.55` (Δ −0.54) across both arms in one process — the artifact's own `environment` block, not a transcription (`#13267` F3: an earlier revision quoted a trace that appears in NO committed artifact, and the load moves between runs, so a trace is only ever valid for the artifact it came from — the pin in `tests/test_paired_expansion_ab_2518.py` compares this number against the artifact **at every site it is quoted**, `#13267` review 4 F5). ⛔ **No `repeat` determinism result is claimed for these runs** (review 4 F2): the `repeat` arm was compared on the target's **rank**, which is null on both sides for every point-arm item, so the point artifacts carry `repeat_identical: null` and a `repeat_check` block naming the basis (`target_rank`) and the zero items actually compared. The tool now compares ranked-list digests, so a re-run measures the read. |
+| **⛔ no retrieval behaviour changed** | **MET** | `git diff --name-only origin/main...HEAD` touches exactly these paths: `tools/paired_expansion_ab_2518.py`, `tests/test_paired_expansion_ab_2518.py`, `MEMORY.md`, `config/ci-surfaces.yml`, `docs/00_index.md`, and the brief plus its four artifacts under `docs/research/2026-11-17-2518-paired-ab/`. No change to `tortoise/`, no index, no `TOOL_REGISTRY`, no public SDK method; the tool **refuses** when `TORTOISE_ENTITY_KEY_DENSE` is armed. ⛔ The **`git diff --stat` insertion/deletion tally is deliberately not quoted**, and neither is a total file count: both move whenever the evidence itself is committed and whenever `main` is merged in, so a quoted tally is stale on the very next commit while the touched-path set is not — the previous revision of this cell quoted one, and the head already prints a different number. The **path set is the falsifier**, because that is what "no retrieval behaviour changed" means, and it is reproducible with the command at the head of this cell; a tally that cannot be reproduced is not a falsifier. (`#13267` F3, three generations on: a 3-file list the tree does not produce, then a `--stat` tally that went stale on the next commit, now the set itself. ⛔ **`#13267` review 4 F6:** an earlier revision of this sentence asserted a set-level test pin here and no such pin existed — what the suite enforced was only that the cell NAME the reproducing command and avoid the tally vocabulary. The pin now checks the enumerated set against the diff in BOTH directions wherever `origin/main` resolves, reds on any path under `tortoise/`, and skips on the suite job's shallow checkout, which is why the set is also re-read by a reviewer at each head.) |
 
 ---
 
@@ -336,8 +348,9 @@ uv run python tools/paired_expansion_ab_2518.py --snapshot /tmp/snap-2518 \
 uv run python tools/paired_expansion_ab_2518.py --snapshot /tmp/snap-2518 \
     --population 1000 --sample 60 --distractors 500 --read-limit 30 --arms object \
     --repeat-arm object --out /tmp/object-60.json   # `--repeat-arm` defaults to POINT and never equals
-                                    # `object`, so omitting it emits `repeat_identical: null` and does
-                                    # NOT reproduce this artifact (`repeat_identical: true`)
+                                    # `object`, so omitting it leaves the repeat unimplemented — and a
+                                    # re-run is NOT comparable to this artifact on that field anyway (see
+                                    # the annotation note below: the committed `repeat_identical` is `null`)
 ```
 
 ⛔ **A re-run is not byte-reproducible from this repo alone.** The frozen snapshot lived only in a
@@ -346,14 +359,18 @@ drawn `population-300.json` was never committed — so `items.name_digest` can b
 (it equals `population.names_sha256`) but the names behind it cannot be re-derived here. The artifacts say
 so rather than implying otherwise.
 
-⛔ **And two fields in these three files are ANNOTATIONS, not run output.** The control's
-`identity_measured: false` + its `identity_note`, and all three files'
+⛔ **And three fields in these three files are ANNOTATIONS, not run output.** The control's
+`identity_measured: false` + its `identity_note`; all three files'
 `construction_unrecorded: {fields: [query_chars, key_tokens, min_query_tokens]}` (their runs predate those
-fields) were added by hand beside the run. They mean "this run did not record/measure it", which is a fact
-about THESE FILES — no version of the tool emitted them (`#13267` review 5, F5). The tool emits
-`identity_measured` itself now, and the suite's artifact-shape helper holds for a tool-produced artifact
-as well as these three, so a correct re-generation is not punished by the pins that document the older
-shape.
+fields); and all three files' `repeat_identical: null` + `repeat_check` block — those were added by hand
+beside the run. They mean "this run did not record/measure it", which is a fact about THESE FILES — no
+version of the tool emitted them (`#13267` review 5, F5). The `repeat_check` case is the sharpest: their
+`repeat` arm compared the target's **rank**, which is null on both sides for every point-arm item, so the
+`true` those files used to carry was `None == None` — a constant. The annotation records the basis
+(`target_rank`), the zero items actually compared, and that it is not a determinism check (`#13267` review 4
+F2). The tool emits `identity_measured` and `repeat_check` itself now, compares ranked-list **digests**, and
+the suite's artifact-shape helper holds for a tool-produced artifact as well as these three, so a correct
+re-generation is not punished by the pins that document the older shape.
 
 The tool records, in the artifact's own `provenance` block, the sha256 of its own bytes and whether those
 bytes were committed (`tool_sha256` / `tool_uncommitted`) — because `git_head` alone does **not** identify

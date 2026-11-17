@@ -25,6 +25,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -545,7 +546,7 @@ def _fake_arm(ids_by_item, *, seed_ranks=None, mode="keyword_only"):
 
 
 def _build_fake_artifact(*, point_off, point_on, object_off, object_on,
-                         args=None):
+                         args=None, repeat_ids=None):
     item_ids = sorted(point_off)
     names = [f"the name {i}" for i in range(len(item_ids))]
     items = [{"item_id": iid, "name": name, "target_overlap_with_query": 0}
@@ -560,6 +561,10 @@ def _build_fake_artifact(*, point_off, point_on, object_off, object_on,
                   "on": _fake_arm(point_on, seed_ranks={i: 0 for i in item_ids})},
         "object": {"off": _fake_arm(object_off), "on": _fake_arm(object_on)},
     }
+    if repeat_ids is not None:
+        # the repeat arm, so the determinism check has something to compare
+        arms["point"]["repeat"] = _fake_arm(
+            repeat_ids, seed_ranks={i: 0 for i in item_ids})
     art = P._build_artifact(
         args or _fake_args(), manifest, pop_body, items, {}, {"anchors": 1},
         arms, item_ids, load_start={"load_1m": 1.0, "load_5m": 1.0,
@@ -714,10 +719,36 @@ def _assert_the_artifact_pins_hold(art: dict) -> None:
             f"in construction_unrecorded={knob in unrecorded}")
     for arm, block in art["arms"].items():
         measured = block["ranked_lists_compared"] > 0
-        # the identity is a MEASUREMENT exactly when ranked lists were compared:
-        # a number beside zero compared items is `None == None` dressed up as a
-        # measurement, and `null` beside a non-zero count is a measurement
-        # thrown away
+        # ⛔ `#13267` review 4 F2: the determinism check must say WHAT it
+        # compared. `repeat_identical` was computed from the target's RANK, which
+        # is null on both sides for every point-arm item, so the field published
+        # `None == None` as "identical for all 300 items". The basis is now part
+        # of the record, and a legacy target-rank basis can never stand in for a
+        # determinism result.
+        check = block.get("repeat_check")
+        assert check is not None, (
+            f"arm {arm!r} records no `repeat_check` — a bare `repeat_identical` "
+            "does not say what was compared")
+        assert check["basis"] in (P.REPEAT_BASIS_DIGEST, P.REPEAT_BASIS_LEGACY)
+        if check["basis"] == P.REPEAT_BASIS_LEGACY:
+            assert block["repeat_identical"] is None, (
+                f"arm {arm!r} publishes `repeat_identical` off a TARGET-RANK "
+                "comparison — that is not a determinism check of the read")
+            assert "not a determinism check" in (check["note"] or ""), (
+                f"arm {arm!r}: a legacy basis must say in the record that it is "
+                "not a determinism check")
+        else:
+            assert (block["repeat_identical"] is None) is (check["compared"] == 0), (
+                f"arm {arm!r}: repeat_identical={block['repeat_identical']!r} "
+                f"with {check['compared']} ranked list(s) compared")
+            assert check["identical"] == block["repeat_identical"]
+            if check["compared"] == 0:
+                assert "UNMEASURED" in (check["note"] or ""), (
+                    f"arm {arm!r} reports an unmeasured determinism with no note")
+        # ⛔ `#13267` F1: the IDENTITY is a MEASUREMENT exactly when ranked lists
+        # were compared — a number beside zero compared items is `None == None`
+        # dressed up as a measurement, and `null` beside a non-zero count is a
+        # measurement thrown away
         assert (block["expansion_identical_items"] is None) is not measured, (
             f"arm {arm!r}: ranked_lists_compared="
             f"{block['ranked_lists_compared']} but "
@@ -885,6 +916,35 @@ def test_the_docs_index_row_repeats_only_what_the_evidence_carries():
     assert head["items"]["name_digest"][:8] in row
     for transposed in ("10.36", "10.27"):
         assert transposed not in row
+
+    # ⛔ `#13267` review 4 F4: every assertion above is a NEGATIVE (a retired
+    # claim that must not return), and `head["items"]["name_digest"][:8] in row`
+    # was the only positive one. So the row could publish a lift the artifact does
+    # not carry, a churn count it does not carry, a corpus digest matching no
+    # artifact and a line count it does not carry — measured GREEN, each on its
+    # own, whole suite passing. The row's figures are asserted against the
+    # artifact the row cites, in the positions a reader reads them.
+    n = head["population"]["sample"]
+    per_k = head["arms"]["point"]["per_k"]
+    k15, k10, k3 = per_k["k=15"], per_k["k=10"], per_k["k=3"]
+    row_checks = [
+        (f"{k15['on_hits']}/{n}", "the k=15 recovered-target count"),
+        (f"{k10['on_hits']}/{n}", "the k=10 count"),
+        (f"{k3['mde_paired'] * 100:.2f} pp", "the k=3 MDE"),
+        (f"{k3['off_topk_displacement']['displaced_ids']} of "
+         f"{k3['off_topk_displacement']['items_with_off_topk'] * 3}",
+         "the k=3 OFF top-k displacement"),
+        (head["snapshot"]["digest"][:16], "the frozen corpus digest"),
+        (f"{head['snapshot']['total_lines']:,} lines", "the corpus line count"),
+        (f"{head['snapshot']['file_count']} files", "the corpus file count"),
+    ]
+    delta15 = (k15["on_hits"] - k15["off_hits"]) / n * 100
+    row_checks.append((f"+{delta15:.2f} pp", "the k=15 paired delta (pp)"))
+    for shown, what in row_checks:
+        assert shown in row, (
+            f"the index row does not carry {what} as {shown!r}: {row[:400]}")
+    # and the class-conditional caveat travels with the lift
+    assert "class-conditional" in row
 
 
 # ── 2e. the published RESULT figures, recomputed cell by cell ────────────────
@@ -1480,3 +1540,288 @@ def test_the_point_arm_reaches_the_lever_and_the_object_arm_cannot(tmp_path,
     assert art["items"]["name_digest"] != art["items"]["id_digest"]
     # and the mechanism demonstrably changed at least one point read
     assert point["expansion_fired_items"] >= 1
+
+
+# ── 2g. the four pins review round 4 measured GREEN (`#13267` F1–F6) ────────
+#
+# Every test below exists because a mutation SURVIVED the suite at this head and
+# was proven to by the reviewer, not because the property looked unprotected. The
+# measured survivors: the re-freeze refusal deleted, `repeat_identical` flipped,
+# the index row's lift re-staled to +9.99 pp, the brief's snapshot digest and its
+# two load traces re-staled, the manifest tampered, and `tortoise/sdk.py` added to
+# the touched-path cell. Each is now RED; each test names the mutant it kills.
+
+def test_a_re_freeze_over_a_tampered_snapshot_is_refused(tmp_path):
+    """F1 — the `--freeze` refusal, which had no pin at all.
+
+    `test_a_tampered_snapshot_is_refused_never_renamed` covers `--snapshot`
+    (`verify_snapshot`) only, and the brief's §1/§5 MET row leaned on it for BOTH
+    paths. Measured by the reviewer: deleting the digest comparison inside
+    `freeze_snapshot` (`if current["digest"] != recorded["digest"]:` → `if
+    False:`) left `37 passed, 1 skipped`, and the mutant then returned the
+    RECORDED manifest for a snapshot whose bytes no longer matched it — a run
+    that attests `snapshot.digest` over a corpus it never verified.
+    """
+    src = tmp_path / "live"
+    _write_corpus(src, names=["the road bike repairs"])
+    dst = tmp_path / "snap"
+    recorded = P.freeze_snapshot(src, dst)
+    victim = dst / "2026-01-01.jsonl"
+    victim.write_text(victim.read_text() + '{"session_id":"late"}\n')
+    before = (dst / "MANIFEST.json").read_text()
+    with pytest.raises(P.Refused, match="no longer matches its own manifest"):
+        P.freeze_snapshot(src, dst)
+    # the failed call recopies NOTHING and rewrites no manifest — a re-freeze
+    # that "succeeds" turns a modified snapshot into fresh evidence
+    assert (dst / "MANIFEST.json").read_text() == before, (
+        "the refused re-freeze rewrote MANIFEST.json — it must leave the "
+        "evidence exactly as it found it")
+    assert victim.read_text().endswith('{"session_id":"late"}\n'), (
+        "the refused re-freeze re-copied the source over the tampered file")
+    assert recorded["digest"] != P._build_manifest(dst, source=str(dst))["digest"]
+
+
+def test_the_determinism_check_compares_the_read_not_the_target_rank(
+        _no_embedder_probe):
+    """F2 — `repeat_identical` was `None == None` on every point-arm item.
+
+    It compared the target's RANK, and the target is selected to be lexically
+    unreachable, so on the point arms that rank is null in BOTH reads: the check
+    was a constant that no retrieval behaviour could move, published in the brief
+    as "the repeat returned identical outcomes for all 300 items". Two mutants
+    died here:
+      * a re-ORDERED repeat window (rank unchanged, read changed) must be
+        `identical: False` — the old basis returned `True`;
+      * a repeat with no recorded ranked list must be UNMEASURED, never `True`.
+    """
+    off = {"item-000000": ["a", "b"], "item-000001": ["c", "d"]}
+    reordered = {"item-000000": ["b", "a"], "item-000001": ["d", "c"]}
+    same = {"item-000000": ["a", "b"], "item-000001": ["c", "d"]}
+    on = {"item-000000": ["a", "b", "z"], "item-000001": ["c", "d"]}
+    ctrl_off = {"item-000000": ["a"], "item-000001": ["c"]}
+    ctrl_on = {"item-000000": ["a"], "item-000001": ["c"]}
+
+    def _point(repeat_ids):
+        art, _ = _build_fake_artifact(
+            point_off=off, point_on=on, object_off=ctrl_off, object_on=ctrl_on,
+            repeat_ids=repeat_ids)
+        return art["arms"]["point"]
+
+    # the target rank is null on BOTH sides of every pair, exactly as in the
+    # committed point artifacts — so a rank-based check cannot see the reorder
+    reordered_arm = _point(reordered)
+    assert reordered_arm["repeat_check"]["basis"] == P.REPEAT_BASIS_DIGEST
+    assert reordered_arm["repeat_check"]["compared"] == len(off)
+    assert reordered_arm["repeat_identical"] is False, (
+        "a re-ordered repeat window is a DIFFERENT read; the retired "
+        "target-rank basis reported it identical because both ranks were null")
+    assert _point(same)["repeat_identical"] is True
+
+    # no recorded ranked list ⇒ no determinism result
+    unmeasured = _point({"item-000000": None, "item-000001": None})
+    assert unmeasured["repeat_identical"] is None
+    assert unmeasured["repeat_check"]["compared"] == 0
+    assert "UNMEASURED" in unmeasured["repeat_check"]["note"]
+
+    # no repeat block at all ⇒ the same, never a vacuous True
+    art, _ = _build_fake_artifact(
+        point_off=off, point_on=on, object_off=ctrl_off, object_on=ctrl_on)
+    assert art["arms"]["point"]["repeat_identical"] is None
+    assert art["arms"]["point"]["repeat_check"]["compared"] == 0
+
+    # and the brief must not describe the legacy field as a determinism result
+    brief = (_DOCS / "research-brief.md").read_text()
+    assert "returned the **identical** outcome for every item" not in brief
+    assert "repeat of the OFF side returned identical outcomes" not in brief
+    for name in _ARTIFACTS:
+        for arm, block in _artifact(name)["arms"].items():
+            assert block["repeat_check"]["basis"] == P.REPEAT_BASIS_LEGACY, (
+                f"{name}/{arm} is one of the committed (legacy) runs")
+            assert block["repeat_identical"] is None
+    assert "`repeat_identical: null`" in brief or \
+           "repeat_identical: null" in brief, (
+        "the brief must say the committed artifacts publish no determinism "
+        "result, so a reader cannot take the retired `true` from them")
+
+
+def test_no_k_below_its_own_mde_is_published_as_a_winner():
+    """F3 — the MDE rule was applied to k=3 and not to k=5.
+
+    Measured by the reviewer: at k = 5 the artifact's `mde_paired` is 0.022785
+    (2.28 pp) against a delta of +2.00 pp — BELOW it — while the brief bolded
+    `p = 0.0313` as significant. With `c = 0` the MDE rule is the same monotone
+    threshold as `p > 0.05`, so applying it selectively adds no constraint and
+    reads as a rule that only fires where it agrees. The convention is therefore
+    mechanical and asserted here: **the p cell is bold exactly when the row's
+    delta clears that row's own MDE** — the two columns of the same table.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    head = _artifact("paired-point-300.json")
+    header, rows = _table(brief, "OFF hits", "McNemar")
+    p_col = _col(header, "McNemar")
+    mde_col = _col(header, "MDE")
+    n = head["population"]["sample"]
+    assert len(rows) == len(head["arms"]["point"]["per_k"])
+    claimed = []
+    for row in rows:
+        k = int(_plain(row[0]))
+        cell = head["arms"]["point"]["per_k"][f"k={k}"]
+        delta_pp = (cell["on_hits"] - cell["off_hits"]) / n * 100
+        mde_pp = cell["mde_paired"] * 100
+        bold = "**" in row[p_col]
+        resolves = delta_pp >= mde_pp - 1e-9
+        assert bold is resolves, (
+            f"brief §4 k={k}: the p-value is {'bold' if bold else 'plain'} but "
+            f"the delta is {delta_pp:.2f} pp against an MDE of {mde_pp:.2f} pp — "
+            "a row below its own MDE is an observation the design could not "
+            "resolve, and must not be printed as a win")
+        if bold:
+            claimed.append(k)
+    # the two rows that DO clear their MDE, and no others
+    assert claimed == [10, 15], f"the brief claims wins at k={claimed}"
+
+
+def test_the_snapshot_digest_and_every_load_trace_are_pinned_where_quoted():
+    """F5 — the digest R2 hangs on was quoted three times and pinned nowhere.
+
+    Measured by the reviewer, all GREEN: `docs/00_index.md`'s digest `…b3` →
+    `…b4`, the brief's digest `…b3` → `…b4` at two sites, the manifest's aggregate
+    digest tampered with its rows kept, a per-file sha256 tampered with the
+    aggregate kept, and ONE of the brief's two load traces re-staled. The last one
+    is the sharpest: the pin asserted `f"{load_1m:.2f}" in brief`, a presence
+    check, so mutating a single site left the brief publishing `13.10 → 12.55` in
+    §3 and `13.09 → 12.55` in §5 — two disagreeing figures in one document.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    index = (Path(__file__).resolve().parent.parent / "docs" / "00_index.md").read_text()
+    head = _artifact("paired-point-300.json")
+    manifest = json.loads((_DOCS / "corpus-snapshot-manifest.json").read_text())
+
+    # the manifest is self-consistent AND is the one every arm read
+    assert P.snapshot_digest(manifest) == manifest["digest"], (
+        "corpus-snapshot-manifest.json's aggregate digest does not recompute "
+        "from its own per-file rows")
+    assert manifest["digest"] == head["snapshot"]["digest"]
+    for name in _ARTIFACTS:
+        assert _artifact(name)["snapshot"]["digest"] == manifest["digest"], (
+            f"{name} attests a corpus the committed manifest does not describe")
+
+    digest = manifest["digest"]
+    # ⛔ EVERY place the digest is quoted must be the artifact's — a plain
+    # `digest[:16] in brief` is vacuous here, because the brief quotes the short
+    # prefix at §3 and the FULL digest at §5, so re-staling one site left the
+    # other satisfying the assertion (measured: GREEN).
+    quoted = re.findall(r"18ab[0-9a-f]*", brief)
+    assert quoted, "the brief must quote the artifact's own digest"
+    for fragment in quoted:
+        assert digest.startswith(fragment), (
+            f"the brief quotes the digest fragment {fragment!r}, which is not a "
+            f"prefix of the artifact's {digest} — one site has been re-staled")
+    assert brief.count(digest[:16]) >= 2, (
+        "the digest is quoted at two sites (§3 as a prefix, §5 in full)")
+    assert digest[:16] in index, "the index row must quote the same digest"
+    assert f"{manifest['total_lines']:,} lines" in brief
+    assert f"{manifest['file_count']} files" in brief
+
+    # ⛔ EVERY load trace the brief prints must be one an artifact recorded: a
+    # presence check let one of the two headline sites re-stale. The object
+    # control legitimately quotes its OWN pair, so the allowed set is every
+    # artifact's `environment` block — a figure in no artifact is still RED.
+    allowed = set()
+    for name in _ARTIFACTS:
+        env = _artifact(name)["environment"]
+        allowed.add((f"{env['load_start']['load_1m']:.2f}",
+                     f"{env['load_end']['load_1m']:.2f}"))
+    traces = re.findall(r"(\d+\.\d+)\s*→\s*(\d+\.\d+)", brief)
+    assert traces, "the brief quotes the load trace"
+    for shown in traces:
+        assert shown in allowed, (
+            f"the brief prints the load trace {shown[0]} → {shown[1]}, which is in "
+            f"NO committed artifact — the committed pairs are {sorted(allowed)}")
+    want = (f"{head['environment']['load_start']['load_1m']:.2f}",
+            f"{head['environment']['load_end']['load_1m']:.2f}")
+    assert brief.count(want[0]) >= 2, (
+        "the headline trace is quoted at two sites (§3 and §5); a single "
+        "occurrence means one of them has been re-staled or dropped")
+
+    # the item class is argued from this median, and nothing compared it
+    overlap = head["items"]["median_target_overlap_with_query"]
+    assert f"median query-token overlap **{overlap:.1f}**" in brief, (
+        f"the brief argues the item class from a median query overlap of "
+        f"{overlap} but that sentence no longer prints it — a bare "
+        f"{overlap:.1f} appears ten times in this document, so its presence is "
+        "not evidence")
+
+
+def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
+    """F6 — the cell claimed a set pin that did not exist.
+
+    The R3 falsifier publishes the touched-path set and ended "the pin in
+    `tests/test_paired_expansion_ab_2518.py` keeps this cell to the path set".
+    The pin's last assertion was `"git diff --name-only origin/main...HEAD" in
+    brief` — it required the cell to NAME the command and banned the tally
+    vocabulary; it never compared the set to the tree, and the reviewer measured
+    `tortoise/sdk.py` added to the cell as GREEN.
+
+    The fix is both halves: the sentence no longer claims a pin that does not
+    exist, and a real set-level check runs wherever `origin/main` resolves. It is
+    skipped on the suite job's shallow checkout (where `origin/main` is
+    unresolvable and such a pin would SKIP anyway — the residual the previous
+    lane recorded rather than shipping a vacuous guard), so the brief says the set
+    is re-read by a reviewer at each head.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    assert "keeps this cell to the path set" not in brief, (
+        "the cell must not claim a set-level pin — that sentence was `#13267` "
+        "review 4 F6, and the set is re-read by a reviewer, not by the suite")
+    # the cell must still say where the set IS checked, or the reversal is a loss
+    # of information rather than a correction
+    assert "re-read by a reviewer at each head" in brief, (
+        "dropping the false pin claim must keep the honest one: the path set is "
+        "re-read by a reviewer at each head")
+
+    repo = Path(__file__).resolve().parent.parent
+    try:
+        base = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "origin/main"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        diff = subprocess.run(
+            ["git", "-C", str(repo), "diff", "--name-only",
+             f"{base}...HEAD"],
+            capture_output=True, text=True, check=True).stdout.split()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pytest.skip("origin/main does not resolve here (shallow checkout) — the "
+                    "path set is re-read by a reviewer at each head")
+    if not diff:
+        pytest.skip("origin/main == HEAD in this tree — nothing to compare")
+
+    assert not [p for p in diff if p.startswith("tortoise/")], (
+        "the R3 claim is 'no retrieval behaviour changed', and the diff reaches "
+        f"the product: {[p for p in diff if p.startswith('tortoise/')]}")
+    # ⛔ the cell's ENUMERATION is part of the record, both ways: a path it names
+    # that the diff does not carry is a re-staled cell (the reviewer's mutant,
+    # `tortoise/sdk.py` added to the cell, was GREEN), and a diff path it omits is
+    # an incomplete set. Only the `touches exactly these paths:` span is an
+    # enumeration — the `No change to \`tortoise/\`` clause after it is a
+    # NEGATIVE and is deliberately not read as a member.
+    marker = "touches exactly these paths:"
+    at = brief.find(marker)
+    assert at >= 0, "the cell must enumerate the paths it publishes"
+    span = brief[at + len(marker):].split(". No change to")[0]
+    tokens = set(re.findall(r"`([^`]+)`", span))
+    assert tokens, f"no path tokens in the enumerated span: {span[:200]!r}"
+    dirs = {t for t in tokens if t.endswith("/")}
+    named = tokens - dirs
+    extra = named - set(diff)
+    assert not extra, (
+        f"the cell names paths this diff does not carry: {sorted(extra)} — a "
+        "path set that over-claims is as stale as one that under-claims")
+    covered = set(named)
+    for directory in dirs:
+        covered |= {p for p in diff if p.startswith(directory)}
+    missing = set(diff) - covered
+    assert not missing, (
+        "the cell does not name these touched paths, so its set is incomplete: "
+        f"{sorted(missing)}")
+    assert dirs and "docs/research/2026-11-17-2518-paired-ab/" in dirs, (
+        "the cell must name the directory it summarises")

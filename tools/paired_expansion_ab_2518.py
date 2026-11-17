@@ -121,6 +121,14 @@ MODE_REFUSAL = "window_modes"
 STRUCTURAL_REFUSAL = "structurally_blind"
 INERT_REFUSAL = "inert_harvest"
 
+#: What the determinism check compares. `ranked_list_digest` compares the READ
+#: this run's repeat performed against the OFF read; the retired basis compared
+#: the target's RANK, which is `None` on every point-arm item, i.e. `None ==
+#: None` (`#13267` review 4 F2). Recorded in the artifact so a reader can tell a
+#: measured determinism from a vacuous one.
+REPEAT_BASIS_DIGEST = "ranked_list_digest"
+REPEAT_BASIS_LEGACY = "target_rank"
+
 
 class Refused(Exception):
     """A measurement the tool will not take. Every caller returns exit 3."""
@@ -774,10 +782,18 @@ def detectable_effect(n: int, discordance: float, *,
 
         δ = ( z_{1-α/2}·√π + z_{power}·√(π − δ²) ) / √n,     π = P(discordant)
 
-    solved by fixed-point iteration because δ appears on both sides. ⛔ Stated
-    BEFORE any verdict: an n that cannot resolve 3 pp must not report a winner.
-    ``discordance`` is measured, not assumed — the paired advantage is entirely in
-    it, which is why the independent-design figure below is also computed.
+    solved by fixed-point iteration because δ appears on both sides.
+
+    ⛔ This is REPORTED BESIDE the exact test, and it is NOT pre-stated: π is this
+    run's own discordant share, which does not exist until both arms have been
+    read, so a figure computed here cannot have been fixed before the outcome.
+    (`#13267` review 4 F3: the docstring said "Stated BEFORE any verdict" three
+    lines above "discordance is measured, not assumed", and the brief reported
+    the row as MET on that basis.) What IS fixed in advance is ``n``; δ says what
+    that n could resolve at 80 % power, so a delta BELOW it is an observation the
+    design was not powered to resolve and is not reported as a winner. The
+    independent-design figure below is computed for the same reason: the paired
+    advantage lives entirely in π, so the unpaired comparison is shown too.
     """
     if n <= 0:
         return float("nan")
@@ -1123,12 +1139,31 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
                                  f"arm {arm}/{side} has MIXED window modes "
                                  f"{counter} — a comparison across modes is "
                                  f"contaminated by the leg, not the lever"))
+        # ⛔ The determinism check compares the READ, not the target's RANK.
+        # `#13267` review 4 F2: it used to be
+        #
+        #     repeat["per_item"][i]["rank"] == off["per_item"][i]["rank"]
+        #
+        # and on the POINT arms the target's rank is `None` for every item (the
+        # target is selected to be lexically unreachable), so the check was
+        # `None == None` 300 times — a constant no retrieval behaviour can move,
+        # published as "the repeat returned identical outcomes for all 300 items".
+        # It could not see a re-ordered window or a different id set, only a
+        # change in target PRESENCE. The ranked lists ARE recorded per side
+        # (`_ids_digest`), so that is what is compared — and where a side has no
+        # recorded list the check is UNMEASURED (`None`), never a vacuous `True`.
         repeat = blocks.get("repeat")
         repeat_identical = None
+        repeat_compared = 0
         if repeat is not None:
-            repeat_identical = all(
-                repeat["per_item"][i]["rank"] == off["per_item"][i]["rank"]
-                for i in item_ids)
+            pairs = [(repeat["per_item"][i]["ids"], off["per_item"][i]["ids"])
+                     for i in item_ids]
+            if any(a is None or b is None for a, b in pairs):
+                repeat_identical = None
+            else:
+                repeat_identical = all(
+                    _ids_digest(a) == _ids_digest(b) for a, b in pairs)
+                repeat_compared = len(pairs)
         prov_off = off["provenance_counts"].get(EXPANSION_PROVENANCE, 0)
         prov_on = on["provenance_counts"].get(EXPANSION_PROVENANCE, 0)
         # ⛔ "Did the lever fire?" must NOT be read off ``provenance``: ONLY the
@@ -1178,6 +1213,17 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
             "expansion_provenance_entries": {"off": prov_off, "on": prov_on},
             "window_modes": modes,
             "repeat_identical": repeat_identical,
+            # the basis is part of the record: a `true` beside zero compared
+            # lists is the `None == None` constant this field used to publish
+            "repeat_check": {
+                "basis": REPEAT_BASIS_DIGEST,
+                "compared": repeat_compared,
+                "identical": repeat_identical,
+                "note": "" if repeat_compared else (
+                    "UNMEASURED: no repeat block, or a side recorded no ranked "
+                    "list — the target's rank alone cannot show a re-ordered "
+                    "window, so no determinism is claimed"),
+            },
             "per_k": per_k,
             "reads": {"off": off["reads"], "on": on["reads"]},
             "per_item": {iid: {

@@ -1982,7 +1982,13 @@
         "off": 300,
         "on": 300
       },
-      "repeat_identical": true,
+      "repeat_check": {
+        "basis": "target_rank",
+        "compared": 0,
+        "identical": null,
+        "note": "LEGACY (not a determinism check): this run's `repeat` was compared on each item's TARGET RANK, and the point arm's target is selected to be lexically unreachable, so the rank is null in BOTH reads \u2014 `None == None` on every item, a constant no retrieval behaviour can move (`#13267` review 4 F2). It could not see a re-ordered window or a different id set, only a change in target PRESENCE. `repeat_identical` is therefore null here; the tool now compares per-side ranked-list digests and records this block itself."
+      },
+      "repeat_identical": null,
       "structurally_blind": false,
       "why": "",
       "window_modes": {
