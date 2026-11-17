@@ -491,15 +491,19 @@ class TestDeprovisionOnDelete:
         from tortoise import hosted_api as ha
 
         class _Broken:
-            # ⛔ `query_all`, NOT `query`: `_org_graph_names` calls the walk now, so
-            # a `query`-only double raised `AttributeError` ("no attribute
-            # 'query_all'") and this test silently became a DUPLICATE of
-            # ``test_a_seam_without_query_all_is_ANNOUNCED_not_silent`` — the
-            # store-OUTAGE arm its own docstring names was left unpinned. That
-            # matters because `query_all` "RAISES on an outage by contract" is the
-            # load-bearing sentence both new docstrings lean on: a mutant that
-            # swallowed only `RuntimeError` inside the walk kept the suite green
-            # while re-opening the unrecoverable partial-erasure path.
+            # ⛔ `query_all`, NOT `query`: `_org_graph_names` walks now, so a
+            # `query`-only double raised `AttributeError` ("no attribute
+            # 'query_all'"), and this test still PASSED — on the wrapper text alone
+            # (`pytest.raises(RuntimeError, match="refusing…")` matched a
+            # `RuntimeError` whose `__cause__` was that `AttributeError`). So the
+            # store-OUTAGE arm its own docstring names was left unpinned, measured:
+            # a mutant that swallows only `RuntimeError` inside the walk and degrades
+            # to the derived names keeps the suite green (838 passed) with the old
+            # double, and reds here ("DID NOT RAISE") with this one — while the
+            # mutant's return value, `['team_o1','org_o1']`, is exactly the partial
+            # erasure. NOT redundant with
+            # ``test_a_seam_without_query_all_is_ANNOUNCED_not_silent``, which pins
+            # the OTHER function's non-raising announcement (`dropped == []`).
             def query_all(self, *a, **k):
                 raise RuntimeError("postgrest down")
 
