@@ -32305,7 +32305,7 @@ class TortoiseSDK:
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{own_status!r} for a :{_item_label} — the writer "
+                           f"{_refusal_repr(own_status)} for a :{_item_label} — the writer "
                            f"validates against the declared lifecycle and "
                            f"refuses it mid-write, so the bundle is "
                            f"rejected at validation. {_status_refusal}",

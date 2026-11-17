@@ -186,7 +186,26 @@ def _render(value: object) -> str:
     try:
         return repr(value)
     except Exception:
-        return f"<{type(value).__name__} whose repr() raised>"
+        return f"<{_render_type(value)} whose repr() raised>"
+
+
+def _render_type(value: object) -> str:
+    """``type(value).__name__`` that CANNOT escape as its own exception.
+
+    The sibling of :func:`_render` on the CLASS-NAME axis, and it needed a pin of
+    its own (#12910): a caller can hand in a value whose METACLASS raises from
+    ``__name__`` — ``class _BoomInt(metaclass=_BoomMeta)`` with
+    ``int`` semantics is a perfectly good ``status`` payload — and the
+    shape arm's ``{type(value).__name__}`` then replaced the promised
+    ``ValueError`` with the metaclass's own ``RuntimeError`` (MEASURED:
+    ``RuntimeError: name-boom`` out of this module). Same rule, same containment:
+    the exception CLASS is the refusal's contract, so no caller-controlled
+    lookup runs unguarded on the way to the message.
+    """
+    try:
+        return type(value).__name__
+    except Exception:
+        return "<unreadable class name>"
 
 
 def _refusal(value: object, fault: str, repair: str, *,
@@ -253,7 +272,7 @@ def read_caller_status(value: object, *, kind: str = "",
     if not issubclass(type(value), str):
         raise _refusal(
             value,
-            f"a status must be a plain string, and {type(value).__name__} is "
+            f"a status must be a plain string, and {_render_type(value)} is "
             f"not one",
             "Pass the word itself, as a string.",
             count=count,
