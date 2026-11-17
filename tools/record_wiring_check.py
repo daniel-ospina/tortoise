@@ -76,6 +76,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import ast
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -683,6 +684,151 @@ def live_call_sites_pass_the_ordinal() -> list[str]:
     return problems
 
 
+def the_door_reads_the_allocate_flag(
+        module_path: Path | None = None) -> list[str]:
+    """⛔ IS THE FLAG ACTUALLY READ ON THE DOOR'S PATH? (#13043 review P2-12).
+
+    THE MEASURED DEFECT. Every claim above is about the POSITION's provenance,
+    so this gate certified `record wiring — WIRED` over a tree where the allocate
+    flag's plumbing had been deleted entirely: `allocate=True` from a caller, and
+    the counter's number in the row, are both satisfied by a test harness. The
+    flag is what makes the LIVE path allocate, and nothing static asserted it.
+
+    Four facts about the flag's PLUMBING, plus a fifth about its FORWARDING —
+    each independently falsifiable, and deleting any one of them is the shape a
+    reviewer measured:
+
+    1. ``RECORD_ALLOCATE_ENV`` is a module-level STRING constant;
+    2. it is exported in ``__all__`` (an operator's tooling reads it by name);
+    3. ``record_live_allocate`` calls the env parser (``*env_flag``) with THAT
+       name as its first argument — a helper that returned a constant would pass
+       a call-count check and is the defect;
+    4. ``write_live_record`` assigns a name from a call to
+       ``record_live_allocate`` in ITS OWN scope. A helper nobody calls on the
+       door's path is the same as no helper;
+    5. ⛔ THE BINDING MUST REACH THE WRITE (#13043 review V2, MEASURED). Fact 4
+       is satisfied by a name that is bound and then DISCARDED: keeping
+       ``allocate = allocate or record_live_allocate()`` and changing the
+       door's ``write_records(…, allocate=allocate)`` to ``allocate=False``
+       left this gate printing `record wiring — WIRED`. The class the gate
+       exists to catch — a switch that does nothing — was restored while the
+       gate stayed green, which is a FALSE PASS (category A). So the door's
+       ``write_records`` call must forward one of the names fact 4 proved is
+       bound from the flag.
+
+    Read from SOURCE (`ast`), not by importing: the point is that the code that
+    ships carries the wiring, and an import would execute the tree under test.
+    """
+    path = module_path or (PACKAGE / "record_writer.py")
+    try:
+        rel = path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        # A caller handed a file OUTSIDE the tree (a test's mutated copy): the
+        # rule is about SOURCE, so the path only labels the problem.
+        rel = path.name
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+        return [f"{rel}: cannot be read to answer the flag question ({exc})"]
+
+    problems: list[str] = []
+    flag_value: str | None = None
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "RECORD_ALLOCATE_ENV"
+                        for t in node.targets)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            flag_value = node.value.value
+    if flag_value is None:
+        problems.append(
+            f"{rel}: no module-level `RECORD_ALLOCATE_ENV = \"…\"` constant — the "
+            "allocate flag cannot be read by name, so the door cannot be armed "
+            "and the operator tooling has nothing to print")
+
+    exported = False
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "__all__"
+                for t in node.targets):
+            with contextlib.suppress(Exception):
+                exported = "RECORD_ALLOCATE_ENV" in ast.literal_eval(node.value)
+    if not exported:
+        problems.append(
+            f"{rel}: `RECORD_ALLOCATE_ENV` is not in `__all__` — a tool that "
+            "needs the flag's name would hard-code it (the drift P2-2 records)")
+
+    functions = {node.name: node for node in tree.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    helper = functions.get("record_live_allocate")
+    if helper is None:
+        problems.append(
+            f"{rel}: `record_live_allocate` is gone — nothing reads the flag")
+    else:
+        reads_flag = False
+        for scope, call in _calls_by_scope(helper):
+            if scope is not helper:
+                continue
+            name = _call_name(call) or ""
+            if not name.endswith("env_flag") or not call.args:
+                continue
+            first = call.args[0]
+            if ((isinstance(first, ast.Name) and first.id == "RECORD_ALLOCATE_ENV")
+                    or (isinstance(first, ast.Constant)
+                        and first.value == flag_value)):
+                reads_flag = True
+        if not reads_flag:
+            problems.append(
+                f"{rel}: `record_live_allocate` does not parse "
+                "`RECORD_ALLOCATE_ENV` — a helper that answers without reading "
+                "the environment cannot be turned on by an operator")
+
+    door = functions.get("write_live_record")
+    if door is None:
+        problems.append(f"{rel}: `write_live_record` is gone")
+    else:
+        # The names the door binds FROM THE FLAG, in its own scope.
+        flag_names: set[str] = set()
+        for name, values in _assigned_targets_in(door).items():
+            for value in values:
+                if any((_call_name(call) or "").endswith(
+                        "record_live_allocate")
+                       for _scope, call in _calls_by_scope(value)):
+                    flag_names.add(name)
+        if not flag_names:
+            problems.append(
+                f"{rel}: `write_live_record` never binds a name from "
+                "`record_live_allocate()` — the flag is read nowhere on the "
+                "door's path, so the switch does nothing")
+        else:
+            # FACT 5 — the binding must REACH THE WRITE (#13043 review V2). A
+            # name that is bound and then discarded satisfies every fact above
+            # and is the same outcome as no flag at all.
+            forwarded = False
+            for scope, call in _calls_by_scope(door):
+                if scope is not door:
+                    continue
+                if not (_call_name(call) or "").endswith("write_records"):
+                    continue
+                keyword = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+                value = keyword.get("allocate")
+                if value is None:
+                    continue
+                referenced = {node.id for node in ast.walk(value)
+                              if isinstance(node, ast.Name)}
+                if referenced & flag_names:
+                    forwarded = True
+            if not forwarded:
+                bound_names = ", ".join(sorted(flag_names))
+                problems.append(
+                    f"{rel}: `write_live_record` binds {{{bound_names}}} from "
+                    "`record_live_allocate()` but never FORWARDS it to its "
+                    "`write_records(...)` call — a bound-and-discarded flag is "
+                    "a switch that does nothing, which is the same defect as a "
+                    "flag that is read nowhere (pass `allocate=<that name>`)")
+    return problems
+
+
 def ordinal_argument_problems(tree: ast.AST, rel: str) -> list[str]:
     """The per-module half of :func:`live_call_sites_pass_the_ordinal`.
 
@@ -790,16 +936,16 @@ def _is_journal_append(value: ast.expr) -> bool:
     return False
 
 
-def _assignments_in(scope: ast.AST, name: str) -> list[ast.expr]:
-    """Every value assigned to `name` in `scope`'s OWN body.
+def _assigned_targets_in(scope: ast.AST) -> dict[str, list[ast.expr]]:
+    """`{name: [value, …]}` for every simple assignment in `scope`'s OWN body.
 
-    Scoped rather than `ast.walk(scope)`, for the reason `_calls_by_scope`
-    exists: `ast.walk` enters a NESTED function, so a helper that happens to do
-    `seq = log.append(record)` made an outer `seq = self._counter + 1` read as
-    "the append's result" — and the gate printed `WIRED` for a door that
-    computes its own number (#9307 review I1).
+    The many-names form of :func:`_assignments_in`, needed by the wiring gate's
+    FORWARDING fact (#13043 review V2): the name a door binds the flag to is not
+    necessarily `allocate`, so the rule cannot hard-code one name to look for.
+    Same scoping reason as its sibling: a nested function's bindings are not this
+    scope's.
     """
-    found: list[ast.expr] = []
+    found: dict[str, list[ast.expr]] = {}
 
     def visit(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
@@ -812,14 +958,26 @@ def _assignments_in(scope: ast.AST, name: str) -> list[ast.expr]:
                 value, targets = child.value, [child.target]
             else:
                 value, targets = None, []
-            if value is not None and any(
-                    isinstance(t, ast.Name) and t.id == name
-                    for t in targets):
-                found.append(value)
+            if value is not None:
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        found.setdefault(target.id, []).append(value)
             visit(child)
 
     visit(scope)
     return found
+
+
+def _assignments_in(scope: ast.AST, name: str) -> list[ast.expr]:
+    """Every value assigned to `name` in `scope`'s OWN body.
+
+    Scoped rather than `ast.walk(scope)`, for the reason `_calls_by_scope`
+    exists: `ast.walk` enters a NESTED function, so a helper that happens to do
+    `seq = log.append(record)` made an outer `seq = self._counter + 1` read as
+    "the append's result" — and the gate printed `WIRED` for a door that
+    computes its own number (#9307 review I1).
+    """
+    return _assigned_targets_in(scope).get(name, [])
 
 
 def _calls_by_scope(tree: ast.AST) -> list[tuple[ast.AST, ast.Call]]:
@@ -930,7 +1088,8 @@ def check() -> tuple[int, dict[str, object]]:
             )
     position_problems = (live_door_writes_the_journals_position()
                          + live_call_sites_pass_the_ordinal()
-                         + production_callers_defer_the_position())
+                         + production_callers_defer_the_position()
+                         + the_door_reads_the_allocate_flag())
 
     report: dict[str, object] = {
         "production_callers": callers,
