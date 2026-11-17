@@ -452,3 +452,28 @@ def test_the_hint_override_writes_the_BEHAVIOURAL_inventory():
     # …and it READS the same half, so the arms cannot both start from `None`.
     assert "getattr(sdk._get_proj(), \"_vector_indexed_labels_for_reads\", None)" \
         in source, "the probe's `indexed` must come from the behavioural half"
+
+
+# ── a seeded `--windows` run must not die on a string index (round 6 F1) ────
+
+def test_seeded_names_accepts_the_seed_reports_STRING_list():
+    """`seed()` returns `names` as a list of STRINGS; `--windows` must not re-index it.
+
+    An earlier revision did `[r["name"] for r in seeded["names"]]` — indexing a
+    `str` with a `str` key — so the natural fresh-graph `--windows` run (the mode
+    that produced this PR's headline `window_modes`) raised
+    `TypeError: string indices must be integers` before measuring anything.
+    """
+    seeds = {"names": ["the diff", "a lane", "V3"]}
+
+    assert probe.seeded_names(seeds) == ["the diff", "a lane", "V3"]
+    # …and it is a COPY: mutating the caller's slice must not touch the report.
+    probe.seeded_names(seeds).append("x")
+    assert seeds["names"] == ["the diff", "a lane", "V3"]
+
+
+def test_seeded_names_is_empty_for_a_no_seed_run():
+    """`--no-seed` leaves `seeded` None; the graph fallback must then be reached."""
+    assert probe.seeded_names(None) == []
+    assert probe.seeded_names({}) == []
+    assert probe.seeded_names({"names": None}) == []

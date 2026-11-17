@@ -663,6 +663,22 @@ def population_measured(census: dict, labels: list[str]) -> dict:
     return out
 
 
+def seeded_names(seeded: dict | None) -> list[str]:
+    """The population a `seed()` report carries, as a plain list of names.
+
+    ⛔ `seed()` returns `"names": [r["name"] for r in pop]` — a list of STRINGS.
+    A `[r["name"] for r in seeded["names"]]` here therefore indexes a `str` with
+    a `str` key and raises `TypeError: string indices must be integers` — which
+    killed the natural fresh-graph `--windows` run (the mode that produced this
+    PR's headline `window_modes`) before a single window was measured, with an
+    error naming neither the flag nor the mode (`#13121` round 6 F1). Pure, so
+    the shape is pinned without a graph.
+    """
+    if not seeded:
+        return []
+    return list(seeded.get("names") or [])
+
+
 def worktree_state() -> dict:
     """The tree the figure was measured ON, not just the commit it names.
 
@@ -803,8 +819,7 @@ def run(args: argparse.Namespace) -> int:
     # ── the eval's own window, at concurrency (the issue's `window_modes`) ──
     windows: dict = {}
     if args.windows:
-        names = ([r["name"] for r in seeded["names"]] if seeded
-                 else [])
+        names = seeded_names(seeded)
         if not names:
             names = [r[0] for r in graph.query(
                 "MATCH (o:Object) WHERE o.id STARTS WITH 'obj-13108' "

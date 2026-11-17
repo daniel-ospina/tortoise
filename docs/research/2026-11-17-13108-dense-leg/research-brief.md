@@ -149,8 +149,8 @@ Published, 384-dim `all-MiniLM-L6-v2`, cosine, k=10, 100k vectors, 500 queries:
 right answer** (~0.2 ms at 1k, ~1.9 ms at 10k in the same extrapolation).
 
 **This is where the external pass becomes evidence rather than background.** Our own
-measurement (§3.4) is **≈13.3 ms to scan 1,000 `:Object` vectors** — about **65×** the
-literature's ~0.2 ms at the same size (and ≈70× once the two refused round trips are added back,
+measurement (§3.4) is **≈13.3 ms to scan 1,000 `:Object` vectors** — about **66×** the
+literature's ~0.2 ms at the same size (≈167× once the two refused round trips are added back,
 which is what the pre-fix read paid). So the cost we are paying is **not the algorithm's**: it is
 FalkorDB evaluating `vec.euclideanDistance` as a Cypher function per row and sorting the label. That reframes V3's option set — "get an index" and "make the scan not be a
 per-row interpreter call" both address this, and the second one does not touch the recorded
@@ -217,7 +217,12 @@ sequentially; a capture fleet does not.
 | **8,000 names**, probe windows c=1 | rest (load 7.7) | 60 | `{hybrid: 60}` | 0 % |
 | **8,000 names**, probe windows c=1 | load 114–134 | 120 | `{hybrid: 120}` | 0 % |
 | **8,000 names**, probe windows c=1 | **load 122–132** | 60 | `{hybrid: 58, keyword_only: 2}` | **3.3 %** — reason **`timeout`** |
-| **1,000 names**, probe windows c=8/16/32 | rest | 96 each | `{hybrid: 96}` | 0 % (p50 window latency 638/1249/2607 ms) |
+
+⛔ **A fourth 8,000/1,000-window row is WITHDRAWN, not carried** (`#13121` round 6, F5): an earlier
+revision listed `1,000 names, probe windows c=8/16/32` with `{hybrid: 96}` and window p50s
+638/1249/2607 ms. No committed artifact backs it — no 1,000-name artifact has a populated `windows`
+key, no artifact records concurrency 8/16/32 windows, and `grep -c '1249'` / `'2607'` over the ten
+artifacts returns 0 — so the row is removed rather than left as a number without a source.
 
 **The two eval runs are BETWEEN-RUN, not paired, and that is declared rather than glossed.**
 Their population digests differ — `0defe6b3adae26ee` vs `343c1c49f4568d8d` — because the capture
@@ -355,10 +360,12 @@ load ~130 the dense leg still timed out (§3.3).
   live label.
 
 ⚠️ **And a third option this measurement opens, which is neither index nor budget:** the scan is
-**≈65× slower than a tuned exact scan of the same size** (13.3 ms vs the §2.2 literature's
-0.18–0.19 ms per 10k rows) — and **≈70×** if the two refused round trips are still paid. If the
-requirement is "the dense leg fits in 500 ms at 8,000 rows", a scan that costs 0.2–2 ms instead
-of 13 ms achieves it without touching V3 at all. That is a bigger change than this lane should make, and it is filed
+**≈66×** a tuned exact scan of the same size (13.26 ms vs the §2.2 literature's 0.18–0.19 ms
+**per 1,000 rows**; that figure is derived from 18.58 ms at 100k, so it must not be read as a
+per-10k rate). ⛔ The pre-fix read paid **≈167×** once the two refused round trips are added back
+(13.26 + 20.17 = 33.43 ms) — a separate, larger ratio, and not the "≈70×" an earlier revision of
+this paragraph claimed. If the requirement is "the dense leg fits in 500 ms at 8,000 rows", a scan
+that costs 0.2–2 ms instead of 13 ms achieves it without touching V3 at all. That is a bigger change than this lane should make, and it is filed
 as such rather than assumed.
 
 ---
@@ -378,7 +385,7 @@ as such rather than assumed.
 1. **V3's index question — for the owner.** §6 is the evidence; this lane does not create one.
 2. **The 45 % magnitude is not reproduced here** (§3.3). Reproducing it needs a census-sized
    label and a store shared with fleet traffic; both are named, neither is guessed at.
-3. **The scan's ≈65× gap to a tuned exact scan** (§2.2, §6) — an alternative remedy with no
+3. **The scan's ≈66× gap to a tuned exact scan** (§2.2, §6) — an alternative remedy with no
    decision attached, unmeasured beyond the comparison above.
 4. **The default product caller still sees no degradation** — `leg_trace=None` everywhere
    (`#2952` is opt-in). Surfacing `degraded_read` on the product's own read is unaffected by this

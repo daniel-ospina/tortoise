@@ -3946,10 +3946,15 @@ def run_vector_query(
                 return out
 
     # ── #13108: do not pay for an index the store has already measured absent ──
-    # `_vector_indexed_labels` is the projection's OWN measured set (the served
-    # labels ∩ the engine's VECTOR-indexed labels), i.e. the same source of truth
-    # behind the `#4997` notice — so this cannot be staler than the line an
-    # operator already reads, and it is re-measured on every projection setup.
+    # ⛔ The caller supplies `FalkorProjection._vector_indexed_labels_for_reads`
+    # — the BEHAVIOURAL half, never the reported pair above it. The reported pair
+    # collapses "the catalogue came back but nothing in it parsed" into an empty
+    # set (#11087's pinned message semantic), so acting on that value would read
+    # an engine catalogue reshape as "this store indexes nothing" and demote
+    # every dense read to a scan. The behavioural half is None in exactly that
+    # lane. Both are equal in every other lane, and both are re-measured on every
+    # projection setup, so neither can be staler than the `#4997` line an
+    # operator already reads.
     # None means NOT MEASURED (the inventory's fail-open lane): attempt as before
     # rather than assume absence, because a wrong skip would demote every read of
     # an indexed label to a scan.
