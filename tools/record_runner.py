@@ -917,6 +917,32 @@ def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
     return lines
 
 
+def completeness_lines(j: dict[str, Any]) -> list[str]:
+    """The `complete: UNKNOWN` sentence, chosen by WHY the claim was withdrawn.
+
+    ⛔ `completeness_unknown` is `journal.salvage` (#13272's ruling), so the same
+    predicate covers three very different reads, and one sentence for all three
+    was false in two: a PRISTINE `--salvage` read was told *"this read SKIPPED
+    damaged input"* while the payload's own `corrupt_lines: 0, torn_tails: 0` (and
+    the absent damage line above it) denied it. The claim is withdrawn either way —
+    that is the ruling — but the REASON is the read's to state:
+
+    * no counters at all → the layout cannot account for input;
+    * a counter above zero → the read SKIPPED damaged input (or dropped a tail);
+    * counters clean → the mode alone withdrew the claim, and the sentence says so
+      instead of inventing damage.
+    """
+    if j["corrupt_lines"] is None or j["torn_tails"] is None:
+        return ["complete: UNKNOWN — this layout's reader reports no damage "
+                "counters, so it cannot account for input"]
+    if j["corrupt_lines"] or j["torn_tails"]:
+        return ["complete: UNKNOWN — this read SKIPPED damaged input, so it is "
+                "not a completeness claim"]
+    return ["complete: UNKNOWN — this read was taken with --salvage, and a salvage "
+            "read's completeness is not a claim; the counters above measured no "
+            "damage (#13272)"]
+
+
 def _render_plan(report: PlanReport) -> str:
     j = report.journal
     lines = [
@@ -1296,8 +1322,13 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
          "not apply" if allocated
          else f"events remaining: unknown — {mismatch}" if mismatch is not None
          else f"events remaining: {max(0, remaining)}"),
-        *(["complete: UNKNOWN — this read SKIPPED damaged input, so it is "
-           "not a completeness claim"] if completeness_unknown else []),
+        # ⛔ THREE DIFFERENT REASONS, THREE DIFFERENT SENTENCES (review P2, #13275).
+        # `completeness_unknown` is `journal.salvage` (#13272's ruling), so this arm
+        # fires for a PRISTINE `--salvage` read too — where the same payload's
+        # `corrupt_lines: 0, torn_tails: 0` and the absent damage line above deny
+        # that anything was skipped. The predicate is the ruling's and stays; the
+        # SENTENCE has to be true of the read it describes.
+        *(completeness_lines(payload["journal"]) if completeness_unknown else []),
         "cutover: " + ("none (positions are the journal's)" if cursor is None
                        else f"cursor present (seq {cursor[0]}, mode {cursor[1]})"),
     ])

@@ -1225,6 +1225,45 @@ def test_apply_folds_ACROSS_BATCHES_and_counts_every_one(monkeypatch, capsys):
     assert "seq 1..39" in out
 
 
+def test_the_unknown_completion_sentence_names_the_REASON_it_was_withdrawn(
+        monkeypatch, capsys):
+    """⛔ P2 (review #13275): one sentence for three different reads was false in two.
+
+    `completeness_unknown` is `journal.salvage` (#13272's ruling), so a PRISTINE
+    `--salvage` read — counters `0/0`, no damage line — was told *"this read
+    SKIPPED damaged input"*, which the same payload denies. Measured before this
+    fix (`status` over a clean journal with `--salvage`): the sentence above, with
+    `corrupt_lines: 0, torn_tails: 0`. Nothing asserted it: `grep -rn 'SKIPPED
+    damaged' tests/` had 0 hits, so the wording could be reverted freely.
+
+    Three arms, so the sentence is a function of the read's own counters rather
+    than of the flag that happens to have withdrawn the claim.
+    """
+    for counters, expected, forbidden in (
+            # a read that skipped nothing: no invented damage
+            ((0, 0), "taken with --salvage",
+             "SKIPPED damaged input"),
+            # a read that DID skip a line
+            ((1, 0), "SKIPPED damaged input", "counters above measured no damage"),
+            # a layout whose reader cannot report: not "skipped", just unmeasured
+            ((None, None), "reports no damage counters",
+             "SKIPPED damaged input")):
+        corrupt, torn = counters
+        journal = Journal(path=FIXTURE,
+                          records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
+                          segmented=corrupt is None, salvage=True,
+                          corrupt=corrupt, torn=torn)
+        monkeypatch.setattr(record_runner, "read_journal", lambda *a, **k: journal)
+        _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
+        rc = main(["status", "--org-id", "o", "--graph-id", "g",
+                   "--journal", str(FIXTURE), "--salvage"])
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert "complete: UNKNOWN" in out, out
+        assert expected in out, f"counters={counters}: {out}"
+        assert forbidden not in out, f"counters={counters}: {out}"
+
+
 def test_the_counters_REACH_plan_and_apply_from_a_real_graph_directory(
         tmp_path, monkeypatch, capsys):
     """⛔ P3 (review #13275): the plumbing into `plan`/`apply` was unfenced.
