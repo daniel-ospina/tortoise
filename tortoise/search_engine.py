@@ -580,7 +580,7 @@ _ZERO_HEX_LITERAL = re.compile(
 _ZERO_LITERAL = re.compile(r"\s*[+-]?0*(?:\.0*)?(?:[eE][+-]?[0-9]+)?\Z",
                            re.ASCII)
 #: `re.ASCII` is load-bearing on both patterns: without it `\s` matches Unicode
-#: spaces that `float()` skips and `strtof` does not — `" 0.7"` (a value
+#: spaces that `float()` skips and `strtof` does not — `"\u00a00.7"` (a value
 #: pasted out of a spreadsheet) was 0.7 in Python and null to the store, the same
 #: twin split this grammar exists to prevent — and `[0-9]`/`\d` stay Latin,
 #: which is what the store parses.
