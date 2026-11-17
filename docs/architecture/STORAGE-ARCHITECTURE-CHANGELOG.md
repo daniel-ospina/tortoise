@@ -2331,7 +2331,7 @@ re-derived from the tree rather than read back:
   `test_the_design_documents_carry_no_issue_state_or_change_narration`) hold on symbols, which is the
   form this file uses.
 
-## 2026-11-17 — two owner rulings on the same day: every served label's embeddings get their index in Postgres, and the `:Object`/`:Subject` GRAPH copy retires once the record holds it (`#13220`, `#11395`)
+## 2026-11-17 — two owner rulings on the same day: every served label's embeddings get their index in Postgres, and the `:Object`/`:Subject` GRAPH copy retires once the record holds and indexes them (`#13220`, `#11395`)
 
 **Ruling 1, verbatim:** *"if indexing improves search for Object/Subject/Event of course we want that,
 and we just need it in Postgres and the search aligned with that and everything armed and working"* …
