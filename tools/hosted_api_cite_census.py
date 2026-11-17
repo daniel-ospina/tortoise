@@ -150,10 +150,13 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: tortoise/hosted_api.py`), re-deriving the notes, the scorecard and this constant
 #: TOGETHER — the constant is the third of the three, and the pin reds when it lags.
 #: The #13000 re-cut then merged main's `cde3e7743c` forward and this branch's own
-#: #12992 block sits above the site, so it was re-derived once more, 24762 -> 24903
-#: and then again after the forward merge onto `aa8413ca38`, where `#13043` moved it
-#: once more, 24903 -> 25005 (measured: `grep -n 'proj.g.query(LIFETIME_MEMORY_QUERY)'
-#: tortoise/hosted_api.py` -> 25005): the tool that owns these figures wrote it, not a hand.
+#: #12992 block sits above the site, so it was re-derived once more, 24762 -> 24903,
+#: and the tool re-derived it again at `e743e35748` (24903 -> 25005). ⛔ The exact
+#: hop count is NOT typed here any more: every one of these numbers moves with the
+#: next merge, and this paragraph exists to explain the CLASS, not to be quoted —
+#: read the constant's history from the two verbs when you need it, and note that at
+#: `e743e35748^` (`2512c4f906`) this constant LAGGED the site by one head, which is
+#: the split below.
 #: ⛔ THIS CONSTANT USED TO BE THE ONE THE `--check` VERB COULD NOT SEE: `_NOTES`
 #: covered the three PROSE notes and the test's `_PIVOT`, so a stale DEFAULT_PIVOT
 #: left `--check` at exit 0 while every defaulted call (`census()`,
