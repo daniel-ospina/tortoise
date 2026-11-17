@@ -1682,6 +1682,7 @@ REFUSAL_CODES: dict[str, int] = {
     "tools/ci_runner_topology.py": 4,
     "tools/capstone_ledger.py": 1,
     "tools/build_site_icons.py": 4,
+    "tools/record_runner.py": 2,
 }
 
 #: Why THAT code is the right one for THAT file — quoted in the failure message, so
@@ -1724,6 +1725,13 @@ REFUSAL_WHY: dict[str, str] = {
         "caller cannot tell 'the tool refused' from 'the interpreter is too old'; "
         "4 is never returned by anything but the guard. Deliberately stated as the "
         "SHAPE, not as a list of line numbers — a count in this field rots silently"
+    ),
+    "tools/record_runner.py": (
+        "1 is REFUSED — this runner's own verdict that a run must not be claimed, "
+        "which a caller reads as a statement about the RECORD — so an environment "
+        "refusal must not wear it; `main()` never returns 2 (only "
+        "`_UsageParser.error` raises EXIT_USAGE, i.e. argparse takes it for a bad "
+        "flag), so 2 cannot collide with a verdict"
     ),
 }
 

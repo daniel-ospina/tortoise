@@ -260,6 +260,41 @@ def test_plan_json_reports_zero_writes_and_the_event_census(capsys):
     assert payload["totals"]["events_by_type"]["PointAdded"] >= 1
 
 
+def test_the_plan_states_its_ZEROS_from_the_runs_own_ledger_not_a_constant():
+    """⛔ review P2: `rows_written: 0` was a LITERAL in both renderers.
+
+    An expected value composed from a constant outside the code under test cannot
+    be perturbed by any mutant of that code ("oracles that cannot fail",
+    arXiv 2608.17214; constant-mutation rows in the mutation-testing literature).
+    The four assertions built on those literals were therefore true under EVERY
+    mutation of `tools/record_runner.py` — including one that made `plan` write
+    to the record — while reading as evidence that the dry run's headline
+    falsifier was covered.
+
+    The fix is not a better assertion on the same literals: it is to make the
+    number reachable. `PlanReport.executed` is the run's write ledger, `apply`
+    fills the SAME type from the fold's report (pinned below), and both renderers
+    read it. This test drives a NON-ZERO ledger through both surfaces, so the
+    mutant "restore the literal" reddens here: on the pre-fix code the JSON says
+    `0` and the text says `rows_written: 0` whatever the ledger holds.
+    """
+    report = record_runner.PlanReport(
+        org_id="o", graph_id="g",
+        journal={"path": "j", "records": 0, "segmented": False,
+                 "salvage": False, "corrupt_lines": 0, "torn_tails": 0},
+        checkpoint=None, cursor=None, start_at=0, events_to_consume=0,
+        totals={"events": 0, "statements": 0, "position_rows": 0,
+                "events_by_type": {}},
+        executed=record_runner.WriteLedger(rows_written=7, statements_executed=11),
+    )
+    payload = report.as_dict()
+    assert payload["rows_written"] == 7, payload
+    assert payload["statements_executed"] == 11, payload
+    text = record_runner._render_plan(report)
+    assert "rows_written: 7" in text, text
+    assert "statements_executed: 11" in text, text
+
+
 def test_plan_finds_an_undeclared_record_type_BEFORE_anything_could_write(tmp_path,
                                                                         capsys):
     """`#5285`'s totality rule reaches the operator as a refusal, not a crash."""
@@ -656,6 +691,24 @@ def test_apply_folds_ACROSS_BATCHES_and_counts_every_one(monkeypatch, capsys):
     assert conn.committed == 4, "one commit per batch, and there are four batches"
     assert "consumed: 39 events in 4 batch(es)" in out
     assert "seq 1..39" in out
+
+
+def test_the_write_ledger_is_a_MEASUREMENT_the_fold_populates(monkeypatch):
+    """The ledger a plan reports as empty is the one `apply` fills — so reachable.
+
+    Without this, "the plan's ledger is empty" is a statement about a field
+    nothing ever writes, which is a constant wearing a field's name. 39 records
+    at `--batch-size 10` folds as 4 batches → the fold reports 39 events and
+    117 statements (3 per record), both non-zero.
+    """
+    monkeypatch.setattr(_replay_attr(), "replay", _fold_report_for)
+    journal = record_runner.read_journal(FIXTURE)
+    report = record_runner.apply_batches(
+        journal=journal, org_id="o", graph_id="g", conn=_StubConn(),
+        start_at=0, batch_size=10, limit=None, allocate=False,
+        timeout_ms=1000, echo=lambda line: None)
+    assert report.executed.rows_written == 39, report.executed
+    assert report.executed.statements_executed == 117, report.executed
 
 
 def test_plan_from_checkpoint_opens_ONE_read_only_connection(monkeypatch, capsys):
