@@ -5325,7 +5325,10 @@ surfaces:
   # ⛔ Both registrations buy SELECTION, not EXECUTION: the `api` row's motivating arm is a
   # method of the `@_needs_db` `TestAClosedObjectIsNeverCurrent`, so neither row makes it run
   # — the docker seam above does.
-  - test_13034_currency_rule_reads_position.py
+  # ⛔ THE `core` ROW IS NOT REPEATED HERE (#13139 landed it first, at the `#13034` block above):
+  # the merge that brought `origin/main`'s repair into this branch kept BOTH `core` rows, which
+  # is exactly the duplicate the block above warns about (`--integrity`: "duplicate entry … at
+  # .surfaces.core[]"). One row per surface, deleted here rather than resolved by keeping both.
   - test_10893_read_stage_attribution.py  # #10893: the stage attribution a breach publishes — `read_stages.py` matches no SOURCE_PATTERN (→ `core`), the seams are in `hosted_api.py`/`mcp_server.py` (→ `api`) and the marks are in `sdk.py` (dual: api)
   - test_10602_wait_bound_breach_visible.py  # #10602: the breach channel itself — `wait_bound_breaches` on `/health`, the counter family in `tortoise/monitoring.py` (which selects `core`) plus the two emit sites in `hosted_api.py`/`mcp_server.py` (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
