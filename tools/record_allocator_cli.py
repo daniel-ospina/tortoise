@@ -349,9 +349,15 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
 
     ⛔ THE FLOOR IS NOT `max_seq`. For a born-uncut graph the journal's own
     COUNT is the floor, and the two are NOT interchangeable: a refused seq leaves
-    a GAP, so `COUNT(*) < MAX(seq)`, and a floor taken from `MAX(seq)` would seed
-    the counter AHEAD of the journal — positions no row claims. (The reverse
-    ordering, `COUNT(*) > MAX(seq)`, is unrepresentable and must not be reasoned
+    a GAP, so `COUNT(*) < MAX(seq)`, and the counter numbers POSITIONS — so a
+    floor read off `MAX(seq)` would allocate positions this journal never
+    enumerated. `seed` never lets that happen silently: it refuses any floor
+    below the graph's `row_max` as a divergence (``ra.SeedRefused``,
+    ``reason="divergence"``, which leaves the graph UN-cut-over and working) and
+    otherwise writes ``GREATEST(row_max, floor)`` — so on a gapped journal the
+    COUNT floor ENDS in that refusal rather than seeding behind or ahead of the
+    journal. (The reverse ordering, `COUNT(*) > MAX(seq)`, is unrepresentable and
+    must not be reasoned
     from: `journal_event` carries `PRIMARY KEY (org_id, graph_id, seq)` +
     `CHECK (seq > 0)`, so N distinct positive seqs with maximum M always satisfy
     N <= M — see :data:`ra.JOURNAL_COUNT_SQL`.) So each entry carries
@@ -413,11 +419,13 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         # `journal_row_max`, beside a `floor_is_the_journals_count: True` literal,
         # which asserts the two are the same quantity — false whenever the seq
         # axis has a gap (`COUNT(*) < MAX(seq)`). The opposite ordering cannot
-        # exist, and the only other direction anything here cares about is an
-        # OPERATOR-stated floor above the max (`_cmd_status`'s `healed_tail`),
-        # which is a comparison against a claim, never a reading of the journal
-        # (#13043 review findings B and 4, plus the re-review row that caught
-        # "or a tail" stated as a state of the seq axis).
+        # exist, and the only other direction anything here cares about is
+        # `_cmd_status`'s `healed_tail`: a STATED floor above the max, where the
+        # statement is the operator's `--enumerated-floor` OR a count taken from
+        # `--journal` (`_journal_floor`) — a comparison against a stated number
+        # either way, never a reading of `MAX(seq)` (#13043 review findings B and
+        # 4, plus the re-review rows that caught "or a tail" stated as a state of
+        # the seq axis).
         journal_count = int(count_row[0]) if count_row else 0
         entry: dict[str, Any] = {
             "graph_id": graph_id,
