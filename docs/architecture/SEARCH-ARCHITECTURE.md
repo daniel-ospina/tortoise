@@ -625,6 +625,8 @@ prints it.
 | **M4** | rebuild peak memory and latency per tenant at the real window size, **and whether a KEPT `db.idx.fulltext` or range index blocks a restore the way the removed vector index did (§7)** | the 6× headroom (§7), the #1 risk — and whether §7's window is a feasibility question after all |
 | **M5** | the **miss rate** per tenant (a DIFFERENT M5 from `STORAGE-ARCHITECTURE.md` §15's, which asks where the vector index lives and was answered 2026-11-07) | the compute/IOPS/egress tier |
 
+⛔ **What M1 does NOT cover, and must not be read as covering: model identity.** Neither leg compares `embedding_model`/`embedding_revision` — the dimension is the only gate on either side (`record_embedding_vector` returns NULL for anything that is not 384 long, the same semantics as the graph's `required_embedding_dim`, `#4280`), and no record table carries a model column (`grep embedding_model supabase/migrations/*.sql` → nothing). So a corpus holding vectors from two models is ranked **across two spaces** after the move exactly as it is today, with a plausible-looking ranked list either way. The move is neutral on this — it neither creates nor fixes it — but "aligned" does not include it, and M1's line-set needs at least one stale-model row or the measurement cannot see the difference at all.
+
 ### 9.1 M2 — measured, and it does not arm the window
 
 The record is `docs/evidence/12186-m2-windowed-quality/` (README + artifact + the instrument
