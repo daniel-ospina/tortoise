@@ -117,11 +117,15 @@ a constant in the instrument, and it is not counted among the invariants.)
 1. **`recall@k <= resident_share` and `found@deep <= resident_share`** — a demoted node cannot be
    returned at a rank.
 2. **The graph holds exactly the intended resident set** after eviction.
-3. **`found_deep_of_demoted == 0`** — no demoted node is returned at **any** rank. This is the strong
-   form of (1) and the one the verdict rests on: `found@deep` is a rate over ALL queries, so on a
-   population whose complete-graph ceiling is below 1.0 (`:Point`: **71.3 %** — 28.7 % of claim
-   canonicals are unreachable even with the whole graph resident) a leak of demoted queries sits *under*
-   the aggregate bound and passes (1).
+3. **`found_deep_of_demoted == 0` in every windowed arm** — no demoted node is returned at **any rank
+   of the depth-50 read**. This is the strong form of (1) and the one the verdict rests on: `found@deep`
+   is a rate over ALL queries, so on a population whose complete-graph ceiling is below 1.0 (`:Point`:
+   **71.3 %** — 28.7 % of claim canonicals are unreachable even with the whole graph resident) a leak
+   of demoted queries sits *under* the aggregate bound and passes (1).
+   ⛔ Scoped two ways, deliberately: **windowed** arms only, because the `complete` arm has no demoted
+   queries so its 0 is a zero denominator rather than an observation; and **of the depth-50 read**
+   only, because that one read at `DEEP_LIMIT` is all the check can observe — a demoted node at rank 51+
+   would be invisible to it, so "any rank" unbounded would claim more than the instrument measures.
 4. The query-sample seed and the `random` eviction seed are **independent** (`EVICT_SEED_OFFSET`).
    They are permutations of the same list; one shared seed made the retained suffix and the sampled
    prefix disjoint by construction, and the first run reported `resident_share` 0.667 / 0.167 / 0.000
@@ -407,8 +411,9 @@ much smaller gaps and must not be read as magnitudes: `tail`-vs-`random` separat
 coverage 0.25 (Finding 4 — a DIRECTION claim, deliberately not a magnitude), and the first-window rule
 costs **~3 points** of ceiling against the adopted one (Finding 7 — a superseded run, not in the
 artifact). The band is larger than either of those, which is exactly why neither is quoted as a number
-to act on. **The verdict does not depend on any of them** — `found_deep_of_demoted == 0` and
-`recall@k <= resident_share` are *not* tie-counting quantities, they held in every arm of every run, and
+to act on. **The verdict does not depend on any of them** — `found_deep_of_demoted == 0`
+(in every **windowed** arm; the `complete` arm has no demoted queries) and `recall@k <= resident_share`
+are *not* tie-counting quantities, they held in every run, and
 they are what make the loss equal to the eviction **on `:Object`** (on `:Point` the loss
 is the eviction plus the claim leg's own ceiling — Finding 2). A reader comparing two runs of their own should
 expect the same split — the bound is a property of the instrument, and the artifact records it rather
