@@ -107,6 +107,28 @@
 # with it is checked by tools/surface-target-check.py, which reads those docs rather than
 # a constant here.
 #
+# ROWS RE-STAMPED FOR A DECLARATION CHANGE (#13110) — recorded HERE because a re-cut
+# erases body comments (see the ⚠️ above). `tortoise_create_entity` and
+# `tortoise_create_point` each gained a `goalState`
+# PARAMETER, which moved both of their cells: `served_from` is the `_code_digest` of the
+# handler's code object (bytecode, names, constants — a docstring counts, it is a
+# `co_const`; `co_firstlineno` is excluded on purpose, so a pure code move moves
+# nothing, and only the edited tool's row moves), and `served_attributes` hashes
+# `__defaults__`/`__annotations__`, which a new parameter changes (#4192). The values were
+# re-stamped to what the code DERIVES — `tools/surface_manifest.py check` re-derives and
+# compares, so the code is authoritative, not these digits. Precedent: #12547 re-stamped
+# `served_from` for `tortoise_query` in the same way, and its own row comment was then
+# erased by the next cut (2c67c0cf99) — which is why this note lives in the header.
+# ⛔ A re-stamp is NOT an approval. The approval gate is the “add or remove a tool or a
+# public SDK method” rule (AGENTS.md §MCP/SDK Surface Approval); a parameter on an
+# existing door is neither, `counts:`/`high_water_counts:` are unchanged, and the tool
+# and SDK name sets are unchanged. A green `surface-guard` run is a consistency result.
+# ⛔ `tortoise_create_object` IS NOT IN THAT LIST ANY MORE, and this note said it was until
+# the `origin/main` merge: `#13052` (`#4282` Phase 2) retired the door from the ADVERTISED
+# surface, so it has no row here and the parameter is declared only on its Python alias
+# (kept for in-repo callers). A note on the shard-layout input that names a retired tool is
+# the same rot this header exists to stop.
+#
 # `cut_at_commit` IS a DEFAULT-BRANCH COMMIT, never a lane one (#11057 review F1). It names
 # the `main` commit this baseline was cut AGAINST, so `cut --commit <sha-in-main>` — not the
 # worktree HEAD it happened to run in. This repo squash-merges and deletes the source
@@ -124,7 +146,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: fdb6a4e395584c07d640903036c31e0c321413b6
+cut_at_commit: 97fd713ffbca967e14e869fe22b84eea4ba7d07d
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1495,8 +1517,8 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_create_point
-  served_from: tortoise/mcp_server.py:9860ad2503ad1b45
-  served_attributes: edb6c4d045fc0522
+  served_from: tortoise/mcp_server.py:a8ac1e8d58e702a6
+  served_attributes: 0bdf08286d48f29c
   family: memory
   family_rank: 1
   served: http
@@ -1847,8 +1869,8 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_get_entity
 - name: tortoise_create_entity
-  served_from: tortoise/mcp_server.py:b489e9cdb82dbd6d
-  served_attributes: 764058954f66db36
+  served_from: tortoise/mcp_server.py:2ad91f43163a0f76
+  served_attributes: 93b456ed38374aa3
   family: graph
   family_rank: 2
   served: http

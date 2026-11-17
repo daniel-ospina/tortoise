@@ -4224,7 +4224,8 @@ def tortoise_create_point(kind: str, content: str,
                           authoredBy: str | None = None,
                           credibility: str | int | float | None = None,
                           props: Any = None,
-                          dedup: bool = True) -> dict:
+                          dedup: bool = True,
+                          goalState: str | None = None) -> dict:
     """Create a Point node (statement, decision, vision, hypothesis, etc.).
 
     On a successful write from an incomplete org, records the onboarding
@@ -4275,6 +4276,12 @@ def tortoise_create_point(kind: str, content: str,
                 return _SafeError({"error": f"invalid tag value: {t!r} (must be a "
                                             f"non-empty string ≤ 200 chars)"})
     merged["dedup"] = dedup
+    # #13110: the LEGACY goal shape — a goal POINT (§4.1 carries `goalState`
+    # too, and the objective map's goals are Points, #7856) — so the same field
+    # is declared here rather than left to the `props` bag only. Placed last in
+    # the signature so no existing positional argument rebinds.
+    if goalState is not None:
+        merged["goalState"] = goalState
     result = _safe(_quota_gated(_get_org_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
     # #3926: gate on the typed failure result, never on key presence — a user
     # prop named "error" must not suppress the onboarding observation.
@@ -6790,8 +6797,19 @@ def tortoise_org_create(name: str) -> dict:
 
 # ── Write/revise consolidation (epic #888 W2) ──────────────────────
 
-def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
+def tortoise_create_entity(type: str, name: str, props: Any = None,
+                           goalState: str | None = None) -> dict:
     """Create an entity — type: subject|object|event|document.
+
+    ``goalState`` (#13110) is the goal's ACHIEVEMENT state — the closed
+    vocabulary ``sdk.GOAL_STATE_VALUES``, a SEPARATE axis from the lifecycle
+    ``status``. Declared here because this is the CANONICAL create door: the
+    surface record has recommended merging ``tortoise_create_object`` into it
+    (`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md` §“absorbs
+    4”), so declaring the field only on the alias would leave the recommended
+    door without it — and would drop the declaration the day the alias is
+    merged. ``props`` stays third for positional compatibility; the vocabulary
+    and the ``None`` rules are the same as ``tortoise_create_object``'s.
 
     Event entities wire about* edges from aboutSubject/aboutObject/aboutPoint/
     aboutDocument props. Returns {node, nudges} — nudges suggest IMPL/NAND/
@@ -6811,6 +6829,8 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
+    if goalState is not None:
+        props = {**(props or {}), "goalState": goalState}
     return _safe(_quota_gated(_get_org_sdk().create_entity, "points"),
                  type, name, **(props or {}))
 
@@ -6965,12 +6985,48 @@ def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> d
         return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_subject, "points"), name, subjectKind, **(props or {}))
 
-def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dict:
-    """Create an Object node (product, customer, skill, etc.)."""
+def tortoise_create_object(name: str, objectKind: str,
+                          props: Any = None,
+                          goalState: str | None = None) -> dict:
+    """Create an Object node (product, customer, skill, etc.).
+
+    ``goalState`` (#13110/#7856) is the goal's ACHIEVEMENT state — the closed
+    vocabulary ``sdk.GOAL_STATE_VALUES``, a SEPARATE axis from the lifecycle
+    ``status`` (ONTOLOGY §4.3). It is declared here, not just accepted through
+    ``props``: the ``props`` bag is an untyped ``Any`` with no description, so
+    before this an agent reading ``tools/list`` had no way to learn the field
+    EXISTS and reached for ``goalState=`` as a top-level keyword — which failed
+    with ``unexpected keyword argument`` even though the value was reachable the
+    whole time through ``props`` (measured, #13110). Declaring it puts the field
+    in the served schema without adding a tool or a public SDK method: the SDK's
+    ``create_object`` already takes it through ``**props``, so this is a
+    parameter on an existing door.
+
+    ⚠️ What the schema now publishes is the field's EXISTENCE (a
+    ``string|null``), not its members — the closed set reaches a caller through
+    the refusal, which names every member, and through
+    ``docs/ONTOLOGY.md`` §4.3. No tool on this surface publishes an enum, so
+    declaring one here would make this door the exception rather than the rule.
+
+    ``goalState`` is placed AFTER ``props`` on purpose: a third positional
+    argument has always bound ``props``, and inserting the new parameter in
+    front of it would silently rebind it.
+
+    An unknown word is refused by the SDK's one guard
+    (``sdk.validate_goal_state``, reached via ``_sanitize_props``) and the
+    refusal names the whole closed set. ``None`` is legal and is NOT forwarded
+    when the caller omits it — a re-create must not wipe a stored state (the
+    #9572 clobber class).
+    """
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
+    # #13110: an explicitly-passed goalState wins over a props copy of the same
+    # key (the named parameter is the declared channel); the SDK's guard then
+    # validates whichever value won, so an unknown word is refused either way.
+    if goalState is not None:
+        props = {**(props or {}), "goalState": goalState}
     return _safe(_quota_gated(_get_org_sdk().create_object, "points"), name, objectKind, **(props or {}))
 
 def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
