@@ -1305,8 +1305,8 @@ def read_entity(conn: Any, *, org_id: str, graph_id: str, id_val: str,
     caller can read ONE label's row — the tests use it, and it is how the
     per-label addressing is measured — and it deliberately does NOT re-check
     parity: a caller that names ``Event`` gets the Event ROW, which is missing the
-    seven fold-written keys (#9721, ``id`` among them) that a served ``:Event``
-    must not lose. Only :func:`serve_entity` decides what may be SERVED, and it
+    seven fold-written keys (#9721, ``id`` among them; an eighth, ``eventKind``,
+    when the producer omitted it) that a served ``:Event`` must not lose. Only :func:`serve_entity` decides what may be SERVED, and it
     reads through this function with no ``labels`` argument. State this rather
     than let a future caller infer a parity guarantee from proximity.
 
@@ -1798,13 +1798,20 @@ def serve_entity(*, tenant: tuple[str, str], id_val: str,
     settles only those labels. :func:`entity_absent_wire` holds that rule; this
     function's job is to answer honestly and never to decide the caller's
     absence for it. ⛔ WHAT AN ARMED MISS CARRIES DIFFERS BY MODE, and the
-    difference is deliberate: in ``prefer`` the read FELL BACK, so the miss names
-    :data:`FALLBACK_RECORD_LABEL_NOT_SERVED` and is counted; in ``record`` nothing
-    fell back — no cache branch, nothing counted — so the miss carries NO
-    ``fallbackReason`` at all and the coverage gap is expressed by
-    :func:`entity_absent_wire`'s ``residency: "not-hot"``. (An earlier revision
-    named the reason in both modes, which put a fallback attribution on a read
-    where no fallback happened; #13353 review cycle 2.)
+    difference is deliberate: in ``prefer`` the read FELL BACK, so the miss is
+    NAMED AND COUNTED; in ``record`` nothing fell back — no cache branch, nothing
+    counted — so the miss carries NO ``fallbackReason`` at all and the coverage
+    gap is expressed by :func:`entity_absent_wire`'s ``residency: "not-hot"``. (An
+    earlier revision named the reason in both modes, which put a fallback
+    attribution on a read where no fallback happened; #13353 review cycle 2.)
+    ⛔ AND THE ``prefer`` REASON ITSELF FLIPS WITH COVERAGE — see
+    :func:`_miss_reason`, which this function only calls: while
+    :func:`entity_coverage_complete` is ``False`` the miss names
+    :data:`FALLBACK_RECORD_LABEL_NOT_SERVED` (a declared gap, so the answer stays
+    ``not-hot``); at complete coverage it names :data:`FALLBACK_RECORD_MISS`, a
+    member of :data:`RECORD_ANSWERED_REASONS`, and the same miss then settles as
+    an ABSENCE. Today's blend is the first; do not read this function's reason as
+    permanent (#13392 review cycle 1).
 
     ``record`` mode does NOT raise on a miss (it raises on an OUTAGE, exactly as
     :func:`serve_point` does). Raising here would turn every Event read into a
