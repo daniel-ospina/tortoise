@@ -1076,9 +1076,16 @@ class TestDashboardCreatedTeamRoundTrip:
         assert r.status_code == 202, r.text
         assert r.json()["grace_hours"] == 0  # env->stored promise pinned
         ha_mod._purge_deleted_orgs()
-        # exactly one drop, exactly the org_{org_id} target (suite precedent:
-        # TestPurge asserts strict equality on the captured drop list)
-        assert dropped == [(org_id, f"org_{org_id}")]  # Indicator 3
+        # #13205: the purge drops EVERY graph the org owns, not just its stored
+        # default — the legacy `team_{org_id}` spelling is this org's data graph
+        # for any org minted before #3543, and a hard delete is the last moment
+        # anything knows it existed. The order is `_org_graph_names`': the bind
+        # target (`org_{org_id}`) is always LAST so every bind precedes its
+        # delete — see that function, this ordering is a correctness property.
+        # The assertion stays STRICT equality so an accidental third target (a
+        # foreign namespace) cannot slip in.
+        assert dropped == [(org_id, f"team_{org_id}"),
+                           (org_id, f"org_{org_id}")]
         assert not any(t["id"] == org_id for t in fake.tables["organizations"])
         ops = [e["operation"] for e in capture_audit]
         assert "team_delete_purged" in ops
@@ -1233,7 +1240,11 @@ class TestPurge:
         assert _registry_count(db_path, "APIKey", "reg-old") == 0
         # within grace → untouched
         assert _registry_count(db_path, "Team", "reg-recent") == 1
-        assert dropped == ["reg-old"]  # never the within-grace team
+        assert dropped == ["reg-old", "reg-old"]  # never the within-grace team
+        # #13205: the doubled id is the SAME org twice — its default
+        # `org_{id}` graph and the legacy `team_{id}` spelling — not a second
+        # target. The within-grace team must appear zero times.
+        assert "reg-recent" not in dropped
         ops = [e["operation"] for e in capture_audit]
         assert ops.count("team_delete_purged") == 1
         assert capture_audit[-1]["org_id"] == "reg-old"
@@ -1464,7 +1475,10 @@ class TestPurge:
         assert not first.is_alive()
 
         assert all(r["id"] != ORG_ID for r in fake.tables["organizations"])
-        assert drops == [ORG_ID]
+        # #13205: one org, every graph it owns (default + legacy spelling) —
+        # the list is longer than one entry now, and the single-flight property
+        # is "no SECOND ENTRY appended a drop", so assert on the population.
+        assert drops == [ORG_ID, ORG_ID]
         ops = [e["operation"] for e in capture_audit]
         assert ops.count("team_delete_purged") == 1
 

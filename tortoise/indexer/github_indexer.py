@@ -55,7 +55,10 @@ from typing import Any
 import httpx
 
 from tortoise import github_map
-from tortoise.live import _terminal_excluded  # #2901 canonical non-current predicate
+from tortoise.live import (
+    _terminal_excluded,  # #2901 canonical non-current predicate
+    is_position_ended,
+)
 from tortoise.quota import QuotaCheckError, QuotaExceededError
 from tortoise.sdk import UnapprovedKindNamespace  # #5475: a refused kind fails the RUN
 
@@ -176,7 +179,17 @@ _PROGRESS_EVERY_ITEMS = 25
 # this ceiling; anything above is a malformed cursor.
 _SANE_ISSUE_NUMBER_MAX = 10_000_000
 
-# Object.status → issue-state projection (inverse of the lifecycle fold).
+# Object LIFECYCLE WORD → issue-state projection (the PRE-#11824-S0 inverse of
+# the connector fold). ⛔ Since S0 the connector folds write the POSITION axis
+# (`pipelineStageId`/`pipelineSlot`/`isClosed`), never `Object.status` — a close
+# folds to the terminal stage `done` and `status` stays NULL. So this map is the
+# LEGACY arm only: it reads a row folded by a pre-S0 binary (or replayed from a
+# pre-S0 journal, where `status='completed'` is still in the graph). The live arm
+# is the POSITION read in `_object_state_to_issue_state` below; reading `status`
+# alone returned None for every S0-folded row, which made `prev_state` read as
+# "first ingest" and
+# SILENCED every close/reopen transition event (measured: `events_minted: 0` on
+# a close, `tests/test_github_indexer.py::test_close_event_and_object_status`).
 _STATUS_TO_STATE = {
     "completed": "closed",
     "in_progress": "open",
@@ -1020,17 +1033,55 @@ class GitHubIndexer:
 
     @staticmethod
     def _object_state_to_issue_state(proj, obj_id: str) -> str | None:
-        """Previous issue-state derived from the persisted Object.status.
+        """Previous issue-state derived from the persisted Object's POSITION.
 
-        None = first ingest (Object absent or never lifecycle-folded).
+        None = first ingest (Object absent or never folded on either axis).
+
+        ⛔ #13143 (S0 reader sweep): this read `Object.status` ONLY, and S0 moved
+        the connector folds off that axis — a close now folds the terminal STAGE
+        (`done`, `isClosed=True`) and leaves `status` NULL. `None` therefore meant
+        "first ingest" for every already-folded row, the transition event was never
+        minted, and the indexer's close/reopen history stopped being written at
+        all: measured on a real indexer run, `events_minted: 0` on the open→closed
+        transition while the `-created` event and its stage fold were fine.
+
+        The two arms are read in the order the axes were introduced: POSITION
+        first (what every current write sets), then the legacy `status` word (a
+        row a pre-S0 BINARY wrote and that has never been rebuilt — a rebuild
+        runs TODAY's fold, so a replayed journal produces the position axis and
+        `status` NULL, never `status='completed'`; measured live vs
+        `rebuild_all`: both give `[NULL, 'done', 'terminal', True]`).
         """
         rows = proj.g.query(
-            "MATCH (o:Object {id:$id}) RETURN o.status",
+            "MATCH (o:Object {id:$id}) "
+            "RETURN o.status, o.isClosed, o.pipelineSlot, o.pipelineStageId",
             params={"id": obj_id},
         ).result_set
-        if not rows or rows[0][0] is None:
+        if not rows:
             return None
-        return _STATUS_TO_STATE.get(str(rows[0][0]))
+        status, is_closed, slot, stage_id = rows[0]
+        # The position axis, through the ONE shared predicate (`live.py`) — never
+        # a local re-spelling of it. ⛔ A local `is_closed is True` was measured
+        # to DISAGREE with the fold that acts on the answer: `isClosed` is stored
+        # verbatim by the public doors (`create_object(..., isClosed=1)` stores
+        # `1`), and `advance_stage` reads it with `bool()`. With identity, a row
+        # at `isClosed=1, slot='active'` read as OPEN while the fold refused as
+        # terminal (`terminal-guard`), so every poll minted another `-closed`
+        # into the journal and the graph said open FOR EVER (measured:
+        # poll1/2/3 each `events_minted=1`, row never moves).
+        # `is_position_ended` reads `isClosed` by `bool()` and strips the slot,
+        # matching `apply_stage_fold` and every other position read.
+        #
+        # `cancelled` is terminal too, so a cancelled item reads as closed —
+        # which is right for THIS question: both mean "not open", and a later
+        # `state=open` in GitHub is a transition worth minting either way.
+        if is_position_ended(is_closed=is_closed, stage_slot=slot):
+            return "closed"
+        if stage_id is not None or slot is not None:
+            return "open"
+        if status is None:
+            return None
+        return _STATUS_TO_STATE.get(str(status))
 
     def _upsert_statement(self, sdk, proj, repo: str, issue: dict) -> dict:
         """Two-phase statement write (P2-1): probe WITHOUT props → create
