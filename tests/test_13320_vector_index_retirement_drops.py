@@ -475,6 +475,47 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
         "the SURVIVOR line must keep the measured cost/arming claim — it is the "
         f"one arm where that statement was measured: {joined!r}")
 
+    # ⛔ THE LATCH IS THE WHOLE PER-REQUEST PROPERTY (#13330 review P2, round 4).
+    # This method runs on the hosted PER-REQUEST path
+    # (`_data_sdk_offloaded(..., attach_projection=True)` builds a projection per
+    # request) and an unable-to-retire store is a PERMANENT state, so an
+    # unlatched survivor WARNING is a per-request log storm. Until here the pin
+    # drove ONE setup, so `if self._retirement_failure_is_news("index-survived")`
+    # could be deleted with the suite green — the property was asserted in prose
+    # and nowhere in code. A SECOND sweep on the same store must produce no
+    # second line; only the LINE is latched, so the sweep still runs — its gate
+    # still READS the catalogue and its DROPs are still re-attempted (both
+    # asserted below, because "still runs" is the half that keeps a store
+    # repaired between sweeps able to announce the repair).
+    #
+    # ⛔ THE ASSERTION IS THE CATALOGUE READ, not the DROP count (#13330 review,
+    # finding 2). `graph.drops` counts DROP attempts, so it cannot tell "the
+    # report is latched" from "the whole measure+report block is latched" — and
+    # at the tip this rebases onto (`5c5ccfac`), a DEFINITIVE `no such index`
+    # refusal no longer forces the post-drop confirmation re-read, so a DROP
+    # count would pass over a sweep that re-measured nothing at all. The gate's
+    # `CALL db.indexes()` is issued on EVERY armed sweep regardless of that, so
+    # it is the read that must not be silenced.
+    reads_after_first = [c for c in graph.calls if "db.indexes()" in c.lower()]
+    drops_after_first = len(graph.drops)
+    with caplog.at_level(logging.DEBUG):
+        _bare(graph)._ensure_indexes()
+
+    reads_after_second = [c for c in graph.calls if "db.indexes()" in c.lower()]
+    assert len(reads_after_second) > len(reads_after_first), (
+        "the latch silenced the MEASUREMENT, not just the line: the second "
+        "sweep issued no catalogue read at all, so a store repaired between "
+        f"sweeps could never announce the repair (reads: {len(reads_after_first)}"
+        f" -> {len(reads_after_second)})")
+    assert len(graph.drops) > drops_after_first, (
+        "the second sweep did not even re-attempt its DROPs — the latch must "
+        f"silence the LINE only (drops: {len(graph.drops)})")
+    assert len(_retirement_warnings(caplog)) == 1, (
+        "the survivor line is not latched: two sweeps on one store produced "
+        f"{len(_retirement_warnings(caplog))} #13320 WARNINGs. On the hosted "
+        "PER-REQUEST path that is one warning per request for the life of the "
+        "deployment (R3, the reason `_retirement_failure_is_news` exists)")
+
 
 def _retirement_warnings(caplog) -> list[str]:
     return [
