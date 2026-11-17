@@ -807,13 +807,15 @@ def open_record(record_dsn: str | None = None,
             f"the record could not be opened ({type(e).__name__}) — an absence "
             f"is NOT established") from e
     try:
+        # ⚠️ THE COERCION RUNS INSIDE THE GUARD, not above it (#11691 review F5):
+        # the connection EXISTS at this point, so an `int()` that raises on a
+        # malformed budget (a str, a Decimal a caller forgot to round) must reach
+        # the handler below and close the handle — computing it before the `try`
+        # escaped the door's own leak guard and abandoned a borrowed pooled
+        # socket per call.
+        #
         # The applied bound: the door's ceiling, tightened by the caller and never
-        # widened by it — see the docstring (#11691). ⛔ COMPUTED INSIDE THE TRY
-        # THAT CLOSES `conn`: `int(statement_timeout_ms)` is a raise between "a
-        # pooled socket exists" and "anything closes it", and an unguarded raise
-        # there leaks a live handle from the pool on every bad call. The door is
-        # PUBLIC — every in-tree caller passes an int today, which is why it is
-        # cheap to keep the leak unreachable from the next one.
+        # widened by it — see the docstring (#11691).
         bound_ms = int(RECORD_STATEMENT_TIMEOUT_MS)
         if statement_timeout_ms is not None:
             bound_ms = max(1, min(bound_ms, int(statement_timeout_ms)))
