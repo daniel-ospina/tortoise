@@ -3533,6 +3533,7 @@ def run_vector_query(
     provenance: str | None = None,
     pg_vector: Callable[[str, Sequence[float], int, tuple | None],
                         list[tuple[str, float, Any]] | None] | None = None,
+    vector_indexed_labels: frozenset[str] | set[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -3626,6 +3627,32 @@ def run_vector_query(
     (C2's ``#2518`` indicator-2 expansion pass uses it). The read then reports
     one vector leg — the same composition ``run_bm25_query``'s ``meter`` exists
     for (``#8488``).
+
+    vector_indexed_labels (#13108) — the labels the STORE has already been
+    MEASURED to carry a VECTOR index for
+    (``FalkorProjection._vector_indexed_labels``, filled by
+    ``_record_vector_index_inventory``: the declared served set intersected with
+    the engine's own catalogue). When this is supplied and the read's label is
+    NOT in it, the two ``queryNodes`` attempts below are skipped and the read
+    goes straight to the brute-force scan.
+
+    ⛔ WHY. On an unindexed label both attempts can only be REFUSED, and this
+    engine does not even say so distinctly — ``Invalid arguments for
+    procedure 'db.idx.vector.queryNodes'`` is what it answers for a missing index
+    AND for a wrong argument order (measured on FalkorDB v4.20.6,
+    ``tools/dense_leg_probe_13108.py``). Paying them costs real time on every
+    such read: measured **34.45 ms p50 for an ``:Object`` dense read, of which
+    ≈20 ms is the two refused round trips** — about 58 % of the leg spent
+    producing a known error (#13108). The scan that follows is UNCHANGED, and
+    the read is still recorded :data:`MECHANISM_SCAN_FALLBACK` — `#4999`'s "an
+    index was expected and was not used" — so the alert surface and the
+    `#4997` unindexed-label notice keep their meaning. This is NOT the index
+    decision (``STORAGE-ARCHITECTURE.md`` §14.3 V3): it creates no index and
+    does not make a scan cheaper, it stops paying twice for the same absence.
+
+    Default ``None`` = attempt as before, so every existing caller is
+    byte-identical and a store that could not measure its catalogue (the
+    inventory's ``None`` lane) keeps the historic behaviour rather than a guess.
 
     pg_vector (#11642 / #4051 V1) is the ANN leg from the POSTGRES RECORD:
     a callable
@@ -3907,8 +3934,26 @@ def run_vector_query(
                         mechanism=MECHANISM_PGVECTOR)
                 return out
 
+    # ── #13108: do not pay for an index the store has already measured absent ──
+    # `_vector_indexed_labels` is the projection's OWN measured set (the served
+    # labels ∩ the engine's VECTOR-indexed labels), i.e. the same source of truth
+    # behind the `#4997` notice — so this cannot be staler than the line an
+    # operator already reads, and it is re-measured on every projection setup.
+    # None means NOT MEASURED (the inventory's fail-open lane): attempt as before
+    # rather than assume absence, because a wrong skip would demote every read of
+    # an indexed label to a scan.
+    _index_known_absent = (vector_indexed_labels is not None
+                           and label not in vector_indexed_labels)
+    if not is_embedded and _index_known_absent:
+        # #4999: this is still scan_FALLBACK, not `scan` — an index was expected
+        # for this label and was not used. Only the two doomed round trips go.
+        index_attempted = True
+        logger.debug(
+            "#13108: %s carries no vector index on this store — skipping the "
+            "queryNodes attempt and scanning (recorded scan_fallback)", label)
+
     # Docker/server mode → try index-accelerated vector search (#7777)
-    if not is_embedded:
+    if not is_embedded and not _index_known_absent:
         index_attempted = True
         # #689: retracted Points must not leak into vector results.
         # D10 (#5026): the Source label holds both the document node
@@ -4662,6 +4707,7 @@ def degradation_chain(
     scope_kinds: tuple[str, ...] | None = None,
     pg_vector: Callable[[str, Sequence[float], int, tuple | None],
                         list[tuple[str, float, Any]] | None] | None = None,
+    vector_indexed_labels: frozenset[str] | set[str] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -4744,6 +4790,12 @@ def degradation_chain(
         :func:`run_vector_query`, which then judges the dense leg's material
         against that scope instead of the whole entity label.
         Default None = pre-#4199 behavior.
+
+    vector_indexed_labels (#13108): optional set of labels the store has been
+        MEASURED to carry a VECTOR index for. Forwarded verbatim to
+        :func:`run_vector_query`, which skips the doomed index attempt for a
+        label that is absent from it. Default None = pre-#13108 behaviour
+        (attempt as before), merged into the submit kwargs only when supplied.
     """
     # #5404: this is the public orchestration entry point, and the collection
     # loop below swallows every strategy exception by design (a failed leg
@@ -4813,6 +4865,11 @@ def degradation_chain(
                 # the request thread by `record_vector.searcher()`, and this
                 # thread cannot read it (ContextVars do not cross threads).
                 _vec_kwargs["pg_vector"] = pg_vector
+            if vector_indexed_labels is not None:
+                # #13108: merged ONLY when supplied — same pinned-contract
+                # posture as `min_similarity`/`scope_kinds` above, so a default
+                # caller's submit kwargs stay byte-identical.
+                _vec_kwargs["vector_indexed_labels"] = vector_indexed_labels
             futures[executor.submit(
                 bind_metering_context(_retrieval_metering.bind_worker_context(
                     run_vector_query)), graph, query_vec,

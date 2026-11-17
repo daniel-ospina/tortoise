@@ -34732,7 +34732,13 @@ class TortoiseSDK:
                                     # #11642: the Postgres ANN leg when a record
                                     # tenant is armed on this request; `None`
                                     # keeps the graph branch unchanged.
-                                    pg_vector=_record_vector_searcher(self))
+                                    pg_vector=_record_vector_searcher(self),
+                                    # #13108: the store's own measured index
+                                    # inventory, so an unindexed label skips the
+                                    # doomed queryNodes attempt (`None` = not
+                                    # measured → attempt as before).
+                                    vector_indexed_labels=getattr(
+                                        proj, "_vector_indexed_labels", None))
             for nid, _score in hits:
                 if nid == pid or nid not in pool:
                     continue
@@ -42855,6 +42861,12 @@ class TortoiseSDK:
             # #1359: the recorded vector-index API (procedure vs Cypher-native)
             # lets run_vector_query skip the failing signature attempt.
             vector_index_api=getattr(proj, "_vector_index_api", None),
+            # #13108: the labels this STORE measured a VECTOR index for
+            # (`_record_vector_index_inventory`). A label absent from it skips
+            # two round trips that can only be REFUSED — measured at ≈58 % of an
+            # unindexed `:Object` read's store time. `None` (the inventory's
+            # not-measured lane) is forwarded as None, i.e. attempt as before.
+            vector_indexed_labels=getattr(proj, "_vector_indexed_labels", None),
             excluded_statuses=() if include_terminal else None,
             leg_trace=status_trace,
             # A1 (#2070): the ask-lane numeric-token policy threads into the
@@ -45194,6 +45206,9 @@ class TortoiseSDK:
                 is_embedded=getattr(proj, "_is_embedded", True),
                 entity_type="point",
                 vector_index_api=getattr(proj, "_vector_index_api", None),
+                # #13108: the same measured inventory the shipped leg gets.
+                vector_indexed_labels=getattr(
+                    proj, "_vector_indexed_labels", None),
                 excluded_statuses=excluded_statuses,
                 leg_trace=_exp_trace,
                 min_similarity=min_similarity,
