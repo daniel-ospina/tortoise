@@ -1156,6 +1156,12 @@ def test_apply_keeps_the_signature_the_replay_engines_introspect(
      "source_label": "Session", "target_id": "o-missing",
      "target_label": "Object", "edge_type": "aboutObject"},
     {"type": "SessionRecorded"},                        # malformed: no id
+    # Adopted from the bg-rescue snapshot `c9aefaaa` (a lane that ended before
+    # committing): two more arms whose fold returns its own 0-row count, so
+    # nothing translated it into `_skip()` — measured on the head before this
+    # change, each left `{'embedded:…|tortoise': 1}` behind.
+    {"type": "EntityMutated"},                            # no id -> no statement
+    {"type": "EventRecorded"},                            # no eventId, no links
 ])
 def test_the_OTHER_writing_nothing_exits_are_not_counted(
         monkeypatch, tmp_path, event):

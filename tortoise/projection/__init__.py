@@ -13223,9 +13223,18 @@ class FalkorProjection(
             # #3585 (P1-1): thread the existence map so a state op the journal
             # materializes only LATER (which `rebuild_all`'s hoist skips and
             # live no-op'd) is not folded or refused on this path either.
-            return self._fold_entity_mutation(
+            _mutated = self._fold_entity_mutation(
                 ev, journal_first_materialized=journal_first_materialized,
                 journal_seq=journal_seq)
+            # #12943 (review cycle 3, ISSUE 2 — residual adopted from the
+            # bg-rescue snapshot `c9aefaaa`, whose lane ended before committing):
+            # 0 means no id (so no statement was issued) or a delete that matched
+            # no node. Either way NO write landed, and the default
+            # `_wrote[0] = True` would report one. The return value is preserved
+            # as-is — the replay engines read it, and 0 is already their verdict.
+            if not _mutated:
+                _skip()
+            return _mutated
         elif t == "EventRecorded":
             _replayed = self._upsert_event(ev)
             # #8398: the about* links are GRAPH EDGES written live, not node
@@ -13283,6 +13292,14 @@ class FalkorProjection(
                     "yet; ``rebuild``/``rebuild_all`` re-wire these in a "
                     "trailing sweep, a direct ``apply`` replay cannot",
                     _about_f, ev.get("event_id") or ev.get("id"))
+            # #12943 (review cycle 3, ISSUE 2 — residual adopted from the
+            # bg-rescue snapshot `c9aefaaa`, whose lane ended before committing):
+            # the upsert folded nothing AND no about* edge was wired, so this
+            # record issued no statement at all. BOTH halves are required — the
+            # re-wire writes edges even when the upsert matched nothing, and that
+            # IS a landed write.
+            if not _replayed and not _about_w:
+                _skip()
             return _replayed
         elif t == "EntityLinked":
             # #3664: the capture entity-attachment replay consumer — an
