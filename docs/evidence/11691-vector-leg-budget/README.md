@@ -22,10 +22,33 @@ priced: `docs/evidence/11642-vector-move/README.md` prices the BUILD (4.0–4.2 
 for the index at 20k rows, 6.9 s for the generated-column rewrite) and nothing
 about the ongoing line.
 
-This file is that line. Every number below is a field in
+This file is that line. Every dollar, byte and millisecond below is arithmetic on
 [`measurement.json`](./measurement.json), produced by
 [`tools/record_vector_write_cost_11691.py`](../../../tools/record_vector_write_cost_11691.py);
 re-derive rather than trust — the run command is at the bottom.
+
+⚠️ **Provenance, stated precisely (second review, finding 2).** *Most* figures below are
+**fields** of the artifact. Three are not, and each is named where it appears rather than
+implied to be a field:
+
+- **27,813** (`public.point` rows carrying `embedding_vec`) is a **QUOTED INPUT** — the live
+  record's own count from the issue, in no artifact field, and nothing here depends on it.
+- **69.0 MB / 1.9 MB**, the two "of which" rows of the volume table, are a **DERIVED SPLIT**
+  of the one field that does exist (`production_index_bytes`), apportioned by the measured
+  shape's own index sizes:
+
+  ```text
+  production_index_bytes × scale.indexes[<index>] / scale.index_bytes
+  70,833,683 × 40,968,192 / 42,074,112 = 68,971,816.33 B → 68,971,816 B = 69.0 MB   (HNSW)
+  70,833,683 ×  1,105,920 / 42,074,112 =  1,861,866.67 B →  1,861,867 B =  1.9 MB   (point_pkey)
+  ```
+
+  (rounded to the nearest byte; a floor division gives 1,861,866 for the second, and either
+  rounds to the same 1.9 MB)
+
+  They are arithmetic on committed fields, not fields of their own — and the shape they
+  split is the MEASURED one (an `id`-only primary key), so both halves are a **FLOOR**.
+
 
 ```text
 date       2026-11-17T03:19:15Z
@@ -138,8 +161,8 @@ bytes below.
 |---|---|
 | the vector payload + index (total relation) | **233.4 MB** |
 | the indexes, all — of the MEASURED SHAPE (`idx_point_embedding_vec_hnsw` + its `id`-only `point_pkey`) | **70.8 MB** |
-| of which the HNSW index's own bytes | **69.0 MB** |
-| of which `point_pkey` | **1.9 MB** |
+| of which the HNSW index's own bytes (derived split, see above) | **69.0 MB** |
+| of which `point_pkey` (derived split, see above) | **1.9 MB** |
 | monthly, at `postgres_storage.cost_basis_usd_per_gb_month` (**$0.125/GB-month**) | **$0.029/month** |
 | monthly, at the customer-facing `overage_price_usd_per_gb_month` (**$0.30/GB-month**) | **$0.070/month** |
 | the indexes, all, cost basis | **$0.0089/month** |
