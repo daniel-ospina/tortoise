@@ -1209,36 +1209,49 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  # ⛔ #13075 moved this handler (`a09a0b3840`, "the currency rule reads the position
-  # axis") and left `served_from` at the value #12726 had hand-refreshed, so
-  # `surface_manifest.py check --provenance-strict` has been red on `main` ITSELF since
-  # then — the same FAIL row measured on a pristine `origin/main` worktree (`55ec2c71b1`)
-  # and on this branch BEFORE the re-stamp below, so it is `main`'s third red and not
-  # this diff's. With the re-stamp applied this head prints no such row; what it still
-  # prints is `cut_at_commit … UNPROVABLE`, the artifact of a shallow checkout, which
-  # `main` prints too and which the tool itself declines to read as a verdict. It is the SECOND
-  # half of `a09a0b3840`'s fallout: the same commit added
+  # ⛔ #13075 moved this handler (`a09a0b3840`, "the currency rule reads the position axis") and
+  # left `served_from` at the value #12726 had hand-refreshed, so
+  # `surface_manifest.py check --provenance-strict` has been red on `main` ITSELF since then —
+  # the same FAIL row measured on a pristine `origin/main` worktree (`55ec2c71b1`) and on this
+  # branch BEFORE the re-stamp below, so it is `main`'s third red and not this diff's.
+  #
+  # With the re-stamp applied this head prints no such row, and on a full-history checkout
+  # (measured here: `git rev-parse --is-shallow-repository` → false) it prints neither that nor
+  # `cut_at_commit … UNPROVABLE` — `check` exits 0. That second line is the artifact of a SHALLOW
+  # checkout, and what it MEANS depends on the arm, so name the arm: on the default (non-strict)
+  # read `provenance_report` returns no problem, prints it as a `::notice::` and its own text
+  # calls it "Not a verdict on the record"; under `--provenance-strict` — the arm the
+  # `surface-guard` job runs — `_cannot_answer` appends "and this step requires a checkout that
+  # CAN answer", `cmd_check` prints it as `FAIL`, and `check` exits 1. So a shallow checkout REDS
+  # the step rather than passing it, on `main` as here.
+  #
+  # It is the SECOND half of `a09a0b3840`'s fallout: the same commit added
   # `tests/test_13034_currency_rule_reads_position.py` unregistered, which reds
-  # `manifest-integrity`, and this PR repairs that half above. `served_from` is
-  # `_code_digest` of the handler's CODE OBJECT, so an edit INSIDE `tortoise_query`
-  # re-stamps it: refreshed here to the value the tree DERIVES, which is what `check`
-  # compares against.
-  # A full `cut` is deliberately NOT run: it is gated on the owner's approval DOCUMENT —
-  # `read_approval` (`tools/surface_manifest.py`) reads `docs/product/canonical-mcp-tools.md`
-  # and, through `build_doc`, REFUSES when that file is missing or carries no `approval_status`
-  # (a doc whose provenance was deleted cannot re-cut to `pending`) — and `cut` is documented
-  # as a human step, not an owner-only verb. It re-emits only `MANIFEST_HEADER`, so every
-  # per-row rationale comment in this file is lost. While a plain re-cut CARRIES the
-  # observed-usage columns forward (#10914 review P2), re-stamping them is exactly what
-  # `--refresh-observations` does from a machine-local call log — so a cut here would buy
-  # one cell and cost the rationale. No
-  # tool or SDK method is added, removed or renamed here (55 MCP tools / 94 public SDK
-  # methods, unchanged), so this is a fingerprint refresh, not a surface change.
+  # `manifest-integrity`, and this PR repairs that half above. `served_from` is `_code_digest` of
+  # the handler's CODE OBJECT, so an edit INSIDE `tortoise_query` re-stamps it: refreshed here to
+  # the value the tree DERIVES, which is what `check` compares against.
+  #
+  # A full `cut` is deliberately NOT run. It is NOT owner-only — it is documented as a human step,
+  # once, with an explicit `--commit`, and `cmd_cut` carries no identity check — but it is gated on
+  # the owner's approval DOCUMENT: `read_approval` (`tools/surface_manifest.py`) reads
+  # `docs/product/canonical-mcp-tools.md` and, through `build_doc`, REFUSES when that file is
+  # missing (`_frontmatter` raises `SurfaceEvidenceUnreadable`) or carries no `approval_status`
+  # (a doc whose provenance was deleted cannot re-cut to `pending`). That gate is currently OPEN
+  # here — `read_approval()` returns `approved` and no per-row approval is recorded — so the
+  # operative reason is the next clause rather than a refusal.
+  #
+  # `cut` re-emits only `MANIFEST_HEADER`, so every per-row rationale comment in this file is
+  # lost. While a plain re-cut CARRIES the observed-usage columns forward (#10914 review P2),
+  # re-stamping them is exactly what `--refresh-observations` does from a machine-local call log —
+  # so a cut here would buy one cell and cost the rationale. No tool or SDK method is added,
+  # removed or renamed here (55 MCP tools / 94 public SDK methods, unchanged), so this is a
+  # fingerprint refresh, not a surface change.
+  #
   # IDENTICAL TO #13000's `c1e3ff8500` (#12992) IN THE VALUE it writes (`served_from:
-  # tortoise/mcp_server.py:59f8f7e5957d81d8`, byte-for-byte): whichever lands second applies to
-  # an unchanged line, so the duplicate resolves as identical rather than as a competing value.
-  # The comment blocks around it differ (that branch measured its base at `2390101f68`), so a
-  # conflict in the comment region is expected and is not a disagreement about the value.
+  # tortoise/mcp_server.py:59f8f7e5957d81d8`, byte-for-byte): whichever lands second applies to an
+  # unchanged line, so the duplicate resolves as identical rather than as a competing value. The
+  # comment blocks around it differ (that branch measured its base at `2390101f68`), so a conflict
+  # in the comment region is expected and is not a disagreement about the value.
   served_from: tortoise/mcp_server.py:59f8f7e5957d81d8
   served_attributes: 7a717e4e60ce3bfa
   family: memory
