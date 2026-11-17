@@ -754,19 +754,26 @@ def test_a_designed_absence_is_reported_as_an_absence_not_a_cold_wait(
         EmbeddingModel._reset()
 
 
-#: Each zero-wait cause, set up so `await_write_ready_reason` answers with it.
+#: Each zero-wait cause: how to set it up so `await_write_ready_reason` answers
+#: with it, and the phrase that names THAT cause. The phrase is part of the
+#: parametrisation because the cause is the claim under test — see the row below.
 _ZERO_WAIT_CAUSES = (
-    ("fail_cooldown", lambda: setattr(
-        EmbeddingModel, "_last_failed_at", time.monotonic())),
-    ("attempt_spent", lambda: (
-        setattr(EmbeddingModel, "_warm_up_started", True),
-        setattr(EmbeddingModel, "_warm_up_thread", None))),
+    ("fail_cooldown",
+     lambda: setattr(EmbeddingModel, "_last_failed_at", time.monotonic()),
+     "load attempt FAILED"),
+    ("attempt_spent",
+     lambda: (
+         setattr(EmbeddingModel, "_warm_up_started", True),
+         setattr(EmbeddingModel, "_warm_up_thread", None)),
+     "already spent"),
 )
 
 
-@pytest.mark.parametrize("setup", [c[1] for c in _ZERO_WAIT_CAUSES],
+@pytest.mark.parametrize("cause,setup,cause_phrase",
+                         [c for c in _ZERO_WAIT_CAUSES],
                          ids=[c[0] for c in _ZERO_WAIT_CAUSES])
-def test_a_zero_wait_decline_never_claims_a_wait(setup, monkeypatch, caplog):
+def test_a_zero_wait_decline_never_claims_a_wait(cause, setup, cause_phrase,
+                                                monkeypatch, caplog):
     """#13229 review F2: only the budget-expiry cause actually waited.
 
     The shared message ended *"after waiting 0.25s"* for every cause. For a load
@@ -774,6 +781,25 @@ def test_a_zero_wait_decline_never_claims_a_wait(setup, monkeypatch, caplog):
     attempt (which re-arms one background retry and declines instantly, verified
     by `test_a_spent_load_attempt_does_not_charge_the_budget`), 0 s is waited —
     so the line sent an operator to look for a slow load that was never slow.
+
+    ⛔ NAMING THE WAIT is only half the claim, and the weaker half: the
+    designed-absence line ALSO satisfies "no wait claim" + "names the backfill" +
+    "INFO is not asserted" verbatim, so every zero-wait FAULT was free to borrow
+    the absence's text and severity and stay green. The other half is the CAUSE:
+    each of the four `_WRITE_DECLINE_*` reasons needs an OPPOSITE operator
+    response (install the extra / repair the failed load / retry later / wait
+    longer), and the absence's repair — `uv sync --extra embeddings` — is a no-op
+    on the box that hits a FAULT. So each row also asserts its OWN level
+    (WARNING: a fault, unlike the designed absence's INFO) and its OWN
+    cause-bearing phrase, and that the absence line is not the one emitted.
+
+    Mutants this row is the only killer for (each verified to leave the rest of
+    this file green — #13229 `c53b3db9` review, P2): make the `fail_cooldown`
+    arm return `_WRITE_DECLINE_NOT_INSTALLED`; downgrade its `logger.warning` to
+    `logger.info`; make the `attempt_spent` arm return
+    `_WRITE_DECLINE_NOT_INSTALLED`. They also keep `_note_cold_write`'s
+    fall-through default (the budget-expired text) unreachable, instead of it
+    silently labelling a future fifth cause.
     """
     monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
     EmbeddingModel._reset()
@@ -793,6 +819,22 @@ def test_a_zero_wait_decline_never_claims_a_wait(setup, monkeypatch, caplog):
         )
         assert "backfill_embeddings.py" in msg, (
             f"the repair an operator runs must still be named: {msg!r}"
+        )
+        assert lines[0].levelno == logging.WARNING, (
+            f"the {cause} cause was logged at {lines[0].levelname} — it is a "
+            f"FAULT the operator must repair, not the designed absence "
+            f"(`warm_up()` logs that state at INFO, #2952): {msg!r}"
+        )
+        assert "NOT INSTALLED" not in msg, (
+            f"the {cause} cause is being reported with the DESIGNED-ABSENCE "
+            f"line, which sends an operator to `uv sync --extra embeddings` — a "
+            f"no-op on a box that already HAS the extra — instead of the repair "
+            f"this state needs: {msg!r}"
+        )
+        assert cause_phrase in msg, (
+            f"the line must NAME the {cause} cause (expected {cause_phrase!r}), "
+            f"or it is indistinguishable from the other zero-wait declines: "
+            f"{msg!r}"
         )
     finally:
         EmbeddingModel._reset()
