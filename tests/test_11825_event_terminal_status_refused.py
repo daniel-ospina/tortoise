@@ -645,7 +645,19 @@ class TestTheEventApiDoor:
                 return isinstance(other, _AliasOutdated) and str.__eq__(self, other)
 
         eid = _event(sdk, name="Masked")
-        with pytest.raises(ValueError, match="not writable on an :Event"):
+        # ⛔ RE-DERIVED at #12910's merge of #11824 S0: the MASKING guard this
+        # arm exists for is now the GENERAL one. `#12910`'s `_sanitize_props`
+        # refuses a CONFLICTING status write — "more than one key in this call
+        # renders as `status` and they ask for different words … which word
+        # lands cannot be known here, and guessing it is a bypass" — and it
+        # answers BEFORE the Event terminal door, because the ambiguity is the
+        # bypass (#13065 review finding 3). The property this arm pins is
+        # unchanged and is asserted below: the masked write is REFUSED and
+        # nothing lands. Named as a third accepted refusal rather than relaxed
+        # to `ValueError`, so an arm that stops refusing still reds.
+        with pytest.raises(ValueError,
+                           match=r"(not writable on an :Event"
+                                 r"|CONFLICTING status write)"):
             sdk.update_knowledge(eid, **{"status": "superseded",
                                       _AliasHarmless("status"): "live"})
         assert "status" not in _props(sdk, eid)
