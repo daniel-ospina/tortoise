@@ -473,7 +473,10 @@ the same function, so the two rankers cannot drift apart again.
 **Disclosure, because "ranked" and "answered" are different facts.** `signals_read` says the read
 answered; `signals_informative` says the answer DISTINGUISHED the rows. An entity read that answers
 `(degree 0, confidence null)` for every row sets the second to `false` and logs — the order is then
-relevance-only, and the caller can say so instead of presenting a constant as a graph judgement.
+relevance-only, and the caller can say so instead of presenting a constant as a graph judgement. A read
+that answers **no rows at all** is the SAME verdict (`false`): the gate is the request, not the row
+count, because "no answer" distinguishes the rows even less than a flat one. `null` is reserved for the
+cases with no subject: a label with no entity signal set, no projection to read, or a read that RAISED.
 
 **What this does NOT decide.** It does not put the entity signals on the DEFAULT noun path: they reach
 `order_by="graph"` and any caller that constructs `GraphRanker(..., entity_type=...)`; the capture prior

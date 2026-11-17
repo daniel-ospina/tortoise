@@ -18,14 +18,7 @@ What is asserted here:
   * the dispatch is explicit for every label in ``VALID_ENTITY_TYPES``;
   * a label with no signal set REFUSES loudly, and the refusal is not swallowed
     into the defensive ``None`` (which a caller reads as "the read did not
-    answer" and ranks anyway). ⛔ THE ARM THAT PROVES THAT IS
-    ``test_an_unknown_label_raises_before_any_read``: it calls ``_fetch_signals``
-    directly, so moving the dispatch back INSIDE the ``try`` (the regression the
-    property names) reds it. ``test_rerank_lets_the_refusal_out…`` does NOT prove
-    it — measured: with the dispatch restored inside the ``try`` that arm still
-    passes, because ``rerank`` reaches ``signal_family_for`` a second time,
-    unguarded, at the identity dimension (``ranking.py:1063``). It proves only
-    that ``rerank`` never ANSWERS an unknown label with a ranked list;
+    answer" and ranks anyway);
   * an entity row's signals are its INBOUND CLAIMS (degree + mean belief), not
     its own belief and not its operator edges — measured on a real graph, with
     the point read on the same ids as an anti-inert control;
@@ -38,6 +31,7 @@ MUST run against a live FalkorDB (Docker). Test-prefixed isolated graph.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import sys
 import uuid
@@ -184,16 +178,7 @@ def test_the_refusal_is_a_value_error_for_existing_callers():
 
 
 def test_rerank_lets_the_refusal_out_instead_of_ranking_with_defaults():
-    """The old shape returned a ranked list here. It must not.
-
-    ⚠️ NOT the arm for "the refusal is not swallowed into the defensive ``None``".
-    Measured by review: restore the dispatch inside ``_fetch_signals``' own ``try``
-    and this arm STILL PASSES, because ``rerank`` calls ``signal_family_for`` a
-    second time (unguarded) at the identity dimension. What it proves is the
-    caller-visible contract: no ranked list for an unknown label. The
-    "not swallowed" property is pinned by
-    ``test_an_unknown_label_raises_before_any_read``, which reds in that state.
-    """
+    """The old shape returned a ranked list here. It must not."""
     r = GraphRanker(projection=_NeverQueried())
     rows = [{"id": "a", "scores": {"rrf": 0.9}}, {"id": "b", "scores": {"rrf": 0.5}}]
     with pytest.raises(UnsupportedEntitySignals):
@@ -212,6 +197,12 @@ def test_state_ranker_refuses_a_label_it_has_no_signal_set_for():
             [{"id": "e", "entity_type": "event", "scores": {"rrf": 0.9}}])
 
 
+# ⚠️ The ROUTING half of R4 (round-4 review FINDING 2 — which labels reach
+# ``StateRanker``'s ENTITY read, not only which labels it refuses) is pinned in
+# ``tests/test_12184_state_ranker_routing.py``, which needs no Docker: ONE owner
+# for that predicate, and the file that runs everywhere. It is not restated here.
+# This module keeps the live-graph assertions and the refusal, which need the
+# lane's own FalkorDB.
 # ── 3. What an entity row is actually measured by (live graph) ────────────
 
 def _seed_object_with_claims(sdk, *, beliefs=(0.9, None, None)) -> tuple[str, str]:
@@ -333,6 +324,75 @@ def test_an_uninformative_entity_read_says_so(sdk):
     r3.rerank([{"id": seeded[0][0], "scores": {"rrf": 0.5}}],
               entity_type="object")
     assert r3.signals_informative is True
+
+
+def test_a_read_that_answers_no_rows_is_relevance_only_not_not_applicable(sdk):
+    """A ZERO-row answer is `False`, not `None` — the field's gate is the REQUEST.
+
+    Pre-fix the assignment sat behind `and signals`, so an id the graph does not
+    hold (a Source keyed by a `url` no node carries, a stale id) left
+    `signals_informative` at its `None` default. Callers render `None` as "not
+    applicable", while the order produced by that read WAS relevance-only:
+    `graph_boost` answers `0.0` for every row because there is no signal to
+    read. "The set is not applicable" and "the set answered nothing" are
+    different facts, and only the first is `None`.
+    """
+    r = GraphRanker(sdk._get_proj())
+    r.rerank([{"id": "no-such-object-id-12184", "scores": {"rrf": 0.5}}],
+             entity_type="object")
+    assert r.signals_read is False, "the read answered nothing at all"
+    assert r.signals_informative is False, (
+        "…and nothing is not 'not applicable': the order IS relevance-only")
+
+    # The `None` label keeps its meaning: a label with no entity signal set is
+    # genuinely not applicable, and must not be swept into the new `False`.
+    r2 = GraphRanker(sdk._get_proj())
+    r2.rerank([{"id": "no-such-point-id-12184", "scores": {"rrf": 0.5}}],
+              entity_type="point")
+    assert r2.signals_informative is None, (
+        "a non-entity label has no entity signal set to be informative about")
+
+    # …and so does a ranker with no projection: there is no read to be
+    # informative, so the field has no subject. This is the second half of the
+    # boundary — the gate is the REQUEST *with a projection*, never the row
+    # count, so the no-graph unit-test shape is unchanged.
+    r3 = GraphRanker(None)
+    r3.rerank([{"id": "no-such-object-id-12184", "scores": {"rrf": 0.5}}],
+              entity_type="object")
+    assert r3.signals_informative is None
+
+
+def test_a_read_that_RAISED_is_not_reported_as_an_empty_answer(sdk, caplog):
+    """``None`` from the fetch is "we do not know", never "the graph answered nothing".
+
+    The THIRD boundary, and the one the zero-row fix could have swallowed:
+    ``_fetch_signals`` answers ``None`` when the read RAISED (its defensive
+    ``except``). Reporting that as ``signals_informative=False`` states "the
+    entity signal read answered NO rows" about a query that never completed —
+    a claim about the graph minted from an infrastructure failure — while
+    ``signals_read`` (also ``False``) says the read did NOT answer. The two
+    fields must not contradict each other, and #10137 is the rule that a failed
+    read never becomes a claim.
+    """
+    r = GraphRanker(sdk._get_proj())
+    r._fetch_signals = lambda ids, et: None       # the defensive `except` path
+    with caplog.at_level("INFO", logger=logging.getLogger("tortoise.ranking").name):
+        r.rerank([{"id": "no-such-object-id-12184", "scores": {"rrf": 0.5}}],
+                 entity_type="object")
+    assert r.signals_read is False
+    assert r.signals_informative is None, (
+        "a read we could not complete makes no claim about the graph")
+    # …and neither LOG LINE may describe it as an answer (round-3 review
+    # FINDING 3): the block is gated on `raw_signals is not None`, so a failed
+    # read reaches neither the "answered NO rows" line nor the "no structure"
+    # one. Telling an operator the read answered empty, when it raised, is the
+    # same false claim on the operator's surface that the field refuses to
+    # make — `_fetch_signals` already emitted its own WARNING for the failure.
+    assert not [rec for rec in caplog.records
+                if "answered NO rows" in rec.getMessage()
+                or "answered with no structure" in rec.getMessage()], (
+        "a FAILED read must not be logged as an ANSWER: "
+        f"{[rec.getMessage() for rec in caplog.records]}")
 
 
 # ── 4. The identity term applies to entity rows only ─────────────────────

@@ -73,7 +73,15 @@ class _EngineGraph:
             if not self._vector_index_created:
                 return _ResultSet([])
             return _ResultSet([("Point", "Point", {"embedding": ["VECTOR"]})])
-        if "drop index" in low and "embedding" in low:
+        if low.startswith("drop") and "embedding" in low:
+            # ⛔ #13320: the REAL engine (graph module 42006) drops a VECTOR index
+            # only through `DROP VECTOR INDEX FOR …`. The generic forms answer
+            # `no such index` WHILE `db.indexes()` reports the row — a fake that
+            # accepted either form is how the retirement shipped two statements
+            # that never dropped anything, and kept this pin green.
+            if "drop vector index" not in low:
+                raise Exception(
+                    "Unable to drop index on :Point(embedding): no such index.")
             if not self._vector_index_created:
                 raise Exception("No such index")
             self._vector_index_created = False

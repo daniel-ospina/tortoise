@@ -1402,12 +1402,17 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # branches' index-manifest work), so the declaration 20346 -> 20401, the def
     # 20774 -> 20829 and the loop 21224 -> 21279. Re-derived by CONTENT at the
     # stacked head, never by adding a delta.
-    ("tortoise/projection/__init__.py", 20401, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:20401`"),
-    ("tortoise/projection/__init__.py", 20829, "def _create_fulltext_index(",
-     "`:20829`"),
-    ("tortoise/projection/__init__.py", 21279,
-     "self._create_fulltext_index(label, fields)", "`:21279`"),
+    # ⛔ RE-DERIVED AGAIN at the `origin/main` `31bdd1dd` merge: the stacked tree had
+    # moved them once more — declaration 20401 -> 20542, def 20829 -> 20970, call
+    # 21279 -> 21420 — measured with the same three CONTENT greps (the fragment above
+    # each row), never by adding the merge's delta. The pin was RED at this head and
+    # the fix is the locator, not a relaxed assertion.
+    ("tortoise/projection/__init__.py", 20542, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:20542`"),
+    ("tortoise/projection/__init__.py", 20970, "def _create_fulltext_index(",
+     "`:20970`"),
+    ("tortoise/projection/__init__.py", 21420,
+     "self._create_fulltext_index(label, fields)", "`:21420`"),
 )
 
 

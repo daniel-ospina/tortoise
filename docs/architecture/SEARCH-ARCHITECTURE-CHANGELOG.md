@@ -276,7 +276,9 @@ graph-side embeddings; ⛔ **but that ruling was itself SUPERSEDED for the GRAPH
 its write stopped **once the record holds and indexes those vectors** — record first (`#13220` step 1),
 graph removal second, in a later release, and never before (removing it early would delete the only copy,
 the failure the original ruling existed to prevent). `:Event`/`:Source` were never named by that ruling,
-so their graph copies were already retirable once the record serves them.
+so their graph copies were already retirable once the record serves them. ⛔ **SUPERSEDED 2026-11-17
+(`#13350`, the entry below):** no owner ruling makes them retirable — comment `6956793300` authorises
+retirement for `:Object`/`:Subject` and no other label — and the design document now says so.
 
 **What the design document does NOT gain, on purpose.** No delivery state and no census: the per-label
 vector population is still `tools/dod_5090_probe.py --census`'s to measure on a named graph, the probe's
@@ -284,3 +286,32 @@ docstring still forbids re-quoting the 2026-09-24 count, and `#13108`'s read-tim
 its own scope (it decided nothing and created no index). The work the ruling orders — columns and writer,
 the record-served dense leg through `record_vector.LABEL_SERVED`, the retirements, the arming — is
 `#13220`'s and is not this document's narration.
+
+## `#13350` — the KEEP ruling's *status* words restated: its prohibition is today's operative rule, and the GRAPH-COPY reopen is recorded as the ruling that governs removal
+
+Applies an owner instruction of 2026-11-17: the **INDEX** half stays *decided, implementation in flight — `#13220`*,
+and the 2026-11-10 KEEP ruling's prohibition — `:Object`/`:Subject` keep their stored embedding, and no pass may
+remove it or stop writing it — is kept intact and is what binds **today**, because the later ruling's own condition
+is unmet.
+
+**What changed is not only status wording — one content claim moved with it.** The decision block at the head of
+the document — not a §3 paragraph; §3's change is the vector-search table row — had replaced the reopen's own
+statement with a bare "the KEEP ruling is in force today". That is not what the record says: `#11395` comment
+`6956793300` is itself headed **"SUPERSEDED 2026-11-17 — the KEEP ruling's *reason* no longer holds, so the graph
+copy retires"** and carries an `OVERRIDES:` line. The block now names that second ruling as the one that governs
+removal, scopes its permission to the **GRAPH COPY only**, and cites its `OVERRIDES:` marker — so the operative
+effect is unchanged (nothing may be removed or stop being written while `#13220` is in flight) and both owner
+statements are recorded rather than one cancelling the other.
+
+**The content claim that moved:** `origin/main`'s block ended *"`:Event`/`:Source` were never named by the KEEP
+ruling, and were already retirable once the record serves them"* — a permission no owner ruling grants, since
+comment `6956793300` authorises retirement for `:Object`/`:Subject` and no other label. The block now says the pair
+is *"neither protected by the KEEP ruling nor retired by this second one"*, and states the record-first condition as
+**SEQUENCING** — addressed to every label, scoping none — kept separate from the label-scoped authorisation to
+retire. The entry above records the old sentence; this entry supersedes it.
+
+⛔ **Why this entry exists.** `origin/main`'s decision block carried the reopen explicitly — *"The same day's SECOND
+ruling reopens the KEEP half — for the GRAPH COPY only … `OVERRIDES:` recorded there"* — and this change replaced it
+with a sentence that kept the condition but dropped the reopen's status, its scope and its `OVERRIDES:` citation.
+The reopen's statement is restored with all three. This entry is the record that the wording moved **and that the
+`:Event`/`:Source` permission sentence changed with it.** **No measurement was re-read and no figure was retired.**

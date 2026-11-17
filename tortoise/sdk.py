@@ -59313,6 +59313,23 @@ class TortoiseSDK:
         how the internal-reader tests pin those arms, and their contract says
         the interception must work `regardless of how it is spelled`.
 
+        ⛔ **ON AN ARMED DEPLOYMENT, ``{}`` IS NOT REACHABLE FROM THIS DOOR FOR A
+        NAMED ID — EVERY ABSENT *NAME* ANSWERS THE TRUTHY ``not-hot`` SHAPE.**
+        (The one exception is the EMPTY key, which names nothing and therefore
+        answers ``{}`` — in the ARMED modes, where the short-circuit below runs.
+        ``off`` never reaches it: that mode delegates to the accessor unchanged,
+        byte for byte, which is what ``off`` means and why an empty key there
+        behaves exactly as it did before #13093.)
+        The coverage rule (`record_serve.entity_coverage_complete`) is `False`
+        while ``Event``/``Source`` lack measured parity (#9721) AND a Source
+        cannot be addressed by a bare ``id`` at all
+        (``record_serve.ENTITY_UNION_ADDRESS_RESIDUALS``), so the falsy arm above
+        is unreachable for a named id and a caller MUST read the ``residency``
+        field rather than the truthiness of the answer. That is why the ten
+        internal readers pass `cache_only=True` instead of testing truthiness, and
+        it is the one migration an external caller of this door owes: `if out:`
+        no longer distinguishes found from absent while the record seam is armed.
+
         ``off`` — the default — is byte-identical to the pre-#13093 call: one
         cache query through the accessor, no record consult, no added key, and
         no residency marker (this door does not read the ``partial``
@@ -59374,6 +59391,22 @@ class TortoiseSDK:
             # The pre-#13093 shape, byte for byte: one cache query, no consult,
             # no attribution, no marker.
             return self._get_entity(id_val)
+
+        # ⛔ AN EMPTY KEY NAMES NO NODE, SO NO STORE IS CONSULTED — not the
+        # record and NOT THE CACHE. This has to short-circuit here, BEFORE the
+        # tenant resolution and the record round trip: the record's reader
+        # refuses an empty key as STRUCTURAL (`read_node`), so an armed
+        # `get_entity("")` would go from `{}` to an exception while `off` stayed
+        # absent — the same id answering two ways depending on a deployment flag.
+        # And it answers `{}` ITSELF rather than delegating to `_get_entity`:
+        # that would build a graph handle, which `record` mode exists to avoid
+        # (the laziness the point door pins with `handle_opens == 0`). ⚠️ The
+        # CACHE's own view of an empty key is not something this door should be
+        # deciding: no fold WRITES such a node (`projection._writable_id` refuses
+        # it), so it is a state only a raw write can create — and `record` mode
+        # must not go looking in the store it exists to replace.
+        if not id_val:
+            return {}
 
         # ⛔ ONE COORDINATE SPELLING (#13322 review observation 3).
         # `record_serve.serve_entity` builds `union:<labels>:<id>`; a second
