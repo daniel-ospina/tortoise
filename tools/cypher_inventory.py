@@ -205,7 +205,7 @@ WRITE_INLINE = re.compile(
     r"\bSET\s+(?:(?:`[^`]*`|[\w]+)\s*(?:[.\[]|\+=|=|:)|[{\[]|\?\?\?)"
     r"|\b(?:MERGE|CREATE)\s*\("
     r"|\bDETACH\s+DELETE\b"
-    r"|\b(?:DELETE|REMOVE|DROP)\s+(?:\w|[{\[]|\?\?\?)",
+    r"|\b(?:DELETE|REMOVE|DROP)\s+(?:(?:`[^`]*`|[\w]+)|[{\[]|\?\?\?)",
     re.IGNORECASE,
 )
 

@@ -192,6 +192,13 @@ def test_a_postgres_statement_is_not_cypher():
         ("MATCH (s:Point {id:$sid}), (t) WHERE ID(t) = $tid CREATE (s)-[:CONTAINS]->(t)",
          "adjacency"),
         ("MATCH ({} {id:$id}) REMOVE {}.embedding", "plain"),
+        # a BACKTICKED target containing a space. The SET arm was widened for this
+        # spelling and the DELETE/REMOVE/DROP arm was not, so a legal Cypher write
+        # still classified role=`read` → `candidate:SQL-shaped` (`#13098` review P3).
+        ("MATCH (n:Point {id:$id}) SET `my node`.`a b` = 1 RETURN count(n)", "plain"),
+        ("MATCH (n:Point {id:$id}) REMOVE `my node`.`a b` RETURN count(n)", "plain"),
+        ("MATCH (n:Point {id:$id}) DELETE `my node` RETURN count(n)", "plain"),
+        ("MATCH (n:Point {id:$id}) DROP `my node` RETURN count(n)", "plain"),
     ],
 )
 def test_an_inline_write_clause_is_a_write_not_a_candidate(statement, shape):
@@ -373,6 +380,33 @@ def test_the_multiset_pass_pairs_rows_with_the_equality_it_compares_with():
     assert different["equal"] is False
     assert [(d["kind"], d["cypher"], d["sql"]) for d in different["differences"]] == \
         [("value", 10, 11.0)]
+
+
+def test_the_multiset_sort_key_agrees_with_the_equality_for_collections_too():
+    """The sort key must be a total order that agrees with `_norm_row` — for lists
+    and dicts, not only scalars.
+
+    ⛔ `_norm` recurses into collections but a json rendering of its result does
+    not, so `[1]` and `[1.0]` stayed different keys and the false `value`
+    difference this file's `_sort_key` closes for a scalar column was still
+    reproducible for a collection column (`#13098` review P3). The census lists
+    plenty of `collect(…)`/`properties(…)` reads, so this is the shape a future
+    candidate would hit.
+    """
+    candidate = harness.Candidate(name="collections", cypher="", sql="",
+                                 columns=("id", "tags"), ordered=False)
+    cols = ["id", "tags"]
+    for cypher_rows, sql_rows in (
+        ([("a", [1]), ("a", [10])], [("a", [1.0]), ("a", [10.0])]),
+        ([("a", {"k": 1})], [("a", {"k": 1.0})]),
+        ([("a", [1, [2]])], [("a", [1.0, [2.0]])]),
+    ):
+        result = harness.diff(candidate, cypher_rows, cols, sql_rows, cols, ["a"])
+        assert result["equal"] is True, (cypher_rows, sql_rows, result["differences"])
+    # …and the collection pass still reports a REAL difference
+    different = harness.diff(candidate, [("a", [1])], cols, [("a", [2])], cols, ["a"])
+    assert different["equal"] is False
+    assert [d["kind"] for d in different["differences"]] == ["value"]
 
 
 def test_a_projection_that_drifts_on_both_sides_still_reddens_against_the_declaration():

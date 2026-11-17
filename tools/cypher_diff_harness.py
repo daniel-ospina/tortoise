@@ -600,6 +600,28 @@ def _norm_row(row: Sequence[Any]) -> tuple:
     return tuple(_norm(v) for v in row)
 
 
+def _render_canonical(value: Any) -> Any:
+    """`_norm`'s value, re-rendered so two `_norm`-equal values render the SAME.
+
+    ⛔ `_norm` recurses into lists/dicts, but a json rendering of its result does
+    not collapse `[1]` and `[1.0]` — so `_sort_key` was NOT the total order it
+    claims to be for a list/dict column, and the false-`value`-difference this
+    file's `_sort_key` closes for scalars stayed reproducible for a collection
+    (`[("a", [1]), ("a", [10])]` vs the `[1.0]`/`[10.0]` side, `#13098` review P3).
+    Recursive, because one level was the whole defect.
+    """
+    value = _norm(value)
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else value
+    if isinstance(value, (list, tuple)):
+        return [_render_canonical(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _render_canonical(v) for k, v in value.items()}
+    return value if isinstance(value, int) else str(value)
+
+
 def _sort_key(row: Sequence[Any]) -> tuple:
     """A total order over rows that AGREES with `_norm_row`'s equality.
 
@@ -608,17 +630,19 @@ def _sort_key(row: Sequence[Any]) -> tuple:
     different rows: `[("a", 1), ("a", 10)]` sorts `["\"a\", 10", "\"a\", 1"]`
     because `]` > `,` > `.`, while the `1.0`/`10.0` side sorts the other way — a
     false `value` difference on multisets that are equal (`#13098` review P3). Each
-    element renders as `(type_rank, text)` with integral floats written as integers,
-    so `1`, `1.0` and `Decimal("1")` produce the same key and equal rows always sort
-    to the same place on both sides.
+    element renders through `_render`, which collapses `1`/`1.0`/`Decimal("1")`
+    INSIDE a list or dict as well as at the top level, so two `_norm`-equal rows
+    always produce the same key.
     """
     def part(value: Any) -> tuple[int, str]:
-        value = _norm(value)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return (1, json.dumps(value, sort_keys=True, default=str))
-        if isinstance(value, float) and value.is_integer():
-            value = int(value)
-        return (0, repr(value))
+        if isinstance(value, bool):
+            # its own rank: a bool and a number are different FAMILIES (`_family`
+            # reports that difference first), so they must not share a sort order.
+            return (2, "true" if value else "false")
+        number = _render_canonical(value)
+        if isinstance(number, (int, float)):
+            return (0, repr(number))
+        return (1, json.dumps(number, sort_keys=True, default=str))
 
     return tuple(part(v) for v in row)
 
