@@ -84,14 +84,19 @@
 --     labels), so `python -m tortoise record-restore` lands these two nodes
 --     WITHOUT a vector, and nothing on that path encodes — `record_restore` →
 --     `rebuild_from_record` → `cache_projection.record_plan` contains no
---     `encode_for_row` call at all (the only recomputers are
---     `_upsert_object`/`_upsert_subject`, which run on the JOURNAL fold).
---     ⛔ SO STATE THE SPLIT PLAINLY: the column closes gap 1's INDEXABILITY half
---     (the vector is in Postgres and HNSW-indexed) and NOT its RESTORE half;
---     teaching `rebuild_from_record` to re-encode a dropped DERIVED vector is a
---     FOLLOW-UP, and an earlier cut of this header claimed it was already done
---     (review, P2 — measured: `node_from_row(Object, {…, embedding})` returns no
---     `embedding` prop);
+--     `encode_for_row` call at all.
+--     ⛔ THE SPLIT, STATED PLAINLY: the column closes gap 1's INDEXABILITY half
+--     (the vector is in Postgres and HNSW-indexed) and NOT its RESTORE half —
+--     an earlier cut of this header claimed the restore was already done
+--     (review, P2; measured: `node_from_row(Object, {…, embedding})` returns no
+--     `embedding` prop).
+--     ⛔ AND THE FOLLOW-UP IS NOT A NEW ENCODER. The recomputers at this head are
+--     the graph fold's `_upsert_object`/`_upsert_subject` (both on the JOURNAL
+--     fold) and this change's `record_writer.derived_embedding_columns` (the
+--     LIVE write seam, whose only caller is `RecordWriter.write`); the work is
+--     to thread `derived=` from `record_restore`/`rebuild_from_record` into
+--     `replay` — and through `tools/record_runner.py`'s fold — REUSING that
+--     encoder rather than writing a second one;
 --   * `embedding_vec` stays GENERATED, so "the indexed vector disagrees with the
 --     stored payload" is not a reachable state (the same property
 --     `20261109000001` took for point/source/event).
