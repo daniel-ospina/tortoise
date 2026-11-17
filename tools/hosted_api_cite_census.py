@@ -10,7 +10,7 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 24762
+    uv run python tools/hosted_api_cite_census.py --pivot 24903
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
@@ -127,8 +127,12 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: net +1 line moved it 24620 -> 24621, re-deriving none of the three; #12904 moved
 #: it 24686 -> 24692 and re-derived none of the three either, which #12897 then
 #: repaired by re-deriving all three; #12947 moved it 24692 -> 24731 (24728 after
-#: its forward merge of main, then +3 more comment lines in the same PR), and
-#: re-derived all of the three at each step). Two
+#: its forward merge of main, then +3 more comment lines in the same PR, and
+#: re-derived all of the three at each step; #12992's typed-refusal block added
+#: 130 lines above the site, moving it 24731 -> 24861, and its own review's
+#: `/health` degraded-arm repair added 11 more, 24861 -> 24872 — all three
+#: re-derived at each hop).
+#: Two
 #: distinct wrongnesses, with distinct start points — do not merge them:
 #:   • `pivot_is_the_lifetime_site(<old pivot>)` goes FALSE the moment the CALL
 #:     moves, because the note still cites the old line (#11803, #11977);
@@ -145,7 +149,11 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: 24731 -> 24762 (measured: `grep -n 'proj.g.query(LIFETIME_MEMORY_QUERY)'
 #: tortoise/hosted_api.py`), re-deriving the notes, the scorecard and this constant
 #: TOGETHER — the constant is the third of the three, and the pin reds when it lags.
-DEFAULT_PIVOT = 24762
+#: The #13000 re-cut then merged main's `cde3e7743c` forward and this branch's own
+#: #12992 block sits above the site, so it was re-derived once more, 24762 -> 24903
+#: (measured: `grep -n 'proj.g.query(LIFETIME_MEMORY_QUERY)' tortoise/hosted_api.py`
+#: -> 24903): the tool that owns these figures wrote it, not a hand.
+DEFAULT_PIVOT = 24903
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"

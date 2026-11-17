@@ -1026,6 +1026,19 @@ surfaces:
   # through to `core`. A one-surface registration drops this file on either
   # half's own diff — the #1349/#3332 silent-drop class the manifest exists for.
   - test_10602_wait_bound_breach_visible.py
+  # #12992: the capture gate's refusal and its `/health` block. `api` ONLY, and the
+  # single row is the measured answer rather than the `--register` default: the ONLY
+  # product module this suite exercises is `tortoise/hosted_api.py`, which is an exact
+  # `api` SOURCE_PATTERN (it REPLACES the `core` fallback), so a `core` row would buy
+  # nothing. ⛔ An earlier cut of this comment added "and would run the file twice"; that
+  # is FALSE — the selector emits a DEDUPED list (measured: a dual-registered suite
+  # appears once in `test_files`), and the dual-registered rows in this list (#10602 above,
+  # #10749 below) are the precedent. The `api`-only row is the measured answer. The sibling half
+  # of that gate — `tortoise/mcp_server.py`, whose `tortoise_session_capture` reaches the same
+  # `_reserve_capture_slot` — is a `SHARED_MODULE`, so its own diff forces the FULL
+  # matrix and selects this file regardless of any row (the same argument #10749 records
+  # for `mcp_server.py`).
+  - test_12992_capture_capacity_typed_refusal.py
   # #10749: the health tail must fit INSIDE the transport wait bound. Dual-registered
   # for the same reason as #10602 directly above and #3834 before it: the publish sites
   # live on BOTH halves — `setup_timeout_clamped` / `setup_timeout_clamped_s` on the
@@ -2505,6 +2518,7 @@ surfaces:
   # claims the diff. DB-free at the door level: every record is a fake and the SDK
   # arm reuses `test_record_serve.py`'s recording doubles.
   - test_12941_read_your_writes.py
+  - test_13034_currency_rule_reads_position.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
   # (where `TIER_DISPLAY_NAMES` now lives) is a `core` source. The `tier1` row is
