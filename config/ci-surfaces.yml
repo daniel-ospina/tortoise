@@ -2572,15 +2572,24 @@ surfaces:
   # claims the diff. DB-free at the door level: every record is a fake and the SDK
   # arm reuses `test_record_serve.py`'s recording doubles.
   - test_12941_read_your_writes.py
-  # #13034: the reader rule reads BOTH axes (the lifecycle word and the position
-  # axis), plus the pins that no consumer re-spells it. Registered HERE rather than
-  # under the `core` fallback it would take by accident: the file arrived with
-  # a09a0b3840 without a row, so `tools/ci_selection.py --integrity` reported
-  # manifest drift on main and this merge inherited it. `core` is the surface the
-  # fallback already chose (the subjects are `tortoise/live.py`'s predicate and its
-  # consumers, none of which is an EXACT `SOURCE_PATTERNS` match), so this row
-  # declares the same lane explicitly — no behaviour change, only the drift gone.
-  - test_13034_currency_rule_reads_position.py
+  # ⛔ #13034 is NOT registered here, and this absence is deliberate — do not add the
+  # row back. An earlier cut of this branch carried a `core` row for
+  # `test_13034_currency_rule_reads_position.py` because `main` had the file merged
+  # (#13075, a09a0b3840) with no manifest row, so `--integrity` reported drift and
+  # every merge inherited it. `main` has since registered it canonically on its OWN
+  # sides (#13144, 3d437429e9): one `api` row, one `core` row further DOWN this file,
+  # and the `durations` row. `config/ci-surfaces.yml` is `merge=union`, so keeping this
+  # branch's row on top would leave TWO `core` rows — the same file registered twice in
+  # one surface — and `duplicate_entries()` is a GATE FAILURE, not a note (#5373).
+  # MEASURED on the merge of `main` into this branch before this deletion:
+  #   duplicate_entries(load_manifest()) -> ['core: test_13034_currency_rule_reads_position.py']
+  #   integrity(load_manifest())         -> []   (integrity asks only that a file is
+  #                                              classified SOMEWHERE, so it stays green
+  #                                              on a duplicate — the duplicate gate is
+  #                                              what reds, and it reds `test-slow (c)`
+  #                                              and `manifest-integrity`)
+  # After the deletion the file keeps main's two rows; `--integrity` and
+  # `duplicate_entries()` are both green here.
   - test_13100_planned_occurrences.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
