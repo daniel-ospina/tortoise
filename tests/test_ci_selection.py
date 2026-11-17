@@ -22971,8 +22971,9 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
 def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     """#13074 review P1: the census must RUN on the file it converted.
 
-    `tests/test_13034_currency_rule_reads_position.py` was UNLISTED on `main`;
-    `core` ALONE missed it. Its cross-cutting guard is a census over `_CENSUS_MODULES`
+    `tests/test_13034_currency_rule_reads_position.py` was UNLISTED on `main`
+    when #13075 landed it (both rows registered later, by #13144); `core` ALONE
+    missed it. Its cross-cutting guard is a census over `_CENSUS_MODULES`
     (`:606-611`), which names `tortoise/hosted_api.py` as one of its six
     consumers — the file #13034 converted — and whose presence arm (`:708-722`,
     literal at `:714`) asserts `"tortoise/hosted_api.py": "_terminal_excluded"`
@@ -23002,11 +23003,14 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     That is the #1349/#2938/#3154 silent-drop class in its harmful direction. It is
     the same defect `test_record_serve.py` and `test_12941_read_your_writes.py`
     each record for themselves (`config/ci-surfaces.yml:351` and `:352` — the two
-    rows ABOVE this one). The `['api', 'core']` siblings are
-    `test_12941_read_your_writes.py` (`:352` / `:2541`) and
-    `test_11892_health_quota.py` (`:1816` / `:2532` — elsewhere in the map, not
-    above this row). ⛔ NOT "the only hosted-door guard registered
-    single-surface": on `main` this file was registered on **zero** surfaces,
+    rows ABOVE where the registration sits on `main`). The `['api', 'core']`
+    siblings, each at its OWN rows: `test_12941_read_your_writes.py` at `:352` /
+    `:2574`, and `test_11892_health_quota.py` at `:1849` / `:2565` (both
+    re-derived on the merged tree: taking `main`'s `ci-surfaces.yml` moved them
+    from the `:1816` / `:2532` / `:2541` this docstring previously carried).
+    ⛔ NOT "the only hosted-door guard registered
+    single-surface": on `main` this file was registered on **zero** surfaces
+    when #13075 landed it (both rows were added later, by #13144),
     and several hosted-door guards legitimately live on `api` alone
     (`test_hosted_api.py`, `test_billing.py`, `test_commit_endpoint.py`,
     `test_dr_endpoints.py` — all `['api']`, measured). The defect here is the
@@ -23045,8 +23049,12 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     )
 
     # The registration itself: `api` is the arm the `hosted_api.py` diff class
-    # needs, `core` is the arm that covers the three `core`-classified CONSUMERS
-    # (`core` was NOT pre-existing on `main` — this PR added BOTH rows). The rows
+    # needs, `core` is the arm that covers the three `core`-classified CONSUMERS.
+    # ⛔ Both rows were landed on `main` by #13144 (`3d437429e9`) AFTER this
+    # branch first cut them — so this branch carries the GUARD, not the rows
+    # (its own `config/ci-surfaces.yml` delta was dropped as superseded in the
+    # merge). The guard is the half `main` lacks: without it a later edit can
+    # drop an arm and nothing reds. The rows
     # are the subject because a selection assert alone would pass the day any
     # second surface also lists the file (the #12645 pin records that lesson).
     assert pin in manifest["surfaces"]["api"], (
