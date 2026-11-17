@@ -82,7 +82,7 @@ above was re-measured afterwards. ⚠️ **The figure counts the file it is writ
 it contributes **14** resolved pairs, **9** of which drift — 97 (the `main` copy) + 9 = **106** — and every one of
 the 14 was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
-magnitude — the omission class §2.3 records one section down — which is why that count is now MEASURED by
+magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of §0) instead of enumerated here.
 ⛔ **The `:3524` address that §2.4 retracts is NOT counted**, because it is a **comment line**: it is spelled
 bare, not as a `path.py:NNNN` pair. A cite that cannot be opened on the line its row quotes is worse than
