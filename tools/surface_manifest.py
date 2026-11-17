@@ -322,6 +322,28 @@ MANIFEST_HEADER = (
     "# not \u2014 that re-opens the slack. #10906 and #10914 compose because their retired name\n"
     "# sets are disjoint (77 \u2212 5 = 72 advertised at #10914's head).\n"
     "#\n"
+    "# LOWERED 55 → 48 (tools) on 2026-11-16 by the #11609 DOOR-RETIREMENT wave (#4282 Phase 2,\n"
+    "# lane E), with the SDK count LEFT at 94 — that wave retires MCP names only, so the SDK\n"
+    "# pin does not move; 94 is `#12901` wave 2's pin (110 → 94), inherited from `main` by\n"
+    "# RE-CUTTING onto it instead of carrying this branch's pre-wave 110 forward. The two\n"
+    "# waves touch disjoint surfaces, so the composition is main's SDK number and this\n"
+    "# wave's tool number. SEVEN doors left\n"
+    "# the advertised surface and each retired FORWARD (#3883) into a container that is live on\n"
+    "# `main`: `get_session` → `get_entity(type=\"session\")`, `find_cross_lens_candidates` →\n"
+    "# `review_link_candidates(kind=\"cross_lens\")`, `list_batch` → `list_knowledge(kind=\"batch\")`,\n"
+    "# and `create_subject`/`create_object`/`create_event`/`create_document` →\n"
+    "# `create_entity(type=...)`. NO row was archived: the archive is for doors with NO\n"
+    "# destination (`archive/README.md`), and a forwarded name is still served.\n"
+    "# ⛔ WHY ONLY SEVEN. The other 25 live names absent from the 27-target are each protected by a\n"
+    "# RECORDED decision, and the list is in `tortoise/tool_registry.py` beside the new rows so the\n"
+    "# next lane does not re-derive it: six READ doors + `check_structure` + `calibrate_summary`\n"
+    "# keep their `-> list[dict]` envelope (the #8482 repair), `issue_insight`/`session_context`/\n"
+    "# `search` keep a `rest_spec` (retiring the entry deletes a REST route), `query` is the paged\n"
+    "# destination of two already-retired pointers, `create_point`/`diary_write`/\n"
+    "# `compute_confidence` have no arm on their container, and nine destinations are not live on\n"
+    "# `main` yet. Lowering the pin to the LIVE count is what keeps it a growth pin: at 55 it would\n"
+    "# carry seven slots of slack and re-adding any of the seven would read green.\n"
+    "#\n"
     "# THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so\n"
     "# drift is visible (tools/surface-guard.py). The approved TARGET is recorded in\n"
     "# docs/product/canonical-mcp-tools.md and docs/product/beta-sdk-surface.md; compliance\n"
@@ -3698,8 +3720,9 @@ def cmd_render(args: argparse.Namespace) -> int:
         add("reported 40 in Cursor — a cap the whole surface fits inside, so no tool is hidden by it,")
         add(f"and we pay context for all {len(tools)} of them on every turn. {_comparable_clause}")
     add("and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and")
-    add("`tortoise_get_entity` already absorbed five of the six fetch-by-id getters — the sixth,")
-    add(f"`tortoise_get_session`, is proposed for merge. Deferring the rest keeps all {len(tools)} callable.")
+    add("`tortoise_get_entity` already absorbed all six fetch-by-id getters — the last,")
+    add("`tortoise_get_session`, answers as `tortoise_get_entity(id, type=\"session\")` and is retired FORWARD in")
+    add(f"this change rather than dropped. Deferring the rest keeps all {len(tools)} callable.")
     add("")
     add("**The case against, which is real and not a formality.** Tortoise is genuinely broader than the")
     add("comparables — a graph memory *and* a reasoning engine with sessions, sources and mining — so some")
@@ -3845,8 +3868,21 @@ def cmd_check(args: argparse.Namespace) -> int:
         # read — an endpoint response is anchored by its `sdk:<method>` row, and
         # `_partition_rows` drops exactly those. Reading `rows` here made the anchor
         # property unable to see any SDK endpoint at all.
+        #
+        # ⛔ AND THE RETIRED-FORWARD NAMES ARE ANCHORS TOO (#11609 lane E). A retired name
+        # is STILL SERVED (#3883): it resolves, it runs, and its response carries the very
+        # fields this block records — so a record anchored to one describes a real surface.
+        # Reading only `rows` (the ADVERTISED surface) made the rule demand the opposite:
+        # the seven doors lane E retired each carried true `response_fields` rows, and the
+        # only way to satisfy the anchor was to DELETE them — losing a record of keys the
+        # shim still emits, to satisfy a rule about anchoring. The retired block is where
+        # those names live now, so it is read here.
         _row_names = {
             str(r["name"]) for r in doc["rows"] if isinstance(r, dict) and "name" in r
+        } | {
+            str(r["name"])
+            for r in (doc.get("retired") or [])
+            if isinstance(r, dict) and r.get("name")
         }
         for rf in _rf_block:
             if not isinstance(rf, dict) or not rf.get("response"):

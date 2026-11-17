@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -415,16 +416,55 @@ def test_fingerprint_membership_session_workers(tmp_path):
 # ── Task 1 test (c)/(k): write-stage retry recovery with the ordering pin ──
 
 
+#: The verbs that make a statement a WRITE. Deliberately BROADER than the
+#: `("CREATE", "MERGE", "SET")` list the write-stage test asserts on, so that
+#: assertion stays an INDEPENDENT check of what the injector selected rather than
+#: a restatement of the selector. `SET` covers the collision-OR / tombstone
+#: shapes the injector's own note names (MATCH…SET, MATCH+conditional-SET).
+_WRITE_VERBS = ("CREATE", "MERGE", "SET", "DELETE", "REMOVE")
+
+
+def _is_write_statement(cypher: str) -> bool:
+    """True when ``cypher`` MUTATES the graph (a read has none of the verbs).
+
+    ⛔ #13065: this discriminator exists because "the first non-probe call after
+    the probe" stopped being a write. ``sdk._stored_goal_ending_view`` — the
+    stored half of the goal-ending guard, new in #13035 — issues
+    ``MATCH (n:<label> {id:$id}) OPTIONAL MATCH (s)-[:CORRECTS]->(n) RETURN …``
+    from ``_sanitize_props``, and the ingest writer puts ``status="draft"`` on
+    every point, so the guard must read the stored ``goalState`` to answer the
+    pairing question: that READ became the first call after the E7 probe, and
+    the injector stalled it instead of a write. Measured at
+    ``f5397ebce4`` (CI run 44057969190, job 133959273094, shard
+    ``test-carve-out (c)``): ``failed_statement`` was the ``MATCH … RETURN``
+    above, so ``assert any(k in … for k in ("CREATE", "MERGE", "SET"))`` in
+    ``test_write_stage_timeout_recovers_with_evidence`` red-ed — the test was
+    measuring a read stall while claiming to measure the write stage.
+    """
+    upper = cypher.upper()
+    return any(re.search(rf"\b{verb}\b", upper) for verb in _WRITE_VERBS)
+
+
 def _install_write_fault(monkeypatch, *, fail_which: str = "write"):
     """Monkeypatch ``tortoise.projection._GuardedGraph.query`` (CLASS level —
     the wrapper uses ``__slots__`` so instance assignment is impossible) with a
-    counting wrapper that fails the FIRST non-probe call after the E7 batch
+    counting wrapper that fails the FIRST non-probe WRITE after the E7 batch
     probe ran (P2-N/P2-12 ordering pin: the probe is a `MATCH ... WHERE n.id
     IN $ids` statement; a MERGE/CREATE substring match is NOT a complete
     characterization of ingest write calls — collision-OR writes are
-    MATCH…SET, retract tombstones are MATCH+conditional-SET).
+    MATCH…SET, retract tombstones are MATCH+conditional-SET — which is why the
+    selector reads the verb SET rather than only CREATE/MERGE, and why it is
+    broader than the list the test asserts on).
 
-    ``fail_which="write"`` fails the first non-probe call after the probe
+    ⛔ #13065: the selector must skip READS, not merely the probe. "The first
+    non-probe call" injected the stall on ``_stored_goal_ending_view``'s
+    ``MATCH … RETURN`` (see :func:`_is_write_statement`), so the write-stage
+    retry the test names was never the thing stalled. Non-vacuity: reverting
+    this branch to `elif not failed and probe_seen >= 1` reds
+    ``test_write_stage_timeout_recovers_with_evidence``'s
+    CREATE/MERGE/SET assertion, because the statement it captures is the read.
+
+    ``fail_which="write"`` fails the first non-probe WRITE after the probe
     (a real write); ``fail_which="probe"`` fails the SECOND probe call
     (the probe-failure branch, P2-12)."""
     import tortoise.projection as proj_mod
@@ -442,11 +482,14 @@ def _install_write_fault(monkeypatch, *, fail_which: str = "write"):
                     and not state["failed"]:
                 state["failed"] = True
                 raise redis_exc.TimeoutError("simulated probe stall")
-        elif not state["failed"] and state["probe_seen"] >= 1:
+        elif (not state["failed"] and state["probe_seen"] >= 1
+                and fail_which == "write" and _is_write_statement(cypher)):
             # only fail AFTER the batch E7 probe ran (the SDK health probe
-            # at open and the session MERGE happen before it — never failed)
+            # at open and the session MERGE happen before it — never failed),
+            # and only on a statement that MUTATES: a read is not the write
+            # stage this test proves (#13065 — see the docstring).
             state["writes_after_probe"] += 1
-            if fail_which == "write" and state["writes_after_probe"] == 1:
+            if state["writes_after_probe"] == 1:
                 state["failed"] = True
                 state["failed_statement"] = cypher
                 raise redis_exc.TimeoutError("simulated write stall")
@@ -505,6 +548,43 @@ def _count_points(sdk) -> int:
     rows = sdk._get_proj().g.query(
         "MATCH (p:Point) RETURN count(p)").result_set
     return rows[0][0]
+
+
+def test_the_write_fault_selector_skips_the_goal_ending_guards_READ():
+    """#13065: the fault selector must never mistake a READ for the write stage.
+
+    ``_stored_goal_ending_view`` issues a pure ``MATCH … OPTIONAL MATCH …
+    RETURN`` from ``_sanitize_props``, and the ingest writer stamps
+    ``status="draft"`` on every point, so the guard reads the stored
+    ``goalState`` on the ingest path — making that READ the first call after
+    the E7 probe. When the selector was "the first non-probe call", the stall
+    landed on this read and ``test_write_stage_timeout_recovers_with_evidence``
+    red-ed on its own CREATE/MERGE/SET assertion (measured: CI run 44057969190,
+    job 133959273094, shard ``test-carve-out (c)``; reproduced locally at
+    ``f5397ebce4``, where ``failed_statement`` was exactly the statement
+    below).
+
+    Non-vacuity: replacing ``_is_write_statement``'s body with ``return True``
+    reds the first assertion here; replacing it with ``return False`` reds the
+    second, so the discriminator cannot be collapsed to a constant either way.
+    """
+    stored_view_read = (
+        "MATCH (n:Point {id:$id}) OPTIONAL MATCH (s)-[:CORRECTS]->(n)"
+        " RETURN n.status, n.goalState, coalesce(n.supersededBy,"
+        " n.superseded_by), collect(s.id), n.outdated"
+    )
+    assert not _is_write_statement(stored_view_read), (
+        "the goal-ending guard's stored-view read was classified as a WRITE, "
+        "so the write-stage fault would be injected on a read again")
+    # ...and the shapes the injector exists to catch ARE writes, including the
+    # two the sibling note names (collision-OR MATCH…SET, tombstone MATCH+SET)
+    for write in (
+        "MERGE (m:EpMeta) SET m.ep_version = coalesce(m.ep_version, 0) + 1 RETURN m.ep_version",
+        "MATCH (p:Point {id:$id}) SET p.status = $st RETURN p",
+        "MATCH (p:Point {id:$id}) WHERE p.retracted IS NULL SET p.retracted = $now SET p.status = 'retracted'",
+        "CREATE (p:Point {id:$id}) RETURN p",
+    ):
+        assert _is_write_statement(write), write
 
 
 def test_write_stage_timeout_recovers_with_evidence(tmp_path, monkeypatch):

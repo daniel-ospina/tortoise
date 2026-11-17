@@ -302,12 +302,20 @@ def test_audit_mcp_mirror(sdk, monkeypatch):
 def test_audit_tool_registry_surface():
     """A13 SC5 surface: the mirror tools are registered, read-only, and
     HTTP-accessible (a read surface)."""
-    from tortoise.tool_registry import TOOL_REGISTRY
-    by_name = {t.name: t for t in TOOL_REGISTRY}
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, RETIRED_USE_INSTEAD, TOOL_REGISTRY
+    # ⛔ The property is about the MIRROR, not about which list the name sits in
+    # (#11609 door-retirement wave retired `tortoise_list_batch` FORWARD into
+    # `tortoise_list_knowledge(kind="batch")`). A retired-forward name is still
+    # SERVED (#3883) and still resolves to the same SDK method, so the entry is read
+    # from the whole served population; asserting on `TOOL_REGISTRY` alone would
+    # have made this audit red on a name that still answers.
+    by_name = {t.name: t for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)}
+    assert "list_knowledge" in RETIRED_USE_INSTEAD["tortoise_list_batch"], (
+        "the retired batch mirror must name the list_knowledge container")
     for name, method in (("tortoise_list_batch", "list_batch"),
                          ("tortoise_list_batches", "list_batches")):
         entry = by_name.get(name)
-        assert entry is not None, f"{name} missing from TOOL_REGISTRY"
+        assert entry is not None, f"{name} missing from the served registry"
         assert entry.sdk_method == method
         assert entry.annotations.readOnlyHint is True
         assert entry.http_policy is True  # read surface → HTTP-accessible
