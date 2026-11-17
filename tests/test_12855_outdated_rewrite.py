@@ -256,6 +256,109 @@ def test_the_rewrite_reaches_zero_rows_including_the_dead_to_dead_move(env):
 # ══ AC3 — idempotence ═════════════════════════════════════════════════════
 
 
+def test_a_failed_journal_append_is_a_failure_and_exits_1(tmp_path, monkeypatch):
+    """The RECORD is part of the write, not a side effect.
+
+    The SDK's append is best-effort (it returns False when it raises) and
+    `_update_entity` ignores that return, so a failed append leaves a LIVE-ONLY
+    write that the next `rebuild_all` reverts — with no exception anywhere. This
+    tool must not report that as a success: the row is a failure, it is not
+    counted as rewritten, and the run exits 1.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    db = tmp_path / "unrecorded.db"
+    events = tmp_path / "ev"
+    events.mkdir()
+    journal = events / "events.jsonl"
+    sdk = TortoiseSDK(str(db), event_log_path=str(journal))
+    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    sdk.close()
+
+    def boom(self, event):
+        raise OSError("journal is read-only")
+
+    monkeypatch.setattr(EventLog, "append", boom)
+
+    rc = tool.main(["--db-path", str(db), "--event-log-path", str(journal),
+                    "--execute"])
+
+    assert rc == 1, "a live-only rewrite must never exit 0"
+    sdk = TortoiseSDK(str(db), event_log_path=str(journal))
+    try:
+        # The write DID land live — that is exactly why the guard is needed.
+        assert _status(sdk, oid) == "deprecated"
+        assert _legacy_rows(sdk) == []
+    finally:
+        sdk.close()
+
+
+def test_a_point_sharing_the_id_is_refused_and_never_written(env):
+    """`update_knowledge` binds on the ID, not on the row.
+
+    A `:Point` that merely SHARES an `:Object`'s id is invisible in that row's
+    labels, so a labels-only guard lets the Point arm restamp the POINT (#12855
+    keeps Points' words) while the `:Object` stays untouched — and the call
+    still returns the target status, so a return-value guard would certify the
+    rewrite. The id must be resolved, and the row refused.
+    """
+    sdk, _events = env
+    oid = sdk.create_object("shared-id", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    sdk.create_point("stmt", "sibling claim", id=oid)
+
+    preview = tool.run(sdk, execute=False)
+    assert [r["id"] for r in preview.fanout] == [oid], preview.fanout
+
+    rep = tool.run(sdk, execute=True)
+
+    assert rep.rewritten == [], "a fan-out row must never be counted as rewritten"
+    assert [f.get("id") for f in rep.failures] == [oid], rep.failures
+    both = sdk._get_proj().g.query(
+        "MATCH (n) WHERE n.id=$id RETURN labels(n), n.status",
+        params={"id": oid}).result_set
+    statuses = {",".join(labs): st for labs, st in both}
+    assert statuses["Object"] == "outdated", "the :Object row must be untouched"
+    assert statuses["Point"] == "live", "the sibling :Point must be untouched"
+
+
+def test_a_truncated_read_cannot_print_the_zero_rows_conclusion():
+    """The `0 rows / dead weight` sentence is what authorises the SEQUENCED drop.
+
+    It must never appear beside (or without) the truncation warning: a read that
+    fell short is not a measurement of zero.
+    """
+    rep = tool.Report(total=0, store_count=3, truncated=True)
+    out = tool.render(rep)
+    assert "dead weight" not in out
+    assert "TRUNCATED" in out
+
+
+def test_a_truncated_preview_exits_nonzero(tmp_path, monkeypatch):
+    """A preview over an incomplete read is not a complete answer (exit 1)."""
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    db = tmp_path / "trunc.db"
+    events = tmp_path / "ev"
+    events.mkdir()
+    journal = events / "events.jsonl"
+    sdk = TortoiseSDK(str(db), event_log_path=str(journal))
+    oid = sdk.create_object("trunc", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    sdk.close()
+
+    real_collect = tool.collect
+
+    def short_read(proj, *, sample=20):
+        rep = real_collect(proj, sample=sample)
+        rep.truncated = True
+        return rep
+
+    monkeypatch.setattr(tool, "collect", short_read)
+
+    assert tool.main(["--db-path", str(db),
+                      "--event-log-path", str(journal)]) == 1
+
+
 def test_a_second_run_finds_nothing_and_appends_nothing(env):
     """Re-running is safe by measurement, not by assumption: the population is
     empty and the journal does not grow."""
