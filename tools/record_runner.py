@@ -948,7 +948,8 @@ def _parser() -> argparse.ArgumentParser:
                     "It does not touch the graph.")
     sub = ap.add_subparsers(dest="verb", required=True)
 
-    def common(p: argparse.ArgumentParser, *, bounds: bool = True) -> None:
+    def common(p: argparse.ArgumentParser, *, bounds: bool = True,
+               allocate: bool = True) -> None:
         p.add_argument("--org-id", required=True)
         p.add_argument("--graph-id", required=True)
         p.add_argument("--journal", required=True,
@@ -967,9 +968,19 @@ def _parser() -> argparse.ArgumentParser:
                            dest="batch_size")
             p.add_argument("--limit", type=int, default=None,
                            help="consume at most N events this run")
-        p.add_argument("--allocate", action="store_true",
-                       help="use the ordinal ALLOCATOR (a cut-over graph) instead "
-                            "of the journal's enumeration")
+        # ⛔ `--allocate` IS NOT `status`'S EITHER, for the same reason and by the
+        # same rule (review P2, PR #13210). Whether a graph is cut over is a FACT
+        # in the record — `status` reads it from the `record_cursor` row — not a
+        # mode the operator selects, so `status --allocate` was accepted and
+        # IGNORED: identical output, exit 0, no hint. Registering it there would
+        # be a flag that cannot do anything, which is the defect the bounds group
+        # above exists to prevent; `apply` still registers it so that passing it
+        # gets the refusal that names the allocator rather than argparse's
+        # "unrecognized arguments".
+        if allocate:
+            p.add_argument("--allocate", action="store_true",
+                           help="use the ordinal ALLOCATOR (a cut-over graph) "
+                                "instead of the journal's enumeration")
         p.add_argument("--salvage", action="store_true",
                        help="read a damaged journal, skipping mid-file damage "
                             "(explicitly NOT a completeness claim)")
@@ -993,7 +1004,7 @@ def _parser() -> argparse.ArgumentParser:
                               "acknowledge a number you have not seen")
 
     p_status = sub.add_parser("status", help="where the fold stands; writes nothing")
-    common(p_status, bounds=False)
+    common(p_status, bounds=False, allocate=False)
 
     return ap
 

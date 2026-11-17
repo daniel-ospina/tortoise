@@ -1732,9 +1732,10 @@ REFUSAL_WHY: dict[str, str] = {
     "tools/record_runner.py": (
         "1 is REFUSED — this runner's own verdict that a run must not be claimed, "
         "which a caller reads as a statement about the RECORD — so an environment "
-        "refusal must not wear it; `main()` never returns 2 (only "
-        "`_UsageParser.error` raises EXIT_USAGE, i.e. argparse takes it for a bad "
-        "flag), so 2 cannot collide with a verdict"
+        "refusal must not wear it; 2 is this tool's USAGE class, raised by "
+        "`_UsageParser.error` (a bad flag) and by `_refuse_impossible_bounds` "
+        "(a below-1 bound), while `main()` returns only 0/1 — so 2 is the one code "
+        "in this tool's set that cannot collide with a verdict about the record"
     ),
     "tools/cypher_diff_harness.py": (
         "0/1/3 are this harness's ANSWERS (same / DIFFERS / no verdict), and "

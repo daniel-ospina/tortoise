@@ -528,13 +528,25 @@ def test_status_does_not_accept_a_bound_it_cannot_apply(monkeypatch, capsys):
     the flag did nothing — a flag that cannot do anything is worse than an absent
     one, so it is a usage error (exit 2), which is a different answer from a
     refusal and says which of the two happened.
+
+    ⛔ `--allocate` IS THE SAME DEFECT and was missed here (review P2, PR
+    #13210): it was registered OUTSIDE the bounds group, so `status --allocate`
+    exited 0 with byte-identical output — whether a graph is cut over is read
+    from the `record_cursor` row, never selected by a flag. Pinning all three
+    together is the point: this row is what makes the group's membership a
+    property rather than a habit, so the next flag added there must answer the
+    same question. `apply` keeps `--allocate` on purpose — it is refused there
+    with a sentence that names the allocator, which is a better answer than
+    argparse's "unrecognized arguments".
     """
     _patched(monkeypatch, checkpoint=Checkpoint(high_seq=39, present=39))
-    for flag in (("--limit", "5"), ("--batch-size", "5")):
+    for flag in (("--limit", "5"), ("--batch-size", "5"), ("--allocate", None)):
+        argv = [flag[0]] if flag[1] is None else [flag[0], flag[1]]
         with pytest.raises(SystemExit) as exc:
             main(["status", "--org-id", "o", "--graph-id", "g",
-                  "--journal", str(FIXTURE), flag[0], flag[1]])
+                  "--journal", str(FIXTURE), *argv])
         assert exc.value.code == EXIT_USAGE, flag
+        assert "unrecognized arguments" in capsys.readouterr().err, flag
 
 
 def _must_not_run(*a, **k):  # pragma: no cover - the gate must refuse first
