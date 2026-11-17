@@ -1417,12 +1417,12 @@ class TestLifecycleCarrierCoherence:
             sdk.close()
 
     @pytest.mark.parametrize("target,expected", [
-        (["live"], "refused a non-string status"),
-        ({"a": 1}, "is TERMINAL for a :Object"),
-        (123, "refused a non-string status"),
-        (True, "refused a non-string status"),
-        (None, "is TERMINAL for a :Object"),
-        (_LyingEq(), "is TERMINAL for a :Object"),
+        (["live"], "and list is not one"),
+        ({"a": 1}, "and dict is not one"),
+        (123, "and int is not one"),
+        (True, "and bool is not one"),
+        (None, "refused the status transition"),
+        (_LyingEq(), "and _LyingEq is not one"),
     ], ids=["list", "dict", "int", "bool", "none", "lying-eq"])
     def test_a_non_string_or_absent_status_cannot_lift_a_dead_row(
             self, tmp_path, target, expected):
@@ -1454,15 +1454,21 @@ class TestLifecycleCarrierCoherence:
         only naming a status that leaves the dead state is refused.
 
         ⛔ WHICH REFUSAL ANSWERS, and why it is per-parameter (#12869). This pin
-        asks one question — "did the dead row move?" — and two doors now answer
-        it, in a fixed order. The Object write door refuses a non-string that
-        would LAND (`['live']`, `123`, `True`) BEFORE this guard runs, so those
-        three get the TYPE message; the three that are DROPPED by the `#7369`
-        gate (`{'a': 1}`, `None`, and the non-persistable `_LyingEq()`) reach
-        this guard, which refuses them as a resurrection. The expected message
-        is therefore per-parameter: both arms are an atomic `ValueError`, so the
-        claim this pin exists for is unchanged, and a mutant that lets any one of
-        them through still reddens the row assertion.
+        asks one question — "did the dead row move?" — and two doors answer it,
+        in a fixed order. `#11824` S0's VOCABULARY door is a TYPE check and runs
+        first, so it refuses FIVE of the six targets here with
+        `a status must be a plain string, and <type> is not one` — `['live']`,
+        `123`, `True`, and ALSO `{'a': 1}` and `_LyingEq()`, which an earlier cut
+        of this docstring placed on the `#7369`-dropped side. Measured at this
+        head: the door does not ask the transport gate before refusing, so a
+        "DROPPED" shape is refused exactly like a storable one. Only an explicit
+        `None` — the DELETE sentinel, which the vocabulary door passes through by
+        design — reaches the dead-set transition guard, and that one answers
+        `refused the status transition`. The expectation is therefore genuinely
+        per-parameter (and `expected` is now USED, below, rather than declared
+        and ignored): both are an atomic `ValueError`, so the claim this pin
+        exists for is unchanged, and a mutant that lets any one of them through
+        still reddens the row assertion.
         """
         sdk = TortoiseSDK(str(tmp_path / "t10192n.db"))
         try:
@@ -1473,15 +1479,14 @@ class TestLifecycleCarrierCoherence:
             before = _carrier_row(sdk, "Object", "delta")
             assert before[1] == "archived", before
             # ⚠️ #11824 S0: the refusal comes from ONE of two doors, and which
-            # one depends on the value. A non-string (list/dict/int/bool) is
-            # refused by the VOCABULARY door ("was refused: a status must be a
-            # plain string"). An explicit ``None`` is the DELETE sentinel, so it
-            # passes the vocabulary door and is refused HERE — by the dead-set
-            # transition guard, because deleting the status of a DEAD row is
-            # itself the resurrection. The ROW assertion below is the invariant
-            # both doors must keep.
-            with pytest.raises(ValueError,
-                               match=r"was refused|refused the status transition"):
+            # one depends on the value. EVERY non-string (list/dict/int/bool, and
+            # the non-persistable `_LyingEq()`) is refused by the VOCABULARY
+            # door ("was refused: a status must be a plain string"). An explicit
+            # ``None`` is the DELETE sentinel, so it passes the vocabulary door
+            # and is refused HERE — by the dead-set transition guard, because
+            # deleting the status of a DEAD row is itself the resurrection. The
+            # ROW assertion below is the invariant both doors must keep.
+            with pytest.raises(ValueError, match=expected):
                 sdk.update_knowledge(oid, status=target)
             assert _carrier_row(sdk, "Object", "delta") == before, (
                 "a refused resurrection moved the row: " +
@@ -1707,12 +1712,12 @@ class TestLifecycleCarrierCoherence:
             sdk.close()
 
     @pytest.mark.parametrize("target,expected", [
-        (["live"], "refused a non-string status"),
-        ({"a": 1}, "is TERMINAL for a :Object"),
-        (123, "refused a non-string status"),
-        (True, "refused a non-string status"),
-        (None, "is TERMINAL for a :Object"),
-        (_LyingEq(), "is TERMINAL for a :Object"),
+        (["live"], "and list is not one"),
+        ({"a": 1}, "and dict is not one"),
+        (123, "and int is not one"),
+        (True, "and bool is not one"),
+        (None, "refused the status transition"),
+        (_LyingEq(), "and _LyingEq is not one"),
     ], ids=["list", "dict", "int", "bool", "none", "lying-eq"])
     def test_a_composed_non_string_status_is_refused_too(self, tmp_path, target,
                                                         expected):
@@ -1739,14 +1744,16 @@ class TestLifecycleCarrierCoherence:
         accepted (#10371 / #8166 — an `:Object`'s status is unvalidated). Only the
         non-string half is pinned here.
 
-        ⛔ AND ON `#12869`'s HEAD THE NON-STRING HITS THE TYPE DOOR FIRST. A
-        non-string that would LAND is refused by the Object write door before
-        this allowance is ever reached, so `list`/`int`/`bool` carry the TYPE
-        message and the three DROPPED shapes (`dict`, `None`, `_LyingEq()`) carry
-        the TERMINAL one. Both are atomic refusals and the row assertion is what
-        the pin is for, so the expectation is per-parameter rather than widened
-        to a substring that would also match a message this guard no longer
-        emits.
+        ⛔ AND ON `#12869`'s HEAD THE NON-STRING HITS THE TYPE DOOR FIRST — and
+        that door is `#11824` S0's VOCABULARY one, a TYPE check that refuses
+        before asking the transport gate, so `list`/`int`/`bool` AND the two
+        shapes an earlier cut called "DROPPED" (`dict`, `_LyingEq()`) all carry
+        the TYPE message; only an explicit `None` (the DELETE sentinel, which the
+        vocabulary door passes through by design) reaches the TERMINAL one.
+        Both are atomic refusals and the row assertion is what the pin is for, so
+        the expectation is per-parameter AND USED (`match=expected`), rather than
+        widened to a substring that would also match a message this guard no
+        longer emits.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12882c.db"))
         try:
@@ -1757,13 +1764,13 @@ class TestLifecycleCarrierCoherence:
                 "superseded", "zeta-v2", None)
             before = _carrier_row(sdk, "Object", "zeta")
             # #11824 S0: a non-string target is refused before it can ride into
-            # the row — by the VOCABULARY door for a list/dict/int/bool, and by
-            # the dead-set transition guard for an explicit ``None`` (the DELETE
-            # sentinel, which the vocabulary door passes through by design).
+            # the row — by the VOCABULARY door for every non-string shape
+            # (list/dict/int/bool and `_LyingEq()`), and by the dead-set
+            # transition guard for an explicit ``None`` (the DELETE sentinel,
+            # which the vocabulary door passes through by design).
             # Either way the composed shape can no longer reach the row, which is
             # a STRONGER result than the allowance's `str` requirement.
-            with pytest.raises(ValueError,
-                               match=r"was refused|refused the status transition"):
+            with pytest.raises(ValueError, match=expected):
                 sdk.update_knowledge(oid, status=target,
                                      supersededBy=None, supersededAt=None)
             assert _carrier_row(sdk, "Object", "zeta") == before, (
@@ -1864,9 +1871,9 @@ class TestLifecycleCarrierCoherence:
             sdk.close()
 
     @pytest.mark.parametrize("target,expected", [
-        (["live"], "refused a non-string status"),
-        ({"a": 1}, "STORED status is"),
-        (123, "refused a non-string status"),
+        (["live"], "and list is not one"),
+        ({"a": 1}, "and dict is not one"),
+        (123, "and int is not one"),
     ], ids=["list", "dict", "int"])
     def test_a_non_string_stored_status_does_not_crash_the_dead_set(
             self, tmp_path, target, expected):
@@ -1900,8 +1907,12 @@ class TestLifecycleCarrierCoherence:
             # here is that the STORED shape does not crash the door.
             # The write under test must complete: `TypeError` out of a door that
             # promises a refusal is the defect this pins shut. A non-string
-            # TARGET is refused by the vocabulary door, cleanly.
-            with pytest.raises(ValueError, match="was refused"):
+            # TARGET is refused by the vocabulary door, cleanly — and the
+            # message is per-parameter because the door names the TYPE it found
+            # (measured at this head; `expected` was declared here and never used
+            # before, still holding the pre-S0 spelling `refused a non-string
+            # status`).
+            with pytest.raises(ValueError, match=expected):
                 sdk.update_knowledge(oid, status=target)
             assert _carrier_row(sdk, "Object", "kappa") == before
         finally:
@@ -2747,8 +2758,18 @@ class TestNonScalarStatus12869:
             (same for `**{"status": None, KHash("status"): ['live']}` and for a
              str subclass whose `__str__` renders `status`)
 
-        FALSIFIABLE BY: reverting `_persist_extra_props`' skip test to
-        `k in skip` alone reds every arm here (the value lands again).
+        ⛔ `#11824` S0 PRE-EMPTS THE VALUE THESE ARMS CARRY, and this docstring
+        used to claim otherwise. Measured at this head: `['live']` is a
+        non-`str`, so S0's shared `:Object` door refuses it with "a status must
+        be a plain string" before any writer runs — `_persist_extra_props` is
+        never reached with it, so reverting the render-aware skip reds NOTHING
+        here. The skip itself is pinned by
+        `test_the_render_aware_skip_still_holds_for_a_LANDABLE_value`, which
+        carries the one value the door accepts (a plain `str` word).
+
+        FALSIFIABLE BY: exempting the declared non-`str` from S0's door reds
+        every arm here (the write is then accepted, and on the residue the
+        rendered key is the poison path again).
         """
         class KHash(str):
             def __hash__(self):
@@ -2791,7 +2812,13 @@ class TestNonScalarStatus12869:
         `resolve_or_mint` stamps an id here, so this is also the shape where a
         late failure would cost a write.
 
-        FALSIFIABLE BY: as above — reverting the render-aware skip reds it.
+        ⛔ `#11824` S0 pre-empts this value too (see the MERGE arm's note): the
+        refusal that reds this arm is the shared door's, not the skip's. The
+        ADOPT-stamp atomicity it also asserts is unaffected either way.
+
+        FALSIFIABLE BY: exempting the declared non-`str` from S0's door reds it
+        (the write is then accepted, and `_adopt_idless_holder` has already
+        stamped the id — the refusal-that-costs-a-write shape).
         """
         class KHash(str):
             def __hash__(self):
@@ -2811,6 +2838,51 @@ class TestNonScalarStatus12869:
                 "the refused adopt stamped an id onto the id-less holder")
             assert adopted[1] is None, (
                 f"the refused adopt took the renderer-only status: {adopted}")
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("key_kind", ["hash-lie", "str-lie"])
+    def test_the_render_aware_skip_still_holds_for_a_LANDABLE_value(
+            self, tmp_path, key_kind):
+        """The MERGE skip is TWO renderings — and S0 does not cover this value.
+
+        `_persist_extra_props`'s skip set is literal names while the live write
+        inlines `str(key)`, so `k in skip` alone let a `str` SUBCLASS that
+        RENDERS as `status` through to `SET n += $extra` on the ON MATCH lane —
+        the #12869 review-round-3 P0 this pair of tests was written for. The two
+        arms above carry a NON-`str` value, which `#11824` S0's shared door now
+        refuses before any writer runs, so they can no longer tell whether the
+        skip is render-aware at all. THIS arm carries the one value the door
+        ACCEPTS — the plain `str` word `'live'` — which is exactly the value the
+        skip has to stop on a node that already exists.
+
+        MEASURED at this head: on the real tree the merged row is byte-identical
+        before and after the call (`status` absent); with the skip reverted to
+        `k in skip` alone the same call leaves `status='live'` on it.
+
+        FALSIFIABLE BY: reverting `(k in skip or str(k) in skip)` to `k in skip`
+        reds both arms (the word lands on the merged row).
+        """
+        class KHash(str):
+            def __hash__(self):
+                return 424242
+
+        class StrOnly(str):
+            def __str__(self):
+                return "status"
+
+        key = {"hash-lie": KHash("status"),
+               "str-lie": StrOnly("renders as status")}[key_kind]
+        sdk = TortoiseSDK(str(tmp_path / f"t12869skip-{key_kind}.db"))
+        try:
+            sdk.create_object("held", "core:strategy")     # the holder exists
+            before = _carrier_row(sdk, "Object", "held")
+            assert before[1] is None, before
+            sdk.create_object("held", "core:strategy", **{key: "live"})
+            after = _carrier_row(sdk, "Object", "held")
+            assert after == before, (
+                "a renderer-only `status` key was written onto the merged row — "
+                f"the skip set is not render-aware: {after}")
         finally:
             sdk.close()
 

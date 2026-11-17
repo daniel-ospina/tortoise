@@ -10181,8 +10181,10 @@ def _status_is_stored_unhashable(value: object) -> bool:
 
     :func:`_status_is_evaluable` alone over-refuses: a NON-persistable value is
     DROPPED by the writers, so the node never carries it and the direct-edge
-    check never sees it (pinned by
-    ``test_direct_route_object_and_event_status_values_not_over_rejected``).
+    check never sees it (pinned at this head by
+    ``test_direct_route_object_and_event_status_values_are_refused_in_phase_1_like_the_writer``
+    in ``tests/test_ingest_event_endpoint.py`` — the name this comment used to
+    cite, ``…_not_over_rejected``, is the arm ``#13100`` INVERTED).
     Only a PERSISTABLE unhashable value — an array — lands on the node.
 
     Note the two clauses are independent: ``bytes`` passes
@@ -24291,10 +24293,13 @@ class TortoiseSDK:
         # `refuse_event_lifecycle_state(props, ...)`, the PROPS-AWARE predicate
         # that reads the caller's DECLARED keys; this arm is
         # label-only, so firing it for that door answered for the LABEL rather
-        # than the declaration — #11825's `test_a_non_terminal_update_still_lands_
-        # on_a_multi_label_event` required the prop lane there, and #13100 has
-        # since retracted that allowance at the DOOR, which is the site that owns
-        # the question. So the arm is gated on a SECOND question, defaulted on for
+        # than the declaration — #11825's arm here (
+        # ``…_still_lands_on_a_multi_label_event``)
+        # required the prop lane, and #13100 has since retracted that allowance
+        # at the DOOR, which is the site that owns the question — so that arm was
+        # INVERTED and now reads
+        # ``test_a_non_terminal_update_is_refused_on_a_multi_label_event``. The
+        # arm below is gated on a SECOND question, defaulted on for
         # the doors that only ever write a terminal value, and switched off by the
         # one door that decides from its props.
         if (refuse_terminal and refuse_event_terminalization
@@ -53451,7 +53456,7 @@ class TortoiseSDK:
         # #9974/#10192 divergence class rather than a recovery. (The test
         # `test_a_coherent_un_supersede_lifts_the_row_and_a_status_only_write_cannot`
         # is the pin that caught the over-block — it was
-        # `test_clearing_a_supersession_is_still_writable` when #12745 tripped it,
+        # `…_clearing_a_supersession_is_still_writable` when #12745 tripped it,
         # and the name moved twice since; #12745's own suite pins the status-only
         # refusal.)
         #
@@ -53523,9 +53528,14 @@ class TortoiseSDK:
         # vocabulary), so the only rows still holding a non-`str` stored status
         # are ones a pre-S0 SDK / raw Cypher / journal replay wrote — there is no
         # backfill (#11824 §1). What is left here is therefore the STORED-shape
-        # question, not a traceback and not a write-side hole; how THIS arm reads
-        # the shape is pinned by `test_a_NON_PERSISTABLE_status_is_still_DROPPED_not_refused`
-        # and the `_np_foreign` refusal arms in `tests/test_status_projection.py`.
+        # question, not a traceback and not a write-side hole. How THIS arm reads
+        # the shape is pinned by the `_np_foreign` refusal arms in
+        # `tests/test_status_projection.py`
+        # (`test_no_SDK_status_write_can_repair_a_non_scalar_row`), and the
+        # write-side population by `TestNonScalarStatus12869`'s
+        # `test_a_NON_PERSISTABLE_status_is_REFUSED_not_dropped` — ⛔ INVERTED by
+        # `#11824` S0, which refuses the shape instead of dropping it, so that
+        # name no longer reads `…is_still_DROPPED_not_refused`.
         #
         # ⛔ THE REMEDY IS `supersede_knowledge` (#12914 review P3): #12592 gave
         # the Object/Subject families their OWN supersede path, so this paragraph
@@ -54734,20 +54744,43 @@ class TortoiseSDK:
             # `status` (it is projection-owned) — so a declared status is
             # DROPPED there and that row is never poisoned. Refusing it would
             # reverse the recorded `#7925` round-4 decision that this refusal
-            # fires ONLY where the value would LAND (pinned by
-            # `tests/test_status_projection.py`'s
-            # `TestNonScalarStatus12869.test_the_CREATE_guard_is_a_LANDING_test_not_a_presence_test`
-            # — the MERGE and the id-less ADOPT — and by
-            # `…test_a_NON_PERSISTABLE_status_is_still_DROPPED_not_refused`).
+            # fires ONLY where the value would LAND.
+            # ⚠️ AT THIS DOOR THAT SCOPE IS NOW UNOBSERVABLE, and the comment is
+            # not allowed to imply otherwise: `#11824` S0's shared door
+            # (`_validate_bundle` → `_read_caller_status`) type-refuses EVERY
+            # declared non-`str` before this writer arm runs — mint, MERGE and
+            # ADOPT alike — so this arm's `lands` thunk never gets to answer
+            # for one. MEASURED at this head: `create_object(name, kind,
+            # status=['retracted'])` on a held name, on a fresh name and on an
+            # id-less ADOPT holder all return `a status must be a plain
+            # string`, never this helper's `refused a non-string status`.
+            # ⛔ SO THE TESTS THAT PIN IT ARE THE INVERTED ONES. `#11824` S0
+            # renamed and INVERTED both arms this paragraph used to cite, which
+            # is why the old names
+            # (`…_CREATE_guard_is_a_LANDING_test_not_a_presence_test`,
+            # `…_NON_PERSISTABLE_status_is_still_DROPPED_not_refused`) exist
+            # nowhere: they are now
+            # `TestNonScalarStatus12869.test_a_MERGE_or_ADOPT_holder_cannot_take_a_non_string_status`
+            # (which asserts the refusal ON the merge and adopt shapes — the
+            # landing exemption is gone, not re-scoped) and
+            # `…test_a_NON_PERSISTABLE_status_is_REFUSED_not_dropped`. A future
+            # reader who restores a "refuse only what lands" claim here must
+            # move those arms back with it or the two disagree silently.
             # ⛔ THE BUNDLE-LEVEL NAMES THIS COMMENT USED TO CITE
-            # (`test_object_item_status_is_accepted_when_a_holder_owns_the_name`,
-            # `test_second_same_name_item_declaring_array_is_dropped`) exist
-            # NOWHERE at this head: `#11824` S0 renamed and INVERTED both — the
-            # `:Object` arm now refuses every non-`str` at its own door
+            # (`…_object_item_status_is_accepted_when_a_holder_owns_the_name`,
+            # `…_second_same_name_item_declaring_array_is_dropped`) exist
+            # NOWHERE at this head for the same reason: the `:Object` arm now
+            # refuses every non-`str` at its own door
             # (`test_object_item_declaring_a_non_string_status_is_refused_in_phase_1`),
-            # so the bundle refuses before this writer arm is reached. What this
-            # arm still owns is the value the door ACCEPTS but the transport
-            # drops, and the landing scope that keeps that refusal off a merge.
+            # so the bundle refuses before this writer arm is reached.
+            # ⛔ WHAT `lands` STILL DECIDES, and where: the THIRD caller,
+            # `EventAPI.add_object` (`api.py`, the journal lane), has no shared
+            # type door above it — there the landing question is the live one
+            # and it keeps that refusal off a merge (`#7925` r4). It also stops
+            # this helper's two-key AMBIGUITY refusal, which at this door S0's
+            # shared check answers first (measured: the `{status: None,
+            # KHash('status'): …}` spelling returns `refused a CONFLICTING
+            # status write` from the bundle door, not from here).
             #
             # ⛔ SO THE TEST IS "WILL THIS CALL CREATE THE NODE?", AND
             # `resolve_or_mint`'s `created` FLAG IS NOT THAT QUESTION. It means
