@@ -25011,7 +25011,7 @@ class TortoiseSDK:
                 "MATCH (o:Point {id:$oid})-[r]->(s) "
                 f"WHERE {epistemic_disjunction('s')} "
                 "RETURN s.id, s.status, coalesce(s.outdated, false), "
-                "       s.objectKind, s.pipelineSlot",
+                "       s.objectKind, s.pipelineSlot, coalesce(s.isClosed, false)",
                 params={"oid": oid},
             ).result_set
             if not eps:
@@ -25022,16 +25022,18 @@ class TortoiseSDK:
             # pollution. ``is_terminal_status`` alone is not the gate (a draft
             # endpoint is un-promoted, not dead — #944), and since #13100 the
             # retired non-terminal ``:Event`` status is replaced by the plan's
-            # POSITION: a plan that has not reached a terminal stage has not
-            # happened, so it suppresses exactly as ``status='scheduled'`` on an
-            # Event did. A stored legacy Event word still suppresses through the
+            # POSITION: a plan whose stage is a non-terminal one — and which the
+            # durable ``isClosed`` marker does not end, and which HAS a position
+            # at all — has not happened, so it suppresses exactly as
+            # ``status='scheduled'`` on an Event did. A stored legacy Event word still suppresses through the
             # status arm (the reader net stays wider than the write door, #2977).
             all_live = all(
                 endpoint_permits_operator_promotion(
                     st, bool(od),
                     is_plan=is_plan_kind(kind),
-                    pipeline_slot=slot)
-                for _, st, od, kind, slot in eps
+                    pipeline_slot=slot,
+                    is_closed=bool(closed))
+                for _, st, od, kind, slot, closed in eps
             )
             if not all_live:
                 continue  # keep draft until every endpoint is live
@@ -49469,12 +49471,12 @@ class TortoiseSDK:
                 params={"id": id_val},
         ).result_set[0][0]:
             refuse_event_lifecycle_state(props, door="update_entity")
-            # ⛔ No `props` surgery here on purpose: a NON-terminal status is a
-            # legal write on an `:Event` target (#2788's prop lane), and on a
-            # multi-label node the property is shared, so there is no "Point side"
-            # to keep it away from. The guard's whole job is the TERMINAL half,
-            # and it has it — measured: dropping the key here red 9 pins that
-            # legitimately land `draft`/`live` through this door.
+            # ⛔ No `props` surgery here on purpose: a non-`None` `status` on an
+            # `:Event` target is now REFUSED outright (#13100 — the non-terminal
+            # allowance #2788 declared is gone), and on a multi-label node the
+            # property is shared, so there is no "Point side" to keep it away
+            # from. The guard's whole job is the key, and it has it; `status=None`
+            # (the legacy clear) rides through as an ordinary Point-side write.
 
         # ── #9649: this door consults the lifecycle guard (#2498/#7819) ───────
         # Measured on the pre-change tree (issue #9649, comment `6839154493`, at
@@ -49728,8 +49730,10 @@ class TortoiseSDK:
                     # arm is the wrong question here — it refused `draft -> live`
                     # on a hybrid (the prop lane #2788 pins). The Event half is
                     # answered ABOVE, by the props-aware
-                    # `refuse_event_lifecycle_state`, which refuses exactly the
-                    # TERMINAL values and lets a non-terminal one ride that lane.
+                    # `refuse_event_lifecycle_state`, which refuses EVERY
+                    # non-`None` `status` since #13100 (the terminal-only boundary
+                    # was #11825's interim one) and lets `None` through as the
+                    # legacy clear.
                     self._assert_lifecycle_guard(
                         _lifecycle_id, method="update_entity", missing_ok=True,
                         allow_operator=True,

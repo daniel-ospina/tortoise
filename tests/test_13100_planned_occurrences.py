@@ -145,6 +145,45 @@ class TestThePlanPipeline:
         with pytest.raises(ValueError, match="no plan Object"):
             PO.record_occurrence(sdk, "no-such-plan")
 
+    def test_a_non_plan_reference_is_refused_BEFORE_any_write(self, sdk):
+        """The refusal lands before the Event, so nothing is left behind.
+
+        Without the kind check the ``:Event`` is written and JOURNALED (with its
+        durable ``aboutObject`` edge) and the caller then gets a pipeline-binding
+        error — an orphan occurrence behind a refusal that named the wrong
+        problem.
+        """
+        goal = sdk.create_entity("object", "a goal", objectKind="core:goal")[
+            "node"]
+        with pytest.raises(ValueError, match="is not a plan"):
+            PO.record_occurrence(sdk, goal["id"])
+        assert sdk._get_proj().g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$o}) RETURN count(*)",
+            params={"o": goal["id"]}).result_set[0][0] == 0
+
+    def test_a_BACKFILLED_occurrence_is_not_a_stale_transition(self, sdk):
+        """The date an occurrence actually happened is a correction, not a stale
+        observation — a plan is recorded now and backfilled for last March."""
+        plan = PO.create_plan(sdk, "Backfilled")
+        PO.record_occurrence(sdk, plan["id"], name="it happened last March",
+                             at="2020-01-01T00:00:00+00:00")
+        cur = _stage(sdk, plan["id"])
+        assert cur["stageId"] == "held"
+        assert cur["outcome"] == "completed"
+
+    def test_a_BACKFILLED_missed_ending_applies_and_is_never_silent(self, sdk):
+        """``settle_plan`` must not return a success-shaped UNapplied move.
+
+        A no-op settlement leaves the plan reading as still upcoming to every
+        reader — the answer this slice exists to get right.
+        """
+        plan = PO.create_plan(sdk, "Missed last March")
+        PO.settle_plan(sdk, plan["id"], PO.STAGE_MISSED,
+                       at="2020-01-01T00:00:00+00:00")
+        cur = _stage(sdk, plan["id"])
+        assert cur["stageId"] == "missed"
+        assert cur["outcome"] == "lost"
+
 
 # ── acceptance 2: no :Event carries a lifecycle word ────────────────────────
 
@@ -178,6 +217,38 @@ class TestNoEventCarriesALifecycleWord:
         assert status_as_reported(None, label="Event") == ""
         # …and a stored legacy word is echoed, not invented.
         assert status_as_reported("draft", label="Event") == "draft"
+
+    def test_the_clear_route_works_and_the_refusal_names_it(self, sdk):
+        """R4: the advertised repair must be PERFORMABLE at the door it names.
+
+        Only the UPDATE door removes a property; the record doors drop a null on
+        the way to the fold, so a clear sent there writes nothing. The refusal
+        text says which is which, and this pin holds both halves.
+        """
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        eid = sdk.create_entity("event", "Legacy clear",
+                                eventKind="deployment")["node"]["id"]
+        g = sdk._get_proj().g
+        g.query("MATCH (e:Event {id:$e}) SET e.status='superseded'",
+                params={"e": eid})
+
+        with pytest.raises(ValueError) as exc:
+            sdk.update_knowledge(eid, status="live")
+        assert "update_knowledge" in str(exc.value), (
+            "the refusal must name the door that can actually clear the word")
+
+        api = EventAPI(EventLog(os.path.join(sdk._test_root, "clear.jsonl")),
+                       initiated_by="user", projection=sdk._get_proj())
+        api.add_event(eid, "deployment", status=None)
+        assert g.query("MATCH (e:Event {id:$e}) RETURN e.status",
+                       params={"e": eid}).result_set[0][0] == "superseded", (
+            "documented inertness: the record door cannot REMOVE a property")
+
+        sdk.update_knowledge(eid, status=None)
+        assert g.query("MATCH (e:Event {id:$e}) RETURN e.status",
+                       params={"e": eid}).result_set[0][0] is None
 
     def test_the_refusal_teaches_the_plan_route(self, sdk):
         """AX (#10183): a refusal names the remedy, and the remedy is the plan."""
@@ -250,6 +321,27 @@ class TestThePromotionSuppressionIsRehomed:
         PO.settle_plan(sdk, plan["id"], PO.STAGE_MISSED)
         assert op in _promote(sdk, point)
 
+    def test_a_plan_with_NO_position_does_not_suppress(self, sdk):
+        """R2's other bound: an extractor-minted ``core:plan`` Object has no
+        pipeline position and was promoted over before this change — inventing a
+        "not yet" for it would block that operator for ever."""
+        point = sdk.create_point("statement", "a live point")["id"]
+        bare = sdk.create_entity("object", "extracted plan",
+                                 objectKind="core:plan")["node"]
+        op = f"op-bare-{bare['id']}"
+        _operator_over(sdk, (point, bare["id"]), op)
+        assert op in _promote(sdk, point)
+
+    def test_a_marker_closed_plan_does_not_suppress(self, sdk):
+        """An ending is durable through ``isClosed`` (§6), so a closed plan is a
+        settled record even while its stage still reads non-terminal."""
+        point = sdk.create_point("statement", "a live point")["id"]
+        plan = PO.create_plan(sdk, "Closed but scheduled stage")
+        op = f"op-closed-{plan['id']}"
+        _operator_over(sdk, (point, plan["id"]), op)
+        sdk.update_knowledge(plan["id"], isClosed=True)
+        assert op in _promote(sdk, point)
+
     def test_the_LEGACY_event_path_still_suppresses(self, sdk):
         """The acceptance bullet says "on the Event path", not "on draft Points".
 
@@ -307,6 +399,20 @@ class TestPlannedButNeverHappened:
             "p.isClosed=true", params={"p": plan["id"]})
         names = [r["name"] for r in PO.planned_without_occurrence(g)]
         assert "Claims to have happened" in names
+
+    def test_the_durable_marker_ends_a_plan_too(self, sdk):
+        """§6's two inputs: a CLOSED record is ended even with no stage.
+
+        Reading the slot alone answered a marker-closed plan as "still upcoming"
+        — the opposite of the claim this read makes.
+        """
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Closed by marker")
+        g.query("MATCH (p:Object {id:$p}) SET p.pipelineStageId=null, "
+                "p.pipelineSlot=null, p.isClosed=true",
+                params={"p": plan["id"]})
+        rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
+        assert rows["Closed by marker"]["ended"] is True
 
     def test_a_legacy_status_word_does_not_change_the_answer(self, sdk):
         """The read must not consult a mutable status — so a legacy word on the

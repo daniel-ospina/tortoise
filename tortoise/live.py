@@ -612,7 +612,10 @@ _EVENT_LIFECYCLE_STATE_REFUSAL = (
     "later fact, never by a status flip on an earlier one. For ingest "
     "bookkeeping use `eventStatus` (`pending` -> `indexed`), which is a plain "
     "prop and not a lifecycle. To un-mark a legacy status on an existing Event, "
-    "pass `status=None`."
+    "pass `status=None` to the UPDATE door (`update_knowledge`) — ⛔ it is the "
+    "one door that REMOVES a property; the record doors (`add_event`, "
+    "`emit_belief`) drop a null on the way to the fold, so a clear sent there "
+    "writes nothing."
 )
 
 
@@ -620,9 +623,10 @@ def _status_is_discarded_by_every_writer(value: object) -> bool:
     """True only when every writer DISCARDS ``value`` on its way to the node.
 
     The question :func:`refuse_event_lifecycle_state` asks before typing a
-    non-string ``status``: a value no writer keeps leaves the node with no
-    ``status``, so it cannot be a terminal half-state and refusing it would be
-    #7925 round 4's over-rejection class. ⛔ But THREE paths can carry a
+    non-boolean ``outdated``: a value no writer keeps leaves the node with no
+    flag, so it cannot make the Event terminal and refusing it would be #7925
+    round 4's over-rejection class. (It is no longer asked of ``status`` — since
+    #13100 the declaration itself is refused, whatever its value.) ⛔ But THREE paths can carry a
     ``status`` to the store and each has its OWN predicate, so asking one of
     them is not enough — measured at review cycle 3, after the first revision
     asked only the fold's:
@@ -966,6 +970,7 @@ def refuse_event_lifecycle_state(props, *, door: str) -> None:
 #: predicate stays importable from a leaf.
 def endpoint_permits_operator_promotion(
     status, outdated=False, *, is_plan=False, pipeline_slot=None,
+    is_closed=False,
 ) -> bool:
     """True when one operator endpoint lets a draft operator be promoted.
 
@@ -981,19 +986,30 @@ def endpoint_permits_operator_promotion(
       the write door refuses that shape now (#13100), and the reader keeps
       reading it, because a stored fact is not corrected by refusing new writes
       (#2977 — the net stays wider than the door).
-    * **planned, not happened** — a plan (``is_plan``) whose position is not
-      ``terminal`` has not occurred yet, so it suppresses exactly as the retired
-      ``:Event`` ``status='scheduled'`` did. ``terminal`` is the line: a plan
-      ends ``held`` / ``missed`` / ``cancelled`` and is then a settled record,
-      not a future one.
+    * **planned, not happened** — a plan (``is_plan``) whose position is a
+      non-terminal STAGE has not occurred yet, so it suppresses exactly as the
+      retired ``:Event`` ``status='scheduled'`` did. Two bounds, both required
+      (the model's own two-input rule, §6: *a record is closed when the durable
+      marker is set OR the resolved stage is terminal*):
+
+      - ``terminal`` is the line — a plan ends ``held`` / ``missed`` /
+        ``cancelled`` and is then a settled record, not a future one;
+      - ``isClosed`` ends it too, even with no resolvable stage (an ending is
+        durable through the marker), and a plan with **no position at all** is
+        NOT evidence of anything: an extractor-minted ``core:plan`` Object was
+        promoted over before this change, and inventing a "not yet" for it would
+        block that operator for ever.
+
+      So the arm fires only on a plan that is demonstrably mid-pipeline.
     """
     if is_terminal_status(status, bool(outdated)):
         return False
     if (status or "live") != "live":
         return False
-    # A plan that has not reached a terminal stage has not happened. Kept as one
-    # expression so the arm reads as the rule it is.
-    return not (is_plan and pipeline_slot != "terminal")
+    # A plan WITH a non-terminal position, and not closed by the marker, has not
+    # happened yet. One expression, so the arm reads as the rule it is.
+    return not (is_plan and pipeline_slot is not None
+                and pipeline_slot != "terminal" and not is_closed)
 
 
 #: The keys an epistemic node's identity may live under, in resolution order

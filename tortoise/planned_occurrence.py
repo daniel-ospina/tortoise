@@ -129,7 +129,7 @@ def is_plan_kind(object_kind: object) -> bool:
 
 
 def create_plan(sdk, name: str, *, title: str | None = None,
-                **props) -> dict:
+                at: str | None = None, **props) -> dict:
     """Create a plan Object and put it on the ``scheduled`` stage.
 
     Returns the created node (``create_entity``'s ``node`` payload).
@@ -154,7 +154,7 @@ def create_plan(sdk, name: str, *, title: str | None = None,
         # case, #3590) must not look like a staged plan.
         return node
     pipeline.advance_stage(
-        sdk, plan_id, PLAN_PIPELINE_KEY, STAGE_SCHEDULED,
+        sdk, plan_id, PLAN_PIPELINE_KEY, STAGE_SCHEDULED, at=at,
         declared=PLAN_PIPELINE_DECL)
     return node
 
@@ -200,9 +200,17 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
         **event_props)
     node = created.get("node") or {}
     event_id = node.get("eventId") or node.get("id")
+    # ⛔ ``correction=True`` whenever the caller supplies ``at``. The pipeline's
+    # stale-transition guard exists to stop an OUT-OF-ORDER observation moving a
+    # record backwards; a caller who states the date an occurrence actually
+    # happened is not that — a backfilled "it happened last March" is the
+    # ordinary case, and without this the plan is created NOW and every backfill
+    # is refused as stale. The regression half of the guard is moot here anyway:
+    # the target stage is terminal, i.e. last in order.
     move = pipeline.advance_stage(
         sdk, plan_id, PLAN_PIPELINE_KEY, STAGE_HELD, at=at,
-        declared=PLAN_PIPELINE_DECL, source="occurrence")
+        declared=PLAN_PIPELINE_DECL, source="occurrence",
+        correction=at is not None)
     if not move.applied:
         raise ValueError(
             f"Refused: the :Event {event_id!r} was recorded but the plan "
@@ -246,7 +254,17 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
             f"is a new record.")
     move = pipeline.advance_stage(
         sdk, plan_id, PLAN_PIPELINE_KEY, stage, at=at,
-        declared=PLAN_PIPELINE_DECL, reason=reason, source="settle")
+        declared=PLAN_PIPELINE_DECL, reason=reason, source="settle",
+        correction=at is not None)
+    if not move.applied:
+        # ⛔ A settlement that did NOT land must not look like one: the caller
+        # asked for an ending, and a returned-but-unapplied StageMove leaves the
+        # plan reading as still-upcoming to every reader (#13100 review R5).
+        raise ValueError(
+            f"Refused: the plan {plan_id!r} could not reach {stage!r} "
+            f"({move.reason}). WHAT TO DO: inspect the plan's current stage — an "
+            f"already-terminal plan is settled, and a stale date needs the "
+            f"ending recorded at or after `pipelineStageSince`.")
     return {"planId": plan_id, "move": move}
 
 
@@ -268,6 +286,22 @@ def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
             f"Refused: no plan Object named or identified by {plan_ref!r}. WHAT "
             f"TO DO: create the plan first (`create_plan`), then record the "
             f"occurrence against it.")
+    # ⛔ The KIND is checked HERE, before any write. `create_entity` accepts any
+    # Object reference, so without this a caller could name a goal, get the
+    # `:Event` written and JOURNALED (with its durable `aboutObject` edge), and
+    # only then hit the pipeline's kind-binding refusal — a refusal that leaves
+    # an orphan occurrence behind and names the wrong problem (#13100 review).
+    rows = graph.query(
+        "MATCH (o:Object {id:$o}) RETURN o.objectKind",
+        params={"o": plan_id}).result_set
+    object_kind = rows[0][0] if rows else None
+    if not is_plan_kind(object_kind):
+        raise ValueError(
+            f"Refused: {plan_ref!r} is not a plan — its kind is "
+            f"{object_kind!r}, and this write settles a plan. WHAT TO DO: "
+            f"create the plan with `create_plan` (kind {PLAN_PIPELINE_KEY!r}), or "
+            f"if the thing is not a planned occurrence, record the :Event "
+            f"directly with `create_entity(type='event')`.")
     return plan_id, cur
 
 
@@ -281,9 +315,10 @@ def planned_without_occurrence(graph) -> list[dict]:
         {"id", "name", "stage", "ended", "outcome"}
 
     ``stage`` is the plan's current stage (``scheduled`` when it has none yet),
-    ``ended`` is True when that stage is terminal (so the plan ended
-    ``missed`` / ``cancelled`` rather than still being upcoming), and
-    ``outcome`` is the stage's shipped outcome.
+    ``ended`` is True when the record has ENDED — the durable ``isClosed``
+    marker (a cleared or legacy stage still ends) **or** a terminal slot — and
+    ``outcome`` is the stage's shipped outcome. An ended-but-occurrence-less plan
+    is the ``missed`` / ``cancelled`` case: it never happened and never will.
 
     ⛔ No ``status`` is read, and no ``eventStatus`` is read: those answer
     different questions (the lifecycle word is about currency, the ingest marker
@@ -294,10 +329,10 @@ def planned_without_occurrence(graph) -> list[dict]:
         "OPTIONAL MATCH (e:Event)-[:aboutObject]->(p) "
         "WITH p, collect(DISTINCT e.id) AS occurrences "
         "RETURN p.id, p.name, p.pipelineStageId, p.pipelineSlot, "
-        "       p.pipelineOutcome, occurrences",
+        "       p.pipelineOutcome, coalesce(p.isClosed, false), occurrences",
         params={"kinds": sorted(PLAN_KINDS)}).result_set
     out: list[dict] = []
-    for pid, name, stage, slot, outcome, occurrences in rows:
+    for pid, name, stage, slot, outcome, closed, occurrences in rows:
         # The link is the proof. A plan whose plan-side words say "held" but
         # with no Event wired to it has no occurrence in the graph, and this
         # read does not take the plan's word for it.
@@ -307,7 +342,11 @@ def planned_without_occurrence(graph) -> list[dict]:
             "id": pid,
             "name": name,
             "stage": stage or STAGE_SCHEDULED,
-            "ended": slot == "terminal",
+            # §6's two inputs, and BOTH are required: a durable `isClosed`
+            # marker ends a record even when no stage resolves (a cleared or
+            # legacy stage), so reading the slot alone answers a closed plan as
+            # "still upcoming" — the opposite of the claim this read makes.
+            "ended": bool(closed) or slot == "terminal",
             "outcome": outcome or None,
         })
     return out
