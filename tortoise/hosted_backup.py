@@ -2374,17 +2374,24 @@ def list_backups(storage: BackupStorage, org_id: str,
     * **Only the unreadable/vanished class is skipped** — a corrupt manifest and a
       concurrently-pruned object are ordinary states of a live bucket, not an
       outage, and on the SUCCESS path they are logged (`logger.warning`) exactly
-      as before. On the FAILURE path the difference is bounded and one-sided:
-      `Executor.map` SUBMITS every key up front but CANCELS the ones that have not
-      started (CPython's `_result_iterator` does `finally: for future in fs:
-      future.cancel()`), so only the in-flight batch — at most
-      `_LIST_MANIFEST_MAX_INFLIGHT` — still runs and may still log: measured 9
-      downloads of 40 keys when the first key failed. `map`'s `with` block waits
-      for that batch before the exception reaches the caller, so a decisive
-      failure can arrive up to one download timeout later than the serial loop,
-      which never started the keys after the failing one. That wait is
-      deliberate: returning while workers still hold connections would move the
-      load onto a request that has already failed.
+      as before. On the FAILURE path `Executor.map` SUBMITS every key up front and
+      CANCELS only what is still QUEUED, and that cancel fires when the
+      in-INPUT-order iterator reaches the failing key — so how much still runs
+      depends on how SLOW the failure is, NOT on `_LIST_MANIFEST_MAX_INFLIGHT`.
+      Measured over 40 keys (every other key 10 ms): an instantly-failing first
+      key leaves **9** downloads (the 8 workers plus the one key a freed worker
+      picks up), a first key 50 ms slower than the rest leaves **37**, and one
+      200 ms slower leaves **40 of 40** — a slow failure drains the queue behind
+      it, so a listing over a stalled backend issues its remaining GETs before the
+      error surfaces. That is still bounded by the key set a SUCCESSFUL listing
+      would have fetched, and `map`'s `with` block waits for the in-flight batch
+      before the exception reaches the caller, so a decisive failure can arrive up
+      to one download timeout later than the serial loop, which never started the
+      keys after the failing one. That wait is deliberate: returning while workers
+      still hold connections would move the load onto a request that has already
+      failed. ⛔ Do not restate this as "at most `_LIST_MANIFEST_MAX_INFLIGHT` still
+      runs" — that bound is false for every slow failure, and an earlier revision
+      of this paragraph said it (and quoted a 9 that refuted its own bound).
     """
     _validate_org_id(org_id)
     if graph_id is not None:
