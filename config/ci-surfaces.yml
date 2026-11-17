@@ -5149,14 +5149,23 @@ surfaces:
   # `tests/test_ci_selection.py` asserts the same `integrity(load_manifest()) == []` against
   # the real tree, and it is a gating-slow file (`slow_files`, not `carve_out`, not
   # on-demand), so the drift reds `test-slow` as well — MEASURED on main at `55ec2c71b1`
-  # (run 44025094904): `test-slow (a)` and `test-slow (c)` both failure, with
-  # `test_integrity_covers_all_test_files`,
+  # (run 44025094904, job `test-slow (c)` 133859918151, the shard that carries
+  # `tests/test_ci_selection.py`): `test_integrity_covers_all_test_files`,
   # `test_gh_read_cache_guard_is_REGISTERED_so_the_required_gate_can_see_it`,
   # `test_the_blank_session_id_guard_keeps_its_core_arm_too`,
   # `test_the_lane_is_a_classification_for_integrity_too` and
-  # `test_integrity_still_notices_an_absent_stamp_and_exits_zero` among the failures.
+  # `test_integrity_still_notices_an_absent_stamp_and_exits_zero` each red asserting this
+  # exact filename. ⛔ NOT `test-slow (a)` from that same run: it is red for an UNRELATED
+  # class — every one of its failures is `tests/test_surface_manifest.py` (a shallow clone
+  # that cannot resolve `cut_at_commit`, plus the `tortoise_query` digest) — which is the
+  # next paragraph's subject, not this row's.
   # Reproduced locally too: `integrity()` over this manifest is `[]`, and over the same
-  # manifest with this one row removed it returns `['test_13034_currency_rule_reads_position.py']`.
+  # manifest with this file's rows removed from BOTH lists (the state `main` was in) it
+  # returns `['test_13034_currency_rule_reads_position.py']`. ⛔ Removing only the `core`
+  # row still yields `[]`: integrity asks that a file is classified SOMEWHERE, never that
+  # it is registered on the surface its subjects select — the exact gap that made the first
+  # attempt (an `api:`-only row) green here and useless, and the reason this PR's second
+  # commit moved it.
   # ⛔ NOT `surface-guard`: that gate grades `config/surface-manifest.yml` (`tools/surface_manifest.py:232`)
   # and never reads this file (`grep -c ci-surfaces tools/surface-guard.py
   # tools/surface_manifest.py` -> 0, 0), and its job carries no `needs:` on
