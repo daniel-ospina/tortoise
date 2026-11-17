@@ -335,6 +335,95 @@ def test_every_construction_site_passes_a_budget():
         assert "timeout_ms" in keywords, (
             f"the call at sdk.py:{node.lineno} does not bind the read's budget, "
             f"so its record leg keeps the door's {DOOR_MS} ms bound")
+        # ⛔ PRESENCE IS NOT BINDING (#11691 review F6): `timeout_ms=None` asks
+        # the door for its own bound — the 15 s path `_record_vector_searcher`
+        # documents as "kept for the places that do not go through a bounded
+        # read" — so a site that names the keyword and passes `None` (or an
+        # `or VECTOR_LEG_BUDGET_MS` expression whose left side is always None)
+        # would satisfy a presence-only pin while the leg is unbounded again.
+        bound = next(kw.value for kw in node.keywords if kw.arg == "timeout_ms")
+        assert not (isinstance(bound, ast.Constant) and bound.value is None), (
+            f"the call at sdk.py:{node.lineno} binds `timeout_ms=None`, which "
+            f"leaves the record leg on the door's {DOOR_MS} ms bound — pass the "
+            f"read's budget instead")
+
+
+def _names_the_budget(node: ast.expr) -> bool:
+    """Does the expression READ `VECTOR_LEG_BUDGET_MS` anywhere?
+
+    A `Constant` check is not enough, and that is measured, not assumed: the
+    first version of these pins asserted "not a literal", and the call site
+    `int(_elevated_timeout_ms or 500)` — a `Call` wrapping a `BinOp` whose right
+    side is the literal — stayed GREEN under exactly the mutation it exists to
+    catch (#11691 review F4). The pin has to name the thing it wants.
+    """
+    return any((isinstance(n, ast.Name) and n.id == "VECTOR_LEG_BUDGET_MS")
+               or (isinstance(n, ast.Attribute) and n.attr == "VECTOR_LEG_BUDGET_MS")
+               for n in ast.walk(node))
+
+
+def test_the_dense_pass_default_is_the_one_budget_not_a_literal():
+    """`_entity_key_dense_pass`'s `timeout_ms` default NAMES the constant.
+
+    The constant is `500` today, so a reverted `timeout_ms: int = 500` behaves
+    identically — which is exactly why nothing would go red while the default
+    stopped tracking the budget the moment somebody moved it. Measured:
+    reverting the default to the literal left every other arm in this file
+    passing (the whole point of #11691 is "ONE home for the number").
+    """
+    source = pathlib.Path(sdk_module_file()).read_text()
+    defaults: list[ast.expr] = []
+    for node in ast.walk(ast.parse(source)):
+        if (isinstance(node, ast.FunctionDef)
+                and node.name == "_entity_key_dense_pass"):
+            params = node.args.kwonlyargs + node.args.args
+            for param, default in zip(params[len(params) - len(node.args.defaults or
+                                                              []):],
+                                      node.args.defaults or [], strict=False):
+                if param.arg == "timeout_ms":
+                    defaults.append(default)
+            for param, default in zip(node.args.kwonlyargs,
+                                      node.args.kw_defaults, strict=False):
+                if param.arg == "timeout_ms" and default is not None:
+                    defaults.append(default)
+    assert defaults, (
+        "no `timeout_ms` default found on `_entity_key_dense_pass` — the pin's "
+        "own anchor moved, so re-derive it rather than deleting this test")
+    for default in defaults:
+        assert _names_the_budget(default), (
+            "`_entity_key_dense_pass`'s `timeout_ms` default does not name "
+            f"`VECTOR_LEG_BUDGET_MS` ({ast.unparse(default)}) — the constant is "
+            "the one home for the number (#11691)")
+
+    # …and the name it should carry really is the budget, not a lookalike.
+    from tortoise import sdk as sdk_mod
+    assert (sdk_mod.VECTOR_LEG_BUDGET_MS
+            is search_engine.VECTOR_LEG_BUDGET_MS), (
+        "`sdk.VECTOR_LEG_BUDGET_MS` is not the object `search_engine` defines — "
+        "a second home for the number has appeared")
+
+
+def test_the_expansion_pass_binds_the_constant_not_a_literal():
+    """The call site that hands the dense pass its budget names the constant.
+
+    `test_every_construction_site_passes_a_budget` pins the record leg's three
+    sites; this pins the OTHER end of the same budget — the expansion pass's own
+    `timeout_ms=`, which was a literal `500` while the constant lived one module
+    away.
+    """
+    tree = ast.parse(pathlib.Path(sdk_module_file()).read_text())
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "_entity_key_dense_pass"]
+    assert len(calls) == 1, (
+        f"expected ONE `_entity_key_dense_pass` call site, found {len(calls)} — "
+        "a new one must name the constant too")
+    bound = next(kw.value for kw in calls[0].keywords if kw.arg == "timeout_ms")
+    assert _names_the_budget(bound), (
+        f"the call at sdk.py:{calls[0].lineno} does not name "
+        f"`VECTOR_LEG_BUDGET_MS` ({ast.unparse(bound)}) — a literal here leaves "
+        "this leg on the old budget when the constant moves")
 
 
 def sdk_module_file() -> str:
@@ -384,7 +473,11 @@ def test_the_committed_measurement_prices_itself_from_pricing_json():
         assert pv["usd_per_month"][field] == expected, (field, expected)
 
     # (3) the flow, at the write volumes pricing.json publishes per tier.
+    #     THREE components, because the control shape carries a primary key the
+    #     index under test does not (#11691 review F2) — the split is reported,
+    #     never folded into the HNSW figure.
     per_1k = (art["deltas"]["hnsw_bytes_per_1000_writes"]
+              + art["deltas"]["primary_key_bytes_per_1000_writes"]
               + art["deltas"]["payload_bytes_per_1000_writes"])
     for tier, spec in pricing["tiers"].items():
         ops = spec.get("included_write_ops_per_month")

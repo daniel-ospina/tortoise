@@ -26,7 +26,13 @@ The controls are derived from it structurally — ``point_gen_only`` is
 ``CREATE TABLE … (LIKE point)``, which copies the generated column (and its
 expression) and none of the indexes; ``point_plain`` is that table with the
 generated column dropped. So "generated column present" and "HNSW present" are
-the only differences between the three, by construction.
+the only differences between the three — ⚠️ WITH ONE DOCUMENTED EXCEPTION that
+this file's first version got wrong (#11691 review F2): `LIKE` copies NO primary
+key, so `point` carries `point_pkey` and the two controls carry no index at all.
+Every index figure is therefore reported from the index's OWN byte count in the
+`indexes` map (``hnsw_bytes_per_1000_writes``), never as "all index bytes of
+`point` minus the controls' zero" — that difference also carried the pkey's own
+growth (~75 kB per 1,000 writes, 3.5 % of the figure).
 
 ⛔ TWO THINGS THE METHOD REFUSES, each because it would report the environment
 as if it were the feature:
@@ -79,6 +85,11 @@ REPO = Path(__file__).resolve().parent.parent
 MIGRATION = REPO / "supabase/migrations/20261109000001_record_embedding_vector.sql"
 
 DIM = 384
+#: The HNSW index the migration creates on ``public.point`` (#11642). Named here
+#: because the per-write index cost is read from THAT index's own byte count
+#: (#11691 review F2) — the controls are `LIKE`-derived and carry no primary key,
+#: so "all of `point`'s index bytes minus zero" would also charge `point_pkey`.
+HNSW_INDEX = "idx_point_embedding_vec_hnsw"
 #: The ``point`` population the issue measured on the live record (2026-11-16:
 #: 33,671 ``public.point`` rows, 27,813 carrying ``embedding_vec``). The index's
 #: own size at this base is the storage principal at current production volume.
@@ -220,7 +231,12 @@ def _corpus(n: int, seed: int = 11691) -> list[str]:
     HNSW insert into one costs LESS than an insert into a corpus with actual
     neighbourhoods — so the uniform choice would under-price the write. Returned
     as the JSON text a ``jsonb`` column stores (which is what the record holds,
-    and why the payload column is ~7 KB rather than pgvector's 1,536 B).
+    and why the payload column is ~3.6 kB rather than pgvector's 1,536 B).
+
+    ⚠️ THAT NUMBER IS MEASURED OFF THIS FUNCTION, not eyeballed: `_corpus(50,
+    seed=11691)` averages 3,607.6 characters a row (min 3,585, max 3,631), i.e.
+    3,608 B — and a corpus with a DIFFERENT DIM or precision has a different one,
+    so re-measure rather than re-quote it.
     """
     rng = random.Random(seed)
     centroids = [[rng.gauss(0.0, 1.0) for _ in range(DIM)] for _ in range(50)]
@@ -230,6 +246,27 @@ def _corpus(n: int, seed: int = 11691) -> list[str]:
         vec = [round(x + rng.gauss(0.0, 0.08), 6) for x in c]
         out.append(json.dumps(vec, separators=(",", ":")))
     return out
+
+
+def _corpus_shape(n: int = 50, seed: int = 11691) -> dict:
+    """The corpus' OWN bytes/row, as a field of the artifact (#11691 review F3).
+
+    The evidence doc quotes the row size to explain why these figures are bigger
+    than a 1,536-B `vector` column predicts, and it claims every number it states
+    is a field of `measurement.json`. A quoted size that lives only in prose is a
+    number nobody can re-derive, so emit it from the generator that produces the
+    rows it measures.
+    """
+    sizes = [len(row) for row in _corpus(n, seed=seed)]
+    return {"rows": n,
+            "seed": seed,
+            "dim": DIM,
+            "text_bytes_per_row_mean": round(sum(sizes) / len(sizes), 1),
+            "text_bytes_per_row_min": min(sizes),
+            "text_bytes_per_row_max": max(sizes),
+            "derivation": ("len() of each row `_corpus(n, seed)` emits, i.e. the "
+                           "`jsonb` text the record stores; mean/min/max over "
+                           "those rows")}
 
 
 # ── measurement ───────────────────────────────────────────────────────────
@@ -495,10 +532,21 @@ def _derive(report: dict) -> dict:
             "total": round(full["p95_ms"] - plain["p95_ms"], 4),
             "host_noise_floor": round(plain["p95_ms"] - plain["p50_ms"], 4),
         },
-        # The index's OWN growth per 1,000 writes, from the two shapes that
-        # differ by exactly the index.
+        # The index's OWN growth per 1,000 writes — read from the HNSW index's
+        # own byte count, NOT as "all of `point`'s index bytes minus the
+        # controls' zero" (#11691 review F2: `LIKE` copies no PRIMARY KEY, so
+        # `point` carries `point_pkey` and that difference silently charged the
+        # pkey's ~75 kB/1k growth to the index under test).
         "hnsw_bytes_per_1000_writes": round(
-            (full["index_bytes"] - gen_only["index_bytes"])
+            (full["indexes"].get(HNSW_INDEX, 0)
+             - gen_only["indexes"].get(HNSW_INDEX, 0))
+            / (full["timed_writes"] + WARMUP) * 1000.0, 1),
+        # …and the growth the CONTROL SHAPE carries but the index does not: the
+        # primary key's own bytes, reported separately so the split is auditable
+        # instead of invisible.
+        "primary_key_bytes_per_1000_writes": round(
+            (full["index_bytes"] - full["indexes"].get(HNSW_INDEX, 0)
+             - gen_only["index_bytes"] + gen_only["indexes"].get(HNSW_INDEX, 0))
             / (full["timed_writes"] + WARMUP) * 1000.0, 1),
         # The generated COLUMN's payload (vector + heap) per 1,000 writes.
         "payload_bytes_per_1000_writes": round(
@@ -540,6 +588,7 @@ def _derive(report: dict) -> dict:
             production["production_index_bytes"], COST_BASIS_GB_MONTH), 4),
     }
     flow_bytes_per_1k = (deltas["hnsw_bytes_per_1000_writes"]
+                         + deltas["primary_key_bytes_per_1000_writes"]
                          + deltas["payload_bytes_per_1000_writes"])
     production["flow_usd_per_month"] = {
         # The FLOW: the same per-1,000-write growth at the write volumes
@@ -573,6 +622,9 @@ def _derive(report: dict) -> dict:
                     "bytes_per_gb": BYTES_PER_GB},
         "deltas": deltas,
         "production_volume": production,
+        # the corpus' own bytes/row — the number the evidence doc quotes to
+        # explain the row size, emitted so it is a FIELD and not prose (F3).
+        "corpus": _corpus_shape(),
     })
 
     return report

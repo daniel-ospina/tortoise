@@ -130,7 +130,7 @@ from .live import _current_status_clause  # #4058 canonical current-status allow
 from .live import same_mitigation_assertion  # #9962 redelivery vs re-assertion
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
-from .search_engine import belief_value  # #11702: ONE belief-value reader
+from .search_engine import belief_value, VECTOR_LEG_BUDGET_MS  # #11702; #11691
 from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
 from .live import direction_flows  # #7852 (source→target, target→source) flows
 from .live import direction_spellings  # #7852 stored-token equivalence class
@@ -44092,7 +44092,7 @@ class TortoiseSDK:
                     scope_kinds=_scope_kinds,
                     # the shipped leg's own timeout, so on a slow store the
                     # expansion no-ops for the same reason rather than sooner.
-                    timeout_ms=int(_elevated_timeout_ms or 500),
+                    timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS),
                 )
                 if expanded_vec is not None:
                     raw_results["vector"] = expanded_vec
@@ -45935,7 +45935,7 @@ class TortoiseSDK:
         leg_trace: list[dict] | None,
         min_similarity: float | None = None,
         scope_kinds: tuple[str, ...] | None = None,
-        timeout_ms: int = 500,
+        timeout_ms: int = VECTOR_LEG_BUDGET_MS,
     ) -> list[tuple[str, float]] | None:
         """C2 (#2518) indicator 2 — DENSE-leg parity for the key expansion.
 

@@ -32,10 +32,14 @@ date       2026-11-17T03:19:15Z
 server     PostgreSQL 16.16 (Debian 16.16-1.pgdg12+1), pgvector 0.8.7
 image      pgvector/pgvector:pg16 (throwaway container, one run)
 corpus     50 centroids + gaussian noise, 384-d, STORED AS THE RECORD STORES IT
-           (`jsonb` — ~5.4 KB of text/row, not pgvector's 1,536 B)
+           (`jsonb` — 3,608 B of text/row on average, `corpus.text_bytes_per_row_mean`
+           = 3,607.6 over `_corpus(50, seed=11691)`, not pgvector's 1,536 B)
 shapes     point_plain      the record's columns, no generated column, no index
            point_gen_only   + `embedding_vec` GENERATED … STORED   (no index)
            point            + `embedding_vec` and the HNSW index   (= production)
+           ⚠️ `… INCLUDING GENERATED` copies the GENERATED expression but NOT the
+           primary key, so `point` carries `point_pkey` and the two controls carry
+           no index at all — every index figure below is net of that split (§1.5)
 host       macOS-27.0 arm64, loadavg 45.7 / 45.3 / 50.4 at the start
 ```
 
@@ -87,9 +91,21 @@ Measured as size deltas over exactly the writes the timings above describe:
 
 | component | bytes per 1,000 writes | per write |
 |---|---|---|
-| the HNSW index (`idx_point_embedding_vec_hnsw`) | **2,129,920** | 2,130 B |
+| the HNSW index (`idx_point_embedding_vec_hnsw`) | **2,054,827** | 2,055 B |
+| the primary key's own index (`point_pkey`) | **75,093** | 75 B |
 | the generated column's payload (vector + heap tuple) | **1,945,600** | 1,946 B |
 | **total** | **4,075,520** | 4,076 B |
+
+⛔ **THE THREE ROWS ARE SPLIT BECAUSE THE CONTROLS DO NOT CARRY A PRIMARY KEY**
+(#11691 review F2). `point_gen_only` / `point_plain` are derived with `LIKE …`,
+which copies no primary key, so `point` holds `point_pkey` (90,112 B at 1,200
+writes) and the controls hold no index at all: a single "all index bytes of
+`point` minus the controls' zero" figure is **2,129,920 B/1,000** and charges the
+pkey's growth to the HNSW index. The HNSW row above is therefore read from that
+index's OWN byte count in `measurement.json`'s `indexes` map, and
+`primary_key_bytes_per_1000_writes` reports the remainder — the total is
+unchanged, only its attribution is now auditable
+(`2,054,826.7 + 75,093.3 = 2,129,920.0`).
 
 The index figure reproduces as a STOCK too, which is the cross-check that matters:
 built to **20,000 rows** the index is **40,968,192 B = 39.07 MiB**, and `#11642`
@@ -110,10 +126,12 @@ bytes below.
 | quantity at 33,671 rows | value |
 |---|---|
 | the vector payload + index (total relation) | **233.4 MB** |
-| of which the HNSW index | **70.8 MB** |
+| the indexes, all (`idx_point_embedding_vec_hnsw` + `point_pkey`) | **70.8 MB** |
+| of which the HNSW index's own bytes | **69.0 MB** |
+| of which `point_pkey` | **1.9 MB** |
 | monthly, at `postgres_storage.cost_basis_usd_per_gb_month` (**$0.125/GB-month**) | **$0.029/month** |
 | monthly, at the customer-facing `overage_price_usd_per_gb_month` (**$0.30/GB-month**) | **$0.070/month** |
-| the index alone, cost basis | **$0.0089/month** |
+| the indexes, all, cost basis | **$0.0089/month** |
 
 **The FLOW**, at the write volumes `pricing.json` itself publishes per tier
 (`included_write_ops_per_month`), priced the same two ways:

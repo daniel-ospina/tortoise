@@ -176,7 +176,8 @@
    "total": 79.791,
    "host_noise_floor": 2.933
   },
-  "hnsw_bytes_per_1000_writes": 2129920.0,
+  "hnsw_bytes_per_1000_writes": 2054826.7,
+  "primary_key_bytes_per_1000_writes": 75093.3,
   "payload_bytes_per_1000_writes": 1945600.0
  },
  "production_volume": {
@@ -224,5 +225,14 @@
     "team": 797.4
    }
   }
+ },
+ "corpus": {
+  "rows": 50,
+  "seed": 11691,
+  "dim": 384,
+  "text_bytes_per_row_mean": 3607.6,
+  "text_bytes_per_row_min": 3585,
+  "text_bytes_per_row_max": 3631,
+  "derivation": "len() of each row `_corpus(n, seed)` emits, i.e. the `jsonb` text the record stores; mean/min/max over those rows"
  }
 }
