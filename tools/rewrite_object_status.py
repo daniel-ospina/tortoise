@@ -64,10 +64,12 @@ are different questions and are counted separately), the ids, and the rows this
 tool deliberately does NOT touch. A preview that reports **0 / 0** is a real
 result: it means no stored row needs the `assembly` member, and the member is
 dead weight on that graph (measured per graph — it is not a claim about any
-other). ⛔ UNLESS a durability marker is present (a previous run left rows
-LIVE-ONLY) or the read was truncated: those are printed, the 0/0 sentence is
-withheld, and the preview exits 1 — a read it could not complete is not a
-measurement.
+other). ⛔ UNLESS a marker names rows that are still not proven durable (a
+previous run may have left them LIVE-ONLY) or the read was truncated: those are
+printed, the 0/0 sentence is withheld, and the preview exits 1 — a read it could
+not complete is not a measurement. The proof is the journal's LAST status record
+per row, so a marker left by a killed run whose rows all landed is discharged by
+a preview too, and the 0/0 reading becomes a real measurement.
 
 WHAT IT REWRITES, AND WHAT IT DELIBERATELY DOES NOT
 ==================================================
@@ -166,10 +168,14 @@ EXIT CODES
         that unblocks the sequenced drop, so it must not read as complete.
     2   refused before touching anything — on BOTH arms, since a refusal is the
         same verdict whether or not `--execute` was asked for: no journal, an
-        empty or AMBIGUOUS target flag (`--uri` together with `--db-path`), and a
+        empty or AMBIGUOUS target flag (`--uri` together with `--db-path`), a
         durability marker this run could not READ (permission, or a directory in
         its place: its ids are unknown, so neither the report nor the 0-rows
-        reading is trustworthy); and on `--execute` a TRUNCATED read or an
+        reading is trustworthy), and on the WRITE arm another run holding the
+        journal's run lock (`another-run-in-progress`) or a lock file that cannot
+        be created (`run-lock-unavailable`) — a preview takes the lock best-effort:
+        it writes nothing but that lock, so a busy or read-only lock must not
+        block a measurement; and on `--execute` a TRUNCATED read or an
         UNADDRESSABLE row (no usable `id`) — both exit 1 on
         a preview (an incomplete measurement) and 2 on the write arm (nothing is
         written). ⚠️ A FAN-OUT / dual-labelled row is NOT in this set: it is a
@@ -213,6 +219,7 @@ REFUSE_AMBIGUOUS_TARGET = "ambiguous-target-flag"
 REFUSE_PENDING_UNWRITABLE = "durability-marker-unwritable"
 REFUSE_PENDING_UNREADABLE = "durability-marker-unreadable"
 REFUSE_BUSY = "another-run-in-progress"
+REFUSE_LOCK_UNAVAILABLE = "run-lock-unavailable"
 
 #: Knowledge labels a ``:Object`` must NOT also carry. ``update_knowledge``
 #: dispatches on the label, so a dual-labelled row takes the other family's arm
@@ -261,24 +268,32 @@ def _journal_records_since(log, cursor):
 
 
 def _row_recorded(records, rid) -> bool:
-    """True only when THIS row's own status record is among ``records``.
+    """True only when this row's LAST status record among ``records`` says rewritten.
 
-    Matching on `(type, label, id, state.status)` — not on a count — is what
-    makes the gate independent of a concurrent writer: a peer's record for
-    another row cannot stand in for ours.
+    Matching on `(type, label, id)` — not on a count — is what makes the gate
+    independent of a concurrent writer: a peer's record for another row cannot
+    stand in for ours.
+
+    ⛔ LAST RECORD WINS, not "any record exists". The journal replays as a FOLD,
+    so what makes a row durable is its final status, not some earlier one. A row
+    whose history is `deprecated` -> `outdated` (an un-deprecation, or a rewrite
+    that later got re-stated) HAS a `deprecated` record; an existence test
+    discharges it, and a preview then prints "0 rows ⇒ dead weight" over a row
+    whose live state is `outdated` — the false PASS this gate exists to prevent
+    (measured: journal ['deprecated','outdated'], live `deprecated`, exit 0).
     """
+    last = None
     for rec in records or ():
         if not isinstance(rec, dict):
             continue
         state = rec.get("state")
-        if not isinstance(state, dict):
+        if not isinstance(state, dict) or "status" not in state:
             continue
         if (rec.get("type") == "EntityMutated"
                 and rec.get("label") == "Object"
-                and str(rec.get("id")) == str(rid)
-                and state.get("status") == REWRITE_TO):
-            return True
-    return False
+                and str(rec.get("id")) == str(rid)):
+            last = state.get("status")
+    return last == REWRITE_TO
 
 
 def _pending_path(journal: str | None):
@@ -336,6 +351,14 @@ def _write_pending(journal: str | None, ids: list) -> bool:
     path = _pending_path(journal)
     if path is None:
         return True
+    with _marker_lock(journal):
+        return _write_pending_locked(journal, ids)
+
+
+def _write_pending_locked(journal: str | None, ids: list) -> bool:
+    path = _pending_path(journal)
+    if path is None:
+        return True
     current = _read_pending(journal)
     if current is None:
         # ⛔ ``None`` is NOT "no marker": merging onto an unreadable one would
@@ -379,8 +402,15 @@ def _set_pending(journal: str | None, ids: list) -> bool:
     return True
 
 
-def _acquire_run_lock(journal: str | None):
-    """An EXCLUSIVE, non-blocking lock for the whole run; :class:`Refused` if busy.
+#: ``{"<lock path>": [handle, refcount]}`` — the lock is held per process, so a
+#: nested acquisition (the CLI holds it for the whole run, the marker operations
+#: take it again) must not deadlock against itself: a second `flock` on a second
+#: fd of the SAME process fails with EWOULDBLOCK, which would refuse our own run.
+_RUN_LOCKS: dict[str, list] = {}
+
+
+def _acquire_run_lock(journal: str | None, *, required: bool = True):
+    """An EXCLUSIVE, non-blocking lock next to the marker; ``Refused`` if busy.
 
     ⛔ The marker protocol is a read-modify-write shared by every process pointed
     at this journal: a per-row MERGE reads the file and writes it back, and the
@@ -391,49 +421,80 @@ def _acquire_run_lock(journal: str | None):
     the exact false PASS this marker exists to prevent (measured: a peer merge
     fired inside the discharge's journal read, and the peer id was gone).
 
-    A one-shot migration does not need concurrent runs, so the whole run takes
-    the lock and a second run is REFUSED BY NAME rather than interleaved. The
-    lock file lives beside the marker, is never deleted (unlinking a file under
-    a held flock reintroduces the race), and a filesystem without `fcntl` simply
-    does not lock — recorded here rather than silently assumed.
+    ``required=False`` is the PREVIEW arm: a preview writes nothing but the lock
+    file, and a lock it cannot create (read-only journal directory) or cannot
+    take (a peer mid-run) must not block a legitimate measurement — it degrades
+    to no lock instead of refusing. The write arm is serialized for real.
+
+    The lock file is never unlinked: removing a file under a held `flock` lets a
+    third process lock a NEW inode and run concurrently with the old holder.
     """
     path = _pending_path(journal)
     if path is None:
         return None
     lock_path = path.with_name(path.name + ".lock")
+    key = str(lock_path)
+    held = _RUN_LOCKS.get(key)
+    if held is not None:
+        held[1] += 1
+        return (key, held[0])
     try:
         # A long-lived handle is the POINT (the flock lives as long as the run),
         # so the context-manager rule does not apply here.
         handle = open(lock_path, "a+", encoding="utf-8")  # noqa: SIM115
     except OSError as exc:
-        raise Refused(REFUSE_BUSY, (
+        if not required:
+            return None
+        raise Refused(REFUSE_LOCK_UNAVAILABLE, (
             f"the run lock {lock_path} could not be created ({exc}), so a "
             "concurrent run could erase this run's durability marker. Nothing "
             "was written.")) from exc
     try:
         import fcntl
     except ImportError:                     # pragma: no cover - non-POSIX
-        return handle
+        _RUN_LOCKS[key] = [handle, 1]
+        return (key, handle)
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
         handle.close()
+        if not required:
+            return None
         raise Refused(REFUSE_BUSY, (
             f"another run holds {lock_path} ({exc}). Two runs on one journal can "
             "erase each other's durability markers, so this one refuses rather "
             "than interleave. Wait for it, then re-run. Nothing was written."
         )) from exc
-    return handle
+    _RUN_LOCKS[key] = [handle, 1]
+    return (key, handle)
 
 
-def _release_run_lock(handle) -> None:
-    if handle is None:
+def _release_run_lock(token) -> None:
+    if token is None:
         return
+    key, handle = token
+    held = _RUN_LOCKS.get(key)
+    if held is None:
+        return
+    held[1] -= 1
+    if held[1] > 0:
+        return
+    _RUN_LOCKS.pop(key, None)
     with contextlib.suppress(OSError, AttributeError, ValueError):
         import fcntl
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     with contextlib.suppress(OSError, AttributeError):
         handle.close()
+
+
+@contextlib.contextmanager
+def _marker_lock(journal: str | None):
+    """Serialise one marker read-modify-write (the write arm's granularity)."""
+    token = _acquire_run_lock(journal, required=True)
+    try:
+        yield
+    finally:
+        _release_run_lock(token)
 
 
 def _population_ids(rep) -> set[str]:
@@ -1025,7 +1086,11 @@ def rewrite(sdk, rep: Report) -> Report:
     # So the same identity proof is applied to the marker's OWN ids: an id
     # carrying a durable rewrite record is discharged, one without it is kept.
     _discharged = {str(i) for i in rep.rewritten}
-    _on_disk = _read_pending(rep.journal)
+    # ⛔ ONE LOCKED READ-FILTER-WRITE. Computing the kept set from a read taken
+    # OUTSIDE this lock is the lost-update this tool must not have: an id a peer
+    # merges in between is dropped when the exact set is written back.
+    with _marker_lock(rep.journal):
+        _on_disk = _read_pending(rep.journal)
     if _on_disk is None:
         # An unreadable marker is not an empty one (see `_read_pending`); do not
         # shrink a set nobody could read, and say so.
@@ -1036,9 +1101,10 @@ def rewrite(sdk, rep: Report) -> Report:
                       f"{_pending_path(rep.journal)} became unreadable during "
                       "the run, so its ids could not be discharged."),
         })
-    _still = [pid for pid in _kept_pending(
-        sorted(set(_on_disk) | _marker_ids), _population_ids(rep), log)
-        if pid not in _discharged]
+    with _marker_lock(rep.journal):
+        _still = [pid for pid in _kept_pending(
+            sorted(set(_on_disk) | _marker_ids), _population_ids(rep), log)
+            if pid not in _discharged]
     _write_failed = None
     if (rep.failures or rep.truncated or rep.unaddressable or rep.fanout
             or _still
@@ -1368,7 +1434,7 @@ def main(argv: list[str] | None = None) -> int:
     # ⛔ ONE run at a time on this journal (see `_acquire_run_lock`). Held across
     # both arms, so the preview cannot be interleaved with another run's writes.
     try:
-        _lock = _acquire_run_lock(journal)
+        _lock = _acquire_run_lock(journal, required=args.execute)
     except Refused as refused:
         sys.stderr.write(
             f"rewrite_object_status: REFUSED {refused.reason}: "

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import subprocess
 import sys
 from pathlib import Path
 
@@ -574,34 +575,102 @@ def test_a_PREVIEW_discharges_a_durable_only_marker(env, monkeypatch):
     assert "rebuild_all" not in text, text
 
 
-def test_a_SECOND_concurrent_run_is_refused_by_name(env, monkeypatch):
+def test_a_SECOND_concurrent_run_is_refused_by_name(env):
     """Two runs on one journal must not interleave their read-modify-writes.
 
     The marker is a shared read-modify-write: a per-row MERGE reads and rewrites
     it, and the end-of-run discharge writes an exact set. Last-writer-wins lets
     the discharge DELETE an id a peer just merged, so the peer's live-only row
-    loses its only durable trace and the next preview certifies the graph
-    (measured: a peer merge fired inside the discharge's journal read and the id
-    was gone). The run therefore takes an exclusive lock and refuses a second
-    run BY NAME.
+    loses its only durable trace and the next preview certifies the graph. The
+    write arm therefore takes an exclusive lock and refuses a second run BY NAME.
+
+    ⛔ A holder in ANOTHER PROCESS, not a second in-process acquisition: the lock
+    is refcounted per process so the CLI and the marker operations can nest, and
+    an in-process probe would measure the refcount, not the exclusion.
     """
     sdk, events = env
     _seed(sdk)
     journal = str(events / "events.jsonl")
+    marker = tool._pending_path(journal)
+    lock_path = marker.with_name(marker.name + ".lock")
 
-    held = tool._acquire_run_lock(journal)
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl,sys\nf=open(sys.argv[1],'a+')\n"
+         "fcntl.flock(f.fileno(),fcntl.LOCK_EX)\n"
+         "print('locked',flush=True)\nimport time;time.sleep(60)", str(lock_path)],
+        stdout=subprocess.PIPE, text=True)
     try:
-        with pytest.raises(tool.Refused) as raised:
-            tool._acquire_run_lock(journal)
-        assert raised.value.reason == tool.REFUSE_BUSY, raised.value.reason
-        assert "another run" in raised.value.message.lower()
-    finally:
-        tool._release_run_lock(held)
+        assert holder.stdout.readline().strip() == "locked", "precondition: lock held"
 
-    # Released: the next run gets it, and the lock file is not a leftover marker.
-    again = tool._acquire_run_lock(journal)
-    tool._release_run_lock(again)
-    assert tool._read_pending(journal) == [], "the lock file must not read as a marker"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = tool.main(["--db-path", str(sdk._db_path),
+                              "--event-log-path", journal, "--execute"])
+        assert code == 2, f"a concurrent write run exited {code}, not the refusal"
+        assert tool.REFUSE_BUSY in err.getvalue(), err.getvalue()
+
+        # ⛔ The PREVIEW arm writes nothing but the lock file, so a peer holding
+        # it must NOT block a legitimate measurement.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            preview = tool.main(["--db-path", str(sdk._db_path),
+                                 "--event-log-path", journal])
+        assert preview in (0, 1), (
+            f"a preview was refused by a busy lock (exit {preview}): {err.getvalue()}")
+        assert tool.REFUSE_BUSY not in err.getvalue(), (
+            "a preview reported a concurrency refusal it did not suffer")
+    finally:
+        holder.kill()
+        holder.wait()
+
+    # Released: the next write run is not left refused.
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        after = tool.main(["--db-path", str(sdk._db_path),
+                           "--event-log-path", journal, "--execute"])
+    assert after == 0, f"the lock outlived its holder (exit {after}): {err.getvalue()}"
+
+
+def test_a_STALE_deprecated_record_does_not_discharge_a_live_only_row(env):
+    """The journal folds, so its LAST status record decides — not any record.
+
+    A row whose history is `outdated` -> `deprecated` -> `outdated` (a legitimate
+    un-deprecation) still HAS a `deprecated` record. An existence-based proof
+    discharges it, so a rewrite that went live-only on such a row is forgotten
+    and the next preview prints "0 rows ⇒ dead weight" over a row whose live
+    state is, in fact, only live — the false PASS the marker exists to prevent.
+    """
+    sdk, _events = env
+    oid = sdk.create_object("stale", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    tool.run(sdk, execute=True)                    # a real, durable deprecated
+    assert _status(sdk, oid) == tool.REWRITE_TO
+    _mint_legacy(sdk, oid, "outdated")             # un-deprecated, journaled after
+    assert _status(sdk, oid) == "outdated"
+
+    real_append = EventLog.append
+
+    def boom(self, event):
+        raise OSError("journal is read-only")
+
+    EventLog.append = boom
+    try:
+        rep = tool.run(sdk, execute=True)           # live-only rewrite
+    finally:
+        EventLog.append = real_append
+
+    assert rep.failures, "precondition: the append must have failed"
+    assert _status(sdk, oid) == tool.REWRITE_TO, "precondition: live write landed"
+    assert rep.pending == [oid], rep.pending
+
+    preview = tool.run(sdk, execute=False)
+
+    assert preview.total == 0, "precondition: the live graph reads clean"
+    assert preview.pending == [oid], (
+        "a STALE `deprecated` record discharged a live-only row: "
+        f"{preview.pending!r}")
+    assert "dead weight" not in tool.render(preview)
 
 
 def test_a_discharged_id_is_REMOVED_from_the_marker(env):
