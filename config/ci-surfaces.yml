@@ -2585,7 +2585,13 @@ surfaces:
   # claims the diff. DB-free at the door level: every record is a fake and the SDK
   # arm reuses `test_record_serve.py`'s recording doubles.
   - test_12941_read_your_writes.py
-  - test_13034_currency_rule_reads_position.py
+  # ⛔ No `test_13034_currency_rule_reads_position.py` row in this list. This PR once carried one
+  # for the #13139 main-red, then `main` landed its OWN repair for the same red (`3d437429e9`,
+  # #13144) registering the file in `api` AND `core`. Keeping both is not additive here:
+  # `.gitattributes` declares this file `merge=union`, so the merge emits the entry TWICE in one
+  # list and `tools/registry_integrity.py` refuses it (`duplicate entry … at .surfaces.core[]`,
+  # exit 1), reddening the required `manifest-integrity` job on the merge result. Re-check with:
+  # `python tools/registry_integrity.py`.
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
   # (where `TIER_DISPLAY_NAMES` now lives) is a `core` source. The `tier1` row is
