@@ -1057,10 +1057,18 @@ surfaces:
   # matrix legs provision one and export `TORTOISE_TEST_DOCKER_PORT`) and SKIPS on the
   # embedded carve-out lane (measured: `TORTOISE_TEST_CARVE_OUT=1` -> 23 passed, 90 skipped).
   # ⛔ NOT on "any URI-less leg": with no `TORTOISE_DB_URI`, or an unreachable one, the
-  # conftest session gates REFUSE the run before a test starts — MEASURED: 113 errors,
+  # conftest session gates REFUSE the run before a test starts UNLESS
+  # `TORTOISE_TEST_CARVE_OUT` is set — the tier-2 legs and the carve-out job BOTH set it, so
+  # the refusal is the DEFAULT lane's shape, not every URI-less one
+  # (`tests/_embedded.py::_assert_p4_uri_required` returns early via `_carve_out_opted_in()`,
+  # and its own docstring names "carve-out job, tier-2 legs, e2e surfaces"). MEASURED on the
+  # default lane with no opt-in: 113 errors,
   # `Failed: default pytest requires TORTOISE_DB_URI` / `no … database could be reached` —
   # and the carve-out job runs the `carve_out` set, which this file is NOT in. So the skip
-  # is one lane's shape, never a green a no-DB leg can produce (#1349's other half).
+  # is one lane's shape, never a green a no-DB leg can produce (#1436's skip half, whose
+  # container half is #5084 — the pair this file already uses for
+  # `test_live_storage_fail_closed.py` below; ⛔ NOT #1349, which is this file's silent-DROP
+  # citation, not its skip one).
   # The SECOND pin is `tortoise/mcp_auth.py`: the tag-arm fixture binds `_current_org_id` /
   # `_current_org_limits` / `_transport_mode` from it, and it is an EXACT `api`
   # SOURCE_PATTERNS match too — MEASURED: `--changed-files tortoise/mcp_auth.py` -> surfaces
@@ -5206,8 +5214,11 @@ surfaces:
   # (measured: 23 passed, 90 skipped), and a `durations` row is exactly what a verifier
   # reads INSTEAD of the test (the reason `test_consent_key_runbook_10488.py`'s row
   # documents itself). ⛔ Not "any URI-less leg": with no `TORTOISE_DB_URI`, or an
-  # unreachable one, the conftest session gates REFUSE the run (measured: 113 errors,
-  # `Failed: default pytest requires TORTOISE_DB_URI`), and the carve-out job runs the
+  # unreachable one, the conftest session gates REFUSE the run UNLESS
+  # `TORTOISE_TEST_CARVE_OUT` is set — the tier-2 legs and the carve-out job BOTH set it
+  # (`tests/_embedded.py::_assert_p4_uri_required` returns early via `_carve_out_opted_in()`);
+  # measured on the default lane with no opt-in: 113 errors,
+  # `Failed: default pytest requires TORTOISE_DB_URI`, and the carve-out job runs the
   # `carve_out` set, which this file is NOT in — so no no-DB leg can read this green.
   # The predicate-matrix and census classes are pure Python. The weight below is still the
   # flat default, and the reading shows COST, never the skip.
