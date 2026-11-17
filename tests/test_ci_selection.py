@@ -10505,8 +10505,175 @@ def _durations_rows_claiming_unmeasured_on_ci(text: str):
 # review named; the guard found the other five). The PAST tense is a true history
 # and must stay silent: "the flat 2.0 UNDERSTATED it until this sweep replaced the
 # row" is what the fix says.
+#
+# ⛔ WIDENED at the 2026-11-16 refresh (#12962). The literal `flat 2.0 … UNDERSTATES`
+# spelling was the ONLY form the arm read, so ten rows that named the same claim in
+# another spelling shipped GREEN: an inserted adverb (`the flat 2.0 still UNDERSTATES`,
+# `the flat 2.0 may UNDERSTATE` — note the BARE `understate`, not the `-S` form) and
+# the three noun spellings the map also uses (`the flat default`, `the flat reading`,
+# `the flat weight`). A guard that reads one spelling of a claim cannot say the claim
+# is absent — `[]` from a spelling-bound arm is a false clean, and it is why the same
+# defect regenerated on two successive refreshes. The tense boundary is now explicit:
+# `UNDERSTATE(S)` / `OVERSTATE(S)` are present/future and bite; the PAST forms
+# (`UNDERSTATED`, `OVERSTATED`) end in a word character after `UNDERSTATE`, so they
+# cannot satisfy the closing `\b` and stay silent — that is the polarity the fix relies
+# on, not an incidental property.
+#
+# ⛔ A `.` TERMINATES THE CLAIM ONLY WHEN IT IS NOT PART OF A NUMBER (#12962 rebase
+# review, P1). `[^.;]*?` was the cycle-5 fix for an undocumented 40-character budget,
+# and it introduced a second invisible bound of its own: the DECIMAL POINT of any
+# figure ended the "sentence", so the most natural way to write a weight note —
+# "the flat weight is, against the 2.5 reading, one that UNDERSTATES it" — returned
+# `[]` while the claim was on the page. Measured on the shipped arm, all three
+# decimal-bearing probes pinned below were SILENT, while the same shape with the
+# figure spelled out BIT. That is the same false clean this whole guard family exists
+# to close, one spelling over again. `_CLAUSE` is the window these arms now share:
+# `.` and `;` still bound it, and a `.` followed by a digit does not.
+# ⛔ The ONE negative lookahead left in this family — `_FLAT_DEFAULT_STILL_OWED_RE`'s
+# future-sweep `until …` arm — keeps the narrower `[^.;]` window ON PURPOSE: widening
+# a past-marker SCAN can only add silence, i.e. push that arm further toward
+# fail-open. Widening a window that CONSUMES between a noun and its verb can only add
+# bites, which is the safe direction. The two are not the same fix and must not be
+# "unified". (The past-copula arm that used to be the second member of this list is a
+# LOOKBEHIND on the predicate now — see `_WEIGHT_UNCHANGED_CLAIM_RE` — so there is no
+# window left to widen there at all.)
+_CLAUSE = r"(?:[^.;]|\.(?=\d))*?"
 _FLAT_DEFAULT_STILL_OWED_RE = re.compile(
-    r"\bflat\s+2\.0s?(?:\s+default)?\s+(?:UNDERSTATES|overstates)\b",
+    r"\bflat\s+(?:2\.0s?(?:\s+default)?|default|reading|weight)\b" +
+    # ⛔ The verb WINDOW is the SENTENCE, not a character budget (#12962 cycle 5).
+    # It was `[^.;]{0,40}?` — an undocumented 40-character bound, which is the same
+    # false clean one spelling over: a row can name the noun and the present-tense
+    # verb with more than 40 characters between them, and the arm then returned `[]`
+    # while the claim was on the page (measured: "the flat weight a PR-added row
+    # takes is, in this shard, one that UNDERSTATES it" — 48 chars — did not match).
+    # `_CLAUSE` keeps the bound MEANINGFUL (the claim and its subject in ONE clause:
+    # `.` and `;` still terminate it, and a decimal point does NOT — see `_CLAUSE`)
+    # while removing a limit no reader of this file could have known about. Both the
+    # over-window shape and the decimal shape that caught this arm's own bound are
+    # pinned in `test_the_still_owed_flat_default_guard_bites_and_stays_quiet`.
+    _CLAUSE +
+    r"\b(?:UNDERSTATES|UNDERSTATE|OVERSTATES|OVERSTATE)\b"
+    # …and the FUTURE-SWEEP construction, which names the owed sweep without ever
+    # writing UNDER/OVERSTATE — so the tense arm above cannot see it. Four rows
+    # shipped this way at the 2026-11-16 refresh (`flat default until a CI sweep
+    # measures this file`, `KNOWN UNDER-ESTIMATE UNTIL THE REFRESHER`, `until the
+    # refresh lands`, `until the first post-merge sweep`), which is what made the
+    # widening's own `[]` a false clean (#12962 cycle 4). Scoped to the words that
+    # name a sweep still TO COME: the healed wording names the LANDED sweep
+    # (`until the 2026-11-16 sweep replaced the row`) and matches none of these.
+    #
+    # ⛔ AND THE NOUN ARMS NEED A TENSE BOUNDARY TOO (#12962 cycle 6). `until the
+    # refresher` / `until the first post-merge` were bare, so they matched a TRUE
+    # past-tense history — "the flat 2.0 UNDERSTATED it until the refresher replaced
+    # the row", "it was the flat default until the first post-merge sweep gave it a
+    # reading" — i.e. the blessed healed form redded `test-slow` on the next
+    # refresh, the opposite polarity to every other arm here. `UNTIL THE REFRESHER.`
+    # (nothing after) still bites, which is the shipped shape the bare arm was added
+    # for.
+    #
+    # ⛔ THE TENSE BOUNDARY IS A SHORT PAST-VERB LIST, AND THAT IS ITS ACTUAL
+    # BOUNDARY — NOT "the past tense" (#12962 cycle 10, review P1 + three VGATE
+    # passes). The list was `replaced|re-bas\w*|gave|lifted|landed|resolved`, so a
+    # healed note that past-tenses the sweep with any OTHER verb still bites:
+    # measured, "It was the flat default until the refresher **corrected** the row"
+    # / **re-measured** / **fixed** all red, while `replaced` / `re-based` / `gave`
+    # stay silent. That over-block is REAL and is NOT fixed here.
+    #
+    # ⛔ FOUR DESIGNS WERE BUILT AND EACH WAS REFUTED BY MEASUREMENT. Recorded so the
+    # next lane does not re-derive this as an easy win:
+    #   (a) require a PRESENT/FUTURE predicate → FAILS OPEN. A bounded list of
+    #       present forms goes silent on the next synonym and on every modal, and it
+    #       silently DROPPED four genuine catches on `origin/main`'s map
+    #       (`test_rail_detach.py`, `test_measure_ask_distilled.py`,
+    #       `eval/ask/test_ask_corpus.py`, `test_code_freshness_9494.py`) — those
+    #       name the owed sweep and then a CITATION or a COMMA, not a verb.
+    #   (b) no past marker anywhere (`[a-z]+ed`) → FAILS OPEN. `[a-z]+ed` matches
+    #       `red`, `need`, `embed`, so a provenance word anywhere later in the
+    #       clause silenced a live claim.
+    #   (c) a `[^.;]*?` window over present forms → OVER-BLOCKS: the window crosses
+    #       commas and re-bites a healed sentence on a later present word.
+    #   (d) extend the past list to ~32 verbs → FAILS OPEN against THIS arm. The
+    #       extra verbs are the map's general prose vocabulary — `set` appears in 25
+    #       tails, `moved` in 20, `taken` in 19, `introduced`, `superseded`,
+    #       `corrected`, `adopted`, … — so any of them anywhere before the next
+    #       `.`/`;` silences a LIVE claim that the shipped six caught (measured: 13
+    #       of 14 probes regressed). A short list over-blocks healed notes; a long
+    #       list silences live ones. THERE IS NO LIST LENGTH THAT IS CORRECT.
+    #
+    # So the shipped boundary is left EXACTLY as it was, and this comment is the fix:
+    # it previously claimed "fires only when NO past-tense `landed`-marker follows",
+    # i.e. it described a general tense test the code does not implement. The honest
+    # consequences, both live and both accepted for this PR:
+    #   • OVER-BLOCK (the live bug): a healed note with an unlisted past verb reds
+    #     `test-slow`. Loud, and one word fixes the list — deliberately preferred
+    #     over a silent miss, because a silent miss ships an unread claim.
+    #   • FAIL-OPEN (unavoidable here): a future claim whose sweep action is spelled
+    #     with a LISTED past form after a modal reads as healed — measured
+    #     `until the refresher will have replaced …`, `… has landed a reading`,
+    #     `… will be resolved` are all silent. (A modal in front of an UNLISTED verb
+    #     like `will set` still bites, which is why the example has to name a listed
+    #     form; the original draft of this sentence cited `will set` and was wrong
+    #     about its own code — #12962 review cycle 11.)
+    # ⛔ THE ROOT IS FILED, NOT WORKED AROUND: regex tense detection over free prose
+    # cannot be made complete in both directions, which is the same structural reason
+    # these row guards cannot reach block comments. Recorded on **#9442** (the home
+    # for ungated provenance prose) with the four refuted designs and their
+    # measurements, rather than a fifth regex.
+    r"|\buntil\s+(?:the\s+)?(?:refresher|first\s+post-merge)"
+    r"(?![^.;]*?\b(?:replaced|re-bas\w*|gave|lifted|landed|resolved)\b)"
+    r"|\buntil\s+the\s+refresh\s+lands"
+    r"|\buntil\s+a\s+(?:push-to-main\s+|CI\s+)?sweep\s+"
+    r"(?:includes|measures|covers|collects)"
+    # …and the construction that names the sweep by its INSTRUMENT or its VERB
+    # rather than the word "sweep" (#12962 cycle 6). Rows shipped `entered at the
+    # flat default … until a CI junit artifact carries the weight` and `stays at the
+    # default until \`tools/ci_timing.py --refresh-durations\` replaces it from
+    # junit`, each beside a tail citing the ALREADY-LANDED sweep — the same
+    # contradiction the two cycles above chased, and `[]` from the arms above.
+    #
+    # ⛔ The INSTRUMENT arm carries a VERB LIST, not just `until <instrument>`
+    # (#12962 cycle 7). Keying on the instrument alone made the arm TENSE-BLIND, so
+    # it red the minimal legal repair of the owed sentence — past-tense the verb and
+    # keep the tool name (`until \`tools/ci_timing.py --refresh-durations\` REPLACED
+    # it`). That is the same trap the UNDER/OVERSTATE arm is built to avoid: the fix
+    # IS the past tense, so an arm that bites it leaves no legal way to write the
+    # note. Only the present/future verbs bite.
+    #
+    # ⚠️ SCOPE, stated so this is not read as total: these arms read the `until …`
+    # form ONLY. The map's more common forward-looking PROVENANCE boilerplate drops
+    # `until` entirely (`… \`tools/ci_timing.py --refresh-durations\` replaces this
+    # value from the first push-to-main junit sweep that includes the file`), which
+    # these arms cannot see. That is the ungated-provenance-prose class, recorded on
+    # #9442 rather than claimed closed here. Its size is COUNTED, not asserted — at
+    # 3d74516 the rows whose tail names `--refresh-durations` and carries no `until`
+    # (case-insensitive, as this regex compiles) numbered 112, of which 110 carry a
+    # landed `; was N` tail; at `b7cd203` the same count is 114 / 111. The count is
+    # pinned to a DEFINITION so the next reader can reproduce it rather than trust it
+    # (`rows = [l for l in text.splitlines() if _DURATIONS_ROW_RE.match(l)]`;
+    # `tail_names = [l for l in rows if "--refresh-durations" in m.group("tail")]`;
+    # `no_until = [l for l in tail_names if not re.search(r"\buntil\b", l, re.I)]`;
+    # `landed = [l for l in no_until if _MEASURED_BASIS_RE.search(l)]`), because three
+    # earlier revisions of this sentence asserted 121/112, 112/106 and then 111/105 and
+    # NONE reproduces — 111/105 matches no natural variant of the definition at all
+    # (measured 2026-11-16, #12962 cycle 10 review P2). A figure that cannot be
+    # re-derived is exactly the stale-prose rot the surrounding arms exist to stop.
+    # ⛔ The WINDOW is `[^.;\n]` — `.`, `;` and the newline, NOT "the sentence" — and
+    # the anchor eats its OWN period (#12962 cycles 7-8). Two revisions each inverted a
+    # different polarity: `[^.;]` cannot span `tools/ci_timing.py`, so the arm was
+    # silent on the very row it was written for; `[^;\n]{0,80}` let the window cross
+    # a `.` into the NEXT sentence, where `What the weight covers:` — the map's
+    # dominant opener, 104 occurrences at aff53070 — supplied a present-tense verb and
+    # falsely red a correctly past-tensed row. That is the over-block this arm's own
+    # contract forbids, so it is not a nit: `tools/ci_timing(?:\.py)?` consumes the
+    # anchor's period, restoring that bound with no character budget. ⚠️ Residual, so
+    # the wording does not overclaim again: `…`, `!` and `?` are NOT in the class, so a
+    # healed row whose boundary is one of those can still reach the next sentence's
+    # verb. No shipped row is reachable that way (the opener's preceding character is
+    # `.` x89, `;` x11, line-start x4 — zero ellipsis/bang/question).
+    r"|\buntil\s+(?:a\s+)?(?:CI\s+)?junit[^.;\n]*?"
+    r"\b(?:carries|lands|collects|measures|covers|exists|arrives)\b"
+    r"|\buntil\s+`?tools/ci_timing(?:\.py)?[^.;\n]*?"
+    r"\b(?:replaces|re-derives|measures|collects|covers)\b",
     re.IGNORECASE)
 
 
@@ -10762,6 +10929,193 @@ def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
         stale, durations) == [("test_a.py", 39.0), ("test_b.py", 0.9)]
     assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
         legitimate, durations) == []
+
+    # ── The spellings that shipped PAST this arm (#12962 repair) ───────────────
+    # Each names the same present-tense claim as `stale` above and none of them
+    # matched the literal `flat 2.0 … UNDERSTATES` form: an inserted adverb, and the
+    # `flat default` / `flat reading` / `flat weight` nouns the map actually uses.
+    # Ten rows carried one of these while their own tail cited the landed sweep.
+    widened = (
+        "  test_a.py: 27.3  # weight-dominated by a single case and the flat default"
+        " UNDERSTATES it on the slow leg until the refresher re-bases it." + basis + "\n"
+        "  test_b.py: 0.5  # The flat 2.0 may understate it until a sweep replaces"
+        " the row." + basis + "\n"
+        "  test_c.py: 25.1  # it sits above the flat weight, so the flat reading"
+        " UNDERSTATES it until a sweep replaces this row" + basis + "\n"
+        "  test_d.py: 12.7  # the flat 2.0 still UNDERSTATES it until a sweep"
+        " re-bases it." + basis)
+    quad = {f"test_{c}.py": 1.0 for c in "abcd"}
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        widened, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5),
+                           ("test_c.py", 25.1), ("test_d.py", 12.7)]
+    # ── The VERB-WINDOW shape (#12962 cycle 5) ────────────────────────────────
+    # The arm used to bound the gap between the noun and the present-tense verb at
+    # an undocumented 40 characters, so a row stating the same claim across a longer
+    # same-sentence clause read as absent. Pinned here because that bound was
+    # invisible: the claim is in ONE sentence, and the guard's job is to say so.
+    far_verb = (
+        "  test_a.py: 27.3  # the flat weight a PR-added row takes is, in this"
+        " shard, one that UNDERSTATES it" + basis + "\n"
+        "  test_b.py: 0.5  # the flat default a cold leg pays interpreter start for"
+        " here is one the census reading has already replaced, and on the slow leg"
+        " it still UNDERSTATES the body" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        far_verb, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5)], (
+        "the window is the SENTENCE — an arm bounded to 40 characters returns [] "
+        "while the claim is on the page, which is the false clean it exists to "
+        "prevent")
+    # ── The DECIMAL-POINT bound (#12962 rebase review, P1) ────────────────────
+    # `[^.;]*?` reads the decimal point of ANY figure as a sentence end, so the most
+    # natural way to write this note — naming the reading the flat default is being
+    # compared against — returned `[]` while the claim was on the page. All three of
+    # these were SILENT on the shipped arm; the same shape without a figure BIT.
+    # A `.` followed by a digit is not a terminator; `_CLAUSE` is the window.
+    decimal = (
+        "  test_a.py: 27.3  # the flat weight is, against the 2.5 reading, one that"
+        " UNDERSTATES it" + basis + "\n"
+        "  test_b.py: 0.5  # the flat default, measured against a 3.0 wall, still"
+        " UNDERSTATES it" + basis + "\n"
+        "  test_c.py: 25.1  # the flat reading is 1.4 on the 2.0 rule and it"
+        " UNDERSTATES this file" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        decimal, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5),
+                           ("test_c.py", 25.1)], (
+        "a decimal point is not a sentence end — `[^.;]` returns [] over every "
+        "claim that names the reading it compares against")
+    # …and the DECIMAL is still not a licence to cross a REAL terminator: a `.`
+    # followed by a space, or a `;`, bounds the clause exactly as before.
+    real_stop = (
+        "  test_a.py: 27.3  # the flat weight is 2.0. It UNDERSTATES nothing now"
+        + basis + "\n"
+        "  test_b.py: 0.5  # the flat weight is 2.0; the row UNDERSTATES nothing"
+        + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        real_stop, quad) == []
+    # …and the sentence bound is what keeps it honest: a `.` or `;` terminates the
+    # claim, so a healed past-tense sentence is never joined to a later verb.
+    cross_sentence = (
+        "  test_a.py: 27.3  # the flat weight was replaced by this sweep; the row"
+        " now UNDERSTATES nothing" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        cross_sentence, quad) == []
+    # …and the PAST tense of every one of those spellings stays silent, because the
+    # fix IS the past tense — a widening that bit the healed wording would red every
+    # corrected row on the committed map and leave no legal way to write the note.
+    healed = (
+        "  test_a.py: 27.3  # the flat default UNDERSTATED it until this sweep"
+        " replaced the row." + basis + "\n"
+        "  test_b.py: 0.5  # The flat 2.0 OVERSTATED it until this sweep replaced"
+        " the row." + basis + "\n"
+        "  test_c.py: 25.1  # so the flat reading UNDERSTATED it until this sweep"
+        " replaced the row" + basis + "\n"
+        "  test_d.py: 12.7  # the flat weight OVERSTATED it until this sweep"
+        " re-based it." + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        healed, quad) == []
+
+    # ── The FUTURE-SWEEP construction (#12962 cycle 4) ────────────────────────
+    # These name the sweep still owed without ever writing UNDER/OVERSTATE, so the
+    # tense arm alone cannot see them; four rows shipped this way at the 2026-11-16
+    # refresh, under a widening whose own docstring already promised this arm.
+    owing = (
+        "  test_a.py: 55.5  # #9076: flat default until a CI sweep measures this"
+        " file" + basis + "\n"
+        "  test_b.py: 31.3  # ⚠️ KNOWN UNDER-ESTIMATE UNTIL THE REFRESHER." + basis + "\n"
+        "  test_c.py: 24.7  # until the refresh lands a fast shard is"
+        " under-weighted" + basis + "\n"
+        "  test_d.py: 18.8  # flat default until the first post-merge sweep —"
+        " nothing else" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        owing, quad) == [("test_a.py", 55.5), ("test_b.py", 31.3),
+                         ("test_c.py", 24.7), ("test_d.py", 18.8)]
+    # …and the healed wording — which names the LANDED sweep — stays silent. This
+    # is the arm that keeps the widening from biting every corrected row on the
+    # committed map, so it is pinned rather than assumed.
+    landed_sweep = (
+        "  test_a.py: 55.5  # it opened as the flat default; the 2026-11-16 sweep"
+        " replaced it" + basis + "\n"
+        "  test_b.py: 31.3  # A KNOWN UNDER-ESTIMATE, and it survived the"
+        " 2026-11-16 sweep" + basis + "\n"
+        "  test_c.py: 24.7  # until the 2026-11-16 sweep landed, a fast shard was"
+        " under-weighted by ~6.4x" + basis + "\n"
+        "  test_d.py: 18.8  # the flat 2.0 OVERSTATED it until this sweep replaced"
+        " the row" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        landed_sweep, quad) == []
+
+    # …and the SAME construction in the PRESENT tense bites. Pinned because the
+    # boundary is the shipped six-verb list only in its `until the refresher` form:
+    # these spell the claim with a present predicate the list does not cover.
+    synonym_owing = (
+        "  test_a.py: 27.3  # it stays at the flat default until the refresher"
+        " corrects the row." + basis + "\n"
+        "  test_b.py: 0.5  # it stays at the flat default until the refresher"
+        " measures the file." + basis + "\n"
+        "  test_c.py: 25.1  # it is the flat default until the first post-merge"
+        " sweep gives it a reading." + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        synonym_owing, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5),
+                                 ("test_c.py", 25.1)]
+
+    # ── The INSTRUMENT/VERB spellings (#12962 cycle 6) ────────────────────────
+    # The map names the owed sweep by its TOOL or its VERB far more often than by the
+    # word "sweep", so the four arms above reported `[]` over three rows that each
+    # sat beside a tail citing the ALREADY-LANDED sweep — the same contradiction this
+    # guard exists to catch, one spelling over again. Pinned in both directions.
+    instrument_owing = (
+        "  test_a.py: 3.9  # a weight is a SHARD-LAYOUT input, so it stays at the"
+        " default until `tools/ci_timing.py --refresh-durations` replaces it from"
+        " junit" + basis + "\n"
+        "  test_b.py: 0.6  # entered at the flat default per the convention until a"
+        " CI junit artifact carries the weight" + basis + "\n"
+        "  test_c.py: 0.9  # flat default until a junit reading lands" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        instrument_owing, quad) == [("test_a.py", 3.9), ("test_b.py", 0.6),
+                                    ("test_c.py", 0.9)], (
+        "naming the sweep by its instrument (`junit`, `tools/ci_timing`) is the "
+        "map's DOMINANT spelling of this claim; an arm that reads only the word "
+        "`sweep` reports [] while three rows assert the owed basis")
+    # …and the healed wording — which names the LANDED sweep instead of an owed one
+    # — stays silent. The last two rows are the cycle-7 POLARITY pin: the minimal
+    # legal repair of an owed sentence is to PAST-TENSE its verb and keep the
+    # instrument, so an arm keyed on the tool name alone (rather than on a
+    # present/future verb) red exactly that repair and left no way to write the note.
+    instrument_healed = (
+        "  test_a.py: 3.9  # it stayed at the default until the 2026-11-16 sweep"
+        " replaced it from junit" + basis + "\n"
+        "  test_b.py: 0.6  # entered at the flat default; the 2026-11-09 sweep"
+        " re-derived it to 0.9" + basis + "\n"
+        "  test_c.py: 0.9  # it stayed at the default until `tools/ci_timing.py"
+        " --refresh-durations` replaced it from junit" + basis + "\n"
+        "  test_d.py: 1.2  # until junit artifacts carried the weight, the flat"
+        " default stood" + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        instrument_healed, quad) == [], (
+        "the fix IS the past tense — an arm that bit the healed wording would red "
+        "every corrected row on the committed map")
+    # ── The NOUN arms' tense boundary (#12962 cycle 6) ──────────────────────────
+    # `until the refresher` / `until the first post-merge` were bare, so they matched
+    # a TRUE past-tense history — the blessed healed form itself — and would have
+    # redded `test-slow` on the next refresh. The lookahead requires no past-tense
+    # `landed`-marker to follow in the same sentence; `UNTIL THE REFRESHER.` with
+    # nothing after it (the shipped shape the arm was added for) still bites.
+    healed_noun = (
+        "  test_a.py: 27.3  # the flat 2.0 UNDERSTATED it until the refresher"
+        " replaced the row." + basis + "\n"
+        "  test_b.py: 27.3  # it was the flat default until the first post-merge"
+        " sweep gave it a reading." + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        healed_noun, {"test_a.py": 27.3, "test_b.py": 27.3}) == [], (
+        "a past-tense history is not a claim — the noun arms need the same tense "
+        "boundary the UNDER/OVERSTATE arm gets from its closing \\b")
+    bare_owing = (
+        "  test_a.py: 27.3  # ⚠️ KNOWN UNDER-ESTIMATE UNTIL THE REFRESHER."
+        + basis + "\n"
+        "  test_b.py: 27.3  # the flat default holds until the first post-merge"
+        " sweep, so a fast shard is under-weighted." + basis)
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        bare_owing, {"test_a.py": 27.3, "test_b.py": 27.3}) == [
+        ("test_a.py", 27.3), ("test_b.py", 27.3)]
 
 
 _DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")
@@ -11906,14 +12260,75 @@ def test_the_staleness_chain_terminus_guard_is_not_vacuous():
     assert _durations_rows_whose_chain_disagrees_with_its_citation(legitimate) == []
 
 
-#: A row asserting that its OWN committed weight is "deliberately unchanged" —
-#: "The 3.7 weight sits inside that range and is deliberately unchanged". The number
-#: is a claim about the row it sits in, so it can be falsified by that row's value.
+#: A row asserting that its OWN committed weight stands at N — "The 3.7 weight sits
+#: inside that range and is deliberately unchanged". The number is a claim about the
+#: row it sits in, so it can be falsified by that row's value.
 #: A note that quotes a PREVIOUS weight ("was 3.7", the sweep's provenance) must not
-#: be read as a claim — the sweep suffix never puts `deliberately unchanged` after
+#: be read as a claim — the sweep suffix never puts a present-tense predicate after
 #: the number, which is what this anchors on.
+#:
+#: ⛔ WIDENED at the 2026-11-16 refresh (#12962 cycle 6). The arm read exactly ONE
+#: predicate (`deliberately unchanged`), so nine rows asserted a superseded weight
+#: in another spelling and the pin returned `[]` while they contradicted their own
+#: value: `the 8.8 WEIGHT is deliberately left alone`, `The 18.0 WEIGHT … is
+#: deliberately NOT re-derived`, `the 10.0 weight is NOT moved`, `Declared at 5.0,
+#: above the highest observed wall`, `the 6.8 weight … left alone`, `WEIGHT raised
+#: 3.6 -> 6.2 … never corrected downward`, `The 5.0 WEIGHT is kept`, `the 2.0 weight
+#: is unchanged`. That is the same false-clean class this PR closes one function
+#: above — a guard that reads one spelling of a claim cannot say the claim is
+#: absent — so the predicate set is now the family the map actually uses. The PAST
+#: tense stays silent by construction: every alternative below is present-tense, and
+#: `was`/`held`/`had` are not among them.
 _WEIGHT_UNCHANGED_CLAIM_RE = re.compile(
-    r"\bthe\s+(?P<w>\d+(?:\.\d+)?)\s*weight\b[^.;]{0,160}?\bdeliberately\s+unchanged",
+    r"\bthe\s+(?P<w>\d+(?:\.\d+)?)\s*weight\b" +
+    # ⛔ the tense boundary: a PAST copula governing the predicate means the clause is
+    # history ("The 8.8 WEIGHT WAS deliberately left alone"), which is what every
+    # repaired row says after a sweep re-bases it. Without this the widening bit the
+    # healed form and left no legal way to write the note.
+    #
+    # ⛔ AND THE BOUNDARY IS THE PREDICATE'S OWN COPULA, NOT A SENTENCE-WIDE SCAN
+    # (#12962 rebase review, P2). It shipped as a negative LOOKAHEAD over the whole
+    # window — `(?![^.;]*?\b(?:was|were|had|held|became)\b)` — so ANY past verb
+    # anywhere later in the clause silenced a LIVE claim: measured on a row holding
+    # `1.5`, "The 5.0 WEIGHT is kept, because the earlier reading had been 3.6"
+    # returned `[]`, while the same sentence with the reason dropped BIT. A lookahead
+    # cannot be scoped to "the gap I am about to match", so the scan had to become a
+    # lookbehind ON THE PREDICATE — which is the shape `_WEIGHT_DECLARED_CLAIM_RE`
+    # below already used, and the two arms now agree about the rule they document.
+    #   • The over-block this trades for is real and narrow: a past copula that does
+    #     NOT sit immediately before the predicate still bites — "The 8.8 WEIGHT
+    #     WAS, per the census, deliberately left alone", "… had all been deliberately
+    #     left alone". Loud, one word away from a legal form, and deliberately
+    #     preferred over a silent miss — the polarity this file's future-sweep arm
+    #     sets out at length further down.
+    #
+    # ⛔ AND A SINGLE TOKEN IS NOT ENOUGH (#12962 rebase review cycle 2, P1). The
+    # first cut of this lookbehind listed five ONE-WORD copulas, so every multi-token
+    # past auxiliary put `been`/`being` immediately before the predicate and fell
+    # straight through it: measured end-to-end, a correctly-healed row reading "The
+    # 8.8 WEIGHT had been deliberately left alone until the 2026-11-16 census
+    # replaced it" reported `[('test_a.py', 8.8, 1.4)]` — a FALSE RED on a
+    # `slow_files` row, i.e. on `test-slow`, which is the very failure this commit's
+    # own sibling fix set out to remove. The auxiliary chains are named explicitly.
+    # ⚠️ `has been` is NOT in the list and must not be: present perfect is a claim
+    # about the CURRENT state ("the 8.8 WEIGHT has been deliberately left alone" says
+    # it is left alone now), so it has to bite. `had been` / `was being` are history.
+    _CLAUSE +
+    r"(?<!\bwas )(?<!\bwere )(?<!\bhad )(?<!\bheld )(?<!\bbecame )"
+    r"(?<!\bhad been )(?<!\bwas being )(?<!\bwere being )"
+    r"\b(?:deliberately\s+(?:unchanged|left\s+alone|not\s+re-derived)"
+    r"|(?:is|stays|remains)\s+(?:kept|unchanged|not\s+moved|an\s+upper\s+bound)"
+    r"|never\s+corrected\s+downward)",
+    re.IGNORECASE)
+#: The same claim in its `declared at N` spelling: "Declared at 5.0, above the
+#: highest observed wall, so a loaded leg cannot under-pack" while the row holds 1.5.
+#: Kept as its own arm because it names no `weight` noun at all.
+_WEIGHT_DECLARED_CLAIM_RE = re.compile(
+    # the same tense boundary, on the other side of the verb: "It WAS declared at 5.0"
+    # is history, "Declared at 5.0" is a claim.
+    r"(?<!\bwas )(?<!\bwere )(?<!\bhad )\bdeclared\s+at\s+(?P<w>\d+(?:\.\d+)?)\b" + _CLAUSE +
+    r"\b(?:above\s+the\s+highest|so\s+a\s+loaded\s+leg\s+cannot\s+under-pack"
+    r"|so\s+a\s+cold\s+leg\s+cannot\s+under-pack)",
     re.IGNORECASE)
 
 
@@ -11921,7 +12336,8 @@ def _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(text: str):
     """`(key, claimed, value)` rows whose note calls a weight unchanged at another number."""
     out = []
     for key, note in _durations_row_comments(text):
-        claim = _WEIGHT_UNCHANGED_CLAIM_RE.search(note)
+        claim = (_WEIGHT_UNCHANGED_CLAIM_RE.search(note)
+                 or _WEIGHT_DECLARED_CLAIM_RE.search(note))
         if claim is None:
             continue
         row = next((ln for ln in text.splitlines()
@@ -11955,6 +12371,131 @@ def test_no_durations_row_calls_an_unchanged_weight_one_it_does_not_hold():
     )
 
 
+#: A row asserting that its OWN committed weight IS a number the row no longer
+#: holds — "The weight is 0.9", "Declared 14.0s". The same falsification as
+#: `_WEIGHT_UNCHANGED_CLAIM_RE` above, in the DECLARATIVE spelling that guard cannot
+#: see: at the 2026-11-16 refresh four rows shipped this way after the sweep moved
+#: their values (`test_substrate_map.py` 0.9 -> 1.4, `test_10017_turn_parity_census`
+#: 25.0 -> 15.2, `test_embed_decision_step_11086` 7.0 -> 0.9,
+#: `test_demo_session_read_exclusion_8290` 14.0 -> 12.3) — the third re-ship of
+#: this defect in `test_substrate_map.py`'s row alone (3.7 -> 0.9 -> 1.4).
+#: ⛔ Anchored to the PRESENT-TENSE forms only. A note recording history must stay
+#: silent: "the weight WAS 0.9", the sweep's own `was 3.7`, and the `-> declared
+#: 23.8` derivation of a superseded figure all name a past value deliberately.
+#:
+#: ⛔ AND THE PREDICATE-BEFORE-NUMBER SPELLING (#12962 cycle 7, review P1). The
+#: first cut required the digit IMMEDIATELY after `is`, so
+#: `test_8843_malformed_envelope_accounting.py` — row `0.2`, note "The WEIGHT is
+#: rounded UP to 3.0 on the neighbouring rows' rule (never correct a weight downward
+#: without a CI junit reading)" with its own tail reading `was 0.3` — was unread by
+#: BOTH arms and the refresh corrected it DOWNWARD against that very sentence. That
+#: is the third spelling in a row that this class has shipped in, so the arm reads
+#: the verb window too: `the WEIGHT is <verb …> to N`. The window is the SENTENCE
+#: (`_CLAUSE`: `.`, `;` and the newline, no character budget — and a DECIMAL POINT
+#: does not terminate it; `[^.;]*?` here was the same invisible bound one spelling
+#: over, #12962 rebase review P1) — cycle 8 fixed an undocumented 120-character
+#: budget here that contradicted this sentence and would have returned `[]` over a
+#: long-but-single-sentence claim, the same invisible-bound defect cycle 5 removed
+#: one arm over. The copula must still be PRESENT — `the WEIGHT WAS rounded UP to
+#: 3.0` is history and stays silent.
+_WEIGHT_IS_CLAIM_RE = re.compile(
+    r"\bthe\s+weight\s+is\s+(?P<w1>\d+(?:\.\d+)?)"
+    # the same tense boundary its sibling `_WEIGHT_DECLARED_CLAIM_RE` already carried:
+    # "It WAS declared 7.0s" is history, "Declared 7.0s" is a claim. Measured before
+    # this fix, BOTH past forms bit — and the past form is exactly how every repaired
+    # row writes it, so the healed note was unwritable in this spelling (#12962
+    # rebase review, P2). Two arms for one verb have to agree about the tense rule.
+    r"|(?<!\bwas )(?<!\bwere )(?<!\bhad )\bDeclared\s+(?P<w2>\d+(?:\.\d+)?)\s*s\b"
+    r"|\bthe\s+weight\s+is\b" + _CLAUSE + r"\bto\s+(?P<w3>\d+(?:\.\d+)?)",
+    re.IGNORECASE)
+
+
+def _durations_rows_declaring_a_weight_they_do_not_hold(text: str):
+    """`(key, claimed, value)` rows whose note declares a weight at another number."""
+    out = []
+    for key, note in _durations_row_comments(text):
+        claim = _WEIGHT_IS_CLAIM_RE.search(note)
+        if claim is None:
+            continue
+        row = next((ln for ln in text.splitlines()
+                    if (m := _DURATIONS_ROW_RE.match(ln)) and m.group("key") == key),
+                   None)
+        if row is None:  # pragma: no cover — every judged note came from a row
+            continue
+        value = float(_DURATIONS_ROW_RE.match(row).group("value"))
+        claimed = float(claim.group("w1") or claim.group("w2")
+                        or claim.group("w3"))
+        if abs(claimed - value) > 1e-9:
+            out.append((key, claimed, value))
+    return out
+
+
+def test_no_durations_row_declares_a_weight_it_does_not_hold():
+    """#12962 cycle 5: the DECLARATIVE form of the #10726 claim.
+
+    `test_no_durations_row_calls_an_unchanged_weight_one_it_does_not_hold` anchors
+    on `the N weight … deliberately unchanged`, so a row that says `The weight is
+    0.9` or `Declared 7.0s` while its value moved is invisible to it — which is how
+    four rows shipped past the 2026-11-16 refresh. Same thesis as the flat-default
+    guard above: a guard that reads one spelling cannot say a claim is absent.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_declaring_a_weight_they_do_not_hold(text)
+    assert offenders == [], (
+        "a durations row's note DECLARES a weight the row does not hold — the note "
+        "is a stale copy of the row it sits in, and a reader trusts the prose: "
+        f"(key, claimed, row's value): {offenders}")
+
+
+def test_the_declared_weight_claim_check_is_not_vacuous():
+    """Bite on the declarations that shipped; stay silent on the history forms."""
+    stale = (
+        "durations:\n"
+        "  test_a.py: 1.4  # The weight is 0.9, the refresh-durations replacement.\n"
+        "  test_b.py: 0.9  # Declared 7.0s — ~1.4x the measured body.\n"
+        # test_8843_malformed_envelope_accounting.py: row 0.2, note asserting 3.0.
+        # VERBATIM from the row that shipped past the first cut of this arm: the
+        # digit follows the verb, not the copula, so `the weight is <N>` misses it.
+        "  test_c.py: 0.2  # The WEIGHT is rounded UP to 3.0 on the neighbouring"
+        " rows' rule (never correct a weight downward without a CI junit reading).\n"
+        # ⛔ the SENTENCE bound, pinned (#12962 cycle 8): a long single-sentence claim
+        # must still be read. A character budget here would return `[]` over a real
+        # claim, which is the invisible-bound defect this family already paid for once.
+        "  test_f.py: 0.2  # The WEIGHT is, following the neighbouring rows'"
+        " long-standing convention about never correcting a weight downward without a"
+        " CI junit reading that covers the whole file and not merely one collected case"
+        " in it, rounded UP to 3.0.\n"
+        # ⛔ the DECIMAL-POINT bound (#12962 rebase review, P1): `[^.;]*?` read the
+        # decimal of the `2.5` as a sentence end, so the claim went unread. VERBATIM
+        # the reviewer's probe, on a row holding `0.2`.
+        "  test_h.py: 0.2  # The weight is, on a 2.5 s wall, rounded UP to 3.0.\n"
+        "surfaces: []\n")
+    assert _durations_rows_declaring_a_weight_they_do_not_hold(stale) == [
+        ("test_a.py", 0.9, 1.4), ("test_b.py", 7.0, 0.9), ("test_c.py", 3.0, 0.2),
+        ("test_f.py", 3.0, 0.2), ("test_h.py", 3.0, 0.2)]
+    legitimate = (
+        "durations:\n"
+        "  test_a.py: 1.4  # The weight WAS 0.9 from the 2026-11-02 sweep.\n"
+        "  test_b.py: 0.9  # 23.77 s of testcase time -> declared 23.8 on that"
+        " day's map.\n"
+        "  test_c.py: 0.9  # Declared 0.9s, and the row still holds it.\n"
+        "  test_d.py: 1.4  # the census reading, not a declaration at all.\n"
+        # the PAST copula in the predicate-before-number spelling is history: this
+        # is the exact form every repaired row takes, so it must stay silent.
+        "  test_e.py: 0.2  # The WEIGHT WAS rounded UP to 3.0 until the 2026-11-16"
+        " census read 0.2.\n"
+        # ⛔ `Declared N s` needed the SAME tense boundary its sibling
+        # `_WEIGHT_DECLARED_CLAIM_RE` already carried (#12962 rebase review, P2).
+        # Both past forms BIT before the fix — and they are the form every repaired
+        # row takes, so the healed note was unwritable in this spelling.
+        "  test_g.py: 0.9  # It was declared 7.0s on the old map; the census has"
+        " since read 0.9.\n"
+        "  test_h.py: 0.9  # the weight was declared 7.0s until the 2026-11-16"
+        " sweep gave this row its 0.9.\n"
+        "surfaces: []\n")
+    assert _durations_rows_declaring_a_weight_they_do_not_hold(legitimate) == []
+
+
 def test_the_unchanged_weight_claim_check_is_not_vacuous():
     """The guard above must bite on the shipped shape and stay quiet on its siblings.
 
@@ -11982,6 +12523,120 @@ def test_the_unchanged_weight_claim_check_is_not_vacuous():
         "surfaces: []\n")
     assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
         legitimate) == []
+
+    # ── The spellings that shipped PAST this arm (#12962 cycle 6) ──────────────
+    # The arm read exactly ONE predicate (`deliberately unchanged`), so nine rows
+    # asserted a superseded weight in another spelling and this pin returned `[]`
+    # while they contradicted their own value. Four of them became false through the
+    # 2026-11-16 refresh's own re-basing. Each shape below is VERBATIM from one of
+    # those rows, paired with the value the map actually held.
+    respelled = (
+        "durations:\n"
+        # test_8098_webhook_retry_sweep.py: 1.4 (main: 8.8)
+        "  test_a.py: 1.4  # The 8.8 WEIGHT is deliberately left alone: it is the"
+        " shard packer's input, so do not 'correct' it down.\n"
+        # test_9079_edge_lane_declared.py: 1.8 (main: 18.0)
+        "  test_b.py: 1.8  # The 18.0 WEIGHT predates that added test and is"
+        " deliberately NOT re-derived from this box.\n"
+        # test_7949_capstone_verdict_check.py: 11.3 (main: 10.0)
+        "  test_c.py: 11.3  # it is a file scan with no subprocess and the 10.0"
+        " weight is NOT moved.\n"
+        # test_9256_lane_probe_attribution.py: 0.5
+        "  test_d.py: 0.5  # the 7-test wall is BELOW the 6.8 weight, so it is"
+        " deliberately left alone rather than trimmed to it.\n"
+        # test_mcp_safe_error_telemetry_8135.py: 0.1
+        "  test_e.py: 0.1  # The 5.0 WEIGHT is kept as the higher/conservative"
+        " reading on purpose.\n"
+        # test_s2_decision_seam_5087.py: 4.6
+        "  test_f.py: 4.6  # the case is inside that weight, so the 2.0 weight is"
+        " unchanged.\n"
+        # test_ax_write_eval.py: 1.5 — the `declared at N` spelling, which names no
+        # `weight` noun at all and so needed its own arm.
+        "  test_g.py: 1.5  # Declared at 5.0, above the highest observed wall, so a"
+        " loaded leg cannot under-pack.\n"
+        # ⛔ the DECIMAL-POINT bound, on the two arms that had no pin for it (#12962
+        # rebase review cycle 2, P2). Both were SILENT on the `[^.;]*?` window and
+        # BITE on `_CLAUSE`; mutation-tested, reverting `_CLAUSE` in EITHER arm left
+        # the whole suite green, so the class could be re-opened silently. Probe #5 is
+        # the reviewer's, verbatim.
+        "  test_i.py: 1.5  # the 8.8 weight is, against the 2.5 local reading,"
+        " deliberately left alone.\n"
+        "  test_j.py: 1.5  # declared at 5.0 against a 2.5 s wall, above the highest"
+        " observed wall, so a loaded leg cannot under-pack.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
+        respelled) == [
+        ("test_a.py", 8.8, 1.4), ("test_b.py", 18.0, 1.8),
+        ("test_c.py", 10.0, 11.3), ("test_d.py", 6.8, 0.5),
+        ("test_e.py", 5.0, 0.1), ("test_f.py", 2.0, 4.6),
+        ("test_g.py", 5.0, 1.5), ("test_i.py", 8.8, 1.5),
+        ("test_j.py", 5.0, 1.5)], (
+        "a guard that reads one spelling of the claim cannot say the claim is "
+        "absent — these are the spellings that shipped past it")
+
+    # …and the PAST tense stays silent, which is the whole repaired dialect: without
+    # this boundary the widening bit every row a sweep had already healed.
+    past = (
+        "durations:\n"
+        "  test_a.py: 1.4  # The 8.8 WEIGHT WAS deliberately left alone; the"
+        " 2026-11-16 census replaced it with the 1.4 beside this row.\n"
+        "  test_b.py: 1.5  # It WAS declared at 5.0, above the highest observed"
+        " wall, so a loaded leg could not under-pack.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
+        past) == []
+
+    # ── The past-copula boundary is the PREDICATE's, not a sentence scan (#12962
+    # rebase review, P2) ─────────────────────────────────────────────────────────
+    # It shipped as a negative LOOKAHEAD over the whole window, so ANY past verb
+    # later in the clause read the row as healed. `unrelated_past_verb` is the
+    # reviewer's probe: a present-tense claim (`is kept`) carrying a past tense in
+    # an unrelated trailing reason. It returned `[]` on the shipped arm — a live
+    # claim silenced by a sentence it does not belong to.
+    unrelated_past_verb = (
+        "durations:\n"
+        "  test_a.py: 1.5  # The 5.0 WEIGHT is kept, because the earlier reading"
+        " had been 3.6.\n"
+        "  test_b.py: 1.5  # The 5.0 WEIGHT is kept, since the 3.6 became 6.2 and"
+        " the census had not yet run.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
+        unrelated_past_verb) == [("test_a.py", 5.0, 1.5), ("test_b.py", 5.0, 1.5)], (
+        "the tense boundary is the predicate's own copula — a past verb elsewhere in "
+        "the clause must not silence a claim that is present tense")
+    # …and the healed forms this boundary exists for stay silent, INCLUDING the one
+    # with material between the number and the copula. That shape is why the scan
+    # could not simply become "the copula adjacent to the number".
+    healed_with_gap = (
+        "durations:\n"
+        "  test_a.py: 1.4  # The 8.8 WEIGHT WAS deliberately left alone; the"
+        " 2026-11-16 census replaced it with the 1.4 beside this row.\n"
+        "  test_b.py: 1.4  # The 8.8 WEIGHT, sitting inside that range, WAS"
+        " deliberately left alone.\n"
+        # ⛔ the PAST-AUXILIARY chain (#12962 rebase review cycle 2, P1). Each of
+        # these put `been`/`being` immediately before the predicate, so a one-word
+        # lookbehind fell straight through and reported a FALSE RED on a healed row.
+        "  test_c.py: 1.4  # The 8.8 WEIGHT had been deliberately left alone until"
+        " the 2026-11-16 census replaced it.\n"
+        "  test_d.py: 1.4  # The 8.8 WEIGHT had been deliberately unchanged; the"
+        " 2026-11-16 census replaced it with the 1.4 beside this row.\n"
+        "  test_e.py: 1.4  # The 8.8 WEIGHT was being deliberately left alone when"
+        " the 2026-11-16 census replaced it.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
+        healed_with_gap) == []
+    # …and `has been` is PRESENT perfect — it asserts the CURRENT state, so it must
+    # bite. The line between this case and the three above is the whole point of
+    # naming the auxiliary chains explicitly rather than widening `was|were|had`.
+    present_perfect = (
+        "durations:\n"
+        "  test_a.py: 1.4  # The 8.8 WEIGHT has been deliberately left alone since"
+        " the 2026-11-16 census moved everything else.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
+        present_perfect) == [("test_a.py", 8.8, 1.4)], (
+        "`has been` is a claim about the state NOW — only `had been` / `was being` "
+        "are history")
 
 
 #: A row restating its file's total in PROSE, beside the machine-read instrument cite:

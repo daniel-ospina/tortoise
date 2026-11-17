@@ -733,12 +733,18 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 #                             filed under a guessed tenant (#9192);
 #   ``write_failed``          the record was unreachable or the projection
 #                             refused the record;
-#   ``journal_collision``     the position row holds content this write would
-#                             not produce (a different record, or this record's
-#                             payload re-derived) (#9318). ⛔ Unlike ``write_failed``
+#   ``journal_collision``     the position row holds a record this write does
+#                             NOT continue — a different record, or (when this
+#                             write carries no `ts` to compare) a payload whose
+#                             derivation moved (#9318). ⛔ Unlike ``write_failed``
 #                             a REPLAY CANNOT heal it — the replay re-raises —
 #                             so the remedy is journal identity in the key
-#                             (#12894), not a replay;
+#                             (#12894), not a replay. A same-capture payload
+#                             re-derivation is DRIFT and never reaches this
+#                             counter (#12904) — and neither does a DIFFERENT
+#                             record captured at the same instant, which that
+#                             same split admits silently (the mirror residual in
+#                             `record_projection.JournalPositionCollision`);
 #   ``circuit_open``          a connect to the record FAILED moments ago, so the
 #                             live door refused this write locally instead of
 #                             paying the connect timeout once per record
@@ -763,6 +769,40 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 RECORD_WRITE_FAILURE_COUNT = Counter(
     "tortoise_record_write_failures_total",
     "Armed record writes that did not happen (#9188)",
+    ["reason"],
+)
+
+#: The CACHE leg's own channel (#12943). Every counter above counts the RECORD
+#: — a row that never reached Postgres, a journal append that failed, a row
+#: declined because the lane has no journal. NONE of them could see the failure
+#: #12943 measured: the record took every write and the CACHE took none,
+#: because this process's cache was a local store rather than the record's
+#: store. The record's counters read perfectly healthy while that happened, so
+#: the cache needs a counter of its own rather than a new reason on the
+#: record's — the two answer different questions ("did the truth land?" vs
+#: "did the DERIVED copy get the same write?"), and folding them together would
+#: make a healthy record on an unshared cache read as a failing record.
+#:
+#: ⚠️ **THE UNIT IS A CONSTRUCTION, NOT A WRITE**, and the help text says so
+#: because the difference is load-bearing. The condition is a property of the
+#: PROCESS's two stores, and the check runs where that property is decided
+#: (``TortoiseSDK.__init__``), so one increment = one SDK built in the split
+#: shape. It is therefore NOT comparable with ``record_writes_applied`` beside
+#: it: ``hosted_api._make_sdk`` builds an anchor AND a per-request SDK on its
+#: embedded path, and ``_data_sdk`` serves reads as well as writes. What the
+#: number answers is "is this process split, and how hard is it being asked" —
+#: any non-zero value is the misconfiguration, and the RATE is constructions.
+#: (Counting at the write seam instead was rejected: it would need a check per
+#: write, on the hot path, to learn a fact that is already fixed at
+#: construction.)
+#:
+#: ``reason`` vocabulary: ``cache_not_shared`` (the only value today — see
+#: :mod:`tortoise.cache_leg`). Kept as a label rather than a bare counter so a
+#: future cache-leg fault names itself instead of arriving as an increment
+#: nobody can attribute.
+CACHE_LEG_FAILURE_COUNT = Counter(
+    "tortoise_cache_leg_failures_total",
+    "SDK constructions whose cache is not the record's store (#12943)",
     ["reason"],
 )
 
@@ -2139,24 +2179,26 @@ def record_record_write_failure(reason: str) -> None:
       neither set it names the graph-bound credential instead;
     * ``write_failed`` — the record was unreachable or the projection refused
       the record; ``replay`` heals it from the journal;
-    * ``journal_collision`` — the record WAS reached and refused to index this
-      record under a journal position whose content differs from what this write
-      would produce (a different record, or this record's payload re-derived
-      since that row was written) (#9318). Neither unreachable nor
+    * ``journal_collision`` — the record WAS reached and refused to file this
+      record under a journal position it does not CONTINUE (#9318): a different
+      record, or — when this write carries no ``ts`` for the capture time to be
+      compared — a payload whose DERIVATION moved. Neither unreachable nor
       misconfigured: the journal holds the
       record, and what the record cannot do is file it under that position — so
       the fix is not on this deployment at all. The population is any journal
       instance whose numbering resumes below the tenant's position high-water
       mark — a second durable journal under one tenant (two corpus roots, two
-      SDKs with different ``event_log_path``), a journal RESTORE, a rotation, or
-      a truncation — AND any journal whose payload DERIVATION changed since that
-      row was written, which reuses the same journal's own numbering and needs no
-      second instance at all. ``replay`` heals every other failure; it cannot heal this
+      SDKs with different ``event_log_path``), a journal RESTORE, a rotation, a
+      truncation — plus any POSITION TWO RECORDS REACHED at different capture
+      times. ⛔ A payload re-derivation alone is NOT in this population (#12904
+      P0-1): `recorded_at` is stamped at capture and survives a re-derivation,
+      so the same record re-derived at the same capture is DRIFT and replays
+      SILENTLY. ``replay`` heals every other failure; it cannot heal this
       one, because the append-only row that owns the position carries that
       other content, and the key carries no journal identity — that is ``#12894``'s
-      schema decision. A genuine REPLAY (same position, same content) never
-      reaches this counter: the fold compares the surviving row's content and
-      stays silent;
+      schema decision. A genuine REPLAY (same position, same content AND the
+      same ``recorded_at``) never reaches this counter: it compares the surviving
+      row's content and its capture time and stays silent;
     * ``circuit_open`` — a connect to the record failed within
       ``record_writer.LIVE_WRITE_BREAKER_SECONDS``, so the live door refused this
       write locally: no socket, no timeout. The record is DEGRADED, not
@@ -2540,6 +2582,34 @@ def record_last_write_at() -> str | None:
 def record_write_failure_counts() -> dict[str, int]:
     """In-process snapshot of ``RECORD_WRITE_FAILURE_COUNT``, by reason (#9188)."""
     return _collect_by_label(RECORD_WRITE_FAILURE_COUNT, "reason")
+
+
+def record_cache_leg_failure(reason: str) -> None:
+    """Count one SDK construction whose CACHE is not the record's store (#12943).
+
+    The UNIT is a construction, not a write — see ``CACHE_LEG_FAILURE_COUNT``'s
+    help for why that is the only place the condition can be answered, and why
+    the number is therefore not comparable with ``record_writes_applied``.
+
+    Single writer: ``tortoise.cache_leg.note_local_cache`` (the ``#501``/``#3677``
+    house shape — callers never touch the counter directly). The vocabulary is
+    documented at ``CACHE_LEG_FAILURE_COUNT``; today's only value is
+    ``cache_not_shared``: the record is armed against a shared store while this
+    process's cache is the embedded one, so the two are different stores rather
+    than two copies of the same data.
+
+    ⛔ It is NOT ``RECORD_WRITE_FAILURE_COUNT`` with a new reason: that family's
+    zero means "no record row was lost", which stays true on exactly the
+    deployment this counter exists to make visible. Reporting a healthy record
+    on an unshared cache as a RECORD failure would be the misattribution the
+    #4034 class is about, pointed the other way.
+    """
+    CACHE_LEG_FAILURE_COUNT.labels(reason=reason).inc()
+
+
+def cache_leg_failure_counts() -> dict[str, int]:
+    """In-process snapshot of ``CACHE_LEG_FAILURE_COUNT``, by reason (#12943)."""
+    return _collect_by_label(CACHE_LEG_FAILURE_COUNT, "reason")
 
 
 def record_journal_write_failure() -> None:
@@ -7246,7 +7316,7 @@ _GRAPH_SIZE_UNAVAILABLE = "graph_size not measured"
 
 
 def _bounded_graph_size(target, timeout: float) -> int:
-    """``sum(target.taxonomy().values())`` bounded by ``timeout`` (#3253).
+    """``sum(target.graph_overview(section="taxonomy").values())`` bounded by ``timeout`` (#3253).
 
     Runs the count on the DEDICATED ``GRAPH_SIZE_WORKER_NAME`` daemon worker
     and refuses to wait past ``timeout`` (see ``GRAPH_SIZE_TIMEOUT``). RAISES
@@ -7259,12 +7329,16 @@ def _bounded_graph_size(target, timeout: float) -> int:
     ``_reset_graph_size_worker()`` (mirrors ``_reset_probe_worker()``), so
     ``graph_size`` is measurable again without a process restart.
     """
-    future = daemon_worker(GRAPH_SIZE_WORKER_NAME).submit(target.taxonomy)
+    # #11609: `taxonomy()` retired into the orientation container, so the count
+    # is read through the section it became. A lambda (not a bound method) because
+    # the section is an argument to the container, and `submit` takes a callable.
+    future = daemon_worker(GRAPH_SIZE_WORKER_NAME).submit(
+        lambda: target.graph_overview(section="taxonomy"))
     try:
         counts = future.result(timeout=timeout)
     except concurrent.futures.TimeoutError as exc:
         # ``concurrent.futures.TimeoutError`` IS ``builtins.TimeoutError`` on
-        # py3.12, so a ``TimeoutError`` raised INSIDE ``taxonomy()`` (e.g. a
+        # py3.12, so a ``TimeoutError`` raised INSIDE the container call (e.g. a
         # redis socket read timeout) is caught here too. ``future.done()``
         # separates the two: a callable that already finished raised its OWN
         # error and must keep it, not be relabelled as a budget overrun.
@@ -7305,8 +7379,8 @@ def _reset_graph_size_worker() -> None:
     Mirrors ``_reset_probe_worker()``: the escape hatch for tests and for ops
     recovery when a count is presumed wedged past any realistic budget. The
     old (possibly wedged) thread is a daemon — it is abandoned, never joined,
-    so a permanently stalled ``taxonomy()`` cannot pin the one slot for the
-    life of the process and force a restart (#3253 review P2).
+    so a permanently stalled ``graph_overview(section="taxonomy")`` cannot pin the one slot
+    for the life of the process and force a restart (#3253 review P2).
     """
     reset_daemon_worker(GRAPH_SIZE_WORKER_NAME)
 
@@ -7522,6 +7596,11 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # keeps meaning "no record row was lost" on a healthy armed deployment —
         # every `capture_session` emits through the M2 lane.
         "record_non_journal_skips": record_non_journal_skip_counts(),
+        # #12943: the CACHE leg's own channel. Every record counter above can
+        # read healthy while the cache holds none of the same writes — that is
+        # the measured shape (record 2 objects/3 points, cache 0/0) — so the
+        # derived store gets its own key rather than a reason on the record's.
+        "cache_leg_failures": cache_leg_failure_counts(),
         # #10515: `update_point`'s ABSENT arm refused a write that may have been
         # a LEGITIMATE revision (the journal knows the id, or the graph key could
         # not be confirmed). Zero on a healthy lane means "no revision was lost in

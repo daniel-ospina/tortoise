@@ -17,7 +17,8 @@ The **current stage is state** on the Object (``pipelineStageId`` /
 ``pipelineSlot`` / ``pipelineOutcome`` / ``pipelineStageSince`` / ``isClosed``),
 so a query always returns one answer (#2792 indicator 5). **History is the
 journal**: a stage move is written through the generic entity write surface
-(``TortoiseSDK.update_entity``), which journals an ``EntityMutated`` record the
+(``TortoiseSDK.update_knowledge`` — named ``update_entity`` before #4282
+retired it), which journals an ``EntityMutated`` record the
 rebuild path replays, so the prior values are retained as dated history without
 a second lifecycle axis (the same doctrine ``Object.status`` follows).
 
@@ -573,10 +574,17 @@ def current_stage(graph, object_ref: str) -> dict:
     legal (#3590 D2), and the bare ``LIMIT 1`` silently picked one carrier, so
     this read could answer from the wrong Object.
     """
-    # #12120: over the WRITER's folded union — the raw resolver missed a
-    # spelling the write door had resolved onto this Object, so the stage read
-    # answered from no node.
-    oid = resolve_entity_id_same_entity(graph, "Object", object_ref)
+    # #12120: over the WRITER's folded union — and #13034: with the currency
+    # predicate OFF for the NAME arm. This read's whole subject is an object's
+    # POSITION, and a closed object is exactly the one whose position must stay
+    # readable (to report `isClosed`, and for `advance_stage`'s terminal guard
+    # and explicit reopen). Resolving it through the live-only arm made the
+    # position axis refuse to name the records it exists to describe — measured:
+    # `current_stage(<a closed object>)` answered `{}` and `advance_stage`
+    # reported "no Object named …" for an Object that plainly exists. Design §6
+    # puts this on the by-name arm: asking by name IS the request.
+    oid = resolve_entity_id_same_entity(graph, "Object", object_ref,
+                                        live_only=False)
     if oid is None:
         return {}
     cols = ", ".join(f"o.{p}" for p in STAGE_PROPS)
@@ -949,8 +957,11 @@ def _resolve_object(graph, ref: str) -> tuple[str, dict] | None:
     against the wrong current stage. The resolver routes a name to exactly one
     id and REFUSES on ambiguity; the props are then read by that id.
     """
-    # #12120: over the WRITER's folded union (see the note on the sibling site).
-    oid = resolve_entity_id_same_entity(graph, "Object", ref)
+    # #12120: over the WRITER's folded union (see the note on the sibling site);
+    # #13034: `live_only=False` for the same reason — a stage MOVE must find a
+    # closed Object, or the terminal guard and `reopen=True` are unreachable by
+    # name, which is the resurrection this module's guards exist to stop.
+    oid = resolve_entity_id_same_entity(graph, "Object", ref, live_only=False)
     if oid is None:
         return None
     rows = graph.query(
@@ -972,9 +983,10 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
                   declared: dict | None = None) -> StageMove:
     """Apply one observed stage transition to an Object.
 
-    The write goes through ``sdk.update_entity`` — the ONE generic entity write
-    — so it is journaled (``EntityMutated``) and replayed on every rebuild, and
-    the history is the dated record sequence.
+    The write goes through ``sdk.update_knowledge`` — the ONE generic entity
+    write since #4282 retired ``update_entity`` — so it is journaled
+    (``EntityMutated``) and replayed on every rebuild, and the history is the
+    dated record sequence.
 
     Guards (the resurrection vector the design names):
     - **kind binding** — the pipeline key must equal the Object's namespaced
@@ -1050,7 +1062,7 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
         # pair — ``pipelineStageKey`` stays the pipeline of the CURRENT stage,
         # or the guards below could not be evaluated against it (P1).
         raw = stage_ref.strip()
-        sdk.update_entity(oid, pipelineStagePending=raw,
+        sdk.update_knowledge(oid, pipelineStagePending=raw,
                           pipelineStagePendingAt=stage_ts,
                           pipelineStagePendingKey=pipeline_key)
         return StageMove(applied=False, reason="unknown-stage", pending=raw)
@@ -1097,7 +1109,7 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
     # The marker is also INDEPENDENT of the current stage: an Object the graph
     # records as closed with no resolvable stage (``isClosed`` is written
     # through the generic entity surface — ``create_object(..., isClosed=
-    # True)``, ``update_entity(id, isClosed=True)``, or the #2728 repair verb
+    # True)``, ``update_knowledge(id, isClosed=True)``, or the #2728 repair verb
     # that clears ``pipelineStageId`` while the marker remains) was reopened by
     # an ordinary later mention, because this check used to live inside
     # ``if cur_stage is not None``. That is the mirror of the
@@ -1128,7 +1140,7 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
         props["pipelineStageSource"] = source
     if reason:
         props["pipelineStageReason"] = reason
-    sdk.update_entity(oid, **props)
+    sdk.update_knowledge(oid, **props)
     return StageMove(applied=True, stage=target)
 
 

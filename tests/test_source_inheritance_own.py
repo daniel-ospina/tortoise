@@ -379,7 +379,7 @@ class TestAssessSource:
         with fresh_sdk() as sdk:
             url = "https://assess1.example"
             sdk.create_point("statement", "claim", extractedFrom=url)
-            r = sdk.assess_source(url, "alice", 0.8, "well-sourced and verified")
+            r = sdk.manage_source_trust(url=url, assessor="alice", score=0.8, rationale="well-sourced and verified")
             row = sdk._get_proj().g.query(
                 "MATCH (p:Point {id:$id}) RETURN p.pointKind, p.targetSource, "
                 "p.assessor, p.score, p.assessorReputation",
@@ -397,15 +397,15 @@ class TestAssessSource:
             url = "https://validate.example"
             sdk.create_point("statement", "claim", extractedFrom=url)
             with pytest.raises(ValueError):
-                sdk.assess_source(url, "alice", 1.5, "too high")
+                sdk.manage_source_trust(url=url, assessor="alice", score=1.5, rationale="too high")
             with pytest.raises(ValueError):
-                sdk.assess_source(url, "alice", -0.1, "negative")
+                sdk.manage_source_trust(url=url, assessor="alice", score=-0.1, rationale="negative")
             with pytest.raises(ValueError):
-                sdk.assess_source(url, "alice", "not-a-number", "bad type")
+                sdk.manage_source_trust(url=url, assessor="alice", score="not-a-number", rationale="bad type")
             with pytest.raises(ValueError):
-                sdk.assess_source(url, "alice", 0.5, "  ")
+                sdk.manage_source_trust(url=url, assessor="alice", score=0.5, rationale="  ")
             with pytest.raises(ValueError):
-                sdk.assess_source(url, "", 0.5, "no assessor")
+                sdk.manage_source_trust(url=url, assessor="", score=0.5, rationale="no assessor")
 
     def test_latest_wins_per_assessor(self):
         with fresh_sdk() as sdk:
@@ -417,8 +417,8 @@ class TestAssessSource:
                 "s.ingestedAt = $ts",
                 params={"url": url, "ts": FRESH},
             )
-            sdk.assess_source(url, "alice", 0.1, "first assessment")
-            sdk.assess_source(url, "alice", 0.9, "revised assessment")
+            sdk.manage_source_trust(url=url, assessor="alice", score=0.1, rationale="first assessment")
+            sdk.manage_source_trust(url=url, assessor="alice", score=0.9, rationale="revised assessment")
             # Latest-wins: only 0.9 counts → factor = 1 + (rep-0.5)*0.4 > 1
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
             alpha = sdk.get_point(p["id"]).get("ep_alpha")
@@ -445,11 +445,11 @@ class TestAssessSource:
                 params={"url": url, "ts": FRESH},
             )
             # Neutral assessor (no track record): rep 0.5 → term 0 → factor 1.0
-            sdk.assess_source(url, "neutral-agent", 0.1, "meh")
+            sdk.manage_source_trust(url=url, assessor="neutral-agent", score=0.1, rationale="meh")
             rel_neutral = sdk.get_source_reliability(url)["reliability"]
             # Expert assessor with a strong track record FIRST (snapshot at write)
             _give_reputation(sdk, "expert-agent")
-            sdk.assess_source(url, "expert-agent", 0.1, "unreliable")
+            sdk.manage_source_trust(url=url, assessor="expert-agent", score=0.1, rationale="unreliable")
             rel_expert = sdk.get_source_reliability(url)["reliability"]
             assert rel_expert < rel_neutral  # expert's low score carries more weight
 
@@ -464,7 +464,7 @@ class TestAssessSource:
                 params={"url": url, "ts": FRESH},
             )
             # Assess with a zero-track-record assessor (rep snapshot 0.5)
-            sdk.assess_source(url, "growing-agent", 0.1, "assessment before reputation")
+            sdk.manage_source_trust(url=url, assessor="growing-agent", score=0.1, rationale="assessment before reputation")
             r_before = sdk.get_source_reliability(url)
             # Raise the assessor's reputation
             sdk._get_proj().g.query(  # noqa: B018
@@ -496,7 +496,7 @@ class TestAssessSource:
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
             alpha_before = sdk.get_point(p["id"]).get("ep_alpha")  # 3.0 (T2, no factor)
             _give_reputation(sdk, "alice")  # rep > 0.5 → snapshot at write
-            sdk.assess_source(url, "alice", 0.0, "downweight")
+            sdk.manage_source_trust(url=url, assessor="alice", score=0.0, rationale="downweight")
             # rep ~0.667: factor = 1 + 0.167*(-0.5) = 0.9167 → pc = 2.0*0.9167 = 1.833
             # → alpha 2.833 < 3.0. Gate dirty-marked → recomputes NOW (interval 3600).
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
@@ -509,7 +509,7 @@ class TestAssessSource:
 class TestSourceTierAPI:
     def test_create_source_with_tier_dual_write(self):
         with fresh_sdk() as sdk:
-            r = sdk.create_source("https://kind.example", "github_issue", tier="T2")  # noqa: F841
+            r = sdk.register_source("https://kind.example", "github_issue", tier="T2")  # noqa: F841
             rows = sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) RETURN s.sourceKind, s.credibilityTier",
                 params={"url": "https://kind.example"},
@@ -520,7 +520,7 @@ class TestSourceTierAPI:
 
     def test_tier_form_sourcekind_mirrors(self):
         with fresh_sdk() as sdk:
-            sdk.create_source("https://tierform.example", "T0")
+            sdk.register_source("https://tierform.example", "T0")
             rows = sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) RETURN s.sourceKind, s.credibilityTier",
                 params={"url": "https://tierform.example"},
@@ -532,7 +532,7 @@ class TestSourceTierAPI:
         with fresh_sdk() as sdk:
             p = sdk.create_point("statement", "from link", extractedFrom="https://collide.example")  # noqa: F841
             # Auto-created Source has sourceKind='document'
-            sdk.create_source("https://collide.example", "T0", tier="T0")
+            sdk.register_source("https://collide.example", "T0", tier="T0")
             rows = sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) RETURN s.sourceKind, s.credibilityTier",
                 params={"url": "https://collide.example"},
@@ -543,8 +543,8 @@ class TestSourceTierAPI:
 
     def test_set_source_tier_never_touches_type_strings(self):
         with fresh_sdk() as sdk:
-            sdk.create_source("https://type.example", "slack_message")
-            sdk.set_source_tier("https://type.example", "T3")
+            sdk.register_source("https://type.example", "slack_message")
+            sdk.manage_source_trust(url="https://type.example", tier="T3")
             rows = sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) RETURN s.sourceKind, s.credibilityTier",
                 params={"url": "https://type.example"},
@@ -567,7 +567,7 @@ class TestSourceTierAPI:
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
             alpha_before = sdk.get_point(p["id"]).get("ep_alpha")  # 3.0
             # Re-tier to T0 via the sanctioned writer
-            sdk.set_source_tier(url, "T0")
+            sdk.manage_source_trust(url=url, tier="T0")
             r2 = sdk.get_source_reliability(url)
             assert r2["components"]["tier"] == "T0"  # cache invalidated → recomputed
             # Gate dirty-marked → recomputes within the interval
@@ -583,7 +583,13 @@ class TestSourceTierAPI:
             summary = sdk.calibrate_summary()
             item = next(i for i in summary if i["id"] == p["id"])
             assert item["calibrated"] is False
-            assert "set_source_tier" in item["suggestion"]
+            # #12948 review F3: this pinned `set_source_tier`, which the same PR RETIRED —
+            # so it asserted that the suggestion named a name the caller can no longer
+            # call, i.e. it held the "actionable" half of its own name in the negative.
+            # Retargeted, not loosened: the property is that the suggestion names the
+            # LIVE doors, one of which tiers and one of which registers the source.
+            assert "manage_source_trust" in item["suggestion"]
+            assert "register_source" in item["suggestion"]
             assert "untiered" in item["suggestion"]
 
     def test_calibrate_summary_registry_tiered_not_flagged(self):
@@ -608,9 +614,9 @@ class TestSourceTierAPI:
 
     def test_list_sources_after_dual_write(self):
         with fresh_sdk() as sdk:
-            sdk.create_source("https://list.example", "T1", tier="T1")
-            sdk.create_source("https://list2.example", "github_issue", tier="T2")
-            sources = sdk.list_sources()
+            sdk.register_source("https://list.example", "T1", tier="T1")
+            sdk.register_source("https://list2.example", "github_issue", tier="T2")
+            sources = sdk.list_knowledge("source")
             by_url = {s["url"]: s for s in sources}
             assert by_url["https://list.example"]["sourceKind"] == "T1"
             assert by_url["https://list2.example"]["sourceKind"] == "github_issue"
@@ -618,20 +624,39 @@ class TestSourceTierAPI:
 
 class TestMCPRegistration:
     def test_new_tools_registered_and_http_allowed(self):
-        """New MCP tools are registered and present in the HTTP allowlist."""
+        """New MCP tools are registered and present in the HTTP allowlist.
+
+        #11609: `tortoise_get_source_reliability` is RETIRED (its name is a
+        #3883 shim, and its read is the `source_reliability` arm of
+        #`tortoise_list_knowledge`), so it must be ABSENT from the advertised
+        surface while its replacement is present — the assertion is kept, and
+        its direction flips with the surface rather than being deleted.
+        """
         import asyncio  # noqa: I001
         from tortoise.mcp_server import mcp
         from tortoise.mcp_auth import HTTP_ALLOWED
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
 
         async def _names():
             tools = await mcp._list_tools()
             return {t.name for t in tools}
 
         tool_names = asyncio.run(_names())
-        for name in ("tortoise_get_source_reliability", "tortoise_assess_source",
-                     "tortoise_set_source_tier"):
+        # #4282 Phase 2 (#11609 lane C) retired `tortoise_assess_source` and
+        # `tortoise_set_source_tier` into `tortoise_manage_source_trust`, which
+        # dispatches on the argument (`score=` vs `tier=`). The registration +
+        # HTTP-allowlist property those rows measured travels with the capability,
+        # so it is asserted on the container. ⛔ `tortoise_get_source_reliability`
+        # is NOT in this loop: THIS PR's READ/QUERY wave retired it into
+        # `tortoise_list_knowledge(kind='source_reliability')`, so it is advertised
+        # nowhere — the two assertions below are the ones that measure it.
+        for name in ("tortoise_manage_source_trust",):
             assert name in tool_names, f"{name} not registered"
             assert name in HTTP_ALLOWED, f"{name} missing from HTTP_ALLOWED"
+        assert "tortoise_get_source_reliability" not in tool_names, (
+            "the retired door is advertised again — its name is a #3883 shim and "
+            "its read is tortoise_list_knowledge(kind='source_reliability')")
+        assert "tortoise_get_source_reliability" in RETIRED_USE_INSTEAD
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -682,7 +707,7 @@ class TestReviewGateFixes:
         with fresh_sdk() as sdk:
             url = "https://calib-excl.example"
             p = sdk.create_point("statement", "claim", extractedFrom=url)
-            a = sdk.assess_source(url, "alice", 0.8, "an assessment")
+            a = sdk.manage_source_trust(url=url, assessor="alice", score=0.8, rationale="an assessment")
             summary = sdk.calibrate_summary()
             ids = {item["id"] for item in summary}
             assert p["id"] in ids
@@ -721,11 +746,11 @@ class TestReviewGateFixes:
             # 20 HIGH-REP assessors assess 0.1 then 0.9 (older marked outdated)
             for i in range(20):
                 _give_reputation(sdk, f"expert{i}")
-                sdk.assess_source(url, f"expert{i}", 0.1, f"old {i}")
-                sdk.assess_source(url, f"expert{i}", 0.9, f"new {i}")
+                sdk.manage_source_trust(url=url, assessor=f"expert{i}", score=0.1, rationale=f"old {i}")
+                sdk.manage_source_trust(url=url, assessor=f"expert{i}", score=0.9, rationale=f"new {i}")
             # 980 NEUTRAL assessors assess 0.9 once (rep 0.5 → contribute 0)
             for i in range(980):
-                sdk.assess_source(url, f"neutral{i}", 0.9, f"assessment {i}")
+                sdk.manage_source_trust(url=url, assessor=f"neutral{i}", score=0.9, rationale=f"assessment {i}")
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
             alpha = sdk.get_point(p["id"]).get("ep_alpha")
             # Only the 20 ACTIVE 0.9s (rep 2/3) count: factor = 1 + 20*0.1667*0.4 = 2.33 → clamped 2.0
@@ -739,20 +764,20 @@ class TestReviewGateFixes:
         with fresh_sdk() as sdk:
             url = "https://edges.example"
             sdk.create_point("statement", "claim", extractedFrom=url)
-            r1 = sdk.assess_source(url, "alice", 0.0, "floor")
-            r2 = sdk.assess_source(url, "bob", 1.0, "ceiling")
+            r1 = sdk.manage_source_trust(url=url, assessor="alice", score=0.0, rationale="floor")
+            r2 = sdk.manage_source_trust(url=url, assessor="bob", score=1.0, rationale="ceiling")
             assert r1["score"] == 0.0
             assert r2["score"] == 1.0
 
     def test_set_source_tier_missing_source_raises(self):
         with fresh_sdk() as sdk:  # noqa: SIM117
             with pytest.raises(ValueError):
-                sdk.set_source_tier("https://nope.example", "T1")
+                sdk.manage_source_trust(url="https://nope.example", tier="T1")
 
     def test_create_source_invalid_tier_raises(self):
         with fresh_sdk() as sdk:  # noqa: SIM117
             with pytest.raises(ValueError):
-                sdk.create_source("https://bad-tier.example", "document", tier="T9")
+                sdk.register_source("https://bad-tier.example", "document", tier="T9")
 
     def test_get_source_reliability_unknown_url(self):
         with fresh_sdk() as sdk:
@@ -770,8 +795,8 @@ class TestReviewGateFixes:
                 params={"url": url, "ts": FRESH},
             )
             # Simulate a partial write: two active assessments, no outdated flag
-            sdk.assess_source(url, "crash-agent", 0.1, "first")
-            sdk.assess_source(url, "crash-agent", 0.9, "second")
+            sdk.manage_source_trust(url=url, assessor="crash-agent", score=0.1, rationale="first")
+            sdk.manage_source_trust(url=url, assessor="crash-agent", score=0.9, rationale="second")
             # Remove the outdated flag on the first (crash between create and mark)
             sdk._get_proj().g.query(
                 "MATCH (p:Point {pointKind:'assessment'}) WHERE p.targetSource = $url "
@@ -787,10 +812,15 @@ class TestReviewGateFixes:
 
 class TestMCPAnnotationsContract:
     def test_get_source_reliability_has_no_read_only_hint(self):
-        """get_source_reliability writes the cache → must NOT be readOnlyHint.
+        """The caching reliability read must NOT be advertised as readOnlyHint.
 
         A regression adding readOnlyHint would silently auto-approve a
         cache-writing tool (plan Task 6 acceptance).
+
+        #11609: the per-source door is retired; the arm that RECOMPUTES and
+        caches now lives on `tortoise_list_knowledge(kind='source_reliability')`,
+        so that is the door the guard has to read — the promise follows the arm,
+        not the name.
         """
         import asyncio  # noqa: I001
         from tortoise.mcp_server import mcp
@@ -800,15 +830,23 @@ class TestMCPAnnotationsContract:
             return {t.name: t for t in tools}
 
         tools = asyncio.run(_get())
-        t = tools["tortoise_get_source_reliability"]
-        # readOnlyHint must NOT be True (it writes the cache) — registered via
-        # tool_registry with _rw() (readOnlyHint=False, destructiveHint=True).
-        ro = getattr(t.annotations, "readOnlyHint", getattr(t.annotations, "read_only_hint", False))
+        t = tools["tortoise_list_knowledge"]
+        ro = getattr(t.annotations, "readOnlyHint",
+                     getattr(t.annotations, "read_only_hint", False))
         assert ro is not True, (
-            "get_source_reliability writes the reliability cache — no readOnlyHint"
+            "tortoise_list_knowledge's source_reliability arm writes the "
+            "reliability cache — no readOnlyHint"
         )
 
     def test_assess_and_set_tier_are_destructive_hint(self):
+        """The trust write is destructive.
+
+        #4282 Phase 2 (#11609 lane C) folded `tortoise_assess_source` and
+        `tortoise_set_source_tier` into ONE tool; both were `destructiveHint`
+        (each writes a reputation-weighted Point or a tier the EP weights read), so
+        the container that carries both must keep the hint — otherwise a client
+        auto-approves a write it used to ask about.
+        """
         import asyncio  # noqa: I001
         from tortoise.mcp_server import mcp
 
@@ -817,10 +855,8 @@ class TestMCPAnnotationsContract:
             return {t.name: t for t in tools}
 
         tools = asyncio.run(_get())
-        a = tools["tortoise_assess_source"].annotations
-        b = tools["tortoise_set_source_tier"].annotations
+        a = tools["tortoise_manage_source_trust"].annotations
         assert getattr(a, "destructiveHint", getattr(a, "destructive_hint", False)) is True
-        assert getattr(b, "destructiveHint", getattr(b, "destructive_hint", False)) is True
 
 
 #: ONE document. NOTE (measured, and it matters): the write path applies S0a and

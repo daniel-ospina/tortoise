@@ -653,11 +653,11 @@ class TestMitigateOperator:
 class TestListTags:
     def test_empty_graph(self, sdk):
         """Empty graph returns empty list."""
-        assert sdk.list_tags() == []
+        assert sdk.graph_overview("tags") == []
 
     def test_single_tag(self, sdk):
         p = sdk.create_point("statement", "tagged content", tags=["alpha"])  # noqa: F841
-        tags = sdk.list_tags()
+        tags = sdk.graph_overview("tags")
         assert len(tags) == 1
         assert tags[0]["name"] == "alpha"
         assert tags[0]["count"] == 1
@@ -665,7 +665,7 @@ class TestListTags:
     def test_multiple_points_same_tag(self, sdk):
         sdk.create_point("statement", "first", tags=["shared"])
         sdk.create_point("statement", "second", tags=["shared"])
-        tags = sdk.list_tags()
+        tags = sdk.graph_overview("tags")
         assert len(tags) == 1
         assert tags[0]["name"] == "shared"
         assert tags[0]["count"] == 2
@@ -673,7 +673,7 @@ class TestListTags:
     def test_multiple_tags(self, sdk):
         sdk.create_point("statement", "a", tags=["alpha", "beta"])
         sdk.create_point("statement", "b", tags=["beta", "gamma"])
-        tags = sdk.list_tags()
+        tags = sdk.graph_overview("tags")
         names = {t["name"] for t in tags}
         assert names == {"alpha", "beta", "gamma"}
         # alpha tagged 1 point, beta 2, gamma 1
@@ -685,7 +685,7 @@ class TestListTags:
     def test_untagged_point_not_counted(self, sdk):
         sdk.create_point("statement", "no tags here")
         sdk.create_point("statement", "tagged", tags=["solo"])
-        tags = sdk.list_tags()
+        tags = sdk.graph_overview("tags")
         assert len(tags) == 1
         assert tags[0]["name"] == "solo"
         assert tags[0]["count"] == 1
@@ -753,7 +753,7 @@ class TestUpdatePointTags:
         assert results[0]["id"] == p["id"]
         # n.tags property and list_tags agree
         assert sdk.get_point(p["id"])["tags"] == ["alpha"]
-        by_name = {t["name"]: t["count"] for t in sdk.list_tags()}
+        by_name = {t["name"]: t["count"] for t in sdk.graph_overview("tags")}
         assert by_name["alpha"] == 1
 
     def test_update_removes_tag_deletes_edge(self, sdk):
@@ -793,7 +793,7 @@ class TestUpdatePointTags:
         p = sdk.create_point("statement", "solo", tags=["only"])
         sdk.update_point(p["id"], tags=[])
         assert sdk.query_points_by_tag("only") == []
-        assert sdk.list_tags() == []
+        assert sdk.graph_overview("tags") == []
 
     def test_update_non_list_tags_no_crash(self, sdk):
         """Non-list tag values match create_point: property set, no edge sync."""
@@ -826,13 +826,13 @@ class TestUpdatePointTags:
         """update_point on a non-existent id must not create phantom :Tag
         nodes (empty MATCH short-circuits the MERGEs)."""
         sdk.update_point("000000000000-000000000000", tags=["phantom"])
-        assert sdk.list_tags() == []
+        assert sdk.graph_overview("tags") == []
 
     def test_int_tag_names_roundtrip(self, sdk):
         """Non-string (int) tag names are param-bound and round-trip."""
         p = sdk.create_point("statement", "ints", tags=[123])
         assert [r["id"] for r in sdk.query_points_by_tag(123)] == [p["id"]]
-        names = {t["name"] for t in sdk.list_tags()}
+        names = {t["name"] for t in sdk.graph_overview("tags")}
         assert 123 in names
 
     def test_update_shared_tag_survives_removal(self, sdk):
@@ -841,7 +841,7 @@ class TestUpdatePointTags:
         a = sdk.create_point("statement", "a", tags=["shared"])
         b = sdk.create_point("statement", "b", tags=["shared"])  # noqa: F841
         sdk.update_point(a["id"], tags=[])
-        tags = sdk.list_tags()
+        tags = sdk.graph_overview("tags")
         assert len(tags) == 1
         assert tags[0]["name"] == "shared"
         assert tags[0]["count"] == 1
@@ -861,16 +861,16 @@ class TestOrphanTagGC:
     def test_delete_gc_orphan_tags(self, sdk):
         """Deleting the only tagged point removes its Tag from list_tags."""
         p = sdk.create_point("statement", "only tagged", tags=["alpha"])
-        assert len(sdk.list_tags()) == 1
+        assert len(sdk.graph_overview("tags")) == 1
         sdk.delete_point(p["id"])
-        assert sdk.list_tags() == []
+        assert sdk.graph_overview("tags") == []
 
     def test_delete_keeps_shared_tag(self, sdk):
         """A tag still used by another point survives GC."""
         p1 = sdk.create_point("statement", "one", tags=["shared"])
         sdk.create_point("statement", "two", tags=["shared"])
         sdk.delete_point(p1["id"])
-        tags = sdk.list_tags()
+        tags = sdk.graph_overview("tags")
         assert len(tags) == 1
         assert tags[0]["name"] == "shared"
         assert tags[0]["count"] == 1
@@ -920,11 +920,21 @@ class TestSanitizeProps:
         doc = sdk.create_document("Upd", "planDoc")
         did = doc["id"]
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.update_entity(did, sourcePath="/etc/passwd")
+            sdk.update_knowledge(did, sourcePath="/etc/passwd")
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.update_entity(did, source_path="/etc/passwd")
+            sdk.update_knowledge(did, source_path="/etc/passwd")
+        # #11609 Phase 2 replaced `update_entity` with `update_knowledge`, whose
+        # first parameter IS named `id` — so the TOP-LEVEL spelling binds to the
+        # signature and raises TypeError at the call site, exactly like
+        # `update_point` below (`test_update_point_rejects_id_and_sourcepath`
+        # records that same shape). Node identity is never mutated either way.
+        with pytest.raises(TypeError):
+            sdk.update_knowledge(did, **{"id": "evil"})
+        # ⛔ …and the guard MESSAGE is not lost with it: the nested spelling that
+        # `update_knowledge` accepts reaches the named refusal, so a caller who
+        # tries to set the id still learns WHY it is refused.
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.update_entity(did, id="evil")
+            sdk.update_knowledge(did, props={"id": "evil"})
 
     def test_update_point_rejects_id_and_sourcepath(self, sdk):
         p = sdk.create_point("statement", "A")

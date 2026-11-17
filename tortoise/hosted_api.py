@@ -2390,7 +2390,7 @@ def _sweep_oauth_retention() -> None:
 def _sweep_invite_ghosts() -> None:
     """#1890: give the terminal-state invite-ghost sweep a LIVE caller.
 
-    ``TortoiseSDK.sweep_invite_ghost_memberships`` (#1908) deletes every
+    ``TortoiseSDK._sweep_invite_ghost_memberships`` (#1908) deletes every
     ``invite-{iid}`` placeholder Membership whose Invitation node is terminal
     (accepted / revoked / expired / orphaned) — but it shipped with exactly
     ONE caller: ``graph-scripts/backfill_invite_ghost_members.py``, which an
@@ -2420,7 +2420,7 @@ def _sweep_invite_ghosts() -> None:
         if is_supabase_enabled():
             return
         sdk = _make_sdk(namespace="registry")
-        result = sdk.sweep_invite_ghost_memberships()
+        result = sdk._sweep_invite_ghost_memberships()
         if result.get("deleted"):
             _logger.info("invite ghost sweep deleted %s terminal placeholder "
                          "row(s) of %s examined",
@@ -3612,7 +3612,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         # ⚠️ MEASURED, and it corrects an earlier claim here (review round 7, P2):
         # at DEBUG this line is NOT emitted in the hosted deployment. uvicorn's
         # `LOGGING_CONFIG` configures only the `uvicorn*` loggers and leaves root
-        # at WARNING, `Dockerfile.hosted:153` passes no `--log-level`, and nothing
+        # at WARNING, `Dockerfile.hosted:163` passes no `--log-level`, and nothing
         # in `tortoise/` or `entrypoint.sh` sets a level for `tortoise.*` — so
         # `tortoise.api` is effectively WARNING there and `Logger.isEnabledFor`
         # drops the record (reproduced under the real `dictConfig`). The PRODUCTION
@@ -6037,7 +6037,8 @@ def _cors_headers_for_scope(scope) -> list[tuple[bytes, bytes]]:
     ]
 
 
-async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
+async def _send_wait_bound_refusal(send, scope, route_path: str,
+                                  stages: dict | None = None) -> None:
     """Answer a breached request with the transport's OWN 504 refusal.
 
     No new format: the REST arm is the §6.1 shape the rest of this app already
@@ -6048,6 +6049,14 @@ async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
     builders and only transported here as raw ASGI messages.
     """
     retry_after = _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S
+    # #10893: the stage rides `data`, ADDITIVELY and only when a timeline was
+    # bound. The refusal's IDENTITY is `code` + the exact `message` (see
+    # `tests/_verdict.py::is_transport_wait_bound_refusal`), so neither arm's
+    # envelope moves — a caller that knows nothing about stages is byte-identical,
+    # and one that reads `data.stage` learns what actually consumed the budget.
+    # The REST arm gets the same three fields under its own `detail` payload, and
+    # keeps the shipped `detail` STRING when no timeline is bound.
+    stage_fields = dict(stages) if stages else {}
     if _is_jsonrpc_surface(route_path):
         # Function-local: mcp_auth reaches back into this module (late, from a
         # function body), so a module-level edge here would be a needless
@@ -6056,7 +6065,13 @@ async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
 
         resp = _jsonrpc_error(
             ERR_TIMEOUT, _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
-            data={"retry_after": retry_after}, status=504,
+            data={"retry_after": retry_after, **stage_fields}, status=504,
+            headers={"Retry-After": str(retry_after)})
+    elif stage_fields:
+        resp = JSONResponse(
+            status_code=504,
+            content={"detail": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+                     **stage_fields},
             headers={"Retry-After": str(retry_after)})
     else:
         resp = JSONResponse(
@@ -6078,7 +6093,8 @@ async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
 
 
 def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
-                            latency_ms: int, *, tool_name: str | None = None) -> None:
+                            latency_ms: int, *, tool_name: str | None = None,
+                            stages: dict | None = None) -> None:
     """Fire-and-forget breach telemetry — OFF the request path.
 
     ``_track_analytics_event`` does a BLOCKING ``httpx`` POST (5 s timeout), so
@@ -6095,6 +6111,22 @@ def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
     props = {"path": route_path, "method": method, "latency_ms": latency_ms}
     if tool_name is not None:
         props["tool_name"] = tool_name
+    if stages:
+        # #10893: the stage attribution, on the SAME row as the latency it
+        # explains. Both keys are registered in `_ALLOWED_ANALYTICS_PROPS` —
+        # an unregistered prop is STRIPPED here in silence (#3821), which for
+        # this instrument would rebuild the exact blindness it removes.
+        # ⛔ `read_stage` is validated against the closed vocabulary before it
+        # is published: the analytics lake is a top-level-key filter with no
+        # per-event scoping (see the allowlist's own note), so a free-form
+        # string must never reach it.
+        from tortoise.read_stages import STAGE_SET as _STAGE_SET
+        started = stages.get("stage")
+        if started in _STAGE_SET:
+            props["read_stage"] = started
+        spent = stages.get("stages_ms")
+        if spent:
+            props["read_stages_ms"] = spent
 
     def _write() -> None:
         try:
@@ -6301,6 +6333,26 @@ class WaitBoundMiddleware:
             scope["state"] = state
         state["_wait_bound_t0"] = t0
 
+        # #10893: the READ-STAGE timeline for THIS request. Created here, on the
+        # request's own thread, and bound AROUND the handler task's creation so
+        # the task — and every context-copying hand-off below it, including
+        # `_read_offload`'s `monitoring.confine_context`, which is where
+        # `tortoise_fts_query` actually runs — carries a reference to it. The
+        # read path calls `read_stages.mark(...)` at each boundary; the refusal
+        # path below reads it back. `started_at=t0` makes `stages_ms` directly
+        # comparable to the `latency_ms` on the same breach record.
+        #
+        # ⛔ CONSTRUCTED FOR `data` TRAFFIC ONLY, and that is not an
+        # optimisation: the exempt routes returned above are the ones that must
+        # not pay for this bound at all, and a control poll (`/health`, the
+        # instrument's own probe) provokes no read stages, so a timeline there
+        # could only ever publish `pre_handler` — a misleading "nothing ran"
+        # for a request that never had anything to run.
+        request_stages = None
+        if traffic_class == "data":
+            from tortoise.read_stages import begin as _begin_read_stages
+            request_stages = _begin_read_stages(t0)
+
         # #4055 (P2): bind an opaque owner token for THIS request, then create
         # the handler task INSIDE the binding so the task copies it. Any
         # one-time embedder load the handler triggers (possibly through a
@@ -6308,8 +6360,12 @@ class WaitBoundMiddleware:
         # the load's owner; the wait-bound seam admits the cold-setup exemption
         # only for a load THIS request owns — never a concurrent request's.
         from tortoise.embeddings import request_load_owner
+        from tortoise.read_stages import request_stages as _bind_read_stages
         owner = object()
-        with request_load_owner(owner):
+        with contextlib.ExitStack() as _bindings:
+            _bindings.enter_context(request_load_owner(owner))
+            if request_stages is not None:
+                _bindings.enter_context(_bind_read_stages(request_stages))
             task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
         try:
             # ``wait_for`` + ``shield``, not ``asyncio.wait``: on 3.12
@@ -6455,9 +6511,21 @@ class WaitBoundMiddleware:
         # `counted_now` would keep the SEAM's event and drop THIS one, inverting
         # the #3834 F-2 rule that the detector which ANSWERED the caller owns the
         # truthful event. Tracked on #10602.
+        # #10893: WHICH STAGE the budget went to. Two views, for two audiences:
+        # `stages_view` (telemetry + log) is published whenever a timeline was
+        # bound — `pre_handler` is the ANSWER for an operator, because it says the
+        # time did not go to retrieval at all. `wire_stages` (the refusal BODY) is
+        # published only once the read actually started, because a caller cannot
+        # act on "no stage was slow". ``None`` (no timeline, i.e. control traffic)
+        # adds nothing to either.
+        stages_view = (request_stages.snapshot()
+                       if request_stages is not None else None)
+        wire_stages = (request_stages.wire_snapshot()
+                       if request_stages is not None else None)
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
-                                int((time.monotonic() - t0) * 1000))
+                                int((time.monotonic() - t0) * 1000),
+                                stages=stages_view)
         # A refused request is demand that reached the plane — it belongs in the
         # denominator of the share it is also the numerator of, or the ratio
         # divides by a population that excludes its own failures.
@@ -6469,9 +6537,15 @@ class WaitBoundMiddleware:
                     _monitoring.record_wait_bound_attempt(surface)
             except Exception:  # measurement must never be a new failure mode
                 _logger.debug("wait-bound attempt count failed", exc_info=True)
+        # #10893: the stage is on the LOG line too, not only in the analytics
+        # prop. The operatives who re-measured this issue a dozen times were
+        # reading a terminal, and a breach that names its stage is the difference
+        # between "the plane is wedged" and "the encode is wedged".
+        from tortoise.read_stages import log_suffix as _stage_log_suffix
         _logger.warning(
-            "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly",
-            _mcp_auth._TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path)
+            "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly%s",
+            _mcp_auth._TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path,
+            _stage_log_suffix(stages_view))
         # The task has already outlived the refusal decision, so register it
         # BEFORE the send: the send happens 10 s in, where a client that has
         # already gone makes uvicorn raise (ConnectionResetError /
@@ -6479,7 +6553,8 @@ class WaitBoundMiddleware:
         # handler would never be drained. The send is then best-effort.
         _track_wait_bound_request(task)
         try:
-            await _send_wait_bound_refusal(send, scope, route_path)
+            await _send_wait_bound_refusal(send, scope, route_path,
+                                           stages=wire_stages)
         except Exception:
             _logger.debug(
                 "wait-bound refusal send failed (client disconnected?)",
@@ -7467,6 +7542,19 @@ def _record_health() -> dict:
         NON-ZERO value is the claim "a transaction committed here", not a row
         count — the runbook's SQL read is still the witness for how many rows
         landed.
+      * ``cache_leg_failures`` — **the CACHE half of the write (#12943)**, and a
+        FOURTH counter outside "the record counters" above: it does not describe
+        a record write at all, it describes a construction whose cache is not the
+        record's store (the record armed, no shared cache ⇒ the cache is a
+        process-local file and the record is in Postgres). ⚠️ Its unit is
+        **SDK constructions, not writes** — the store choice is made once per
+        construction and this read path serves reads too, so it is NOT comparable
+        with ``record_writes_applied`` beside it. ⛔ It does **NOT** move ``ok``
+        or ``status``: ``#10185`` ruled the verdict window-based over rows
+        actually dropped, and a split cache drops no rows — it strands them in a
+        store the record is not in. Read it as HISTORY, like
+        ``record_write_failures``, and read it on the process that PERFORMED the
+        write (a process with a shared cache reports ``{}`` by construction).
       * ``counters_error`` — why the counter snapshot could not be read, or ``None``.
         Kept distinct from ``error`` so the documented pairing
         (*``error`` non-null ⇔ set-but-unusable value*) stays true.
@@ -7521,6 +7609,7 @@ def _record_health() -> dict:
     try:
         from tortoise import record_writer
         from tortoise.monitoring import (
+            cache_leg_failure_counts,
             record_last_write_at,
             record_non_journal_skip_counts,
             record_position_unproven_count,
@@ -7539,6 +7628,9 @@ def _record_health() -> dict:
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
+                # Present-and-null for the same reason (#12943): a missing key
+                # must not read as "the cache is fine".
+                "cache_leg_failures": None,
                 # The POSITIVE pair is present-and-null here for the same reason:
                 # a consumer must not read a missing key as "no writes" (#9548).
                 "record_writes_applied": None, "record_last_write_at": None,
@@ -7561,6 +7653,13 @@ def _record_health() -> dict:
         "record_write_failures": None,
         "record_non_journal_skips": None,
         "record_position_unproven": None,
+        # #12943: seeded ``None`` for the same reason as the three above — this
+        # is the dict the `counters_error` arm PUBLISHES, so a key that is only
+        # assigned in the `else` arm is ABSENT exactly when the snapshot failed,
+        # and an absent key reads as "the cache is fine" (#9548 review P2's
+        # missing-key class). Caught by review cycle 2; the seeded arm had no
+        # test at all.
+        "cache_leg_failures": None,
         # The POSITIVE pair (#9548): committed writes, and when. Seeded ``None``
         # for the same reason as the three above — an unread counter is not a
         # zero, and a ``0`` here is exactly what a never-writing deployment
@@ -7618,6 +7717,12 @@ def _record_health() -> dict:
         # move the zero that means "no record row was lost" (#9231/#9307).
         skips = record_non_journal_skip_counts()
         unproven = record_position_unproven_count()
+        # #12943: the CACHE leg, read in the SAME snapshot so the block stays
+        # all-read or all-``None``. ``metrics()`` alone was not enough: the
+        # hosted app publishes THIS block and has no ``/metrics`` route, so a
+        # key that only existed there would have made the split visible to a
+        # scrape and invisible to ``/health`` — the surface an operator reads.
+        cache_leg = cache_leg_failure_counts()
         # The POSITIVE pair (#9548) rides the SAME snapshot for the same reason.
         applied = record_write_applied_count()
         last_write_at = record_last_write_at()
@@ -7630,6 +7735,7 @@ def _record_health() -> dict:
         block["record_position_unproven"] = unproven
         block["record_writes_applied"] = applied
         block["record_last_write_at"] = last_write_at
+        block["cache_leg_failures"] = cache_leg
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
     # this counter carries — SEVEN values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly
@@ -7638,12 +7744,12 @@ def _record_health() -> dict:
     #
     #   ``write_failed``      the record was unreachable or the projection
     #                         refused the row — a REPLAY heals it.
-    #   ``journal_collision`` the position row holds content this write would
-    #                         not produce (a different record, or this record's
-    #                         payload re-derived since that row was written)
-    #                         (#9318): a REPLAY DOES NOT HEAL IT — it
-    #                         re-raises. The remedy is journal identity in the
-    #                         key (#12894).
+    #   ``journal_collision`` the position row holds a record this write does not
+    #                         continue — a different record, or (with no `ts` to compare) a
+    #                         payload whose derivation moved (#9318): a REPLAY DOES NOT HEAL
+    #                         IT, it re-raises. Remedy = journal identity in the key (#12894).
+    #                         Same-capture drift is not this counter (#12904) — and neither,
+    #                         silently, is a DIFFERENT record there (`.JournalPositionCollision`).
     #   ``no_tenant``         armed with no tenant in scope; heal the tenant
     #                         resolution, then replay.
     #   ``malformed_dsn``     the value is configured but unusable — fix the
@@ -13695,11 +13801,20 @@ async def list_points(
     # identical SDK (`_data_sdk`), so only WHERE the call runs changes.
     sdk = await _data_sdk_offloaded(org, attach_projection=True)
     conditions = ["n.is_operator = false"]
-    # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
-    # default listing surface — tombstone contract: retrievable by id via
+    # #432 Task 2 / #689 / #13034: ended Points are EXCLUDED from the default
+    # listing surface — tombstone contract: retrievable by id via
     # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
     # minimal).
-    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
+    #
+    # ⛔ This used to be a hand-written ``(n.status IS NULL OR n.status <>
+    # 'retracted')``, appended TWICE (once for #432, once for #689), and it is
+    # the exact defect #13034 records: a hand-written SUBSET of the terminal
+    # vocabulary served a ``superseded`` / ``deprecated`` / ``archived`` Point
+    # as current on the highest-traffic list route. It is the ONE shared
+    # predicate now, so the vocabulary and the position axis (``isClosed`` /
+    # a ``terminal`` pipeline slot) are read here exactly as every other read
+    # surface reads them.
+    conditions.append(_terminal_excluded("n.status"))
     # #8447 (C2): this route capped at ``limit`` and answered
     # ``{"points": …, "count": len(results)}`` — a FULL page was byte-identical
     # to a COMPLETE one, and there is no offset and no cursor on this surface, so
@@ -13721,8 +13836,6 @@ async def list_points(
         params["tag"] = tag
     else:
         tag_clause = ""
-    # #689: exclude retracted (tombstoned) points from the list endpoint.
-    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
     query = (
         f"MATCH (n:Point){tag_clause} WHERE "
         + " AND ".join(conditions)
@@ -13873,13 +13986,39 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
         # Called from a worker thread (both call sites are off-loop), so the SDK
         # built on the loop is queried off it — the pre-#7970 shape.
+        #
+        # #13034: the cache applies the ENDPOINT's currency rule through the one
+        # shared predicate. It used to hand-write the ``retracted`` tombstone
+        # test, so a superseded/closed Point was still served from the hot set
+        # while every list/search surface had dropped it. A Point the predicate
+        # excludes now answers ``None`` here, which is a cache MISS, never a 404:
+        # the route falls through to the store (which returns ended records to a
+        # caller who asked by NAME — design §6's by-name arm) and
+        # ``_cache_sees_node`` below keeps that apart from "the cache cannot see
+        # this id at all".
         rows = sdk._get_proj().g.query(
             "MATCH (p:Point {id: $id}) "
-            "WHERE p.status IS NULL OR p.status <> 'retracted' "
+            f"WHERE {_terminal_excluded('p.status')} "
             "RETURN properties(p)",
             params={"id": point_id},
         ).result_set
         return dict(rows[0][0]) if rows else None
+
+    def _cache_sees_node() -> bool:
+        """Can the CACHE see this id at all, tombstone included? (#12941 P1-3)
+
+        `_cache_props` applies the endpoint's TOMBSTONE rule, so a cache that
+        holds a retracted point answers `None` — reading that as "the store
+        cannot see it" would mark a node the store can plainly see `not-hot`, a
+        FALSE impairment on a correctness-guaranteed 404. Only reached on the
+        residency-armed `off` 404 arm, which is why one extra bounded read is
+        acceptable here and nowhere else.
+        """
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id: $id}) RETURN properties(p)",
+            params={"id": point_id},
+        ).result_set
+        return bool(rows)
 
     served = None
     if mode != record_serve.MODE_OFF:
@@ -14046,15 +14185,48 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         # the caller. ⚠️ OFF keeps the pre-#7970 detail EXACTLY — a plain string,
         # not a wrapper — so the default path stays byte-identical.
         if served is None:
+            # #12941: OFF consults no record, so it cannot establish absence at
+            # all — but the marker's OWN flag is what lets this door say so, and
+            # it is read BEFORE the marker does any work of its own
+            # (`residency_armed`), so an unarmed deployment pays no extra round
+            # trip and answers the same string. (The cache read above already
+            # happened — that is the pre-#7970 read itself, not a cost this flag
+            # adds.)
+            marker = None
+            if record_serve.residency_armed():
+                # `found` is the CACHE's own visibility, not the endpoint's
+                # tombstone-filtered answer (#12941 review P1-3): only a node the
+                # cache cannot see at ALL is outside the hot set.
+                marker = await _read_offload(
+                    lambda: record_serve.point_residency(
+                        sdk._get_proj().g, found=_cache_sees_node(),
+                        key=point_id),
+                    op="get_point.residency")
+            if marker:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"message": "Point not found", "residency": marker})
             raise HTTPException(status_code=404, detail="Point not found")
         absent: dict = {"message": "Point not found"}
-        # `as_wire` emits BOTH keys, `fallbackReason` as null when there was
-        # none — an omission would let a stored property masquerade.
-        absent.update(served.as_wire())
+        # `absent_wire` emits BOTH attribution keys (as `as_wire` does), plus
+        # `residency: "not-hot"` when the record could not be asked (#12941):
+        # a cache-only empty answer is "we cannot see it from here", and a
+        # plain "Point not found" here is the false absence §17.2 forbids.
+        absent.update(served.absent_wire())
         raise HTTPException(status_code=404, detail=absent)
     # The tombstone rule is the ENDPOINT's, not the store's: a retracted point
     # stays retrievable by get_point on the SDK but not here, whichever store
     # answered (#432 Task 2).
+    #
+    # ⛔ DELIBERATELY NOT CONVERTED to the shared predicate (#13034), and the
+    # distinction is the point: this arm asks "is this record a TOMBSTONE this
+    # route refuses to name", not "is it still current". Design §6's by-name
+    # row says a caller who asks for a record BY NAME gets it, with the word that
+    # says how it ended — so widening this to every terminal word would turn
+    # `superseded`/`deprecated`/`archived`/closed reads into 404s and change a
+    # documented REST contract (#432/#689), which is a different decision from
+    # the one this issue takes. The CURRENCY question on this route is the
+    # cache read above (``_cache_props``), which does use the predicate.
     if props.get("status") == "retracted":
         # A second 404 arm, and the attribution rule is the same one: a caller
         # that armed the record must be able to tell WHICH store answered even
@@ -14063,7 +14235,7 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         if served is None:  # OFF keeps the pre-#7970 shape exactly
             raise HTTPException(status_code=404, detail="Point not found")
         retracted: dict = {"message": "Point not found"}
-        retracted.update(served.as_wire())
+        retracted.update(served.absent_wire())
         raise HTTPException(status_code=404, detail=retracted)
     props = dict(props)
     if served is not None:
@@ -16594,7 +16766,7 @@ def _org_node_sync_limits(org_id: str) -> dict:
         row = org_by_id(get_control_plane(), org_id)
         return _org_limits_from_node(row) if row else {}
     sdk = _make_sdk(namespace="registry")
-    node = sdk.org_get(org_id)
+    node = sdk._org_get(org_id)
     return _org_limits_from_node(node) if node else {}
 
 
@@ -16743,7 +16915,7 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
         # node — capture BOTH so the envelope's key.id and key_plaintext
         # match the registry node (revoke/shrink in C3 must hit the real
         # id; a revealed plaintext must verify against the stored hash).
-        created = sdk.apikey_create(
+        created = sdk._apikey_create(
             org_id, session_user_id or "api",
             graph_id=graph_id, scopes=final_scopes or None,
             created_by_key_id=caller_key_id, delegation_depth=delegation_depth,
@@ -22464,7 +22636,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # MERGE preserves a previously stored contentHash/version/title.
         anchor = next((ref.contentHash for ref in payload.provenance_refs
                        if ref.contentHash), None)
-        sdk.create_source(
+        sdk.register_source(
             session_url, "agentSession",
             contentHash=anchor,
             provenance_spans=session_spans, is_episodic=True,
@@ -22495,7 +22667,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # "" (no min_length), and an empty anchor is an absent one — the same
         # normalization the session-Source write applies via its
         # `next((ref.contentHash for ref in ... if ref.contentHash), None)`.
-        sdk.create_source(
+        sdk.register_source(
             u, src.sourceKind, tier=src.credibilityTier,
             contentHash=(src.contentHash or None), is_episodic=True,
         )
@@ -22748,7 +22920,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                     "(#3366)",
                     resolved_pid, _succ_state[0], _succ_state[1])
             else:
-                sdk.supersede_point(pr.existing_id, resolved_pid)
+                sdk.supersede_knowledge(pr.existing_id, resolved_pid)
         else:
             point_props = {}
             if pr.point.when:
@@ -22979,7 +23151,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # ── 6b. Supersessions — client-derived records (the deterministic channel
     # for the Object status fold, #1350), applied via the SHARED
     # apply_supersessions helper (#2164/#2193): pt_<sha> refs → the canonical
-    # supersede() CORRECTS (terminal-probed, idempotent); entity records →
+    # supersede_point() CORRECTS (terminal-probed, idempotent); entity records →
     # id-style ObjectSuperseded journal (full provenance incl. session_id) +
     # count-verified fold. ONE consumer-side discipline with capture
     # (_extract_session_v2) and eval ingest_v2 — §6b's inline consumer was the
@@ -23037,7 +23209,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # #4970: same remap the capture path applies (#4716 Part 1, the
         # adjacent hole). ``supersedes_by`` is a payload ``pt_<sha>`` id BY
         # CONSTRUCTION and shares the operators' two-id-space hole — a
-        # re-keyed successor reached ``sdk.supersede(prior, '<payload id>')
+        # re-keyed successor reached ``sdk.supersede_knowledge(prior, '<payload id>')
         # with the target missing, which RAISED and was swallowed by
         # ``apply_supersessions`` as ``point supersede '<prior>' → '<payload
         # id>' failed: …`` (NOT the ``… ref '<payload id>' not found`` skip,
@@ -27397,7 +27569,7 @@ def _revoke_minted_key(org_id: str, key_id: str) -> None:
     if is_supabase_enabled():
         revoke_api_key(get_control_plane(), key_id)
     else:
-        _make_sdk(namespace="registry").apikey_revoke(key_id)
+        _make_sdk(namespace="registry")._apikey_revoke(key_id)
 
 
 def _revoke_graph_keys(org_id: str, graph_id: str | None) -> None:
@@ -27430,9 +27602,9 @@ def _revoke_graph_keys(org_id: str, graph_id: str | None) -> None:
             except Exception:
                 pass
     else:
-        for kid in sdk.graph_key_ids(org_id, graph_id):
+        for kid in sdk._graph_key_ids(org_id, graph_id):
             try:  # noqa: SIM105
-                sdk.apikey_revoke(kid)
+                sdk._apikey_revoke(kid)
             except Exception:
                 pass
 
@@ -29173,9 +29345,9 @@ async def delete_graph(graph_id: str, org_id: str,
         # its sibling below was wrapped, which is the inconsistency, not a
         # deliberate exemption.
         deleted = await _graph_offload(
-            lambda: sdk.graph_delete(org_id, graph_id), op="graph_delete")
+            lambda: sdk._graph_delete(org_id, graph_id), op="graph_delete")
         key_ids = await _graph_offload(
-            lambda: sdk.graph_key_ids(org_id, graph_id), op="graph_key_ids")
+            lambda: sdk._graph_key_ids(org_id, graph_id), op="graph_key_ids")
     if not deleted:
         # #10180: reachable now — a promotion can commit between the kind read
         # above and the tombstone, and `soft_delete_graph`'s PATCH is conditioned
@@ -29210,7 +29382,7 @@ async def delete_graph(graph_id: str, org_id: str,
                     lambda kid=kid: sb_revoke(get_control_plane(), kid),
                     op="revoke_api_key")
             else:
-                sdk.apikey_revoke(kid)
+                sdk._apikey_revoke(kid)
         except Exception:
             _logger.error(
                 "delete_graph cascade revoke failed (key stays active): "
@@ -29421,7 +29593,7 @@ async def list_trash(org_id: str,
         from tortoise.supabase_control import trash_graphs as sb_trash
         trash = await asyncio.to_thread(sb_trash, cp, org_id)
     else:
-        trash = await asyncio.to_thread(sdk.trash_graphs, org_id)
+        trash = await asyncio.to_thread(sdk._trash_graphs, org_id)
     return [{"graph_id": t["graph_id"], "name": t["name"],
              "kind": "custom", "deleted_at": t.get("deleted_at")}
             for t in trash]
@@ -29742,7 +29914,7 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user_graph_l
                     get_control_plane(), org_id, g["graph_id"]),
                 op="count_graph_keys")
         else:
-            key_count = sdk.graph_active_key_count(org_id, g["graph_id"])
+            key_count = sdk._graph_active_key_count(org_id, g["graph_id"])
         out.append({
             "graph_id": g["graph_id"], "name": g["name"],
             "kind": g["kind"], "status": g.get("status", "active"),
@@ -30447,7 +30619,7 @@ def _sweep_terminal_invite_placeholders(sdk, org_id: str, email: str) -> int:
     and ``cleanup_expired_invitations`` use: nothing live ever writes
     ``status='expired'``, so a status-only predicate would keep the ghost of
     an invite that expired by the clock. The predicate mirrors
-    ``TortoiseSDK.sweep_invite_ghost_memberships`` so the two cannot classify
+    ``TortoiseSDK._sweep_invite_ghost_memberships`` so the two cannot classify
     a node differently.
 
     Deletes go through ``_delete_fake_invite_membership`` (best-effort, one
@@ -30662,7 +30834,7 @@ async def accept_invite(body: dict, request: Request,
                                 detail="Invitation has already been accepted")
         # Create the active membership (route through membership_create for the max_users gate)
         try:
-            sdk.membership_create(invite["org_id"], user["user_id"], invite["role"])
+            sdk._membership_create(invite["org_id"], user["user_id"], invite["role"])
         except Exception as e:
             # #1880: the accepted_at write above ran BEFORE membership_create, so a
             # membership_create failure (non-capacity: org deleted between the
@@ -31115,7 +31287,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
             raise HTTPException(status_code=409,
                                 detail="Invitation has already been accepted")
         try:
-            sdk.membership_create(org_id, user["user_id"], invite["role"])
+            sdk._membership_create(org_id, user["user_id"], invite["role"])
         except Exception as e:
             _delete_fake_invite_membership(sdk, org_id, invite["id"])
             raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
@@ -31500,7 +31672,7 @@ async def list_invites(org_id: str, user: dict = Depends(get_current_user)):  # 
     # Registry accept sets accepted_at but LEAVES status='pending' — a
     # consumed invite must not appear as actionable (code-review P2,
     # PR #864).
-    return [i for i in sdk.invitation_list(org_id)
+    return [i for i in sdk._invitation_list(org_id)
             if i.get("status") in (None, "pending")
             and i.get("accepted_at") is None]
 
@@ -31647,7 +31819,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
             raise HTTPException(status_code=409,
                                 detail="Invitation has already been accepted")
         try:
-            sdk.membership_create(org_id, user["user_id"], role)
+            sdk._membership_create(org_id, user["user_id"], role)
         except Exception as e:
             _delete_fake_invite_membership(sdk, org_id, iid)
             raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
@@ -31783,7 +31955,7 @@ async def rescind_invite(invitation_id: str, org_id: str,
                                 detail="Invites unavailable (control plane error)")
     await _require_owner_admin(user["user_id"], org_id)
     sdk = _make_sdk(namespace="registry")
-    inv = sdk.invitation_get_by_id(invitation_id)
+    inv = sdk._invitation_get_by_id(invitation_id)
     if inv is None or inv.get("org_id") != org_id:
         raise HTTPException(status_code=404, detail="Invitation not found")
     # Registry accept sets accepted_at but leaves status='pending' — check
@@ -31791,7 +31963,7 @@ async def rescind_invite(invitation_id: str, org_id: str,
     if inv.get("status") == "accepted" or inv.get("accepted_at"):
         raise HTTPException(status_code=409,
                             detail="Invitation already accepted — cannot rescind")
-    result = sdk.invitation_revoke(invitation_id)
+    result = sdk._invitation_revoke(invitation_id)
     # #1880: ghost-members cleanup — the fake row dies with the invite
     _delete_fake_invite_membership(sdk, org_id, invitation_id)
     return result
@@ -34604,19 +34776,19 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
     sdk = _make_sdk(namespace="registry")
     try:
-        node = sdk.signup_token_lookup(signup_token)
+        node = sdk._signup_token_lookup(signup_token)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Agent signup failed") from e
     if node is None:
         raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
     org_id = node.get("org_id") or ""
-    org = sdk.org_get(org_id)
+    org = sdk._org_get(org_id)
     if org is None or org.get("deleted_at"):
         raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
     if org.get("suspended_at") is not None:
         raise HTTPException(status_code=403, detail=_suspended_detail())
     try:
-        rec = sdk.signup_token_recover(signup_token)
+        rec = sdk._signup_token_recover(signup_token)
     except ControlPlaneError as e:
         # token revoked between lookup and recover, or org deleted
         # concurrently → uniform 422 (fail closed, never a partial mint)
@@ -34975,7 +35147,7 @@ async def agent_token_revoke(request: Request, org: dict = Depends(get_current_o
     # ── Registry lane (selfhost) ──
     sdk = _make_sdk(namespace="registry")
     try:
-        out = sdk.signup_token_revoke(signup_token, org_id)
+        out = sdk._signup_token_revoke(signup_token, org_id)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("agent_token_revoke failed")
@@ -40273,6 +40445,16 @@ _ALLOWED_ANALYTICS_PROPS = {
     "questions", "step", "error_type",
     # #889: MCP tool-call telemetry (friction evidence for epic #888)
     "tool_name", "status", "latency_ms", "error_kind",
+    # #10893: WHICH stage consumed a breached wait budget, and how long the
+    # stages that finished took. On the `transport_wait_bound_exceeded` row
+    # beside the `latency_ms` it explains — without them every re-measurement of
+    # that issue had to infer the stage from outside the process, and three of
+    # them inferred a different one. `read_stage` is validated against
+    # `read_stages.STAGES` at the emit site before it is published, so the
+    # free-form-string hazard this flat list has (no per-event scoping) does not
+    # apply to it; `read_stages_ms` is a nested ``{stage: float}`` mapping, which
+    # the PII filter passes because it tests top-level keys only.
+    "read_stage", "read_stages_ms",
     # #3675: the result-bearing half of the SAME row. Without it the
     # ``mcp_tool_call`` series cannot tell a ``tortoise_search`` that returned
     # 8 points from one that returned nothing — both are ``status: "ok"`` —
@@ -44272,7 +44454,7 @@ async def _run_docs_indexing(job_id: str, org_id: str, org: str,
                 totals["errors"].append(str(e))
                 break
             try:
-                ingest = org_sdk.index_directory(
+                ingest = org_sdk.index_sources_from_directory(
                     str(org_root), file_type="doc", extract_metadata=False,
                     corpus_name=f"{org}-docs")
             except Exception as e:
@@ -49715,7 +49897,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 185 tracked files (455 distinct
+# ABSOLUTE line number from 185 tracked files (457 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
@@ -49766,3 +49948,16 @@ def _session_list_conds(actor_filter: str | None) -> tuple[list[str], dict]:
         conds.insert(0, "s.actor_user_id = $uid")
         params["uid"] = actor_filter
     return conds, params
+
+# ── #12926: state the two embedding switches the process actually resolved ──
+# Module scope, not `_lifespan`: this is the process boot (`uvicorn
+# tortoise.hosted_api:app`), a lifespan may legally run more than once in a
+# process, and a boot record that repeated per lifespan would read as a state
+# change. The two switches read OPPOSITE ways when unset (`value_gate` ON,
+# `embed_gate` OFF — both modules record that, and changing either is a reopen of
+# `#11445`), so an unstated EMBED switch silently keeps a vector on every row;
+# the line makes the OFF direction visible instead of silent. A RECORD, never a
+# refusal: the pre-merge refusal is `tools/embed_switch_gate.py`.
+from tortoise.gate_visibility import report_effective_switches as _report_gates  # noqa: E402
+
+_report_gates()

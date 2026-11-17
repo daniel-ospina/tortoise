@@ -319,7 +319,7 @@ def test_a_rename_journals_on_the_stable_id_and_survives_replay(sdk):
                          is_episodic=False)
     (oid,) = _name_ids(proj, "Object", "Acme")
 
-    client.update_entity(oid, name="Acme Renamed")
+    client.update_knowledge(oid, name="Acme Renamed")
 
     assert _name_ids(proj, "Object", "Acme") == [], "the old name survived the rename"
     assert _name_ids(proj, "Object", "Acme Renamed") == [oid], (
@@ -927,7 +927,7 @@ def test_a_rename_onto_a_held_name_is_refused(sdk):
                                  is_episodic=False)["node"]["id"]
 
     with pytest.raises(NameAlreadyHeld):
-        client.update_entity(mover, name="Held")
+        client.update_knowledge(mover, name="Held")
 
     # The refusal wrote NOTHING: the mover keeps its own name.
     assert _name_ids(proj, "Object", "Mover") == [mover], (
@@ -935,7 +935,7 @@ def test_a_rename_onto_a_held_name_is_refused(sdk):
     assert _name_ids(proj, "Object", "Held") == ["id-held"]
 
     # …and the guard is not a blanket block: a rename onto a FREE name works.
-    client.update_entity(mover, name="Freed")
+    client.update_knowledge(mover, name="Freed")
     assert _name_ids(proj, "Object", "Freed") == [mover]
 
 
@@ -967,7 +967,7 @@ def test_a_rename_onto_an_id_less_live_holder_is_refused(sdk):
                                  is_episodic=False)["node"]["id"]
 
     with pytest.raises(NameAlreadyHeld) as refused:
-        client.update_entity(mover, name="Legacy")
+        client.update_knowledge(mover, name="Legacy")
     # The refusal COUNTS the holder it cannot address by id — a message that
     # silently dropped it would report the graph as less ambiguous than it is.
     assert "1 other live Object" in str(refused.value), str(refused.value)
@@ -1142,7 +1142,9 @@ def test_the_bundle_guard_reads_the_live_holder_not_a_terminal_one(sdk):
     obj = client.create_entity("object", "Ghost", objectKind="core:strategy",
                                _server_id="id-ghost",
                                is_episodic=False)["node"]["id"]
-    client.update_entity(obj, status="superseded")
+    # #12592: the word names its successor (ONTOLOGY §4.3); the row still
+    # ends terminal, which is what these arms measure.
+    client.update_knowledge(obj, status="superseded", supersededBy="Ghost II")
 
     _exists, hit, _op, _bad, _carriers, merges, target = \
         client._entity_name_holders("Object", "Ghost")
@@ -1222,7 +1224,8 @@ def test_a_mention_of_a_superseded_name_does_not_mint_an_incarnation(sdk):
                                   objectKind="core:strategy",
                                   _server_id="id-retired",
                                   is_episodic=False)["node"]["id"]
-    client.update_entity(buried, status="superseded")
+    client.update_knowledge(buried, status="superseded",
+                         supersededBy="Retired II")
     registrations_before = [r for r in _journal(events)
                             if r.get("type") in ("ObjectRegistered",
                                                  "SubjectAdded")]
@@ -1329,7 +1332,8 @@ def test_a_lifecycle_event_on_a_terminal_only_object_is_a_recorded_no_op(
                                   objectKind="core:strategy",
                                   _server_id="id-buried",
                                   is_episodic=False)["node"]["id"]
-    client.update_entity(buried, status="superseded")
+    client.update_knowledge(buried, status="superseded",
+                         supersededBy="Buried II")
 
     # The DOOR writes the event (no ghost minted, nothing registered) and the
     # miss it records is the bounded, reported one.
@@ -1592,7 +1596,7 @@ def test_the_event_api_registration_door_is_idempotent_on_a_live_name(
     ``entity_identity``, so a routine re-run of the v1 extractor left the name
     with TWO live carriers — after which every by-name read refuses
     (``AmbiguousEntityName``), ``create_entity`` raises, and
-    ``update_entity(name=…)`` raises ``NameAlreadyHeld``, for a name the
+    ``update_knowledge(name=…)`` raises ``NameAlreadyHeld``, for a name the
     producer registered legitimately.
 
     FAILS IF: the emitters go back to ``ulid()``. On that tree the two calls
@@ -1670,7 +1674,7 @@ def test_a_noop_name_rewrite_on_a_doubly_held_name_is_not_refused(sdk):
 
     ``_refuse_ambiguous_rename`` fires on *any* truthy string ``name`` in
     ``props``, and a read-modify-write caller that re-sends the entity's
-    CURRENT name (the ordinary ``update_entity(id, name=<unchanged>, …)``
+    CURRENT name (the ordinary ``update_knowledge(id, name=<unchanged>, …)``
     shape) gets a hard ``NameAlreadyHeld`` whenever ANOTHER live carrier also
     holds that name — even though no name moved. The two-carrier state is
     LEGAL (D2) and this PR's own fixtures build it, so the pre-fix guard made a
@@ -1693,7 +1697,7 @@ def test_a_noop_name_rewrite_on_a_doubly_held_name_is_not_refused(sdk):
                          is_episodic=False)
 
     # A read-modify-write re-sending the CURRENT name changes only the title.
-    node = client.update_entity("id-noop-a", name="Dup", title="Edited")
+    node = client.update_knowledge("id-noop-a", name="Dup", title="Edited")
     assert node.get("name") == "Dup", node
     assert node.get("title") == "Edited", (
         "the property half of the write was dropped: " + repr(node))
@@ -1705,7 +1709,7 @@ def test_a_noop_name_rewrite_on_a_doubly_held_name_is_not_refused(sdk):
     client.create_entity("object", "Mover", _server_id="id-noop-mover",
                          is_episodic=False)
     with pytest.raises(NameAlreadyHeld):
-        client.update_entity("id-noop-mover", name="Dup")
+        client.update_knowledge("id-noop-mover", name="Dup")
     assert _name_ids(proj, "Object", "Mover") == ["id-noop-mover"], (
         "a refused rename still moved the name")
 
@@ -1819,7 +1823,7 @@ def test_the_rename_door_locks_the_guard_and_the_write_together(sdk, monkeypatch
 
     monkeypatch.setattr(TortoiseSDK, "_journal_entity_mutation", journaling)
 
-    client.update_entity(oid, name="New Name")
+    client.update_knowledge(oid, name="New Name")
 
     assert ("Object", "New Name") in taken and ("Subject", "New Name") in taken, (
         "the rename door took no create lock — a create can mint and write a "

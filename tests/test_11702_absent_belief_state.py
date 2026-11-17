@@ -5554,7 +5554,7 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
         assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == \
             pytest.approx(0.9, abs=1e-3)
 
-        j.update_entity(pid, posterior_alpha=10.0, posterior_beta=10.0)
+        j.update_knowledge(pid, posterior_alpha=10.0, posterior_beta=10.0)
 
         row = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.confidence, n.posterior_alpha, "

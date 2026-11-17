@@ -209,7 +209,7 @@ class TestStoredValueIsNotHonoured:
                 "MATCH (t:Team {id:$id}) SET t.max_sessions = $ms",
                 params={"id": tid, "ms": LEGACY_CAP},
             )
-            assert reg.org_get(tid)["max_sessions"] == LEGACY_CAP  # stored...
+            assert reg._org_get(tid)["max_sessions"] == LEGACY_CAP  # stored...
             limits = resolve_org_limits(tid)
             assert limits["max_sessions"] is None, (  # ...and NOT honoured
                 f"a stored max_sessions={LEGACY_CAP} was honoured as a cap — "

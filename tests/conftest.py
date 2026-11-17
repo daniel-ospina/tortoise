@@ -1183,7 +1183,7 @@ def provision_test_user():
             except Exception:
                 pass
         user_id = f"user-{os.urandom(4).hex()}"
-        sdk.membership_create(team["id"], user_id, "owner")
+        sdk._membership_create(team["id"], user_id, "owner")
         created.append(sdk)
         return {"sdk": sdk, "org_id": team["id"], "api_key": team["api_key"],
                 "graph_name": team["graph_name"], "org_name": team["name"],

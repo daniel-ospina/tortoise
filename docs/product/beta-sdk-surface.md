@@ -15,7 +15,7 @@ approvedBy: daniel-ospina
 # Beta SDK surface
 
 **The recommended set a beta developer sees.** Designed from who the SDK is for and what
-they do — not pruned from the existing 120.
+they do — not pruned from the existing 110.
 
 > **Scope of this approval.** The owner settled the **target surface** on 2026-09-21, including the
 > ruling that `graph_set_recording` is kept — which is what sets the MCP count at **26** (26 at
@@ -128,7 +128,7 @@ person managing their own account).
 > logic survives as the internal `_graph_count`). `config/surface-manifest.yml`'s
 > `high_water_counts` pin does **not** move, and the approved 40 does not grow.
 
-**40 methods** against **120** today. **MCP: 27 tools** (26 at the 2026-09-21 ruling; 27 since #3540) — every row except the tenancy block (28–39), `write_knowledge_batch`
+**40 methods** against **110** today. **MCP: 27 tools** (26 at the 2026-09-21 ruling; 27 since #3540) — every row except the tenancy block (28–39), `write_knowledge_batch`
 (builder-only, 13) and the constructor/`close` (1–2) — **plus row 30**, `update_memory_graph`,
 which is inside the tenancy block but is the one tenancy method with an MCP twin, because the
 owner's 2026-09-21 ruling kept the `graph_set_recording` tool. 40 − 12 − 1 − 2 + 1 = 26. That

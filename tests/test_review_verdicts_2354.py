@@ -99,7 +99,7 @@ def _make_candidate(sdk, tmp, *, tx=D2_TX, session=T2):
     prior = _prior_id(sdk)
     sdk.promote_point(prior)
     _mine(sdk, tx, "rv-d2", session, str(tmp))
-    cands = sdk.list_dedup_candidates(candidate_type="temporal")
+    cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
     assert cands, "expected a temporal correction candidate"
     cid = cands[0]["id"]
     props = sdk.get_point(cid)
@@ -174,7 +174,7 @@ class TestQueuedDecisionState:
         assert props["reviewMeasurement"] in ("measured", "baseline", "unmeasured")
         assert props["status"] == "draft"
         # It is a decision to make, not a resolved one: still in the queue.
-        cands = sdk.list_dedup_candidates(candidate_type="temporal")
+        cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
         assert [c["id"] for c in cands] == [cid]
 
         layer = VerdictLayer(sdk)
@@ -300,7 +300,7 @@ class TestVerdictMapping:
         assert _nand_between(sdk, cid, prior) == 0  # no wire
         assert _props(sdk, prior)["reviewVerdict"] == VERDICT_CLOSE
         # decided-no-action removes it from the review queue
-        assert sdk.list_dedup_candidates(candidate_type="temporal") == []
+        assert sdk.review_link_candidates("dedup", candidate_type="temporal") == []
         assert VerdictLayer(sdk).pending(candidate_type="temporal") == []
 
     def test_out_of_vocabulary_verdict_and_double_decide(self, sdk, tmp_path):

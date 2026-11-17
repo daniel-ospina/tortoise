@@ -81,8 +81,8 @@ def sdk(tmp_path, monkeypatch):
 def _seed_two_streams(sdk, n: int = 1) -> list[str]:
     """Seed two separately-ingested streams (sources s1/s2) with similar
     points. Returns the created point ids (stream A then stream B)."""
-    sdk.create_source(url="https://s1", sourceKind="document")
-    sdk.create_source(url="https://s2", sourceKind="T2")
+    sdk.register_source(url="https://s1", sourceKind="document")
+    sdk.register_source(url="https://s2", sourceKind="T2")
     ids = []
     for _ in range(n):
         ids.append(sdk.create_point(kind="statement", content="alpha one",
@@ -243,9 +243,9 @@ def test_top_k_hard_clamp(sdk, monkeypatch):
 # ── 5. tier gate (D3: registered sourceKind, any tier) ─────────────────
 
 def test_registered_sourcekind_gate(sdk):
-    sdk.create_source(url="https://s1", sourceKind="document")  # registered (neutral)
-    sdk.create_source(url="https://s2", sourceKind="T2")        # registered tier form
-    sdk.create_source(url="https://s3", sourceKind="custom_kind_xyz")  # NOT registered
+    sdk.register_source(url="https://s1", sourceKind="document")  # registered (neutral)
+    sdk.register_source(url="https://s2", sourceKind="T2")        # registered tier form
+    sdk.register_source(url="https://s3", sourceKind="custom_kind_xyz")  # NOT registered
     pa = sdk.create_point(kind="statement", content="alpha one",
                           extractedFrom="https://s1")["id"]
     pb = sdk.create_point(kind="statement", content="beta two",
@@ -286,13 +286,13 @@ def test_two_cycle_cross_stream_e2e(sdk):
     """Cross-stream discovery E2E (scoping test plan): separately ingested
     streams produce candidates, with path-provenance on the payload."""
     # Cycle 1: only stream A ingested — nothing cross-lens to see.
-    sdk.create_source(url="https://stream-a", sourceKind="document")
+    sdk.register_source(url="https://stream-a", sourceKind="document")
     pa = sdk.create_point(kind="statement", content="alpha one",
                           extractedFrom="https://stream-a")["id"]
     res1 = sdk.get_cross_lens_candidates()
     assert res1["count"] == 0
     # Cycle 2: stream B ingested separately — cross-stream candidates appear.
-    sdk.create_source(url="https://stream-b", sourceKind="T1")
+    sdk.register_source(url="https://stream-b", sourceKind="T1")
     pb = sdk.create_point(kind="statement", content="beta two",
                           extractedFrom="https://stream-b")["id"]
     res2 = sdk.get_cross_lens_candidates()
@@ -313,7 +313,7 @@ def test_empty_results_not_error(sdk):
 
 
 def test_single_stream_no_cross_lens(sdk):
-    sdk.create_source(url="https://s1", sourceKind="document")
+    sdk.register_source(url="https://s1", sourceKind="document")
     sdk.create_point(kind="statement", content="alpha one",
                      extractedFrom="https://s1")
     sdk.create_point(kind="statement", content="beta two",

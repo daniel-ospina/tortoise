@@ -3,7 +3,7 @@
 Measured at #11825's head, on three doors:
 
 ```
-update_entity(<event>, status='superseded')                     -> ACCEPTED
+update_knowledge(<event>, status='superseded')                     -> ACCEPTED
 create_entity('event', …, status='superseded')                  -> ACCEPTED
 create_event(…, status='superseded')                            -> ACCEPTED
 EventAPI.add_event(id, kind, status='superseded')               -> ACCEPTED
@@ -250,7 +250,7 @@ class TestTheUpdateDoor:
         before = self._state(sdk, pid)
         records_before = len(_journal_lines(sdk._test_log))
         with pytest.raises(ValueError, match=":Event"):
-            sdk.update_entity(pid, status="superseded")
+            sdk.update_knowledge(pid, status="superseded")
         assert self._state(sdk, pid) == before, (
             "the Point arm wrote before the :Event guard could refuse")
         assert len(_journal_lines(sdk._test_log)) == records_before, (
@@ -266,14 +266,14 @@ class TestTheUpdateDoor:
         pid = self._multi_label(sdk, "Multi-live", event_id=False,
                                 status="draft")
         assert self._state(sdk, pid)[0] == "draft"
-        sdk.update_entity(pid, status="live")
+        sdk.update_knowledge(pid, status="live")
         assert self._state(sdk, pid)[0] == "live"
 
     def test_a_refused_rename_costs_no_status_write(self, sdk):
         """#12222: every refusal on this surface precedes every write.
 
         Measured before the fix, on a `:Point:Object` in `draft` whose target
-        name a live `:Object` already holds: `update_entity(<id>,
+        name a live `:Object` already holds: `update_knowledge(<id>,
         status="live", name=<held>)` raised `NameAlreadyHeld` and STILL left
         `status='live'` on the node with a journaled `restatus` — the fold
         would replay a status the caller was told had not been applied.
@@ -286,7 +286,7 @@ class TestTheUpdateDoor:
         before = self._state(sdk, pid)
         records_before = len(_journal_lines(sdk._test_log))
         with pytest.raises(ValueError, match=r"taken-name|NameAlreadyHeld"):
-            sdk.update_entity(pid, status="live", name="taken-name")
+            sdk.update_knowledge(pid, status="live", name="taken-name")
         assert self._state(sdk, pid) == before, (
             "the status arm wrote before the rename guard refused")
         assert len(_journal_lines(sdk._test_log)) == records_before, (
@@ -298,7 +298,7 @@ class TestTheUpdateDoor:
         before = _props(sdk, eid)
         records_before = len(_journal_lines(sdk._test_log))
         with pytest.raises(ValueError, match=":Event"):
-            sdk.update_entity(eid, status=status)
+            sdk.update_knowledge(eid, status=status)
         # T6: the refusal precedes the write — the node is byte-identical, and
         # no EntityMutated record was emitted (the journal half of R5).
         assert _props(sdk, eid) == before
@@ -306,7 +306,7 @@ class TestTheUpdateDoor:
         assert len(_journal_lines(sdk._test_log)) == records_before
 
     def test_the_refusal_also_covers_update(self, sdk):
-        """`update()` is the documented alias of `update_entity()`."""
+        """`update()` is the documented alias of `update_knowledge()`."""
         eid = _event(sdk, name="Aliased")
         with pytest.raises(ValueError, match=":Event"):
             sdk.update(eid, status="superseded")
@@ -315,7 +315,7 @@ class TestTheUpdateDoor:
         """T1 — the MCP `props={…}` convention flattens before the guard runs."""
         eid = _event(sdk, name="Nested")
         with pytest.raises(ValueError, match=":Event"):
-            sdk.update_entity(eid, props={"status": "retracted"})
+            sdk.update_knowledge(eid, props={"status": "retracted"})
         assert "status" not in _props(sdk, eid)
 
     def test_the_guard_resolves_the_write_s_own_key(self, sdk):
@@ -330,16 +330,16 @@ class TestTheUpdateDoor:
             "MERGE (e:Event {eventId:'ev-key-only'}) "
             "SET e.eventKind='deployment', e.name='KeyOnly'")
         with pytest.raises(ValueError, match=":Event"):
-            sdk.update_entity("ev-key-only", status="superseded")
+            sdk.update_knowledge("ev-key-only", status="superseded")
         assert "status" not in g.query(
             "MATCH (e:Event {eventId:'ev-key-only'}) RETURN properties(e)"
         ).result_set[0][0]
 
     def test_a_non_terminal_update_still_lands(self, sdk):
         eid = _event(sdk, name="Restatus")
-        sdk.update_entity(eid, status="draft")
+        sdk.update_knowledge(eid, status="draft")
         assert _props(sdk, eid).get("status") == "draft"
-        sdk.update_entity(eid, status="scheduled")
+        sdk.update_knowledge(eid, status="scheduled")
         assert _props(sdk, eid).get("status") == "scheduled"
 
 
@@ -563,7 +563,7 @@ class TestTheEventApiDoor:
         ``_is_persistable_prop_value`` refuses these LEAVES while the engine
         really does STORE them (``projection._value_ok``, the predicate the
         ``#7369`` gate nulls on), so scoping on the fold alone let
-        ``update_entity(status=np.int64(7))`` write ``7`` onto the node — a
+        ``update_knowledge(status=np.int64(7))`` write ``7`` onto the node — a
         status no vocabulary can name, which is exactly what the type refusal is
         for. Refused now, and the stored status is untouched.
         """
@@ -574,9 +574,9 @@ class TestTheEventApiDoor:
                  "np.bool_": lambda: np.bool_(True),
                  "Decimal": lambda: Decimal("0.25")}[factory]()
         eid = _event(sdk, name=f"Transport-{factory}")
-        sdk.update_entity(eid, status="draft")
+        sdk.update_knowledge(eid, status="draft")
         with pytest.raises(ValueError, match="not a legal value on an :Event"):
-            sdk.update_entity(eid, status=value)
+            sdk.update_knowledge(eid, status=value)
         assert _props(sdk, eid)["status"] == "draft"
 
     def test_a_key_that_RENDERS_as_status_cannot_smuggle_a_terminal_status(self, sdk):
@@ -599,9 +599,9 @@ class TestTheEventApiDoor:
                 return "status"
 
         eid = _event(sdk, name="KeyRenders")
-        sdk.update_entity(eid, status="draft")
+        sdk.update_knowledge(eid, status="draft")
         with pytest.raises(ValueError, match="not writable on an :Event"):
-            sdk.update_entity(eid, **{_KeyLiar("x"): "superseded"})
+            sdk.update_knowledge(eid, **{_KeyLiar("x"): "superseded"})
         assert _props(sdk, eid)["status"] == "draft"
 
         api = self._api(sdk)
@@ -646,7 +646,7 @@ class TestTheEventApiDoor:
 
         eid = _event(sdk, name="Masked")
         with pytest.raises(ValueError, match="not writable on an :Event"):
-            sdk.update_entity(eid, **{"status": "superseded",
+            sdk.update_knowledge(eid, **{"status": "superseded",
                                       _AliasHarmless("status"): "live"})
         assert "status" not in _props(sdk, eid)
 
@@ -677,7 +677,7 @@ class TestTheEventApiDoor:
 
         eid = _event(sdk, name="ReplaySplit")
         with pytest.raises(ValueError, match="not writable on an :Event"):
-            sdk.update_entity(eid, **{_ReplayKey("status"): "superseded"})
+            sdk.update_knowledge(eid, **{_ReplayKey("status"): "superseded"})
         stored = _props(sdk, eid)
         assert "harmless" not in stored and "status" not in stored, stored
 
@@ -690,7 +690,7 @@ class TestTheEventApiDoor:
         rendered-alias `outdated` key slipped past `_sanitize_props`' literal
         `"outdated" in props`, the guard was skipped, and the flag was STORED —
         the terminal half-state #11825 records, through a declared door. Measured
-        on the previous head: `update_entity(<event>, **{KOut("x"): True})` was
+        on the previous head: `update_knowledge(<event>, **{KOut("x"): True})` was
         ACCEPTED and the node read `status=None, outdated=True`, which `ep.py`
         reads as terminal while every retrieval leg serves it.
         """
@@ -701,7 +701,7 @@ class TestTheEventApiDoor:
 
         eid = _event(sdk, name="AliasOutdated")
         with pytest.raises(ValueError, match="not writable on an :Event"):
-            sdk.update_entity(eid, **{_KeyOutdated("x"): True})
+            sdk.update_knowledge(eid, **{_KeyOutdated("x"): True})
         assert "outdated" not in _props(sdk, eid)
 
     def test_a_BYTES_key_naming_status_is_refused_before_the_write(self, sdk):
@@ -731,7 +731,7 @@ class TestTheEventApiDoor:
         `EventRecorded` arm above already does.
         """
         eid = _event(sdk, name="PosRecord")
-        sdk.update_entity(eid, status="draft")
+        sdk.update_knowledge(eid, status="draft")
         api = self._api(sdk)
         with pytest.raises(ValueError, match="not writable on an :Event"):
             api._emit("EntityMutated", {"id": eid, "label": "Event",
@@ -759,9 +759,9 @@ class TestTheEventApiDoor:
         assert _props(sdk, "ev-drop-fold")["status"] == "draft"
 
         eid = _event(sdk, name="DropLive")
-        sdk.update_entity(eid, status="draft")
+        sdk.update_knowledge(eid, status="draft")
         assert _props(sdk, eid)["status"] == "draft"
-        sdk.update_entity(eid, status={"a": 1})
+        sdk.update_knowledge(eid, status={"a": 1})
         assert "status" not in _props(sdk, eid)
 
     def test_an_unhashable_string_subclass_is_refused_by_name(self, sdk):
@@ -824,9 +824,9 @@ class TestTheEventApiDoor:
             assert _journal_lines(sdk._test_log) == []
 
         eid = _event(sdk, name="KeyedUpdate")
-        sdk.update_entity(eid, status="draft")
+        sdk.update_knowledge(eid, status="draft")
         with pytest.raises(ValueError, match="not writable on an :Event"):
-            sdk.update_entity(eid, **{_ConstHashKey("status"): "superseded"})
+            sdk.update_knowledge(eid, **{_ConstHashKey("status"): "superseded"})
         assert _props(sdk, eid)["status"] == "draft"
 
     def test_a_str_subclass_that_lies_about_hash_and_eq_is_still_refused(self, sdk):
@@ -1546,9 +1546,19 @@ class TestTheBundleValidationDoor:
 # ── T5: no over-block on the other labels ───────────────────────────────────
 
 class TestTheGuardDoesNotOverBlock:
+    """#11825's guard is about :Events; it must not narrow the other labels.
+
+    ⛔ #12592 narrowed ONE thing these cases touch: a bare
+    ``status='superseded'`` is now refused on every label (ONTOLOGY §4.3 — the
+    word names its successor), so the `superseded` control names its partner.
+    The #11825 question is unchanged: the label still takes a terminal status, it
+    is only the partnerless spelling that stopped landing.
+    """
+
     def test_a_point_still_takes_a_terminal_status(self, sdk):
         pid = sdk.create_point("statement", "a claim", status="live")["id"]
-        sdk.update_entity(pid, status="superseded")
+        sdk.update_knowledge(pid, status="superseded",
+                          supersededBy="the successor")
         row = sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": pid}
         ).result_set
@@ -1561,12 +1571,12 @@ class TestTheGuardDoesNotOverBlock:
         # knowledge kind now shares — same refusal, one home, and its third part
         # names the words that ARE accepted.
         with pytest.raises(ValueError, match="not a lifecycle word for :Point"):
-            sdk.update_entity(pid, status="dead")
+            sdk.update_knowledge(pid, status="dead")
 
     def test_a_subject_still_takes_a_terminal_status(self, sdk):
         """`#1423`'s `:Subject` vocabulary is its own arm and is untouched."""
         sid = sdk.create_entity("subject", "Acme Corp", subjectKind="organization")["node"]["id"]
-        sdk.update_entity(sid, status="superseded")
+        sdk.update_knowledge(sid, status="superseded", supersededBy="Acme Corp II")
         row = sdk._get_proj().g.query(
             "MATCH (n:Subject {id:$id}) RETURN n.status", params={"id": sid}
         ).result_set
@@ -1574,11 +1584,34 @@ class TestTheGuardDoesNotOverBlock:
 
     def test_an_object_still_takes_a_terminal_status(self, sdk):
         oid = sdk.create_entity("object", "PolicyV1", objectKind="policy")["node"]["id"]
-        sdk.update_entity(oid, status="superseded")
+        sdk.update_knowledge(oid, status="superseded", supersededBy="PolicyV2")
         row = sdk._get_proj().g.query(
             "MATCH (n:Object {id:$id}) RETURN n.status", params={"id": oid}
         ).result_set
         assert row[0][0] == "superseded"
+
+    @pytest.mark.parametrize("label", ["Point", "Object", "Subject"])
+    def test_a_bare_superseded_is_the_one_terminal_status_refused(self, sdk, label):
+        """#12592's delta, pinned HERE beside the case it narrows.
+
+        The non-vacuity control above must not be read as "every terminal word is
+        the same": `superseded` is the one the model defines by its partner, so
+        it is the one this door refuses without one.
+        """
+        if label == "Point":
+            node = sdk.create_point("statement", "bare", status="live")["id"]
+        elif label == "Object":
+            node = sdk.create_entity("object", "BarePolicy",
+                                     objectKind="policy")["node"]["id"]
+        else:
+            node = sdk.create_entity("subject", "Bare Team",
+                                     subjectKind="organization")["node"]["id"]
+        with pytest.raises(ValueError, match="no successor"):
+            sdk.update_knowledge(node, status="superseded")
+        row = sdk._get_proj().g.query(
+            "MATCH (n {id:$id}) RETURN n.status", params={"id": node}
+        ).result_set
+        assert row[0][0] != "superseded"
 
     def test_a_legacy_terminal_event_can_still_be_repaired(self, sdk):
         """The repair route a denylist (unlike an allowlist) preserves.
@@ -1597,11 +1630,11 @@ class TestTheGuardDoesNotOverBlock:
         assert _props(sdk, eid).get("status") == "superseded"
         # the terminal value can no longer be written…
         with pytest.raises(ValueError, match=":Event"):
-            sdk.update_entity(eid, status="superseded")
+            sdk.update_knowledge(eid, status="superseded")
         # …and the legacy mark can be lifted
-        sdk.update_entity(eid, status="live")
+        sdk.update_knowledge(eid, status="live")
         assert _props(sdk, eid).get("status") == "live"
-        sdk.update_entity(eid, status=None)
+        sdk.update_knowledge(eid, status=None)
         assert "status" not in _props(sdk, eid)
 
     def test_the_whole_terminal_vocabulary_is_a_subset_of_the_point_vocabulary(self):

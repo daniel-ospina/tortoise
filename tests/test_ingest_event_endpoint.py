@@ -569,7 +569,9 @@ def test_direct_route_terminal_only_carrier_is_a_different_incarnation(sdk):
     """
     sub = sdk.create_subject("Alpha")["id"]
     sdk.create_object("Beta")
-    sdk.update_entity(sub, status="superseded")
+    # #12592: the word names its successor (ONTOLOGY §4.2), so the fixture does.
+    # The question here is unchanged — the resolver must not reuse the buried one.
+    sdk.update_knowledge(sub, status="superseded", supersededBy="Alpha II")
     bundle = {
         "points": [{"ref": "pX", "kind": "statement",
                     "content": "must-not-commit"}],
@@ -913,7 +915,7 @@ def test_direct_route_non_point_endpoints_still_rejected(sdk):
     epistemic side, see test_direct_route_event_endpoint_accepted) — the pin
     is re-specified, never silently deleted."""
     pa = sdk.create_point("statement", "A")["id"]
-    src = sdk.create_source("https://pre.example/s", "report")
+    src = sdk.register_source("https://pre.example/s", "report")
     bundle = {
         "points": [{"ref": "pO", "kind": "statement", "content": "op-shaped",
                     "is_operator": True}],
@@ -1345,7 +1347,8 @@ def test_direct_route_self_edge_rejected_when_the_name_is_only_terminal(sdk):
     Mutation that must red this: restoring `if _h[0]:` in the guard.
     """
     sub = sdk.create_subject("Gamma")["id"]
-    sdk.update_entity(sub, status="superseded")
+    # #12592: a bare `superseded` is refused, so the fixture names its successor.
+    sdk.update_knowledge(sub, status="superseded", supersededBy="Gamma II")
     bundle = {
         "points": [{"ref": "pX", "kind": "statement",
                     "content": "must-not-commit"}],

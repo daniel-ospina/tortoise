@@ -352,7 +352,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "the graph; violations are warnings, not blocks.",
         risk="read",
         http_policy=True,
-        sdk_method="validate_domain",
+        sdk_method="",  # #11609: the SDK method retired into graph_overview(section=\'validate_domain\'); the handler answers through it
     ),
     ToolDefinition(
         name="tortoise_summarize_structure",
@@ -392,7 +392,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="List all pointKinds present in the graph with counts. What EXISTS.",
         risk="read",
         http_policy=True,
-        sdk_method="list_pointkinds",
+        sdk_method="",  # #11609: the SDK method retired into graph_overview(section=\'pointkinds\'); the handler answers through it
     ),
     ToolDefinition(
         name="tortoise_list_sources",
@@ -400,7 +400,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="List all Sources with point counts. Where data came FROM.",
         risk="read",
         http_policy=True,
-        sdk_method="list_sources",
+        sdk_method="",  # #11609: the SDK method retired into graph_overview(section=\'sources\'); the handler answers through it
     ),
     ToolDefinition(
         name="tortoise_list_namespaces",
@@ -408,7 +408,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="List installed pack namespaces.",
         risk="read",
         http_policy=True,
-        sdk_method="list_namespaces",
+        sdk_method="",  # #11609: the SDK method retired into graph_overview(section=\'namespaces\'); the handler answers through it
     ),
     # epic #902 A13 (#1051) — batch audit surface
     ToolDefinition(
@@ -449,7 +449,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="List all Tag names with count of tagged Points. Where tags are USED.",
         risk="read",
         http_policy=True,
-        sdk_method="list_tags",
+        sdk_method="",  # #11609: the SDK method retired into graph_overview(section=\'tags\'); the handler answers through it
     ),
     ToolDefinition(
         name="tortoise_query_points_by_tag",
@@ -467,7 +467,29 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_get_point",
         id="surface.get_point",
-        description="Get a single Point by ID. Returns all properties, or empty dict.",
+        # #12941: an ARMED deployment (`TORTOISE_RECORD_SERVE`) adds two things a
+        # client cannot infer from the pre-#12941 sentence: a found node names
+        # the store that answered (`servedFrom` / `fallbackReason`), and an
+        # answer no reachable store could SEE is a dict carrying
+        # `residency: "not-hot"` rather than an empty one (#7952). ⛔ `{}` does
+        # NOT mean "we checked and it is not there": it is an ESTABLISHED
+        # absence when the record answered, and it is also what an `off`
+        # deployment with the marker unarmed returns — an empty answer that says
+        # NOTHING about whether the node exists (the pre-#12941 shape). So
+        # `if result:` separates an empty answer from a found node and NOTHING
+        # MORE: the marker shape is a TRUTHY dict carrying no node properties,
+        # so a write-verification that stops at `if result:` reports a node this
+        # store could not see as a successful write. It must ALSO read
+        # `result.get("id")` or refuse the `residency` marker
+        # (`tortoise/sdk.py::get_point` states the same rule for the SDK shape,
+        # and the two must not disagree).
+        # ⚠️ The LIVE canonical tool is `tortoise_get_entity` (this name is its
+        # RETIRED alias); its description is the owner-approved surface text and
+        # is NOT edited here.
+        description=("Get a single Point by ID. Returns all properties, or empty dict "
+                     "(with TORTOISE_RECORD_SERVE armed: found answers name the store "
+                     "via servedFrom/fallbackReason, and an answer the store could not "
+                     "see carries residency=\"not-hot\" instead of being empty)."),
         risk="read",
         http_policy=True,
         sdk_method="get_point",
@@ -478,7 +500,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Entity resolution — NL query → matching entities from the graph.",
         risk="read",
         http_policy=True,
-        sdk_method="suggest_entry_points",
+        # #11609: the SDK method is private behind the container now; the handler
+        # answers through `tortoise_search_knowledge(mode="entry_points")`.
+        sdk_method="",
     ),
     # ── Semantic Search (#6990) ───────────────────────────────────
     ToolDefinition(
@@ -502,7 +526,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "text on demand).",
         risk="read",
         http_policy=False,
-        sdk_method="expand_relationships",
+        sdk_method="",  # #11609: the SDK method retired into explore_connections(id, include_content=True); the handler answers through it
     ),
     ToolDefinition(
         name="tortoise_recall",
@@ -554,7 +578,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "wrapper's note (#12364).",
         risk="read",
         http_policy=True,
-        sdk_method="list_dedup_candidates",
+        sdk_method="",  # #11609: the SDK method retired into review_link_candidates(kind=\'dedup\'); the handler answers through it
     ),
     ToolDefinition(
         name="tortoise_approve_merge",
@@ -692,7 +716,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "(#9202).",
         risk="destructive",
         http_policy=True,
-        sdk_method="update_point",
+        sdk_method="update_knowledge",  # #11609 lane B: the SDK name retired into the container
     ),
     # ── Operators ─────────────────────────────────────────────────
     ToolDefinition(
@@ -731,8 +755,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_get_operator",
         id="surface.get_operator",
-        description="Get an operator Point by ID. Returns all properties including "
-                    "annotation dimensions.",
+        description=("Get an operator Point by ID. Returns all properties including "
+                     "annotation dimensions. TORTOISE_RECORD_SERVE armed: a found answer names the store; residency=not-hot when unseeable."),
         risk="read",
         http_policy=True,
         sdk_method="get_point",  # get_operator uses get_point + is_operator check
@@ -764,7 +788,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Creates decision + options + evidence + IMPL edges atomically.",
         risk="write",
         http_policy=True,
-        sdk_method="file_decision",
+        sdk_method="write_question",  # #11609 lane B: retired into the container
     ),
     ToolDefinition(
         name="tortoise_file_human_approval",
@@ -775,7 +799,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "(label approvedBy) so dependent claims strengthen.",
         risk="write",
         http_policy=True,
-        sdk_method="file_human_approval",
+        sdk_method="record_decision",  # #11609 lane B: retired into the container
     ),
     # ── Deletion / Invalidation ───────────────────────────────────
     ToolDefinition(
@@ -800,14 +824,20 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_supersede",
         id="surface.supersede",
-        description="Atomically replace old Point with new — CORRECTS edge + outdated flag. "
-                    "transfer_edges=True (default): full supersede — all edges move from "
-                    "old to new. transfer_edges=False: invalidate behavior — outdated flag "
-                    "+ CORRECTS edge only, no edge transfer. "
-                    "dry_run=True previews exactly which edges would transfer and changes nothing.",
+        description="Atomically replace a node with its successor. The arm follows the OLD "
+                    "node's label: a Point gets a full supersede — CORRECTS edge + outdated "
+                    "flag + every edge moved to the new node; an Object/Subject gets the "
+                    "family supersede — status='superseded' + supersededBy (the successor's "
+                    "NAME) + supersededAt, with no edge transfer. transfer_edges=None "
+                    "(default, not supplied) takes that label-driven arm; True/False are "
+                    "POINT-ONLY and are REFUSED on an Object/Subject rather than silently "
+                    "dropped. dry_run=True previews with the same arm and the same "
+                    "FAMILY-ARM checks, writing nothing — not refusal parity on the hybrid "
+                    ":Object:Event / :Subject:Event / :Object:Source / :Subject:Source "
+                    "shapes (fail-closed; tortoise#13114).",
         risk="destructive",
         http_policy=True,
-        sdk_method="supersede",
+        sdk_method="supersede_knowledge",  # #11609 lane B: retired into the container
     ),
     # ── Subscriptions / claim lifecycle (#432) ─────────────────────
     ToolDefinition(
@@ -878,9 +908,15 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_entity_profile",
         id="surface.entity_profile",
+        # ⛔ This description reaches the CALLER (the retired-call message is
+        # `RETIRED — use {pointer}. {description}`), so it is a POINTER, not prose:
+        # naming a retired sibling sends the caller into a second hop that resolves
+        # nowhere (#12948 review F1, #12951 fallout). It names the live shallow door
+        # `tortoise_list_topics` itself retired into, not the retired name.
         description="Multi-hop BFS from an entity with optional filters (pointKind, "
                     "confidenceMin) — full neighborhood categorized by node type. Use for deep "
-                    "entity analysis; for a fast neighbor list use tortoise_list_topics.",
+                    'entity analysis; for a fast neighbor list use '
+                    'tortoise_list_knowledge(kind="topic", entity_id=...).',
         risk="read",
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (calls navigation.entityProfile)
@@ -920,7 +956,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Read recent diary entries for an agent, newest first.",
         risk="read",
         http_policy=True,
-        sdk_method="diary_read",
+        sdk_method="",  # #11609: the SDK method retired into list_knowledge(kind=\'diary\'); the handler answers through it
     ),
     ToolDefinition(
         name="tortoise_list_graphs",
@@ -937,7 +973,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Returns {connected, counts, total_entities}.",
         risk="read",
         http_policy=True,
-        sdk_method="status",
+        sdk_method="",  # #11609: the SDK method retired into graph_overview(section=\'status\'); the handler answers through it
     ),
     ToolDefinition(
         name="tortoise_health",
@@ -1021,7 +1057,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_ingest_corpus",
         id="surface.ingest_corpus",
-        description="DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter "
+        description="DEPRECATED — use "
+                    "tortoise_index_sources_from_directory(directory, file_type=\"doc\"). "
+                    "Batch document ingestion — walk directory, parse YAML frontmatter "
                     "from .md files, create/update document Sources "
                     "(D10: a document is a :Source). "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
@@ -1078,17 +1116,20 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "(D10: a document is a Source, not a :Document node).",
         risk="read",
         http_policy=True,
-        sdk_method="taxonomy",
+        sdk_method="",  # #11609: the SDK method retired into graph_overview(section=\'taxonomy\'); the handler answers through it
     ),
     ToolDefinition(
         name="tortoise_list_topics",
         id="surface.list_topics",
+        # ⛔ Same rule as `tortoise_entity_profile` above: the description is the
+        # caller's next hop, so it names the LIVE multi-hop door, never the retired
+        # `tortoise_entity_profile` it used to point at (#12951 fallout).
         description="Fast one-hop neighbor enumeration for an entity — quick discovery and "
                     "navigation. Use for shallow context; for multi-hop filtered BFS use "
-                    "tortoise_entity_profile.",
+                    "tortoise_explore_connections(node_id, hops=...).",
         risk="read",
         http_policy=True,
-        sdk_method="list_topics",
+        sdk_method="",  # #11609: the SDK method retired into graph_overview(section=\'topics\'); the handler answers through it
     ),
     # ── Graph Analysis ────────────────────────────────────────────
     # ⛔ `tortoise_analyze` is REMOVED from the MCP surface (#11609 batch 1, owner ruling
@@ -1104,7 +1145,13 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Find Points not updated in N days. Returns {stale, count, cutoff, limit}.",
         risk="read",
         http_policy=True,
-        sdk_method="stale_points",
+        # ⛔ `stale_points` did NOT retire (#12951 review P3): the owner's narrow-alias
+        # row names `stale`, the TOOL, not this method name, so no approving region
+        # authorises its retirement and it stays public in `sdk.py`. The empty binding
+        # is a different fact — this door answers through the orientation container
+        # (`graph_overview(section='stale')`), which dispatches to `stale_points`, so
+        # there is no single SDK method for the row to name.
+        sdk_method="",
     ),
     ToolDefinition(
         name="tortoise_review_connections",
@@ -1152,9 +1199,21 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.provenance",
         description="Provenance chain — 'Who decided this?' "
                     "Follows authoredBy → Subject → delegation.",
-        risk="read",
+        # ⛔ maintenance, NOT read (#12951 review, P1): the handler answers through
+        # `check_confidence(claim_id, include_provenance=True)`, whose claim arm reaches
+        # `get_confidence` — and that read's lazy-consistency path DREAMS a dirty root
+        # (`dream(dirty_only=True, …)` SETs `n.confidence`), a graph write. The tier is
+        # what produces `readOnlyHint`, so a `read` tier here advertised "this call
+        # writes nothing" over a call that does — the exact #4122 defect this file's
+        # `READ_THROUGH_WRITE_METHODS` ledger exists to refuse. `require_calibration=False`
+        # is forwarded into that dream, so the write happens on the uncalibrated path too.
+        # A `graphs:read` key can still call it: maintenance is the third state, for
+        # exactly this shape — it just does not auto-approve. Same tier as
+        # `tortoise_check_confidence` / `tortoise_get_confidence`, which reach the same
+        # writer.
+        risk="maintenance",
         http_policy=True,
-        sdk_method="provenance",
+        sdk_method="",  # #11609: the SDK method retired into check_confidence(claim_id, include_provenance=True); the handler answers through it
     ),
     # ── Multi-tenancy (#7001) ─────────────────────────────────────
     ToolDefinition(
@@ -1220,7 +1279,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_index_sessions",
         id="surface.index_sessions",
-        description="DEPRECATED — use tortoise_index_files. Index session .md files "
+        description="DEPRECATED — use "
+                    "tortoise_index_sources_from_directory(directory, "
+                    "file_type=\"agent_session\"). "
+                    "Index session .md files "
                     "as AgentSession Events. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
         risk="destructive",
@@ -1249,7 +1311,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Search indexed agent sessions. Returns Events with narrative_arc snippets.",
         risk="read",
         http_policy=True,
-        sdk_method="search_sessions",
+        # #11609: the member SDK method is PRIVATE behind the container; this door
+        # answers through it and keeps its own declared list envelope (see
+        # `RETIRED_USE_INSTEAD`'s note on the six wrap-envelope doors).
+        sdk_method="",  # tortoise_search_knowledge(mode="sessions")
     ),
     ToolDefinition(
         name="tortoise_create_document",
@@ -1340,7 +1405,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Update any entity's properties.",
         risk="destructive",
         http_policy=True,
-        sdk_method="update_entity",
+        sdk_method="update_knowledge",  # #11609 lane B: retired into the container
     ),
     ToolDefinition(
         name="tortoise_delete_entity",
@@ -1377,7 +1442,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "get a plain property update.",
         risk="destructive",
         http_policy=True,
-        sdk_method="update",
+        # #12915 review F1: this door routes through `sdk.update_knowledge` (the
+        # relay `_update_entity_any`, which the absorbed `tortoise_update_point` /
+        # `tortoise_update_entity` handlers already call), NOT `sdk.update` —
+        # `update` sends a Point to `update_point`, which journals no `restatus`
+        # record and refuses every non-promote transition by a fixed sentence.
+        # This door is what `tortoise_update_knowledge`'s `props` arm delegates to,
+        # so the container and the doors it absorbs cannot disagree about behaviour.
+        sdk_method="update_knowledge",
     ),
     ToolDefinition(
         name="tortoise_delete",
@@ -1445,6 +1517,124 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (dispatches per section)
     ),
+    # ── #11609 Phase 2 — the READ/QUERY family's containers (#4282) ──────
+    # Each is ONE approved read verb whose `mode=`/`kind=` (or argument) selects
+    # the question, and each DELEGATES to `sdk.<the same name>` — the SDK method
+    # `docs/product/bridge-table.md` Part C1 recorded as missing. The member
+    # tools a container covers retire in the same batch through
+    # `RETIRED_USE_INSTEAD` (#3883), so a client that still calls one gets the
+    # same rows plus a warning.
+    ToolDefinition(
+        name="tortoise_search_knowledge",
+        id="surface.search_knowledge",
+        description="Find things by text — ONE search door (#4282 row 3). mode selects "
+                    "which question: hybrid (default) = meaning-ranked RRF fusion of "
+                    "full-text + vector + structural, EP-annotated (omit query and set "
+                    "kind to enumerate a kind); full_text = exact pointKind/property "
+                    "matching with NO ranking, paged over a total order and returning "
+                    "{results,total,hasMore}; tag = the Points reachable through one "
+                    "Tag (page sliced from a full scan — approximate when walked); "
+                    "sessions = indexed agent sessions (agent/topics/after/before); "
+                    "entry_points = natural-language query → matching entities; "
+                    "issue_insight = 'there is more in the graph' for a would-be issue "
+                    "(title/body/repo), call BEFORE filing. For a single known id use "
+                    "tortoise_get_entity.",
+        # ⛔ maintenance, NOT read: its `full_text` arm delegates to `list_knowledge`,
+        # whose `source_reliability` arm reaches the caching `get_source_reliability` —
+        # and #4122 refuses a read-only hint over a declared read-through write (the
+        # declaration is `READ_THROUGH_WRITE_METHODS` in
+        # `tests/tool_surface_capabilities.py`). A `graphs:read` key can still call it:
+        # maintenance is the tier for exactly that shape — it does not auto-approve.
+        risk="maintenance",
+        http_policy=True,
+        # The handler is custom (it dispatches per `mode`), but the BINDING is real:
+        # the tool answers through `TortoiseSDK.search_knowledge`. Declared as the
+        # method rather than blanked so the write ledger can see that the guard-relevant
+        # `search_knowledge` this handler reaches has a declaring tool (#4035's blanking
+        # would remove exactly that evidence).
+        sdk_method="search_knowledge",
+    ),
+    ToolDefinition(
+        name="tortoise_list_knowledge",
+        id="surface.list_knowledge",
+        description="One list method; kind selects the collection (#4282 row 4). Browse "
+                    "and filter WITHOUT a text search. kind: claim (default) = Points "
+                    "by pointKind/property filters, paged over a total order with "
+                    "{results,total,hasMore}; source = every provenance Source with its "
+                    "point count; source_reliability = one Source's derived reliability "
+                    "(url required — recomputes and caches the derivation); batch = one "
+                    "bundle's stamped artifacts with id, or the recent batch ids "
+                    "without; namespace = installed pack namespaces with kind counts; "
+                    "topic = one entity's topic profile (entity_id required); diary = an "
+                    "agent's recent diary entries (agent required).",
+        # ⛔ maintenance, NOT read: one arm refreshes a stored projection —
+        # its `source_reliability` arm reaches the caching
+        # `get_source_reliability`, which recomputes and re-caches `s.reliability` — and #4122
+        # refuses a read-only hint over a declared read-through write (the declaration is
+        # `READ_THROUGH_WRITE_METHODS` in `tests/tool_surface_capabilities.py`). A
+        # `graphs:read` key can still call it: maintenance is the tier for exactly that
+        # shape — it just does not auto-approve.
+        risk="maintenance",
+        http_policy=True,
+        # Custom handler, REAL binding — see `tortoise_search_knowledge` above.
+        sdk_method="list_knowledge",
+    ),
+    ToolDefinition(
+        name="tortoise_check_confidence",
+        id="surface.check_confidence",
+        description="How confident the graph is — the confidence view ONLY (#4282 row "
+                    "5). Dispatch is by argument: claim_id = one claim's EP posterior "
+                    "{mean,variance,alpha,beta}, and include_provenance adds the chain "
+                    "behind it; topic = the dated belief chain for a topic; session = "
+                    "what happened last session, including its confidence changes; "
+                    "calibrate (or no selector) = the graph-wide calibration audit. It "
+                    "never RECOMPUTES the posterior — that is "
+                    "tortoise_compute_confidence's job — and it is NOT write-free: the "
+                    "claim_id arm reaches get_confidence, whose lazy consistency pass "
+                    "dreams a dirty root, which is why this door is tiered maintenance "
+                    "rather than read.",
+        # ⛔ maintenance, NOT read: one arm refreshes a stored projection through a write
+        # — the `claim_id` arm reaches `get_confidence`, whose lazy `dream(dirty_only=True)`
+        # writes `n.confidence` (the no-selector default answers from `calibrate_summary`,
+        # a pure projection query that calls neither `dream` nor `get_confidence`) — and #4122
+        # refuses a read-only hint over a declared read-through write (the declaration is
+        # `READ_THROUGH_WRITE_METHODS` in `tests/tool_surface_capabilities.py`). A
+        # `graphs:read` key can still call it: maintenance is the tier for exactly that
+        # shape — it just does not auto-approve.
+        risk="maintenance",
+        http_policy=True,
+        # Custom handler, REAL binding — see `tortoise_search_knowledge` above.
+        sdk_method="check_confidence",
+    ),
+    ToolDefinition(
+        name="tortoise_explore_connections",
+        id="surface.explore_connections",
+        description="Walk outward from a node through its links (#4282 row 8). "
+                    "node_id = the entity-centric BFS from that node, neighbours "
+                    "categorised by layer; node_id + include_content = the full "
+                    "payload for one Point, every neighbour's text included; query = "
+                    "resolve a natural-language query to the node it names, then walk "
+                    "from it. hops bounds the walk (default 2).",
+        risk="read",
+        http_policy=True,
+        # Custom handler, REAL binding — see `tortoise_search_knowledge` above.
+        sdk_method="explore_connections",
+    ),
+    ToolDefinition(
+        name="tortoise_review_link_candidates",
+        id="surface.review_link_candidates",
+        description="Connections found but not made — READ-ONLY (#4282 row 10). kind: "
+                    "connections (default) = related-but-missing suggestions and "
+                    "illogical/stale links, mode=add|prune|both with an optional scope; "
+                    "dedup = the deduplication review queue (candidate_type=content|entity); "
+                    "cross_lens = unverified cross-source candidate pairs. Nothing here "
+                    "writes: accept a candidate by calling link_entities with its two "
+                    "endpoints.",
+        risk="read",
+        http_policy=True,
+        # Custom handler, REAL binding — see `tortoise_search_knowledge` above.
+        sdk_method="review_link_candidates",
+    ),
     ToolDefinition(
         name="tortoise_overview",
         id="surface.overview",
@@ -1466,6 +1656,158 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         risk="read",
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (dispatches to legacy tools)
+    ),
+    # ── The WRITE/MUTATE containers (#4282 Phase 2, #11609 lane B) ──────
+    # Six approved target names (`tortoise/__all__.py` rows 20-26) as ONE tool each,
+    # dispatching on the discriminator `docs/product/bridge-table.md` Part A records.
+    # Every member keeps its handler FUNCTION and its `sdk_method` binding; only the
+    # NAME retires (#3883), so a caller of a retired name still resolves through the
+    # warning shim and gets exactly what it got before, plus the redirect.
+    #
+    # ⛔ THE RULE THAT KEEPS THIS HONEST: a member is retired only because its
+    # container's handler DELEGATES to that member's handler. Each container body
+    # below calls the legacy tool function, so the two doors cannot disagree about
+    # behaviour — the same rule `tortoise_graph_overview` states for its sections.
+    #
+    # ⚠️ THREE of the recorded beta rows name TWO destinations for one group
+    # (`update_knowledge` for the state, `list_knowledge` for the filter;
+    # `adjust_relationship` for strength, `update_knowledge` for annotation), so the
+    # SDK-level retirement of `promote_point` / `set_point_baseline` /
+    # `annotate_operator` / `mitigate_operator` cannot cite a single approved
+    # replacement and stays OPEN (bridge-table.md §D2c, sdk-rename-table.md §C3b).
+    # Their MCP names retire here regardless: the bridge map is owner-approved and
+    # places each of them in exactly one container.
+    ToolDefinition(
+        name="tortoise_update_knowledge",
+        id="surface.update_knowledge",
+        description="Change what a stored thing says — ONE revise verb for a Point, an "
+                    "entity or an epistemic link — or retract it. Dispatches on WHICH "
+                    "FIELDS are set: props → a property update (point-lifecycle for a "
+                    "Point, plain properties for an entity); annotation={bias,precision,"
+                    "consistency,directness} → annotate the link; invalid_at=/valid_until="
+                    " (+ corrected_by_id=) → retract, or invalidate against a successor. "
+                    "Retraction is a TEMPORAL FIELD here, not a separate verb. One arm per "
+                    "call: a keyword the chosen arm cannot record is refused, never dropped.",
+        risk="destructive",
+        http_policy=True,
+        # #4282 Phase 2: this container BINDS NO SINGLE SDK METHOD — it dispatches
+        # per arm to the handler it absorbed (`props` -> `tortoise_update` ->
+        # `sdk.update_knowledge`, the `_update_entity_any` relay; `annotation` ->
+        # `sdk.annotate_operator`; the temporal arms ->
+        # `sdk.retract_point` / `sdk.invalidate_point`), which is the SAME shape its
+        # two sibling containers ship with (`tortoise_adjust_relationship`,
+        # `tortoise_refresh_confidence`) and the shape `tortoise_graph_overview`
+        # already declares for a per-section dispatcher. Declaring the SDK verb
+        # `update_knowledge` here was a claim the code does not consume: two
+        # independent gates red on it —
+        #   #4337 `binding_resolution_violations`: "declares sdk_method
+        #        'update_knowledge' that its handler never reaches (reaches:
+        #        ['annotate_operator','invalidate_point','retract_point','update'])"
+        #   #3904 `_classify`: DECLARED_BINDING_NOT_CONSUMED, reads=['update']
+        # `tests/tool_surface_capabilities.py::NON_SDK_WRITER_TOOLS` carries the
+        # declaration that this is a handler-served WRITE (the #4035 idiom).
+        sdk_method="",
+    ),
+    ToolDefinition(
+        name="tortoise_supersede_knowledge",
+        id="surface.supersede_knowledge",
+        description="Replace a node with a successor, keeping the history. The arm follows "
+                    "the OLD node's label: a Point gets a full supersede — CORRECTS edge, "
+                    "outdated flag, and every edge moved from old to new; an Object/Subject "
+                    "gets the family supersede — status='superseded' + supersededBy (the "
+                    "successor's NAME) + supersededAt, no edge transfer. transfer_edges=None "
+                    "(default, not supplied) takes that label-driven arm; True/False are "
+                    "POINT-ONLY and are REFUSED on an Object/Subject rather than silently "
+                    "dropped. dry_run=True previews with the same arm and the same "
+                    "FAMILY-ARM checks, writes nothing, and reports the node count the "
+                    "write would touch; it is NOT refusal parity on the hybrid shapes "
+                    ":Object:Event / :Subject:Event / :Object:Source / :Subject:Source, "
+                    "where the preview says would-supersede and the write refuses "
+                    "(fail-closed; tortoise#13114).",
+        risk="destructive",
+        http_policy=True,
+        sdk_method="supersede_knowledge",
+    ),
+    ToolDefinition(
+        name="tortoise_adjust_relationship",
+        id="surface.adjust_relationship",
+        description="Adjust an existing epistemic link. Dispatches on the ADJUSTMENT: "
+                    "reason=/strength=/credibility= → mitigate the edge (a graded dampener, "
+                    "strength 0.10-0.50); bias/precision/consistency/directness → annotate "
+                    "its four epistemic dimensions; action=mitigate|annotate keeps the "
+                    "legacy spelling. Annotating a link is `update_knowledge` on it — this "
+                    "verb is the one for STRENGTH. ⛔ The mitigation arm is idempotent only "
+                    "for a CURRENT mitigation; once it has been withdrawn "
+                    "(retracted/superseded/outdated/archived) a re-assertion mints a NEW "
+                    "mitigation Point and returns its id — so a refused retry does NOT "
+                    "converge by repeating the call.",
+        risk="destructive",
+        http_policy=True,
+        # #4282 Phase 2, SPLIT (disclosed): the container ships now, its SDK `def` does
+        # NOT. `annotate_operator` and `mitigate_operator` cannot be retired yet — the
+        # beta row that authorises them names TWO destinations ("`adjust_relationship`
+        # for strength, `update_knowledge` for annotation"), so
+        # `tests/test_sdk_retirement.py` cannot derive a single approved replacement for
+        # either, and retiring a live name with a hint the owner never approved is the
+        # one thing that gate exists to refuse. So this row is a CUSTOM HANDLER, the
+        # shape `tortoise_graph_overview` uses: it dispatches to the member handlers and
+        # declares no SDK binding it cannot honour.
+        sdk_method="",  # custom handler in mcp_server.py (dispatches per adjustment)
+    ),
+    ToolDefinition(
+        name="tortoise_refresh_confidence",
+        id="surface.refresh_confidence",
+        description="Recompute or seed a belief's confidence. Dispatches on SCOPE: "
+                    "scope='dirty' (default) → dream the accumulated dirty subgraph; "
+                    "scope='full' → whole-graph stabilization; scope='promote' → the "
+                    "reviewer-gated draft→live promotion of point_id; "
+                    "scope='baseline' → set point_id's Beta prior (alpha, beta). The two "
+                    "scopes are stated as a parameter, never chosen silently.",
+        risk="destructive",
+        # #329, carried over with the container: whole-graph EP is CPU-heavy, so the
+        # MCP surface excludes it for tenants and the REST route below is the
+        # separately-budgeted path (MAX_DREAM_FULL_PER_HOUR, hosted_api). The policy
+        # is the STRICTEST member's: `tortoise_dream` was `http_policy=False` and a
+        # container that reaches it must be too. Disclosed consequence of the
+        # #11609 lane B consolidation: `promote`/`baseline` are no longer ADVERTISED
+        # over tenant HTTP MCP (they were) — the handler still answers them by name,
+        # and the dream arms refuse over HTTP exactly as `tortoise_dream` did.
+        http_policy=False,
+        # SPLIT (disclosed), same reason as `tortoise_adjust_relationship`:
+        # `promote_point` / `set_point_baseline` sit on a beta row that names two
+        # destinations, so the SDK `def` waits on that ruling and this row is a custom
+        # handler over the member handlers (`graph_overview`'s shape).
+        sdk_method="",  # custom handler in mcp_server.py (dispatches per scope)
+
+        # The REST route survives the container: this is the one HTTP door to whole-
+        # graph EP and it is BUDGETED at the hosted layer, so retiring the tool row
+        # must not retire the route with it.
+        rest_spec=RestSpec(method="POST", path="/v1/dream"),
+    ),
+    ToolDefinition(
+        name="tortoise_write_question",
+        id="surface.write_question",
+        description="File a QUESTION with its options and the evidence behind them — not a "
+                    "decision. Creates the question, its option Points, the evidence Points "
+                    "and the IMPL edges atomically. options: option descriptions; evidence: "
+                    "evidence statements; choice: 0-indexed preferred option. Returns "
+                    "{decision_id, option_ids, evidence_ids}.",
+        risk="write",
+        http_policy=True,
+        sdk_method="write_question",
+    ),
+    ToolDefinition(
+        name="tortoise_record_decision",
+        id="surface.record_decision",
+        description="Record that a question was resolved — a human approval of a planning "
+                    "artifact: an Event (eventKind humanApproval) with full provenance, a "
+                    "decision Point carrying an EP evidence prior, and unidirectional IMPL "
+                    "(approvedBy) edges to the approved claims so dependent claims "
+                    "strengthen. Returns {event_id, decision_point_id, impl_operator_ids, "
+                    "confidence_delta}.",
+        risk="write",
+        http_policy=True,
+        sdk_method="record_decision",
     ),
     # ⛔ `tortoise_backfill_v25` is REMOVED from the MCP surface (#11609 batch 1, owner
     # ruling comment 6831894340): it targets ONTOLOGY v2.5 against a v3.13 schema, has no
@@ -1545,6 +1887,123 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="",
         rest_spec=RestSpec(method="POST", path="/v1/index/github"),
+    ),
+
+    # ── #4282 Phase 2 — the SOURCES / MINE / SESSION containers ──────
+    #
+    # ⛔ APPENDED AT THE END OF THE LIST ON PURPOSE. Every entry above keeps its
+    # line number, so the ~20 files that cite `tool_registry.py:NNNN` (including
+    # `tools/surface_manifest.py` and the #9664 capstone pin) are NOT re-staled
+    # by this batch. Inserting in the middle of the list is a cite migration,
+    # not a feature, and it costs a whole repair round.
+    #
+    # Each name is an OWNER-APPROVED target row (`tortoise/__all__.py`). The
+    # members they absorb were moved to `RETIRED_USE_INSTEAD` below in the SAME
+    # change (#3883): they leave `tools/list` and still answer through the
+    # warning shim with their original bodies. `sdk_method` names the SDK method
+    # the container dispatches through — a binding that RESOLVES now (Part C1's
+    # finding was that these rows had no `def` at all).
+    ToolDefinition(
+        name="tortoise_register_source",
+        id="surface.register_source",
+        description="Declare a source exists — the URL is its identity (#4282 row 14). "
+                    "The one declaring door: the retired per-kind entry points "
+                    "redirect here. `tier` (T0-T4) overrides the tier "
+                    "the source KIND derives; `sourceDate` is the evidence-age clock. "
+                    "An existing Source (URL collision) is never re-kinded.",
+        risk="write",
+        idempotent=True,
+        http_policy=True,
+        sdk_method="register_source",
+    ),
+    ToolDefinition(
+        name="tortoise_manage_source_trust",
+        id="surface.manage_source_trust",
+        description="Set how far a source is trusted (#4282 row 18). Dispatch is BY "
+                    "ARGUMENT: `tier=` (T0-T4) sets the credibility tier; `score=` with "
+                    "`assessor=` and `rationale=` records an assessment (a "
+                    "reputation-weighted Statement Point). Passing both is refused — "
+                    "they are different writes. The one trust door — both former arms "
+                    "(set a tier, or record a scored assessment) live here. Reads: "
+                    "tortoise_graph_overview(section='sources').",
+        risk="destructive",
+        http_policy=True,
+        sdk_method="manage_source_trust",
+    ),
+    ToolDefinition(
+        name="tortoise_index_sources_from_directory",
+        id="surface.index_sources_from_directory",
+        description="Register a directory's files as sources — NOTHING is extracted "
+                    "(#4282 row 15). The three older per-kind indexing doors "
+                    "redirect here: `file_type='agent_session'` files a session "
+                    "transcript and `file_type='doc'` a document corpus. "
+                    "`extract_metadata` defaults PER ARM to the absorbed door's own "
+                    "value (`true` for `agent_session` only) "
+                    "and `llm_model` is forwarded on the arms that had it. "
+                    "`file_type`: auto | "
+                    "agent_session | meeting | doc. Batched and resumable "
+                    "(progress_file). Returns the honest summary (file_count, indexed, "
+                    "updated, skipped, failed, aborted, ignored, errors[], by_kind); "
+                    "idempotent — re-runs converge to skipped. On a shared graph, give "
+                    "each corpus a unique corpus_name (default = directory basename) to "
+                    "avoid cross-corpus url collisions. EXCLUDED from tenant HTTP — "
+                    "walks the server filesystem with a caller-supplied path.",
+        risk="destructive",
+        http_policy=False,
+        sdk_method="index_sources_from_directory",
+    ),
+    ToolDefinition(
+        name="tortoise_mine_knowledge_from_session",
+        id="surface.mine_knowledge_from_session",
+        description="Mine ONE session (#4282 row 16). Dispatch is BY ARGUMENT: "
+                    "`conversation=` files an agent session (turns become episodic "
+                    "Points, LLM extraction produces epistemic Points; the backend is "
+                    "the target graph's configuration) — same door and gates as the "
+                    "retired session-capture shim, whose `machine_id=`/`model=` "
+                    "attribution claims are forwarded too; `conversation=` as a raw "
+                    "transcript STRING (with `source_id=`, stdio/CLI only) mines one "
+                    "transcript through the retired conversations-mining door's "
+                    "single-transcript arm; "
+                    "`items=` files an already-distilled batch "
+                    "({wing, room, content}) with two-tier dedup. Passing two arms is "
+                    "refused. Absorbs both retired capture doors — the session arm "
+                    "AND the checkpoint batch arm — plus that single-transcript arm. "
+                    "CONSENT (#3662, Option 1): this tool runs server-side and cannot "
+                    "read the caller's TORTOISE_CAPTURE, so calling it with "
+                    "`conversation=` IS the agreement to record the session — tell the "
+                    "user you are filing it BEFORE you call, so they can decline. "
+                    "session_id is the idempotency key; a team that disabled capture "
+                    "gets 409, so do not retry.",
+        risk="destructive",
+        http_policy=True,
+        sdk_method="mine_knowledge_from_session",
+    ),
+    ToolDefinition(
+        name="tortoise_mine_knowledge_from_directory",
+        id="surface.mine_knowledge_from_directory",
+        description="Mine a FOLDER of files, each by its own content type (#4282 row "
+                    "17) — the batch form of tortoise_mine_knowledge_from_session, not a "
+                    "kind of indexing: this call EXTRACTS, "
+                    "tortoise_index_sources_from_directory does not. It absorbs the "
+                    "retired conversations-mining door. EXCLUDED from tenant HTTP — walks the "
+                    "server filesystem.",
+        risk="destructive",
+        http_policy=False,
+        sdk_method="mine_knowledge_from_directory",
+    ),
+    ToolDefinition(
+        name="tortoise_check_connection",
+        id="surface.check_connection",
+        description="What does this credential reach? (#4282 row 40 — programmatic, "
+                    "returns a result, NOT a wizard). Omit key_id: connectivity, the "
+                    "resolved graph + namespace, and this caller's own account. Pass "
+                    "key_id: one credential's declared reach (graph, scopes, delegation "
+                    "depth, revocation, expiry). Read-only. A key belonging to another "
+                    "account and a key that does not exist give the SAME answer, so this "
+                    "cannot be used to probe another tenant's key ids.",
+        risk="read",
+        http_policy=True,
+        sdk_method="check_connection",
     ),
 
 ]
@@ -1983,12 +2442,31 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_summarize_structure": "reasoning",
     "tortoise_graph_overview": "reasoning",
     "tortoise_overview": "reasoning",
+    # #11609 Phase 2 — the READ/QUERY containers. Grouped by the QUESTION they
+    # answer, not by the discriminator they dispatch on: a container that lands in
+    # the wrong curation group is invisible to exactly the role-scoped surface that
+    # needed it (the #1727 lesson).
+    "tortoise_search_knowledge": "memory",
+    "tortoise_list_knowledge": "memory",
+    "tortoise_check_confidence": "memory",
+    "tortoise_explore_connections": "reasoning",
+    "tortoise_review_link_candidates": "reasoning",
     "tortoise_traverse": "reasoning", "tortoise_entity_profile": "reasoning",
     "tortoise_taxonomy": "reasoning",
     "tortoise_list_topics": "reasoning", "tortoise_provenance": "reasoning",
     "tortoise_stale": "reasoning", "tortoise_dream": "reasoning",
     "tortoise_review_connections": "reasoning",
     "tortoise_find_cross_lens_candidates": "reasoning",
+    # ── The WRITE/MUTATE containers (#4282 Phase 2, #11609 lane B) ────────────
+    # Each is grouped where its absorbed members already sat, so a role-scoped
+    # server that served `tortoise_update_point` still serves the container that
+    # now answers for it.
+    "tortoise_update_knowledge": "memory",
+    "tortoise_supersede_knowledge": "memory",
+    "tortoise_adjust_relationship": "graph",
+    "tortoise_refresh_confidence": "reasoning",
+    "tortoise_write_question": "journal",
+    "tortoise_record_decision": "journal",
     # graph
     "tortoise_create_operator": "graph", "tortoise_annotate_operator": "graph",
     "tortoise_get_operator": "graph", "tortoise_mitigate_operator": "graph",
@@ -2030,6 +2508,16 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_manage_sources": "onboarding",
     "tortoise_onboarding_session_recording": "onboarding",
     "tortoise_onboarding_github_index": "onboarding",
+    # #4282 Phase 2 — the SOURCES / MINE / SESSION containers. Same families as
+    # the members they absorbed, so a curated view keeps the shape its readers
+    # already navigate by (the absorbed names keep THEIR entries below/above — a
+    # retired entry still renders).
+    "tortoise_register_source": "sources",
+    "tortoise_manage_source_trust": "sources",
+    "tortoise_index_sources_from_directory": "sources",
+    "tortoise_mine_knowledge_from_session": "sessions",
+    "tortoise_mine_knowledge_from_directory": "mining",
+    "tortoise_check_connection": "onboarding",
 }
 
 
@@ -2102,6 +2590,51 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # graph (different per-check counts, different `exit_code`).
     "tortoise_audit": 'tortoise_graph_overview(section="audit", point_kinds=...)',
     "tortoise_dream_health": 'tortoise_graph_overview(section="dream_health")',
+    # ── #11609 Phase 2 — the READ/QUERY family retires into its containers ──
+    # Each pointer names the CONTAINER and the discriminator value that answers the
+    # question, and every one resolves in ONE hop (aliases are not transitive —
+    # GitHub's own `DeprecatedToolAliases` states the same limit). A member retires
+    # only in the batch that lands the container covering it, so no pointer ever
+    # names a replacement that does not exist.
+    # ⛔ SIX of this family's members are DELIBERATELY NOT retired here, and the reason is
+    # the one #10914 recorded for `tortoise_check_structure`: `search_sessions`,
+    # `suggest_entry_points`, `list_batches`, `list_namespaces`, `diary_read` and
+    # `expand_relationships` all declare a LIST envelope (`-> list[dict]`), which is what
+    # carries the #8482 failure repair. Their containers return `Any`, so retiring the door
+    # before the container declares an envelope would move that repair off the advertised
+    # path — a `_safe` failure payload the array schema cannot carry. They are covered by
+    # their containers TODAY (the handler answers through the container) and retire in the
+    # batch that gives the container a declared envelope. Pinned in
+    # `tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`.
+    # ⛔ `tortoise_issue_insight` and `tortoise_session_context` are NOT retired here, and
+    # the reason is a SURFACE fact rather than a tier one: each carries a `rest_spec`
+    # (`GET /v1/issue-insight`, `GET /v1/context`), and retiring the registry entry
+    # deletes its REST route with it. That is a public API removal, and it is not this
+    # batch's mandate — the container ADDS the approved name, so the member can stay live
+    # as a thin door and retire in the batch that re-homes its REST twin.
+    "tortoise_list_topics": 'tortoise_list_knowledge(kind="topic", entity_id=...)',
+    # `include_provenance` is named because it is what makes the two answers equal:
+    # the confidence read alone is not the chain.
+    "tortoise_provenance": 'tortoise_check_confidence(claim_id, include_provenance=True)',
+    # Members that carry NO `rest_spec` AND no wrap-envelope repair record, so retiring
+    # them removes no REST route and no list envelope: purely the MCP consolidation this
+    # batch is for. ⛔ `tortoise_calibrate_summary` is NOT here for the second reason —
+    # it returns a LIST, so its `_meta.tortoise_error` repair would move off the
+    # advertised path into a `-> Any` container that cannot carry it (the rule #10914
+    # recorded for `tortoise_check_structure`).
+    "tortoise_get_confidence": 'tortoise_check_confidence(claim_id=...)',
+    "tortoise_belief_timeline": 'tortoise_check_confidence(topic=...)',
+    # ⛔ `tortoise_expand_relationships` is NOT retired here either: it declares a LIST
+    # envelope (`-> list[dict]`) and so carries the #8482 repair, which a `-> Any`
+    # container cannot. Its handler already answers through the container
+    # (`include_content=True`); the name retires with the container's envelope.
+    "tortoise_entity_profile": 'tortoise_explore_connections(node_id, hops=...)',
+    "tortoise_traverse": 'tortoise_explore_connections(node_id, hops=...)',
+    "tortoise_review_connections": 'tortoise_review_link_candidates(kind="connections", mode=...)',
+    "tortoise_list_dedup_candidates": 'tortoise_review_link_candidates(kind="dedup", candidate_type=...)',
+    # The reliability read RECOMPUTES and caches, which is why its own door is not a
+    # read-tier tool; the container keeps that arm and says so.
+    "tortoise_get_source_reliability": 'tortoise_list_knowledge(kind="source_reliability", url=...)',
     # Tier 2 — the entry's own description already named its replacement.
     "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
     # #11057 review F3: the walk, not the bare read. `tortoise_query(tag=...)`
@@ -2111,8 +2644,16 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # shape the alias's own `Migrate to:` text repudiates 1000 lines away. The
     # paged form is the only destination that can be walked to the whole population.
     "tortoise_query_points_by_tag": "tortoise_query(tag=..., offset=..., limit=...)",
-    "tortoise_index_sessions": "tortoise_index_files(directory)",
-    "tortoise_ingest_corpus": "tortoise_index_files(directory)",
+    # #12948 review F1: these two pointed at `tortoise_index_files`, which THIS batch
+    # also retires — so the pointer resolved to a retired name and dead-ended in two
+    # hops, the rule `TestEveryPointerResolvesInOneHop` states and neither test covered
+    # (both are parameterized over their own batch). They now name the live container
+    # directly, pinning the `file_type` discriminator the two doors differ on: a caller
+    # redirected without it would silently walk the wrong file class.
+    "tortoise_index_sessions":
+        'tortoise_index_sources_from_directory(directory, file_type="agent_session")',
+    "tortoise_ingest_corpus":
+        'tortoise_index_sources_from_directory(directory, file_type="doc")',
     # #3540 ruling B (owner, 2026-10-12): ONE consolidated source-management
     # operation replaces the two per-source switches, so the surface ends one
     # tool FEWER while the number of agent-settable sources grows (the
@@ -2125,17 +2666,115 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # the model" condition kept it out of an agent-callable list/enable/disable
     # operation; #4282 Phase 3.2 removed that tool from the MCP surface entirely,
     # leaving `POST /v1/onboarding/github/connect` as its only door.)
-    # NB: no `|` in these values. `RETIRED_USE_INSTEAD` is rendered into
-    # markdown table cells (docs/product/mcp-rename-table.md, Part A and Part B),
-    # where an unescaped pipe ends the cell — it produced a row with one cell too
-    # many and TRUNCATED the value when the table rendered (MD056). The word "or"
-    # says the same thing and cannot break a table.
+    # A `|` in these values is a CALL SIGNATURE, not a table delimiter: the pointer
+    # is contractual (`scope="dirty"|"full"`, `action="mitigate"|"annotate"`), so it
+    # is ESCAPED at RENDER time — `tools/mcp_rename_table._cell()` and
+    # `tools/surface_manifest.py` write `\|` — and NEVER rewritten to avoid the
+    # character. Rewriting the signature is how the value a caller needs got
+    # TRUNCATED (an unescaped pipe ends the GFM cell: MD056, one cell too many).
+    # Consumers unescape (`_parse_part_a` / `_parse_part_b`).
     "tortoise_onboarding_github_index":
         'tortoise_manage_sources(action="enable", source="github_issues")'
         ' (no per-repo scope: it indexes every connected repo)',
     "tortoise_onboarding_session_recording":
         'tortoise_manage_sources(action="enable" or "disable", '
         'source="agent_sessions")',
+
+    # ── #4282 Phase 2 — the SOURCES / MINE / SESSION members ──────────────────
+    #
+    # The seven names the containers above absorb. Each pointer RESOLVES in one
+    # hop (the same rule the `graph_overview` block states: aliases are not
+    # transitive, and a chain would send a caller to a name that is itself
+    # retired), and each SHOWS the discriminator the container dispatches on —
+    # dropping it would silently change what the caller gets, which is the #8447
+    # shape: a familiar name, a narrower answer, no way to tell.
+    #
+    # NB: no `|` in these values (see the note above — these are rendered into
+    # markdown table cells).
+    "tortoise_create_source":
+        "tortoise_register_source(url, sourceKind, tier=...)",
+    "tortoise_assess_source":
+        'tortoise_manage_source_trust(url, score=..., assessor=..., rationale=...)',
+    "tortoise_set_source_tier":
+        'tortoise_manage_source_trust(url, tier="T0"-"T4")',
+    # `file_type` and `progress_file` are shown for the same reason `days`/`limit`
+    # are shown on `tortoise_stale`: the door took them, and a migrating caller
+    # that omits `file_type` silently changes which files are indexed as what.
+    "tortoise_index_files":
+        'tortoise_index_sources_from_directory(directory, file_type=..., '
+        'progress_file=...)',
+    # `items`/`agent_name`/`threshold` are the batch arm's own knobs: a caller
+    # that drops `threshold` gets the 0.95 near-identical bar instead of its own.
+    "tortoise_checkpoint":
+        'tortoise_mine_knowledge_from_session(items=..., agent_name=..., '
+        'threshold=...)',
+    # The session arm keeps the server's own gates (429 capacity, 409 duplicate /
+    # recording-off, 400 turn cap, 422 empty transcript, 402 quota) — which is
+    # why the pointer names `conversation`/`session_id` and not a knob. The two
+    # ATTRIBUTION claims are named for the same reason (#12948 review round 2):
+    # they are client-declared and stamped set-if-absent downstream, so a caller
+    # that drops them loses attribution with no error — `machine_id` at least has
+    # a derive fallback, `model` has none.
+    "tortoise_session_capture":
+        'tortoise_mine_knowledge_from_session(conversation=..., '
+        'harness=..., session_id=..., machine_id=..., model=...)',
+    "tortoise_mine_conversations":
+        "tortoise_mine_knowledge_from_directory(directory=..., "
+        "extract_entities=...) for a corpus — the single-transcript arm is "
+        "tortoise_mine_knowledge_from_session(conversation=<transcript>, "
+        "source_id=...)",
+
+    # ── #4282 Phase 2 WRITE/MUTATE containers (#11609 lane B) ────────────────
+    # ONE hop to a LIVE name in every pointer below (GitHub's own
+    # `DeprecatedToolAliases` limit: aliases are not transitive), and the container
+    # delegates to the very handler this name still runs through the shim — so a
+    # migrating caller lands on the same body, not a re-implementation.
+    #
+    # Arguments are shown where the door took them (`props=`, `days=`,
+    # `point_kinds=` precedent). ⛔ Dropping `transfer_edges` does NOT select the
+    # full supersede any more (#12914): the arm follows the OLD node's label — a
+    # Point gets the full supersede (every edge moves), an Object/Subject gets the
+    # family supersede (status + successor name, no edge transfer). An explicit
+    # `True` is POINT-ONLY and is REFUSED on an Object/Subject, so the pointer
+    # passes the caller's value rather than a default.
+    "tortoise_update": 'tortoise_update_knowledge(id, props=...)',
+    "tortoise_update_point": 'tortoise_update_knowledge(id, props=...)',
+    "tortoise_update_entity": 'tortoise_update_knowledge(id, props=...)',
+    # The retraction is a TEMPORAL FIELD on the container (Zep's shape,
+    # `beta-sdk-surface.md`): `invalid_at`/`valid_until` is the instant the claim
+    # stopped holding, and it MUST be passed — that field is what selects the
+    # retract arm. ⛔ Omitting it does NOT retain the old door's `now` default
+    # (#12915 review F7): with no temporal field and no `props` the call falls
+    # through to the PROPERTY arm (`tortoise_update(id, props=None)`), which is a
+    # different operation, not a smaller one. The pointer below passes
+    # `invalid_at=...` for exactly that reason.
+    "tortoise_retract_point": 'tortoise_update_knowledge(id, invalid_at=...)',
+    # `transfer_edges=False` is the INVALIDATE arm. It is still named explicitly
+    # because it differs in what it destroys — but it is POINT-ONLY: on an
+    # Object/Subject an explicit `False` is REFUSED, while OMITTING the keyword
+    # takes the label's arm (Point: full supersede, every edge moves;
+    # Object/Subject: family supersede, no edge transfer) (#12914).
+    "tortoise_supersede": 'tortoise_supersede_knowledge(old_id, new_id, transfer_edges=...)',
+    "tortoise_invalidate":
+        'tortoise_supersede_knowledge(id, corrected_by_id, transfer_edges=False)',
+    "tortoise_annotate_operator":
+        'tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., '
+        'directness=...)',
+    "tortoise_mitigate_operator":
+        'tortoise_adjust_relationship(id, reason=..., strength=..., credibility=...)',
+    # `credibility` is carried by BOTH spellings of the mitigate arm — the
+    # `action='mitigate'` form forwards it to `mitigate_operator` rather than
+    # dropping it (#12915 review F4).
+    "tortoise_operator_action": 'tortoise_adjust_relationship(id, action="mitigate"|"annotate", ...)',
+    # `scope` names the arm: dream's two scopes, the reviewer-gated promotion, and
+    # the Beta prior are DIFFERENT writes behind one verb, so the pointer names it.
+    "tortoise_dream": 'tortoise_refresh_confidence(scope="dirty"|"full", ...)',
+    "tortoise_promote_point": 'tortoise_refresh_confidence(scope="promote", point_id=...)',
+    "tortoise_set_point_baseline":
+        'tortoise_refresh_confidence(scope="baseline", point_id=..., alpha=..., beta=...)',
+    "tortoise_file_decision": 'tortoise_write_question(options, evidence, choice)',
+    "tortoise_file_human_approval":
+        'tortoise_record_decision(approver_id, artifact_id, point_ids, decision_content=...)',
 }
 
 

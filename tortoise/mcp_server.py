@@ -37,6 +37,7 @@ from tortoise import code_freshness as _code_freshness
 # ``create_direct_edge`` / 2a-DIRECT transfer probe it in this exact order) —
 # imported, never re-listed, so the preview cannot drift from the write.
 from tortoise.live import EPISTEMIC_LABELS
+from tortoise.live import is_terminal_status as _is_terminal_status  # #12502/#13034
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
                                _current_graph_id, _transport_mode, _tool_group,
@@ -476,7 +477,8 @@ def _hold_mcp_dispatch_after_request(task) -> None:
 
 
 def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
-                                         name: str) -> None:
+                                         name: str,
+                                         stages: dict | None = None) -> None:
     """Schedule the shared breach writer OFF the event loop (#3834 G1).
 
     The writer is ``hosted_api._emit_wait_bound_breach`` — the SAME single emit
@@ -535,7 +537,8 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
         try:
             from tortoise import hosted_api as _ha
             _ha._emit_wait_bound_breach(
-                org_id, "/mcp", "POST", latency_ms, tool_name=safe_name)
+                org_id, "/mcp", "POST", latency_ms, tool_name=safe_name,
+                stages=stages)
         except Exception:  # telemetry must never turn a refusal into an error
             _log.debug("mcp wait-bound telemetry emit failed", exc_info=True)
 
@@ -1419,7 +1422,8 @@ def _write_retry_safety(name: str, arguments=None) -> bool:
 
 
 def _wait_bound_refusal_result(name: str | None = None,
-                               arguments=None, *, dispatched: bool = True) -> ToolResult:
+                               arguments=None, *, dispatched: bool = True,
+                               stages: dict | None = None) -> ToolResult:
     """The ONE refusal result both wait-bound paths return.
 
     The message and the advertised delay come from the single module both
@@ -1511,6 +1515,16 @@ def _wait_bound_refusal_result(name: str | None = None,
     default, because there the dispatch really was started and abandoned.
     """
     data: dict = {"retry_after": _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}
+    if stages:
+        # #10893: ADDITIVE, and only when a timeline was bound — the envelope
+        # (`code` + the exact neutral `message`) is the refusal's IDENTITY for
+        # `tests/_verdict.py::is_transport_wait_bound_refusal` and does not move.
+        # ⛔ It rides BOTH arms deliberately, including the `committed: "none"`
+        # write arm: "which stage was it in" is a fact about the WAIT, not a
+        # claim about the write, so it cannot contradict `committed`.
+        data["stage"] = stages.get("stage")
+        if stages.get("stages_ms"):
+            data["stages_ms"] = stages["stages_ms"]
     # The human channel. Not in the write set, so the shape it always had stands.
     # NOT a claim that nothing was mutated: non-write-set tools can write (see the
     # docstring's `_cas_write_onboarding_state` case).
@@ -1797,6 +1811,19 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     # its route path for. Escape it for the log line (the analytics sink
     # sanitizes its own copy).
     safe_name = _mcp_auth._sanitize_for_log(name)
+    # #10893: WHICH read stage the budget went to — read from the timeline the
+    # REST middleware bound around this request (this dispatch task inherits it),
+    # so the MCP refusal and the REST refusal of the SAME request cannot describe
+    # the same stall two different ways. Two views, on purpose: `stages_view`
+    # (telemetry + log, ALWAYS when a timeline is bound) and `wire_stages`
+    # (the refusal body, only once the read actually started — see
+    # `read_stages.ReadStages.wire_snapshot`). ``None`` when nothing is bound
+    # (stdio MCP, an in-process SDK call): both calls below then add nothing,
+    # keeping those refusals byte-identical to the pre-#10893 shape.
+    from tortoise.read_stages import stage_view as _read_stage_view
+    from tortoise.read_stages import stage_wire_view as _read_stage_wire_view
+    stages_view = _read_stage_view()
+    wire_stages = _read_stage_wire_view()
     # #3834 F-2 / #9762: RE-READ the flag here, not only at entry. The entry
     # short-circuit only sees a refusal that already happened; a transport that
     # does not start its response before dispatching (fastmcp's
@@ -1817,11 +1844,13 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         # a ``hosted_api`` import, and neither must the breach path, where that
         # import froze the loop and delivered the refusal seconds late.
         _emit_mcp_wait_bound_breach_off_loop(
-            _current_org_id.get() or "", latency_ms, name)
+            _current_org_id.get() or "", latency_ms, name, stages=stages_view)
+        from tortoise.read_stages import log_suffix as _stage_log_suffix
         _log.warning(
             "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
-            "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
-    return _wait_bound_refusal_result(name, arguments)
+            "refusing legibly%s", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name,
+            _stage_log_suffix(stages_view))
+    return _wait_bound_refusal_result(name, arguments, stages=wire_stages)
 
 
 def _enforce_mcp_tool_scope(name: str) -> None:
@@ -3095,7 +3124,20 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # declare `dry_run` — whose schema will REJECT that key — would be
         # recorded as a READ the caller never performed. Gate on the declared
         # preview set, not on key presence in untrusted input.
-        dry_run=name in _dry_run_tool_names() and bool((arguments or {}).get("dry_run")),
+        #
+        # ⛔ AND READ THE SPELLING THE WAY THE HANDLER WILL (`_coerces_to_true`),
+        # not with `bool()`: `bool("false")` is True while pydantic coerces
+        # `"false"` to False, so the raw-dict truthiness counted a call that
+        # WRITES as a preview read — the same raw-dict trap `_is_preview` and
+        # `_arguments_say_preview` each document. Pre-existing for the live
+        # `dry_run` tools and reachable for the three retired-but-answering ones
+        # this batch added to the set; one predicate closes both (measured:
+        # `dry_run="false"`/`"no"`/`"0"` took the WRITE branch and were metered
+        # as reads under `bool`).
+        dry_run=(
+            name in _dry_run_tool_names()
+            and _coerces_to_true((arguments or {}).get("dry_run"))
+        ),
     )
     status, error_kind, result_count = "ok", None, None
     # #8135: open the per-dispatch failure holder BEFORE the dispatch task is
@@ -3404,12 +3446,31 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     "tortoise_retract_point",
     # epic #888 W2 consolidated write surface
     "tortoise_create_entity", "tortoise_update", "tortoise_operator_action",
+    # #11609 Phase 2 (#4282): the container that ABSORBED the update doors above.
+    # It is not in this set for parity's sake — its body reaches the same
+    # node/edge-creating writers through `tortoise_update` (properties),
+    # `invalidate_point` and `retract_point` (the temporal arms), so leaving it out
+    # let the #329 completeness gate go red in the very batch that retires the
+    # gates' own names (`tests/test_mcp_http.py::TestIntrospectiveQuotaCompleteness`
+    # measures membership, not intent).
+    "tortoise_update_knowledge",
     # #684: node-creating tools that were missed in the original #329 audit
     "tortoise_file_human_approval",  # creates Event + decision Point + IMPL edges
     "tortoise_assess_source",        # creates assessment Point
     # epic #900 T7 (#1043): the index path creates Sources + Events (a document
     # is a Source — D10) + references edges — node/edge-creating, quota-gated (S8 pin, I25)
     "tortoise_index_files",
+    # #4282 Phase 2 (#11609 lane C): the containers that REPLACED the seven
+    # members above. Each new name wraps `_quota_gated` in its handler body, and
+    # this inventory is what the introspective completeness test cross-checks, so
+    # a container whose gate was dropped in a later edit reds instead of silently
+    # un-metering a write path. `check_connection` is absent on purpose: it is
+    # read-only (`risk="read"`), and gating a read would meter nothing.
+    "tortoise_register_source",          # replaces tortoise_create_source
+    "tortoise_manage_source_trust",      # replaces tortoise_assess_source + tortoise_set_source_tier
+    "tortoise_index_sources_from_directory",   # replaces tortoise_index_files
+    "tortoise_mine_knowledge_from_session",    # replaces tortoise_checkpoint
+    "tortoise_mine_knowledge_from_directory",  # replaces tortoise_mine_conversations
 })
 
 
@@ -3445,13 +3506,43 @@ _DRY_RUN_TOOLS: frozenset[str] | None = None
 
 
 def _dry_run_tool_names() -> frozenset[str]:
-    """Registry names whose served handler declares `dry_run` (computed once)."""
+    """Names whose handler declares `dry_run`, from BOTH registries (computed once).
+
+    ⛔ THE POPULATION IS "NAMES THAT STILL ANSWER", NOT "NAMES IN `tools/list`".
+    A retired name is not advertised, but `_RetiredToolTransform` resolves it on
+    `get_tool` and `build_retired_tools` builds its shim from the ORIGINAL module
+    handler — so `tools/call` on it runs that very handler, `dry_run` argument and
+    all. Reading only `TOOL_REGISTRY` therefore dropped the preview arm for every
+    retired door whose handler still previews: measured at the #11609 Phase-2
+    head, `tortoise_supersede`, `tortoise_invalidate` and `tortoise_retract_point`
+    are each retired, still answering, still declaring `dry_run`, and were each
+    missing — so a real preview of a destructive write was reported
+    `committed: "unknown"` + "this call is NOT safe to repeat", the exact
+    falsehood #10084/#10849 fix (the CI red was
+    `test_wait_bound_write_ack.py::test_a_COERCED_true_is_a_preview_and_a_coerced_false_is_not`,   # noqa: E501
+    whose subject is `tortoise_supersede`).
+
+    Widening is safe in the other direction too: membership only ever permits a
+    PREVIEW reading, and every reader of it still asks the ARGUMENT as well —
+    `_arguments_say_preview` (the refusal's `committed` cell) coerces the spelling
+    the way the handler will, `_is_preview` (the "nothing was written" receipt)
+    keeps its deliberately STRICTER `is True` identity read — so an uncoerced
+    spelling MISSES that disclosure rather than forging it, which is the
+    fail-closed direction — and the metering half
+    (`maybe_record_mcp_read`'s caller) uses the coercing predicate rather than
+    `bool()` — so a `dry_run="false"` call that takes the WRITE branch is never
+    labelled a preview and never counted as a preview read. Each member is
+    verified by its own signature (a retired name with no module handler, or one
+    that does not declare `dry_run`, is not added), so the #4057 gate ("a client
+    cannot move the read counter for a tool whose schema REJECTS the key") is
+    untouched too: every member accepts the key.
+    """
     global _DRY_RUN_TOOLS
     if _DRY_RUN_TOOLS is None:
-        from tortoise.tool_registry import TOOL_REGISTRY
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
         names = set()
-        for entry in TOOL_REGISTRY:
+        for entry in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY):
             fn = globals().get(entry.name)
             if fn is None:
                 continue
@@ -4085,12 +4176,23 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 def _http_excluded_error() -> dict:
     """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
 
-    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding seven
-    tool bodies (four live, three retired-but-served), each of which returns it
+    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding ten
+    tool bodies (four live, six retired-but-served), each of which returns it
     verbatim, so the dispatch used to be recorded ``status="ok"``. The wire
     payload is unchanged (`_SafeError` is a ``dict`` subclass); the seam matches
     it by value. Its ``error`` is a MAPPING, so the seam's text arm cannot see
     it — the exact-dict arm is what classifies it.
+
+    `#12948`: the population moved from seven (four live, three retired) to
+    nine (four live, five retired), then to TEN when the sibling WRITE/MUTATE
+    lane landed its own retired-but-still-answering door. The six
+    SOURCES/MINE/SESSION containers
+    replaced the public `tortoise_index_files` / `tortoise_index_sessions` /
+    `tortoise_ingest_corpus` / `tortoise_mine_conversations` doors, which keep
+    answering from the retired table and therefore keep returning this funnel.
+    The pin that measures it is
+    `tests/test_mcp_refusal_telemetry_9084.py::test_the_funnel_docstring_states_the_population_it_actually_feeds`,
+    which counts the call sites rather than trusting this sentence.
     """
     return _SafeError({
         "jsonrpc": "2.0",
@@ -4394,10 +4496,14 @@ def tortoise_query(kind: str | None = None,
       nothing else, and tag mode reads EVERY kind of tagged Point, so a named
       kind narrows nothing while looking like it did.
     - include_retracted=True surfaces tombstones on every path (structural,
-      paginated, text, and tag modes); default False excludes them. Known gap, tracked
-      in #12502: the TAG arm's own exclusion is `status != "retracted"` only, so
-      it still serves superseded/archived/outdated/deprecated rows by default,
-      where the structural and fts arms exclude the whole terminal vocabulary.
+      paginated, text, and tag modes); default False excludes them. The TAG
+      arm excluded only `status != "retracted"` until #13034 — a narrower
+      vocabulary that served superseded/archived/outdated/deprecated rows as
+      current on the one arm whose contract says otherwise (the gap #12502
+      filed). It now asks the same shared predicate as the structural and fts
+      arms (`live.is_terminal_status`), so every mode excludes the whole
+      terminal vocabulary plus the position axis (a closed Object, or one in a
+      `terminal` pipeline stage).
 
     Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
     a structured error dict. A `kind` that is SET but not a string (`True`, `1`,
@@ -4894,9 +5000,11 @@ def tortoise_query(kind: str | None = None,
     # `filters` into its own parameter above, and the `text=` arm now forwards it
     # as the fts leg's `include_terminal`. Refusing a name that is not a property
     # filter would be a false block; leaving it unapplied was the same defect one
-    # level down. NOTE the `tag=` arm APPLIES the flag but with a narrower
-    # vocabulary than the other arms (`status != "retracted"` only) — a real gap
-    # filed as #12502, and the reason this comment does not say the arms agree.
+    # level down. NOTE the `tag=` arm APPLIES the flag through the SAME shared
+    # predicate the other arms use (#12502, closed by #13034): it used to carry
+    # its own `status != "retracted"` test — a narrower vocabulary than every
+    # sibling arm — and now asks `live.is_terminal_status`, position axis
+    # included.
     if filters and (text or tag is not None):
         _arm = "tag=" if tag is not None else "text="
         # A caller who set BOTH must drop both to reach the structural path —
@@ -4925,10 +5033,22 @@ def tortoise_query(kind: str | None = None,
         rows = _safe(_get_org_sdk().query_points_by_tag, tag, _record_reads=False)
         if not isinstance(rows, list):
             return rows
-        # query_points_by_tag has no retracted exclusion in the SDK — mirror
-        # the tombstone contract of the other paths here (Epic #888).
+        # #12502: this arm used to carry its OWN tombstone test
+        # (``status != "retracted"``) — a hand-written SUBSET of the terminal
+        # vocabulary, so a superseded / deprecated / archived / ``outdated``
+        # row was served as current on the one arm whose docstring promises
+        # tombstones on every path. #13034: it now asks the ONE shared predicate
+        # (``live.is_terminal_status``) instead of re-spelling a status set, and
+        # passes the POSITION axis too — the rows are full ``properties(p)``
+        # dicts, so a closed Object (``isClosed``) or one parked in a
+        # ``terminal`` pipeline stage is excluded like any other ended record.
+        # ``include_retracted`` is still the escape hatch: an audit caller
+        # asking for tombstones gets every ended row.
         if not include_retracted:
-            rows = [r for r in rows if r.get("status") != "retracted"]
+            rows = [r for r in rows if not _is_terminal_status(
+                r.get("status"), bool(r.get("outdated")),
+                is_closed=r.get("isClosed"),
+                stage_slot=r.get("pipelineSlot"))]
         if not paginated:
             # #10602 review 3: a lone `limit=` used to be ignored HERE too, so a caller
             # asking for 2 rows of a large tag got the whole tagged population back —
@@ -5099,7 +5219,7 @@ def tortoise_validate_domain(domain: str) -> dict:
     actionable violations ({rule, kind, ref, message, fix}) plus drift
     warnings for manifest chains with no registered validator. Never
     modifies the graph; violations are warnings, not blocks."""
-    return _safe(_get_org_sdk().validate_domain, domain)
+    return _safe(_get_org_sdk().graph_overview, "validate_domain", domain=domain)
 
 
 def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
@@ -5124,19 +5244,19 @@ def tortoise_summarize_structure() -> dict:
 def tortoise_list_pointkinds() -> list[dict]:
     """List all pointKinds present in the graph with counts. What EXISTS.
     Alias → graph_overview(section='pointkinds') (epic #888 W3)."""
-    return _safe(_get_org_sdk().list_pointkinds)
+    return _safe(_get_org_sdk().graph_overview, "pointkinds")
 
 
 def tortoise_list_sources() -> list[dict]:
     """List all Sources with point counts. Where data came FROM.
     Alias → graph_overview(section='sources') (epic #888 W3)."""
-    return _safe(_get_org_sdk().list_sources)
+    return _safe(_get_org_sdk().graph_overview, "sources")
 
 
 def tortoise_list_namespaces() -> list[dict]:
     """List installed pack namespaces.
     Alias → graph_overview(section='namespaces') (epic #888 W3)."""
-    return _safe(_get_org_sdk().list_namespaces)
+    return _safe(_get_org_sdk().graph_overview, "namespaces")
 
 
 def tortoise_list_batch(batch_id: str) -> dict:
@@ -5152,7 +5272,7 @@ def tortoise_list_batches(limit: int = 20) -> list[dict]:
 def tortoise_list_tags() -> list[dict]:
     """List all Tag names with count of tagged Points. Where tags are USED.
     Alias → graph_overview(section='tags') (epic #888 W3)."""
-    return _safe(_get_org_sdk().list_tags)
+    return _safe(_get_org_sdk().graph_overview, "tags")
 
 
 def tortoise_query_points_by_tag(tag: str) -> list[dict]:
@@ -5184,10 +5304,91 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
     return tortoise_query(tag=tag, include_retracted=True, limit=_TAG_ALIAS_LIMIT)
 
 
+def _read_point_served(id: str) -> dict:
+    """The ONE caller-facing point-by-id read: the seam's verdict, applied.
+
+    Shared by `tortoise_get_point` and `tortoise_get_operator` so the two cannot
+    disagree about an absence (#12941 review P1-1: the operator door reads a
+    Point by id too, and the operators are the issue's OWN measured population —
+    "5 operators were accepted by the record … 0 in the cache").
+
+    Three shapes, and each is deliberate:
+
+    * found → the node's properties, plus the attribution merged AFTER them, so
+      a stored property of the same name cannot forge a fallback;
+    * absent with the record's authority behind it (`record-miss`, `record`) —
+      and, in an `off` deployment with the residency marker unarmed, an empty
+      answer that establishes nothing at all (the pre-#12941 shape) — → `{}`
+      — FALSY, because this tool's contract is "properties, or empty dict" and a
+      verifier written as `if out:` must not read an absence as a success
+      (#12941 review P0-1);
+    * `not-hot` → a dict carrying `residency`, never an empty one (#7952: a
+      store that cannot see the node must say so). In an ARMED mode the reason
+      rides beside it; on the `off` + `TORTOISE_RESIDENCY` arm `off` emits no
+      attribution, so there `residency` is the only key.
+    """
+    from tortoise.residency import RESIDENCY_FIELD
+
+    served: dict = {}
+    out = _safe(_get_org_sdk().get_point, id, served_out=served)
+    if not isinstance(out, dict) or isinstance(out, _SafeError):
+        return out
+    if not out:
+        marker = served.get(RESIDENCY_FIELD)
+        return {RESIDENCY_FIELD: marker, **served} if marker else {}
+    return {**out, **served}
+
+
 def tortoise_get_point(id: str) -> dict:
     """Get a single Point by ID. Returns all properties, or empty dict.
-    Alias → get(id, type='point') (epic #888 W3)."""
-    return _safe(_get_org_sdk().get_point, id)
+    Alias → get(id, type='point') (epic #888 W3).
+
+    ⚠️ ARMED MODES (`TORTOISE_RECORD_SERVE`) change what an ABSENT answer looks
+    like, in one direction only: a node that does not exist still returns `{}`,
+    while an answer the store could not SEE returns a dict carrying
+    `residency: "not-hot"`. That is deliberate — `not-hot` is never an empty
+    answer (#7952), and a found node additionally names the store that answered
+    (`servedFrom` / `fallbackReason`). With `TORTOISE_RECORD_SERVE` unset the
+    seam is never consulted — but `TORTOISE_RESIDENCY` arms the marker
+    SEPARATELY, so on a cache that declares itself PARTIAL and does not cover
+    the id this door answers `{"residency": "not-hot"}` where pre-#12941 it
+    answered `{}` (#7952). Neither flag is set by default.
+
+    #12941 — THIS DOOR HONOURS `TORTOISE_RECORD_SERVE`. The read runs through
+    `TortoiseSDK.get_point(..., served_out=...)`, the opt-in caller-facing form
+    of the one seam (`tortoise/record_serve.py`), so an agent that writes and
+    then verifies does not read back ABSENT: the record answers when the cache
+    is cold (`off` mode, the default, is unchanged). The store that answered is
+    named on the response — `servedFrom` / `fallbackReason` — and an answer the
+    store could not see carries `residency: "not-hot"` instead of an empty dict
+    (#7952). The MCP lane already carries the record tenant ambiently
+    (`mcp_auth._record_tenant_scope`, installed by `OrgResolutionMiddleware`
+    since #9192/#10025/#10046), which is why this door can consult the record at
+    all — `record_serve`'s `internal-accessor` exclusion was written when it
+    could not.
+
+    ⛔ AN ARMED ABSENCE STILL RETURNS `{}` (#12941 review P0-1). The seam's
+    attribution is NOT merged into an answer that found nothing: this tool's
+    contract is "properties, or empty dict", and a verifier written as
+    `if out: my write landed` would read a TRUTHY attribution dict for a node
+    that does not exist as a success — the same wrong answer this issue removes,
+    inverted. So an absence the RECORD established (`servedFrom: record`, or a
+    `record-miss` fallback) returns `{}` exactly as `off` mode does; only a
+    `not-hot` answer — which is NOT an absence claim, and must never read as an
+    empty one (#7952) — returns a non-empty dict, carrying the marker and the
+    reason. The full attribution for an established absence stays available to
+    SDK callers through the `served_out` sink, which is caller-owned and cannot
+    be confused with the node.
+
+    ⛔ OWNERSHIP OF THE OUT-DICT. `served_out` is filled by the seam and merged
+    into a FOUND answer, and there the attribution WINS over a stored property
+    of the same name: a caller that cannot tell a fallback from stored data
+    would have exactly the invisible fallback this seam forbids (the
+    reserved-name rule `hosted_api.get_point` states). In `off` mode with no
+    marker armed the dict is empty, so the response is the pre-#12941 shape
+    exactly.
+    """
+    return _read_point_served(id)
 
 
 # ── Entity Resolution (GAP-01 #6987) ──────────────────────────
@@ -5201,6 +5402,21 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     Returns [{id, name, kind, confidence}] in the read's own (relevance) order;
     the ``suggest_entry_points`` FALLBACK sorts the match by confidence DESC.
     """
+    # An empty query is NOT a resolution request. `search_knowledge(mode=
+    # 'entry_points')` REFUSES the empty string (it is a text-driven read), but this
+    # door's contract is "no hits" → `[]`, so the refusal is answered here rather than
+    # turned into a `_SafeError` (#12951 review P1: the retired `suggest_entry_points`
+    # call raised instead). Two halves, and only one of them is that refusal:
+    #   * `""` — refused by the container, answered `[]` here; this door answered `[]`
+    #     before the guard too (the hybrid read returned `[]`, and so did the fallback).
+    #   * `"   "` — the container does NOT refuse a blank string (it answers `[]`), so
+    #     this half is a DELIBERATE CHANGE made here: the raw string used to reach
+    #     `tortoise_fts_query`, which matches EVERY row for a blank query (measured: 5
+    #     rows at `limit=5`, 6 of 6 rows at `limit=50`), so a blank query answered with
+    #     arbitrary entities. That is a false resolution answer, not an enumeration
+    #     request, so it is answered `[]`.
+    if not (query or "").strip():
+        return []
     try:
         # #12297: THE RETURNED PAGE **IS** THE RESOLUTION RESULT SET, at
         # ``limit`` default 5 — far inside the shipped pool width of 40 — so an
@@ -5210,7 +5426,8 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
         # this PR's own docstring defines. ⛔ This function does NOT sort (it
         # returns ``_safe(...)``'s list as-is, see the return below); the
         # confidence-DESC sort lives in the SDK lane it mirrors,
-        # ``sdk.suggest_entry_points``, which opts out for its own reason.
+        # ``search_knowledge(mode='entry_points')``, which opts out for its own
+        # reason.
         results = _safe(_get_org_sdk().tortoise_fts_query, query,
                         kind=kind_filter, limit=limit,
                         _rerank_candidates=False)
@@ -5240,7 +5457,8 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
                     for r in results]
     except Exception:
         pass
-    return _safe(_get_org_sdk().suggest_entry_points, query, limit=limit, kind_filter=kind_filter)
+    return _safe(_get_org_sdk().search_knowledge, query,
+                 mode="entry_points", kind=kind_filter, limit=limit)
 
 
 # ── Semantic Search (#6990) ────────────────────────────────────
@@ -5316,7 +5534,8 @@ def tortoise_expand_relationships(point_id: str) -> list[dict]:
     use this to read a single point's complete relationships, including the
     related points' full text, on demand (single-point fan-out is trivially cheap).
     """
-    return _safe(_get_org_sdk().expand_relationships, point_id)
+    return _safe(_get_org_sdk().explore_connections, point_id,
+                 include_content=True)
 
 
 # ── Recall — epistemic intents (epic #898) ─────────────────────
@@ -5575,7 +5794,7 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
-    return _safe(_quota_gated(_get_org_sdk().update_point, "points"), id, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk().update_knowledge, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
                               direction: str = "bidirectional",
@@ -5630,13 +5849,51 @@ def tortoise_annotate_operator(id: str, bias: float, precision: float,
 def tortoise_get_operator(id: str) -> dict:
     """Get an operator Point by ID. Returns all properties including annotation dimensions.
     Raises error if the Point is not an operator.
-    Alias → get(id, type='operator') (epic #888 W3)."""
-    point = _safe(_get_org_sdk().get_point, id)
+    Alias → get(id, type='operator') (epic #888 W3).
+
+    ⚠️ Extending its registry `description` (see `tool_registry.py`) is safe here
+    ONLY because `tortoise_get_operator` is a RETIRED name, and both gates that
+    would otherwise move are keyed to LIVE entries: a live description is
+    snapshotted into `config/surface-manifest.yml`'s `job:` field and compared by
+    `tools/surface_manifest.py check`, and the served row's handler docstring is
+    digested by `tools/surface-guard.py`. The retired row carries `use_instead`
+    and NEITHER a `job:` nor a `served_from`, so nothing derives a GATE from this
+    entry's `description` — though its `use_instead`/`sdk_method`/`http_policy` ARE
+    still compared, and the description is still what the RETIRED shim advertises.
+    Editing the live `tortoise_get_entity` text is the change that needs the owner's
+    approval and a manifest re-cut.
+
+    ⚠️ ARMED MODES (`TORTOISE_RECORD_SERVE`) change TWO of those sentences (#12941):
+    a found operator also names the store that answered (`servedFrom` /
+    `fallbackReason`), and an answer no reachable store could SEE returns
+    `residency: "not-hot"` — which is an IMPAIRMENT, deliberately not the "not an
+    operator" error, because a store that could not see the node cannot establish
+    anything about the graph. A genuine non-operator Point still answers the plain
+    `{"error": "Point … is not an operator"}` dict, and an established absence is
+    still `{}`.
+
+    With `TORTOISE_RECORD_SERVE` unset the seam is never consulted and the answer is
+    the pre-#12941 one — BUT the residency marker is armed SEPARATELY: with
+    `TORTOISE_RESIDENCY` on, a cache that declares itself PARTIAL and does not cover
+    the id still answers `{"residency": "not-hot"}` here, exactly as on every other
+    point door (#7952). Neither flag is set by default."""
+    # #12941: this door reads a POINT by id, so it honours the record seam like
+    # `tortoise_get_point` does — an operator written and then verified must not
+    # read back ABSENT (the issue's own measured population: 5 operators in the
+    # record, 0 in the cache).
+    point = _read_point_served(id)
     # _safe reports ANY failure as an _SafeError — itself a dict subclass — so
     # the non-operator guard below would match a failed call and fabricate a
     # domain fact ('is not an operator'), discarding the real cause. Surface
     # the typed failure FIRST (#4576; same pattern as #3926).
     if isinstance(point, _SafeError):
+        return point
+    if isinstance(point, dict) and point.get("residency") == "not-hot" \
+            and "id" not in point:
+        # ⛔ `not-hot` is an IMPAIRMENT, not a domain fact. Without this arm the
+        # guard below would read a dict with no `is_operator` and answer "Point
+        # … is not an operator" — inventing a fact about the graph from a store
+        # that could not see it, which is the #4576 class in the other direction.
         return point
     if isinstance(point, dict) and point and not point.get("is_operator"):
         # ⛔ DELIBERATELY a plain dict, NOT `_SafeError` (#4576, pinned by
@@ -5705,7 +5962,7 @@ def tortoise_file_decision(options: Any, evidence: Any,
         return _SafeError({"error": f"file_decision evidence exceeds the cap "
                                     f"({MAX_FILE_DECISION_EVIDENCE})",
                            "code": ERR_QUOTA})
-    result = _safe(_quota_gated(_get_org_sdk().file_decision, "points",
+    result = _safe(_quota_gated(_get_org_sdk().write_question, "points",
                           abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
     # #3926: gate on the typed failure result, never on key presence.
     if not isinstance(result, _SafeError):
@@ -5735,7 +5992,7 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
     Returns {event_id, decision_point_id, impl_operator_ids, confidence_delta}.
     """
     point_ids = _parse(point_ids)
-    return _safe(_quota_gated(_get_org_sdk().file_human_approval, "points", abuse_weight=1),
+    return _safe(_quota_gated(_get_org_sdk().record_decision, "points", abuse_weight=1),
                  approver_id, artifact_id, point_ids, decision_content)
 
 
@@ -5765,23 +6022,43 @@ def tortoise_invalidate(id: str, corrected_by_id: str,
     return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"), id, corrected_by_id)
 
 
-def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True,
+def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool | None = None,
                        dry_run: bool = False) -> dict:
-    """Atomically replace old Point with new — CORRECTS edge + outdated flag.
+    """Replace a node with a successor, keeping the history — the arm follows the OLD node's label.
 
-    transfer_edges=True (default): full supersede — all edges move from old to
-    new. transfer_edges=False: invalidate behavior — mark old outdated with a
-    CORRECTS edge only (no edge transfer). Absorbs tortoise_invalidate.
-    Returns {invalidated, id, corrected_by} (+ edges_transferred when
-    transfer_edges=True).
+    A Point gets the full supersede: CORRECTS edge + outdated flag + edge transfer.
+    An Object/Subject gets the family supersede: status + successor NAME + instant,
+    with no edge transfer.
 
-    dry_run=True previews exactly which edges would transfer and changes
-    nothing; dry_run=False (default) applies the supersede.
+    transfer_edges=None (default, NOT SUPPLIED): the SDK picks the arm by the
+    OLD node's label. transfer_edges=True: full supersede — all edges move from
+    old to new. transfer_edges=False: invalidate behavior — mark old outdated
+    with a CORRECTS edge only (no edge transfer). Both explicit values are
+    POINT-ONLY and are REFUSED on an Object/Subject. Absorbs tortoise_invalidate.
+    Returns {invalidated, id, corrected_by} (+ edges_transferred when the
+    supersede arm ran) for a Point, {superseded, id, label, superseded_by,
+    superseded_at} for an Object/Subject.
+
+    ⛔ The default is `None`, not `True` (#12914 review P3 + re-review finding 2):
+    passing `True` is a CALLER CHOICE the Object/Subject arm cannot honour, so it
+    is REFUSED there rather than silently dropped — and this container must not
+    manufacture that choice on the caller's behalf by defaulting to it. It passes
+    the value through UNCHANGED; the SDK owns the one dispatch rule.
+
+    dry_run=True previews what would change — the same arm and the same FAMILY-ARM
+    checks, nothing written — and reports the node count the write would touch.
+    ⛔ It is NOT refusal parity with the write on every shape: the write continues
+    into `update_knowledge` -> `_update_entity`, whose label-surface guards an
+    `:Event` row and a `:Source` row fail, and the preview does not run those. On
+    the hybrid shapes `:Object:Event` / `:Subject:Event` / `:Object:Source` /
+    `:Subject:Source` the preview says "would supersede" and the write refuses
+    (fail-closed, nothing written; tortoise#13114). dry_run=False (default)
+    applies the supersede.
     """
     if dry_run:
         return _safe(_preview_supersede, _get_org_sdk(),
                      old_id, new_id, transfer_edges)
-    return _safe(_quota_gated(_get_org_sdk().supersede, "points"),
+    return _safe(_quota_gated(_get_org_sdk().supersede_knowledge, "points"),
                  old_id, new_id, transfer_edges=transfer_edges)
 
 
@@ -5966,7 +6243,7 @@ def tortoise_checkpoint(items: Any,
         return _SafeError({"error": f"checkpoint items exceed the batch cap "
                                     f"({MAX_CHECKPOINT_ITEMS})",
                            "code": ERR_QUOTA})
-    return _safe(_quota_gated(_get_org_sdk().checkpoint, "points",
+    return _safe(_quota_gated(_get_org_sdk()._checkpoint, "points",
                           abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)), items,
                  agent_name=agent_name, threshold=threshold)
 
@@ -5982,8 +6259,11 @@ def tortoise_diary_write(agent_name: str, entry: str,
 
 def tortoise_diary_read(agent_name: str, last_n: int = 10,
                         wing: str | None = None) -> list[dict]:
-    """Read recent diary entries for an agent, newest first."""
-    return _safe(_get_org_sdk().diary_read, agent_name, last_n, wing=wing)
+    """Read recent diary entries for an agent, newest first.
+
+    Alias → list_knowledge(kind='diary', agent=...) (#4282 row 4)."""
+    return _safe(_get_org_sdk().list_knowledge, "diary", agent=agent_name,
+                 limit=last_n, wing=wing)
 
 
 def tortoise_list_graphs() -> list[str]:
@@ -6029,7 +6309,7 @@ def tortoise_status() -> dict:
     Returns {connected, counts: {Point, Event, ...}, total_entities}.
     Alias → graph_overview(section='status') (epic #888 W3).
     """
-    return _safe(_get_org_sdk().status)
+    return _safe(_get_org_sdk().graph_overview, "status")
 
 
 def _org_quota_block(sdk=None, timeout: float | None = None) -> dict:
@@ -6354,13 +6634,13 @@ def tortoise_taxonomy() -> dict[str, int]:
     """Count entities by node label. Returns {Point: N, Event: N, Subject: N,
     Object: N, Source: N} (D10: a document is a Source, not a :Document node).
     Alias → graph_overview(section='taxonomy') (epic #888 W3)."""
-    return _safe(_get_org_sdk().taxonomy)
+    return _safe(_get_org_sdk().graph_overview, "taxonomy")
 
 
 def tortoise_list_topics(entity_id: str) -> dict:
     """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}.
     Alias → graph_overview(section='topics', entity_id=...) (epic #888 W3)."""
-    return _safe(_get_org_sdk().list_topics, entity_id)
+    return _safe(_get_org_sdk().graph_overview, "topics", entity_id=entity_id)
 
 
 def tortoise_topic_summarize(topic: str,
@@ -6399,7 +6679,7 @@ def tortoise_topic_summarize(topic: str,
 def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
     """Find Points not updated in N days. Returns {stale, count, cutoff, limit}.
     Alias → graph_overview(section='stale', days=, limit=) (epic #888 W3)."""
-    return _safe(_get_org_sdk().stale_points, days=days, limit=limit)
+    return _safe(_get_org_sdk().graph_overview, "stale", days=days, limit=limit)
 
 
 def tortoise_review_connections(mode: str = "both", scope: str | None = None) -> dict:
@@ -6455,10 +6735,41 @@ def tortoise_find_cross_lens_candidates(
 
 def tortoise_provenance(point_id: str) -> dict:
     """Provenance chain — "Who decided this?" Follows authoredBy → Subject → delegation."""
-    return _safe(_get_org_sdk().provenance, point_id)
+    return _safe(_check_confidence_provenance, point_id)
 
 
 # ── Multi-tenancy (#7001) ────────────────────────────────────
+
+
+def _check_confidence_provenance(point_id: str) -> dict:
+    """The provenance chain alone, read through the `check_confidence` container.
+
+    `TortoiseSDK.provenance` was retired into `check_confidence` (#4282 row 5), so a
+    caller of the RETIRED `tortoise_provenance` tool (the #3883 shim) must reach the
+    chain through the container rather than through the name that no longer resolves.
+    The container's claim arm returns `{"confidence": …, "provenance": …}`; this peels
+    the chain off and keeps the answer byte-identical to the live tool's.
+
+    ⛔ `require_calibration=False` is not a relaxed gate: this door THROWS THE
+    POSTERIOR AWAY and answers with the chain only, and the #344 / #7478 gate
+    guards the EP posterior. ⚠️ It is NOT write-free either, and this docstring
+    used to call it "a pure read" — that was wrong: `check_confidence` reaches
+    `get_confidence`, whose lazy-consistency path dreams a DIRTY root
+    (`self.dream(dirty_only=True, …)`, `sdk.py::get_confidence`), a write that
+    PRE-DATES this shim and is unchanged by it. What this arm removes is the
+    CALIBRATION GATE, not a write surface it never had: paying it here turned a
+    chain-only answer ("who decided this?") into a `CalibrationError` on any
+    graph with one uncalibrated
+    evidence point — measured on this head, `sdk.check_confidence(id,
+    include_provenance=True)` raised while the chain resolved fine (#12951
+    review, found by the test sweep). The gate still governs every caller that
+    serves the posterior, because the default posture is unchanged.
+    """
+    payload = _safe(_get_org_sdk().check_confidence, point_id,
+                    include_provenance=True, require_calibration=False)
+    if isinstance(payload, _SafeError):
+        return payload
+    return (payload or {}).get("provenance", {}) if isinstance(payload, dict) else payload
 
 def tortoise_org_create(name: str) -> dict:
     """Create isolated org graph via FalkorDB select_graph.
@@ -6507,13 +6818,26 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
 def tortoise_update(id: str, props: Any = None) -> dict:
     """Update a Point OR entity by id. Points get point-lifecycle semantics
     (draft→live promote via status — an already-live point is an idempotent
-    no-op, version increment for Point:Object, status validation); entities
-    get a plain property update."""
+    no-op, version increment for Point:Object, status validation, a journalled
+    `restatus` for a status write, and a named refusal for an undeclared
+    transition); entities get a plain property update.
+
+    ⛔ Route is `sdk.update_knowledge`, **not** `sdk.update` (#12915 review F1).
+    This door is the one `tortoise_update_knowledge`'s `props` arm delegates to,
+    and `sdk.update` sends a Point to `update_point`, which (a) appends NO
+    journal record for a status write — the `derived = replay(journal)` class,
+    so a rebuild loses the transition — and (b) refuses every non-promote
+    transition with one fixed sentence that names neither the target status nor
+    the transition. `update_knowledge`'s property arm is the same RELAY the
+    absorbed `tortoise_update_point` / `tortoise_update_entity` handlers below
+    already call (`_update_entity_any` → `_update_entity`), so all four doors
+    land on one writer and cannot disagree about behaviour.
+    """
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
-    return _safe(_quota_gated(_get_org_sdk().update, "points"),
+    return _safe(_quota_gated(_get_org_sdk().update_knowledge, "points"),
                  id, **(props or {}))
 
 
@@ -6573,28 +6897,60 @@ def tortoise_delete(id: str, dry_run: bool = False,
 
 
 def tortoise_operator_action(action: str, id: str, reason: str | None = None,
-                             strength: float = 0.5,
+                             strength: float | None = None,
+                             credibility: str | int | float | None = None,
                              bias: float | None = None,
                              precision: float | None = None,
                              consistency: float | None = None,
                              directness: float | None = None) -> dict:
     """Consolidated operator write action — action=mitigate|annotate.
 
-    mitigate: reason (required) + strength (0-1, default 0.5) — creates/updates
-    a CURRENT mitigation Point (idempotent only while it is current: a
-    re-assertion after withdrawal mints a NEW Point). annotate:
-    bias/precision/consistency/directness (all required, 0-1).
+    mitigate: reason (required) + strength (0-1, default 0.5) + credibility (an
+    optional validated label) — creates/updates a CURRENT mitigation Point
+    (idempotent only while it is current: a re-assertion after withdrawal mints
+    a NEW Point). annotate: bias/precision/consistency/directness (all
+    required, 0-1).
+
+    ⛔ `credibility` is CARRIED here, never dropped (#12915 review F4):
+    `mitigate_operator` takes it as a validated label, and this handler used to
+    accept it and silently discard it — the exact defect the
+    `tortoise_adjust_relationship` container header cites as the reason
+    `operator_action` was retired.
+
+    ⛔ AND ONE ARM PER CALL, here too (#12915 review, P2). This door is retired
+    but still SERVED through the #3883 shim, and the shim calls THIS function —
+    not the container — so fixing only the container left the two disagreeing:
+    a #3883 caller could still pass `bias=` to the mitigate arm and get success
+    with the dimension discarded. A keyword the chosen arm cannot record is now
+    refused here as well, naming the arm it belongs to.
     """
     if action == "mitigate":
         if not reason:
             return _SafeError({"error": "operator_action(action='mitigate') requires 'reason'"})
+        stray = [name for name, value in zip(
+            ("bias", "precision", "consistency", "directness"),
+            (bias, precision, consistency, directness), strict=True) if value is not None]
+        if stray:
+            return _SafeError({"error": (
+                f"operator_action(action='mitigate') cannot record "
+                f"{', '.join(stray)} — those belong to the 'annotate' arm. "
+                "ONE arm per call: a silent partial write is indistinguishable "
+                "from a full one.")})
         return _safe(_quota_gated(_get_org_sdk().mitigate_operator, "points", abuse_weight=1),
-                     id, reason, strength)
+                     id, reason, 0.5 if strength is None else strength, credibility)
     if action == "annotate":
         dims = (bias, precision, consistency, directness)
         if any(d is None for d in dims):
             return _SafeError({"error": "operator_action(action='annotate') requires "
                                          "bias, precision, consistency, directness"})
+        stray = [name for name, value in zip(
+            ("reason", "strength", "credibility"),
+            (reason, strength, credibility), strict=True) if value is not None]
+        if stray:
+            return _SafeError({"error": (
+                f"operator_action(action='annotate') cannot record "
+                f"{', '.join(stray)} — those belong to the 'mitigate' arm. "
+                "ONE arm per call.")})
         return _safe(_quota_gated(_get_org_sdk().annotate_operator, "points"),
                      id, *dims)
     return _SafeError({"error": f"operator_action: unknown action {action!r} — "
@@ -6646,7 +7002,7 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
         return _http_excluded_error()
     if not os.path.isdir(directory):
         return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."})
-    return _safe(_get_org_sdk().index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
+    return _safe(_get_org_sdk()._index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
 
 def tortoise_index_files(directory: str, corpus_name: str | None = None,
                         extract_metadata: bool = False) -> dict:
@@ -6666,7 +7022,7 @@ def tortoise_index_files(directory: str, corpus_name: str | None = None,
     if not os.path.isdir(directory):
         return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
                                     f"path to a directory containing .md files."})
-    return _safe(_quota_gated(_get_org_sdk().index_directory, "points"),
+    return _safe(_quota_gated(_get_org_sdk()._index_directory, "points"),
                  directory, corpus_name=corpus_name,
                  extract_metadata=extract_metadata)
 
@@ -6688,8 +7044,9 @@ def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any =
         topics_list = topics
     else:
         topics_list = None
-    return _safe(_get_org_sdk().search_sessions, query, agent=agent, topics=topics_list,
-                 after=after, before=before, limit=limit, offset=offset)
+    return _safe(_get_org_sdk().search_knowledge, query, mode="sessions",
+                 agent=agent, topics=topics_list, after=after, before=before,
+                 limit=limit, offset=offset)
 
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
     """Create a document — a :Source keyed by url (research, planDoc,
@@ -6717,7 +7074,7 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
     # caller passed them there (kwarg wins; avoids TypeError on splat).
     props.pop("tier", None)
     props.pop("sourceDate", None)
-    return _safe(_quota_gated(_get_org_sdk().create_source, "points"), url, sourceKind,
+    return _safe(_quota_gated(_get_org_sdk()._create_source, "points"), url, sourceKind,
                  tier=tier, sourceDate=sourceDate, **props)
 
 
@@ -6748,7 +7105,7 @@ def tortoise_assess_source(url: str, assessor: str, score: float,
     (compute_reputation at write time). Feeds the source's reliability factor
     (clamped [0.1, 2.0]).
     """
-    return _safe(_quota_gated(_get_org_sdk().assess_source, "points"),
+    return _safe(_quota_gated(_get_org_sdk()._assess_source, "points"),
                  url, assessor, score, rationale)
 
 
@@ -6761,7 +7118,259 @@ def tortoise_set_source_tier(url: str, tier: str) -> dict:
     Dirty-marks the inheritance gate + clears the reliability cache so EP and
     reliability reads reflect the new tier promptly.
     """
-    return _safe(_get_org_sdk().set_source_tier, url, tier)
+    return _safe(_get_org_sdk()._set_source_tier, url, tier)
+
+
+# ── #4282 Phase 2 — the SOURCES / MINE / SESSION containers ──────
+# One tool per OWNER-APPROVED target row (`tortoise/__all__.py`;
+# `docs/product/beta-sdk-surface.md` rows 14-18 and 40). Each dispatches on the
+# discriminator `docs/product/bridge-table.md` Part A records for it — by
+# ARGUMENT (`tier=` vs `score=`, `items=` vs `conversation=`, `file_type=`) —
+# never on a fresh invented one. The members they absorb are RETIRED in the
+# same release (#3883): their names still answer through the warning shim with
+# their ORIGINAL bodies, which is why the functions above are untouched.
+#
+# The containers are thin on purpose. The SDK method owns the dispatch and its
+# refusals (one implementation of "which write did you mean"), so the MCP layer
+# cannot drift from it; the layer here adds only what no SDK may assume: the
+# transport exclusion for filesystem walks, the quota gate, and _safe's
+# structured-error mapping.
+
+def tortoise_register_source(url: str, sourceKind: str, tier: str | None = None,
+                             sourceDate: str | None = None, props: Any = None) -> dict:
+    """Declare a source exists — row 14. **The URL is its identity.**
+
+    Absorbs `tortoise_create_source` (retired, still answering). `tier` (T0-T4)
+    overrides the tier the source KIND would derive; `sourceDate` is the
+    evidence-age clock. A URL collision never re-kinds the existing Source.
+    """
+    props = _parse(props) or {}
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
+    # tier/sourceDate are first-class kwargs (#398) — pop from props if a legacy
+    # caller passed them there (kwarg wins; avoids TypeError on splat).
+    props.pop("tier", None)
+    props.pop("sourceDate", None)
+    return _safe(_quota_gated(_get_org_sdk().register_source, "points"), url, sourceKind,
+                 tier=tier, sourceDate=sourceDate, **props)
+
+
+def tortoise_manage_source_trust(url: str,
+                                 tier: str | None = None,
+                                 assessor: str | None = None,
+                                 score: float | None = None,
+                                 rationale: str | None = None) -> dict:
+    """Set how far a source is trusted — row 18. Dispatch is BY ARGUMENT.
+
+    `tier=` sets the credibility tier (T0-T4). `score=` + `assessor=` +
+    `rationale=` records an assessment (a reputation-weighted Statement Point).
+    Supplying both is refused: they are different writes, not two spellings of
+    one. Reads are `tortoise_graph_overview(section="sources")` — the tier is a
+    property of the source, so reading it is not a trust write.
+
+    Absorbs `tortoise_assess_source` and `tortoise_set_source_tier` (retired,
+    still answering).
+    """
+    return _safe(_quota_gated(_get_org_sdk().manage_source_trust, "points"), url,
+                 tier=tier, assessor=assessor, score=score, rationale=rationale)
+
+
+def tortoise_index_sources_from_directory(directory: str,
+                                          file_type: str = "auto",
+                                          corpus_name: str | None = None,
+                                          extract_metadata: bool | None = None,
+                                          llm_model: str | None = None,
+                                          progress_file: str | None = None) -> dict:
+    """Register a directory's files as sources — row 15. **Nothing is extracted.**
+
+    `file_type` is the discriminator: `auto` (detect per file) | `agent_session`
+    | `meeting` | `doc`. Batched and resumable (`progress_file`). Absorbs
+    `tortoise_index_files` (retired, still answering) and the two tools already
+    retired into it — `tortoise_index_sessions` (`file_type="agent_session"`) and
+    `tortoise_ingest_corpus` (`file_type="doc"`).
+
+    ⛔ The absorbed doors did NOT share one default for `extract_metadata`, and
+    collapsing them onto one would silently change what a migrating caller gets
+    (#12948 review P2-3): `tortoise_index_sessions` extracted metadata by DEFAULT
+    (and took `llm_model`), while `tortoise_index_files` / `tortoise_ingest_corpus`
+    did not. So the default is resolved PER ARM — `None` means "the absorbed door's
+    own default": `True` for `agent_session` (the one arm a door defaulted ON),
+    `False` for every other arm including `meeting`, where no retired door ever
+    extracted by default. `llm_model` is forwarded on the arms that had it. Pass an
+    explicit value to override either.
+
+    #329: EXCLUDED from tenant HTTP — walks the server filesystem with a
+    caller-supplied path. Stdio/CLI only; node-creating, so quota-gated.
+    """
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
+    if not os.path.isdir(directory):
+        return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
+                                    f"path to a directory containing .md files."})
+    # `tortoise_index_sessions`' own default (metadata extraction ON) applies to
+    # the session-shaped arm it absorbed. `meeting` does NOT get it: no retired
+    # door ever defaulted extraction ON for meetings, so flipping it there would
+    # be this container inventing a default and calling it parity.
+    metadata_arm = file_type == "agent_session"
+    if extract_metadata is None:
+        extract_metadata = metadata_arm
+    # `tortoise_index_sessions` always FORWARDED `llm_model` (None when the caller
+    # did not set it); the corpus doors passed no model at all and so took the
+    # SDK's default. Mirroring that keeps each arm's behaviour, not just its flag.
+    extra: dict[str, Any] = {}
+    if llm_model is not None or metadata_arm:
+        extra["llm_model"] = llm_model
+    return _safe(_quota_gated(_get_org_sdk().index_sources_from_directory, "points"),
+                 directory, file_type=file_type, corpus_name=corpus_name,
+                 extract_metadata=extract_metadata, progress_file=progress_file,
+                 **extra)
+
+
+def tortoise_mine_knowledge_from_session(conversation: Any = None,
+                                         session_id: str | None = None,
+                                         harness: str | None = None,
+                                         machine_id: str | None = None,
+                                         model: str | None = None,
+                                         source_id: str | None = None,
+                                         extract_entities: bool = True,
+                                         content_dedup: bool = True,
+                                         session_date: str | None = None,
+                                         participants: Any = None,
+                                         items: Any = None,
+                                         agent_name: str = "checkpoint",
+                                         threshold: float = 0.95) -> dict:
+    """Mine ONE session — row 16. Dispatch is BY ARGUMENT.
+
+    `conversation=` files an agent session (turns → episodic Points, LLM
+    extraction → epistemic Points). **The backend is the target graph's
+    configuration**, so this arm goes through the SAME door as
+    `tortoise_session_capture`, with its gates: 429 capacity, 409 duplicate /
+    recording-off, 400 turn cap, 422 empty transcript, 402 quota. The server's
+    turn cap is the gate's, not a caller knob — that is why `max_turns` is on
+    the SDK method and not here. `machine_id`/`model` are the capture's
+    attribution claims and are FORWARDED: dropping them let a migrating
+    `tortoise_session_capture` caller lose its attribution silently (#12948
+    review P2-2; the base door sanitized and stamped both).
+
+    ⛔ `conversation=` ALSO takes a RAW TRANSCRIPT STRING (with `source_id=`),
+    which is the other mode the retired `tortoise_mine_conversations` had: a
+    single transcript mined by `mine_conversation`, not the turn-list capture
+    pipeline. `content_dedup`/`session_date`/`participants`/`extract_entities`
+    are that arm's own knobs. A door that absorbed `tortoise_mine_conversations`
+    but could only mine a FOLDER would send every single-transcript caller to a
+    name that cannot perform their call (#12948 review P2-1).
+
+    `items=` files an already-distilled batch ({wing, room, content}) with
+    two-tier dedup; `agent_name` and `threshold` are the batch's own knobs.
+    Supplying two arms at once is refused — extraction and batch-filing are
+    different pipelines.
+
+    Absorbs `tortoise_checkpoint`, `tortoise_session_capture` and the
+    single-transcript arm of `tortoise_mine_conversations` (all retired, still
+    answering).
+    """
+    if items is not None and conversation is not None:
+        return _SafeError({"error": "pass conversation= (a transcript to extract from) "
+                                    "OR items= (a distilled batch to file) — they are "
+                                    "different pipelines", "code": ERR_INVALID})
+    if source_id is not None and not isinstance(conversation, str):
+        # `source_id` addresses the RAW-TRANSCRIPT arm only; on the capture arm it
+        # would be accepted and ignored, which is the silent-drop shape this
+        # container exists to avoid.
+        return _SafeError({"error": "source_id= belongs to the raw-transcript arm: pass "
+                                    "conversation= as a transcript STRING, or drop "
+                                    "source_id= (the capture arm keys on session_id=)",
+                           "code": ERR_INVALID})
+    if items is not None:
+        items = _parse(items)
+        # #329 batch cap: one call must not create unbounded nodes
+        from tortoise.quota import MAX_CHECKPOINT_ITEMS
+        if isinstance(items, list) and len(items) > MAX_CHECKPOINT_ITEMS:
+            return _SafeError({"error": f"items exceed the batch cap "
+                                        f"({MAX_CHECKPOINT_ITEMS})",
+                               "code": ERR_QUOTA})
+        return _safe(_quota_gated(_get_org_sdk().mine_knowledge_from_session,
+                                  "points",
+                                  abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)),
+            items=items, agent_name=agent_name, threshold=threshold)
+    if conversation is not None:
+        if isinstance(conversation, str):
+            # The RAW-TRANSCRIPT arm of the retired `tortoise_mine_conversations`
+            # (`transcript=` + `source_id=`). Delegated to that retired body rather
+            # than re-implemented: it IS the pipeline, and a copy would be a second
+            # implementation of the same write to keep in sync.
+            #
+            # ⛔ Transport: the retired door was excluded from tenant HTTP as a
+            # WHOLE (its corpus mode walks the server filesystem with a
+            # caller-supplied path), so its transcript arm never answered over HTTP.
+            # This arm keeps that posture instead of silently widening the HTTP
+            # surface — and refuses with a message about THIS ARM, because the
+            # retired body's blanket refusal would tell an HTTP caller the whole
+            # container is unavailable, including the capture/`items=` arms that do
+            # work here (#12948 review round 2).
+            if _transport_mode.get() == "http":
+                return _SafeError({"error": "the raw-transcript arm (conversation= as a "
+                                            "transcript STRING with source_id=) is stdio/CLI "
+                                            "only — it keeps the retired conversations-"
+                                            "mining door's tenant-HTTP exclusion. The "
+                                            "capture arm (conversation= as a turn list) and "
+                                            "items= ARE available over HTTP.",
+                                   "code": ERR_INVALID})
+            if not source_id:
+                return _SafeError({"error": "conversation= given as a transcript string "
+                                            "needs source_id= — the source the transcript "
+                                            "came from. (Pass conversation= as a turn list "
+                                            "for the capture arm.)",
+                                   "code": ERR_INVALID})
+            return tortoise_mine_conversations(
+                transcript=conversation, source_id=source_id,
+                extract_entities=extract_entities, content_dedup=content_dedup,
+                session_date=session_date, participants=participants)
+        return tortoise_session_capture(conversation, harness=harness,
+                                        session_id=session_id,
+                                        machine_id=machine_id, model=model)
+    return _SafeError({"error": "nothing to mine — pass conversation= for one session "
+                                "transcript (a turn list, or a raw transcript string "
+                                "with source_id=), or items= for a distilled batch",
+                       "code": ERR_INVALID})
+
+
+def tortoise_mine_knowledge_from_directory(directory: str,
+                                           extract_entities: bool = True) -> dict:
+    """Mine a FOLDER of files — row 17. Each file is mined by its own type.
+
+    Absorbs `tortoise_mine_conversations` (retired, still answering). It is the
+    BATCH FORM of `tortoise_mine_knowledge_from_session`, not an indexing mode:
+    this call extracts, `tortoise_index_sources_from_directory` does not.
+
+    #329: EXCLUDED from tenant HTTP — walks the server filesystem. Stdio/CLI only.
+    """
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
+    if not os.path.isdir(directory):
+        return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
+                                    f"path to a directory of conversation files."})
+    return _safe(_quota_gated(_get_org_sdk().mine_knowledge_from_directory, "points"),
+                 directory, extract_entities=extract_entities)
+
+
+def tortoise_check_connection(key_id: str | None = None) -> dict:
+    """What does this credential reach? — row 40. Read-only, and NOT a wizard.
+
+    Omit `key_id` for this connection: connectivity, the resolved graph +
+    namespace, and this caller's own account (one read, from the same
+    `get_organisation_account` the plan gates use). Pass `key_id` to inspect a
+    single credential's declared reach (graph, scopes, delegation depth,
+    revocation, expiry).
+
+    ⛔ The isolation promise is the KEY half, enforced by the answer shape: a key
+    belonging to another account and a key that does not exist return the SAME
+    `key_error`, so this call cannot be used as an existence oracle across
+    tenants. Replaced the dropped `run_onboarding` (#3540).
+    """
+    return _safe(_get_org_sdk().check_connection, key_id)
+
 
 def tortoise_get_entity(id: str | None = None, type: str | None = None,
                         limit: int = 20) -> Any:
@@ -6784,7 +7393,7 @@ def tortoise_update_entity(id: str, props: Any = None) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
-    return _safe(_quota_gated(_get_org_sdk().update_entity, "points"), id, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk().update_knowledge, "points"), id, **(props or {}))
 
 def tortoise_delete_entity(id: str, dry_run: bool = False) -> dict | bool:
     """Delete any entity by ID.
@@ -6902,6 +7511,45 @@ _OVERVIEW_SECTIONS = (
     # defaults — the container's shared `limit=50` against the door's `limit=2`.
     "validate_domain", "audit", "dream_health",
 )
+# ⛔ This tuple is the approved container's set (`TortoiseSDK.GRAPH_OVERVIEW_SECTIONS`)
+# PLUS `_OVERVIEW_TRANSPORT_ONLY_SECTIONS` below, and NOTHING else. It was an
+# independent literal that happened to agree with the SDK tuple … except for those two,
+# which nothing declared or pinned (#12951 fresh-context review, ISSUE 4). The
+# relationship is asserted by `tests/test_11609_read_containers.py`, in both directions:
+# a section added to the container with no arm here reds, and a section served here
+# without being either approved or declared transport-only reds.
+#
+# Kept as a LITERAL rather than derived (`… = TortoiseSDK.GRAPH_OVERVIEW_SECTIONS +
+# _OVERVIEW_TRANSPORT_ONLY_SECTIONS`) because `tests/test_curation_11469.py` reads this
+# constant out of the module SOURCE with `ast.literal_eval` — it must not import this
+# module, whose import raises on an ambient `TORTOISE_API_KEY`. A pin that can FAIL is
+# also the stronger statement here, the same reason `_OVERVIEW_DEFAULT_SUMMARY_KEYS` is
+# pinned literally rather than derived.
+
+#: The sections THIS TRANSPORT serves and `TortoiseSDK.GRAPH_OVERVIEW_SECTIONS` does
+#: NOT — the whole difference between the approved container's set and this door's,
+#: named in ONE place so a pin can hold it (`tests/test_11609_read_containers.py`)
+#: instead of leaving it an accident of two literals that happened to agree
+#: (#12951 fresh-context review, ISSUE 4: nothing compared the two, and the comments
+#: on both sides claimed the SDK tuple drove this tuple).
+#:
+#:   graphs — `tortoise_list_graphs` is a LIVE door whose destination in
+#:       `docs/product/bridge-table.md` Part A is `tenancy:list_memory_graphs`, NOT
+#:       this container. It is a section HERE because `tortoise_overview(section=
+#:       "graphs")` retires forward through this door, and because the read carries
+#:       the #9340 HTTP tenant filter — a transport concern applied on top of
+#:       `list_graphs`, so an SDK section would not be able to answer it.
+#:   health — this IS one of the container's approved sections
+#:       (`docs/product/canonical-mcp-tools.md`'s `tortoise_health` pointer is
+#:       `tortoise_graph_overview(section="health")`), but it has no SDK read to
+#:       delegate to: `tortoise_health` is a monitoring probe bounded by a TRANSPORT
+#:       deadline clamp (#10749 / `_health_setup_allowance`).
+#:
+#: ⛔ Neither can be closed by a lane adding a section to the SDK tuple: `health` has
+#: no SDK read and `graphs` is another container's source. Both are therefore DECLARED
+#: here and pinned, so a third difference cannot appear silently and neither of these
+#: two can be dropped without reddening.
+_OVERVIEW_TRANSPORT_ONLY_SECTIONS = ("graphs", "health")
 
 #: Sections that REQUIRE an argument, so the no-`section` combined summary cannot
 #: call them. `topics` was the only one; #4282 added `validate_domain` (needs
@@ -7279,9 +7927,629 @@ def tortoise_graph_overview(section: str | None = None,
                              point_kinds=point_kinds)
 
 
+# ── #11609 Phase 2 — the READ/QUERY containers (#4282) ────────────────────────
+#
+# Each handler is a DOOR onto its SDK container and nothing else: the discriminator
+# dispatch, the closed value sets and every refusal message live in
+# `tortoise/sdk.py` (`search_knowledge`, `list_knowledge`, `check_confidence`,
+# `explore_connections`, `review_link_candidates`). Re-deciding any of it here would
+# be a second dispatch table that can disagree with the SDK's — which is the drift
+# Part C1 of `docs/product/bridge-table.md` exists to catch. The `mode=`/`kind=`
+# enum is a closed set on both sides: an unknown value REFUSES with the valid set
+# named (AIP-193), never silently falls through to a default.
+#
+# ⛔ ONE member of the six is NOT shaped that way, and saying so is the point of this
+# paragraph: `tortoise_graph_overview` dispatches through `_overview_section`, whose
+# arms were the epic-#888 `tortoise_overview` aliases and predate this batch. Its value
+# set is `TortoiseSDK.GRAPH_OVERVIEW_SECTIONS` PLUS the two transport-only sections
+# declared at `_OVERVIEW_TRANSPORT_ONLY_SECTIONS` (`graphs`, `health` — see the reason
+# there), and `tests/test_11609_read_containers.py` pins that relationship in both
+# directions. The claim "there cannot be a second copy" was FALSE for this container
+# (#12951 fresh-context review, ISSUE 4); the pin is what makes it true now.
+
+
+def tortoise_search_knowledge(query: str | None = None, mode: str = "hybrid",
+                              kind: str | None = None,
+                              tag: str | None = None,
+                              entity_type: str = "point",
+                              limit: int | None = None,
+                              offset: int = 0,
+                              include_retracted: bool = False,
+                              min_confidence: float = 0.0,
+                              order_by: str = "relevance",
+                              threshold: float = 0.0,
+                              relationship_filter: str | None = None,
+                              traversal_path: str | None = None,
+                              agent: str | None = None,
+                              topics: list[str] | None = None,
+                              after: str | None = None,
+                              before: str | None = None,
+                              title: str | None = None,
+                              body: str | None = None,
+                              repo: str | None = None) -> Any:
+    """Find things by text — full-text and hybrid (#4282 row 3).
+
+    One search door; `mode` selects the question (hybrid | full_text | tag |
+    sessions | entry_points | issue_insight). Every arm answers with the rows its
+    own read returned, and an unknown mode refuses naming the valid set.
+    """
+    return _safe(
+        _get_org_sdk().search_knowledge, query, mode, kind=kind, tag=tag,
+        entity_type=entity_type, limit=limit, offset=offset,
+        include_retracted=include_retracted, min_confidence=min_confidence,
+        order_by=order_by, threshold=threshold,
+        relationship_filter=relationship_filter,
+        traversal_path=traversal_path, agent=agent, topics=topics, after=after,
+        before=before, title=title, body=body, repo=repo)
+
+
+def tortoise_list_knowledge(kind: str = "claim",
+                            point_kind: str | None = None,
+                            id: str | None = None,
+                            url: str | None = None,
+                            entity_id: str | None = None,
+                            agent: str | None = None,
+                            wing: str | None = None,
+                            limit: int = 20,
+                            offset: int = 0,
+                            include_retracted: bool = False) -> Any:
+    """One list method; `kind` selects the collection (#4282 row 4).
+
+    kind: claim | source | source_reliability | batch | namespace | topic | diary.
+    Browse and filter without a text search; an unknown kind refuses naming the
+    valid set.
+    """
+    return _safe(
+        _get_org_sdk().list_knowledge, kind, point_kind=point_kind, id=id,
+        url=url, entity_id=entity_id, agent=agent, wing=wing, limit=limit,
+        offset=offset, include_retracted=include_retracted)
+
+
+def tortoise_check_confidence(claim_id: str | None = None,
+                              topic: str | None = None,
+                              session: bool = False,
+                              calibrate: bool = False,
+                              include_provenance: bool = False,
+                              limit: int = 50,
+                              require_calibration: bool | None = None) -> Any:
+    """How confident the graph is — the confidence view only (#4282 row 5).
+
+    Dispatch by argument: claim_id | topic | session | calibrate (the default
+    when nothing is named). It never RECOMPUTES the posterior, and it is not
+    write-free either: the `claim_id` arm reaches `get_confidence`, whose
+    lazy-consistency path dreams a DIRTY root (`self.dream(dirty_only=True, …)`)
+    — a write that PRE-DATES this container and is unchanged by it, which is why
+    the row is tiered `maintenance` rather than `read`.
+    """
+    return _safe(
+        _get_org_sdk().check_confidence, claim_id, topic=topic, session=session,
+        calibrate=calibrate, include_provenance=include_provenance,
+        limit=limit, require_calibration=require_calibration)
+
+
+def tortoise_explore_connections(node_id: str | None = None,
+                                 query: str | None = None,
+                                 hops: int = 2,
+                                 include_content: bool = False,
+                                 point_kind: str | None = None,
+                                 confidence_min: float | None = None) -> Any:
+    """Walk outward from a node through its links (#4282 row 8).
+
+    node_id | node_id + include_content (the expand payload) | query (resolve a
+    name, then walk from it). `hops` bounds the walk.
+    """
+    return _safe(
+        _get_org_sdk().explore_connections, node_id, query=query, hops=hops,
+        include_content=include_content, point_kind=point_kind,
+        confidence_min=confidence_min)
+
+
+def tortoise_review_link_candidates(kind: str = "connections",
+                                    mode: str = "both",
+                                    scope: str | None = None,
+                                    candidate_type: str = "content",
+                                    limit: int | None = None,
+                                    threshold: float | None = None) -> Any:
+    """Connections found but not made — READ-ONLY (#4282 row 10).
+
+    kind: connections | dedup | cross_lens. Nothing here writes; accepting a
+    candidate is `link_entities` with its two endpoints.
+
+    `limit` bounds every arm; omitted (the default) keeps each arm's own bound,
+    which is what the SDK container documents at `review_link_candidates`.
+    """
+    return _safe(
+        _get_org_sdk().review_link_candidates, kind, mode=mode, scope=scope,
+        candidate_type=candidate_type, limit=limit, threshold=threshold)
+
+# ── The WRITE/MUTATE containers (#4282 Phase 2, #11609 lane B) ─────────────
+#
+# SIX approved target names (`tortoise/__all__.py` rows 20-26) replace FOURTEEN
+# doors. Every container DISPATCHES to the handler it absorbs — never a
+# re-implementation — so the retired door (which still answers through the #3883
+# warning shim, on this exact function) and the container cannot disagree. That is
+# the rule `tortoise_graph_overview` states for its sections and the reason these
+# bodies are three lines each rather than a second copy of the logic.
+#
+# The DISCRIMINATOR is the one `docs/product/bridge-table.md` Part A records for
+# each: `scope=` for refresh_confidence, "which fields" for update_knowledge, the
+# link policy for supersede_knowledge, the adjustment (strength vs the four
+# dimensions) for adjust_relationship. None is invented here.
+#
+# ⛔ A discriminator value outside the documented set is REFUSED, naming the field
+# and the values that exist (AIP-193: the message must let a reasonably technical
+# caller resolve it, and must not assume they know this implementation). Nothing
+# falls through to "some arm" — a fall-through is how `operator_action` used to
+# accept `credibility` and silently drop it.
+
+
+def tortoise_update_knowledge(id: str, props: Any = None,
+                              annotation: Any = None,
+                              valid_until: str | None = None,
+                              invalid_at: str | None = None,
+                              corrected_by_id: str | None = None,
+                              dry_run: bool = False) -> dict:
+    """Change what a stored thing says — or retract it (#4282 row 22).
+
+    Dispatches on WHICH FIELDS are set, exactly as `TortoiseSDK.update_knowledge`
+    does at the SDK layer:
+
+      props=                      → property update. Was `tortoise_update` (which
+                                    already dispatches Point-lifecycle vs plain
+                                    entity), so `tortoise_update_point` and
+                                    `tortoise_update_entity` are the same arm.
+      annotation={bias, precision, consistency, directness}
+                                  → annotate the LINK. Was `tortoise_annotate_operator`.
+      invalid_at=/valid_until=    → retract the claim: a tombstone whose window
+        (no corrected_by_id)       END is the instant given. Was `tortoise_retract_point`.
+      invalid_at=/valid_until=    → invalidate: mark outdated and link to the
+        + corrected_by_id=         successor. Was `tortoise_invalidate`.
+
+    ⛔ ONE arm per call. Two arms in one call is REFUSED below rather than
+    recorded partly — that is the contract the SDK verb states and the one this
+    door honours, because a caller cannot tell a partial write from a full one.
+    """
+    arms = {
+        "props": props is not None,
+        "annotation": annotation is not None,
+        "temporal": valid_until is not None or invalid_at is not None,
+    }
+    chosen = [name for name, on in arms.items() if on]
+    if len(chosen) > 1:
+        return _SafeError({
+            "error": ("update_knowledge: ONE arm per call — this call names "
+                      f"{', '.join(sorted(chosen))}. They record different "
+                      "things (a property bag, the four annotation dimensions, "
+                      "a window end + tombstone) and the writers take one each, "
+                      "so a combined call would return success having stored "
+                      "only part of it. Send them as separate calls."),
+            "code": ERR_INVALID})
+
+    if annotation is not None:
+        annotation = _parse(annotation)
+        if not isinstance(annotation, dict):
+            return _SafeError({"error": "update_knowledge: annotation= must be an "
+                                        "object of the four epistemic dimensions",
+                               "code": ERR_INVALID})
+        # ⛔ `dry_run` on THIS arm is REFUSED, never ignored (#12915 review F2).
+        # It used to be: the arm neither previewed nor refused, so it WROTE —
+        # while `_dry_run_tool_names()` lists this container (it declares a
+        # `dry_run` parameter) and `_arguments_say_preview` therefore recorded
+        # the call as a preview that "writes nothing". An agent asking for a
+        # preview got a real graph write plus a write-ack saying nothing had
+        # been written: a false PASS in the disclosure path (#10084), not a UX
+        # nit. The property arm refuses with the same shape — only the two
+        # temporal arms have a preview to return.
+        if dry_run:
+            return _SafeError({
+                "error": ("update_knowledge: dry_run applies to the retract and "
+                          "invalidate arms only — annotating a link has no "
+                          "preview, so this call would have WRITTEN the four "
+                          "dimensions while reporting a preview. Drop dry_run "
+                          "to record the annotation."),
+                "code": ERR_INVALID})
+        try:
+            return tortoise_annotate_operator(id, **annotation)
+        except TypeError as exc:
+            # `annotate_operator` takes four REQUIRED dimensions, so a partial or
+            # typo'd dict raises TypeError out of a public verb whose every other
+            # malformed input raises a structured error. Name what is missing.
+            return _SafeError({
+                "error": ("update_knowledge: annotation= takes exactly bias, "
+                          f"precision, consistency, directness — {exc}. A partial "
+                          "rating is not a smaller update: leaving them unset is "
+                          "the neutral default (factor 1.0), so pass all four."),
+                "code": ERR_INVALID})
+
+    if corrected_by_id is not None:
+        if not arms["temporal"]:
+            return _SafeError({
+                "error": ("update_knowledge: corrected_by_id needs a temporal "
+                          "field — pass invalid_at= or valid_until= with it "
+                          "(that is what makes it an invalidation rather than a "
+                          "silent no-op)."),
+                "code": ERR_INVALID})
+        # Two spellings of ONE field with different values cannot both be the
+        # window end: refuse rather than record one and drop the other.
+        if (valid_until is not None and invalid_at is not None
+                and valid_until != invalid_at):
+            return _SafeError({
+                "error": (f"update_knowledge: valid_until={valid_until!r} and "
+                          f"invalid_at={invalid_at!r} name two different window "
+                          "ends. They are two spellings of the same `validTo` — "
+                          "pass one (or two equal values)."),
+                "code": ERR_INVALID})
+        end = invalid_at if invalid_at is not None else valid_until
+        if dry_run:
+            return _safe(_preview_invalidate, _get_org_sdk(), id, corrected_by_id)
+        return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"),
+                     id, corrected_by_id, valid_to=end)
+
+    if arms["temporal"]:
+        if (valid_until is not None and invalid_at is not None
+                and valid_until != invalid_at):
+            return _SafeError({
+                "error": (f"update_knowledge: valid_until={valid_until!r} and "
+                          f"invalid_at={invalid_at!r} name two different window "
+                          "ends. They are two spellings of the same `validTo` — "
+                          "pass one (or two equal values)."),
+                "code": ERR_INVALID})
+        end = invalid_at if invalid_at is not None else valid_until
+        if dry_run:
+            return _safe(_preview_retract_point, _get_org_sdk(), id)
+        return _safe(_quota_gated(_get_org_sdk().retract_point, "points"),
+                     id, valid_to=end)
+
+    if dry_run:
+        return _SafeError({"error": "update_knowledge: dry_run applies to the "
+                                    "retract and invalidate arms only — a property "
+                                    "update has no preview.",
+                           "code": ERR_INVALID})
+    # The property arm: `tortoise_update` IS the Point/entity dispatcher, so this
+    # does not choose a type and cannot choose it wrongly. It routes through
+    # `sdk.update_knowledge` (#12915 review F1), the same relay the absorbed
+    # `tortoise_update_point` / `tortoise_update_entity` handlers call — so the
+    # Point arm journals its `restatus` and names a refused transition here too.
+    return tortoise_update(id, props=props)
+
+
+def tortoise_supersede_knowledge(old_id: str, new_id: str,
+                                 transfer_edges: bool | None = None,
+                                 dry_run: bool = False) -> dict:
+    """Replace a node with a successor — dispatching on the LINK POLICY (#4282 row 23).
+
+      transfer_edges=None (default, NOT SUPPLIED) → the SDK picks the arm by the
+                                       OLD node's label: a full supersede for a
+                                       :Point, the family supersede for an
+                                       :Object/:Subject.
+      transfer_edges=True            → FULL SUPERSEED (Point only). CORRECTS edge,
+                                       outdated flag, and every edge moves from
+                                       old to new. Was `tortoise_supersede`.
+      transfer_edges=False           → INVALIDATE ONLY (Point only). Outdated flag
+                                       + a CORRECTS edge; nothing is transferred.
+                                       This is the whole of `tortoise_invalidate`,
+                                       so that door retires here rather than into a
+                                       fourth verb.
+
+    ⛔ The default is `None`, not `True` (#12914 re-review finding 2): either
+    boolean is a Point-arm choice the family arm refuses, so defaulting to `True`
+    made every Object/Subject call here hit that refusal — a regression on the
+    only public route for a family supersede. The value is passed through
+    UNCHANGED; the SDK owns the one dispatch rule.
+
+    dry_run=True previews what would change — the same arm and the same FAMILY-ARM
+    checks, nothing written — and reports the node count the write would touch (and
+    the rows it would bind on the family arm, which transfers no edges).
+    ⛔ It is NOT refusal parity with the write on every shape: the write continues
+    into `update_knowledge` -> `_update_entity`, whose label-surface guards an
+    `:Event` row and a `:Source` row fail, and the preview does not run those. On
+    the hybrid shapes `:Object:Event` / `:Subject:Event` / `:Object:Source` /
+    `:Subject:Source` the preview says "would supersede" and the write refuses
+    (fail-closed, nothing written; tortoise#13114).
+    """
+    return tortoise_supersede(old_id, new_id, transfer_edges=transfer_edges,
+                              dry_run=dry_run)
+
+
+def tortoise_adjust_relationship(id: str,
+                                 reason: str | None = None,
+                                 strength: float | None = None,
+                                 credibility: str | int | float | None = None,
+                                 bias: float | None = None,
+                                 precision: float | None = None,
+                                 consistency: float | None = None,
+                                 directness: float | None = None,
+                                 action: str | None = None) -> dict:
+    """Adjust an existing epistemic link (#4282 row 25).
+
+    Dispatches on the ADJUSTMENT:
+
+      reason=/strength=/credibility=  → MITIGATE (the graded dampener). Was
+                                        `tortoise_mitigate_operator`.
+      bias/precision/consistency/directness
+                                      → ANNOTATE the four dimensions. Was
+                                        `tortoise_annotate_operator`.
+
+    `action='mitigate'|'annotate'` keeps the spelling `tortoise_operator_action`
+    published, and selects the same two arms explicitly — so that door retires
+    here as well, with no third code path. An unknown `action` is refused with the
+    two values that exist (never defaulted: a wrong arm writes the wrong thing).
+
+    ⛔ Annotating a link IS `update_knowledge` on it (`beta-sdk-surface.md` row 25,
+    which states it in both directions) — the container accepts it because the
+    approved bridge map absorbs `annotate_operator` here, and mirrors it rather
+    than introducing a second annotation writer.
+    """
+    dims = (bias, precision, consistency, directness)
+    if action is not None:
+        if action not in ("mitigate", "annotate"):
+            return _SafeError({
+                "error": (f"adjust_relationship: unknown action {action!r} — the "
+                          "documented values are 'mitigate' (reason=/strength=) "
+                          "and 'annotate' (bias/precision/consistency/directness)."),
+                "code": ERR_INVALID})
+        if action == "annotate" and any(d is None for d in dims):
+            return _SafeError({
+                "error": ("adjust_relationship(action='annotate') requires all "
+                          "four dimensions: bias, precision, consistency, "
+                          "directness."),
+                "code": ERR_INVALID})
+        if action == "mitigate" and not reason:
+            return _SafeError({
+                "error": "adjust_relationship(action='mitigate') requires 'reason'.",
+                "code": ERR_INVALID})
+        # ⛔ ONE arm per call — the SAME rule the fields-only spelling below
+        # enforces. A keyword the chosen arm cannot record is REFUSED here, not
+        # dropped: the `action=` spelling used to hand `credibility` (and
+        # `bias..directness` under 'mitigate', `reason`/`strength` under
+        # 'annotate') to `tortoise_operator_action`, which discarded whatever its
+        # single branch did not read and returned success (#12915 review F4).
+        if action == "annotate":
+            stray = [name for name, value in
+                     (("reason", reason), ("strength", strength),
+                      ("credibility", credibility)) if value is not None]
+        else:
+            stray = [name for name, value in zip(
+                ("bias", "precision", "consistency", "directness"), dims,
+                strict=True)
+                if value is not None]
+        if stray:
+            return _SafeError({
+                "error": (f"adjust_relationship(action={action!r}) cannot record "
+                          f"{', '.join(stray)} — that keyword belongs to the "
+                          f"{'mitigate' if action == 'annotate' else 'annotate'} "
+                          "arm. ONE arm per call: send them as two calls, "
+                          "because a silent partial write is indistinguishable "
+                          "from a full one."),
+                "code": ERR_INVALID})
+        if action == "mitigate":
+            return tortoise_operator_action(
+                action, id, reason=reason,
+                strength=0.5 if strength is None else strength,
+                credibility=credibility)
+        # The annotate arm takes the four dimensions and NOTHING else: `strength`
+        # has a mitigate-side default, so forwarding it here would hand the
+        # annotate branch a keyword it must refuse (#12915 review).
+        return tortoise_operator_action(
+            action, id, bias=bias, precision=precision, consistency=consistency,
+            directness=directness)
+
+    named_dims = [name for name, value in zip(("bias", "precision", "consistency",
+                                               "directness"), dims, strict=True)
+                  if value is not None]
+    if named_dims and len(named_dims) != 4:
+        return _SafeError({
+            "error": (f"adjust_relationship: the annotation arm takes all four "
+                      f"dimensions — this call named {', '.join(named_dims)}. "
+                      "Leaving them unset is the neutral default (factor 1.0), "
+                      "so pass all four or none."),
+            "code": ERR_INVALID})
+    if named_dims:
+        if reason is not None or strength is not None or credibility is not None:
+            return _SafeError({
+                "error": ("adjust_relationship: ONE arm per call — the annotation "
+                          "arm records the four dimensions and the mitigation arm "
+                          "records a reason + strength. Send them as two calls."),
+                "code": ERR_INVALID})
+        return tortoise_annotate_operator(id, bias, precision, consistency,
+                                         directness)
+
+    if reason is not None or strength is not None or credibility is not None:
+        if not reason:
+            return _SafeError({
+                "error": ("adjust_relationship: the mitigation arm requires "
+                          "'reason' — strength= alone says how much weaker the "
+                          "edge is without saying why."),
+                "code": ERR_INVALID})
+        return tortoise_mitigate_operator(
+            id, reason, 0.5 if strength is None else strength, credibility)
+
+    return _SafeError({
+        "error": ("adjust_relationship: nothing to adjust — pass reason=/strength= "
+                  "to mitigate the edge, or all four of bias/precision/"
+                  "consistency/directness to annotate it."),
+        "code": ERR_INVALID})
+
+
+def tortoise_refresh_confidence(scope: str | None = None,
+                                point_id: str | None = None,
+                                full: bool = False,
+                                dirty_only: bool = True,
+                                max_hops: int = 2,
+                                require_calibration: bool | None = None,
+                                mode: str | None = None,
+                                budget: int | None = None,
+                                alpha: float | None = None,
+                                beta: float | None = None) -> dict:
+    """Recompute or seed a belief's confidence — dispatching on SCOPE (#4282 row 26).
+
+    The approved surface states the two scopes of a confidence refresh as a
+    PARAMETER rather than choosing silently (`beta-sdk-surface.md` row 26):
+
+      scope='dirty'  (default) → dream the accumulated dirty subgraph. Was
+                                 `tortoise_dream(dirty_only=True)`.
+      scope='full'             → whole-graph EP stabilization. Was
+                                 `tortoise_dream(full=True)`.
+      scope='promote'          → the reviewer-gated draft→live promotion of
+                                 `point_id`. Was `tortoise_promote_point`.
+      scope='baseline'         → set `point_id`'s Beta prior (`alpha`, `beta`).
+                                 Was `tortoise_set_point_baseline`.
+
+    ⚠️ RECORDED DISAGREEMENT, not decided here: `docs/product/sdk-rename-table.md`
+    §C3b and `bridge-table.md` §D2c record that the beta doc names the promote and
+    baseline states as FIELDS on `update_knowledge`, while this map places them in
+    `refresh_confidence`. The map is owner-approved, so this door follows it and
+    the disagreement stays visible there — reopening it is an owner decision, not
+    a build step.
+
+    `scope=None` resolves to 'dirty' (plus `full=True` ⇒ 'full') so the two
+    dream call shapes that existed keep working verbatim through the shim.
+
+    ⛔ ONE ARM PER CALL, and the knobs follow the arm (#12915 final review, F2-b):
+    the four scopes take disjoint keyword sets. A point_id scope (`promote`,
+    `baseline`) REFUSES `full`/`dirty_only`/`max_hops`/`require_calibration`/
+    `mode`/`budget` rather than dropping them, exactly as the dream scopes
+    already refuse `point_id`/`alpha`/`beta`; and an explicit `scope='dirty'`
+    REFUSES `full=True`, which would otherwise be dropped because the dream arm
+    derives `full` from the scope. Bound, stated in the handler: the three knobs
+    whose defaults are not `None` (`full=False`, `dirty_only=True`,
+    `max_hops=2`) are refused when they DIFFER from the default, because an
+    explicit pass of the default value is indistinguishable from omission at
+    this boundary.
+
+    ⛔ HTTP-EXCLUDED (#329), and the refusal is TOTAL rather than per-arm: the
+    registry policy that guards an `http_policy=False` tool requires the handler to
+    reject HTTP as its FIRST statement, because an unadvertised tool is still
+    callable BY NAME. Whole-graph EP is CPU-heavy and must not be reachable over the
+    tenant HTTP surface, so the STRICTEST arm sets the policy for the tool. The
+    DISCLOSED consequence of the #11609 lane B consolidation: `scope='promote'` and
+    `scope='baseline'` are no longer advertised over tenant HTTP MCP (they were,
+    as `tortoise_promote_point` / `tortoise_set_point_baseline`); they remain
+    callable by name on the stdio/operator surface, and the REST door to whole-graph
+    EP survives as `POST /v1/dream`, separately budgeted at the hosted layer.
+    """
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
+    if scope is None:
+        scope = "full" if full else "dirty"
+    if scope not in ("dirty", "full", "promote", "baseline"):
+        return _SafeError({
+            "error": (f"refresh_confidence: unknown scope {scope!r} — the "
+                      "documented values are 'dirty' (the changed nodes), "
+                      "'full' (the whole graph), 'promote' and 'baseline'."),
+            "code": ERR_INVALID})
+    if scope in ("dirty", "full"):
+        if full and scope == "dirty":
+            # ⛔ The SAME one-arm rule, one arm over (#12915 final review, P2):
+            # `scope` and `full=` both name the mechanism, and a `full=True` on
+            # an explicit `scope='dirty'` was silently DROPPED —
+            # `tortoise_dream(full=(scope == "full"))` is computed from the scope,
+            # so the caller asking for a whole-graph pass got a dirty dream with
+            # no signal. `scope=None, full=True` is the supported spelling (it
+            # RESOLVES to 'full' above); naming both is a contradiction.
+            return _SafeError({
+                "error": ("refresh_confidence(scope='dirty', full=True) names "
+                          "two mechanisms — `full=True` is what selects the "
+                          "whole-graph scope. Pass scope='full' (or omit scope "
+                          "and let full=True resolve it) instead of asking for "
+                          "a dirty pass and a whole-graph one in the same call."),
+                "code": ERR_INVALID})
+        if point_id is not None or alpha is not None or beta is not None:
+            return _SafeError({
+                "error": (f"refresh_confidence(scope={scope!r}) stabilizes a "
+                          "subgraph and takes no point_id/alpha/beta — those "
+                          "belong to scope='promote' and scope='baseline'."),
+                "code": ERR_INVALID})
+        return tortoise_dream(full=(scope == "full"), dirty_only=dirty_only,
+                              max_hops=max_hops,
+                              require_calibration=require_calibration,
+                              mode=mode, budget=budget)
+    if not point_id:
+        return _SafeError({
+            "error": (f"refresh_confidence(scope={scope!r}) requires point_id — "
+                      f"scope names HOW to refresh, point_id names WHAT."),
+            "code": ERR_INVALID})
+    # ⛔ A keyword the chosen arm cannot record is REFUSED, never dropped — the
+    # rule this container's siblings state in their own headers
+    # (#12915 final review, F2-b). This door refused the point_id-scope fields on
+    # the two DREAM scopes but not the reverse, so
+    # `refresh_confidence(scope='promote', point_id='p1', mode='full', budget=7)`
+    # returned success with both knobs silently discarded: a caller who asked for
+    # a whole-graph pass got a single promotion and no signal that the rest was
+    # ignored. Impact is small (`{ok: 1}`, the promotion does happen) but the
+    # class is the one this batch exists to remove — it is exactly the defect the
+    # `tortoise_adjust_relationship` header cites as the reason
+    # `tortoise_operator_action` was retired (`credibility` dropped on a write).
+    #
+    # ⚠️ BOUND, stated rather than implied: `full`, `dirty_only` and `max_hops`
+    # carry NON-None defaults (`False`, `True`, `2`), so an explicit pass of
+    # exactly the default is indistinguishable from omission at this boundary.
+    # Those three are refused only when they DIFFER from the default — which is
+    # every pass whose value could have changed a dream. The three
+    # `None`-defaulted knobs (`require_calibration`, `mode`, `budget`) are refused
+    # on any non-`None` value. Widening this would need the parameters to default
+    # to `None`, i.e. a change to the advertised tool's input schema, which is not
+    # this fix.
+    stray = [name for name, stated in (
+        ("full", bool(full)),
+        ("dirty_only", bool(dirty_only) is not True),
+        ("max_hops", max_hops != 2),
+        ("require_calibration", require_calibration is not None),
+        ("mode", mode is not None),
+        ("budget", budget is not None),
+    ) if stated]
+    if stray:
+        return _SafeError({
+            "error": (f"refresh_confidence(scope={scope!r}) takes no "
+                      f"{', '.join(stray)} — those belong to scope='dirty' or "
+                      "scope='full', the dream arms. The two mechanisms are "
+                      "different (this scope promotes or seeds ONE belief), so "
+                      "recording the scope and dropping the knobs would return "
+                      "success for a pass that never ran. Send the dream knobs "
+                      "to a dream scope, or drop them here."),
+            "code": ERR_INVALID})
+    if scope == "promote":
+        if alpha is not None or beta is not None:
+            return _SafeError({
+                "error": ("refresh_confidence(scope='promote') promotes a draft "
+                          "and takes no alpha/beta — use scope='baseline' to set "
+                          "the Beta prior."),
+                "code": ERR_INVALID})
+        return tortoise_promote_point(point_id)
+    if alpha is None or beta is None:
+        return _SafeError({
+            "error": ("refresh_confidence(scope='baseline') requires alpha and "
+                      "beta — the Beta prior's two shape parameters."),
+            "code": ERR_INVALID})
+    return tortoise_set_point_baseline(point_id, alpha, beta)
+
+
+def tortoise_write_question(options: Any, evidence: Any, choice: int) -> dict:
+    """File a QUESTION with its options and the evidence behind them (#4282 row 20).
+
+    Was `tortoise_file_decision` — it was filing a *question* and calling it a
+    decision (`beta-sdk-surface.md`). The body is that handler, unchanged: a
+    question Point, one Point per option, one per evidence statement, and the IMPL
+    edges between them, written atomically.
+    """
+    return tortoise_file_decision(options, evidence, choice)
+
+
+def tortoise_record_decision(approver_id: str, artifact_id: str, point_ids: Any,
+                             decision_content: str | None = None) -> dict:
+    """Record that a question was resolved — the human-approval record (#4282 row 21).
+
+    Was `tortoise_file_human_approval`. The body is that handler, unchanged: an
+    Event (eventKind humanApproval) with full provenance, a decision Point that
+    carries an EP evidence prior, and unidirectional IMPL (approvedBy) edges to
+    the approved claims.
+    """
+    return tortoise_file_human_approval(approver_id, artifact_id, point_ids,
+                                        decision_content)
+
+
 _GET_TYPES = ("point", "operator", "entity", "event", "session",
               "events", "governance")
-
 
 def _get_auto_detect(id: str) -> dict:
     """Resolve a node id to its properties without a type hint.
@@ -7289,6 +8557,15 @@ def _get_auto_detect(id: str) -> dict:
     Order: canonical entity resolution (id | eventId | url, Point priority)
     then AgentSession lookup by session_id/sessionId. Returns {} when the
     id matches nothing (same contract as get_point/get_entity).
+
+    ⚠️ RESIDUAL (#12941): this door reads the CACHE only and names no store, and
+    it is enumerated as its own `record_serve.ANCHORED_READS` exclusion
+    (`auto-detect-by-id`) rather than served — it resolves across five labels
+    with Point priority, so a record answer would have to re-decide the
+    resolution ORDER before it could claim parity. An agent verifying a
+    just-written POINT through this bare form therefore still reads `{}`; the
+    typed form (`tortoise_get(id, type="point")` → `tortoise_get_point`) honours
+    the seam.
     """
     sdk = _get_org_sdk()
     try:
@@ -7373,7 +8650,7 @@ def tortoise_mine_conversations(transcript: str | None = None,
         return _http_excluded_error()
     sdk = _get_org_sdk()
     if corpus_dir is not None:
-        return _safe(sdk.mine_corpus, corpus_dir,
+        return _safe(sdk._mine_corpus, corpus_dir,
                      extract_entities=extract_entities)
     if not transcript or not source_id:
         return _SafeError({"error": "transcript= and source_id= are required "
@@ -7428,7 +8705,7 @@ def tortoise_list_dedup_candidates(candidate_type: str = "content",
     and not data-dependent. Enveloping the rows keeps the served declaration
     byte-identical (no owner approval owed) and gives the client one shape.
     """
-    rows = _safe(_get_org_sdk().list_dedup_candidates,
+    rows = _safe(_get_org_sdk().review_link_candidates, "dedup",
                  candidate_type=candidate_type, limit=limit)
     if isinstance(rows, _SafeError):
         return rows  # the failure channel stays _safe's, never an envelope
@@ -9755,12 +11032,62 @@ def _preview_invalidate(sdk, id: str, corrected_by_id: str) -> dict:
     )
 
 
+def _preview_family_supersede(sdk, label: str, old_id: str, new_id: str) -> dict:
+    """Preview the `:Object`/`:Subject` arm of `tortoise_supersede` (#12914).
+
+    The guards are NOT restated here: this calls ``_supersede_entity(dry_run=True)``,
+    which runs every FAMILY-ARM check — same family, not self, source not already
+    terminal, successor current + named + unambiguous, no stranded sibling label —
+    and skips only the write. A preview that restated them would be the second
+    source of truth this lane exists to remove, and a preview that restated them
+    WRONG is exactly what the round-3 finding measured (it refused a supersede the
+    write accepted).
+
+    ⛔ RESIDUAL (#12914 round-4 P1, filed not fixed): the family WRITE continues
+    into ``update_knowledge`` -> ``_update_entity``, whose label-surface guards
+    (``refuse_terminal_event_state`` on an ``:Event`` row, the ``:Source``
+    closed-surface refusal) are NOT part of ``_supersede_entity``'s own checks. On
+    the HYBRID shapes ``:Object:Event`` / ``:Subject:Event`` / ``:Object:Source`` /
+    ``:Subject:Source`` this preview therefore answers `would supersede` and the
+    write refuses. Fail-closed (nothing is written), single-label rows unaffected.
+
+    ``superseded_at`` is the instant the write WOULD stamp; the real write mints its
+    own, so a caller must not reserve this value.
+    """
+    out = sdk._supersede_entity(label, old_id, new_id, dry_run=True)
+    return _preview_result(
+        "tortoise_supersede", f"family supersede ({label}: status + successor name)",
+        found=True, superseded=True, label=label,
+        target={"id": old_id, "superseded_by": out["superseded_by"]},
+        # ⛔ NOT a hardcoded 1 (#12914 round-4 P2): the family write is a bare
+        # `MATCH (n:<label> {id:$id}) SET n += $props`, which binds EVERY row the
+        # id names — the same fan-out the Point preview above mirrors instead of
+        # hardcoding. Measured on the round-4 head: two `:Object` rows sharing one
+        # id, preview said `nodes_affected: 1`, and the write terminalized BOTH.
+        nodes_affected=out["rows"], edges_removed=0, edges_added=0,
+        superseded_at=out["superseded_at"],
+    )
+
+
 def _preview_supersede(sdk, old_id: str, new_id: str,
-                       transfer_edges: bool = True) -> dict:
+                       transfer_edges: bool | None = None) -> dict:
     """Preview `tortoise_supersede`.
 
-    transfer_edges=False is the invalidate behaviour and reuses that preview.
-    transfer_edges=True enumerates the edges the writer repoints, leg by leg:
+    ⛔ THE ARM IS CHOSEN BY THE OLD NODE'S LABEL, EXACTLY AS THE WRITE CHOOSES IT
+    (#12914 round-3 finding 2). An `:Object`/`:Subject` takes
+    `_preview_family_supersede`; a `:Point` takes the edge walk below. Before this
+    the preview was Point-only, so `dry_run=True` refused — with the Point doors'
+    `No point <id>` — the very family supersede the write accepts, and the `dry_run`
+    contract two functions up ("it runs the same guards, so a rejected input is
+    rejected in the preview too") was false in the OTHER direction.
+
+    `transfer_edges=None` (the not-supplied default) is the only value that takes
+    either arm; every supplied value keeps its meaning — `False` is the invalidate
+    behaviour and reuses that preview, and on a family node anything else is
+    REFUSED through the write's own helper rather than restated here.
+
+    On a `:Point`, `transfer_edges=True` enumerates the edges the writer repoints,
+    leg by leg:
       * 2a operator -> old, EXCEPT `alreadyDecided` (kept on the dead prior).
         The writer MERGEs (idx-keyed; an idx-less edge merges on the bare
         pattern — #6180): a pre-existing edge at the successor is
@@ -9824,7 +11151,17 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     `edges_already_present_at_new` names those no-ops; both are multiplied by
     `successor_nodes` when a duplicate successor id fans the writer out.
     """
-    if not transfer_edges:
+    # ⛔ THE FAMILY ARM IS DECIDED FIRST, BEFORE THE INVALIDATE SHORTCUT (#12914
+    # round-3 finding 2). `_preview_invalidate` is a POINT writer, so routing a
+    # family node through it answers a Point refusal (`No point <id>`) for an
+    # Object the write accepts. The label read is the SAME one the write dispatches
+    # on (`_supersession_label`, Point wins a #3311 hybrid tie), and the keyword
+    # refusal is the write's OWN helper — never a restatement of its message.
+    label = sdk._supersession_label(old_id)
+    if label in ("Object", "Subject"):
+        sdk._refuse_family_transfer_edges(label, old_id, transfer_edges)
+        return _preview_family_supersede(sdk, label, old_id, new_id)
+    if transfer_edges is not None and not transfer_edges:
         out = _preview_invalidate(sdk, old_id, new_id)
         out["tool"] = "tortoise_supersede"
         out["would"] = "invalidate (transfer_edges=false)"

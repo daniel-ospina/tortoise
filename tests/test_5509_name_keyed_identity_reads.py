@@ -157,7 +157,7 @@ class TestBeliefTimelineIdentityRead:
             f"one live carrier must resolve to its own chain: {before}")
 
         # The rename that produces the D2 shape. ⛔ This used to go through the
-        # PUBLIC door (`sdk.update_entity(beta["id"], name="Acme")`); #3590 D3
+        # PUBLIC door (`sdk.update_knowledge(beta["id"], name="Acme")`); #3590 D3
         # now REFUSES that (``NameAlreadyHeld`` — a live holder would make the
         # name ambiguous with no by-name repair path), so the D2 state it
         # produced is no longer reachable through a rename. The STATE is still

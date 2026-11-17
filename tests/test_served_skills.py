@@ -69,6 +69,13 @@ KNOWN_STALE_TOOL_NAMES = {
         # skill is redirected rather than broken. Re-cutting the mirror from upstream
         # SHRINKS these entries back out; the ratchet must never grow for any other reason.
         "tortoise_audit",           # #4282 → tortoise_graph_overview(section="audit")
+        # #11609 Phase 2 retired these three into containers; the mirror still
+        # names them and they still RESOLVE through the #3883 warning shim, which
+        # names the container — the same documented state as the row above, entered
+        # here because the retirement is what made them non-advertised.
+        "tortoise_belief_timeline",      # → tortoise_check_confidence(topic=...)
+        "tortoise_get_confidence",       # → tortoise_check_confidence(claim_id=...)
+        "tortoise_review_connections",   # → tortoise_review_link_candidates(kind="connections")
     },
     "how-to-use-tortoise": {
         "tortoise_fts_query",      # an SDK method name, never a tool
@@ -77,11 +84,30 @@ KNOWN_STALE_TOOL_NAMES = {
         "tortoise_list_pointkinds",  # retired #3883 → tortoise_graph_overview
         "tortoise_list_sources",     # retired #3883 → tortoise_graph_overview
         "tortoise_status",           # retired #3883 → tortoise_graph_overview
+        # #4282 Phase 2 (#11609): the write/mutate doors below were ABSORBED into
+        # containers, so this mirror's references became stale in one step. The
+        # entry grows for exactly the reason the note above allows — the text is
+        # NOT owned here: `how-to-use-tortoise` is one of the three sha-pinned
+        # mirrors in `config/served-skills-upstream.yml`, so re-pointing it here
+        # would break `tools/served_skills_parity.py --check-upstream` and the
+        # next `--sync` would overwrite the fix. Every name still resolves
+        # through the #3883 warning shim and each warning names the container;
+        # re-cutting the mirror upstream SHRINKS this entry back out.
+        "tortoise_annotate_operator",   # → tortoise_adjust_relationship(id, bias=…, precision=…, consistency=…, directness=…)
+        "tortoise_invalidate",          # → tortoise_supersede_knowledge(id, corrected_by_id, transfer_edges=False)
+        "tortoise_mitigate_operator",   # → tortoise_adjust_relationship(id, reason=…, strength=…, credibility=…)
+        "tortoise_set_point_baseline",  # → tortoise_refresh_confidence(scope="baseline", point_id=…)
+        "tortoise_supersede",           # → tortoise_supersede_knowledge(old_id, new_id, …)
+        "tortoise_update_point",        # → tortoise_update_knowledge(id, props=…)
     },
     "research-domain": {
         # #4282 → tortoise_graph_overview(section=...) — see the note above.
         "tortoise_audit",
         "tortoise_overview",
+        # #11609 Phase 2 → tortoise_review_link_candidates(kind="connections"); the
+        # mirror is upstream-authored (see the note above), and the retired name
+        # still resolves through the #3883 warning shim.
+        "tortoise_review_connections",
     },
     "tortoise-file-finding": {"tortoise_list_sources"},
     # #4282: `tortoise/onboarding/SKILL.md` is the ONE served skill authored in THIS repo
@@ -290,7 +316,7 @@ def sdk(tmp_path, force_sparse_tfidf):
 
 
 def _link_source(sdk: TortoiseSDK, pid: str, url: str) -> None:
-    sdk.create_source(url, "T1")
+    sdk.register_source(url, "T1")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}), (s:Source {url:$u}) "
         "CREATE (n)-[:extractedFrom]->(s)",

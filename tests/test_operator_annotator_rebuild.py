@@ -228,7 +228,7 @@ def test_update_entity_annotator_dims_survive_rebuild(sup):
     dims were gone — silently. The Point branch must journal the mutation."""
     _, events, sdk = sup
     op = _operator(sdk)
-    sdk.update_entity(op, annotator_bias=0.11, annotator_precision=0.22)
+    sdk.update_knowledge(op, annotator_bias=0.11, annotator_precision=0.22)
     pre = _dims(sdk, op)
     assert pre == {
         "annotator_bias": 0.11,

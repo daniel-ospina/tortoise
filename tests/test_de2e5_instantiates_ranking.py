@@ -87,7 +87,7 @@ class TestDe2e5:
         sdk.create_subject("alice")
         artifact = sdk.create_entity("document", "doc-1",
                                      documentKind="plan", objectKind="document")
-        sdk.file_human_approval(approver_id="alice",
+        sdk.record_decision(approver_id="alice",
                                 artifact_id=artifact["node"]["id"],
                                 point_ids=[claim["id"]])
         rows = sdk._get_proj().g.query(
@@ -110,7 +110,7 @@ class TestDe2e5:
         artifact = sdk.create_entity("document", "doc-1",
                                      documentKind="plan", objectKind="document")
         artifact_id = artifact["node"]["id"]
-        res = sdk.file_human_approval(approver_id="alice",  # noqa: F841
+        res = sdk.record_decision(approver_id="alice",  # noqa: F841
                                       artifact_id=artifact_id,
                                       point_ids=[claim["id"]])
         rows = proj.g.query(

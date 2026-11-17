@@ -183,7 +183,7 @@ def test_update_entity_writes_and_records_under_the_armed_guard(
     # + `EntityMutated` ordering, not the vocabulary — but `active` is now a
     # POSITION word refused at the write door (it is a stage id, not a state), so
     # the write must name a lifecycle word to exercise the path at all.
-    sdk.update_entity(obj, status="draft")
+    sdk.update_knowledge(obj, status="draft")
     assert _records_since(sdk).count("EntityMutated") == before + 1, (
         "the entity mutation's record did not land")
     assert sdk.get_entity(obj)["status"] == "draft"

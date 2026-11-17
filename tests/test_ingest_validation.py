@@ -362,7 +362,7 @@ class TestPhase1Phase2Parity:
     def test_endpoint_classes_need_pre_seeded_graph(self, sdk):
         existing = sdk.create_point("statement", "pre-existing point",  # noqa: F841
                                     status="live")
-        src = sdk.create_source("https://pre.example/s1", "report")
+        src = sdk.register_source("https://pre.example/s1", "report")
         src_url = src.get("url") or src.get("id")
         # #9173: the two terminal legs below are spelled with OBJECTS. A plain
         # IMPL whose endpoints include a plain `:Point` is promoted to the
@@ -454,7 +454,7 @@ class TestE2E1Matrix:
 
     def test_aggregated_violations_both_granularities(self, sdk):
         # c3 needs an EXISTING wrong-type endpoint (a pre-seeded Source).
-        pre = sdk.create_source("https://pre.example/s", "report")
+        pre = sdk.register_source("https://pre.example/s", "report")
         bundle = {
             "points": [
                 {"ref": "p1", "kind": "statement", "content": "one"},

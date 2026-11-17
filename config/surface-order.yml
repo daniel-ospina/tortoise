@@ -133,16 +133,90 @@ family_rank:
 # create, `tortoise_packs_list` -> list, `tortoise_pack_install` -> operate):
 # create 15->14 (`backfill_v25`), list 8->7 (`packs_list`), find 5->4 (`analyze`),
 # operate 5->4 (`pack_install`); fetch / update / delete / check / link / trace unmoved.
+# #11609 Phase 2 (the READ/QUERY containers) moved the distribution, and every number below
+# is the derivation's own output — measured row by row against the previous baseline, never
+# counted by hand. FIVE container rows arrived — `search_knowledge` -> fetch,
+# `list_knowledge` -> list, `check_confidence` -> check, `explore_connections` -> fetch,
+# `review_link_candidates` -> check — and NINE member rows left, each moving the keyword ITS
+# name derives (never its container's): `belief_timeline` -> fetch, `get_confidence` ->
+# fetch, `get_source_reliability` -> fetch, `provenance` -> fetch, `traverse` -> fetch,
+# `entity_profile` -> list, `list_dedup_candidates` -> list, `list_topics` -> list,
+# `review_connections` -> check.
+#     fetch   14 -> 11  (+2 container, -5 member: belief_timeline, get_confidence,
+#                        get_source_reliability, provenance, traverse)
+#     list     7 ->  5  (+1 container, -3 member: entity_profile, list_dedup_candidates,
+#                        list_topics)
+#     check    5 ->  6  (+2 container, -1 member: review_connections)
+# create / update / delete / find / link / operate / trace are unmoved — and that is
+# itself a check: five of the nine retirements moved `fetch`, which is what their names
+# derive. `tools/surface_manifest.py check` RE-DERIVES all ten and reds on any
+# disagreement; this block is a reading of that output, never a second source for it.
 # Re-derived from the registry by `tools/surface_manifest.py check`, which reds on any
 # disagreement.
+#
+
+# #11609 lane B (#4282 Phase 2, the WRITE/MUTATE containers): FOURTEEN rows retire
+# into SIX containers. The ADVERTISED set moves 68 -> 60 while the SERVED set does NOT
+# move at all (97 = 60 live + 37 shims — a retired name still answers through #3883).
+# Two movements compose and the DERIVATION decides both, so these numbers are not
+# hand-attributed: the six new container names derive create +2 (`write_question`,
+# `record_decision`), update +2 (`update_knowledge`, `refresh_confidence`), delete +1
+# (`supersede_knowledge`) and link +1 (`adjust_relationship`); their 14 absorbed rows
+# leave update -5, delete -3, link -3, operate -2 and find -1. Net: create 14->16,
+# update 8->5, delete 6->4, operate 4->2, link 4->2, find 4->3; fetch / list / check /
+# trace unmoved. Re-derived from the registry by `tools/surface_manifest.py check`,
+# which reds on any disagreement — it is the authority here, not this prose.
+#
+# #4282 Phase 2, the SOURCES/MINE/SESSION containers (#11609 lane C — THIS branch, measured on
+# ITS OWN base, 68 -> 67): SIX approved targets replaced SEVEN advertised members. Per row,
+# from the registry's own derivation:
+#   create 14 -> 12 — `tortoise_create_source` and `tortoise_session_capture` both derived
+#     `create` and neither is advertised now (the new `tortoise_index_sources_from_directory`
+#     derives `create` too, and it REPLACES `tortoise_index_files`, whose row also derived
+#     `create` — the pair cancels). `find` 4 -> 5 — `tortoise_mine_knowledge_from_session` and
+#     `tortoise_mine_knowledge_from_directory` both derive `find`, against ONE leaving
+#     (`tortoise_mine_conversations`). fetch / update / delete / list / trace / check / link /
+#     operate UNMOVED: `tortoise_register_source` (operate), `tortoise_manage_source_trust`
+#     (update) and `tortoise_check_connection` (check) each take the slot of a member that
+#     derived the same keyword (`tortoise_checkpoint`, `tortoise_set_source_tier` and
+#     `tortoise_assess_source` respectively). The table below is the COMPOSITION of that move
+#     with lane B's, so it is neither this block's numbers nor lane B's — read the paragraph
+#     under this one.
+#
+# #12948 (this PR — the SOURCE/CONTAINER wave, #4282 Phase 2's sibling of lane B above): SEVEN
+# main-advertised rows leave as SIX containers arrive, so the ADVERTISED set moves 60 -> 59.
+# Neither side's own table is the answer — this is the COMPOSITION, and the keywords are read
+# off each row rather than attributed: the seven that leave derive create 3 (`create_source`,
+# `index_files`, `session_capture`), update 1 (`set_source_tier`), check 1 (`assess_source`),
+# operate 1 (`checkpoint`) and find 1 (`mine_conversations`); the six that arrive derive
+# create 1 (`index_sources_from_directory`), update 1 (`manage_source_trust`), check 1
+# (`check_connection`), operate 1 (`register_source`) and find 2 (`mine_knowledge_from_session`,
+# `mine_knowledge_from_directory`). Net: create 16->14, find 3->4; fetch / update / delete /
+# list / check / link / trace / operate unmoved. Re-derived from the registry by
+# `uv run python tools/surface_manifest.py check`, which reds on any disagreement — it is the
+# authority here, not this prose.
+#
+# COMPOSITION AT THIS HEAD (PR #12951, the re-cut that composes ALL FOUR waves): the table
+# below is derived from the MERGED registry, not inherited from either side, because each side
+# measured on its own base. Advertised tools 68 - 9 (READ/QUERY doors) + 5 (READ containers)
+# - 14 (WRITE/MUTATE doors) + 6 (WRITE containers) - 7 (SOURCES/MINE/SESSION doors)
+# + 6 (SOURCES/MINE/SESSION containers) = 55. Against the table this branch already carried,
+# the only movement lane C composes in is `create` 16 -> 14 (it retires three `create`-deriving
+# rows — `create_source`, `index_files`, `session_capture` — and lands one,
+# `index_sources_from_directory`); `find` stays 4 (the two `mine_knowledge_*` containers arrive
+# and `mine_conversations` leaves, a net +1 against a base that had 3, which this branch's own
+# read wave had already composed away); update / check / operate are unmoved because
+# `manage_source_trust`, `check_connection` and `register_source` each take the slot of a member
+# that derived the same keyword. Measured with `tools/surface_manifest.py check`, which reds on
+# any disagreement — the ten rows below are its printed output.
 baseline_counts:
-  fetch: 14
+  fetch: 11
   create: 14
-  list: 7
-  check: 5
-  operate: 4
-  update: 8
+  list: 5
+  check: 6
+  operate: 2
+  update: 5
   find: 4
-  delete: 6
-  link: 4
+  delete: 4
+  link: 2
   trace: 2

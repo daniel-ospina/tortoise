@@ -12,7 +12,7 @@ together would make a capture-only install silently start injecting context.
 |---|---|
 | `tortoise-capture.ts` | the CAPTURE extension (#3575) — install-probe on `session_start`, session filing on `session_shutdown` |
 | `tortoise-capture.test.ts` | behavioral tests (`node --test tortoise/pi-hooks/tortoise-capture.test.ts`) |
-| `tortoise-volunteer.ts` | the per-turn READ extension (**#2119**) — `before_agent_start` → the shared `tortoise volunteer` reflex → an injected `message` (silent by default, `display: true` renders the `surfaced` disclosure marker). The re-measurement that made it possible is in `docs/research/2026-09-01-gbrain-learnings/platform-seams.md` |
+| `tortoise-volunteer.ts` | the per-turn READ extension (**#2119**) — `before_agent_start` → the shared `tortoise volunteer` reflex → an injected `message` (silent by default, `display: true` renders the `surfaced` disclosure marker). A DEGRADED reflex (`degraded_reason`: `timeout` / `assembly_error` / `breaker_open`) now says so on the turn instead of injecting nothing silently (**#13039**), and one `volunteer:` health line per `session_start` reports the seam's own state. The re-measurement that made it possible is in `docs/research/2026-09-01-gbrain-learnings/platform-seams.md` |
 | `tortoise-volunteer.test.ts` | its behavioral suite (`node --test tortoise/pi-hooks/tortoise-volunteer.test.ts`), including the CLI contract run for real against a fake `tortoise` on PATH |
 | `store-sync.ts` | **#3515 — the store-sync BACKSTOP.** Reads Pi's own session `.jsonl` with a per-file cursor and ships it as `capture_lane: "store_sync"` through the SAME payload builder as the hook. Covers the death modes the in-process hook cannot see (SIGKILL, crash, closed terminal). Run by `tortoise store-sync`; also spawned detached on `session_start`, excluding the live session |
 | `cursor-store.ts` | the per-file cursor: `tmp`+`fsync`+`rename`, a last-good `.bak`, and a **fail-closed** load. Advance-on-2xx ONLY, never on read |
@@ -64,6 +64,35 @@ server can still refuse the capture POST with a
 409 while the organization has agent sessions switched off (Memory sources >
 Agent sessions; that toggle is default-ON, ToS-covered, and can only refuse —
 never enable).
+
+## A degraded read is not an empty graph (#13039)
+
+`POST /v1/context` is deliberately exempt from the transport wait bound so it can
+fail **open** — `200`, an empty block, and `degraded_reason` (`timeout` |
+`assembly_error` | `breaker_open`) instead of an error. The read seam used to
+discard that reason, so a degraded turn looked exactly like "the graph holds
+nothing relevant" — measured 4/4 on the hosted production graph on 2026-11-16.
+
+Two things changed, and they are different surfaces:
+
+- **the turn discloses it.** A degraded response injects
+  `Tortoise memory unavailable this turn (degraded_reason=…) — … an empty memory
+  here is NOT evidence that the graph holds nothing relevant.` — rendered on the
+  transcript when `volunteer.display` is true, carried silently into the model's
+  context when it is false (a `custom_message` enters the context either way). A
+  partial block under degradation is kept and labelled best-effort. A clean-empty
+  response stays **silent**, because routine silence is not a degradation.
+- **the box reports it.** One `volunteer: …` line per `session_start`, mirroring
+  the capture half's `capture: …`: `OK` (a transport resolved, nothing recorded),
+  `DEGRADED (degraded_reason=…, N consecutive turns since …)`, `INERT` (nothing
+  can run at all — the case an install fixes), `UNREADABLE` (the status record
+  exists and cannot be read, so `OK` would be a claim with no evidence). The
+  record is `~/.tortoise/volunteer-status.json`; a healthy turn clears the run
+  and prints one `volunteer: RECOVERED` line.
+
+⛔ The disclosure is **not** deduped. The digest guard exists for re-mentioned
+GRAPH CONTENT; a run of identical degradations is precisely the shape that must
+keep talking.
 
 ## Migration: the install must not leave two capture producers (#3713, #3512)
 

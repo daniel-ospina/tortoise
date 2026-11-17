@@ -137,7 +137,7 @@ class TestDe2e6:
         r2 = _mine(sdk, D2_TX, "s-v-d2", T2, str(tmp_path))
         assert r2["temporal_wired"] == 0, r2
         assert r2["temporal_candidates"] >= 1, r2
-        cands = sdk.list_dedup_candidates(candidate_type="temporal")
+        cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
         assert cands, "temporal candidate must surface to the review queue"
         assert cands[0]["target_id"] == d1[0]
         pts2 = _decision_points(sdk)
@@ -164,7 +164,7 @@ class TestDe2e6:
         sdk.promote_point(d1[0])
         r3 = _mine(sdk, D3_TX, "s-r-d3", T3, str(tmp_path))
         assert r3["temporal_replacements"] >= 1, r3
-        cands = sdk.list_dedup_candidates(candidate_type="temporal")
+        cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
         repl = [c for c in cands if c["replacement"]]
         assert repl, f"replacement candidate expected: {cands}"
         sdk.approve_merge(repl[0]["id"], action="merge")
@@ -300,7 +300,7 @@ class TestDe2e6:
               if p[1].startswith("We decided to use port")][0]
         sdk.promote_point(d1[0])
         _mine(sdk, D2_TX, "s-p-d2", T2, str(tmp_path))
-        cands = sdk.list_dedup_candidates(candidate_type="temporal")
+        cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
         rows = sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN n.source_session",
             params={"id": cands[0]["id"]},
@@ -324,7 +324,7 @@ class TestDe2e6ReviewFixes:
                    "Alice: We decided to replace the port 16379 decision with port 16390.\n",
                    "s-f-r3", T3, str(tmp_path))
         assert r3["temporal_replacements"] >= 1, r3
-        cands = sdk.list_dedup_candidates(candidate_type="temporal")
+        cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
         assert any(c["replacement"] for c in cands), cands
 
     def test_no_double_nand_same_session(self, sdk, tmp_path):
@@ -380,7 +380,7 @@ class TestDe2e6ReviewFixes:
             "date: 2026-07-01\n"  # YAML → datetime.date
             "---\n\n"
             "Alice: We decided to revert to port 16380 because the port 16379 decision was wrong.\n")
-        res = sdk.mine_corpus(str(corpus), extract_entities=False)
+        res = sdk.mine_knowledge_from_directory(str(corpus), extract_entities=False)
         assert res.get("temporal_error") is None, res
         pts = _decision_points(sdk)
         d2 = [p for p in pts if p[1].startswith("We decided to revert")]
@@ -395,7 +395,7 @@ class TestDe2e6ReviewFixes:
               if p[1].startswith("We decided to use port")][0]
         sdk.promote_point(d1[0])
         _mine(sdk, D2_TX, "s-i-d2", T2, str(tmp_path))
-        cand = sdk.list_dedup_candidates(candidate_type="temporal")[0]
+        cand = sdk.review_link_candidates("dedup", candidate_type="temporal")[0]
         sdk.approve_merge(cand["id"], action="merge")
         sdk.approve_merge(cand["id"], action="merge")
         log = sdk._get_event_log().read_all()
@@ -410,7 +410,7 @@ class TestDe2e6ReviewFixes:
               if p[1].startswith("We decided to use port")][0]
         sdk.promote_point(d1[0])
         r3 = _mine(sdk, D3_TX, "s-t-d3", T3, str(tmp_path))  # noqa: F841
-        cands = sdk.list_dedup_candidates(candidate_type="temporal")
+        cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
         repl = [c for c in cands if c["replacement"]][0]  # noqa: RUF015
         sdk.approve_merge(repl["id"], action="merge")
         d3 = [p for p in _decision_points(sdk)  # noqa: RUF015

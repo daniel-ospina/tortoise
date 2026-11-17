@@ -75,7 +75,7 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """68 live tools = 98 − 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5 − 4.
+        """56 live tools = 98 − 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5 − 4 − 9 + 5 − 14 + 6.
 
         The −1 is #3540 ruling B: the two per-source switches were consolidated into
         `tortoise_manage_sources`, which is the ruling's own requirement ("the surface
@@ -98,7 +98,18 @@ class TestRegistryEquivalence:
         redirect to. 77 − 5 = 72. The two moves are independent (disjoint name
         sets) and compose: neither side's own figure survives the merge.
 
-        #11609 batch 1 (this change): four no-destination tools were ARCHIVED —
+        #11609 batch 2 (this change): the SOURCES/MINE/SESSION containers landed —
+        `tortoise_register_source`, `tortoise_manage_source_trust`,
+        `tortoise_index_sources_from_directory`, `tortoise_mine_knowledge_from_session`,
+        `tortoise_mine_knowledge_from_directory` and `tortoise_check_connection` — and
+        SEVEN advertised members retired INTO them (`tortoise_create_source`,
+        `tortoise_assess_source`, `tortoise_set_source_tier`, `tortoise_index_files`,
+        `tortoise_checkpoint`, `tortoise_session_capture`, `tortoise_mine_conversations`).
+        Six in, seven out: 68 − 7 + 6 = **67** live, 23 + 7 = 30 retired. The retired
+        names keep their shims (#3883), which is why the ADVERTISED count falls while
+        the SERVED count does not.
+
+        #11609 batch 1: four no-destination tools were ARCHIVED —
         `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
         `tortoise_pack_install` — so they are off the LIVE count and in NEITHER
         registry: an archived name does not resolve at all, and a
@@ -108,15 +119,67 @@ class TestRegistryEquivalence:
         above — no replacement NAME to redirect to. 72 − 4 = **68** live, 23 retired;
         the archival is its own move, disjoint from both above, which is why this
         docstring's arithmetic has to name it.
+
+        #11609 Phase 2 (this change): the READ/QUERY container family. FIVE container
+        rows arrived — `tortoise_search_knowledge`, `tortoise_list_knowledge`,
+        `tortoise_check_confidence`, `tortoise_explore_connections`,
+        `tortoise_review_link_candidates` — and NINE member doors retired into them:
+        `tortoise_belief_timeline`, `tortoise_list_topics`, `tortoise_provenance`,
+        `tortoise_get_confidence`, `tortoise_entity_profile`, `tortoise_traverse`,
+        `tortoise_review_connections`, `tortoise_list_dedup_candidates`,
+        `tortoise_get_source_reliability`. 68 − 9 + 5 = **64** live, 23 + 9 = **32**
+        retired. ⛔ `tortoise_issue_insight` and `tortoise_session_context` are NOT
+        in that nine: each carries a `rest_spec` (`GET /v1/issue-insight`,
+        `GET /v1/context`), and retiring the registry entry would delete its REST
+        route with it — a public API removal, not a rename (the reason is spelled
+        out at `tortoise/tool_registry.py:2596-2601`). The membership above is
+        re-derived from `RETIRED_USE_INSTEAD`, not typed: `config/surface-order.yml`
+        records the same nine.
+        ⛔ SIX of the family's members are DELIBERATELY still live —
+        `search_sessions`, `suggest_entry_points`, `list_batches`,
+        `list_namespaces`, `diary_read`, `expand_relationships` — because each
+        declares a list envelope, which is what carries the #8482 failure repair a
+        `-> Any` container cannot; they answer through their containers today and
+        retire with the envelope (the same reasoning #10914 applied to
+        `check_structure`). Pinned by
+        `tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`.
+
+        #11609 lane B (#4282 Phase 2, the WRITE/MUTATE containers): FOURTEEN advertised
+        names retire into SIX approved containers and the six containers arrive —
+        64 − 14 + 6 = **56** live, 32 + 14 = **46** retired. The move is a net −8 and it
+        is the approved direction; every retired name still ANSWERS through the #3883
+        shim, so the SERVED set rises 96 → 102 with the six container rows and no
+        capability is lost.
+
+        ⛔ MERGED (#12951 re-cut): every wave figure above was derived against ITS OWN
+        base, and the branch was then re-cut four times as main landed the sibling
+        lanes. The pins below are therefore re-derived on the MERGED tree — neither
+        side's number survives the merge, and inheriting either one silently mis-pins
+        the surface. The composition, in the order the waves landed on main:
+
+            68 − 14 + 6 = 60   lane B (WRITE/MUTATE containers)
+            60 −  7 + 6 = 59   lane C (SOURCES/MINE/SESSION)   = origin/main @ d741bd4
+            59 −  9 + 5 = 55   THIS PR (READ/QUERY)            = measured at this head
+
+        Retired composes the same way, and it is a UNION — no wave drops another's
+        rows: 23 + 7 + 14 = 44 at main, + 9 = **53** here. The live delta is −9 + 5 and
+        not −9 + 6 because `tortoise_graph_overview` — one of the family's six
+        containers — was already live (#10914); the five that actually ARRIVE are
+        `search_knowledge`, `list_knowledge`, `check_confidence`,
+        `explore_connections`, `review_link_candidates`.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 68, f"Expected 68, got {len(TOOL_REGISTRY)}"
+
+        # lane C composes on top of lane B (59), then THIS PR's READ/QUERY wave: 59 - 9 + 5 = 55.
+        assert len(TOOL_REGISTRY) == 55, f"Expected 55, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
-        # consolidated and the 5 #4282 container members are NOT live, and each one is
-        # declared retired (#3883).
+        # consolidated, the 5 #4282 container members, the 14 #11609 lane B
+        # WRITE/MUTATE members, the 7 lane C members and this PR's 9 READ/QUERY
+        # members are NOT live, and each one is declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        assert len(retired) == 23, f"Expected 23 retired, got {len(retired)}"
+
+        assert len(retired) == 53, f"Expected 53 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -147,10 +210,30 @@ class TestRegistryEquivalence:
             assert gone not in names, (
                 f"{gone} is back on the served surface — #4282 Phase 3.2 removed it and "
                 "the owner's 2026-09-22 ruling keeps `run_onboarding` off the MCP")
-        assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
-        assert "tortoise_review_connections" in names, "Missing #913 review_connections tool"
+        # #531's human-approval write, reached through its #11609 lane B container:
+        # the door retired (into the #3883 shim) and `tortoise_record_decision` is the
+        # name that resolves now.
+        assert "tortoise_record_decision" in names, "Missing the record_decision container"
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD as _rui
+        assert "tortoise_file_human_approval" not in names, (
+            "tortoise_file_human_approval retired into tortoise_record_decision but is "
+            "still live")
+        assert "record_decision" in _rui["tortoise_file_human_approval"], (
+            "#531's human-approval write must point at record_decision — a retired name "
+            "with no resolvable replacement is the #3836 (c) failure")
+        # #11609 Phase 2: #913's `review_connections` door retired into the
+        # `review_link_candidates` container (kind="connections"). As with
+        # `validate_domain` above, the assertion follows the CAPABILITY rather than
+        # re-asserting the name the approved target removes.
+        assert "tortoise_review_link_candidates" in names, (
+            "Missing the review_link_candidates container that #913's review_connections "
+            "read now answers through")
+        assert "review_link_candidates" in _rui["tortoise_review_connections"]
         assert "tortoise_events_poll" in names, "Missing #432 poll_events tool"
-        assert "tortoise_retract_point" in names, "Missing #432 retract_point tool"
+        # #432's retraction, reached through `tortoise_update_knowledge`: retraction is a
+        # TEMPORAL FIELD on the revise verb (#11609 lane B), so the door retired and the
+        # container is what resolves.
+        assert "tortoise_update_knowledge" in names, "Missing the update_knowledge container"
         assert "tortoise_find_cross_lens_candidates" in names, "Missing #438 cross-lens tool"
         # #348's audit capability, reached through the #4282 container: the door retired and
         # `graph_overview(section="audit")` is the name that resolves now.
@@ -162,21 +245,41 @@ class TestRegistryEquivalence:
         # (owner decision, docs/product/canonical-mcp-tools.md @ approval_pr 4120).
         # `tortoise_overview` left this set when #4282 retired it into
         # `tortoise_graph_overview` — the container is the W3 consolidation now.
-        w_consolidations = {"tortoise_recall", "tortoise_update", "tortoise_delete",
-                            "tortoise_operator_action", "tortoise_create_edge",
+        w_consolidations = {"tortoise_recall", "tortoise_delete",
+                            "tortoise_create_edge",
                             "tortoise_graph_overview", "tortoise_get_entity",
-                            "tortoise_ingest"}
+                            "tortoise_ingest",
+                            # #11609 lane B: W2's update/operator_action arms moved
+                            # into the approved WRITE/MUTATE containers.
+                            "tortoise_update_knowledge",
+                            "tortoise_adjust_relationship"}
         assert w_consolidations <= names, (
             f"Missing W1–W4 tools: {w_consolidations - names}")
         # #454-era surface tools covered by this PR's tests
         for name in ("tortoise_query", "tortoise_suggest_entry_points",
                      "tortoise_graph_overview"):
             assert name in names, f"Missing tool: {name}"
-        # Phase-4 mining/promotion/dedup/timeline surface (#787)
-        phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
-                  "tortoise_approve_merge", "tortoise_promote_point",
-                  "tortoise_belief_timeline"}
+
+        # Phase-4 mining/promotion/dedup/timeline surface (#787). `tortoise_promote_point`
+        # retired into the `tortoise_refresh_confidence` container (#11609 lane B,
+        # `scope="promote"`) — the capability assertion follows the container.
+        # #11609 Phase 2 (this PR) retired the other two doors the same way:
+        # `tortoise_list_dedup_candidates` → `tortoise_review_link_candidates`
+        # (`kind="dedup"`) and `tortoise_belief_timeline` →
+        # `tortoise_check_confidence` (`topic=`). Both keep their #3883 shims, so the
+        # CAPABILITY is served either way; asserting the retired NAME would re-assert
+        # the surface shape the approved target removes.
+        phase4 = {"tortoise_review_link_candidates",
+                  "tortoise_approve_merge", "tortoise_refresh_confidence",
+                  "tortoise_check_confidence"}
         assert phase4 <= names, f"Missing #787 tools: {phase4 - names}"
+        # `tortoise_mine_conversations` is no longer ADVERTISED: #11609 lane C retired
+        # it into the SESSION container, and the capability assertion follows the
+        # container (the retired name still ANSWERS — #3883 — so it stays served).
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY as _RETIRED
+        served_names = {t.name for t in (*TOOL_REGISTRY, *_RETIRED)}
+        assert "tortoise_mine_conversations" in served_names, "still-served retired shim left the registry"
+        assert "tortoise_mine_knowledge_from_session" in names, "Missing #787 container destination"
 
     def test_no_duplicate_names(self):
         """No two registry entries share the same name."""
@@ -199,7 +302,12 @@ class TestRegistryEquivalence:
         operator_only = (sdk_filesystem_methods() | sdk_operator_only_mutators()
                          | set(HTTP_EXCLUDED_SDK_METHODS))
         # Non-vacuity sentinel: the derived set really matched something.
-        assert {"ingest_corpus", "index_directory", "org_create"} <= operator_only
+        # #11609 batch 2 renamed the walker to `_index_directory` and put the public
+        # door `index_sources_from_directory` in front of it, so the sentinel names
+        # BOTH: the private door proves the AST walk still descends into the renamed
+        # method, and the public name proves the exclusion follows the LIVE binding.
+        assert {"ingest_corpus", "_index_directory",
+                "index_sources_from_directory", "org_create"} <= operator_only
         for method in sorted(operator_only):
             for entry in by_method.get(method, []):
                 assert entry.http_policy is False, (
@@ -217,9 +325,21 @@ class TestCurationGroups:
     """
 
     def test_retract_point_explicitly_in_memory(self):
-        from tortoise.tool_registry import TOOL_REGISTRY
-        entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_retract_point")
+        """#432's retraction stays in "memory" through its #11609 lane B container.
+
+        The DOOR retired (retraction is a temporal field on the revise verb), so
+        this follows the capability rather than re-asserting the removed name: the
+        container that now answers for it carries the same group, and the retired
+        entry keeps it too (a shim serving a name the role-filter dropped would be a
+        capability loss wearing a rename).
+        """
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        entry = next(t for t in TOOL_REGISTRY
+                     if t.name == "tortoise_update_knowledge")
         assert entry.group == "memory", f"got {entry.group}"
+        retired = next(t for t in RETIRED_TOOL_REGISTRY
+                       if t.name == "tortoise_retract_point")
+        assert retired.group == "memory", f"got {retired.group}"
 
     def test_poll_events_in_sessions_group(self):
         from tortoise.tool_registry import TOOL_REGISTRY
@@ -227,16 +347,29 @@ class TestCurationGroups:
         assert entry.group == "sessions", f"got {entry.group}"
 
     def test_session_capture_tool_grouped_sessions(self):
-        """#1727 (Task 13): tortoise_session_capture groups under "sessions"
+        """#1727 (Task 13): the session-capture surface groups under "sessions"
         (else it falls to the implicit "memory" default and is filtered out
-        of sessions-group surfaces)."""
-        from tortoise.tool_registry import TOOL_REGISTRY, tools_by_group
+        of sessions-group surfaces).
+
+        #11609 batch 2: `tortoise_session_capture` is RETIRED into
+        `tortoise_mine_knowledge_from_session` (row 16), so the LIVE assertion moves
+        to the container — that is the name a sessions-group surface now offers. The
+        retired shim keeps the same group, so the warning it serves stays coherent.
+        """
+        from tortoise.tool_registry import (
+            RETIRED_TOOL_REGISTRY,
+            TOOL_REGISTRY,
+            tools_by_group,
+        )
         entry = next(t for t in TOOL_REGISTRY
-                     if t.name == "tortoise_session_capture")
+                     if t.name == "tortoise_mine_knowledge_from_session")
         assert entry.group == "sessions", f"got {entry.group}"
         assert entry.http_policy is True, "must be exposed on HTTP surfaces"
-        assert any(t.name == "tortoise_session_capture"
+        assert any(t.name == "tortoise_mine_knowledge_from_session"
                    for t in tools_by_group("sessions"))
+        shim = next(t for t in RETIRED_TOOL_REGISTRY
+                    if t.name == "tortoise_session_capture")
+        assert shim.group == "sessions", f"the retired shim moved group: {shim.group}"
 
     def test_graph_set_recording_tool_grouped_sessions(self):
         """#2302: tortoise_graph_set_recording groups under "sessions" with
@@ -258,7 +391,10 @@ class TestCurationGroups:
         """tools_by_group / tool_groups expose the corrected groups (#523)."""
         from tortoise.tool_registry import tools_by_group, tool_groups  # noqa: I001
         memory = {t.name for t in tools_by_group("memory")}
-        assert "tortoise_retract_point" in memory
+        # #432's retraction is a temporal field on the revise verb (#11609 lane B):
+        # the DOOR retired, so the capability assertion follows the container that
+        # now serves it rather than re-asserting the removed name.
+        assert "tortoise_update_knowledge" in memory
         groups = tool_groups()
         assert "tortoise_events_poll" in groups["sessions"]
 
@@ -476,8 +612,19 @@ class TestDescriptionImprovements:
 
     @staticmethod
     def _desc(name: str) -> str:
-        from tortoise.tool_registry import TOOL_REGISTRY
-        return next(t for t in TOOL_REGISTRY if t.name == name).description
+        """The description an agent reads for `name` — LIVE first, then the shim.
+
+        #11609 batch 2 retired several names whose description IS the agent-facing
+        contract (the session-capture consent basis is the load-bearing one), and a
+        retired name still answers with its original body and description (#3883),
+        so looking only at `TOOL_REGISTRY` would make the contract unassertable the
+        moment it went off the advertised surface.
+        """
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        for entry in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY):
+            if entry.name == name:
+                return entry.description
+        raise AssertionError(f"{name} is neither live nor retired")
 
     def test_query_description_covers_merged_params(self):
         d = self._desc("tortoise_query")
@@ -490,10 +637,18 @@ class TestDescriptionImprovements:
         assert "tortoise_query" in d, "must point at the structural alternative"
 
     def test_entity_profile_distinguished_from_list_topics(self):
-        ep = self._desc("tortoise_entity_profile")
-        lt = self._desc("tortoise_list_topics")
-        assert "BFS" in ep and "tortoise_list_topics" in ep, ep
-        assert "neighbor" in lt.lower() and "tortoise_entity_profile" in lt, lt
+        """#11609 Phase 2 moved BOTH doors into containers, so the distinction the pair
+        existed to carry is now a distinction between two container ARMS. The property
+        is not "these two names are described distinctly" — it is "a caller can still
+        tell a BFS neighbourhood walk from a topic profile", so it is asserted on the
+        containers that now answer for them."""
+        walk = self._desc("tortoise_explore_connections")
+        topics = self._desc("tortoise_list_knowledge")
+        assert "neighbor" in walk.lower() or "hops" in walk.lower(), walk
+        assert "topic" in topics.lower(), topics
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
+        assert "explore_connections" in RETIRED_USE_INSTEAD["tortoise_entity_profile"]
+        assert "list_knowledge" in RETIRED_USE_INSTEAD["tortoise_list_topics"]
 
     def test_query_aliases_retired(self):
         """The two query aliases are RETIRED (#3883), keeping their DEPRECATED
@@ -519,12 +674,17 @@ class TestDescriptionImprovements:
         #3662); this test is what stops it silently regressing into an
         undocumented behaviour.
         """
-        d = self._desc("tortoise_session_capture")
-        assert "consent" in d.lower(), d
-        assert "agreement" in d.lower(), d
-        assert "before you call" in d.lower(), (
-            "the disclosure obligation must be stated where the agent reads "
-            "it (#3662)")
+        # The LIVE surface is now the row-16 container, so it carries the contract
+        # too: the shim keeps answering, but it is no longer ADVERTISED, and a
+        # consent basis that only ships on a retired name is a basis the next agent
+        # never sees (#11609 batch 2 review).
+        for name in ("tortoise_mine_knowledge_from_session", "tortoise_session_capture"):
+            d = self._desc(name)
+            assert "consent" in d.lower(), (name, d)
+            assert "agreement" in d.lower(), (name, d)
+            assert "before you call" in d.lower(), (
+                f"{name}: the disclosure obligation must be stated where the agent "
+                f"reads it (#3662)")
 
 
 class TestFastMCPAdapter:
@@ -851,16 +1011,24 @@ class TestCapabilityModel:
         assert {"create_point", "delete", "update"} <= mutators
         assert not ({"query", "get_point", "list_pointkinds"} & mutators)
         # over-inclusion sentinel: control-plane READS are not mutators. `apikey_list`
-        # was here until #4282 deleted it; `apikey_verify` is the surviving read in the
-        # same family, so the sentinel keeps a live name instead of going vacuous.
-        assert not ({"org_list", "graph_list", "apikey_verify", "org_get"} & mutators)
+        # was here until #4282 deleted it; `apikey_verify` was the surviving read in the
+        # same family until #12901 wave 2 privatised it, so the sentinel now names the
+        # SEAMS that carry those bodies (`_apikey_verify`, `_org_get`) rather than going
+        # vacuous — the derivation walks every class member, private ones included.
+        assert not ({"org_list", "graph_list", "_apikey_verify", "_org_get"} & mutators)
         fs = sdk_filesystem_methods()
-        assert {"ingest_corpus", "index_directory"} <= fs
+        # #11609 batch 2: the walker is `_index_directory` and its public door is
+        # `index_sources_from_directory`; the sentinel names both so the derivation
+        # cannot go vacuous by following only one of them.
+        assert {"ingest_corpus", "_index_directory",
+                "index_sources_from_directory"} <= fs
         assert not ({"_probe_embedded_busy", "session_index_health"} & fs)
         op = sdk_operator_only_mutators()
-        assert {"org_create", "membership_create", "apikey_revoke",
-                "invitation_revoke"} <= op
-        assert not ({"org_list", "graph_list", "apikey_verify"} & op)
+        # #12901 wave 2 closed the public control-plane doors; each body survives as the
+        # private seam its hosted caller now uses, so the sentinel names the SEAMS.
+        assert {"org_create", "_membership_create", "_apikey_revoke",
+                "_invitation_revoke"} <= op
+        assert not ({"org_list", "graph_list", "_apikey_verify"} & op)
 
     def test_handler_operations_reads_value_passed_and_alias_forms(self):
         """`_get_org_sdk().<m>` as a passed value and via an alias are both seen."""
@@ -1304,8 +1472,17 @@ class TestCapabilityModel:
         assert any("stale map" in v
                    for v in write_surface_map_violations(dropped))
         # FORWARD: a wrap site with no map entry is reported (no KeyError)
+        # #4282 Phase 2: the dropped key must be a method that really HAS a wrap
+        # site in `tortoise/mcp_server.py` — this mutation is only non-vacuous
+        # while the key it deletes exists in the map AND in the AST scan.
+        # `update_point` retired into the container, so deleting it became a
+        # no-op and the assertion could never fire; `update_knowledge` is the
+        # live site (three of them: `tortoise_update_point` 5578,
+        # `tortoise_update` 6529, `tortoise_update_entity` 6832 — #12915 review F1
+        # added the middle one when the container's `props` arm was re-routed).
+        assert "update_knowledge" in DECLARED_WRITE_SURFACE_MAP
         omitted = {k: v for k, v in DECLARED_WRITE_SURFACE_MAP.items()
-                   if k != "update_point"}
+                   if k != "update_knowledge"}
         assert any("unmapped" in v
                    for v in write_surface_map_violations(omitted))
 
@@ -1383,10 +1560,12 @@ class TestCapabilityModel:
         `sdk_method`, so the `by_method` loop in declared_set_violations can never
         key on it; the property is asserted per TOOL NAME via NON_SDK_READ_BINDINGS.
 
-        The live ledger is EMPTY since #11609 batch 1 archived every handler-served
-        read-through door (`tortoise_packs_list` was the last), so this test drives
-        the SAME arm with a probe declaration over a live handler-served row —
-        emptying the ledger must not retire the check it pays for.
+        The live ledger declares ONE handler-served read-through door since #12951
+        (`check_confidence` → `tortoise_provenance`: blanked `sdk_method`, reach inside
+        the `_check_confidence_provenance` helper), so the premise is no longer
+        "empty" — it is "exactly that one". The probe below still drives the SAME arm
+        over a SECOND live handler-served row, so the check is exercised for a door the
+        live declaration does not name.
 
         Mutation: re-classify the bound tool as a pure `read` and the guard must go
         red — #4122 moved the required posture from "readOnlyHint is True" to
@@ -1401,15 +1580,15 @@ class TestCapabilityModel:
 
         # The real registry is clean — the violation below is caused by the probe.
         assert declared_set_violations(served_registry()) == []
-        # ... and the live ledger genuinely declares no read-through op (the premise
-        # of the finding, restated: the declaration is what makes the arm necessary).
+        # ... and the live ledger declares exactly the #12951 door, whose tool is
+        # handler-served (`sdk_method=""`) — the premise of the finding, restated.
+        # ⚠ The live intersection alone would be a statement about the state; the
+        # probe below is what proves the invariant has a false branch.
         assert not any(e.sdk_method == "get_tenant_packs" for e in served_registry())
-        # ⚠ The EMPTINESS is the premise, not a property: with the ledger empty this
-        # intersection cannot be non-empty, so asserting it alone would be a tautology.
-        # What is asserted here is the state, and the probe below proves the invariant
-        # has a false branch (a read-through op bound to a handler-served tool).
-        assert tsc.NON_SDK_READ_BINDINGS == {}, tsc.NON_SDK_READ_BINDINGS
-        assert not (set(tsc.READ_THROUGH_WRITE_METHODS) & set(tsc.NON_SDK_READ_BINDINGS))
+        assert tsc.NON_SDK_READ_BINDINGS == {
+            "check_confidence": "tortoise_provenance"}, tsc.NON_SDK_READ_BINDINGS
+        assert set(tsc.READ_THROUGH_WRITE_METHODS) & set(tsc.NON_SDK_READ_BINDINGS) \
+            == {"check_confidence"}
 
         probe_op, probe_tool = "probe_read_through", "tortoise_entity_profile"
         monkeypatch.setitem(tsc.READ_THROUGH_WRITE_METHODS, probe_op,
@@ -1421,7 +1600,8 @@ class TestCapabilityModel:
         # Non-vacuity of the invariant above: for a read-through op bound to a
         # handler-served tool the SAME expression is false, so it is not a tautology
         # that can never red.
-        assert set(tsc.READ_THROUGH_WRITE_METHODS) & set(tsc.NON_SDK_READ_BINDINGS) == {probe_op}
+        assert set(tsc.READ_THROUGH_WRITE_METHODS) & set(tsc.NON_SDK_READ_BINDINGS) \
+            == {probe_op, "check_confidence"}
 
         # Non-vacuity: the probe binds a LIVE handler-served row with no sdk_method,
         # i.e. exactly the shape the `by_method` loop cannot see.
@@ -1458,10 +1638,10 @@ class TestCapabilityModel:
         with no binding AND an op bound to a tool that has vanished from the served
         set. Both halves exist because a rename drops the check silently otherwise.
 
-        Driven by probes since #11609 batch 1 emptied the live ledger. Deleting
-        EITHER half of the guard's condition leaves one of the two assertions green:
-        measured by the reviewer as a surviving mutant when only the `None` half was
-        covered.
+        Driven by probes, since the LIVE ledger's only entry (#12951's
+        `tortoise_provenance`) names a tool that does resolve. Deleting EITHER half of
+        the guard's condition leaves one of the two assertions green: measured by the
+        reviewer as a surviving mutant when only the `None` half was covered.
         """
         import tool_surface_capabilities as tsc
         from tool_surface_capabilities import declared_set_violations, served_registry
@@ -1572,13 +1752,23 @@ class TestCapabilityModel:
         assert self_heal_writers <= set(entries), (
             f"a declared read-through writer binds no live tool: "
             f"{sorted(self_heal_writers - set(entries))}")
-        # ⛔ The handler-served half of the declaration is EMPTY since #11609 batch 1
-        # (`tortoise_packs_list` / `get_tenant_packs` are archived). The TOOL-NAME arm
-        # that read it is exercised against a probe in
-        # `test_read_through_non_sdk_binding_is_checked_by_tool_name`, so emptying the
-        # ledger does not quietly retire the check.
+        # ⛔ The handler-served half is NOT empty any more: #12951 declared
+        # `tortoise_provenance` by TOOL NAME, because its binding is blanked
+        # (`sdk_method=""`) and its reach to `check_confidence` sits inside the
+        # `_check_confidence_provenance` HELPER — the exact #4035 blind spot. Pinned
+        # LITERALLY so a second name-keyed declaration is a decision, not a diff.
+        name_keyed = {
+            tool for operation, tool in tsc.NON_SDK_READ_BINDINGS.items()
+            if operation in tsc.READ_THROUGH_WRITE_METHODS
+        }
+        assert name_keyed == {"tortoise_provenance"}, (
+            "the handler-served read-through declaration changed: "
+            f"{sorted(name_keyed)}")
+        # The TOOL-NAME arm that reads it is exercised against a probe in
+        # `test_read_through_non_sdk_binding_is_checked_by_tool_name`.
         assert self_heal_writers == {
-            by_method[m] for m in tsc.READ_THROUGH_WRITE_METHODS if m in by_method}
+            by_method[m] for m in tsc.READ_THROUGH_WRITE_METHODS if m in by_method
+        } | name_keyed
         assert "tortoise_compute_confidence" in self_heal_writers
         assert self_heal_writers <= {
             name for name, e in entries.items() if e.risk != "read"}, (
@@ -2197,9 +2387,30 @@ class TestToolIdentity:
         # #11609 batch 1 then ARCHIVED two served writers — `tortoise_pack_install`
         # and `tortoise_backfill_v25` — with no destination (owner ruling), so
         # SERVED 45 -> 43 and LIVE 41 -> 39.
-        assert len(WRITE_TOOL_NAMES) == 43, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+
+        # #11609 lane B (#4282 Phase 2): the WRITE/MUTATE containers add SIX
+        # destructive rows and retire FOURTEEN (twelve destructive, two write) into
+        # them. get_write_tool_names covers TOOL_REGISTRY **and**
+        # RETIRED_TOOL_REGISTRY (a shim still WRITES, #3883), so the SERVED number
+        # moves 43 → 49 (43 + 6) while the ADVERTISED (live) number moves 38 → 30
+        # (38 − 14 + 6). A change to either is a permission change and needs the
+        # owner's eye, not a test edit.
+        # #11609 lane C (SOURCES/MINE/SESSION), composed onto the tree lane B is
+        # already on: SEVEN advertised writers retire into the containers (they stay
+        # SERVED as shims, #3883) and FIVE new writers arrive (the four re-ingesting
+        # containers + `register_source`). So SERVED 49 -> 54 and LIVE 31 -> 29
+        # (−7 + 5), i.e. 29 live + 25 retired writer shims = 54 served.
+        # #11609 Phase 2 (this PR, MERGED): the READ/QUERY family retires NINE doors and
+        # exactly ONE of them was a WRITER — `tortoise_get_source_reliability`
+        # (`risk="write"`: it refreshes the reliability cache on the Source node). It
+        # keeps its #3883 shim, so SERVED stays 54 (28 live + 26 retired writer shims)
+        # while LIVE falls 29 -> 28. None of the five NEW containers writes
+        # (`check_confidence` / `list_knowledge` / `search_knowledge` are tiered
+        # `maintenance`, `explore_connections` / `review_link_candidates` are `read`),
+        # so the live move is exactly −1 and the served move is zero.
+        assert len(WRITE_TOOL_NAMES) == 54, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 39, f"live write census moved: {len(live)}"
+        assert len(live) == 28, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.
@@ -2227,9 +2438,13 @@ class TestToolIdentity:
 
         served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
         writers = sorted(e.name for e in served if e.writes)
-        # 43 = the served writer census (39 live + 4 retired shims). Pinned
-        # here so the derived loop below can never pass by covering nothing.
-        assert len(writers) == 43, writers
+
+        # 54 = the served writer census (29 live + 25 retired shims) at this head:
+        # #11609 lane B moved the advertised number and left the served one larger
+        # than 43; lane C then retired SEVEN advertised writers into its containers
+        # (still served, #3883) and added FIVE writing containers (+5 served, -2 live).
+        # Pinned here so the derived loop below can never pass by covering nothing.
+        assert len(writers) == 54, writers
         for name in ("tortoise_index_files", "tortoise_dream",
                      "tortoise_index_sessions", "tortoise_ingest_corpus",
                      "tortoise_org_create"):

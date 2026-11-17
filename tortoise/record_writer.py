@@ -292,6 +292,25 @@ RECORD_GRAPH_ENV = "TORTOISE_RECORD_GRAPH_ID"
 #: which refuses rows rather than misfiling them.
 RECORD_SINGLE_TENANT_ENV = "TORTOISE_RECORD_SINGLE_TENANT"
 
+#: Arms the ORDINAL ALLOCATOR on the live door (#12894 / `#9190`'s ruling).
+#:
+#: OFF by default, and OFF is today's behaviour byte for byte: the door writes the
+#: position `EventLog.append` reported (the ENUMERATED arm). ON, the door asks the
+#: record's counter for the number (`allocate=True`), and cross-checks it against
+#: the append's own position — a mismatch REFUSES the write and rolls the
+#: allocation back (see `write_live_record`).
+#:
+#: ⛔ IT IS SAFE TO SET ONLY ON A CUT-OVER GRAPH (`record_cursor` row in mode
+#: `active`, written by `tools/record_allocator_cli.py`). ON with no cursor row is
+#: a refusal per record (`cursor_not_active`), not a silent fallback: allocating
+#: for a graph the seed never reached is the one thing the cutover sequence
+#: forbids, and a flag that quietly degraded to enumeration would hide exactly the
+#: mis-armed deployment an operator needs to see.
+#:
+#: Read with :func:`tortoise.env_truthy.env_flag`, so a TYPO leaves it OFF (the
+#: default), never flipped — a half-typed opt-in must not renumber a live write.
+RECORD_ALLOCATE_ENV = "TORTOISE_RECORD_ALLOCATE"
+
 #: The bound on OPENING the record's connection, in seconds. libpq's default is
 #: ``0`` — wait forever — and the live door opens one connection per journal
 #: record ON THE CALLER'S THREAD, after the journal append has committed. So an
@@ -494,18 +513,26 @@ class RecordWrite:
     #: reports the refusal and an operator reading the metric are naming one
     #: thing, and a second word list is a second thing to drift.
     #:
-    #: ⛔ ``journal_collision`` IS THE ONE CONFLICT-DECIDED TOKEN (#9318). Every other
-    #: value is decided before a socket is opened (`_live_write_verdict`) or by
-    #: a failed statement; this one is a VERDICT on a conflict: the position row
-    #: holds content this write would not produce (a different record, or this
-    #: record's payload re-derived since that row was written), which
+    #: ⛔ ``journal_collision`` IS THE ONE POST-WRITE CONFLICT TOKEN (#9318, #12904).
+    #: Every other value is decided before a socket is opened
+    #: (`_live_write_verdict`) or by a failed statement; this one is a VERDICT on
+    #: a conflict: the position row holds a record this write does NOT continue —
+    #: a different record, or (with no `ts` for the capture time to be compared) a
+    #: payload whose derivation moved — which
     #: `record_projection.JournalPositionCollision` detected by comparing the
-    #: surviving row's content. It is not in ``LIVE_WRITE_REFUSALS`` for that
-    #: reason — that tuple is what the PRE-write verdict can return — and a
-    #: consumer switching on this field must accept it. Nothing is lost (the
+    #: surviving row's content AND its `recorded_at`. It is not in
+    #: ``LIVE_WRITE_REFUSALS`` for that reason — that tuple is what the PRE-write
+    #: verdict can return — and a consumer switching on this field must accept it.
+    #: ⛔ A same-capture re-derivation is NOT this token: it is DRIFT, it repairs
+    #: itself, and it reports `applied` with no counter (#12904 P0-1). ⚠️ NOR IS a
+    #: DIFFERENT record captured at the same instant — the split cannot tell it
+    #: from drift and admits it silently, which is the mirror residual named in
+    #: `record_projection.JournalPositionCollision`: do not read "a different
+    #: record" above as "every different record is caught". Nothing is lost (the
     #: journal holds the record); what is refused is indexing it under a position
-    #: that holds content this write would not produce, which the record cannot fix while its key
-    #: carries no journal identity (#12894).
+    #: whose row this write does not CONTINUE (a different `event_type`, or a
+    #: different capture time), which the record cannot fix while its key carries
+    #: no journal identity (#12894).
     #:
     #: ⛔ ``no_tenant_carried`` IS A SEPARATE TOKEN ON PURPOSE (#10021 review P3).
     #: The live door splits the nil tenant from a MALFORMED CARRIED pair — one is
@@ -563,9 +590,9 @@ class RecordWrite:
             # misses, and NOTHING here has its own term: `write_failed` covers an
             # unreachable record AND a record that WAS reached and refused the
             # projection; `journal_collision` (#9318) is a record that WAS reached
-            # and refused to index it under a journal position holding content
-            # this write would not produce (a different record, OR this record's
-            # payload re-derived since that row was written); `malformed_dsn` is a SET-UP defect (a value IS set and
+            # and refused to file itself under a journal position it does not
+            # continue (a different record, OR — with no `ts` to compare — a
+            # payload whose derivation moved); `malformed_dsn` is a SET-UP defect (a value IS set and
             # is wrong, so not `unconfigured`, which is defined as no value at
             # all); `no_tenant` is a deployment/caller gap; `no_tenant_carried` is
             # the same gap one arm over (a CARRIED tenant pair that was unusable);
@@ -2109,6 +2136,20 @@ LIVE_WRITE_REFUSALS: tuple[str, ...] = (
 )
 
 
+def record_live_allocate() -> bool:
+    """Does this deployment's live door allocate the ordinal (#12894)?
+
+    Read at CALL TIME from :data:`RECORD_ALLOCATE_ENV`, never cached at import: a
+    test (and a lane) flips it per write, and a cached read would make the switch
+    depend on which process imported this module first.
+
+    Default ``False``, including for a value :func:`env_flag` cannot parse — the
+    fail-safe direction for a switch whose ON arm refuses writes on a graph that
+    has not been seeded.
+    """
+    return env_flag(RECORD_ALLOCATE_ENV, False)
+
+
 def _live_write_verdict(
     *, durable: bool = True, tenant: tuple[str, str] | None = None,
     consult_breaker: bool = True,
@@ -2473,7 +2514,14 @@ def write_live_record(record: Mapping[str, Any], *,
     a FAILURE never raises: it is counted
     (``monitoring.metrics()["record_write_failures"]``) and logged, because the
     journal already holds the record and a question about the derived record
-    must not fail a write that persisted. ``replay`` heals the gap. That
+    must not fail a write that persisted. ``replay`` heals the gap — ⛔ EXCEPT ON A
+    CUT-OVER GRAPH, and the condition is the ``record_cursor`` ROW, not the write
+    arm: ``_refuse_an_enumerated_replay`` refuses an enumerated replay by the ROW
+    (its docstring is explicit: "the row — not the mode — is the fact"), so an
+    enumerated replay heals nothing on any graph that has one, WHATEVER
+    ``allocate`` was on the write that failed. There the repair is an allocating
+    replay (``replay(allocate=True)``) or the allocator's operator path (see the
+    ``position_unverifiable`` arm below). That
     contract is enforced, not just intended: every counter call goes through
     :func:`_count_write_failure`, which suppresses its own failures.
 
@@ -2587,10 +2635,17 @@ def write_live_record(record: Mapping[str, Any], *,
 
     ⛔ SINCE #9318 IT IS NO LONGER SILENT, and still not REPAIRED. The fold's
     statement loop asks the cursor's affected-row count, and when the position
-    row was absorbed it asks the database whether the surviving row's content
-    DIFFERS (`record_projection._refuse_a_journal_collision`, in Postgres's own
-    jsonb equality). Same content ⇒ a genuine replay ⇒ silent no-op, unchanged.
-    Different content ⇒ `JournalPositionCollision`, reported HERE as the
+    row was absorbed it asks the database whether the surviving row is a record
+    this write CONTINUES (`record_projection._refuse_a_journal_collision`, in
+    Postgres's own jsonb equality and its own `timestamptz` comparison of
+    `recorded_at`). Same content AND the same capture ⇒ a genuine replay ⇒
+    silent no-op, unchanged;
+    same `event_type` and same `recorded_at` with only the payload different ⇒
+    READ AS the same record RE-DERIVED ⇒ also silent (#12904 P0-1) — a reading
+    on two equal coordinates, not proof of one record (the mirror residual in
+    `record_projection.JournalPositionCollision` names the shape it admits);
+    anything else ⇒
+    `JournalPositionCollision`, reported HERE as the
     ``journal_collision`` refusal — the same counter, the same WARNING, the same
     ``RecordWrite`` shape every other refusal uses — with a message naming the
     position and both payloads by digest.
@@ -2600,7 +2655,9 @@ def write_live_record(record: Mapping[str, Any], *,
     derive — do NOT paper it over by declining position rows on the live path,
     which is the #9190 defect this door exists to close. That decision is
     `#12894`'s; when it lands, a collision cannot occur, every conflict is a
-    replay, and the detector never fires — retire it then.
+    replay, and the detector must be DELETED with that key change — leaving it
+    in place converts legitimate old-journal replays into refusals (#12904
+    P1-4).
 
     ``tenant`` is the ``(org_id, graph_id)`` the CALLER already resolved for
     this write — carried explicitly by a lane that cannot hold the ambient scope
@@ -2628,12 +2685,22 @@ def write_live_record(record: Mapping[str, Any], *,
 
     ``allocate`` hands the POSITION to the record (#12894): the plan allocates
     from `public.record_cursor` and the resulting number is what this call
-    reports as `first_seq`/`last_seq` and what the byte meter reads. With
-    ``allocate=True`` the ``seq`` argument is IGNORED — there is one allocator
-    per coordinate, and a caller-supplied number alongside an allocated one is
-    two answers to one question — and the "no position was proven" arm below
-    does not apply, because a position WAS issued (by the counter, not by the
-    journal). The graph's cursor must be in mode ``active``. ⛔ A `seeded` /
+    reports as `first_seq`/`last_seq` and what the byte meter reads.
+
+    ⛔ ON THAT ARM ``seq`` IS **NOT** IGNORED — it is the OTHER SIDE of the
+    cutover invariant. The record's counter issues the number and the journal's
+    append reported one, and while BOTH allocators exist they must AGREE; a
+    disagreement is refused and the allocation rolled back (the
+    ``position_divergence`` arm below). ``seq=None`` is also a REFUSAL on this
+    arm (``position_unverifiable`` — the counter would issue a number nothing
+    corroborates), not the enumerated arm's row-less named skip; and a
+    `seeded`/`halted`/absent counter is the third arm, refused before any of
+    this. An earlier cut of this docstring said ``seq`` was ignored and that
+    both arms did not apply; a fresh-context review measured the door and found
+    the claim false (#12894 review cycle 4, P1), the same defect class this
+    file's history already records once.
+
+    The graph's cursor must be in mode ``active``. ⛔ A `seeded` /
     `halted` / absent cursor, or a duplicate position, comes back as
     ``outcome=REFUSED`` ``refusal="write_failed"`` and is counted — this door
     DOES NOT RAISE, by its own contract (the journal append has already
@@ -2669,6 +2736,11 @@ def write_live_record(record: Mapping[str, Any], *,
         _report_live_write_refusal(refusal, record.get("type"), detail)
         return _refused(refusal, seq)
     assert tenant is not None  # the verdict only clears with a resolved pair
+    # ⛔ THE SWITCH (#12894). Read AFTER the refusals above, so an unarmed or
+    # refused write is byte-identical whatever the flag says. An explicit
+    # `allocate=True` from a caller still means what it said — the flag can only
+    # turn the arm ON, never override a caller's decision.
+    allocate = allocate or record_live_allocate()
     org_id, graph_id = tenant
     connection: Any | None = None
     if seq is None and not allocate:
@@ -2676,17 +2748,47 @@ def write_live_record(record: Mapping[str, Any], *,
         # (see `seq` above): layer 1 gets no row for this record, which is a
         # NAMED skip and never a silent one (#9307 review F1).
         _note_unproven_position(record)
+    if seq is None and allocate:
+        # ⛔ THE ALLOCATED ARM NEEDS THE JOURNAL'S NUMBER TO CHECK AGAINST, so
+        # "the append succeeded but could not prove the position" is a REFUSAL
+        # here rather than a row-less write: the counter would issue a number
+        # nothing corroborates, and the one invariant this arm exists to keep —
+        # the line and its row carry the same number — would be unverifiable for
+        # this record. Fail CLOSED, and say what ACTUALLY repairs it: on the
+        # UNARMED arm a replay of the journal heals a row-less record, but on
+        # THIS arm the counter is the authority and an enumerated replay is
+        # REFUSED once the graph is cut over (`_refuse_an_enumerated_replay`) —
+        # so "a replay heals it" is false here. ⛔ And the cost is not one record
+        # either: the journal consumed a position the counter did not, so the
+        # same one-behind gap the divergence arm produces is armed here too, and
+        # every later armed write refuses for the same reason. The remedy is the
+        # allocator's operator path, named in the warning below.
+        _count_write_failure("write_failed")
+        _logger.warning(
+            "the record write was REFUSED (position_unverifiable) — the journal "
+            "holds the record but the append could not PROVE its position, so "
+            "the ordinal allocator (`%s`) has nothing to check the number it "
+            "would issue against. An ENUMERATED replay does NOT heal this (it is "
+            "refused on a cut-over graph), and "
+            "the journal consumed a position the counter did not — so EVERY "
+            "later armed write refuses for the same reason until the gap is "
+            "closed (an ARMED replay of the missing record closes it one record "
+            "at a time, once the caller commits). For the whole gap the remedy "
+            "is the allocator's operator path: `halt` -> "
+            "`seed --journal` -> `reopen` -> `arm`; record=%s %s",
+            RECORD_ALLOCATE_ENV, record.get("type"), _record_identity(record),
+        )
+        return _refused("write_failed", seq)
     try:
         # #9190's ordinal, straight from the append. `position=False` only when
         # a durable journal could not PROVE the record's position (see `seq`): a
         # row needs a number, and inventing one collides with a later replay's
         # numbering. Counted and warned above, so the skip is observable.
         # ⛔ With `allocate=True` the number comes from the RECORD's counter
-
-        # instead (#12894), so `seq` is neither needed nor consulted — and it
-        # must NOT be forwarded as `first_seq`, because `replay_plan` REFUSES a
-        # caller watermark on that arm (`allocate=True derives the position from
-        # the record's counter, so start_seq must be left at 1`). MEASURED
+        # instead (#12894), so `seq` must NOT be forwarded as `first_seq`,
+        # because `replay_plan` REFUSES a caller watermark on that arm
+        # (`allocate=True derives the position from the record's counter, so
+        # start_seq must be left at 1`). MEASURED
         # (review cycle 1, P1): forwarding it made a cut-over door refuse EVERY
         # write — all three production sites pass a real `seq` from `log.append`
         # — while the wiring gate blessed the body. So the arm passes the one
@@ -2698,6 +2800,123 @@ def write_live_record(record: Mapping[str, Any], *,
                               allocate=allocate)
         _close_live_breaker()
         connection = write.connection
+        # ⛔ THE CUTOVER INVARIANT (#12894): while BOTH allocators exist they must
+        # AGREE, and a disagreement is a REFUSAL — never a silent renumbering.
+        #
+        # On the allocated arm the record's counter issues the number and the
+        # journal's append reported one; if they differ, writing the row anyway
+        # puts the journal LINE at N and the position ROW at M for one record,
+        # and a replay of the JSONL (which enumerates 1..N) can never reproduce
+        # the row again — the two coordinates `#9318` exists to keep honest would
+        # be split by this door. That is reachable on FOUR states that are all
+        # real: a RESTORED or TRUNCATED journal (it reports a smaller position),
+        # a SEALED one (`TORTOISE_JOURNAL_SEGMENTS=1` restarts the file-local
+        # index at 1), a counter left behind by a refused write, and CONCURRENT
+        # WRITERS — the journal is ordered by APPEND (the `sdk` site appends,
+        # then calls this door, holding no lock across the two) while the counter
+        # is ordered by ALLOCATION, so two in-flight writes can be numbered in
+        # the opposite order to their lines: the one that allocated first
+        # refuses (`allocated != its line`), the other applies, and the counter
+        # is left exactly one behind the journal.
+        #
+        # ⛔ THE COST IS NOT "one refused record", AND THE TWO DIRECTIONS ARE
+        # NOT SYMMETRIC — say it here rather than let an operator discover it, and
+        # never describe them with one sentence:
+        #
+        #   * the journal AHEAD of the counter — the refused-write and
+        #     CONCURRENT-WRITER states above. Every refusal arm appends its line
+        #     and issues no counter number, so an ENUMERATED replay cannot close
+        #     the gap: it writes rows and never the counter, and on a cut-over
+        #     graph it is refused outright (`_refuse_an_enumerated_replay`). So
+        #     every LATER armed write refuses for the same reason. ⚠️ An ARMED
+        #     replay of the missing record DOES close it — `replay(allocate=True)`
+        #     runs `ALLOCATION_SQL`, which ISSUES the position. `replay()` itself
+        #     never commits (it is forbidden one — the caller does), so the gap is
+        #     closed by the CALLER'S commit, and a rolled-back armed replay closes
+        #     nothing. That is per-record
+        #     surgery, though, so the general remedy for a whole gap is the
+        #     operator chain: `halt` → `seed --journal <path>` → `reopen` → `arm`
+        #     (the seed is allowed here, because the record's rows are BELOW the
+        #     journal).
+        #   * the journal BEHIND the counter — the RESTORED / TRUNCATED states
+        #     above. WORSE, not better: each refused append still advances the
+        #     journal by one, so the guard stops refusing after `counter - floor`
+        #     records — and each of those records LOST its row with no operator
+        #     action at all. It does not wedge, it eats. `seed --journal` REFUSES
+        #     here (`SEED_SQL` needs `row_max <= enumerated_floor`) and a re-seed
+        #     cannot lift the counter DOWN (`GREATEST(cursor_row.seq,
+        #     EXCLUDED.seq)` is monotone), so `--enumerated-floor` only lets the
+        #     SEED RUN — it is not a remedy. The remedy is to RESTORE the journal
+        #     so its enumeration reaches the counter again.
+        #   * SEALED (`TORTOISE_JOURNAL_SEGMENTS=1`) is STRICTLY WORSE, and it is
+        #     the reason the seal is a gated operator transition. After a seal
+        #     `EventLog.append` reports the FILE-LOCAL index (it restarts at 1)
+        #     while the counter is per-GRAPH over the whole layout, so the guard
+        #     refuses for `local` 1..`counter` — every one of those appends already
+        #     committed its journal line and writes NO row, so it EATS `counter`
+        #     records, more than the behind case's `counter - floor` — and then
+        #     ACCEPTS at `local == counter + 1`, writing a row whose number is NOT
+        #     the journal's position: a silent, permanent split of the two
+        #     coordinates this guard exists to keep. NO counter value fixes that
+        #     comparison, because the two sides are different COORDINATES, so the
+        #     gate is procedural: ⛔ DO NOT ARM ACROSS A SEAL — halt the graph
+        #     before sealing it. Segment-aware numbering is #13050, not a re-seed.
+        #
+        # That is the price of keeping one invariant — the line and its row carry
+        # the same number — instead of guessing which side is right.
+        #
+        # ⛔ THE ROLLBACK IS THE OTHER HALF. Detecting the mismatch AFTER the
+        # insert but BEFORE the commit is what makes this free: the allocation
+        # (the counter increment) rolls back with the row, so the position is
+        # neither BURNED (no gap) nor REUSED (nobody saw it). A check placed
+        # after the commit would leave a row the record cannot number, and one
+        # placed before the write could not exist — the counter's number is only
+        # known once the statement has run.
+        if allocate and seq is not None and write.applied:
+            allocated_first = write.first_seq
+            if allocated_first != seq:
+                if connection is not None:
+                    with contextlib.suppress(Exception):
+                        connection.rollback()
+                _count_write_failure("write_failed")
+                _logger.warning(
+                    "the record write was REFUSED (position_divergence) — the "
+                    "journal holds the record at position %s and the ORDINAL "
+                    "ALLOCATOR issued %s, so the two allocators disagree about "
+                    "this record's number. Writing it would put the journal line "
+                    "and its position row at different numbers, which no replay "
+                    "of the journal could reproduce; the allocation was rolled "
+                    "BACK so nothing was burned or renumbered. Compare the two "
+                    "readings with `tools/record_allocator_cli.py status "
+                    "--journal <path>`, whose position_divergence field is THIS "
+                    "door's condition (LIKELY CAUSES DIFFER IN REMEDY, so read "
+                    "which side is ahead): if the JOURNAL is ahead — a refused "
+                    "write consumed a position the counter did not — the gap "
+                    "never closes and EVERY later armed write refuses until you "
+                    "re-seed: `halt`, `seed --journal <path>`, `reopen`, `arm`. "
+                    "If the JOURNAL is behind — a restored or truncated "
+                    "journal — it does NOT wedge: the guard stops refusing "
+                    "after `counter - floor` records, and each of them "
+                    "SILENTLY LOSES ITS ROW; `seed --journal` refuses there and "
+                    "a re-seed cannot lower the counter, so RESTORE THE "
+                    "JOURNAL (`--enumerated-floor` only lets the seed run, it is "
+                    "not a remedy). A SEALED journal is a THIRD case and is "
+                    "STRICTLY WORSE than either: `status --journal` REFUSES a "
+                    "segmented layout by design (it will not half-count one), and "
+                    "measuring the layout total with "
+                    "`journal_segments.read_all_segments` and passing it as "
+                    "`--enumerated-floor N` corrects the SEED, not the "
+                    "comparison, because the append's number stays FILE-LOCAL "
+                    "while the counter is per-graph. So it EATS `counter` records' "
+                    "rows and then ACCEPTS at `local == counter + 1` with a "
+                    "MIS-numbered row. NO counter value fixes that — the gate is "
+                    "procedural: do not arm across a seal, halt the graph first "
+                    "(#13050 owns segment-aware numbering). "
+                    "record=%s %s",
+                    seq, allocated_first, record.get("type"),
+                    _record_identity(record),
+                )
+                return _refused("write_failed", seq)
         if connection is not None:
             connection.commit()
             # AFTER the commit, and only when the seam's OWN connection
@@ -2730,8 +2949,9 @@ def write_live_record(record: Mapping[str, Any], *,
         collision = _journal_collision_cause(exc)
         if collision is not None:
             # ⛔ A COLLISION, NOT A LOST WRITE (#9318). The row at this position
-            # holds content this write would not produce, so writing the layer
-            # rows under it would index them by that other content — refused
+            # is a record this write does not CONTINUE (a different
+            # `event_type`, or a different capture time), so writing the layer
+            # rows under it would index them by that other record — refused
             # rather than shipped. Nothing is lost: the journal holds the record
             # and the message names both sides. Now made LOUD on the SAME
             # refused-write channel every other arm uses (one counter, one
@@ -2742,10 +2962,10 @@ def write_live_record(record: Mapping[str, Any], *,
             _logger.warning(
                 "the record write was REFUSED (journal_collision) — the "
                 "journal holds the record but the record's position row is "
-                "occupied by content this write would not produce (a "
+                "occupied by a record this write does not continue (a "
                 "different record — a second journal, a restore, a rotation, "
-                "a rebuild numbering below the high-water mark — or this "
-                "record's payload re-derived since that row was written); a "
+                "a rebuild numbering below the high-water mark — or, with no "
+                "`ts` to compare, a payload whose derivation moved); a "
                 "replay cannot heal it while the key carries no journal "
                 "identity (#12894): record=%s %s: %s",
                 record.get("type"), _record_identity(record), collision,
@@ -2776,9 +2996,37 @@ def write_live_record(record: Mapping[str, Any], *,
             # deliberately does NOT trip it — the connection was fine.
             _trip_live_breaker()
         _count_write_failure("write_failed")
+        # ⛔ THE REMEDY MUST MATCH THE ARM (#12894 review). On the ALLOCATED arm
+        # (`TORTOISE_RECORD_ALLOCATE=1`, which this change makes reachable in
+        # production) a plain enumerated replay is REFUSED by
+        # `record_projection._refuse_an_enumerated_replay` — the cursor ROW, not
+        # the mode, is the fact. So the unqualified "a replay heals the record"
+        # is false exactly where it now gets read most; the sibling allocator and
+        # `position_unverifiable` arms were fixed for this, and this arm is the
+        # one that catches every remaining failure on that path.
         _logger.warning(
             "the record write did not happen (write_failed) — the journal has "
-            "the record and a replay heals the record: record=%s %s: %s",
+            "the record; %s: record=%s %s: %s",
+            # ⛔ THE DISCRIMINATOR IS THE CURSOR ROW, NOT THE ARM. `allocate`
+            # says which write arm ran; `_refuse_an_enumerated_replay` refuses by
+            # the ROW, and the two are INDEPENDENT — a graph cut over and then
+            # left with `TORTOISE_RECORD_ALLOCATE` unset (the partial rollout
+            # `.env.example` documents)
+            # refuses on the enumerated arm and landed here, where the old
+            # `if allocate` branch told the operator "a replay heals the "
+            # "record" about a graph whose every replay is refused. The claim is
+            # now true in BOTH states instead of wrong in one: it names the row
+            # as the condition, so an operator on either arm can tell which case
+            # they are in. `record_allocator_cli.py status` reports the row.
+            "a replay heals the record UNLESS this graph has a `record_cursor` "
+            "row (cut over), in which case an enumerated replay is refused — "
+            "and the remedy is the one the refusal below names for the row's "
+            "MODE, not a chain that assumes `active`: `replay(allocate=True)` "
+            "needs mode='active', `halt` is scoped to 'active', `reopen` to "
+            "'halted'. Run `record_allocator_cli.py status` for the mode"
+            if not allocate else
+            "repair it with an ALLOCATING replay (`replay(allocate=True)`), not "
+            "a plain one, which a cut-over graph refuses",
             record.get("type"), _record_identity(record), exc,
         )
         return _refused("write_failed", seq)

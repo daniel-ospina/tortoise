@@ -722,16 +722,31 @@ def test_one_onboarding_call_reaches_the_record_and_its_id_reads_back(
 
 #: LIVE registry tools whose `description` recommends a RETIRED name.
 #:
-#: Measured at `dced2b29b`, BY WHOLE TOKEN: **2 tools, 3 names**. "Live" is
-#: `TOOL_REGISTRY` membership — NOT `http_policy`, and the two are not the same
-#: surface. `tortoise_index_files` carries
-#: `http_policy=False` (`tortoise/tool_registry.py`, "EXCLUDED from tenant HTTP"
-#: in its own description), so it is absent from a connector's `tools/list` and
-#: the CONNECTOR-facing half of this defect is `tortoise_query` alone
-#: — `tortoise_get_point` is the RETIRED spelling of the read the journey's
+#: Measured at the `#12948` head, BY WHOLE TOKEN: **1 tool, 1 name**. Re-measure,
+#: do not trust this sentence: the equality pin below is the instrument.
+#:
+#: ⚠️ `#12948` SHRANK this set the way the pin asks — by FIXING descriptions, not
+#: by widening the pin. Two rows left, for two different reasons:
+#:   * `tortoise_index_files` was itself RETIRED (into
+#:     `tortoise_index_sources_from_directory`), so it is no longer a live
+#:     description and its two stale names left the set with it.
+#:   * The retirement ADDED five stale descriptions — the six new containers' own
+#:     copy, which said "Absorbs tortoise_create_source" / "tortoise_checkpoint and
+#:     tortoise_session_capture" / "tortoise_index_files …" / "tortoise_assess_source
+#:     and tortoise_set_source_tier" / "tortoise_mine_conversations". Those named
+#:     tools ABSENT from the same `tools/list` payload, which is exactly the defect
+#:     this file exists to catch, so they were REWORDED (consolidation history
+#:     without the dead names — the pointers live in `RETIRED_USE_INSTEAD`, where a
+#:     caller holding an old name is actually redirected), not pinned.
+#:
+#: "Live" is `TOOL_REGISTRY` membership — NOT `http_policy`, and the two are not
+#: the same surface. The one surviving row, `tortoise_query`, IS HTTP-advertised:
+#: `tortoise_get_point` is the RETIRED spelling of the read the journey's
 #: "read it back by id" step performs, which the journey makes with
 #: `tortoise_get_entity(id, type="point")` (the registry's own
-#: `RETIRED_USE_INSTEAD` entry says so).
+#: `RETIRED_USE_INSTEAD` entry says so). It is a PRE-EXISTING defect that #12948
+#: neither introduced nor was asked to fix — reworded prose is not this lane's to
+#: spend, so it stays measured and pinned.
 #:
 #: ⛔ ONE NAME, NOT TWO, FOR `tortoise_query`. A dict that pins
 #: `("tortoise_get", "tortoise_get_point")` because the matcher was
@@ -739,24 +754,22 @@ def test_one_onboarding_call_reaches_the_record_and_its_id_reads_back(
 #: of `tortoise_get_point`, so it was counted as "named" without being present.
 #: That is a measurement artifact, not a fact, and it had a second consequence:
 #: `tortoise_get` is ALSO a prefix of `tortoise_get_entity`, the live canonical
-#: read tool (`RETIRED_USE_INSTEAD`'s own value, and explicitly NOT retired at
-#: `tool_registry.py:1854-1861`), so the matcher reported the CORRECT copy as
-#: stale and the equality pins below would have told the fixer "do not widen
-#: this pin" while the xfail stayed armed forever — the fix could not clear the
-#: flag that was supposed to delete itself. The matcher now reads WHOLE tool
-#: tokens (`_retired_names_in_text`), and
+#: read tool (`RETIRED_USE_INSTEAD`'s own value), so the matcher reported the
+#: CORRECT copy as stale and the equality pins below would have told the fixer
+#: "do not widen this pin" while the xfail stayed armed forever — the fix could
+#: not clear the flag that was supposed to delete itself. The matcher now reads
+#: WHOLE tool tokens (`_retired_names_in_text`), and
 #: `test_the_prescribed_fix_clears_the_stale_description_flag` proves that
 #: applying `RETIRED_USE_INSTEAD` empties this measurement.
 #:
-#: The stdio-only half is still measured, because the rule is about the text a
-#: MODEL reads: a stdio client receives the same `description` and the retired
-#: names are absent from ITS `tools/list` too, so the property holds for both
-#: surfaces. What must never drift is the CLAIM — hence
+#: The stdio-only half is still measured when it exists, because the rule is
+#: about the text a MODEL reads: a stdio client receives the same `description`
+#: and the retired names are absent from ITS `tools/list` too, so the property
+#: holds for both surfaces. What must never drift is the CLAIM — hence
 #: `test_the_stale_description_set_says_which_half_is_the_connectors`, which pins
 #: which side of `http_policy` each measured tool sits on.
 _RETIRED_NAMES_NAMED_BY_LIVE_DESCRIPTIONS = {
     "tortoise_query": ("tortoise_get_point",),
-    "tortoise_index_files": ("tortoise_index_sessions", "tortoise_ingest_corpus"),
 }
 
 #: A tool name as it is spelled in prose: `tortoise_` + lowercase/underscore/digit.
@@ -809,8 +822,12 @@ def test_the_retired_name_matcher_reads_whole_tool_names_not_substrings():
     tool", and a substring test answers a different question. `tortoise_get` is
     retired, `tortoise_get_point` is retired, and `tortoise_get_entity` is the
     LIVE canonical read tool (`RETIRED_USE_INSTEAD`'s own value, and the owner
-    ruling at `tool_registry.py:1854-1861` says it must NOT be retired). A
-    substring matcher reports all three as hits on any one of them.
+    ruling at `tool_registry.py:2531-2537`, the block that reads
+    "`tortoise_get_entity` must NOT be retired" and "retire `tortoise_get` in
+    its place"). A substring matcher
+    reports all three as hits on any one of them. (The cite was re-pointed from
+    `:2185-2193` by #12948's review round and rotted again when later merges
+    above it moved the dict — the quoted words are the greppable anchor.)
 
     Mutation check: restore `name in (tool.description or "")` in
     `_retired_names_in_text` → the first assertion reds (the live
@@ -894,18 +911,20 @@ def test_the_prescribed_fix_clears_the_stale_description_flag():
     strict=True,
     reason=(
         "MEASURED defect: a tool's `description` is part of the tools/list "
-        "payload the model reads, and TWO live tools name THREE RETIRED tools "
-        "that are absent from that same payload. `tortoise_query` → "
+        "payload the model reads, and ONE live tool names ONE RETIRED tool "
+        "that is absent from that same payload. `tortoise_query` → "
         "`tortoise_get_point` is the CONNECTOR-facing half "
         "(`tortoise_query` itself IS advertised) and names the RETIRED spelling "
         "of the read that step performs (`tortoise_get_entity(id, "
         "type=\"point\")`), so a tool-grant client is told to "
-        "call a tool it was never granted; `tortoise_index_files` → "
-        "`tortoise_index_sessions`/`tortoise_ingest_corpus` is stdio-only "
-        "(`http_policy=False`), so it mis-instructs a stdio client rather than a "
-        "connector. This marker DELETE-ITSELF when the copy is fixed (the "
-        "condition is the measured set, not a date); the equality pins below are "
-        "what stay loud in the meantime."
+        "call a tool it was never granted. This marker DELETE-ITSELF when the "
+        "copy is fixed (the condition is the measured set, not a date); the "
+        "equality pins below are what stay loud in the meantime. "
+        "`#12948` re-measured the marker: the retirement ADDED five stale "
+        "descriptions (the new containers' own 'Absorbs <retired name>' copy) "
+        "and they were REWORDED — the pin's instruction is fix the description, "
+        "not widen the pin — leaving the pre-existing `tortoise_query` row this "
+        "lane did not introduce."
     ),
 )
 def test_a_live_tool_description_never_recommends_a_retired_tool():
@@ -951,24 +970,20 @@ def test_the_stale_description_set_is_exactly_what_was_measured():
 
 
 def test_the_stale_description_set_says_which_half_is_the_connectors():
-    """The measured set is 2 tools / 3 names, and only ONE tool is advertised.
+    """The measured set is 1 tool / 1 name, and it IS advertised.
 
-    The constant and the `xfail` reason above could read as though four
-    *advertised* descriptions were stale — a count that would itself be an
-    artifact of the substring matcher (`tortoise_get` counted as "named" because
-    it prefixes `tortoise_get_point`). It is 2 tools / 3 names, and a ChatGPT-style
-    tool-grant client is mis-instructed once. `tortoise_index_files`
-    carries `http_policy=False` (`tortoise/tool_registry.py`), and
-    `HTTP_ALLOWED` is derived from exactly that flag (`get_http_allowed` in
-    `tortoise/tool_registry.py`, bound as `HTTP_ALLOWED` in
-    `tortoise/mcp_auth.py`), so by this file's OWN definition of advertised
-    (`test_the_connector_advertises_the_journey_tools_and_nothing_retired`:
-    `{t.name for t in TOOL_REGISTRY if t.http_policy}`) only `tortoise_query`
-    reaches the connector. The impact claim is therefore pinned mechanically
-    rather than left in prose that the next lane would read as measurement.
+    `#12948` re-measured this split. The previous reading was 2 tools / 3 names,
+    with the second tool (`tortoise_index_files`) `http_policy=False`; that tool
+    has since been RETIRED into `tortoise_index_sources_from_directory`, so the
+    only surviving stale description belongs to an ADVERTISED tool. The constant
+    and the `xfail` reason above could read as though several *advertised*
+    descriptions were stale — a count that would itself be an artifact of the
+    substring matcher (`tortoise_get` counted as "named" because
+    it prefixes `tortoise_get_point`). It is 1 tool / 1 name, and a ChatGPT-style
+    tool-grant client is mis-instructed once.
 
     Both halves are asserted by equality, so a tool changing `http_policy` (or a
-    third stale description appearing on either side) forces a re-measure instead
+    second stale description appearing on either side) forces a re-measure instead
     of silently re-wording the claim.
     """
     from tortoise import tool_registry as tr
@@ -983,7 +998,7 @@ def test_the_stale_description_set_says_which_half_is_the_connectors():
         f"advertised stale tools: {http_facing!r}. Only an HTTP-advertised tool's "
         "description can mis-instruct a tool-grant client; re-measure before "
         "re-wording the xfail reason")
-    assert stdio_only == ["tortoise_index_files"], (
+    assert stdio_only == [], (
         "which stale descriptions belong to stdio-only tools changed: "
         f"{stdio_only!r}. Those are real defects for a stdio client, but they "
         "cannot reach a connector — keep both facts in the claim")

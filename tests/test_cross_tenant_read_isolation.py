@@ -798,7 +798,7 @@ def test_mcp_transport_sets_org_contextvar_from_key_auth(xtenant):
 
     from tortoise.mcp_auth import OrgResolutionMiddleware, _current_org_id
 
-    key = xtenant.registry_sdk.apikey_create(
+    key = xtenant.registry_sdk._apikey_create(
         _ORG_A, "xtenant-mcp-transport-probe")["api_key"]
 
     async def _echo_org(request):

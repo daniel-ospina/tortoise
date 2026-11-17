@@ -60,6 +60,20 @@ HTTP_EXCLUDED_SDK_METHODS: dict[str, str] = {
 READ_THROUGH_WRITE_METHODS: dict[str, str] = {
     "compute_confidence": "persists computed `SET n.confidence` (#1157/#4122)",
     "get_confidence": "lazy `dream(dirty_only=True)` writes n.confidence (#1157/#4122)",
+    # #11609 Phase 2 — the READ/QUERY containers. Each of these reaches a refresh that
+    # is ALREADY declared above or below; the container does not add a new writer, it
+    # aggregates reads that one of its arms performs. Named individually because the
+    # #4122 arm reads the HANDLER-reached set, and a container's arm is invisible to it.
+    # ⛔ `get_source_reliability` is deliberately NOT listed here: its own retired door
+    # declares `risk="write"` (it recomputes and caches), so it needs no read-through
+    # exemption — it IS a writer, and the ledger already sees it as one. What needs
+    # declaring is the READ container whose arm reaches it.
+    "list_knowledge": "kind='source_reliability' reaches the declared read-through "
+                      "writer `get_source_reliability` (#11609)",
+    "search_knowledge": "mode='full_text' delegates to `list_knowledge`, whose "
+                        "'source_reliability' arm is the read-through writer above (#11609)",
+    "check_confidence": "lazily reaches `get_confidence`, the declared read-through "
+                        "writer that `dream(dirty_only=True)` writes through (#11609)",
     # `get_tenant_packs` LEFT this set in #11609 batch 1 with its only MCP door
     # (`tortoise_packs_list`, ARCHIVED); the read-through posture it recorded is
     # unchanged on the REST twin `GET /v1/packs`. A future MCP door must re-add it —
@@ -119,7 +133,15 @@ NON_SDK_READ_OPERATIONS: dict[str, str] = {
 # `by_method` index, so the read-classification property must also be asserted
 # per TOOL NAME or it silently stops being checked (#4035 review).
 NON_SDK_READ_BINDINGS: dict[str, str] = {
-    # EMPTY since #11609 batch 1, with NON_SDK_READ_OPERATIONS above.
+    # #12951 review (P1): `tortoise_provenance` is handler-served (`sdk_method=""`)
+    # and its reach to the read-through writer `check_confidence` lives inside the
+    # `_check_confidence_provenance` HELPER, not in the handler body. Between the two,
+    # the op-keyed `by_method` arm above had no declaration to key on and the door was
+    # observed by NOTHING — so the maintenance tier it now carries was a comment: a
+    # later lane could demote it back to `read` (a `readOnlyHint: true` over a call that
+    # dreams a dirty root) and no arm would red. Declared by TOOL NAME so the tier arm
+    # below actually checks it.
+    "check_confidence": "tortoise_provenance",
 }
 
 # ── #9576: read-classified RETENTION housekeeping through another module ─────
@@ -182,7 +204,34 @@ OUT_OF_BOUNDARY_MUTATORS: dict[str, str] = {
 # declaration is gone, so keeping it here would exempt a *future* row that
 # re-declares it from resolution — a re-declaration on a handler-served tool is
 # the defect, not an exemption.
-DANGLING_SDK_DECLARATIONS: frozenset[str] = frozenset({"health"})
+#: Declared `sdk_method` values that DO NOT resolve on `TortoiseSDK`, by name.
+#:
+#: `health` went private in #4282 and `tortoise_health` (a retired shim) still declares
+#: it. #11609 batch 2 (the SOURCES/MINE/SESSION containers) added SEVEN more of the same
+#: shape: each is a RETIRED tool whose frozen original body (#3883) calls the private
+#: door the container now fronts — `create_source` -> `_create_source`,
+#: `assess_source` -> `_assess_source`, `set_source_tier` -> `_set_source_tier`,
+#: `index_directory` -> `_index_directory`, `index_sessions` -> `_index_sessions`,
+#: `mine_corpus` -> `_mine_corpus`, `checkpoint` -> `_checkpoint`. The declaration is
+#: kept as the historical binding rather than blanked, because the retired table is what
+#: a caller reads to find the migration; the exemption is on the METHOD name, so a LIVE
+#: tool declaring one of these still reds (no live tool can: none of the seven resolves).
+#:
+#: ⛔ The alternative — pointing a retired row at the container — was rejected: a retired
+#: shim serves the ORIGINAL body, several of whose legacy branches deliberately diverge
+#: from the unified walker (see `_index_sessions`'s embedding behaviour), so a
+#: declaration naming the container would be a claim about reach the frozen body does not
+#: honour.
+DANGLING_SDK_DECLARATIONS: frozenset[str] = frozenset({
+    "health",
+    "create_source",
+    "assess_source",
+    "set_source_tier",
+    "index_directory",
+    "index_sessions",
+    "mine_corpus",
+    "checkpoint",
+})
 
 class DeclaredBindingDivergence(NamedTuple):
     """One recorded declared-binding divergence (#4337).
@@ -239,12 +288,44 @@ INTERNAL_PATH_READERS: frozenset[str] = frozenset({
     "_probe_embedded_busy", "session_index_health",
 })
 
-# The 8 wrap sites that pass `abuse_weight` (R1 point-create metering).  Every
+# The wrap sites that pass `abuse_weight` (R1 point-create metering).  Every
 # other `_quota_gated` site must NOT.
+# #4282 Phase 2 folded the two decision doors into containers; the WEIGHT travels
+# with the CAPABILITY, so the two weighted sites are the new names — `write_question`
+# (`_quota_gated(..., abuse_weight=lambda r, a, k: 1 + len(options) + len(evidence))`)
+# and `record_decision` (`abuse_weight=1`). Keeping the retired keys here would
+# assert a weight on a method that no longer has a wrap site, which is exactly the
+# `test_point_creating_wrap_sites_have_weights` red this re-key closes.
 WEIGHT_BEARING_METHODS: frozenset[str] = frozenset({
-    "create_point", "create_operator", "mitigate_operator", "file_decision",
-    "file_human_approval", "diary_write", "ingest", "checkpoint",
+    "create_point", "create_operator", "mitigate_operator", "write_question",
+    "record_decision", "diary_write", "ingest",
+    # #11609 lane C retires the PUBLIC `checkpoint` method; its still-served door
+    # wraps the SDK's private seam, and the weight is unchanged (the `filed`
+    # count), so the weight class follows the name the wrap site actually calls.
+    "_checkpoint",
+    # #11609 lane C: the mining container weights by the `filed` count its result
+    # carries — the same bulk-write shape `checkpoint` had (#4113's reason).
+    "mine_knowledge_from_session",
+    # ⛔ #11609 lane B retired `file_decision` / `file_human_approval` in the SAME
+    # release that landed `write_question` / `record_decision`: the two container names
+    # above are the ones the merged tree actually weights, and the retired pair is
+    # in no `_quota_gated(..., abuse_weight=)` site any more (measured, see the
+    # module's own wrap-site arm).
 })
+
+# #11609 lane C: four retired methods are still SERVED, through doors that call the
+# SDK's PRIVATE seam (`_checkpoint`, `_create_source`, `_assess_source`,
+# `_index_directory`). The wrap-site scan reads the attribute the code CALLS, so the
+# registry-binding arm needs to know which REGISTRY method that seam belongs to —
+# without this declaration the four legitimately-served doors read as "no registry
+# binding". Declared, not inferred from the leading underscore: an underscore is a
+# naming convention, and guessing would hide a genuinely unbound site.
+SDK_SEAM_ALIASES: dict[str, str] = {
+    "_checkpoint": "checkpoint",
+    "_create_source": "create_source",
+    "_assess_source": "assess_source",
+    "_index_directory": "index_directory",
+}
 
 # The DECLARED write surface: operation -> surface label.  This is the one
 # place a tool name is declared (not looked up) — the issue's inverse assertion
@@ -253,29 +334,64 @@ WEIGHT_BEARING_METHODS: frozenset[str] = frozenset({
 # liveness).
 DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "create_point": "tortoise_create_point",
-    "update_point": "tortoise_update_point",
     "create_operator": "tortoise_create_operator",
     "mitigate_operator": "tortoise_mitigate_operator",
-    "file_decision": "tortoise_file_decision",
-    "file_human_approval": "tortoise_file_human_approval",
+    # #4282 Phase 2: the four container names replace the five retired ones
+    # (`file_decision`->`write_question`, `file_human_approval`->`record_decision`,
+    # `supersede`->`supersede_knowledge`, `update_entity`/`update_point`->`update_knowledge`).
+    # This map is checked in BOTH directions against the AST wrap-site scan, so the
+    # retired keys red as "declared write methods with no wrap site" and the new ones
+    # red as "unmapped _quota_gated wrap sites" until they are re-keyed here.
+    "write_question": "tortoise_write_question",
+    "record_decision": "tortoise_record_decision",
+    "supersede_knowledge": "tortoise_supersede_knowledge",
+    "update_knowledge": "tortoise_update_knowledge",
     "invalidate_point": "tortoise_invalidate",
-    "supersede": "tortoise_supersede",
     "retract_point": "tortoise_retract_point",
-    "checkpoint": "tortoise_checkpoint",
+    "_checkpoint": "tortoise_checkpoint",  # retired method, seam-wrapping door (#11609)
     "diary_write": "tortoise_diary_write",
     "create_entity": "tortoise_create_entity",
-    "update": "tortoise_update",
+    # ⛔ `update` LEFT this map in #11609 lane B (#12915 review F1): no MCP handler
+    # quota-gates `sdk.update` any more. `tortoise_update` — the door the
+    # `tortoise_update_knowledge` container's `props` arm delegates to — routes
+    # through `sdk.update_knowledge` (the same `_update_entity_any` relay
+    # `tortoise_update_point` and `tortoise_update_entity` call), because `update`
+    # sends a Point to `update_point`, which journals no `restatus` record and
+    # refuses every non-promote transition by a fixed sentence. Keeping the key
+    # would red the inverse arm ("declared write methods with no wrap site") on a
+    # method nothing writes through.
     "annotate_operator": "tortoise_operator_action",
     "create_subject": "tortoise_create_subject",
     "create_object": "tortoise_create_object",
     "create_event": "tortoise_create_event",
     "create_document": "tortoise_create_document",
-    "create_source": "tortoise_create_source",
-    "assess_source": "tortoise_assess_source",
-    "update_entity": "tortoise_update_entity",
+    # #11609 lane C: `create_source` / `assess_source` are RETIRED (`register_source` /
+    # `manage_source_trust` absorb them) and their doors wrap the private seams. The
+    # key is the wrap site's name; the label is the retired-but-served door, which the
+    # #3883 shim still resolves — so the binding stays checked rather than dropped.
+    "_create_source": "tortoise_create_source",
+    "_assess_source": "tortoise_assess_source",
+    # ⛔ `update_entity` LEFT this map in #12901 (wave 2), for the same reason
+    # `update` left it in #12915 review F1: the surface RETIRED the public
+    # `sdk.update_entity` (body kept as the private `_update_entity`), and the
+    # still-served `tortoise_update_entity` door now wraps
+    # `sdk.update_knowledge` — the same `_update_entity_any` relay
+    # `tortoise_update_point` calls. So the door's wrap site is ALREADY the
+    # declared `update_knowledge` key above, and keeping `update_entity` here
+    # reds the inverse arm ("declared write methods with no wrap site") on a
+    # method nothing writes through.
+
     "create_edge": "tortoise_create_edge",
     "ingest": "tortoise_ingest",
-    "index_directory": "tortoise_index_files",
+    "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door
+    # #11609 lane C's containers: each wraps its own SDK operation, so each is a
+    # declared write surface of its own (the forward arm would otherwise report them
+    # as unmapped wrap sites).
+    "index_sources_from_directory": "tortoise_index_sources_from_directory",
+    "mine_knowledge_from_directory": "tortoise_mine_knowledge_from_directory",
+    "mine_knowledge_from_session": "tortoise_mine_knowledge_from_session",
+    "register_source": "tortoise_register_source",
+    "manage_source_trust": "tortoise_manage_source_trust",
 }
 
 # Tenant-scoped control-plane labels: a registry mutation whose labels are
@@ -309,6 +425,19 @@ NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     # happens through hosted_api helpers (index job / onboarding state), so it
     # is an empty-binding writer here. It deliberately does NOT tear the GitHub
     # connection down: #1924 made the per-source switch intent, not a disconnect.
+    # #4282 Phase 2: the two containers that ship with `sdk_method=""` because they
+    # DELEGATE to the handler they absorbed (`adjust_relationship` ->
+    # `tortoise_operator_action` -> sdk.mitigate_operator/annotate_operator;
+    # `refresh_confidence` -> dream/promote_point/set_point_baseline). Both are
+    # writer-classified (`risk="destructive"`), so they belong in this declared set —
+    # without them `empty_writers == set(NON_SDK_WRITER_TOOLS)` reds and a
+    # graphs:read-only HTTP key could reach a write through a container nobody
+    # declared.
+    "tortoise_adjust_relationship", "tortoise_refresh_confidence",
+    # Same shape, same reason: `update_knowledge` dispatches per arm to the handler
+    # it absorbed, so it binds no single SDK method either (#4337 + #3904 both red
+    # on the old `sdk_method="update_knowledge"` declaration).
+    "tortoise_update_knowledge",
     "tortoise_manage_sources",
     # #4035: handler-served writer (reaches pack_manifest_store.upsert_tenant_manifest)
     # ⛔ `tortoise_pack_install` LEFT this set in #11609 batch 1: it is ARCHIVED
@@ -334,6 +463,29 @@ NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
     "tortoise_entity_profile",
     # #3904: handler-served read (navigation.tortoise_traverse on sdk._get_proj())
     "tortoise_traverse",
+    # #11609 Phase 2 — the READ/QUERY containers and the doors that now answer through
+    # them. Each of these declares `sdk_method=""` because its handler dispatches on a
+    # discriminator (`section=`, `kind=`, `mode=`) rather than onto one SDK method; the
+    # container tools themselves carry their own binding (`sdk_method="list_knowledge"`
+    # etc.) so the write ledger can still see the methods they reach.
+    # ⛔ The five CONTAINERS are deliberately ABSENT: each declares its own
+    # `sdk_method` (`list_knowledge` etc.), so it is BOUND, not handler-served. The
+    # declarations below are the member DOORS that dispatch into them.
+    # …and the doors whose member SDK method was re-privatised behind its container
+    # (the public name is gone, so a non-empty `sdk_method` would not resolve).
+    "tortoise_taxonomy", "tortoise_list_pointkinds", "tortoise_list_tags",
+    "tortoise_list_sources", "tortoise_list_namespaces", "tortoise_status",
+    "tortoise_validate_domain", "tortoise_diary_read", "tortoise_search_sessions",
+    "tortoise_suggest_entry_points", "tortoise_expand_relationships",
+    # ⛔ NOT that reason: `tortoise_stale`'s member `stale_points` is STILL PUBLIC
+    # (`sdk_retired.py` says so explicitly, and the owner's narrow-alias row names the
+    # TOOL `stale`, not the method). Its binding is empty because the door answers
+    # through `graph_overview(section='stale')` — a discriminator dispatch, like the
+    # containers above (#12951 review P3).
+    "tortoise_stale",
+    # …and the RETIRED names the #3883 shim still serves, for the same reason: a
+    # retired name that still resolves is still checked here (#4170/#4035 precedent).
+    "tortoise_list_topics", "tortoise_provenance", "tortoise_list_dedup_candidates",
 })
 
 # #4474 removed `NON_HTTP_WRITER_TOOLS` — the last hand-maintained parallel name
@@ -1419,7 +1571,12 @@ def wrap_site_violations(mcp_src: str | None = None) -> list[str]:
         if (method in WEIGHT_BEARING_METHODS) != has_weight:
             out.append(f"_quota_gated({method})@{lineno}: abuse_weight={has_weight}")
     wrapped = {s[0] for s in sites.sites}
-    for method in sorted(wrapped - set(by_method)):
+    for method in sorted(wrapped):
+        if method in by_method:
+            continue
+        alias = SDK_SEAM_ALIASES.get(method)
+        if alias is not None and alias in by_method:
+            continue  # a still-served door wrapping the SDK's private seam (#11609)
         out.append(f"wrap site for {method!r} has no registry binding")
     return out
 

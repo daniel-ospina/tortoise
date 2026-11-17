@@ -157,3 +157,7 @@ docs/product/sdk-rename-table.md
 # it, and `check` re-derives the counts from the logs it cites.
 /WORKTREE-REPORT.md
 /.worktree-report/
+
+# #12943 evidence harness scratch: per-run JSONL journals (EVENTS_BASE).
+# Scratch, not evidence — see docs/evidence/12943-cache-leg/README.md.
+.evidence-events/

@@ -2965,7 +2965,7 @@ def test_extract_session_v2_terminal_old_is_silent_noop(sdk, monkeypatch):
                      id=old, status="live")
     sdk.create_point("statement", "the gym session is now at 5pm",
                      id=new, status="draft")
-    sdk.supersede(old, new)  # first application — old now terminal
+    sdk.supersede_knowledge(old, new)  # first application — old now terminal
     payload = {"session_id": "sess_p1", "story_arc": "",
                "entities": [], "events": [], "operators": [],
                "points": [],
@@ -4040,7 +4040,7 @@ def test_apply_supersessions_pt_self_supersession_skipped(sdk):
     """#2164 review (P1 — ISSUE A, pt_ lane): the same self-supersession
     guard fires for point records — a pt_ ref superseding ITSELF is a
     meaningless record, skipped with the same warning (pre-fix it fell
-    through to sdk.supersede() whose old==new guard raised, surfacing as a
+    through to sdk.supersede_knowledge() whose old==new guard raised, surfacing as a
     spurious "point supersede ... failed" warning with no better signal)."""
     from tortoise.commit_ops import apply_supersessions
     from tortoise.commit_schema import point_content_id
@@ -7503,7 +7503,7 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
         # Point eventId is a WRITABLE provenance property (create_point /
         # update_point authoring path, #1417) — only Event identity is guarded.
         try:
-            sdk.update_entity(ev2.get("id"), eventId="ev_renamed")
+            sdk.update_knowledge(ev2.get("id"), eventId="ev_renamed")
             raise AssertionError("update_entity eventId must be rejected")
         except ValueError as ex:
             assert "server-managed" in str(ex), ex
@@ -7515,7 +7515,7 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
             params={"i": pt["id"]}).result_set[0][0] == "ev_authorable", upd
         # The _update_entity reject is LABEL-AWARE: a Point target (matched by
         # id) keeps eventId authoring; only Event targets reject.
-        sdk.update_entity(pt["id"], eventId="ev_authorable_2")
+        sdk.update_knowledge(pt["id"], eventId="ev_authorable_2")
         assert sdk._get_proj().g.query(
             "MATCH (p:Point {id:$i}) RETURN p.eventId",
             params={"i": pt["id"]}).result_set[0][0] == "ev_authorable_2"

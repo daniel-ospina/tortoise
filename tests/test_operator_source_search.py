@@ -104,7 +104,7 @@ class TestSourceEntityType:
 
     def test_create_source_writes_node(self, sdk):
         """create_source now actually creates a Source node."""
-        src = sdk.create_source("https://example.com/doc1", sourceKind="T1",
+        src = sdk.register_source("https://example.com/doc1", sourceKind="T1",
                                 name="Source Doc 1")
         # Source should have an id or url and be queryable
         assert src is not None
@@ -117,7 +117,7 @@ class TestSourceEntityType:
 
     def test_source_searchable(self, sdk):
         """entity_type='source' search works."""
-        sdk.create_source("https://example.com/doc2", sourceKind="T2",
+        sdk.register_source("https://example.com/doc2", sourceKind="T2",
                           name="Source Doc 2")
         results = sdk.tortoise_fts_query("Source Doc 2", entity_type="source", limit=5)
         assert isinstance(results, list)
@@ -136,20 +136,20 @@ class TestCreateSourceValidation:
     def test_empty_url_raises_value_error(self, sdk):
         """create_source('', 'T1') raises ValueError."""
         with pytest.raises(ValueError, match="url must be a non-empty string"):
-            sdk.create_source("", "T1")
+            sdk.register_source("", "T1")
 
     def test_none_url_raises_value_error(self, sdk):
         """create_source(None, 'T1') raises ValueError."""
         with pytest.raises(ValueError, match="url must be a non-empty string"):
-            sdk.create_source(None, "T1")
+            sdk.register_source(None, "T1")
 
     def test_whitespace_url_raises_value_error(self, sdk):
         """create_source('   ', 'T1') raises ValueError."""
         with pytest.raises(ValueError, match="url must be a non-empty string"):
-            sdk.create_source("   ", "T1")
+            sdk.register_source("   ", "T1")
 
     def test_valid_url_still_works(self, sdk):
         """Valid URL still creates source node."""
-        src = sdk.create_source("https://example.com/valid", "T1")
+        src = sdk.register_source("https://example.com/valid", "T1")
         assert src is not None
         assert src.get("url") == "https://example.com/valid"
