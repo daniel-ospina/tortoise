@@ -5257,14 +5257,13 @@ surfaces:
   # DELIBERATELY unset) and `test-record-postgres` (Postgres, not FalkorDB) have no FalkorDB
   # provision step, so a DB-armed file registered in `carve_out` would skip silently there —
   # this file is in neither `carve_out` nor `slow_files`, so it never runs in them.
-  # ⛔ Not "any URI-less leg", and the two conditions part company: with NO `TORTOISE_DB_URI`
-  # the P4 session gate REFUSES the run UNLESS `TORTOISE_TEST_CARVE_OUT` is set
-  # (`tests/_embedded.py::_assert_p4_uri_required` returns early via `_carve_out_opted_in()`);
-  # measured on the default lane with no opt-in: 113 errors,
-  # `Failed: default pytest requires TORTOISE_DB_URI`. ⛔ With a SET-BUT-UNREACHABLE URI it
-  # refuses REGARDLESS of the flag — that failure is `_assert_configured_db_answers`, which
-  # returns early only on `not _uri_set_supported() or not will_connect` and never consults
-  # the opt-in.
+  # ⛔ NOT on "any URI-less leg" — the URI-gate split is the SAME for this row and is
+  # documented once, on the `api` row above: with no `TORTOISE_DB_URI` the P4 session gate
+  # refuses unless `TORTOISE_TEST_CARVE_OUT` is set, while a SET-BUT-UNREACHABLE URI is refused
+  # regardless of the flag (`_assert_configured_db_answers` never consults the opt-in, it
+  # returns early only on `not _uri_set_supported() or not will_connect`). Restated here it was
+  # a paraphrase that could drift, so this row POINTS at that paragraph rather than duplicating
+  # it — and the last four commits on this branch are what a duplicated paragraph costs.
   # The predicate-matrix and census classes are pure Python. The weight below is still the
   # flat default, and the reading shows COST, never the skip.
   # ⛔ Both registrations buy SELECTION, not EXECUTION: the `api` row's motivating arm is a
