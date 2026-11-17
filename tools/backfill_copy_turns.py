@@ -908,6 +908,142 @@ def _stamp_record_only_tier(conn: object, org_id: str, graph_id: str,
     return stamped
 
 
+def _cutover_state(dsn: str, org_id: str, graph_id: str):
+    """The graph's counter row — ``(seq, mode)`` — or ``None`` if it is uncut.
+
+    Split out from :func:`_refuse_a_miscalibrated_cutover` so a test can answer
+    it without a Postgres (the tool's other tests drive a fake seam), and so the
+    ONE reading the refusal needs is taken in ONE place.
+
+    Read-only and rolled back. A record that cannot be reached is NOT this
+    function's refusal: the write seam owns that (and fails closed itself), so a
+    driver error here is re-raised wrapped for the caller's own error class.
+    """
+    try:
+        import psycopg2
+    except ImportError:  # pragma: no cover - environment, not logic
+        # No driver ⇒ the write seam will refuse with its own (import-time)
+        # message; pre-flighting here would replace a precise failure with a
+        # vague one.
+        return None
+    from tortoise import record_allocator as ra
+
+    conn = psycopg2.connect(dsn)
+    try:
+        conn.autocommit = False
+        return ra.read_cursor(conn, org_id=org_id, graph_id=graph_id)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def _refuse_a_miscalibrated_cutover(dsn: str, org_id: str, graph_id: str, *,
+                                    allocate: bool) -> None:
+    """Refuse a graph/flag pair this lane cannot file, BEFORE it appends.
+
+    ⛔ THE TWO MIS-SET STATES ARE OPPOSITE, and each has a different remedy, so
+    each gets its own sentence rather than a shared "check the configuration":
+
+    * **cut over, flag OFF** — the enumerated arm is REFUSED on a cut-over graph
+      (`record_projection._refuse_an_enumerated_replay`), so every session batch
+      would be refused AFTER its events were appended: the journal grows, no row
+      is written, and the counter falls behind by the number of appends. Set
+      ``TORTOISE_RECORD_ALLOCATE=1`` in this tool's environment.
+    * **flag ON, not cut over** — the allocated arm needs a counter row in mode
+      ``active``; without one every batch raises ``CursorNotActive``. Run
+      ``tools/record_allocator_cli.py seed --journal <path>`` then ``arm`` first
+      (the order is load-bearing: ``seed`` does not change the mode and ``arm``
+      only accepts ``seeded``).
+
+    ⚠️ AN UNREADABLE RECORD IS NOT A VERDICT. If the counter row cannot be read
+    (a wrong ``--dsn``, a dead server, no ``psycopg2``), this returns without
+    refusing: the write seam owns an unreachable record and fails closed with a
+    message about the DSN, which is more precise than anything this pre-flight
+    could say about a state it never saw.
+    """
+    try:
+        state = _cutover_state(dsn, org_id, graph_id)
+    except Exception:  # noqa: BLE001 — see "AN UNREADABLE RECORD" above
+        return
+    if state is None:
+        if allocate:
+            raise CopyRefused(
+                f"{org_id}/{graph_id}: TORTOISE_RECORD_ALLOCATE is set but this "
+                "graph has NO record_cursor row (it is not cut over), so every "
+                "allocation would raise CursorNotActive. Cut it over first: "
+                "`record_allocator_cli.py seed --journal <path>` then `arm` "
+                "--acknowledge-cutover; the seed's floor is the journal's own "
+                "enumeration, which is what aligns the counter with the rows "
+                "this lane is about to write")
+        return
+    seq, mode = state
+    if not allocate:
+        raise CopyRefused(
+            f"{org_id}/{graph_id}: this graph IS cut over (record_cursor "
+            f"seq={seq}, mode={mode!r}) but TORTOISE_RECORD_ALLOCATE is OFF in "
+            "this tool's environment, so the enumerated arm would be refused "
+            "for every session batch — AFTER the events were appended, leaving "
+            "the counter behind the journal with no counter action to close the "
+            "gap. Set TORTOISE_RECORD_ALLOCATE=1 for this run (the same flag "
+            "that arms the live door), or `halt` the graph and re-seed it if "
+            "this backfill must run on the enumerated arm")
+    if mode != "active":
+        raise CopyRefused(
+            f"{org_id}/{graph_id}: TORTOISE_RECORD_ALLOCATE is set but the "
+            f"graph's counter is mode={mode!r} (seq={seq}), not 'active' — the "
+            "allocated arm can only issue numbers on an ACTIVE counter. Resume "
+            "with `record_allocator_cli.py arm --acknowledge-cutover` (from "
+            "'seeded'), or `reopen` then `arm` if it is 'halted'. Do NOT run "
+            "this lane against a halted counter: every batch would raise "
+            "CursorNotActive after its appends")
+
+
+def _refuse_a_divergent_allocation(write, *, journal_first: int,
+                                   session_id: str) -> None:
+    """The line and its rows must carry the SAME number — for THIS caller.
+
+    ⛔ THE HALF THE LIVE DOOR CANNOT GIVE THIS LANE (#13043 review P1-4).
+    `write_live_record` compares the allocated number with the append's and
+    refuses on a disagreement; this module calls `write_records` directly, so it
+    must make the same comparison itself. Without it, an allocated batch on a
+    counter that has drifted from the journal writes rows at N..N+k-1 while the
+    lines sit at M..M+k-1 — the silent two-coordinate split the cutover invariant
+    exists to prevent, and one no replay of the JSONL could repair.
+
+    The rollback is the point: the allocation (the counter increment) is undone
+    with the rows, so nothing is burned and nothing is renumbered. Only a write
+    that actually LANDED can diverge — a refused write is `_commit_or_refuse`'s
+    to report, with its own more precise message.
+    """
+    from tortoise.record_writer import RecordWriteOutcome
+
+    if getattr(write, "outcome", None) is not RecordWriteOutcome.APPLIED:
+        return
+    allocated = getattr(write, "first_seq", None)
+    if allocated is None or allocated == journal_first:
+        return
+    connection = getattr(write, "connection", None)
+    if connection is not None:
+        with contextlib.suppress(Exception):
+            connection.rollback()
+        with contextlib.suppress(Exception):
+            connection.close()
+    raise CopyRefused(
+        f"{session_id}: the ORDINAL ALLOCATOR issued position {allocated} but "
+        f"the journal append reported {journal_first} — the two allocators "
+        f"disagree about this session's first row, so writing it would put the "
+        "journal lines and their position rows at different numbers and no "
+        "replay of the journal could reproduce the rows. The allocation was "
+        "rolled BACK (nothing burned, nothing renumbered). Compare the two "
+        "readings with `tools/record_allocator_cli.py status --journal <path> "
+        "--dsn <dsn>` (its `position_divergence` field is this comparison): if "
+        "the JOURNAL is behind the counter, RESTORE the journal; if it is "
+        "AHEAD, re-seed with `halt` -> `seed --journal <path>` -> `reopen` -> "
+        "`arm`")
+
+
 def _journal_emit(journal_path: str, dsn: str, org_id: str, graph_id: str):
     """The production ``emit``: journal position, then the record, committed.
 
@@ -915,9 +1051,37 @@ def _journal_emit(journal_path: str, dsn: str, org_id: str, graph_id: str):
     numbered by it — a record row with no position is the drift #9190 closed.
     The record seam does NOT commit, so this does, and it REFUSES when nothing
     landed rather than returning a position for a write that was rolled back.
+
+    ⛔ THE ALLOCATING ARM IS WIRED HERE (#13043 review P1-4). Before this, the
+    call passed ``position=True`` and no ``allocate=``, so on a graph an operator
+    had CUT OVER the door refused EVERY session batch — and nothing in the CLI or
+    the evidence said so, while this PR is what made that state reachable at all
+    (the seed was unreachable before it). Two halves, and both are needed:
+
+    * ``allocate=record_live_allocate()`` — the record issues the number and the
+      plan carries it, so the same flag that arms the live door arms this lane;
+    * the CALLER'S OWN CROSS-CHECK, immediately below the write: the allocated
+      number and the position the journal append reported must be the SAME
+      number. That comparison is what `write_live_record` does
+      (`position_divergence`), and this lane cannot borrow it because it calls
+      the seam directly — so it does the comparison itself, on the uncommitted
+      transaction, and refuses with the remedy rather than numbering one batch
+      two ways.
+
+    THE ORDER OF OPERATIONS, which is now enforced instead of described: the
+    graph must be CUT OVER (``seed`` then ``arm``) and ``TORTOISE_RECORD_ALLOCATE``
+    must be set in this tool's environment BEFORE a run. `_cutover_state` is
+    checked before the first journal append, so a mis-set environment refuses
+    with no journal lines written at all — the failure mode the review named (a
+    refusal per session, after the appends had already committed) is unreachable.
     """
     from tortoise.log import EventLog
-    from tortoise.record_writer import RecordWriteOutcome, RecordWriter, write_records
+    from tortoise.record_writer import (
+        RecordWriteOutcome,
+        RecordWriter,
+        record_live_allocate,
+        write_records,
+    )
 
     # The journal must already EXIST: `EventLog` on a mistyped or fresh path
     # ordinals from 1, and `journal_event` absorbs the collision with
@@ -936,6 +1100,13 @@ def _journal_emit(journal_path: str, dsn: str, org_id: str, graph_id: str):
     # non-default `--dsn-env` wrote into whatever `TORTOISE_RECORD_DSN` named —
     # a different database, exit 0.
     writer = RecordWriter(dsn=dsn)
+    # ⛔ BEFORE THE FIRST APPEND, NOT AFTER IT. `_cutover_state` reads the graph's
+    # counter row once, so a graph/flag pair that cannot work is refused while
+    # nothing has been written rather than once per session after every append
+    # has committed (which is what the cutover invariant's refusal would
+    # otherwise cost this lane).
+    _refuse_a_miscalibrated_cutover(dsn, org_id, graph_id,
+                                    allocate=record_live_allocate())
 
     def emit(session_id: str, events: list[dict]):
         try:
@@ -988,8 +1159,22 @@ def _journal_emit(journal_path: str, dsn: str, org_id: str, graph_id: str):
                 "with the writer stopped")
         write = write_records(
             events, org_id=org_id, graph_id=graph_id,
-            position=True, first_seq=first,
+            position=True,
+            # ⛔ ON THE ALLOCATED ARM THE COUNTER OWNS THE NUMBER, and
+            # `replay_plan` REFUSES a caller watermark there, so `first` must
+            # NOT be forwarded — the same shape `write_live_record` uses.
+            first_seq=(1 if record_live_allocate() else first),
+            allocate=record_live_allocate(),
             conn=None, writer=writer)
+        # ⛔ THE CROSS-CHECK, ON THE UNCOMMITTED TRANSACTION (#13043 P1-4). The
+        # journal reported `first` and the counter issued something; while both
+        # allocators exist they must AGREE, or this batch would put rows at one
+        # set of numbers and lines at another. A disagreement is a REFUSAL and
+        # the transaction is rolled back, so the allocation is neither burned nor
+        # reused — the same guarantee `write_live_record`'s
+        # `position_divergence` arm gives the live door.
+        _refuse_a_divergent_allocation(write, journal_first=first,
+                                       session_id=session_id)
         # ⛔ THE TIER, IN THE SAME TRANSACTION (see `_RECORD_ONLY_TIER_SQL`), as
         # this call's `before_commit` hook: the statement runs on the connection
         # the seam opened and has NOT committed, so a stamp that cannot reach

@@ -102,8 +102,52 @@ from pathlib import Path
 from typing import Any
 
 #: The arming variable the seam itself reads — one name, so an operator cannot
-#: seed one record and arm another.
-RECORD_DSN_ENV = "TORTOISE_RECORD_DSN"
+#: seed one record and arm another. (Kept as the DSN default only; see
+#: :func:`_record_env_contract` for why it is not copied here.)
+
+#: The arming variable the seam itself reads — imported, never copied (#13043
+#: review P2-2): a second spelling of one name is how an operator seeds one
+#: record and arms another. Imported LAZILY inside :func:`_record_env_contract`
+#: because this module must run on a box with no `psycopg2` and no tortoise
+#: import cost until a verb actually needs the record.
+def _record_env_contract() -> tuple[str, str, str]:
+    """``(dsn_env, allocate_env)`` — the seam's own names, one copy each."""
+    from tortoise.record_writer import RECORD_ALLOCATE_ENV, RECORD_DSN_ENV
+
+    return RECORD_DSN_ENV, RECORD_ALLOCATE_ENV
+
+
+#: Printed by ``arm`` when it cannot proceed. Kept as a module constant so a
+#: test can assert the CONTENT an operator is handed, rather than a docstring.
+CUTOVER_ACK_TEXT = """record_allocator_cli: `arm` changes a GLOBAL production switch for ONE graph.
+
+arming a graph makes its live door allocate the journal ordinal. FOUR things
+must be true before the flag is rolled, and none of them is this command's to do:
+
+  1. THE FLAG LIVES IN THE WRITER'S ENVIRONMENT, NOT THIS SHELL'S.
+     Set %(allocate_env)s=1 for every process that writes records.
+     ⛔ Roll it AFTER every graph is armed, and NEVER clear it to revert: on a
+     cut-over graph the enumerated arm is REFUSED by name
+     (`_refuse_an_enumerated_replay`), so an unset flag turns the record path
+     OFF rather than back to the old behaviour. The way back is
+     `halt` -> `seed --journal <path>` -> `reopen` -> `arm`.
+
+  2. EVERY GRAPH WRITTEN AFTER THE CUTOVER NEEDS ITS OWN COUNTER ROW, and the
+     creation hook that would give it one (`provision_graph_record`, the plan's
+     §A7.8 item 8) is NOT IN THIS TREE. A graph created after this point is
+     born UNCUT and its records are refused (`cursor_not_active`) until it is
+     seeded and armed. Find them with `%(prog)s sweep --org-id <org> --dsn <dsn>`
+     and seed each one BEFORE the flag is rolled.
+
+  3. CUTOVER IS PER GRAPH. This command arms ONE graph; every other graph in
+     the org stays uncut and is refused while the flag is on.
+
+  4. THE SESSION BACKFILL (`tools/backfill_copy_turns.py`) must have the flag
+     set too — it calls the write seam directly and passes `allocate` from the
+     same variable. It pre-flights this and refuses before appending.
+
+Re-run with `--acknowledge-cutover` once those are true. Nothing has been armed.
+"""
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -220,6 +264,7 @@ def _cmd_status(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         row = cur.fetchone()
     conn.rollback()
     row_max = int(row[0]) if row else 0
+    _dsn_env, allocate_env = _record_env_contract()
     payload = {
         "org_id": args.org_id,
         "graph_id": args.graph_id,
@@ -228,6 +273,15 @@ def _cmd_status(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         "mode": None if cursor is None else cursor[1],
         "journal_row_max": row_max,
         "allocates": cursor is not None and cursor[1] == ra.MODE_ACTIVE,
+        # ⛔ `allocates` IS THE **RECORD'S** STATE, NOT THIS BOX'S (#13043 review
+        # P2-4). It said `true` on a graph whose live door is unarmed, which an
+        # operator reads as "the door is allocating". The door's switch is an
+        # ENVIRONMENT VARIABLE of the WRITER, which this process cannot see — so
+        # the reading of its own environment is reported as exactly that, and
+        # `None` means "unset HERE", never "off in production".
+        "allocates_scope": "record",
+        "record_allocate_env": allocate_env,
+        "record_allocate_seen_here": os.environ.get(allocate_env),
         "metrics": ra.metrics(),
     }
     if args.floor is not None:
@@ -281,14 +335,95 @@ def _cmd_seed(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     return _result_row(result)
 
 
+def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
+    """READ-ONLY: which of this org's graphs are BORN UNCUT (#13043 P1-1).
+
+    WHY A VERB AND NOT A SENTENCE. `arm` can only refuse; the state it must warn
+    about is PER GRAPH and grows over time (every graph created after the
+    cutover), so an operator needs a way to FIND them. This is that way, and it
+    is the plan's own named mechanism for the graph the best-effort mint creates
+    (`§A7.8 item 8`, the row reached *"through the reconciliation sweep"*).
+
+    ⛔ WHAT IT CANNOT SEE, stated so the output is not read as coverage: a graph
+    that has never been written leaves no row in `journal_event`, and the record
+    role cannot read `public.graphs` (no grant — see :data:`ra.UNCUT_GRAPHS_SQL`).
+    Such a graph has lost nothing yet; it becomes visible — and actionable — at
+    its first append.
+
+    ⛔ THE FLOOR IS NOT `row_max`. For a born-uncut graph the journal's own count
+    is the floor, and a `row_max` that is LOWER than it (lines whose rows were
+    refused) seeds the counter BEHIND the journal, which does not heal: it
+    wedges every later armed write. So each entry carries the journal's
+    enumeration where the tool can count it, and says plainly when it cannot.
+    """
+    from tortoise import record_allocator as ra
+
+    # ⛔ SCOPE FIRST, or the query returns zero rows and this verb reports "no
+    # born-uncut graphs" for an org that has them (#13043 P1-1, measured in
+    # `test_sweep_finds_a_born_uncut_graph_and_not_the_cut_over_one`).
+    ra.scope_tenant(conn, args.org_id)
+    with conn.cursor() as cur:
+        cur.execute(ra.UNCUT_GRAPHS_SQL, (args.org_id,))
+        graphs = [row[0] for row in cur.fetchall()]
+    conn.rollback()
+    entries: list[dict[str, Any]] = []
+    for graph_id in graphs:
+        with conn.cursor() as cur:
+            cur.execute(ra.JOURNAL_MAX_SQL, (args.org_id, graph_id))
+            row = cur.fetchone()
+        entry: dict[str, Any] = {
+            "graph_id": graph_id,
+            "journal_row_max": int(row[0]) if row else 0,
+            "seed_command": (
+                f"record_allocator_cli.py seed --org-id {args.org_id} "
+                f"--graph-id {graph_id} --journal <that graph's journal path>"),
+        }
+        if args.floor is not None:
+            # Only meaningful for ONE graph (the seed's floor is per graph); the
+            # operator passes it deliberately when a sweep reports a single
+            # candidate, and this verb never applies it to more than that.
+            entry["enumerated_floor"] = args.floor
+        entries.append(entry)
+    conn.rollback()
+    return {
+        "org_id": args.org_id,
+        "command": "sweep",
+        "uncut_graphs": entries,
+        "count": len(entries),
+        "floor_is_the_journals_count": True,
+        "cannot_see": (
+            "a graph that has never been written (no journal_event row) — the "
+            "record role has no grant on public.graphs; such a graph has lost "
+            "nothing yet"),
+    }
+
+
 def _cmd_transition(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     from tortoise import record_allocator as ra
 
     verb = {"arm": ra.arm, "halt": ra.halt, "reopen": ra.reopen}[args.command]
     seq = verb(conn, org_id=args.org_id, graph_id=args.graph_id)
     conn.commit()
-    return {"org_id": args.org_id, "graph_id": args.graph_id,
-            "command": args.command, "seq": seq}
+    payload: dict[str, Any] = {"org_id": args.org_id, "graph_id": args.graph_id,
+                              "command": args.command, "seq": seq}
+    if args.command == "arm":
+        # ⛔ THE FLAG IS NOT ARMED BY THIS COMMAND, AND THE OPERATOR MUST BE TOLD
+        # WHICH ONE IS (#13043 P1-2). `arm` moves the RECORD's counter; the
+        # door's arm is `TORTOISE_RECORD_ALLOCATE` in the WRITER's environment.
+        # They are two switches on purpose and a reader who confuses them lands
+        # on the state that eats rows.
+        _dsn_env, allocate_env = _record_env_contract()
+        seen = os.environ.get(allocate_env)
+        payload["record_allocate_env"] = allocate_env
+        payload["record_allocate_seen_here"] = seen
+        payload["door_armed_by_this_command"] = False
+        payload["next"] = (
+            f"{allocate_env}=1 in the WRITER's environment, and every other "
+            "graph of this org seeded+armed first (`sweep` lists the ones the "
+            "record has seen). NEVER clear it to revert: on a cut-over graph "
+            "the enumerated arm is refused, so unsetting it turns the record "
+            "path OFF")
+    return payload
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -296,11 +431,18 @@ def _parser() -> argparse.ArgumentParser:
         prog="record_allocator_cli",
         description="Seed / arm / halt / reopen the record's per-graph ordinal "
                     "allocator, or read its state (#12894).")
-    ap.add_argument("command", choices=("status", "seed", "arm", "halt", "reopen"))
+    ap.add_argument("command",
+                    choices=("status", "seed", "arm", "halt", "reopen", "sweep"))
     ap.add_argument("--org-id", required=True)
-    ap.add_argument("--graph-id", required=True)
+    #: `sweep` is the one verb that is ORG-scoped rather than graph-scoped — it
+    #: exists to find graphs nobody has named yet — so `--graph-id` cannot be
+    #: required by the parser for it. It IS required for every other verb, and
+    #: `main` refuses a missing one by name rather than letting a graph-scoped
+    #: verb run with `None`.
+    ap.add_argument("--graph-id", default=None)
     ap.add_argument("--dsn", default=None,
-                    help=f"the record's app-role DSN (default: ${RECORD_DSN_ENV})")
+                    help="the record's app-role DSN (default: the seam's own "
+                         "DSN variable)")
     ap.add_argument("--journal", default=None,
                     help="the graph's journal PATH; the seed's floor is counted "
                          "with the journal's own reader")
@@ -308,6 +450,11 @@ def _parser() -> argparse.ArgumentParser:
                     help="the number of records a replay of this graph's journal "
                          "enumerates, stated by the operator (mutually exclusive "
                          "with --journal)")
+    ap.add_argument("--acknowledge-cutover", action="store_true",
+                    dest="acknowledge_cutover",
+                    help="required by `arm`: confirms the global flag, the "
+                         "per-graph scope and the born-uncut graphs have been "
+                         "read (see the refusal text)")
     ap.add_argument("--json", action="store_true", dest="as_json")
     return ap
 
@@ -316,6 +463,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = _parser()
     args = ap.parse_args(argv)
 
+    if args.command != "sweep" and not args.graph_id:
+        ap.error(f"{args.command} is graph-scoped — pass --graph-id (only `sweep` "
+                 "walks the org)")
     if args.floor is not None and args.journal is not None:
         ap.error("--journal and --enumerated-floor are mutually exclusive: one "
                  "reading of the journal, not two")
@@ -325,6 +475,25 @@ def main(argv: list[str] | None = None) -> int:
                  "for an empty graph, so a default would seed a populated graph "
                  "to 0 and the next live allocation would collide with row 1")
 
+    # ⛔ `arm` REQUIRES AN EXPLICIT ACKNOWLEDGEMENT (#13043 review P1-2), and the
+    # refusal is where an operator learns the four preconditions — the flag's
+    # HOME, the born-uncut graphs, the per-graph scope, and the backfill. Without
+    # it, `seed` + `arm` followed by rolling the flag is a state that EATS rows:
+    # the live door is on the enumerated arm while the graph is cut over, so
+    # `_refuse_an_enumerated_replay` refuses every record while the journal keeps
+    # advancing (`counter - floor` rows lost, WARNed per record, never raised —
+    # `write_live_record` is fail-soft by contract), and the remedy is the
+    # allocator's operator path, not "set the flag".
+    if args.command == "arm" and not args.acknowledge_cutover:
+        _dsn_env, allocate_env = _record_env_contract()
+        print(CUTOVER_ACK_TEXT % {"allocate_env": allocate_env,
+                                  "prog": ap.prog}, file=sys.stderr)
+        _emit(args, {"org_id": args.org_id, "graph_id": args.graph_id,
+                     "command": "arm", "refused": "unacknowledged-cutover",
+                     "requires": "--acknowledge-cutover",
+                     "env": allocate_env})
+        return EXIT_REFUSED
+
     if args.journal is not None:
         try:
             args.floor = _journal_floor(args.journal)
@@ -332,9 +501,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"record_allocator_cli: {exc}", file=sys.stderr)
             return EXIT_USAGE
 
-    dsn = args.dsn or os.environ.get(RECORD_DSN_ENV)
+    dsn_env, _allocate_env = _record_env_contract()
+    dsn = args.dsn or os.environ.get(dsn_env)
     if not dsn:
-        print(f"record_allocator_cli: no DSN — pass --dsn or set {RECORD_DSN_ENV}",
+        print(f"record_allocator_cli: no DSN — pass --dsn or set {dsn_env}",
               file=sys.stderr)
         return EXIT_USAGE
 
@@ -355,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
             payload = _cmd_status(conn, args)
         elif args.command == "seed":
             payload = _cmd_seed(conn, args)
+        elif args.command == "sweep":
+            payload = _cmd_sweep(conn, args)
         else:
             payload = _cmd_transition(conn, args)
     except ra.SeedRefused as exc:
