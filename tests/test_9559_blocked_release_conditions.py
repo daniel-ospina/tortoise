@@ -213,7 +213,19 @@ _RELEASED_PHRASES = {
         "no per-org figure this gate can read ON A WRITE PATH",
     ),
     "storage_included_amounts_confirmed": (
-        "free/anon included amounts are still undecided",
+        # ⛔ THE LIVE WORDING, for the same measured reason as the residency entry
+        # above — and this one was still in the old shape. The previous single
+        # phrase, "free/anon included amounts are still undecided", occurs
+        # NOWHERE in the tree except this list: on the day the amounts are
+        # confirmed, the still-quoted "the included amounts are not confirmed"
+        # would not have been flagged by the per-dimension arm. The empty-list
+        # assert above catches a token with NO phrase; only liveness catches a
+        # token with a phrase over nothing, and
+        # ``test_an_unsatisfied_condition_phrase_is_live_against_its_block``
+        # makes that a class-level guarantee rather than this one fix.
+        "the included amounts are not confirmed",
+        "NOT OWNER-CONFIRMED",
+        "included amounts are still undecided",
     ),
     "vector_index_measurable": (
         "cap MUST NOT be wired",
@@ -384,6 +396,46 @@ def test_a_satisfied_condition_is_not_quoted_as_the_obstacle(dim):
                 f"current obstacle in blocked_reason:\n  {reason}")
 
 
+@pytest.mark.parametrize(
+    "dim,token",
+    [(d, t) for d in DIMENSIONS if d.blocked for t in d.release],
+    ids=lambda v: v.dimension if hasattr(v, "dimension") else v,
+)
+def test_an_unsatisfied_condition_phrase_is_live_against_its_block(dim, token):
+    """★ THE PHRASE LIST MUST GUARD THE BLOCK IT NAMES — not merely be non-empty.
+
+    Round 3 fixed this for ``postgres_residency_gauge`` ("the phrase appeared
+    nowhere in the block it guards") and reviewer round 6 found the SAME defect
+    one token over: ``storage_included_amounts_confirmed``'s only phrase occurred
+    nowhere in the tree except the phrase list itself, so the day the amounts are
+    confirmed the still-quoted "the included amounts are not confirmed" would not
+    have been flagged. ⛔ The non-empty-per-token assert cannot see this — a list
+    of one wrong phrase is non-empty — so the class-level fix is liveness.
+
+    The invariant is the COMPLEMENT of
+    ``test_a_satisfied_condition_is_not_quoted_as_the_obstacle``: for a condition
+    that is NOT satisfied, at least one registered phrase must be PRESENT in the
+    live ``blocked_reason`` of the dimension citing it. Unsatisfied ⇒ its wording
+    is still the obstacle ⇒ the guard has something to match.
+
+    Mutation this REDs: reword the block without updating the phrase list, or
+    leave a token whose phrases exist only in this list.
+    """
+    satisfied, why = _PREDICATES[token]()
+    if satisfied:
+        pytest.skip(f"{token} is SATISFIED — the complementary arm covers it")
+    assert dim.blocked_reason, f"{dim.dimension} cites {token} but has no reason"
+    flat = " ".join(str(dim.blocked_reason).split())
+    live = [p for p in _RELEASED_PHRASES[token] if " ".join(p.split()) in flat]
+    assert live, (
+        f"{dim.dimension} is blocked on the UNSATISFIED condition {token!r} "
+        f"({why}), but NONE of its registered phrases appears in the live "
+        f"blocked_reason — so on the day that condition is satisfied the stale "
+        f"sentence would not be flagged. Register the wording the block actually "
+        f"uses, not a paraphrase. Phrases tried: "
+        f"{list(_RELEASED_PHRASES[token])}\n  live reason: {flat[:300]}")
+
+
 def test_the_staleness_guard_has_at_least_one_live_token():
     """★ The guard must be able to FIRE. Per-dimension arms skip on unsatisfied.
 
@@ -420,6 +472,17 @@ def test_exactly_the_attribution_condition_is_satisfied_today():
         "if #12762's artifact moved, re-point this predicate and re-derive "
         f"postgres_storage's release conditions:\n  {evidence}")
     assert _PREDICATES["per_org_postgres_attribution"] is _per_org_postgres_attribution
+    # ⛔ AND "EXACTLY" MEANS EXACTLY. Reviewer round 6 measured the name
+    # over-claiming: with the pricing artifact flipped to OWNER-CONFIRMED this
+    # test stayed green, because it only ever asserted the one positive. The SET
+    # is pinned, so a second condition firing is a lane's prompt to LIFT A BLOCK
+    # (the docstring above) rather than a silent change in what this file proves.
+    now = {t for t, fn in _PREDICATES.items() if fn()[0]}
+    assert now == {"per_org_postgres_attribution"}, (
+        f"the set of satisfied release conditions changed: {sorted(now)} — if a "
+        f"condition genuinely fired, re-derive every blocked dimension that cites "
+        f"it (lift the block, or add the NEW condition with its evidence); if it "
+        f"only LOOKS satisfied, the predicate is reading the wrong artifact")
 
 
 def test_the_falsified_premise_is_actually_recorded_as_released():
@@ -825,12 +888,28 @@ def test_the_restore_verb_still_exists():
         "rebuild_from_record is gone or renamed — the G5 exemption pin above "
         "scans a package whose restore lane no longer lives where it names")
 
-    main_src = (_REPO / "tortoise" / "__main__.py").read_text(encoding="utf-8")
-    assert "_cmd_record_restore" in main_src, (
-        "the `record-restore` CLI verb is no longer in tortoise/__main__.py — the "
-        "G5 pin keeps scanning that file, so the door would be uncovered. Add the "
-        "verb's new home to the scan set above.")
-    assert "record-restore" in main_src, (
-        "the `record-restore` CLI subcommand name is gone from tortoise/__main__.py "
-        "— re-derive which file now holds the restore door and add it to the G5 "
-        "scan set")
+    # ⛔ CODE AND A BINDING, never a raw-substring grep. Reviewer round 6 measured
+    # the raw-text form: `record-restore` occurs in that file THREE times inside
+    # comments and twice in code, so renaming the actual subcommand literal left
+    # this assertion GREEN — it claimed a code fact that COMMENTS satisfied, the
+    # exact class this file exists to catch, in the pin meant to guard the pin.
+    # Two checks, each blind to prose:
+    #   1. the handler IDENTIFIER resolves in CODE (`_code_only` blanks comments);
+    #   2. the subcommand is BOUND to that handler on a real dispatch line — the
+    #      literal is a string, which `_code_only` blanks, so it is matched on
+    #      non-comment source lines, where the binding is the fact.
+    main_path = _REPO / "tortoise" / "__main__.py"
+    assert "_cmd_record_restore" in _code_only(main_path), (
+        "the `record-restore` CLI handler is no longer in tortoise/__main__.py's "
+        "CODE — the G5 pin keeps scanning that file, so the door would be "
+        "uncovered. Add the verb's new home to the scan set above.")
+    bound = [
+        line for line in main_path.read_text(encoding="utf-8").splitlines()
+        if 'args.cmd == "record-restore"' in line
+        and not line.lstrip().startswith("#")
+    ]
+    assert bound, (
+        'no non-comment line binds `args.cmd == "record-restore"` to a handler in '
+        "tortoise/__main__.py — the verb is quoted only in prose (or renamed), so "
+        "the G5 pin's premise (a door a tenant reaches) is false. Re-derive which "
+        "file now holds the restore door and add it to the G5 scan set")
