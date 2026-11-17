@@ -2997,6 +2997,49 @@ def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
     )
 
 
+#: The exact line that went stale under `#13052` (`4a5ffa0a14`, the seven-door retirement):
+#: `55` had been `counts.tools` before it, and NOTHING reads a comment, so the claim rotted
+#: with `check --provenance-strict` green. Held as the row arm's POSITIVE CONTROL — see the
+#: bottom of `test_no_per_row_comment_quotes_a_stale_surface_count` for why it has to live
+#: in the test rather than in the manifest.
+_STALE_SURFACE_COUNT_PROSE = (
+    "  # removed or renamed here (55 MCP tools / 94 public SDK methods, unchanged), so this is a\n"
+)
+
+#: The two prose shapes a surface count is written in below the header. `(?:public )?` because
+#: both `94 SDK methods` and `94 public SDK methods` are current spellings in this repo.
+_SURFACE_COUNT_PATTERNS = (
+    ("tools", r"(\d+) MCP tools"),
+    ("sdk_methods", r"(\d+) (?:public )?SDK methods"),
+)
+
+
+def _surface_count_claims(text: str) -> list[tuple[str, str, int]]:
+    """Every surface count `text` states, as `(kind, the matching shape, the number)`.
+
+    Extracted from the test body so the DETECTOR can be exercised on a known-stale string:
+    a scanner that is only ever pointed at a clean file proves nothing about itself.
+    """
+    claims: list[tuple[str, str, int]] = []
+    for kind, pattern in _SURFACE_COUNT_PATTERNS:
+        for match in re.finditer(pattern, text):
+            claims.append((kind, match.group(0), int(match.group(1))))
+    return claims
+
+
+def _stale_surface_count_claims(text: str, live: dict[str, int]) -> list[str]:
+    """The counts `text` states that DISAGREE with `live` (`kind` → this tree's count).
+
+    Empty is clean; non-empty names every offending shape so the caller's message can quote
+    them. A count that matches is deliberately NOT a finding: prose may state the live value.
+    """
+    return [
+        shape
+        for kind, shape, quoted in _surface_count_claims(text)
+        if quoted != live[kind]
+    ]
+
+
 def test_no_per_row_comment_quotes_a_stale_surface_count():
     """A rationale block that COUNTS the surface must count THIS tree's (#13141).
 
@@ -3009,31 +3052,63 @@ def test_no_per_row_comment_quotes_a_stale_surface_count():
     had no arm at all. A later lane that hand-edits a block (the re-cut cannot, it emits
     only the header) is exactly who writes the next stale one.
 
-    Fails on the pre-fix head, where the `tortoise_query` block read `55 MCP tools / 94
-    public SDK methods`: 55 is neither `counts.tools` (48) nor `counts.retired` (60).
+    ⛔ THE NEGATIVE ARM ALONE IS INERT, and this test shipped that way. The commit that
+    added it (`fe04f3bdb1f`) also removed the only count-bearing line below the header, so
+    `_surface_count_claims(body)` returns **0 tuples** and the loop below asserts nothing —
+    measured at that head: `re.finditer` → 0 matches for BOTH patterns. A guard whose
+    subject can vanish is a no-op gate (it reports green because it never looks), so the
+    detector's own firing power is asserted against the pre-fix string instead of assumed.
+    Mutation attribution: re-inserting that line into the `tortoise_query` block reddens
+    this test (`1 failed` — `55 MCP tools`, `counts.tools` is 48); removing it again is
+    green. Both arms are measured, so neither the clean verdict nor the positive control
+    can pass vacuously.
     """
     doc = _manifest()
-    # Everything AFTER the header: the header is exempt BY DESIGN, because it quotes the
-    # owner's approved TARGET (27 MCP tools / 40 methods, read from
-    # `docs/product/canonical-mcp-tools.md`), which is deliberately not this tree's count.
-    body = MANIFEST.read_text(encoding="utf-8").split("manifest_version:", 1)[1]
     live = {
         "tools": doc["counts"]["tools"],
         "sdk_methods": doc["counts"]["sdk_public_methods"],
     }
-    for kind, pattern in (
-        ("tools", r"(\d+) MCP tools"),
-        ("sdk_methods", r"(\d+) (?:public )?SDK methods"),
-    ):
-        for match in re.finditer(pattern, body):
-            quoted = int(match.group(1))
-            assert quoted == live[kind], (
-                f"a comment below the header quotes `{match.group(0)}`, but "
-                f"`counts.{'tools' if kind == 'tools' else 'sdk_public_methods'}` is "
-                f"{live[kind]} in this tree — a surface count in prose re-stales silently "
-                "because no gate parses comments; state the count from `counts:` or say "
-                "which tree's count it was and why it was that number"
-            )
+
+    # ⛔ THE POSITIVE CONTROL, FIRST — it is what stops this arm from going inert again.
+    # Every value is derived from `live`, so the control cannot itself go stale when the
+    # surface moves: whatever the current counts are, `+n` is a number that disagrees.
+    control = (
+        f"  # stale ({live['tools'] + 7} MCP tools / "
+        f"{live['sdk_methods'] + 9} public SDK methods, unchanged)\n"
+    )
+    assert _stale_surface_count_claims(control, live) == [
+        f"{live['tools'] + 7} MCP tools",
+        f"{live['sdk_methods'] + 9} public SDK methods",
+    ], (
+        "the row arm's detector no longer fires: a line quoting two counts that disagree "
+        "with `counts:` was judged clean, so the arm below can report green while looking "
+        "at nothing. Fix `_SURFACE_COUNT_PATTERNS` rather than loosening this control"
+    )
+    # …and the historical shape, which is the one that actually landed. `55` is the number
+    # this repo really wrote; `94` was correct then, so only the tools claim is asserted —
+    # that is the whole point (a check that pins the CORRECT count too would make this
+    # control break every time the SDK surface legitimately moves).
+    assert "55 MCP tools" in _stale_surface_count_claims(
+        _STALE_SURFACE_COUNT_PROSE, live
+    ), (
+        "the pre-fix line `…(55 MCP tools / 94 public SDK methods, unchanged)…` is no "
+        "longer recognised as stale — the detector drifted away from the defect it exists "
+        "for, so the clean verdict below proves nothing"
+    )
+
+    # Everything AFTER the header: the header is exempt BY DESIGN, because it quotes the
+    # owner's approved TARGET (27 MCP tools / 40 methods, read from
+    # `docs/product/canonical-mcp-tools.md`), which is deliberately not this tree's count.
+    body = MANIFEST.read_text(encoding="utf-8").split("manifest_version:", 1)[1]
+    stale = _stale_surface_count_claims(body, live)
+    assert stale == [], (
+        "a comment below the header quotes "
+        + ", ".join(f"`{shape}`" for shape in stale)
+        + f", but `counts.tools` is {live['tools']} / `counts.sdk_public_methods` is "
+        f"{live['sdk_methods']} in this tree — a surface count in prose re-stales silently "
+        "because no gate parses comments; state the count from `counts:` or say "
+        "which tree's count it was and why it was that number"
+    )
 
 
 # The `OVERRIDES:` marker's homes, across the tool TRIO that enforce/consume the target.
