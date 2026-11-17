@@ -132,9 +132,12 @@ def test_the_hard_stop_is_1_5x_the_cap_and_refuses_with_a_usable_message():
     assert "LOWER BOUND" in message and "under-reports" in message
     assert "Upgrade your plan" in message
     assert "reduce what you hold resident" in message
-    # the structured payload carries the figures the gate COMPARED
+    # the structured payload carries the figures the gate COMPARED — including
+    # the FRACTIONAL one: `int(115.5)` used to reach the payload as 115, i.e.
+    # half a MB below the number that actually fired the refusal (#13102 P3).
     assert caught.value.resource == "graph_storage"
     assert caught.value.limit == 77
+    assert caught.value.used == 115.5
     assert caught.value.estimated is True  # never presented as exact
 
 

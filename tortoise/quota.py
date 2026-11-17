@@ -464,7 +464,12 @@ class QuotaExceededError(Exception):
     """
 
     def __init__(self, message: str, *, resource: str | None = None,
-                 used: int | None = None, limit: int | None = None,
+                 # ``used`` is `int | float` on purpose: the field carries the
+                 # figure the gate COMPARED, and a banded dimension compares at
+                 # a fractional hard stop (77 × 1.5 = 115.5). An integral reading
+                 # still arrives as an int, so existing payloads are unchanged
+                 # (#13102 round 5, P3: `int()` had silently floored it).
+                 used: int | float | None = None, limit: int | None = None,
                  estimate: int | None = None,
                  estimated: bool | None = None,
                  code: str = QUOTA_REFUSAL_CODE) -> None:
@@ -678,6 +683,16 @@ def _arm_graph_storage(limits: dict, tier: str) -> dict:
     artifact's declared dimension too, for the same reason: two spellings of
     one allowance is how an arming edit silently lands on a key the gate never
     reads.
+
+    ⚠️ WHAT THESE NUMBERS ARE, AND ARE NOT. The artifact records them as
+    **DERIVED, NOT OWNER-CONFIRMED**
+    (``billing.storage._included_amounts_status``): solo's hot window follows the
+    owner's 30 %-of-price rule, while pro and team are that rule carried to
+    another price — *"not a ruling on those tiers"* (#11758 comment 6807826749,
+    where the included amounts are listed as explicitly NOT decided: *"a product
+    choice, not implied by the rates"*). They are defaults of record, PENDING.
+    Arming a reversible write-refusal at them is this slice's decision (#13082);
+    the figures are the artifact's to revise without a code change here.
 
     ⛔ ``free``/``anon`` ARE LEFT UNARMED, and that is a correctness fix, not an
     omission. The artifact carries ``0`` for their hot window because the owner

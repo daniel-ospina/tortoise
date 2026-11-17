@@ -566,6 +566,16 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
         # ``quota.resolve_org_limits``, so the price and the cap cannot drift.
         #
         # THE DERIVATION (recorded here because this is the line that arms it).
+        # ⚠️ THEIR AUTHORITY, stated where the arming happens: the artifact records
+        # these included amounts as **DERIVED, NOT OWNER-CONFIRMED**
+        # (``billing.storage._included_amounts_status``) — solo's hot window comes
+        # from the owner's 30 %-of-price rule, and pro/team are that rule carried
+        # to another price, NOT a ruling on those tiers (#11758 comment 6807826749:
+        # *"a product choice, not implied by the rates"*). They are defaults of
+        # record, pending. ARMING a reversible write-refusal on them is this
+        # slice's decision (#13082); the numbers themselves are the artifact's to
+        # revise, and a revision lands here with no code change.
+        #
         # ⚠️ IT IS NOT A DIVISION OF THE 30 % BUDGET BY $74/GB-MONTH — that
         # shortcut reproduces only solo and is what a reader re-running it
         # disputes (#13102 F4: $7.50/74 = 101.4, $44.70/74 = 604.1, against the
@@ -1097,9 +1107,19 @@ def enforce_allowances(
                 "allowance exceeded: team=%s dimension=%s used=%s limit=%s "
                 "hard_stop=%s", org_id, dim.dimension, used, allowance,
                 refuse_at)
+            # ⛔ THE PAYLOAD CARRIES THE VALUE THE GATE COMPARED (#13102 round 5,
+            # P3). ``quota.py`` documents that every field "must be the ones THIS
+            # gate compared", and a banded dimension compares at the HARD STOP —
+            # e.g. ``used >= 115.5`` — while ``int(used)`` floored the reported
+            # figure to 115, i.e. 0.5 MB BELOW the number that fired the
+            # refusal, in the payload a dashboard/billing reader consumes.
+            # Integral readings keep their int type, so the token dimensions'
+            # payloads stay byte-identical.
+            payload_used = int(used) if used.is_integer() else used
             raise QuotaExceededError(
                 with_limit_contact(f"{head}{note}"),
-                resource=dim.dimension, used=int(used), limit=int(allowance),
+                resource=dim.dimension, used=payload_used,
+                limit=int(allowance),
                 # Omitted (None) when the figure is exact, so `quota.py`'s
                 # documented payload shape holds: only an ESTIMATE is labelled.
                 estimated=True if reading.estimated else None,
