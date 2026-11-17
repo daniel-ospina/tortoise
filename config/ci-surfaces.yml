@@ -8535,6 +8535,12 @@ surfaces:
   - test_subgraph_render.py  # #3011: frozen serializer — block order, provenance, confidence, word budget (hermetic)
   - test_recall_state.py
   - test_belief_order_10137.py  # #10137: the belief layer's contribution to a QUERY's order — ep.informed_order is consulted only where the order read the posterior
+  # #12184: the ranker's PER-LABEL dispatch — every label in VALID_ENTITY_TYPES has an explicit
+  # signal family, an entity row is measured by its INBOUND claims (degree + their mean belief) and
+  # never by a point's own posterior/operator edges, and a label with no signal set REFUSES instead
+  # of silently scoring with another row type's signals. Selects `ep` because the change is in
+  # `tortoise/ranking.py` (a named-surface match replaces the `core` fallback, #2938/#7951).
+  - test_12184_ranker_entity_signals.py
   # #11702: the ABSENCE/PRESENCE contract — an absent belief is `null` + ep_state "absent", never the
   # neutral 0.5, and it never orders against a measured one. Dual-registered with `core` because the
   # surfaces it pins split across two SOURCE_PATTERNS: `tortoise/ranking.py` and `tortoise/analyze.py`
