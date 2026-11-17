@@ -6434,7 +6434,7 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 # so it says what the caller needs (the value the field reads,
                 # and the verb that turns an id into one) and nothing about this
                 # review.
-                f"  1. name the successor — `supersededBy=<successor NAME>` on "
+                f"  1. name the successor — `supersededBy=<successor name>` on "
                 f"an Object (or Subject) goal (that column stores the "
                 f"successor's NAME, which is what every reader of it resolves, "
                 f"so an id matches nothing), or `supersede_point(goal, "
@@ -6572,7 +6572,7 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             f"goalState='abandoned' on an Object/Subject goal, or "
             f"status='retracted' with goalState='abandoned' on a :Point goal "
             f"(whose 'archived' ending is REFUSED there as reserved); or "
-            f"status='superseded' plus supersededBy=<successor NAME> (the column "
+            f"status='superseded' plus supersededBy=<successor name> (the column "
             f"holds the successor's name, not its id);\n"
             f"  2. if this is genuinely a NEW goal, give it its own id "
             f"instead of reusing the ended one."
@@ -24330,7 +24330,7 @@ class TortoiseSDK:
         journal, the guard and the replay fold cannot drift from
         ``update_knowledge``'s:
 
-            status='superseded' + supersededBy=<successor NAME> + supersededAt
+            status='superseded' + supersededBy=<successor name> + supersededAt
 
         ⛔ THE CARRIER IS THE SUCCESSOR'S **NAME**, not its id, and that is what
         the readers require: §4.2/§4.3 define ``supersededBy`` as *"successor

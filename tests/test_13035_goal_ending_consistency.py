@@ -1734,7 +1734,7 @@ def test_the_SUCCESSOR_repairs_prescribe_the_NAME_the_carrier_RESOLVES(sdk):
         sdk.update_knowledge(goal["id"], goalState="superseded",
                              status="superseded")
     msg = str(exc.value)
-    assert "supersededBy=<successor NAME>" in msg, msg
+    assert "supersededBy=<successor name>" in msg, msg
     assert "supersededBy=<successor id>" not in msg, msg
     # ...and the id-taking verb is named, so a caller holding only an id has a
     # one-step route to the name (AX rule 2: say exactly what to do)
@@ -1756,7 +1756,7 @@ def test_the_SUCCESSOR_repairs_prescribe_the_NAME_the_carrier_RESOLVES(sdk):
                          id=ended["id"], goalState="met", status="live")
     msg = str(exc.value)
     assert "ALREADY ENDED" in msg, msg
-    assert "supersededBy=<successor NAME>" in msg, msg
+    assert "supersededBy=<successor name>" in msg, msg
     assert "supersededBy=<successor id>" not in msg, msg
 
     # (e) the prescription is PERFORMABLE and lands the value the reader keys on:
@@ -1832,7 +1832,7 @@ def test_the_FINALITY_repair_is_PERFORMABLE_on_a_POINT_goal_too(sdk):
     msg = str(exc.value)
     assert "ALREADY ENDED" in msg, msg
     assert "status='retracted'" in msg, msg
-    assert "supersededBy=<successor NAME>" in msg, msg
+    assert "supersededBy=<successor name>" in msg, msg
     # the ending survived the refused write
     after = sdk.get_point(ended["id"])
     assert after["goalState"] == "abandoned", after
