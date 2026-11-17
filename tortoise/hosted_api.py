@@ -253,6 +253,7 @@ from tortoise.sdk import (
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
     _journal_write_failure_warning,  # #4240 F1: the shared "a journal append failed" receipt warning
+    _refuse_inconsistent_goal_ending,  # #13065: the status/goalState AGREEMENT refusal, ONE home
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
@@ -260,6 +261,8 @@ from tortoise.sdk import (
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk._capture_session)
+    canonical_org_graph_name,  # #13205: the ONE idempotent `org_{bare id}` composition
+    validate_goal_state,  # #13110: the ONE goal-achievement guard (REST refuses before the write)
 )
 from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
     redact_error,
@@ -440,6 +443,44 @@ _CAPTURE_SESSIONS: dict[str, int] = {}
 # constant so the raise site and the two carve-outs cannot drift.
 _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
     "a capture for this session_id is already in flight — retry shortly")
+
+# ── #12992: the capacity refusal is TYPED, and its refusals are COUNTED ────
+# The capacity 429 used to answer a bare detail STRING while its sibling on the
+# same route (`_ingest_rate_limited`, #4051 §3.1) already answers a dict carrying
+# `code` + `retry_after`. Consequence, measured in #12992: a client that wants to
+# branch on the refusal must prose-match the message, and the only machine-
+# readable form of the retry instruction was the `Retry-After` HEADER — which the
+# capture clients that produced the issue's log lines never read
+# (`reflect-hook.ts`, `.../tortoise-capture.ts`: neither parses the header — the
+# first does one POST and throws, the deployed one re-arms on 30 s × 2^(n-1)
+# (research §5, #11225). So the delay is published in the BODY as well: a JSON
+# client gets it for free; the header stays for HTTP clients that honour it.
+#
+# ⚠️ The `message` keeps the EXACT pre-#12992 wording. A body that is now an
+# object is a shape change for any reader that did `detail in text`; keeping the
+# sentence identical means those readers keep matching while the typed fields are
+# additive.
+_CAPTURE_CAPACITY_CODE = "capture_capacity_saturated"
+_CAPTURE_CAPACITY_RETRY_AFTER_S = 30
+_CAPTURE_CAPACITY_MESSAGE = (
+    "capture capacity saturated — too many captures in "
+    "flight; retry shortly")
+#: Refusals the capacity gate has ANSWERED, and when it last did.
+#:
+#: Two values, because they answer two different questions and only one of them
+#: is ever a rate: `_CAPTURE_CAPACITY_REFUSED_TOTAL` (= CAPACITY refusals only —
+#: the sibling ``409`` duplicate-in-flight is a different class and is deliberately
+#: uncounted here, so one label never answers two questions) is cumulative since
+#: process start (never reset), and `_CAPTURE_LAST_REFUSED_AT` is the wall clock of
+#: the most recent refusal — which is what lets `/health` answer "is this happening
+#: NOW" instead of "has this ever happened" (#10185's forever-red: `refusing` keys on the WINDOW).
+_CAPTURE_CAPACITY_REFUSED_TOTAL = 0
+_CAPTURE_LAST_REFUSED_AT: float | None = None
+#: How recently a refusal must have happened for `/health` to call the gate
+#: "refusing". 10x the advertised `Retry-After`: long enough that a client
+#: retrying exactly as instructed is still counted, short enough that one burst
+#: does not pin the reading for the life of the process.
+_CAPTURE_REFUSAL_WINDOW_S = 300.0
 
 # NOTE (merge of #2850 x #2988/#3060): the dedicated ``_HEALTH_PROBE_EXECUTOR``
 # and its ``_HEALTH_PROBE_BUDGET_S`` wall bound were REMOVED here. They existed
@@ -647,8 +688,15 @@ def _graph_name_for_namespace(namespace: str | None, *,
     Branch order and truthiness mirror ``_get_proj`` EXACTLY: ``registry``
     first; ``graph_name is not None`` (not truthiness); the ``test_`` /
     ``tortoise_test`` family; the hyphenated ``test-`` family; then
-    ``org_{namespace}``; a falsy namespace falls back to the URI's own graph,
-    else ``tortoise``.
+    ``canonical_org_graph_name(namespace)``; a falsy namespace falls back to the
+    URI's own graph, else ``tortoise``.
+
+    ⛔ The org arm DELEGATES to the SDK's
+    :func:`tortoise.sdk.canonical_org_graph_name` (#13205) rather than restating
+    `f"org_{namespace}"`. That is not style: the two used to be independent
+    concatenations, so an idempotency fix applied to one would have split the
+    admission key from the graph the request opened — the #3365 class this
+    mirror exists to prevent.
     """
     if namespace == "registry":
         return "registry_tortoise"
@@ -659,7 +707,11 @@ def _graph_name_for_namespace(namespace: str | None, *,
             return f"{namespace}_tortoise"
         if namespace.startswith("test-"):
             return f"{namespace.replace('-', '_')}_tortoise"
-        return f"org_{namespace}"
+        # #13205: the SAME idempotent composition the SDK uses — never a bare
+        # `f"org_{namespace}"`, which minted a second prefix when the input
+        # already carried one (the `team_team_…` graph on the production
+        # instance). This mirror must not restate the rule; it calls it.
+        return canonical_org_graph_name(namespace)
     return uri_graph or "tortoise"
 
 
@@ -1244,16 +1296,31 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     caller passes a key already scoped by TENANT AND RESOLVED GRAPH
     (`_capture_session_key`, whose graph component is `_data_graph_name` —
     the graph the request will actually open, #3365).
+
+    #12992: a CAPACITY refusal is now a typed condition (``detail.code`` +
+    ``detail.retry_after``, with the ``Retry-After`` header retained) and every
+    one of them is counted for ``/health`` — see ``_CAPTURE_CAPACITY_CODE``.
     """
-    global _CAPTURE_IN_FLIGHT
+    global _CAPTURE_IN_FLIGHT, _CAPTURE_CAPACITY_REFUSED_TOTAL, _CAPTURE_LAST_REFUSED_AT
     session_key = session_key or None
     with _CAPTURE_IN_FLIGHT_LOCK:
         if _CAPTURE_IN_FLIGHT >= _CAPTURE_MAX_IN_FLIGHT:
+            # #12992: count BEFORE raising, under the same lock, so an ANSWERED
+            # refusal is always already COUNTED. ⛔ One direction only — nothing makes
+            # the increment and the raise atomic. Read INSIDE the lock and passed in
+            # the body, the value is LIVE: the gate raises on `>=`, so it EQUALS the limit.
+            _CAPTURE_CAPACITY_REFUSED_TOTAL += 1
+            _CAPTURE_LAST_REFUSED_AT = time.time()
             raise HTTPException(
                 status_code=429,
-                detail=("capture capacity saturated — too many captures in "
-                        "flight; retry shortly"),
-                headers={"Retry-After": "30"})
+                detail={
+                    "code": _CAPTURE_CAPACITY_CODE,
+                    "message": _CAPTURE_CAPACITY_MESSAGE,
+                    "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+                    "in_flight": _CAPTURE_IN_FLIGHT,
+                    "limit": _CAPTURE_MAX_IN_FLIGHT,
+                },
+                headers={"Retry-After": str(_CAPTURE_CAPACITY_RETRY_AFTER_S)})
         if session_key in _CAPTURE_SESSIONS:
             raise HTTPException(
                 status_code=409,
@@ -7533,6 +7600,78 @@ _READY_PROBE = HealthProbe(
     lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
+def _capture_health() -> dict:
+    """#12992: the capture gate's own state, as `/health` reports it.
+
+    The capacity 429 was a LOG LINE and nothing else, so "how often is the gate
+    refusing captures" was unanswerable: the two refusals that filed #12992 left
+    no datum anywhere, and the brief that investigated them could not measure the
+    concurrency at the moment they happened. This block is that read, on the
+    surface an operator already curls.
+
+    It publishes the CAPACITY facts (``in_flight`` / ``max_in_flight`` /
+    ``workers``) beside the REFUSAL facts, because the two together are what
+    distinguish the failure modes: a gate at 8/8 refusing steadily is a saturated
+    consumer, while ``capacity_refused_total`` climbing with ``in_flight`` low is a
+    burst of arrivals that each waited and left — neither is derivable from the other.
+
+    `workers` is on the block deliberately: `_CAPTURE_MAX_IN_FLIGHT` (8) is
+    ABOVE the pool size (4), so up to four ADMITTED captures hold their slots
+    while queued behind running extractions. Publishing only the ceiling made
+    "8 slots" read as "8 can run", which is not what the machine does
+    (``_CAPTURE_EXECUTOR``).
+
+    ⛔ It does NOT fold into `status`, the same rule as `change_feed` and
+    `wait_bound_breaches` — and UNLIKE `record`, whose `.ok` IS one of its three
+    terms: a saturated capture gate is not liveness (the process serves every
+    other route normally), and a cumulative counter must never pin it (#10185).
+    `refusing` is the WINDOWED reading (``_CAPTURE_REFUSAL_WINDOW_S``), so a
+    reader who wants "now" has it without re-deriving a rate from a total that
+    never resets.
+
+    Never raises, collects no I/O (#2850): one lock, three ints, one timestamp.
+    """
+    try:
+        with _CAPTURE_IN_FLIGHT_LOCK:
+            in_flight = _CAPTURE_IN_FLIGHT
+            refused = _CAPTURE_CAPACITY_REFUSED_TOTAL
+            last = _CAPTURE_LAST_REFUSED_AT
+            ceiling = _CAPTURE_MAX_IN_FLIGHT
+            # `_max_workers` survives a shut-down executor, so it needs no guard.
+            # ⛔ THE FORMATTING IS IN-GUARD: `fromtimestamp` can raise → a 500.
+            workers = _CAPTURE_EXECUTOR._max_workers
+            last_refused_at = None if last is None else datetime.fromtimestamp(
+                last, UTC).isoformat()
+    except Exception as exc:  # a health path must always answer
+        # ⛔ THE DEGRADED ARM PUBLISHES THE SAME KEYS AS THE HEALTHY ONE (#12992
+        # review P2). An ad-hoc short dict is the defect this file records in
+        # `health()`'s `refusals` arm — the "250 lines below" this used to say
+        # was head-bound and wrong; state the SYMBOL, not a distance. A
+        # 2-of-13-key dict gets a `KeyError` on `refusals["share"]`
+        # in exactly the degraded path the dashboard reads, measured twice. The operator
+        # contract in `docs/infra-runbook.md` §4.1.1b documents ten keys, so a
+        # jq `.capture.retry_after` on this arm must not raise.
+        return {"in_flight": None, "max_in_flight": None, "workers": None,
+                "capacity_refused_total": None, "last_refused_at": None,
+                "refusing": None, "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
+                "code": _CAPTURE_CAPACITY_CODE,
+                "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+                "error": str(exc)[:200]}
+    refusing = last is not None and (time.time() - last) <= _CAPTURE_REFUSAL_WINDOW_S
+    return {
+        "in_flight": in_flight,
+        "max_in_flight": ceiling,
+        "workers": workers,
+        "capacity_refused_total": refused,
+        "last_refused_at": last_refused_at,
+        "refusing": refusing,
+        "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
+        "code": _CAPTURE_CAPACITY_CODE,
+        "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+        "error": None,
+    }
+
+
 def _change_feed_health() -> dict:
     """#9208: degraded `:GraphEvent` feeds, as `/health` reports them.
 
@@ -8261,7 +8400,7 @@ async def health():
     VALUE ``/v1/version`` returns (one resolver, ``_build_identity``), because
     "is this deployed?" was previously unanswerable from this endpoint: a stale
     build served ``status: ok`` and every other block happily. Like
-    ``change_feed`` and ``record`` it does NOT fold into ``status`` — a stale
+    ``change_feed`` and ``record``'s counters it does NOT fold into ``status`` — a stale
     deploy is up, and calling it degraded would make Fly restart a healthy
     process forever. Currency is a COMPARISON (``check-deploy-staleness.sh``
     against ``origin/main``); this block publishes the datum that comparison
@@ -8285,6 +8424,16 @@ async def health():
     a CODE, never `consent_token_secret_problem`'s message — that message names
     the byte length of a short key, which on an unauthenticated surface would
     narrow exactly the key space the `_MIN_SECRET_BYTES` floor exists to refuse.
+
+    Capture-gate check (#12992): ``capture`` publishes the capture admission
+    gate's capacity and its REFUSALS — ``in_flight``, ``max_in_flight``,
+    ``workers``, ``capacity_refused_total``, ``last_refused_at``, ``refusing`` (a window,
+    not the cumulative total). Same class as ``change_feed``: state that lives in
+    process memory and was previously visible only as a log line on the CLIENT
+    that was refused. It does NOT fold into ``status`` (see ``_capture_health``):
+    a saturated capture gate refuses `POST /v1/sessions` while every other route
+    — including this one — is healthy, and restarting the process would neither
+    drain the extractions holding the slots nor clear a burst of arrivals.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -8409,6 +8558,12 @@ async def health():
             # review, P3; measured: `AttributeError` out of `health()` on a partial module).
             "health_setup_clamped": _health_setup_clamped(),
             "record": record, "build": _build_identity(),
+            # #12992: the CAPTURE gate. A capacity refusal is a product-health
+            # signal (captures refused/min) that used to exist only as a log
+            # line on the refusing client, so a fleet could be refusing a live
+            # agent's capture and NOTHING on this surface said so. Reported,
+            # never folded into `status` — see `_capture_health`'s docstring.
+            "capture": _capture_health(),
             # #10488: the consent bridge's key, published as a truncated hash so
             # a split between this deployment and the Pages mint is one COMPARISON
             # instead of a diagnosis cycle. Reported, never folded into `status`
@@ -11559,6 +11714,33 @@ from pydantic import (  # noqa: E402
 )
 
 
+def _refuse_goal_axes_disagreeing_at_the_door(
+        status: str | None, goal_state: str | None, surface: str) -> None:
+    """Refuse a CREATE whose two goal axes disagree — at the DOOR, as a 422.
+
+    #13110's placement rule, applied to #13065's two-field guard. The SDK runs
+    ``_refuse_inconsistent_goal_ending`` inside ``_sanitize_props``; left to
+    reach it, this route's blanket ``except Exception`` answers a bare 500 that
+    names nothing (measured at #13116's merge: ``POST /v1/objects
+    {"goalState": "abandoned"}`` was ``500 {"detail":"Internal server
+    error"}``). The vocabulary half of #13110 was refused here for exactly this
+    reason; the agreement half is the same failure shape and gets the same home.
+
+    The bag is built EXACTLY as the route forwards it — a ``None`` ``goalState``
+    is OMITTED (the #13110 no-clobber rule) and a falsy ``status`` is OMITTED
+    (the route's own ``if body.status``) — so this judges the state the write
+    actually lands, never a stricter one. An empty bag is a no-op, which is what
+    keeps ``{goalState: null}`` and a bare create working unchanged.
+    """
+    bag: dict[str, object] = {}
+    if status:
+        bag["status"] = status
+    if goal_state is not None:
+        bag["goalState"] = goal_state
+    if bag:
+        _refuse_inconsistent_goal_ending(bag, surface=surface)
+
+
 class CreatePointRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=10000)
     kind: str = Field(default="statement")
@@ -11597,6 +11779,46 @@ class CreatePointRequest(BaseModel):
     # the baseline it already has otherwise (with a logged warning) — never a
     # silent drop either way (#7980).
     credibility: str | int | float | None = None
+    # #13110: the SAME class #4032 fixed above, for the other ontology field a
+    # customer must be able to set. `goalState` is declared on the §4.1 Point
+    # table too (a legacy goal POINT — the objective map's goals are Points,
+    # #7856), the SDK persists it through the props passthrough, and this
+    # model dropped it the same way `confidence`/`authoredBy` were dropped. So
+    # the Field description above is the class: **a value the store can hold
+    # must never be a 200 with the value missing.**
+    goalState: str | None = None
+
+    @field_validator("goalState")
+    @classmethod
+    def valid_goal_state(cls, v: str | None) -> str | None:
+        """Same rule and same sentence as the objects door (`CreateObjectRequest`)
+        — and the same SDK function, so there is still ONE vocabulary.
+
+        Refused at the door rather than left to the SDK because this route's
+        blanket ``except Exception`` would turn the SDK's ValueError into a bare
+        500 that names nothing.
+        """
+        validate_goal_state(v)  # raises ValueError → 422 naming the set
+        return v
+
+    @model_validator(mode="after")
+    def goal_axes_agree(self):
+        """#13065's ending rule, refused HERE so the answer is a 422.
+
+        The route forwards these two fields to one SDK write, and the SDK's
+        ``_sanitize_props`` refuses an ending ``goalState`` beside a live
+        ``status``. Reaching it through the route's ``except Exception`` is a
+        bare 500, so the door runs the SAME guard (one home) before the write.
+
+        ⛔ The points door has NO ``status`` field (#13110 did not add one, and
+        this is not the place to), so the bag carries only ``goalState``: the
+        create reading then refuses an ENDING word outright — which is honest,
+        because this door cannot express the agreeing lifecycle status an
+        ending requires. It is a 422 naming both repairs, not a 500.
+        """
+        _refuse_goal_axes_disagreeing_at_the_door(
+            getattr(self, "status", None), self.goalState, "POST /v1/points")
+        return self
 
     @field_validator("kind")
     @classmethod
@@ -13662,6 +13884,48 @@ class CreateObjectRequest(BaseModel):
     # caller NAMES — there is no 'live' default to splat over since #9974 R1)
     # — the onboarding STATE seed passes in_progress.
     status: str | None = None
+    # #13110: ``goalState`` is a SEPARATE axis from ``status`` (ONTOLOGY §4.3,
+    # #7856) and was reachable only from Python: pydantic's default
+    # ``extra='ignore'`` DROPPED it here, so ``POST /v1/objects
+    # {"goalState": "unmet"}`` answered 200 with the value silently gone —
+    # and an INVALID word was dropped just as silently, so the door failed in
+    # the worst direction (no error, no vocabulary). Same class, same fix shape
+    # as #4032 on the points door (``confidence``/``authoredBy``).
+    goalState: str | None = None
+
+    @field_validator("goalState")
+    @classmethod
+    def valid_goal_state(cls, v: str | None) -> str | None:
+        """Refuse an unknown word HERE, naming the closed set.
+
+        The guard is the SDK's own (``sdk.validate_goal_state``, the same one
+        ``_sanitize_props`` runs) — never a second copy of the vocabulary:
+        this door only decides WHEN it runs, not WHAT it accepts.
+
+        It MUST run at the door. Left to the SDK, the ValueError is raised
+        inside ``sdk.create_object`` and caught by this route's blanket
+        ``except Exception``, which answers a bare 500 — a status that names
+        nothing and tells the client nothing (measured on today's tree: the
+        same request was 200 with the field dropped; with the field declared
+        but unvalidated it would be 500). A pydantic validator turns it into
+        FastAPI's 422, whose body carries the SDK's own sentence and therefore
+        the whole closed set.
+        """
+        validate_goal_state(v)  # raises ValueError → 422 naming the set
+        return v
+
+    @model_validator(mode="after")
+    def goal_axes_agree(self):
+        """#13065's ending rule, refused HERE so the answer is a 422.
+
+        Same home as the vocabulary refusal above and for the same reason: the
+        route's blanket ``except Exception`` turns the SDK's ValueError into a
+        bare 500 (measured at #13116's merge: ``{"goalState": "abandoned"}``
+        answered ``500``), so the door runs the SDK's own guard before the write.
+        """
+        _refuse_goal_axes_disagreeing_at_the_door(
+            self.status, self.goalState, "POST /v1/objects")
+        return self
 
 
 @app.post("/v1/objects")
@@ -13701,6 +13965,17 @@ async def create_object(body: CreateObjectRequest, request: Request,
             props["status"] = body.status
         if _okind is not None:
             props["objectKind"] = _okind
+        # #13110: forward ``goalState`` only when the caller NAMED a value.
+        # ⛔ `is not None`, not `model_fields_set`: an explicit ``null`` must be
+        # treated EXACTLY like an absent field here, because this door MERGEs by
+        # name and a forwarded `None` reaches whichever fold the SDK takes —
+        # measured (#13110 review round 2), the POINTS door's dedup fold REMOVES
+        # the property on a `None` (`create_point` -> `update_point(pid, **props)`)
+        # while this one preserves it, so the two doors deleted vs kept the same
+        # request. One rule for both: a create door never clears, and
+        # `update_knowledge(…, goalState=None)` is the clear (as the test pins).
+        if body.goalState is not None:
+            props["goalState"] = body.goalState
         # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
         # worker thread so THIS pinned call cannot freeze the single event loop
         # while it runs. Same asyncio.to_thread pattern as /v1/search;
@@ -13814,6 +14089,15 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
                 _author_props["authoredBy"] = body.authoredBy
             if body.credibility is not None:
                 _author_props["credibility"] = body.credibility
+            # #13110: `goalState` on the same rule as the objects door — a value
+            # the caller NAMED, never a `None`. ⛔ This is not cosmetic here: with
+            # `dedup=True` this route folds onto the existing Point through
+            # `update_point`, where a forwarded `None` DELETES the property —
+            # measured on this branch, `{goalState: null, dedup: true}` wiped a
+            # stored `met` while the objects door preserved it. A create door does
+            # not clear; `update_knowledge` does.
+            if body.goalState is not None:
+                _author_props["goalState"] = body.goalState
             out = sdk.create_point(
                 content=body.content,
                 kind=body.kind,
@@ -34233,6 +34517,140 @@ def _drop_org_graph_strict(org_id: str, graph_name: str | None = None) -> None:
     _drop_org_graph_impl(org_id, graph_name)
 
 
+def _org_graph_names(org_id: str, graph_name: str | None = None) -> list[str]:
+    """EVERY data-plane graph name this org owns — the deprovision list (#13205).
+
+    Why this exists. An org's data plane is not one graph. The default graph is
+    ``organizations.graph_name`` (``org_{org_id}``, or the pre-#3543
+    ``team_{org_id}``, or the registry lane's ``org_{name}``), and every custom
+    graph ``_provision_graph`` / ``insert_graph`` mints is a SEPARATE physical
+    graph named ``org_{org_id}_{gid}``. The purge used to drop exactly ONE name
+    (the stored default), so a hard-deleted org left its custom graphs — and
+    every legacy-spelled graph — on the instance forever. That is the same
+    class of leak #13205 measured: on ``instance-yxwgk64it``, 148 empty graphs
+    held 216 MB (26 % of a 1 GB instance) because a tenant graph costs ~1.46 MB
+    of resident RAM (measured by DELETE, not by create) and nothing ever
+    reclaimed it.
+
+    ⛔ THE SAFETY CLAUSE IS THE FILTER, not the enumeration. A candidate name is
+    kept ONLY if it provably belongs to THIS org: it equals the stored
+    ``graph_name``, or it is ``org_{org_id}``/``team_{org_id}``, or it is
+    prefixed ``org_{org_id}_``/``team_{org_id}_``. A malformed or foreign
+    ``graphs`` row therefore cannot make a purge delete another tenant's graph —
+    the enumerator supplies candidates, this function decides, and the two are
+    not the same trust level.
+
+    ⛔ THE CANONICAL NAME IS RETURNED **LAST**, and that ordering is a
+    CORRECTNESS requirement, not tidiness. Every drop goes through
+    :func:`_drop_org_graph_impl`, which obtains its DB handle by BINDING
+    ``org_{org_id}`` (``_make_sdk(namespace=org_id)._get_proj()``). Binding a
+    graph the store does not hold MATERIALISES it — measured and documented at
+    ``projection.FalkorProjection.__init__`` (#11113: the open-time health probe
+    creates the graph; write-freedom needs the PAIR ``skip_health_check=True,
+    ensure_indexes=False``) — and on the live lane a bind after a
+    ``GRAPH.DELETE`` brings the graph back WITH ITS NODES (reproduced 2026-11-17
+    on ``falkordb-server:v4.20.6``: delete → bind → ``GRAPH.LIST`` holds it
+    again, ``MATCH (n) RETURN count(n)`` = 1). So a list that dropped the
+    canonical name FIRST and then bound it again on the next name would end the
+    purge with the tenant's data graph still present — the erasure silently
+    undone by its own deprovision loop. Putting the bind target last means every
+    bind happens BEFORE its delete. Pinned by
+    ``test_the_whole_org_is_ACTUALLY_GONE_from_a_live_store``, which reds when
+    the order is reversed.
+
+    Enumeration can FAIL, and it must fail LOUD (review round 4, P1). A failed
+    enumeration is not "no custom graphs": the caller is about to commit an
+    IRREVERSIBLE erasure by deleting the control-plane rows, and after
+    ``purge_org_control_plane`` the custom namespaces exist nowhere — no
+    resolver can derive them and the reaper refuses an unresolved graph, so a
+    partial drop is unrecoverable. `_purge_deleted_orgs_locked` wraps each org in
+    its own try/except, so a raise here keeps the org row as the #926 retry
+    anchor and the next sweep completes the erasure. This is the same rule
+    `record_projection` states about a failed cutover probe: a failure to ask is
+    not an answer.
+
+    ⚠️ Residual, stated rather than hidden: the bind still TRANSIENTLY
+    materialises ``org_{org_id}`` on a legacy org whose only other graph is
+    ``team_{org_id}`` — the empty graph is created by the first iteration's bind
+    and removed by the last iteration's delete, so a process killed inside that
+    window leaves one empty graph behind. Removing the bind altogether means
+    changing ``_drop_org_graph_impl``'s handle (a write-free projection), which
+    is a wider change than this fix and is filed as follow-up work.
+    """
+    prefixes = (f"org_{org_id}_", f"team_{org_id}_")
+    own_defaults = {f"org_{org_id}", f"team_{org_id}"}
+    if graph_name:
+        own_defaults.add(str(graph_name))
+    bind_target = canonical_org_graph_name(org_id)
+    candidates: list[str] = [str(graph_name)] if graph_name else []
+    candidates.append(f"team_{org_id}")  # pre-#3543 spelling; no migration rewrote it
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            rows = get_control_plane().query(
+                "graphs", select=["namespace"],
+                filters=[("org_id", "eq", org_id)],
+            )
+            candidates += [r.get("namespace") for r in rows]
+        else:
+            nodes = _make_sdk(namespace="registry")._get_registry().query(
+                "MATCH (g:Graph {org_id:$tid}) RETURN g.namespace",
+                params={"tid": org_id},
+            ).result_set
+            candidates += [r[0] for r in nodes]
+    except Exception as e:
+        # ⛔ A FAILURE TO ASK IS NOT AN ANSWER (review round 4, P1). Degrading to
+        # "the derived names only" would commit an erasure that leaves every
+        # custom `org_{org_id}_{gid}` graph resident with its control-plane row
+        # gone — unnameable, unreapable, permanent. Raising keeps the org row as
+        # the #926 retry anchor, which is the whole point of that anchor.
+        raise RuntimeError(
+            f"graph enumeration failed for org {org_id}: {e} — refusing to "
+            f"deprovision a SUBSET of the org's graphs (the custom "
+            f"`org_{{id}}_{{gid}}` namespaces exist nowhere once the org rows "
+            f"are deleted); the org row stays so the next sweep retries"
+        ) from e
+    out: list[str] = []
+    for name in candidates:
+        if not name or not isinstance(name, str):
+            continue
+        if name == bind_target:
+            continue  # appended LAST, below
+        if name not in own_defaults and not name.startswith(prefixes):
+            continue  # not provably this org's — never drop it
+        if name not in out:
+            out.append(name)
+    out.append(bind_target)  # the bind target, always last (see the docstring)
+    return out
+
+
+def _drop_org_graphs_strict(org_id: str, graph_name: str | None = None) -> list[str]:
+    """STRICT drop of every graph this org owns — the deprovision seam (#13205).
+
+    Same retry-anchor contract as :func:`_drop_org_graph_strict`, widened from
+    the org's default graph to the WHOLE org: every name
+    :func:`_org_graph_names` proves is this org's (default + legacy spelling +
+    every custom ``org_{org_id}_{gid}``). Dropping only the default was the
+    defect — the row went, the custom graphs stayed, and a hard delete is the
+    last moment anything knows they existed.
+
+    An ABSENT graph is success (the impl treats that family as success), so the
+    list is safe to re-run; a REAL failure (auth, dead connection) propagates so
+    the caller keeps the org row as the retry anchor (#926) rather than
+    committing an erasure that orphaned a live graph.
+
+    ⛔ The list's LAST name is the one the drop seam BINDS, which is why the
+    canonical name is ordered last — see :func:`_org_graph_names`.
+    """
+    names = _org_graph_names(org_id, graph_name)
+    for name in names:
+        _drop_org_graph_strict(org_id, name)
+    return names
+
+
 def _drop_org_graph_impl(org_id: str, graph_name: str | None = None) -> None:
     target = graph_name or f"org_{org_id}"
     sdk = _make_sdk(namespace=org_id)
@@ -34299,10 +34717,17 @@ def _drop_org_acl_users(org_id: str) -> None:
 
 
 def _purge_registry_org(sdk, org_id: str, graph_name: str | None = None) -> None:
-    """Cascade-delete a registry org + drop its graph (mirrors sdk.org_delete)."""
+    """Cascade-delete a registry org + drop its graphs (mirrors sdk.org_delete).
+
+    #13205: EVERY graph, not just the default. The enumeration runs BEFORE the
+    nodes go — the registry ``Graph`` nodes are where the custom graphs'
+    namespaces live, so a drop list built after the ``DETACH DELETE`` would be
+    the default graph alone and the custom ones would leak.
+    """
     # C4 (#2113): drop the custom graphs' ACL users BEFORE the nodes go
     # (the enumeration reads the nodes).
     _drop_org_acl_users(org_id)
+    graph_names = _org_graph_names(org_id, graph_name)
     reg = sdk._get_registry()
     reg.query(
         "MATCH (m:Membership {org_id:$tid}) DETACH DELETE m",
@@ -34320,7 +34745,8 @@ def _purge_registry_org(sdk, org_id: str, graph_name: str | None = None) -> None
         "MATCH (t:Team {id:$id}) DETACH DELETE t",
         params={"id": org_id},
     )
-    _drop_org_graph(org_id, graph_name)
+    for name in graph_names:
+        _drop_org_graph(org_id, name)
 
 
 def _stored_grace_elapsed(row_deleted_at, row_grace_hours,
@@ -34506,8 +34932,12 @@ def _purge_deleted_orgs_locked() -> None:
                     else:
                         # C4 (#2113): drop the custom graphs' ACL users first
                         # (the enumeration reads the rows).
+                        # #13205: and drop EVERY graph the org owns — the
+                        # default name alone left every custom
+                        # `org_{org_id}_{gid}` graph on the instance after the
+                        # row was gone, permanently.
                         _drop_org_acl_users(org_id)
-                        _drop_org_graph_strict(org_id, row.get("graph_name"))
+                        _drop_org_graphs_strict(org_id, row.get("graph_name"))
                     purge_org_control_plane(cp, org_id)
                     _audit_logger.append(
                         org_id, None, "team_delete_purged",
@@ -50085,7 +50515,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 189 tracked files (705 distinct
+# ABSOLUTE line number from 189 tracked files (708 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

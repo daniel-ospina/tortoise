@@ -709,15 +709,12 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     it is WRITER AGREEMENT rather than over-rejection. Asserting the old shape
     would pin a divergence the slice exists to remove.
 
-    ⛔ The `:Event` half is no longer the "other direction" either (#13100): a
-    pre-#13100 Event had no lifecycle, so a non-persistable status was DROPPED
-    there and the bundle stayed accepted. #13100 retires the whole key —
-    `live.refuse_event_lifecycle_state` refuses ANY non-`None` `status` on an
-    `:Event`, whatever its value or type — so Phase 1 refuses it too, for the
-    same partial-mutation reason as the `:Object` arm. What this test still
-    proves is that BOTH labels refuse at Phase 1 with ZERO mutation, and each
-    refuses on the strength of its OWN writer/door rather than on a blanket
-    "reject every non-string" rule.
+    The `:Event` half proves the other direction, and it CHANGED with this diff:
+    since `#13100` an Event has no lifecycle at ALL (#11825), so a declared
+    `status` is REFUSED there rather than dropped, and the bundle must NOT stay
+    accepted. The arm is therefore not "reject every non-`str`" — it is "an
+    `:Event` carries no lifecycle, whatever the value or its type"; the
+    documented clear route stays `status: None`.
     """
     # The WRITER's answer for the same value — the authority Phase 1 mirrors.
     with pytest.raises(ValueError, match="must be a plain string"):
@@ -727,30 +724,32 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
         "entities": [{"ref": "o1", "type": "object", "name": "Alpha",
                       "status": {"a": 1}},
                      {"ref": "o2", "type": "object", "name": "Beta"},
-                     # The `:Event` half — no lifecycle at all since #13100, so
-                     # the whole `status` key is refused, whatever its value.
+                     # The `:Event` half of the contrast — since #13100 an Event
+                     # has no lifecycle at ALL, so any declaration is refused,
+                     # a non-persistable one included.
                      {"ref": "e1", "type": "event", "name": "Happened",
                       "eventKind": "sessionCaptured", "status": {"a": 1}}],
         "connections": [{"from": "o1", "to": "o2", "operator": "IMPL"}],
     }
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("declares status" in m and ":Object" in m for m in msgs), msgs
-    assert any("declares status" in m and ":Event" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(bundle)
-    # ZERO mutation: neither the predecessor objects nor the Event land.
+    # ZERO mutation: the predecessor object and the Event never land.
     assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 0
 
-    # …and the Event's shape alone is refused for the SAME reason, not by the
-    # `:Object` arm's presence: the `:Event` arm is discriminating on its own.
+    # …and the Event's declaration ALONE is refused too, so this isolates the
+    # Event arm from the :Object one above (S0's version of this test asserted
+    # the opposite here — a DROPPED value on an accepted bundle — which is
+    # #11825's TERMINAL-half boundary that #13100 replaced with the whole axis).
     event_only = {"entities": [
         {"ref": "o", "type": "object", "name": "Solo"},
         {"ref": "e1", "type": "event", "name": "OnlyEvent",
          "eventKind": "sessionCaptured", "status": {"a": 1}},
     ]}
-    alone = [v["message"] for v in sdk._validate_bundle(event_only)]
-    assert alone and all(":Event" in m for m in alone), alone
+    ev_msgs = [v["message"] for v in sdk._validate_bundle(event_only)]
+    assert any("declares status" in m and ":Event" in m for m in ev_msgs), ev_msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(event_only)
     assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 0

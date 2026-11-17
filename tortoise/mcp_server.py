@@ -4224,7 +4224,8 @@ def tortoise_create_point(kind: str, content: str,
                           authoredBy: str | None = None,
                           credibility: str | int | float | None = None,
                           props: Any = None,
-                          dedup: bool = True) -> dict:
+                          dedup: bool = True,
+                          goalState: str | None = None) -> dict:
     """Create a Point node (statement, decision, vision, hypothesis, etc.).
 
     On a successful write from an incomplete org, records the onboarding
@@ -4275,6 +4276,12 @@ def tortoise_create_point(kind: str, content: str,
                 return _SafeError({"error": f"invalid tag value: {t!r} (must be a "
                                             f"non-empty string ≤ 200 chars)"})
     merged["dedup"] = dedup
+    # #13110: the LEGACY goal shape — a goal POINT (§4.1 carries `goalState`
+    # too, and the objective map's goals are Points, #7856) — so the same field
+    # is declared here rather than left to the `props` bag only. Placed last in
+    # the signature so no existing positional argument rebinds.
+    if goalState is not None:
+        merged["goalState"] = goalState
     result = _safe(_quota_gated(_get_org_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
     # #3926: gate on the typed failure result, never on key presence — a user
     # prop named "error" must not suppress the onboarding observation.
@@ -6790,8 +6797,19 @@ def tortoise_org_create(name: str) -> dict:
 
 # ── Write/revise consolidation (epic #888 W2) ──────────────────────
 
-def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
+def tortoise_create_entity(type: str, name: str, props: Any = None,
+                           goalState: str | None = None) -> dict:
     """Create an entity — type: subject|object|event|document.
+
+    ``goalState`` (#13110) is the goal's ACHIEVEMENT state — the closed
+    vocabulary ``sdk.GOAL_STATE_VALUES``, a SEPARATE axis from the lifecycle
+    ``status``. Declared here because this is the CANONICAL create door: the
+    surface record has recommended merging ``tortoise_create_object`` into it
+    (`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md` §“absorbs
+    4”), so declaring the field only on the alias would leave the recommended
+    door without it — and would drop the declaration the day the alias is
+    merged. ``props`` stays third for positional compatibility; the vocabulary
+    and the ``None`` rules are the same as ``tortoise_create_object``'s.
 
     Event entities wire about* edges from aboutSubject/aboutObject/aboutPoint/
     aboutDocument props. Returns {node, nudges} — nudges suggest IMPL/NAND/
@@ -6811,6 +6829,8 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
+    if goalState is not None:
+        props = {**(props or {}), "goalState": goalState}
     return _safe(_quota_gated(_get_org_sdk().create_entity, "points"),
                  type, name, **(props or {}))
 
@@ -6965,12 +6985,48 @@ def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> d
         return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_subject, "points"), name, subjectKind, **(props or {}))
 
-def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dict:
-    """Create an Object node (product, customer, skill, etc.)."""
+def tortoise_create_object(name: str, objectKind: str,
+                          props: Any = None,
+                          goalState: str | None = None) -> dict:
+    """Create an Object node (product, customer, skill, etc.).
+
+    ``goalState`` (#13110/#7856) is the goal's ACHIEVEMENT state — the closed
+    vocabulary ``sdk.GOAL_STATE_VALUES``, a SEPARATE axis from the lifecycle
+    ``status`` (ONTOLOGY §4.3). It is declared here, not just accepted through
+    ``props``: the ``props`` bag is an untyped ``Any`` with no description, so
+    before this an agent reading ``tools/list`` had no way to learn the field
+    EXISTS and reached for ``goalState=`` as a top-level keyword — which failed
+    with ``unexpected keyword argument`` even though the value was reachable the
+    whole time through ``props`` (measured, #13110). Declaring it puts the field
+    in the served schema without adding a tool or a public SDK method: the SDK's
+    ``create_object`` already takes it through ``**props``, so this is a
+    parameter on an existing door.
+
+    ⚠️ What the schema now publishes is the field's EXISTENCE (a
+    ``string|null``), not its members — the closed set reaches a caller through
+    the refusal, which names every member, and through
+    ``docs/ONTOLOGY.md`` §4.3. No tool on this surface publishes an enum, so
+    declaring one here would make this door the exception rather than the rule.
+
+    ``goalState`` is placed AFTER ``props`` on purpose: a third positional
+    argument has always bound ``props``, and inserting the new parameter in
+    front of it would silently rebind it.
+
+    An unknown word is refused by the SDK's one guard
+    (``sdk.validate_goal_state``, reached via ``_sanitize_props``) and the
+    refusal names the whole closed set. ``None`` is legal and is NOT forwarded
+    when the caller omits it — a re-create must not wipe a stored state (the
+    #9572 clobber class).
+    """
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
+    # #13110: an explicitly-passed goalState wins over a props copy of the same
+    # key (the named parameter is the declared channel); the SDK's guard then
+    # validates whichever value won, so an unknown word is refused either way.
+    if goalState is not None:
+        props = {**(props or {}), "goalState": goalState}
     return _safe(_quota_gated(_get_org_sdk().create_object, "points"), name, objectKind, **(props or {}))
 
 def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
@@ -10050,20 +10106,76 @@ def tortoise_session_capture(conversation: list[dict],
             # ``_stored_session_harness`` fails open to None, which restores
             # the fresh-session rule (the claim only ever introduces a harness
             # the server has not stamped).
+            #
+            # ⛔ THE RAW `detail`, NEVER `str(detail)` (#12992 review P1). The
+            # helper stringifies a TYPED detail to its message
+            # (`hosted_api._record_capture_last_error`); pre-stringifying here
+            # defeated that branch, so a PLAIN dict detail — the 403 scope /
+            # graph-scoped-team refusals, the 503's `{error_code, message}`
+            # `_capture_control_plane_unavailable` — was written to the
+            # dashboard sub-line as a PYTHON REPR while the SAME refusal through
+            # REST (which passes `e.detail` untouched) painted the sentence. One
+            # detail, two renderings, and the org-visible one was the
+            # unreadable one.
+            #
+            # ⚠️ THE 402 IS THE COUNTER-EXAMPLE HERE, not an instance (#12992
+            # review P2): `quota_refusal_payload` returns a
+            # `quota.RefusalPayload` — a `dict` SUBCLASS whose own `__str__`
+            # returns `message` (#4614; `tortoise/quota.py:420-436` is the class
+            # and its `__str__`) — so `str(detail)` already painted that one. The repr this
+            # line fixes is the plain-dict arms above.
             with contextlib.suppress(Exception):
                 _record_capture_last_error(
                     org_id,
                     _observed_capture_harness(
                         org, harness,
                         asyncio.run(_stored_session_harness(org, session_id))),
-                    str(detail))
+                    detail)
         # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
         # — the points-estimate gate, the cohort cost cap, or the
         # ``_check_org_limit(org, "sessions")`` limit — so carry the shared
         # ERR_QUOTA code rather than making the caller interpret a bare status.
         # One mapping site covers every 402 this impl can raise, so REST and
         # MCP cannot drift on the class of a refusal.
-        out = _SafeError({"error": str(detail), "status": status})
+        #
+        # ⛔ A TYPED `detail` IS RENDERED AS ITS MESSAGE (#12992 review P2), WITH
+        # THE WHOLE-VALUE `str()` KEPT AS A FALLBACK — and that fallback IS a repr
+        # for a dict with no truthy `message`, so this is a CONVENTION the refusal
+        # shapes happen to satisfy, not an invariant this line enforces. Say it that
+        # way rather than claiming more: the capture door's 429s became dicts — the
+        # capacity refusal in this PR, and ``ingest_rate_limited`` before it — so
+        # `str(detail)` reached this tool surface as
+        # `"{'code': 'capture_capacity_saturated', 'message': '…', …}"`: a repr,
+        # not JSON, with `'` quoting that an agent's parser cannot read, and the
+        # plain sentence the refusal was worded as lost inside it. Every `detail=`
+        # the capture door can build at this head carries a `message` (the capacity
+        # 429, `_ingest_rate_limited`, `quota_refusal_payload`, the 503's
+        # `{error_code, message}` and the 403/404 shapes), so no in-repo refusal
+        # reaches the fallback — a NEW dict detail without one would.
+        # This is the SAME rule `hosted_api._record_capture_last_error` already
+        # records for the dashboard sub-line ("a Python repr would leak structure.
+        # Stringify to the message") — one file, one convention, so the two
+        # consumers of one detail cannot disagree about it.
+        error_text = (str(detail.get("message") or detail)
+                      if isinstance(detail, dict) else str(detail))
+        out = _SafeError({"error": error_text, "status": status})
+        # ⛔ A 429 IS DELIBERATELY NOT TYPED HERE, and the reason is the vocabulary,
+        # not an oversight (#12992 review P2). `code` on this surface is the NUMERIC
+        # JSON-RPC vocabulary (`ERR_QUOTA = -32006` above), so there is no field on
+        # this envelope that can carry the door's STRING code
+        # (`capture_capacity_saturated`) without one of the two meanings silently
+        # changing — and a `retry_after` beside a numeric `code` would be a second
+        # spellings of one contract. The capacity refusal therefore reaches this
+        # surface as `status: 429` plus the sentence; REST (`detail.code` /
+        # `detail.retry_after` / the `Retry-After` header) is the typed surface, and
+        # `docs/infra-runbook.md` §4.1.1b publishes it there. ⚠️ A `retry_after` key
+        # on this result dict — a response FIELD — is NOT the approval-gated MCP/SDK
+        # surface change AGENTS.md names: that rule covers adding, removing or
+        # renaming a TOOL (`TOOL_REGISTRY`) or a public SDK method, and
+        # `tools/surface_manifest.py` classifies `response_fields` as "outside the
+        # gated surface". So a typed arm here is a CONTRACT change that needs its own
+        # review, not an owner-approval gate; it is deferred for SCOPE (#12992 types
+        # the REST body, the counter and `/health`), not because a gate forbids it.
         if status == 402:
             out["code"] = ERR_QUOTA
         return out

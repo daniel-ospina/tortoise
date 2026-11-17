@@ -562,8 +562,9 @@ class TestTheLoaderContract:
         so a storage key in it would arm `graph_storage` on a path that never
         passed `quota._arm_graph_storage` — the ONE seam `#13084` built, which
         carries the tier number from the artifact AND the estimate rule with it —
-        and would arm `postgres_storage`, still BLOCKED for want of a per-org
-        byte meter, answering HTTP 500 on every gated write.
+        and would arm `postgres_storage`, still BLOCKED (its grounds live in
+        `allowance_gate.DIMENSIONS[*].blocked_reason` and `release`, not
+        restated here), answering HTTP 500 on every gated write.
 
         Mutation this REDs: moving either storage key into `tier_limits()`'s
         return dict "for symmetry" with the other limits.
@@ -575,8 +576,8 @@ class TestTheLoaderContract:
             leaks = storage_keys & set(pricing.tier_limits(tier))
             assert not leaks, (
                 f"tier_limits({tier!r}) exposes {sorted(leaks)} — the storage "
-                f"allowances belong on storage_limits() until the allowance "
-                f"gate's storage dimensions are unblocked")
+                f"allowances belong on storage_limits(), which is the ONE seam "
+                f"that arms them")
 
     def test_enforcing_on_a_tier_limits_dict_stays_inert(self):
         """The end-to-end statement of the invariant above: the gate must be a

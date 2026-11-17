@@ -106,11 +106,31 @@ agreement the harness never tested. Both names are in the job output.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.11+-only import raises ImportError before a later guard could run.
+#
+# #4053/#11342: the refusal must not wear a VERDICT's status. This harness's
+# answers are 0 (same) / 1 (DIFFERS) / 3 (no verdict), and `raise
+# SystemExit(<message>)` exits 1 — so an old interpreter would report that the
+# two forms DIFFER, which `cypher-diff.yml` reads as proof the harness can fail.
+# 2 is this tool's own "could not run", which is what an old interpreter IS.
+# `SystemExit(<int>)` carries no message, so the refusal is printed explicitly.
+# Pinned by `tests/test_entry_point_python_guard.py::REFUSAL_CODES`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/cypher_diff_harness.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/cypher_diff_harness.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import json
 import os
 import subprocess
-import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -356,12 +376,13 @@ def seed_graph(graph_uri: str, graph_name: str) -> dict[str, Any]:
 
     from tortoise.projection import _bounded_server_socket_kwargs
 
-    # ⛔ BOUNDED (#3065/#8118): ``falkordb`` defaults ``socket_timeout=None`` and
-    # hands it to redis-py explicitly, so an unset one parks this harness in
-    # ``recv()`` forever on a stalled engine — a hang indistinguishable from
-    # "no results". Spread INLINE so the tool-surface gate sees it on the CALL.
+    # #3065/#8118: a harness is not exempt from the read bound. `from_url` hands
+    # `socket_timeout=None` to redis-py, so a stalled engine parks the seed in
+    # `recv()` with no error — and this tool's exit codes cannot tell that apart
+    # from `2 = could not run`. The bound comes from the product's ONE resolution
+    # point, so the `TORTOISE_DB_SOCKET_*` knobs reach this client too.
     client = FalkorDB.from_url(_redis_url(graph_uri),
-                              **_bounded_server_socket_kwargs())
+                               **_bounded_server_socket_kwargs())
     graph = client.select_graph(graph_name)
     _refuse_a_foreign_graph(graph, graph_name)
     graph.query("MATCH (n:Point) DETACH DELETE n")
@@ -538,8 +559,9 @@ def run_cypher(graph_uri: str, graph_name: str, cypher: str, params: dict) -> tu
 
     from tortoise.projection import _bounded_server_socket_kwargs
 
-    # ⛔ BOUNDED (#3065/#8118) — see `seed_graph`'s note: an unset
-    # ``socket_timeout`` is the #2969 hang, not a default.
+    # #3065/#8118 — the same bound as `seed_graph`, on the path that produces the
+    # VERDICT: an unbounded `recv()` here would hang the diff itself rather than
+    # answer it, and a harness that never returns is not `1 = different`.
     graph = FalkorDB.from_url(_redis_url(graph_uri),
                               **_bounded_server_socket_kwargs()).select_graph(graph_name)
     res = graph.query(cypher, params)
@@ -983,7 +1005,8 @@ def bench(graph_uri: str, graph_name: str, dsn: str, candidate: Candidate,
 
     from tortoise.projection import _bounded_server_socket_kwargs
 
-    # ⛔ BOUNDED (#3065/#8118) — see `seed_graph`'s note.
+    # #3065/#8118 — the bench arm seeds padding through the same unbounded
+    # constructor, so it needs the same bound as the two paths above.
     graph = FalkorDB.from_url(_redis_url(graph_uri),
                               **_bounded_server_socket_kwargs()).select_graph(graph_name)
     padding = {f"p-pad-{i:05d}" for i in range(max(0, rows - len(CORPUS)))}
