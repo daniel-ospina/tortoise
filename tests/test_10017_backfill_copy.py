@@ -555,10 +555,19 @@ def test_the_cutover_preflight_runs_BEFORE_the_first_append(
     the first journal append … with no journal lines written at all" — had no
     test where it has to hold.
 
-    MEASURED here: the journal append is the REAL `EventLog`, so "nothing was
-    written" is a byte comparison of the file rather than an assertion about a
-    fake that cannot write. A tree with the call deleted reaches the append and
-    the assertion fails.
+    THE FALSIFIER IS `pytest.raises`, AND MEASURED IT IS THE ONLY ONE THIS ARM
+    HAS. With the call deleted `_journal_emit` RETURNS its `emit` closure and
+    raises nothing, so this row reds with `DID NOT RAISE`. A byte comparison of
+    the journal cannot distinguish those two trees: `EventLog.__init__` only
+    stores the path (`tortoise/log.py`) and every `log.append(...)` lives inside
+    the returned closure, which this arm never calls. That is why an earlier cut
+    of this test's byte assertion was unreachable — an assertion whose value
+    cannot vary under any mutation is not proof.
+
+    The byte assertion below is therefore a DIFFERENT, still-reachable claim —
+    the REFUSING path wrote nothing (a "log the refusal into the journal" mutant
+    reds it) — and the ordering claim's reachable byte evidence lives in
+    `test_the_returned_emit_is_where_the_first_journal_line_appears`.
     """
     import tortoise.record_writer as rw
 
@@ -572,8 +581,51 @@ def test_the_cutover_preflight_runs_BEFORE_the_first_append(
                        match="TORTOISE_RECORD_ALLOCATE is OFF"):
         copy_mod._journal_emit(path, "dsn", "org", "graph")
     assert Path(path).read_bytes() == before, (
-        "the pre-flight ran AFTER a journal line was appended — on a real run "
-        "that is a counter left behind the journal")
+        "the REFUSING path appended a journal line — a line written while "
+        "refusing is a counter left behind the journal, the exact consequence "
+        "the refusal's own message names")
+
+
+def test_the_returned_emit_is_where_the_first_journal_line_appears(
+        monkeypatch, tmp_path) -> None:
+    """⛔ WHERE THE ORDERING IS ACTUALLY OBSERVABLE (#13043 review finding 2).
+
+    `_journal_emit` opens the journal, runs the pre-flight, and RETURNS the
+    `emit` closure — so "the pre-flight runs BEFORE the first append" is
+    checkable as bytes on a real journal: the file is untouched when the
+    function returns, and exactly one line longer only after `emit` runs.
+
+    BOTH assertions vary. An append moved into `_journal_emit` before the
+    pre-flight reds the first; an `emit` that never appends reds the second.
+    """
+    import tortoise.record_writer as rw
+
+    path = _journal(tmp_path)
+    before = Path(path).read_bytes()
+    built: list[dict] = []
+    monkeypatch.setattr(rw, "write_records",
+                        lambda events, **kwargs: _Write(
+                            _outcome().APPLIED, len(events), _Conn()))
+    monkeypatch.setattr(rw, "RecordWriter",
+                        lambda **kwargs: built.append(kwargs) or "writer")
+    monkeypatch.setattr(rw, "record_live_allocate", lambda: False)
+    # The pair the pre-flight WAVES THROUGH: an UNCUT graph (no counter row) with
+    # the flag OFF. The other pair it waves through is cut-over + flag ON, and
+    # `test_the_cutover_arm_passes_allocate_and_never_a_caller_watermark` drives
+    # that one; this arm only needs to reach the returned closure.
+    monkeypatch.setattr(copy_mod, "_cutover_state",
+                        lambda *_a, **_k: None)
+
+    emit = copy_mod._journal_emit(path, "dsn", "org", "graph")
+    assert Path(path).read_bytes() == before, (
+        "_journal_emit appended a journal line BEFORE returning `emit` — the "
+        "pre-flight has to be the last thing that runs before the caller "
+        "appends, or a refusal leaves a line behind")
+    assert built == [{"dsn": "dsn"}]
+    assert emit("s1", [{"a": 1}]) == 2, (
+        "the journal already held one record, so the first append is position 2")
+    assert Path(path).read_bytes() != before, (
+        "the returned `emit` did not append to the journal at all")
 
 
 def test_contiguous_positions_anchor_the_rows_at_the_first_one(
