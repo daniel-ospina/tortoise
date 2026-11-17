@@ -204,6 +204,24 @@ def read_journal(path: str | Path, *, salvage: bool = False) -> Journal:
 
     if segmented:
         records = journal_segments.read_all_segments(graph_dir, salvage=salvage)
+        if not records and not (graph_dir / journal_segments.ACTIVE_NAME).exists() \
+                and not (graph_dir / journal_segments.MANIFEST_NAME).exists():
+            # ⛔ A DIRECTORY IS NOT A JOURNAL BY BEING A DIRECTORY (review P2).
+            # With no segment, no manifest and no `events.jsonl` there is no
+            # journal here to read — and reading it as ZERO RECORDS makes
+            # `apply` print "NOTHING TO DO — every journal position is already in
+            # the record", which is the vacuity class this function exists to
+            # refuse (the existence branch above cannot see it: the path DOES
+            # exist). A real graph directory always carries at least its active
+            # journal file or a manifest, so this refuses a mistyped parent
+            # without touching a legitimately empty graph.
+            raise RunnerError(
+                f"journal {given} is a directory with no journal in it — no "
+                f"{journal_segments.ACTIVE_NAME}, no sealed segment and no "
+                f"{journal_segments.MANIFEST_NAME}. A directory is not a journal "
+                f"by being a directory, and reading this as zero records would "
+                f"report the record as complete. Point --journal at "
+                f"<graph dir>/events.jsonl (or the graph dir)")
         # ⛔ DAMAGE IS REPORTED AS UNKNOWN, NOT AS ZERO (review P2).
         # `read_all_segments` counts a mid-file damage per segment INTERNALLY and
         # then discards the count (it raises or logs, and returns only records) —
@@ -794,7 +812,15 @@ def _render_plan(report: PlanReport) -> str:
                  "(the plan path opens no connection unless asked for the checkpoint)")
     if report.events_to_consume:
         lines.append("")
-        if report.checkpoint is not None:
+        if report.cursor is not None:
+            # ⛔ DON'T HAND OVER A NUMBER ON AN ARM THAT CANNOT WRITE (review P2).
+            # The cutover verdict above already says an enumerated replay is
+            # REFUSED here, so this number is one `apply` can only answer with
+            # that refusal — the same defect this block fixes for the arm that
+            # never read the record, one line below.
+            lines.append("no acknowledgement is handed over: this graph is CUT "
+                         "OVER, so `apply` refuses the enumerated replay")
+        elif report.checkpoint is not None:
             lines.append("to apply this plan:  --acknowledge-plan "
                          f"{report.events_to_consume}")
         else:
@@ -972,7 +998,16 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
         conn.rollback()       # read-only: nothing was written, so nothing commits
     finally:
         _quietly(conn.close)
-    remaining = len(journal.records) - (cp.next_seq - 1)
+    allocated = cursor is not None
+    # ⛔ NEVER SUBTRACT TWO COORDINATE SYSTEMS (review P1). On a cut-over graph
+    # `journal_event.seq` is an ordinal the COUNTER issued, not an index into
+    # this journal, and `cp.next_seq` is in THAT coordinate — so
+    # `len(journal) - (next_seq - 1)` subtracted an allocator ordinal from a
+    # journal length and reported `remaining: 0` / `fully_consumed: true` for a
+    # record holding 3 ordinals and NONE of this journal's records. The
+    # remainder is only a number on the enumerated arm; on the allocated arm the
+    # honest answer is that the fold does not apply, which `plan` already says.
+    remaining = None if allocated else len(journal.records) - (cp.next_seq - 1)
     payload = {
         "verb": "status",
         "org_id": args.org_id,
@@ -981,16 +1016,19 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
                     "segmented": journal.segmented},
         "checkpoint": {"high_seq": cp.high_seq, "present": cp.present,
                        "first_gap": cp.first_gap, "next_seq": cp.next_seq,
-                       "contiguous": cp.contiguous},
+                       "min_seq": cp.min_seq, "contiguous": cp.contiguous},
         "cursor": None if cursor is None else {"seq": cursor[0], "mode": cursor[1]},
-        "events_remaining": max(0, remaining),
-        "fully_consumed": remaining <= 0 and cp.contiguous,
+        "events_remaining": None if allocated else max(0, remaining),
+        "fully_consumed": None if allocated else (remaining <= 0 and cp.contiguous),
     }
     text = "\n".join([
         f"journal: {journal.path} — {len(journal.records)} records",
         f"record: present {cp.present}, high {cp.high_seq}, first gap "
         f"{cp.first_gap} → resume at seq {cp.next_seq}",
-        f"events remaining: {max(0, remaining)}",
+        ("events remaining: unknown — this graph is CUT OVER, so its record's "
+         "positions are the allocator's and not this journal's; the fold does "
+         "not apply" if allocated
+         else f"events remaining: {max(0, remaining)}"),
         "cutover: " + ("none (positions are the journal's)" if cursor is None
                        else f"cursor present (seq {cursor[0]}, mode {cursor[1]})"),
     ])

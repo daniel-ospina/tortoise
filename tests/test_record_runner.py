@@ -82,6 +82,22 @@ def test_a_missing_journal_is_a_refusal_and_not_an_empty_one(tmp_path):
             read_journal(given)
         assert "does not exist" in str(exc.value)
 
+    # ⛔ The THIRD shape: the path EXISTS and is a directory, but holds no
+    # journal at all (the classic mistype: a graph dir's PARENT). Reading it as
+    # zero records made `apply` print "NOTHING TO DO — every journal position is
+    # already in the record", i.e. the vacuity this test is named against.
+    empty = tmp_path / "not-a-graph"
+    empty.mkdir()
+    (empty / "notes.txt").write_text("unrelated", encoding="utf-8")
+    with pytest.raises(RunnerError) as exc:
+        read_journal(empty)
+    assert "no journal in it" in str(exc.value)
+    # …and a REAL graph dir with an empty but present journal is still readable:
+    real = tmp_path / "graph"
+    real.mkdir()
+    (real / "events.jsonl").write_text("", encoding="utf-8")
+    assert len(read_journal(real)) == 0
+
 
 def test_strict_reading_refuses_mid_file_damage_and_salvage_counts_it(tmp_path):
     """`salvage` is an explicit choice, and the report says when it was taken.
@@ -579,6 +595,53 @@ def test_plan_reports_CUT_OVER_and_does_not_hand_over_an_acknowledgement(
     assert rc == EXIT_OK
     out = capsys.readouterr().out
     assert "cutover: cursor present" in out and "REFUSED" in out
+    # ⛔ The test's NAME claims this; before, only the cutover line was asserted,
+    # so the ack number could (and did) come back without any test noticing.
+    assert "--acknowledge-plan" not in out
+
+
+def test_status_reports_the_remainder_on_the_enumerated_arm(monkeypatch, capsys):
+    """`status` had NO coverage, which is why the P1 below reached a head."""
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=20, present=20))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "events remaining: 19" in out
+
+
+def test_status_refuses_to_subtract_an_ALLOCATOR_ordinal_from_a_journal_length(
+        monkeypatch, capsys):
+    """⛔ The P1: two coordinate systems, and `status` reported a false DONE.
+
+    On a cut-over graph `journal_event.seq` is an ordinal the COUNTER issued, so
+    `checkpoint.next_seq` (600) is not an index into this 39-record journal. The
+    old arithmetic `len(journal) - (next_seq - 1)` therefore went NEGATIVE and
+    clamped to 0, printing `events_remaining: 0` and `fully_consumed: true` for a
+    record holding 3 ordinals and NONE of this journal's records — while
+    `plan` on the same graph correctly says the fold does not apply.
+    """
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=600, present=3, min_seq=500),
+             cursor=(600, "seeded"))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
+               "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["events_remaining"] is None, (
+        "a remainder was computed across two coordinate systems")
+    assert payload["fully_consumed"] is None, (
+        "a cut-over graph must never be reported as fully consumed")
+    assert payload["cursor"] == {"seq": 600, "mode": "seeded"}
+
+
+def test_status_text_says_UNKNOWN_rather_than_a_false_zero(monkeypatch, capsys):
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=600, present=3, min_seq=500),
+             cursor=(600, "seeded"))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "events remaining: unknown" in out
+    assert "events remaining: 0" not in out
+    assert "CUT OVER" in out
 
 
 def test_apply_REFUSES_allocate_because_it_would_mint_fresh_ordinals(
