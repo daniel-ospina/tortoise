@@ -112,9 +112,12 @@ all (exit 2, nothing written). Without that second guard a mistyped path — a `
 the ingestion table while scoring nothing, and overwrote `run-{target}.json` /
 `scoreboard-{target}.md` in the packet's own directory. An empty scoreboard is not a result:
 `exit_code` treats an empty tally as a failure too, so that case cannot report success even if the
-shape check were bypassed. For the same reason `run` refuses to publish an **unjudged** board
-into the bundle (`--judge none` with the default output): every row would be `unjudged`, which is a
-non-result, not a baseline — point `--out` at a scratch directory or score it.
+shape check were bypassed. For the same reason `run` refuses to publish a board that is **not
+fully judged** into the bundle — whatever the cause (`--judge none`, a reader that failed, an empty
+verdicts map): the rule is keyed on the produced tally (`may_publish`), not on a flag, so a
+partly-`unjudged` board cannot become the baseline. Point `--out` at a scratch directory to inspect
+it. `judge` and `render --write` refuse the bundle for the same reason: the baseline comes from one
+complete `run`.
 
 `--judge fresh` spawns the fresh reader itself as `pi -p --no-session --no-tools`, in an EMPTY
 sandbox directory rather than the repo root, and writes its verdicts. Both halves of that are
