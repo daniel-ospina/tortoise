@@ -102,7 +102,7 @@ def main() -> int:
         # `--uri` used to auto-approve a sweep of the shared registry graph.
         test_guard(target, args.yes)
         print(f"Registry graph (SDK-resolved): {target}")
-        result = sdk.sweep_invite_ghost_memberships(dry_run=args.dry_run)
+        result = sdk._sweep_invite_ghost_memberships(dry_run=args.dry_run)
     finally:
         sdk.close()
 

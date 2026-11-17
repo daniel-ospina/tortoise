@@ -53,8 +53,10 @@ before #4282 phase 2.3: the gate requires each entry to name a method that has r
 left the surface, to be accounted for in the inventory, and to keep the recorded-
 universe count whole — so a departure cannot go unrecorded the way these two did. And
 for the recorded-destination cells it holds the RECORDED DESTINATION too:
-:data:`SURPLUS_DELETION_DESTINATIONS` (the 26-name `#4282` block) and
-:data:`WAVE1_DELETION_DESTINATIONS` (the `#12901` wave-1 block) are both transcribed from
+:data:`SURPLUS_DELETION_DESTINATIONS` (the 26-name `#4282` block),
+:data:`WAVE1_DELETION_DESTINATIONS` (the `#12901` wave-1 block) and
+:data:`WAVE2_DELETION_DESTINATIONS` (the `#12901` wave-2 control-plane block) are all
+transcribed from
 the inventory's own column and every reason below is pinned to them, because a hand-typed
 destination is how TEN of them
 drifted off the record (#10226 review, 2026-11-10) — and how one wave-1 destination
@@ -315,6 +317,19 @@ UNHINTED_LIVE_DESTINATIONS: dict[str, str] = {
         "either way — `tortoise.mining.quarantine_batch` survives and is what the delegate "
         "called — so until the records are reconciled this departure names nothing."
     ),
+    # ⛔ #12901 wave 2: the one wave-2 name whose recorded destination is LIVE.
+    # `get_organisation_account` has a `def` AND is an approved row, and the departure
+    # STILL gets no hint — the beta ledger never names `org_get`, so the region a
+    # #3836 (c) retirement requires (one naming BOTH names) does not exist. Declaring the
+    # divergence is what keeps a live recorded destination from silently escaping the pin.
+    "org_get": (
+        "a live recorded destination with no approval to point a hint at: "
+        "`get_organisation_account` IS on the surface and IS the destination "
+        "`WAVE2_DELETION_DESTINATIONS` records, but `beta-sdk-surface.md` never names "
+        "`org_get` — so the region a #3836 (c) hint requires does not exist and a hint "
+        "would record an approval nobody wrote. The capability is not lost: the body "
+        "survives as `_org_get`, which the hosted control plane reads."
+    ),
 }
 
 #: The #12901 wave-1 names' recorded destination, transcribed from the inventory's own
@@ -334,6 +349,35 @@ WAVE1_DELETION_DESTINATIONS: dict[str, tuple[str, ...]] = {
     "list_relations": ("graph_overview",),
     "membership_get": (),
     "quarantine_batch": ("update_knowledge",),
+}
+
+#: The #12901 wave-2 names' recorded destination — the same shape, the same pin.
+#:
+#: Wave 2 is the canonical inventory's control-plane partition (N1–N6): the console /
+#: hosted plumbing that the owner-approved beta surface hands to the TENANCY block
+#: (`get_organisation_account`, `create_key`, `list_keys`, `revoke_key`, `add_member`,
+#: `delete_memory_graph`) or to nobody at all. Every destination below is the one
+#: `tools/sdk_rename_table.py` records for the name (its `GROUP_TARGET` / `OVERRIDE`
+#: row, whose own evidence is the beta ledger region quoted in its `CITES` cell) — none
+#: is invented here, and `tests/test_sdk_retirement.py` re-reads the inventory column and
+#: holds every entry to it in both directions, exactly as it holds the two cells above.
+WAVE2_DELETION_DESTINATIONS: dict[str, tuple[str, ...]] = {
+    "apikey_create": ("create_key",),
+    "apikey_revoke": ("revoke_key",),
+    "apikey_verify": (),
+    "graph_active_key_count": ("list_keys",),
+    "graph_delete": ("delete_memory_graph",),
+    "graph_key_ids": ("list_keys",),
+    "invitation_get_by_id": (),
+    "invitation_list": (),
+    "invitation_revoke": (),
+    "membership_create": ("add_member",),
+    "org_get": ("get_organisation_account",),
+    "signup_token_lookup": (),
+    "signup_token_recover": (),
+    "signup_token_revoke": (),
+    "sweep_invite_ghost_memberships": (),
+    "trash_graphs": (),
 }
 
 #: removed public name -> why it is gone, and what a caller does instead (prose only).
@@ -661,6 +705,144 @@ REMOVED_SDK_METHODS: dict[str, str] = {
         "`list_members` surface instead. The beta `n1_console` region rules this class "
         "`Console plumbing` and puts no tenancy administration on the SDK, so there is "
         "**no** recorded destination to name."
+    ),
+
+    # ── #12901 wave 2 (2026-11-16) — the CONTROL PLANE leaves the SDK ─────────
+    #
+    # The MEMBERSHIP RULE, so a later reader re-derives it rather than trusting it: a
+    # name qualifies when it is (a) NOT on `tortoise/__all__.py`, (b) bound by NO entry
+    # in `tortoise/tool_registry.py` — live OR retired, since a retired tool still answers
+    # through the #3883 shim — and (c) a member of the canonical inventory's control-plane
+    # partition (`N1`–`N6`). (c) is what makes this wave a PARTITION rather than a
+    # selection: the whole console/hosted surface leaves together, and the five N-members
+    # that stay do so by the same rule (they are approved target rows —
+    # `check_connection`, `get_organisation_account`, `list_memory_graphs`,
+    # `restore_memory_graph`, `update_memory_graph` — or bound by a live MCP tool:
+    # `org_create`).
+    #
+    # ⚠️ NONE of these is a zero-caller deletion: each body is called from
+    # `tortoise/hosted_api.py`, `tortoise/__main__.py`, `tortoise/mcp_auth.py` or one
+    # `graph-scripts/` entry point, so each took the `capture_session` ->
+    # `_capture_session` shape — the body goes PRIVATE, that caller re-points, and the
+    # unapproved PUBLIC door closes with the capability intact. Closing a door whose only
+    # key-holder is our own code is not what #3836 (c) forbids; leaving a caller BROKEN is.
+    #
+    # Each name's destination cell is in `WAVE2_DELETION_DESTINATIONS` above (7 record a
+    # destination, 9 record none), and each reason states it once in the claim sentence
+    # `Recorded destination \`x\`` the pin parses. The destinations are the approved
+    # TENANCY rows — `create_key` (34), `list_keys` (35), `revoke_key` (36), `add_member`
+    # (37), `get_organisation_account` (27), `delete_memory_graph` (32) — most of which
+    # have no `def` yet, so no hint is emitted: a hint must name something a caller can
+    # CALL.
+    "org_get": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_org_get`. Read one org row from the "
+        "control-plane registry; `tortoise/hosted_api.py` and the SDK's own control-plane "
+        "methods are its callers. Recorded destination "
+        "`get_organisation_account` — the approved tenancy row that answers the customer's "
+        "question, which `org_get` never did (it is the console's internal read and returns "
+        "raw registry properties). ⚠️ UNHINTED although the destination is LIVE: the beta "
+        "ledger never names `org_get`, so the region a #3836 (c) hint requires does not "
+        "exist — see `UNHINTED_LIVE_DESTINATIONS`."
+    ),
+    "graph_delete": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_graph_delete`. Soft-deletes a Graph "
+        "node (tombstone); the hosted graph routes are its only callers. Recorded "
+        "destination `delete_memory_graph` (row 32). It is recorded as a REMOVAL rather "
+        "than a rename because the beta row authorising the collapse names a RANGE — "
+        "`graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` → rows 30–33 — "
+        "and this map may not pick row 32 on the owner's behalf."
+    ),
+    "trash_graphs": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_trash_graphs`. Lists an org's "
+        "tombstoned custom graphs (the trash view behind graph restore), read by the "
+        "hosted graph routes. **No** recorded destination: the beta ledger's maintenance "
+        "row — `trash_graphs`, `migrate_orgs_to_registry`, `cleanup_expired_invitations`, "
+        "`sweep_invite_ghost_memberships` | **Our maintenance.** Never product surface — is "
+        "a verdict that it never belongs on the surface, with nothing to migrate to."
+    ),
+    "graph_key_ids": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_graph_key_ids`. The APIKey node ids "
+        "bound to a graph — the delete-cascade source. Recorded destination "
+        "`list_keys`: the beta row is the 'Console diagnostics' line that folds both key "
+        "counters into `list_keys`. `list_keys` (row 35) has no `def` yet, so no hint is "
+        "emitted."
+    ),
+    "graph_active_key_count": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_graph_active_key_count`. The "
+        "non-revoked key count per graph for the hosted graphs list. Recorded destination "
+        "`list_keys` — the same beta 'Console diagnostics' row as `graph_key_ids`, and the "
+        "same reason there is no hint (`list_keys` has no `def`)."
+    ),
+    "membership_create": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_membership_create`. Adds a user to "
+        "an org with a role; the hosted invite/organisation routes and the SDK's own org "
+        "bootstrap call it. Recorded destination `add_member` (row 37), whose `def` does "
+        "not exist yet — so no hint. This closes the membership family that the #4282 "
+        "surplus block half-retired (`membership_list`, `membership_delete`, "
+        "`membership_update_role`) and wave 1 finished (`membership_get`)."
+    ),
+    "apikey_create": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_apikey_create`. Mints a control-plane "
+        "API key; the hosted key routes and the `apikey` CLI are its callers. Recorded "
+        "destination `create_key` (row 34) — 'the credential carries the tenant' — which "
+        "has no `def` yet, so no hint. It completes the keys family with `apikey_revoke`, "
+        "`apikey_verify` and the already-deleted `apikey_list`."
+    ),
+    "apikey_revoke": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_apikey_revoke`. Revokes a key (soft "
+        "delete); the hosted graph-delete cascade, the offline-key sweep and the key "
+        "routes call it. Recorded destination `revoke_key` (row 36), no `def` yet — no "
+        "hint."
+    ),
+    "apikey_verify": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_apikey_verify`. Verifies a presented "
+        "key against the stored hashes — the MCP auth path and the hosted routes read it. "
+        "**No** recorded destination: the beta ledger files it under the 'Console "
+        "plumbing' row whose verdict is that the builder's account surface is a console "
+        "operation and not in the SDK at all."
+    ),
+    "invitation_list": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_invitation_list`. Lists an org's "
+        "pending invitations for the console. **No** recorded destination: the beta ledger "
+        "rules `invitation_*` (six names) as 'The invite **UX** belongs to the console, "
+        "where a human clicks it' — the console owns that surface, so nothing migrates "
+        "into the SDK."
+    ),
+    "invitation_get_by_id": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_invitation_get_by_id`. Reads one "
+        "invitation row; the hosted revoke route and `_invitation_revoke` are its "
+        "callers. **No** recorded destination — the same `invitation_*` console row as "
+        "`invitation_list`."
+    ),
+    "invitation_revoke": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_invitation_revoke`. Revokes a pending "
+        "invitation from the console. **No** recorded destination — the same "
+        "`invitation_*` console row."
+    ),
+    "sweep_invite_ghost_memberships": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_sweep_invite_ghost_memberships`. The "
+        "scheduled repair that removes membership rows whose invite never completed; the "
+        "hosted scheduler and one `graph-scripts/` entry point call it. **No** recorded "
+        "destination: the beta maintenance row ('**Our maintenance.** Never product "
+        "surface.') covers it, and that row names nothing to migrate to."
+    ),
+    "signup_token_lookup": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_signup_token_lookup`. Resolves an "
+        "agent self-signup token; `_signup_token_recover` and the hosted signup routes "
+        "call it. **No** recorded destination: the beta ledger rules the three "
+        "`signup_token_*` names as 'Operator-side agent self-signup — our provisioning, "
+        "not product surface.'"
+    ),
+    "signup_token_recover": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_signup_token_recover`. Re-mints the "
+        "bootstrap key for a signup token (the process-local lock above it stays for the "
+        "same reason); the hosted signup route calls it. **No** recorded destination — the "
+        "same `signup_token_*` provisioning row."
+    ),
+    "signup_token_revoke": (
+        "#12901 wave 2 (2026-11-16): PRIVATISED as `_signup_token_revoke`. Revokes a "
+        "signup token from operator tooling. **No** recorded destination — the same "
+        "`signup_token_*` provisioning row."
     ),
 }
 
