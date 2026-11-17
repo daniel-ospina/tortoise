@@ -23000,11 +23000,11 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     hosted door, merged green.
 
     That is the #1349/#2938/#3154 silent-drop class in its harmful direction. It is
-    the same defect `test_record_serve.py` (the row immediately above, at
-    `config/ci-surfaces.yml:351`) and `test_12941_read_your_writes.py` (`:352`)
-    each record for themselves — those are the two rows ABOVE this one. The
-    `['api', 'core']` siblings are `test_12941_read_your_writes.py` and
-    `test_11892_health_quota.py` (`:1816` / `:2532` — elsewhere in the map, NOT
+    the same defect `test_record_serve.py` and `test_12941_read_your_writes.py`
+    each record for themselves (`config/ci-surfaces.yml:351` and `:352` — the two
+    rows ABOVE this one). The `['api', 'core']` siblings are
+    `test_12941_read_your_writes.py` (`:352` / `:2541`) and
+    `test_11892_health_quota.py` (`:1816` / `:2532` — elsewhere in the map, not
     above this row). ⛔ NOT "the only hosted-door guard registered
     single-surface": on `main` this file was registered on **zero** surfaces,
     and several hosted-door guards legitimately live on `api` alone
