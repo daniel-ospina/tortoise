@@ -996,6 +996,35 @@ class TestThePlanPipeline:
         assert "create_entity(type='event'" in message, message
         assert "or use `record_occurrence`" not in message
 
+    def test_a_RETIRED_scheduled_stage_is_NOT_reported_as_settled(self, sdk):
+        """A record with NO position is not a settled record.
+
+        `advance_stage` resolves through the graph's `effective_pipeline` while
+        `plan_position` (and so this read) resolves against the DECLARED one, so a
+        graph override that RETIRES `scheduled` makes the move `unknown-stage` on
+        a FRESH create. The defensive arm used to answer "already at None … a
+        settled plan is a closed record, give it a distinct name" — false about
+        the graph, and its advice would mint a second unstaged plan (#13100 review
+        round 10).
+        """
+        import copy
+
+        decl = copy.deepcopy(PO.PLAN_PIPELINE_DECL)
+        decl["stages"].append({"id": "review", "label": "Review",
+                               "order": 4, "slot": "active"})
+        g = sdk._get_proj().g
+        pipeline.set_default_stage(g, PO.PLAN_PIPELINE_KEY, "review",
+                                   declared=decl)
+        pipeline.retire_stage(g, PO.PLAN_PIPELINE_KEY, PO.STAGE_SCHEDULED,
+                              declared=decl)
+        with pytest.raises(ValueError) as exc:
+            PO.create_plan(sdk, "Unstageable")
+        message = str(exc.value)
+        assert "could not be put on" in message, message
+        assert "NOT settled" in message, message
+        assert "already at" not in message, message
+        assert "distinct name" not in message, message
+
     def test_create_plan_cannot_be_mis_kinded_by_a_caller_prop(self, sdk):
         """The kind is the module's decision, not a `**props` override."""
         node = PO.create_plan(sdk, "sneaky", objectKind="core:goal")

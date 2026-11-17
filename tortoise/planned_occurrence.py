@@ -308,9 +308,17 @@ def create_plan(sdk, name: str, *, title: str | None = None,
       bind** (the bare `plan` kind): also falls through, and the door's
       namespaced `objectKind` REPAIRS the binding — a write, deliberately: a
       success here would hand the caller a plan whose next write refuses;
-    * **settled / ENDED** — the durable marker, a terminal stage, or a retired
-      status word: RAISES, naming the stage it is at and the route to a new
-      record.
+    * **a still-LIVE holder that has ENDED** — a terminal stage, or a position
+      that does not resolve: RAISES, naming the stage it is at and the route to a
+      new record.
+
+    ⛔ A holder that is ENDED but no longer LIVE is NOT in that last arm: the
+    re-mention resolve is LIVE-only (``live_only=True``), so a plan settled
+    through this module (``isClosed``) or retired with a status word is not a
+    holder this call can see — its NAME IS FREE and a NEW plan is minted, which
+    is correct for a genuinely new occurrence (#3590 D2; pinned by
+    ``test_a_CLOSED_plans_name_is_free_for_a_new_plan``). Saying "settled →
+    RAISES" for those inputs would be false (#13100 review round 10).
 
     Two further REFUSALS apply to an existing holder before any of that, and
     neither writes: a holder whose kind is not a plan (this call would retag it),
@@ -470,12 +478,13 @@ def create_plan(sdk, name: str, *, title: str | None = None,
         #   a new name.
         #
         # What remains is the defensive arm: a move that did not apply while the
-        # plan is neither at `scheduled` nor unresolvable — which the plan
-        # pipeline cannot produce today (only `scheduled` is non-terminal), so it
-        # exists so a future stage declaration cannot re-open the silent
-        # success. It names the stage the plan is ACTUALLY at. REFUSED rather
-        # than `reopen=True`d, deliberately: reopening would restate a recorded
-        # ending as upcoming, which §8 forbids ("a later event does not rewrite
+        # plan is neither at `scheduled` nor unresolvable. ⛔ NOT unreachable, and
+        # NOT only "a future stage declaration": a per-graph override that
+        # RETIRES `scheduled` (`set_default_stage` + `retire_stage`) makes the
+        # move `unknown-stage` for a record this read still sees without a
+        # position, so a FRESH create lands here (#13100 review round 10). It
+        # therefore branches on what is actually known rather than calling a
+        # brand-new record "settled".
         # an earlier one").
         cur = pipeline.current_stage(sdk._get_proj().g, plan_id) or {}
         pos = plan_position(
@@ -508,6 +517,23 @@ def create_plan(sdk, name: str, *, title: str | None = None,
             # the input that actually failed — a distinct name does not repair a
             # drifted binding, so prescribing one here would be a no-op.
             raise ValueError(_unresolvable_message(name, pos, cur))
+        if pos["stageId"] is None:
+            # ⛔ NOT a settled plan — a record with NO POSITION that could not be
+            # staged. The reachable cause is a graph override the MOVE honours and
+            # this read does not (`advance_stage` → `effective_pipeline`, this read
+            # → the declared pipeline): a retired `scheduled` answers
+            # `unknown-stage` and leaves the record unstaged. Saying "settled …
+            # give it a distinct name" here would be false about the graph and
+            # would mint a second unstaged plan (#13100 review round 10).
+            raise ValueError(
+                f"Refused: the plan {name!r} was created at {plan_id!r} but could "
+                f"not be put on {STAGE_SCHEDULED!r} ({move.reason}), and it "
+                f"stores no stage. WHAT TO DO: the stage this move resolves and "
+                f"the stage this read sees disagree — check the graph's "
+                f"{PLAN_PIPELINE_KEY!r} pipeline override (a retired "
+                f"{STAGE_SCHEDULED!r} answers 'unknown-stage'), repair the "
+                f"override, then advance the plan; it is NOT settled, so a new "
+                f"name would not help.")
         raise ValueError(
             f"Refused: the plan {name!r} resolves to {plan_id!r}, which is "
             f"already at {pos['stageId']!r}"
