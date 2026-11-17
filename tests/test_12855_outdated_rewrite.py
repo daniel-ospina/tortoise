@@ -436,6 +436,80 @@ def test_a_permanently_refused_row_does_not_hold_the_durability_marker(env):
         "a pre-write refusal left an empty marker file behind"
 
 
+def test_a_row_written_before_a_KILL_is_discharged_by_the_next_run(env, monkeypatch):
+    """A kill mid-loop must not strand a row whose record DID land.
+
+    The marker is written before each write, and a killed run never reaches the
+    discharge, so every id named so far stays — including ids whose own
+    `EntityMutated{Object, id, deprecated}` record is on disk. Such a row reads
+    `deprecated` live AND replays `deprecated`, so it never re-enters a
+    population and the documented repair (`rebuild_all` + re-run) restores
+    nothing for it: without an identity check the marker is unremovable and the
+    graph permanently unmeasurable. (Review finding, 2026-11-17: the clean-exit
+    arm was covered, this one was not.)
+    """
+    sdk, events = env
+    first = sdk.create_object("kill-1", objectKind="test:widget")["id"]
+    second = sdk.create_object("kill-2", objectKind="test:widget")["id"]
+    for rid in (first, second):
+        _mint_legacy(sdk, rid, "outdated")
+
+    real_write = tool._write_pending
+    seen = {"n": 0}
+
+    def die_on_the_second_row(journal, ids):
+        seen["n"] += 1
+        if seen["n"] == 2:                       # row 2's marker write is a kill
+            raise KeyboardInterrupt
+        return real_write(journal, ids)
+
+    monkeypatch.setattr(tool, "_write_pending", die_on_the_second_row)
+    with pytest.raises(KeyboardInterrupt):
+        tool.run(sdk, execute=True)
+    monkeypatch.setattr(tool, "_write_pending", real_write)
+
+    marker = tool._read_pending(str(events / "events.jsonl"))
+    # Row 1 is marked AND durably recorded; row 2's marker write is what died, so
+    # it is not marked and its write never happened (it still reads legacy).
+    assert marker == [first], (
+        f"precondition: the durable row must be marked, got {marker!r}")
+    assert _status(sdk, first) == tool.REWRITE_TO, "precondition: row 1 landed"
+    assert _status(sdk, second) == "outdated", "row 2 must be untouched"
+
+    # Row 1 is durable; row 2 was never written (the kill came before its write).
+    nxt = tool.run(sdk, execute=True)
+
+    assert nxt.rewritten == [second], nxt.rewritten
+    assert nxt.pending == [], (
+        "a durably recorded row was kept in the marker forever: "
+        f"{nxt.pending!r}")
+    assert not tool._pending_path(nxt.journal).exists(), (
+        f"marker residue: {tool._read_pending(nxt.journal)!r}")
+    assert "dead weight" in tool.render(tool.run(sdk, execute=False))
+
+
+def test_a_TORN_marker_write_cannot_read_as_no_marker(env):
+    """The marker's own update must be atomic, or it manufactures a false PASS.
+
+    `write_text` truncates first, so a kill in that window leaves an EMPTY file
+    — which `_read_pending` reads as "no marker", and the next preview prints the
+    sentence authorising the `assembly` drop. The write goes through a
+    same-directory tmp file + `os.replace`, and the tmp is cleaned up.
+    """
+    sdk, events = env
+    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+
+    assert tool._write_pending(str(events / "events.jsonl"), [oid]) is True
+    marker = tool._pending_path(str(events / "events.jsonl"))
+    assert tool._read_pending(str(events / "events.jsonl")) == [oid]
+
+    leftovers = [p.name for p in marker.parent.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == [], f"a tmp file was left behind: {leftovers}"
+    # No torn state is representable: whatever a reader sees is a complete set.
+    assert marker.read_text(encoding="utf-8") == f"{oid}\n"
+
+
 def test_a_discharged_id_is_REMOVED_from_the_marker(env):
     """The marker must SHRINK once its row is durably rewritten.
 
@@ -533,7 +607,7 @@ def test_an_UNWRITABLE_marker_refuses_that_row_before_its_write(env, monkeypatch
     leaves a row live-only with no trace, which is precisely the state it exists
     to make impossible.
     """
-    sdk, events = env
+    sdk, _events = env
     oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
 

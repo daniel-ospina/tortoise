@@ -184,6 +184,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -301,6 +302,26 @@ def _pending_path(journal: str | None):
         Path(journal).name + ".rewrite-pending")
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Replace ``path`` atomically (same-directory tmp + ``os.replace``).
+
+    ⛔ NOT ``write_text``: that is truncate-then-write, so a kill, OOM or ENOSPC
+    in the window leaves an EMPTY marker — which `_read_pending` reads as "no
+    marker", and the next preview then prints the sentence that authorises
+    dropping the `assembly` member. The guard's own update could produce the
+    false PASS it exists to prevent (measured: a torn write ⇒ `pending=[]` ⇒
+    "dead weight": True, exit 0).
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(OSError):
+            if tmp.exists():
+                tmp.unlink()
+
+
 def _write_pending(journal: str | None, ids: list) -> bool:
     """MERGE ``ids`` into the marker; ``False`` when it cannot be written.
 
@@ -314,14 +335,20 @@ def _write_pending(journal: str | None, ids: list) -> bool:
     path = _pending_path(journal)
     if path is None:
         return True
-    pending = set(_read_pending(journal) or ())
+    current = _read_pending(journal)
+    if current is None:
+        # ⛔ ``None`` is NOT "no marker": merging onto an unreadable one would
+        # OVERWRITE ids nobody could read. Fail, so the row is refused rather
+        # than written without a durable trace.
+        return False
+    pending = set(current)
     pending.update(str(i) for i in ids if i is not None)
     if not pending:
         # Nothing to record, and an EMPTY marker file is residue a later reader
         # would have to reason about — do not create it.
         return True
     try:
-        path.write_text("\n".join(sorted(pending)) + "\n", encoding="utf-8")
+        _atomic_write(path, "\n".join(sorted(pending)) + "\n")
     except OSError:
         return False
     return True
@@ -345,7 +372,7 @@ def _set_pending(journal: str | None, ids: list) -> bool:
         if not ids:
             _clear_pending(journal)
             return True
-        path.write_text("\n".join(ids) + "\n", encoding="utf-8")
+        _atomic_write(path, "\n".join(ids) + "\n")
     except OSError:
         return False
     return True
@@ -889,17 +916,64 @@ def rewrite(sdk, rep: Report) -> Report:
         if row.get("id") not in written and row.get("id") not in _listed:
             rep.fanout.append(row)
     # ⛔ DISCHARGE, which the per-row MERGE cannot do. See `_set_pending`.
+    #
+    # ⛔ AND THE DISCHARGE IS NOT `rep.rewritten` ALONE. A run KILLED mid-loop
+    # (SIGTERM/OOM/KeyboardInterrupt) never reaches this line, so every id named
+    # so far — INCLUDING ids whose own record already landed — stays in the
+    # marker. Those rows read `deprecated` live AND replay `deprecated`, so they
+    # never re-enter a population and only a hand-edit could clear them: the
+    # documented repair (`rebuild_all`, then re-run) restores nothing for them.
+    # So the same identity proof is applied to the marker's OWN ids: an id
+    # carrying a durable rewrite record is discharged, one without it is kept.
     _discharged = {str(i) for i in rep.rewritten}
-    _on_disk = set(_read_pending(rep.journal) or ())
-    _still = sorted((_on_disk | _marker_ids) - _discharged)
+    _on_disk = _read_pending(rep.journal)
+    if _on_disk is None:
+        # An unreadable marker is not an empty one (see `_read_pending`); do not
+        # shrink a set nobody could read, and say so.
+        _on_disk = set(_marker_ids)
+        rep.failures.append({
+            "id": None,
+            "error": (f"{REFUSE_PENDING_UNREADABLE}: the durability marker "
+                      f"{_pending_path(rep.journal)} became unreadable during "
+                      "the run, so its ids could not be discharged."),
+        })
+    # The WHOLE journal, not a window: these ids were named by runs that may be
+    # long finished. `None` (unreadable) keeps every id — fail closed.
+    try:
+        _all_records = log.read_all()
+    except (AttributeError, OSError, TypeError, ValueError):
+        _all_records = None
+    _population = {str(r.get("id")) for r in rep.rows if r.get("id") is not None}
+    _kept = []
+    for _pid in sorted(set(_on_disk) | _marker_ids):
+        if _pid in _discharged:
+            continue
+        # An id still carrying a legacy word LIVE is NOT dischargeable, whatever
+        # an old record from an earlier life might say about it.
+        if _pid not in _population and _row_recorded(_all_records, _pid):
+            continue
+        _kept.append(_pid)
+    _still = _kept
+    _write_failed = None
     if (rep.failures or rep.truncated or rep.unaddressable or rep.fanout
             or _still
             or any(rep.remaining.get(w, 0) for w in LEGACY_WORDS)):
         rep.pending = _still
-        _set_pending(rep.journal, _still)
+        if not _set_pending(rep.journal, _still):
+            _write_failed = _still or list(_on_disk)
     else:
         _clear_pending(rep.journal)
         rep.pending = []
+    if _write_failed is not None:
+        # A failed discharge is not a silent success: the marker on disk still
+        # names ids this run did not discharge, so the graph is unmeasured.
+        rep.pending = _write_failed
+        rep.failures.append({
+            "id": None,
+            "error": (f"{REFUSE_PENDING_UNWRITABLE}: the durability marker "
+                      f"{_pending_path(rep.journal)} could not be updated with "
+                      f"the discharged set, so it still names {_write_failed!r}."),
+        })
     return rep
 
 
