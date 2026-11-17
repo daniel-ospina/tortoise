@@ -246,6 +246,22 @@ JOURNAL_MAX_SQL = (
     "WHERE org_id = %s AND graph_id = %s"
 )
 
+#: How many journal LINES the record holds for one graph — the FLOOR's own
+#: quantity, and NOT the same number as :data:`JOURNAL_MAX_SQL`.
+#:
+#: ⛔ THE TWO ARE DIFFERENT COORDINATES and the distinction is load-bearing for
+#: `record_allocator_cli.py sweep` (#13043 review: the sweep reported
+#: `floor_is_the_journals_count` while comparing the floor with `MAX(seq)`). A
+#: born-uncut graph has to be seeded with the journal's COUNT, because the count
+#: is how many positions already exist; `MAX(seq)` is the highest one issued.
+#: They agree on a dense axis and diverge the moment a seq is refused or a tail
+#: is lost — which is exactly the state the pre-flight exists to report, so
+#: answering one of them while naming the other is a false CLEAN.
+JOURNAL_COUNT_SQL = (
+    "SELECT COUNT(*) FROM public.journal_event "
+    "WHERE org_id = %s AND graph_id = %s"
+)
+
 #: Graphs this ORG that the RECORD has seen writing, and that have NO counter
 #: row — i.e. "born uncut", the state `#13043` review P1-1 named. The creation
 #: hook that would prevent it (`provision_graph_record`, the plan's §A7.8 item 8)

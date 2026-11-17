@@ -256,6 +256,9 @@ class _SweepCursor:
         elif "IS NULL" in sql:            # UNCUT_GRAPHS_SQL
             self._rows = [(g,) for g in self.conn.graphs]
             self.conn.rollbacks_at_uncut_read = self.conn.rollbacks
+        elif "COUNT(*)" in sql:            # JOURNAL_COUNT_SQL
+            self.conn.count_reads.append((params[1], self.conn.rollbacks))
+            self._rows = [(self.conn.count,)]
         else:                             # JOURNAL_MAX_SQL
             self.conn.max_reads.append((params[1], self.conn.rollbacks))
             self._rows = [(self.conn.max_seq,)]
@@ -276,11 +279,15 @@ class _SweepCursor:
 class _SweepConn:
     closed = False
 
-    def __init__(self, graphs, max_seq=1, org="o"):
+    def __init__(self, graphs, max_seq=1, org="o", count=None):
         self.graphs, self.max_seq, self.org = graphs, max_seq, org
+        # `count` defaults to `max_seq` — a DENSE journal, where the two
+        # quantities coincide. Tests that care about the difference set it.
+        self.count = max_seq if count is None else count
         self.rollbacks = 0
         self.rollbacks_at_uncut_read: int | None = None
         self.max_reads: list[tuple] = []
+        self.count_reads: list[tuple] = []
 
     def cursor(self):
         return _SweepCursor(self)
@@ -310,9 +317,14 @@ def test_the_sweep_keeps_the_tenant_guc_alive_until_the_per_graph_read() -> None
     payload = _sweep(type("A", (), {"org_id": "o", "floor": None,
                                     "journal": None})(), conn)
     assert [e["journal_max_seq"] for e in payload["uncut_graphs"]] == [7, 7]
+    assert [e["journal_count"] for e in payload["uncut_graphs"]] == [7, 7]
     assert all(read[1] == 0 for read in conn.max_reads), (
         "a rollback ran between the tenant scope and the per-graph read — the "
         f"transaction-local GUC is gone there, so MAX(seq) answers 0: {conn.max_reads}")
+    # …and the same for the COUNT read, which is a SECOND scoped statement: a
+    # rollback between the two would make it answer 0 under a NULL predicate.
+    assert conn.count_reads and all(read[1] == 0 for read in conn.count_reads), (
+        f"the COUNT(*) read ran outside the tenant scope: {conn.count_reads}")
 
 
 def test_the_sweep_does_not_assert_a_floor_it_never_counted() -> None:
@@ -349,6 +361,43 @@ def test_the_sweep_reports_the_count_only_when_it_has_one() -> None:
     payload = _sweep(type("A", (), {"org_id": "o", "floor": 5,
                                     "journal": "j.jsonl"})(), conn)
     assert payload["uncut_graphs"][0]["floor_is_the_journals_count"] is False
+
+
+def test_the_floor_is_compared_with_the_journals_COUNT_not_with_MAX_seq() -> None:
+    """⛔ ROUND-3 BLOCKING: the field says COUNT and the code compared `MAX(seq)`.
+
+    The two are different quantities and they diverge exactly on the state this
+    verb exists to find — a refused seq (a GAP: `count < max`) or a lost tail
+    (`count > max`). Comparing the floor with `MAX(seq)` therefore answers the
+    wrong question and, because a DENSE journal makes the two coincide, it can
+    be wrong in the one direction that matters: reporting a false CLEAN.
+
+    The mutant this reds, in both directions: `args.floor == journal_count`
+    back to `args.floor == entry["journal_max_seq"]`.
+    """
+    # A GAP after a refused seq: the journal holds 5 lines, the highest is 9.
+    # `--journal` counted 5, so the floor IS the count — pre-fix said False.
+    conn = _SweepConn(["g"], max_seq=9, count=5)
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": 5,
+                                    "journal": "j.jsonl"})(), conn)
+    entry = payload["uncut_graphs"][0]
+    assert (entry["journal_count"], entry["journal_max_seq"]) == (5, 9), (
+        "both numbers must be in the output, so neither stands in for the other")
+    assert entry["floor_is_the_journals_count"] is True, (
+        "a floor equal to the journal's COUNT was reported as a disagreement — "
+        "the comparison used MAX(seq)")
+    assert payload["floor_is_the_journals_count"] is True
+
+    # The other direction: 9 lines, highest is 5 (a lost/reused tail). A floor of
+    # 5 is NOT the count — and pre-fix, comparing with `MAX(seq)=5`, said True.
+    conn = _SweepConn(["g"], max_seq=5, count=9)
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": 5,
+                                    "journal": None})(), conn)
+    entry = payload["uncut_graphs"][0]
+    assert entry["floor_source"] == "operator"
+    assert entry["floor_is_the_journals_count"] is False, (
+        "a floor of 5 on a 9-line journal was reported as the count — the "
+        "comparison used MAX(seq)")
 
 
 def test_the_sweep_refuses_a_floor_it_cannot_attribute_to_one_graph() -> None:

@@ -424,6 +424,58 @@ def test_an_allocated_batch_whose_number_disagrees_with_the_journal_is_refused(
     assert conn.closed is True
 
 
+def test_a_rollback_that_FAILS_is_reported_and_not_claimed_as_done(
+        monkeypatch, tmp_path, capsys) -> None:
+    """⛔ ROUND-3 BLOCKING: the refusal asserted a rollback it had suppressed.
+
+    `contextlib.suppress(Exception)` around `rollback()` let a FAILED rollback
+    reach a refusal whose message says, as a FACT, *"The allocation was rolled
+    BACK (nothing burned, nothing renumbered)"*. If the rollback raised, the
+    counter could be one ahead of the rows — the state `write_live_record`'s own
+    warning calls "the state that EATS rows" — and nothing anywhere recorded it.
+
+    The mutant this reds: the `try/except`+`print` back to
+    `contextlib.suppress(Exception)`. Then the warning never appears on stderr
+    AND the refusal claims the rollback happened (second and third assertions).
+    """
+    import tortoise.record_writer as rw
+
+    class _RollbackFailsConn(_Conn):
+        def rollback(self) -> None:
+            self.rollbacks += 1
+            raise RuntimeError("server closed the connection\nunexpectedly")
+
+    _calls, _built = _patch_journal(monkeypatch, [7],
+                                    cutover_state=(4, "active"), allocate=True)
+    conn = _RollbackFailsConn()
+    monkeypatch.setattr(
+        rw, "write_records",
+        lambda events, **kw: _AllocatedWrite(_outcome().APPLIED, len(events),
+                                             conn, first_seq=5))
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
+    with pytest.raises(copy_mod.CopyRefused) as excinfo:
+        emit("s1", [{"a": 1}])
+
+    # The divergence is still the refusal — this leg changes only the rollback.
+    assert "issued position 5" in str(excinfo.value)
+    err = capsys.readouterr().err
+    assert "could NOT roll" in err and "RuntimeError" in err, (
+        f"a failed rollback was swallowed — nothing recorded it: {err!r}")
+    assert "EATS rows" in err, (
+        "the warning names no consequence, so it cannot tell an operator what "
+        f"state to check: {err!r}")
+    assert "closed the connection\\nunexpectedly" in err, (
+        f"the cause's own newline was not escaped, so the warning is two lines: {err!r}")
+    # …and the operator-facing refusal must not assert a rollback that did not
+    # reach a verdict.
+    message = str(excinfo.value)
+    assert "was rolled BACK" not in message, (
+        "the refusal claims the allocation was rolled back, and the rollback "
+        f"raised: {message}")
+    assert "could NOT be confirmed rolled back" in message
+    assert conn.closed is True, "the connection was left open on the failure arm"
+
+
 def test_a_cut_over_graph_with_the_flag_off_is_refused_BEFORE_any_append(
         monkeypatch) -> None:
     """The mis-set pair whose cost is a journal that grows while no row lands.

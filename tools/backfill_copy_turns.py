@@ -1045,8 +1045,19 @@ def _refuse_a_divergent_allocation(write, *, journal_first: int,
     with the rows, so nothing is burned and nothing is renumbered. Only a write
     that actually LANDED can diverge — a refused write is `_commit_or_refuse`'s
     to report, with its own more precise message.
+
+    ⛔ A FAILED ROLLBACK IS NOT SILENT (#13043 review, round 3 blocking). The
+    refusal below states, as a FACT, that the allocation was rolled back and
+    nothing was burned — and a `contextlib.suppress(Exception)` around the
+    rollback could make that sentence false with nothing anywhere recording it.
+    That is the same defect this PR fixed one module over
+    (`record_writer.write_live_record`, P2-7), and the state it hides is the one
+    that function's own warning calls *"the state that EATS rows"*: a counter
+    ahead of the rows. So a failure here is caught, reported on stderr, and the
+    refusal says what is TRUE — attempted, not confirmed — plus what to check
+    before writing again.
     """
-    from tortoise.record_writer import RecordWriteOutcome
+    from tortoise.record_writer import RecordWriteOutcome, _bounded_cause
 
     if getattr(write, "outcome", None) is not RecordWriteOutcome.APPLIED:
         return
@@ -1054,18 +1065,36 @@ def _refuse_a_divergent_allocation(write, *, journal_first: int,
     if allocated is None or allocated == journal_first:
         return
     connection = getattr(write, "connection", None)
+    rollback_failed: BaseException | None = None
     if connection is not None:
-        with contextlib.suppress(Exception):
+        try:
             connection.rollback()
+        except Exception as rollback_exc:  # noqa: BLE001, RUF100
+            rollback_failed = rollback_exc
+            print(
+                f"{session_id}: WARNING — the divergence refusal could NOT roll "
+                f"the allocation back ({type(rollback_exc).__name__}: "
+                f"{_bounded_cause(rollback_exc)}). The counter may be ONE AHEAD "
+                "of the rows, which is the state that EATS rows: run "
+                "`tools/record_allocator_cli.py status --journal <path> --dsn "
+                "<dsn>` BEFORE any further write, and halt the graph if the "
+                "counter is ahead",
+                file=sys.stderr)
         with contextlib.suppress(Exception):
             connection.close()
+    allocation_sentence = (
+        "The allocation was rolled BACK (nothing burned, nothing renumbered)."
+        if rollback_failed is None else
+        "The allocation could NOT be confirmed rolled back — the counter may be "
+        "ONE AHEAD of the rows, which is the state that EATS rows, so do NOT "
+        "write again until `status` says which side is ahead.")
     raise CopyRefused(
         f"{session_id}: the ORDINAL ALLOCATOR issued position {allocated} but "
         f"the journal append reported {journal_first} — the two allocators "
         f"disagree about this session's first row, so writing it would put the "
         "journal lines and their position rows at different numbers and no "
-        "replay of the journal could reproduce the rows. The allocation was "
-        "rolled BACK (nothing burned, nothing renumbered). Compare the two "
+        f"replay of the journal could reproduce the rows. {allocation_sentence} "
+        "Compare the two "
         "readings with `tools/record_allocator_cli.py status --journal <path> "
         "--dsn <dsn>` (its `position_divergence` field is this comparison): if "
         "the JOURNAL is behind the counter, RESTORE the journal; if it is "

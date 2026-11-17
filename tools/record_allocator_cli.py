@@ -352,11 +352,12 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     were refused) seeds the counter BEHIND the journal, which does not heal: it
     wedges every later armed write. So each entry carries `journal_max_seq`,
     named for the aggregate it actually ran (`MAX(seq)`), and this verb never
-    claims that number is the count: the count is reported only where an
-    enumeration really exists — an operator's `--enumerated-floor` or a
-    `--journal` this tool counted itself — and `floor_is_the_journals_count`
-    answers `None` (UNKNOWN, with `floor_source` saying why) everywhere else
-    (#13043 review findings B and 4).
+    claims that number is the count: `journal_count` is the `COUNT(*)` of the
+    same rows, and `floor_is_the_journals_count` compares the floor with THAT,
+    answering `None` (UNKNOWN, with `floor_source` saying why) wherever no
+    enumeration was supplied at all (#13043 review findings B and 4, and the
+    round-3 blocking finding that the comparison used `max_seq` under a name
+    that says count).
     """
     from tortoise import record_allocator as ra
 
@@ -388,14 +389,29 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(ra.JOURNAL_MAX_SQL, (args.org_id, graph_id))
             row = cur.fetchone()
+        with conn.cursor() as cur:
+            # ⛔ THE FLOOR'S OWN QUANTITY (#13043 review, blocking). This used to
+            # answer `floor_is_the_journals_count` by comparing the floor with
+            # `journal_max_seq` below — a different number under the wrong name,
+            # so the field's one job ("is this the journal's count?") was
+            # answered about `MAX(seq)` instead. Measured on a dense journal the
+            # two coincide, which is why a false CLEAN survived: the divergence
+            # only shows up on the state the verb exists to find (a refused seq,
+            # a lost tail). Read the count, and report it beside the max so both
+            # numbers are in the output rather than one standing in for the
+            # other.
+            cur.execute(ra.JOURNAL_COUNT_SQL, (args.org_id, graph_id))
+            count_row = cur.fetchone()
         # ⛔ `journal_max_seq` IS `MAX(seq)` AND NOTHING ELSE. It had been called
         # `journal_row_max`, beside a `floor_is_the_journals_count: True` literal,
         # which asserts the two are the same quantity — false whenever the seq
         # axis has a gap or a tail, which `_cmd_status` treats as a real state in
         # both directions (#13043 review findings B and 4).
+        journal_count = int(count_row[0]) if count_row else 0
         entry: dict[str, Any] = {
             "graph_id": graph_id,
             "journal_max_seq": int(row[0]) if row else 0,
+            "journal_count": journal_count,
             "seed_command": (
                 f"record_allocator_cli.py seed --org-id {args.org_id} "
                 f"--graph-id {graph_id} --journal <that graph's journal path>"),
@@ -407,8 +423,11 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             entry["enumerated_floor"] = args.floor
             entry["floor_source"] = (
                 "journal" if args.journal is not None else "operator")
+            # ⛔ AGAINST `journal_count`, NOT `journal_max_seq`. `seed` writes the
+            # floor as the counter's number, and the counter numbers POSITIONS —
+            # so the quantity the floor must equal is how many the journal holds.
             entry["floor_is_the_journals_count"] = (
-                args.floor == entry["journal_max_seq"])
+                args.floor == journal_count)
         else:
             entry["enumerated_floor"] = None
             entry["floor_source"] = None
