@@ -2268,10 +2268,12 @@ def get_current_usage(org_id: str) -> dict:
 #
 # ⛔ WHAT THIS IS NOT. This is ARITHMETIC, not enforcement. Nothing here prices,
 # caps, throttles or refuses. The refusal half ("free/anon refuse at the
-# included amount") is ``tortoise/allowance_gate.py``, where BOTH storage
-# dimensions are currently BLOCKED on instrument defects — so no shipped path
-# can refuse on them yet, and claiming otherwise would be the false claim this
-# note exists to prevent. What IS available, and is pinned by test, is the
+# included amount") is ``tortoise/allowance_gate.py``, and since ``#13084`` the
+# two storage dimensions are in DIFFERENT states there: ``postgres_storage`` is
+# still BLOCKED (no per-org byte meter exists), while ``graph_storage`` is ARMED
+# at the tier's hot window and hard-refuses a WRITE at 1.5x it — on an ESTIMATE,
+# which is why that refusal is the one-directional test rather than a number
+# from this file. What IS available, and is pinned by test, is the
 # billing SEMANTICS the artifact and ``#4815`` already state: a tier that is not
 # overage-eligible cannot be billed for overage, and every paid tier can.
 
@@ -2361,8 +2363,8 @@ def storage_overage_cost_usd(tier: str, dimension: str, used, *,
 
     ⛔ ``overage_purchasable`` is a BILLING SEMANTIC, not an enforcement result:
     it says whether this tier may be billed for overage at all. Whether a write
-    is REFUSED at the allowance is the allowance gate's answer, and for both
-    storage dimensions that gate is BLOCKED — see the section note above.
+    is REFUSED at the allowance is the allowance gate's answer — ARMED for
+    ``graph_storage`` since ``#13084``, still BLOCKED for ``postgres_storage``.
 
     RAISES (never degrades to a zero) for an unusable input: a non-finite or
     negative ``used``/``included``, or an undeclared dimension/unit. Coercing a
@@ -2759,14 +2761,90 @@ def _graph_storage_row(period: MeteringPeriod, total: float,
     }
 
 
+def _graph_storage_state(view: dict) -> dict:
+    """Derive ``measured``/``unmeasured_reason`` from the gauge's own payload.
+
+    ⛔ NOT FROM ROW PRESENCE (#13102, measured): the ``:MeteringRecord`` row is
+    SHARED by every meter, and ``record_write_ops`` MERGEs it — so the very first
+    ``POST /v1/points`` of a freshly-bumped tenant CREATES the row carrying no
+    graph-storage figure at all. Keying on "a row exists" therefore turned the
+    second request of that tenant into a refusal (a row was found, with no
+    timestamp). The discriminator is the gauge's OWN payload, which is what
+    ``backup_sweep`` already documents as *"the one signal that distinguishes a
+    real reading from a gap (``graph_storage_measured_at is None``, ``samples ==
+    0``)"*:
+
+    * an age ⇒ ``measured`` (a zero-byte graph MEASURED is a real reading, so the
+      number must not be the test);
+    * no age but ``samples > 0`` ⇒ ``"unreported"`` — a gauge write happened and
+      left a figure that cannot be aged, which is a FAULT;
+    * neither ⇒ ``"absent"`` — nothing has measured this gauge, so treat it as
+      the absent row it effectively is (the sibling meter's row is not storage).
+    """
+    if view.get("graph_storage_measured_at"):
+        view["measured"] = True
+        view["unmeasured_reason"] = None
+    elif view.get("graph_storage_samples"):
+        view["measured"] = False
+        view["unmeasured_reason"] = "unreported"
+    else:
+        view["measured"] = False
+        view.setdefault("unmeasured_reason", "absent")
+    return view
+
+
 def get_graph_storage_reading(org_id: str) -> dict:
     """The org's last graph-storage reading in the current window (#5331).
 
-    Returns the ``graph_storage_*`` fields plus the window. ZEROS (and a
-    ``None`` timestamp) for an org with no reading yet: a successful read
-    returning NO row is not an error (the MERGE only creates the row on the
-    first write). Read failures degrade to the zero view (never 500, #923),
-    including an unresolvable window.
+    Returns the ``graph_storage_*`` fields plus the window, and — since #13084
+    made this figure a CAP INPUT — the two facts that say WHY it is what it is:
+    ``measured`` and ``unmeasured_reason`` (the same vocabulary
+    :func:`get_capture_usage` already publishes, so one gate reads one shape).
+
+    ⛔ THE REASON TRAVELS RATHER THAN BEING FLATTENED INTO THE NUMBER, because a
+    zero view cannot say which of four DIFFERENT things happened, and the gate
+    must decide them differently (#13102 — arming the dimension without this
+    distinction refused every write of a brand-new paying tenant, measured red
+    in both ``hosted-e2e`` and ``test-slow (b)``):
+
+    * ``"absent"`` — the read SUCCEEDED and there is NO row for the window.
+      That is an ANSWER, not a fault: nobody has measured this tenant yet (the
+      MERGE only creates the row on the first write). A GAUGE cannot promise
+      the true bytes are zero, so this is a deliberate, disclosed
+      under-enforcement — and the alternative is an outage (#3981: a paying org
+      must not be refused over our own bookkeeping state).
+    * ``"unreported"`` — a row EXISTS but carries no ``measured_at``. The
+      writer deposited a figure that cannot be aged, so the reading is not
+      usable — and the GATE decides what follows, not this reader (below).
+    * ``"read_error"`` — the store refused the query. Degraded, not absent.
+    * ``"period_error"`` — the billing window itself was unresolvable.
+
+    ⛔ WHAT THE GATE DOES WITH A REASON IS THE DIMENSION'S DECLARATION, NOT A
+    POLICY OF THIS READER (``#13102`` review F4 corrects this docstring, which
+    still stated the PRE-fix refusal policy for every fault reason). The shipped
+    rule, in the two places it lives:
+
+    * ``capture_extraction`` declares nothing (``unmeasured_is_unarmed`` is
+      ``False`` by default), so ``allowance_gate._extraction_tokens`` still
+      REFUSES on an unusable reading. Unchanged by #13084.
+    * ``graph_storage`` declares ``unmeasured_is_unarmed=True``, so
+      ``allowance_gate._reading`` SERVES the write and records the fact
+      (``_served_unmeasured``: a per-``(dimension, reason)`` counter, a throttled
+      log line, and — for the reason set ``_OPERATOR_FAULT_REASONS`` names, i.e.
+      exactly these OUR-fault ones — a durable ``ALLOWANCE_CAP_UNENFORCEABLE``
+      incident). That is the #3981 ruling taken: a paying org is never refused
+      over our own bookkeeping state, and the unenforced cap is LOUD and
+      COUNTED instead of silent. It is under-enforcement, disclosed by the
+      dimension rather than by an omission here.
+
+    So: this function names the reason, and the DIMENSION decides. A future
+    dimension inherits whichever behaviour its declaration asks for, and a
+    reader must never reintroduce a refusal by deciding one itself.
+
+    ⛔ NEVER RAISES (#923): a failed read degrades to the zero view and NAMES why
+    in ``unmeasured_reason``. Nothing here raises on a fault, so ONE reader serves
+    both the refusing dimension and the serving one; a reader that raised would
+    500 a read path that must not fail.
     """
     zeros: dict = {
         "graph_storage_mb": 0.0,
@@ -2777,16 +2855,24 @@ def get_graph_storage_reading(org_id: str) -> dict:
         "graph_storage_max_mb": 0.0,
         "graph_storage_spread_mb": 0.0,
         "graph_storage_measured_at": None,
+        # TWO keys, not one: ``measured`` is the yes/no the gate branches on and
+        # ``unmeasured_reason`` is the diagnosis a human reads. Collapsing them
+        # into the timestamp's truthiness is exactly the flattening this
+        # docstring forbids.
+        "measured": False,
+        "unmeasured_reason": "absent",
     }
 
     def _zero_view(label: str,
-                   period: MeteringPeriod | None = None) -> dict:
-        return {**zeros, "period": label,
+                   period: MeteringPeriod | None = None, *,
+                   reason: str) -> dict:
+        return {**zeros, "unmeasured_reason": reason, "period": label,
                 "period_start": period.start_iso if period else None,
                 "period_end": period.end_iso if period else None}
 
     if not org_id:
-        return _zero_view(_display_period_label())
+        # No org ⇒ no row is even looked for. Mirrors ``get_capture_usage``.
+        return _zero_view(_display_period_label(), reason="absent")
     try:
         period = _current_period(org_id)
     except Exception as e:
@@ -2794,7 +2880,7 @@ def get_graph_storage_reading(org_id: str) -> dict:
             "graph storage usage query failed (degrading to zero view): "
             "team=%s error=%s", org_id, e,
         )
-        return _zero_view(_display_period_label())
+        return _zero_view(_display_period_label(), reason="period_error")
     try:
         if _supabase_mode():
             from tortoise.supabase_control import (  # noqa: I001
@@ -2807,7 +2893,7 @@ def get_graph_storage_reading(org_id: str) -> dict:
             out.update({"period": period.label,
                         "period_start": period.start_iso,
                         "period_end": period.end_iso})
-            return out
+            return _graph_storage_state(out)
         sdk = _reg_sdk()
         reg = sdk._get_registry()
         rows = reg.query(
@@ -2819,9 +2905,11 @@ def get_graph_storage_reading(org_id: str) -> dict:
             params={"tid": org_id, "pstart": period.start_iso},
         ).result_set
         if not rows:
-            return _zero_view(period.label, period)
+            # A SUCCESSFUL read that found no row: the one state that must not
+            # be read as a fault (see the docstring).
+            return _zero_view(period.label, period, reason="absent")
         r = rows[0]
-        return {
+        return _graph_storage_state({
             "graph_storage_mb": float(r[0] or 0.0),
             "graph_storage_indices_mb": (float(r[1])
                                          if r[1] is not None else None),
@@ -2834,13 +2922,13 @@ def get_graph_storage_reading(org_id: str) -> dict:
             "period": period.label,
             "period_start": period.start_iso,
             "period_end": period.end_iso,
-        }
+        })
     except Exception as e:
         _logger.warning(
             "graph storage usage query failed (degrading to zero view): "
             "team=%s period=%s error=%s", org_id, period.label, e,
         )
-        return _zero_view(period.label, period)
+        return _zero_view(period.label, period, reason="read_error")
 
 
 # ── Postgres bytes lane: per-org STORED bytes from what we write (#12762) ────

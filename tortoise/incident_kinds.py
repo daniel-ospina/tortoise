@@ -224,6 +224,13 @@ KIND_RESTORE_DRILL_FAILED = "RESTORE_DRILL_FAILED"
 # App-owned, non-backup alert-plane kinds (#3820 / #3981 / #3873 / #4456 / #4872).
 KIND_ANALYTICS_SINK_DEGRADED = "ANALYTICS_SINK_DEGRADED"
 KIND_UNMETERED_INCREMENT = "UNMETERED_INCREMENT"
+#: #13102: an ARMED allowance dimension had NO USABLE READING (never measured, a
+#: read fault, an unageable row, or a reading past the staleness bound), so the
+#: cap could not be enforced and the write was SERVED. The sibling of
+#: ``COHORT_CAP_UNENFORCEABLE`` one layer up: that kind is the pre-spend cap, this
+#: one is the stored-bytes cap. Distinct on purpose (never a superstring of the
+#: other) because the R2-unreachable adoption path resolves by GitHub search.
+KIND_ALLOWANCE_CAP_UNENFORCEABLE = "ALLOWANCE_CAP_UNENFORCEABLE"
 KIND_COHORT_CAP_UNENFORCEABLE = "COHORT_CAP_UNENFORCEABLE"
 KIND_COHORT_COST_CAP = "COHORT_COST_CAP"
 KIND_ABUSE_DECISION_FAULT = "ABUSE_DECISION_FAULT"
@@ -359,6 +366,10 @@ SPECS: dict[str, KindSpec] = {
     KIND_COHORT_CAP_UNENFORCEABLE: _spec(
         WRITER_UNSPECIFIED, manual_close=True,
         meaning="pre-spend cohort cap not evaluated (window unresolvable)"),
+    KIND_ALLOWANCE_CAP_UNENFORCEABLE: _spec(
+        WRITER_UNSPECIFIED, manual_close=True,
+        meaning="armed allowance dimension had no usable reading; write served "
+                "(under-enforcement, #13102)"),
     KIND_COHORT_COST_CAP: _spec(
         WRITER_UNSPECIFIED, manual_close=True,
         meaning="the pre-spend cohort cap FIRED (capture refused 402)"),

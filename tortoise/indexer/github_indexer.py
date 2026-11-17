@@ -32,6 +32,47 @@ Lifecycle decision table (THE rule):
 - first ingest of an already-closed issue → ``-created`` ONLY (kind carries
   the closed state) — the one-time legacy backfill is the only other source
   of ``-closed`` events (marker-gated, T2-P3).
+- a row NO fold can reconcile records NO transition ("cannot place") → the diff
+  answers ``None`` and the transition arm is gated off. Two families: a row whose
+  position the fold cannot resolve (foreign ``pipelineStageKey`` / stage id absent
+  from its declaration), and a row carrying a lifecycle LATCH term — a word in the
+  FOLD's own ``commit_ops.OBJECT_TERMINAL_STATUSES``, which ``_fold_object_stage``
+  refuses in BOTH directions (``_status_is_latched``). ⚠️ Stated trade: such a row
+  records neither ``-closed`` nor ``-reopened``. Bounded and inspectable; an
+  unbounded mint loop is neither (#13143, #13288 F1). This is NOT the pre-#13143
+  bug returning — that was a real close reading as "first ingest"; both refusals
+  above are shapes for which no fold writes anything.
+  ⛔ The WIDER terms — ``status='outdated'``, the legacy ``outdated=true`` flag — are
+  NOT latched by the fold, and the two folds are dispatched under DIFFERENT rules
+  (``_row_is_frozen``): the CLOSE fold resolves through the live-holder read, which
+  excludes them, so it never runs and a close can never be applied; the REOPEN fold
+  takes ``_reopen_targets_closed`` and DOES apply. So for those rows this reader
+  answers the POSITION in the reopen direction instead of ``None``, which would drop
+  a reopen the projection would have applied (measured, #13289 round 4). The trade
+  is therefore one-directional, not symmetric.
+  ⛔ BOTH are answered BEFORE the polarity (closed/open) arms, on purpose: the
+  answer therefore does not depend on ``isClosed``. It must not, because
+  ``is_position_ended`` short-circuits on the marker alone and never looks at the
+  slot, so a marker-carrying row with an unplaceable position would otherwise
+  answer ``"closed"`` and mint ``-reopened``, ``-reopened-2``, … on every poll of
+  an OPEN issue (measured at ``[1,1,1]`` — #13288 F1). A lookup the fold refuses to
+  perform is not a negative result; it is a third answer.
+
+  **Stated residual (#13288 review, note).** The declaration this reader resolves
+  against is ``core:workitem`` only, because that is the only pipeline the BUILT-IN
+  fold can put on an indexed issue Object. A graph that declares a lifecycle for
+  ``pm:issue`` makes the fold use the PACK declaration
+  (``projection/entities.py:5950-5958``, ``pipeline_key = target_kind``), so such a
+  row's ``pipelineStageKey`` names a pipeline this reader cannot resolve and it
+  answers ``None`` — its close/reopen history stops, re-introducing the #13143
+  symptom (``events_minted: 0`` on a close) for that population. That answer is
+  unconditional in every other prop (it is taken before the polarity arms, see the
+  refusal bullet above), so it does not flip to ``"closed"`` on a row that also
+  carries ``isClosed`` — the shape that would loop. It is BOUNDED (no
+  mint loop) and one config away from being live, so it is stated here rather than
+  guessed at. Resolving the declaration the way the fold does — through the pack
+  index — is the honest close, and it is deliberately NOT done in the loop fix: it
+  would put the pack registry on the indexer's read path as part of it.
 
 The (dormant) statement machinery writes ``statement`` ONLY — never
 ``observation`` (removed kind, §5). DORMANT since #1844: the default path
@@ -1439,6 +1480,8 @@ class GitHubIndexer:
             # "open" can only mint a reopen, which folds, so it is safe.
             if _STATUS_TO_STATE.get(str(status)) == "open":
                 return None
+            return "closed"
+        if is_position_ended(is_closed=is_closed, stage_slot=declared_slot):
             return "closed"
         if stage_id is not None or slot is not None:
             return "open"

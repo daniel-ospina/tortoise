@@ -121,7 +121,9 @@ Two consequences, both load-bearing:
 
 ⚠️ ``used_memory`` is the whole INSTANCE — the only exact figure the engine gives.
 ``GRAPH.MEMORY USAGE`` is a sampling estimate that omits per-key overhead and is blind
-to the HNSW vector index (#5331), so it must never be wired to a cap.
+to the HNSW vector index (#5331), so it must never be read as a tenant's EXACT bytes.
+(The allowance gate uses it only as a one-directional LOWER BOUND — warn at the cap,
+hard-refuse at 1.5x — because every exclusion removes bytes; #13084.)
 
 THE METRIC
 ----------
