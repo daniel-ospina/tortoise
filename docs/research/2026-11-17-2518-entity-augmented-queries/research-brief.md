@@ -296,8 +296,12 @@ whole `absent_at_any_k` class **82 → 0**, and each lever's share is measured r
   the class is invisible in the production read at HEAD.
 - **The `_`-composite tail removes the remaining 20 in the hybrid shape** (20 → 0) and **all 82 in the
   lexical shape** (82 → 0). Both are deterministic, both are already shipped, neither is an expansion.
-- **Neither lever adds a ranking regression that matters here**: recall@3 rises monotonically across
-  the four cells (61.3 → 82.0 → 87.3 → 99.3 %), and `past_k` at k=3 falls 34 → 34 → 38 → 2.
+- **Neither lever trades absent misses for past-k misses.** Total k=3 misses fall across the four
+  cells **116 → 54 → 38 → 2** and recall@3 rises monotonically (**61.3 → 82.0 → 87.3 → 99.3 %**). The
+  `past_k` component reads **34 → 34 → 38 → 2**: it ticks UP by 4 in the lexical-ON cell precisely
+  because the composite makes 82 previously-unreachable names reachable (so a few land between rank 4
+  and 15 instead of nowhere), and the dense leg then collects them — which is the opposite of the
+  "expansion floods the window" failure.
 
 ### 3.4 The dispatch's baseline is not reproducible at this head — and the nearest measured state is named
 
@@ -391,7 +395,7 @@ not an expansion one.
 - **Not a measurement of the entity-key expansion.** It was **not exercised** by any arm here (§4.2:
   the mechanism is point-only; the instrument measures the object leg). Its cost bound is quoted from
   code and is **not** a measured latency.
-- **Not a claim that the dispatch's 28 is wrong.** It is **not reproducible on this box** (§3.3); the
+- **Not a claim that the dispatch's 28 is wrong.** It is **not reproducible on this box** (§3.4); the
   two measured states bracket it (0 and 82) and the separating mechanism is named. No artifact on
   `main` holds a 28.
 - **Not a claim about `#11901`'s own artifacts.** Their `miss_absent_at_max_k` (81 hybrid / 106
