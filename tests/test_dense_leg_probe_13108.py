@@ -59,16 +59,70 @@ def test_percentile_answers_None_for_an_empty_sample_never_zero():
     assert probe.percentile([0.0], 50) == 0.0
 
 
-def test_percentile_is_nearest_rank():
-    """Nearest-rank, not interpolation: 1..10 must give the 5th/10th/10th value."""
+def test_percentile_is_the_nearest_INDEX_convention_not_nearest_rank():
+    """``ordered[round((n-1)*pct/100)]`` — and the rows BELOW discriminate it.
+
+    ⛔ The original name asserted nearest-RANK, which is a different estimator, and every sample it
+    used (1..10, ``[7.5]``, ``[10,1,5]``) answers identically under both — so the claim it was named
+    for could not fail. ``#13121`` round 14 renamed it and added the inputs on which the two part
+    ways. A mutant to the nearest-rank formula ``ceil(pct/100*n)-1`` reds the two rows below.
+    """
     values = [float(v) for v in range(1, 11)]
     assert probe.percentile(values, 50) == 5.0
     assert probe.percentile(values, 95) == 10.0
     assert probe.percentile(values, 99) == 10.0
     # The single-value sample is the value, at every rank (the `len == 1` branch).
     assert probe.percentile([7.5], 99) == 7.5
-    # Order of the INPUT cannot matter — the rank is over the sorted sample.
+    # Order of the INPUT cannot matter — the index is over the sorted sample.
     assert probe.percentile([10.0, 1.0, 5.0], 50) == 5.0
+    # ⛔ DISCRIMINATING: nearest-rank answers 2.0 here, this answers 3.0.
+    assert probe.percentile([1.0, 2.0, 3.0, 4.0], 50) == 3.0, (
+        "round((4-1)*0.5) = 2 -> the 3rd value; nearest-rank (ceil(4*0.5)-1 = 1) "
+        "would answer 2.0")
+
+
+def test_percentile_p99_is_NOT_the_max_on_a_60_sample_arm():
+    """The consequence the architecture doc has to live with, pinned where it can fail.
+
+    60 samples is the ``:Object`` c=1 under-load arm's ``n``. ``p99`` there is ``ordered[58]`` —
+    ``634.50 ms`` in ``probe-1000-under-load.json`` — while ``max`` is ``644.97 ms``; nearest-rank
+    would answer the max. That is why §14.3 V3 quotes ``max`` beside ``p99``, and why this row
+    exists rather than a comment: a mutant to nearest-rank reds it.
+    """
+    values = [float(v) for v in range(1, 61)]
+    assert probe.percentile(values, 99) == 59.0
+    assert probe.percentile(values, 99) != max(values), (
+        "nearest-rank would answer 60.0; if this ever becomes the max, the "
+        "estimator changed and every committed artifact's p99 must be re-derived")
+    assert probe.percentile(values, 100) == max(values)
+
+
+def test_engine_version_is_None_when_the_projection_cannot_answer():
+    """UNMEASURED is ``None``, never a fabricated string, and never an exception.
+
+    ``#13121`` round 14: the prose names the engine it was measured on, and the artifacts it used to
+    cite carry no version at all. The fix records it going forward — so the *unreadable* case must be
+    distinguishable from ``4.20.6``, and a connection failure must not take the whole run down.
+    """
+    class _NoVersion:
+        def _get_proj(self):
+            return type("P", (), {"_get_falkordb_version": lambda self: None})()
+
+    class _Raises:
+        def _get_proj(self):
+            raise RuntimeError("no connection")
+
+    assert probe.engine_version(_NoVersion()) is None
+    assert probe.engine_version(_Raises()) is None
+
+
+def test_engine_version_is_the_dotted_form_the_prose_cites():
+    """The citation's figure has to be readable off the artifact, so it is a string."""
+    class _Sdk:
+        def _get_proj(self):
+            return type("P", (), {"_get_falkordb_version": lambda self: (4, 20, 6)})()
+
+    assert probe.engine_version(_Sdk()) == "4.20.6"
 
 
 def _sample(elapsed_ms: float, timeout_ms: int = 500, **kw) -> dict:

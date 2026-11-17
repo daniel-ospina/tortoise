@@ -218,7 +218,9 @@ are refused for `:Object` while the same call answers on `:Point` (`signature B`
 > four carry none) is what does.
 
 Each refused round trip costs **≈10 ms** on this box, so an unindexed dense read pays **≈20 ms
-before the scan starts** — 58 % of a 34.45 ms read at 1,000 nodes (§5).
+before the scan starts** — 58.0 % of the **34.78 ms** paired read at 1,000 nodes (§3.4; both figures
+from `fix-1000-paired-at-rest.json`, `index_attempt[0].elapsed_ms` = 10.18 + 9.97 against
+`arms["object[nohint]@c1"].latency_ms.p50`).
 
 ### 3.2 Latency, at rest and under load (1,000-node label)
 
@@ -228,6 +230,16 @@ before the scan starts** — 58 % of a 34.45 ms read at 1,000 nodes (§5).
 | `:Object` c=16 | p50 **723.07** / p99 1092.53 ms · **87/100 over** | — | p50 **551.78** / p99 860.21 · **43/60 over** |
 | `:Point` c=1 | p50 **21.04** / p99 28.76 ms · 0/100 | — | p50 **62.15** / p99 370.33 · 0/60 |
 | `:Point` c=16 | p50 **450.95** / p99 924.31 · **41/100 over** | — | p50 **461.79** / p99 681.90 · **24/60 over** |
+
+⛔ **Every percentile in this table — and in every artifact — is the probe's NEAREST-INDEX
+convention** (`ordered[round((n-1)·pct/100)]`, numpy's `method='nearest'`), **not nearest-RANK**
+(`ordered[ceil(n·pct/100)-1]`). They diverge at the tail of a short arm: the 60-sample `:Object`
+c=1 under-load arm's `p99` is **634.50 ms** while its `max` is **644.97 ms**, which nearest-rank
+would have reported. `max` is published beside `p99` in every `latency_ms` block — **quote `max`
+when the tail is the claim**. (`#13121` round 14 corrected the estimator's docstring, which claimed
+"nearest-rank", and pinned the distinction with discriminating rows; the convention itself was not
+swapped, because every committed artifact's `p99` is that formula and re-deriving them needs the
+engine.)
 
 Two things this settles and one it corrects:
 
@@ -255,8 +267,9 @@ sequentially; a capture fleet does not.
 | **8,000 names**, probe windows c=1 | **load 122–132** | 60 | `{hybrid: 58, keyword_only: 2}` | **3.3 %** — reason **`timeout`** |
 
 ⚠️ **The four committed 8,000-row artifacts predate the `population_arg`/`population_measured`
-fix (`#13121` rounds 4–9) and still carry `config.population: 1000` with `population_measured:
-null`, beside their own `census.labels.Object.stored: 8000`.** That field is the `--seed`
+fix (`#13121` rounds 4–9) and still carry `config.population: 1000` with **no `population_measured`
+field at all** (corrected in round 14: they do not carry it as `null`), beside their own
+`census.labels.Object.stored: 8000`.** That field is the `--seed`
 ARGUMENT on a `--no-seed` run, not the population read; **`census.labels.*.stored` is the reading
 to quote**, and it is the field these rows rest on. (The tool now writes both halves; the
 artifacts were not regenerated — the same disclosure §5 makes for the empty-arm zeros.)

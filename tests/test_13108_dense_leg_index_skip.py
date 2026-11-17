@@ -10,14 +10,22 @@ an empty set (`#11087` pins that for the MESSAGE), and acting on it would demote
 every dense read, ``:Point`` included, after an engine catalogue reshape. On an unindexed label the two
 ``CALL db.idx.vector.queryNodes`` attempts can only be REFUSED, and this engine
 answers ``Invalid arguments for procedure`` for a missing index AND for a wrong
-argument order alike — measured on FalkorDB v4.20.6 with
+argument order alike — measured on ``falkordb/falkordb-server:v4.20.6`` (the pin
+``tools/test_lane.py`` launches; the committed artifacts record no server version — the probe's
+``engine_version`` field was added by ``#13121`` round 14) with
 ``tools/dense_leg_probe_13108.py``, where the two refused round trips cost
-**20.17 ms of a 34.45 ms ``:Object`` dense read at 1,000 nodes** (58 %;
-``fix-1000-paired-at-rest.json`` → ``index_attempt[0].elapsed_ms``, 10.18 + 9.97).
-⛔ ``#13121`` rounds 4/5/8 corrected an earlier ``≈23 ms of 36.5 ms (63 %)`` here. Neither
-``23.45 ms`` nor ``36.5 ms`` is in ANY committed artifact: the artifact-backed scan is
-**13.26 ms** (``fix-1000-paired-at-rest.json`` → ``arms["object[hint]@c1"].latency_ms.p50``),
-and 23.45 ms would be arithmetically impossible beside a 34.45 ms total. The figures now match
+**20.17 ms of a 34.78 ms ``:Object`` dense read at 1,000 nodes** (58.0 %). ⛔ **Both figures come
+from the SAME artifact** — ``fix-1000-paired-at-rest.json``: 20.17 is ``index_attempt[0].elapsed_ms``
+(10.18 + 9.97) and 34.78 is that artifact's own ``arms["object[nohint]@c1"].latency_ms.p50``.
+``34.45 ms`` is the *un-paired probe* run's ``:Object`` p50 (``probe-1000-at-rest-and-concurrent.json``,
+a different run at a different ``code_head``); round 14 removed the pairing that quoted it here.
+⛔ ``#13121`` rounds 4/5/8 corrected an earlier ``≈23 ms of 36.5 ms (63 %)`` here. ``23.45 ms`` is
+in NO committed artifact, and **no artifact reports 36.5 ms as an ARM p50** — it appears only as
+per-sample values (``36.5``/``36.58`` in ``fix-1000-paired-at-rest.json``, ``36.53`` in
+``probe-1000-at-rest-and-concurrent.json``, ``36.57`` in ``probe-8000-at-rest.json``), which is why
+"in ANY committed artifact" was too strong. The artifact-backed scan is **13.26 ms**
+(``fix-1000-paired-at-rest.json`` → ``arms["object[hint]@c1"].latency_ms.p50``), and 23.45 ms would
+be arithmetically impossible beside a 34.78 ms total. The figures now match
 `tortoise/search_engine.py` (the skip site) and brief §3.4.
 
 So the injected inventory lets the read skip them. Four things must stay true,
@@ -154,13 +162,18 @@ def test_none_means_unmeasured_and_attempts_as_before():
     assert entry[VECTOR_MECHANISM_KEY] == MECHANISM_SCAN_FALLBACK
 
 
-def test_a_label_missing_from_an_UNMEASURED_set_is_not_a_skip():
-    """`set()` and `None` are DIFFERENT facts and must not collapse.
+def test_a_label_absent_from_a_MEASURED_set_skips_and_an_indexed_one_does_not():
+    """MEMBERSHIP, not mere presence: ``{"Point"}`` keeps ``:Point`` on the index branch.
 
-    An empty set means "measured, and NOTHING is indexed" (a real answer); None
-    means "the catalogue could not be read" (no answer). Both skip here for
-    `:Object`, so the distinction is pinned on a label that IS indexed in the
-    set: `{"Point"}` keeps `point` on the index branch.
+    ``:Object`` is ABSENT from ``{"Point"}``, so it skips; ``:Point`` is IN it, so it attempts —
+    that pair is what says the guard tests membership rather than truthiness.
+
+    ⛔ ``None`` is a DIFFERENT lane and ATTEMPTS for ``:Object`` too —
+    ``test_none_means_unmeasured_and_attempts_as_before`` asserts 2 attempts for this very label.
+    So the two lanes must never be described as "both skip for ``:Object``": only the MEASURED set
+    can skip, and ``#13121`` round 14 corrected a docstring and a test name that said otherwise.
+    The measured-EMPTY set has its own row below, because it is the lane the fix's own numbers come
+    from.
     """
     graph = RecordingGraph()
     trace = _trace_for(graph, vector_indexed_labels={"Point"})
@@ -173,6 +186,35 @@ def test_a_label_missing_from_an_UNMEASURED_set_is_not_a_skip():
                      leg_trace=t2, vector_indexed_labels={"Point"})
     assert next(e for e in t2 if e.get("leg") == "vector")[
         VECTOR_MECHANISM_KEY] == MECHANISM_INDEX
+
+
+def test_a_MEASURED_EMPTY_set_skips_where_None_attempts():
+    """``set()`` is an ANSWER (nothing is indexed), and it is the lane the fix ships for.
+
+    After ``#11642`` an ARMED store retires every in-graph VECTOR index, so
+    ``_vector_indexed_labels_for_reads`` IS ``set()`` and that is what makes every dense read skip —
+    the population the paired −62 % table is measured on. ``None`` means "the catalogue could not be
+    read" and ATTEMPTS (``test_none_means_unmeasured_and_attempts_as_before``: 2 attempts for this
+    same ``:Object`` label), so the two facts must not collapse.
+
+    ⛔ **Non-vacuity:** this is the only row that reds the collapse
+    ``_index_known_absent = bool(vector_indexed_labels) and label not in vector_indexed_labels`` —
+    ``{"Point"}`` is truthy so every other skip/control row still passes, and ``None`` still attempts.
+    The empty set is the single lane where "measured, nothing indexed" is mistaken for "not
+    measured".
+    """
+    graph = RecordingGraph()
+    trace = _trace_for(graph, vector_indexed_labels=set())
+
+    assert graph.index_attempts() == 0, (
+        "a MEASURED-EMPTY set is an answer: no label carries an index, so issue "
+        "neither doomed queryNodes round trip")
+    assert any("vec.euclideanDistance" in c for c in graph.cypher), (
+        "the scan is still the point — a skip must not remove the read")
+    entry = next(e for e in trace if e.get("leg") == "vector")
+    assert entry[VECTOR_MECHANISM_KEY] == MECHANISM_SCAN_FALLBACK, (
+        "#4999: measured-absent is still an EXPECTED index that was not used")
+    assert entry["degraded"] is False
 
 
 def test_embedded_mode_is_unaffected():

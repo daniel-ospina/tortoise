@@ -150,12 +150,31 @@ class UnknownMechanism(RuntimeError):
 # ── statistics (pure, and pinned by the tests) ──────────────────────────────
 
 def percentile(values: list[float], pct: float) -> float | None:
-    """Nearest-rank percentile. ``None`` for an empty sample, never ``0``.
+    """The NEAREST-INDEX percentile: ``ordered[round((n-1) * pct/100)]``.
 
-    An empty sample and a zero-millisecond sample are different facts (the same
-    distinction ``tools/dod_5090_probe.py``'s census draws between ``UNMEASURED``
-    and ``0``), and a percentile that answers ``0`` for "nothing ran" is exactly
-    the shape that reads as measured without being measured.
+    ``None`` for an empty sample, never ``0``. An empty sample and a
+    zero-millisecond sample are different facts (the same distinction
+    ``tools/dod_5090_probe.py``'s census draws between ``UNMEASURED`` and ``0``),
+    and a percentile that answers ``0`` for "nothing ran" is exactly the shape
+    that reads as measured without being measured.
+
+    ⛔ **This is NOT the nearest-RANK estimator** (``ordered[ceil(n*pct/100)-1]``,
+    the ``PERCENTILE.INC`` / "nearest-rank" convention), and ``#13121`` round 14
+    deleted a docstring that said it was. The two agree on most samples and part
+    ways at the TAIL of a short arm: on the 60-sample ``:Object`` c=1 under-load
+    arm this answers ``ordered[58] = 634.50 ms`` for ``p99``, where nearest-rank
+    answers ``max = 644.97 ms``. Both are published — ``max`` sits beside ``p99``
+    in every ``latency_ms`` block — so **quote ``max`` when the tail is the
+    claim**, never ``p99`` alone.
+
+    ⛔ **Why the convention is not swapped to nearest-rank here:** every committed
+    artifact under ``docs/research/2026-11-17-13108-dense-leg/`` carries a
+    ``latency_ms`` block computed by THIS formula, and re-deriving those blocks
+    needs the engine (they are not regenerable offline). Swapping the estimator
+    would leave each artifact's ``p99`` disagreeing with the tool that wrote it —
+    precisely the claim/artifact mismatch class ``#13121`` rounds 4–13 removed. So
+    the honest move is to NAME what this computes, pin it with a discriminating
+    row, and publish ``max`` beside it.
     """
     if not values:
         return None
@@ -323,7 +342,11 @@ def probe_index_attempt(graph, query_vec, label: str, limit: int,
     attempt is reported. ⚠️ **This engine does NOT distinguish them by message**:
     an unindexed label and a wrong argument order both come back as
     ``Invalid arguments for procedure 'db.idx.vector.queryNodes'`` (measured on
-    FalkorDB v4.20.6 — see the artifact). The distinguishing evidence is
+    ``falkordb/falkordb-server:v4.20.6`` — the pin ``tools/test_lane.py``
+    launches; ⛔ the committed ``#13108`` artifacts do **not** record a server
+    version, which is why ``--out`` now writes ``engine_version`` from
+    :func:`engine_version` and why (``#13121`` round 14) this sentence no longer
+    cites them for it). The distinguishing evidence is
     therefore NOT the text but the census (:func:`label_census`): the same call
     answers on a label the catalogue holds a VECTOR index for, and is refused on
     one it does not. That is why the two are reported side by side and this
@@ -383,6 +406,25 @@ def probe_index_attempt(graph, query_vec, label: str, limit: int,
     return {"label": label, "outcome": outcome, "answered_signature": answered,
             "aborted_reason": aborted_reason, "attempts": attempts,
             "elapsed_ms": round((time.monotonic() - start) * 1000.0, 2)}
+
+
+def engine_version(sdk) -> str | None:
+    """The server's version as ``major.minor.patch``, or ``None`` if unread.
+
+    ⛔ ``None``, never ``"unknown"`` and never a ``0``: this file, the skip site in
+    ``tortoise.search_engine`` and ``tests/test_13108_dense_leg_index_skip.py``
+    all name the engine they were measured on, and until ``#13121`` round 14 that
+    figure was cited to artifacts which carry no such field. A run writes it here
+    so the citation has a home. **An artifact committed before that round has no
+    ``engine_version`` key** — its engine is the ``tools/test_lane.py`` pin.
+    """
+    try:
+        version = sdk._get_proj()._get_falkordb_version()
+    except Exception:  # noqa: BLE001, RUF100 — an UNMEASURED version is not an error
+        return None
+    if not version:
+        return None
+    return ".".join(str(part) for part in version)
 
 
 def label_census(sdk) -> dict:
@@ -901,6 +943,10 @@ def run(args: argparse.Namespace) -> int:
         # #13121 review round 4 (F3): a head is not the tree it was measured on.
         "worktree": worktree_state(),
         "uri_graph": args.graph or sdk._graph_name,
+        # #13121 round 14 (F, version citation): the prose names an engine; the
+        # artifact must be able to answer for it. `None` when unread, never a
+        # fabricated string.
+        "engine_version": engine_version(sdk),
         "config": {
             # #13121 review round 4 (F4), corrected in round 5 (F1): the
             # `--population` ARGUMENT, which is NOT the population measured on a

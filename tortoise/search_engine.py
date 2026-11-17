@@ -3650,11 +3650,15 @@ def run_vector_query(
     ⛔ WHY. On an unindexed label both attempts can only be REFUSED, and this
     engine does not even say so distinctly — ``Invalid arguments for
     procedure 'db.idx.vector.queryNodes'`` is what it answers for a missing index
-    AND for a wrong argument order (measured on FalkorDB v4.20.6,
-    ``tools/dense_leg_probe_13108.py``). Paying them costs real time on every
-    such read: measured **34.45 ms p50 for an ``:Object`` dense read, of which
-    ≈20 ms is the two refused round trips** — about 58 % of the leg spent
-    producing a known error (#13108). The scan that follows is UNCHANGED, and
+    AND for a wrong argument order (measured on
+    ``falkordb/falkordb-server:v4.20.6`` — the pin ``tools/test_lane.py`` launches
+    — with ``tools/dense_leg_probe_13108.py``). Paying them costs real time on
+    every such read: measured **34.78 ms p50 for an ``:Object`` dense read, of
+    which 20.17 ms is the two refused round trips** — 58.0 % of the leg spent
+    producing a known error (``fix-1000-paired-at-rest.json``: the 20.17 is
+    ``index_attempt[0].elapsed_ms``, 10.18 + 9.97, against that same artifact's
+    ``arms["object[nohint]@c1"].latency_ms.p50``). The scan that follows is
+    UNCHANGED, and
     the read is still recorded :data:`MECHANISM_SCAN_FALLBACK` — `#4999`'s "an
     index was expected and was not used" — so the alert surface and the
     `#4997` unindexed-label notice keep their meaning. This is NOT the index
@@ -3850,10 +3854,12 @@ def run_vector_query(
                          "scope un-embedded", e)
             _scope_hollow = True
 
-    # #4999: did THIS call attempt an index query? Embedded mode never does
-    # (the scan is the design, not a fallback); docker mode always does, and a
-    # failure falls through to the scan below. That distinction is what makes
-    # ``scan`` and ``scan_fallback`` tellable apart.
+    # #4999: did THIS call EXPECT an index it could not use? TWO lanes set it —
+    # the attempt below, and #13108's measured-absent skip — so docker mode does
+    # NOT always attempt one, it always EXPECTS one. Embedded mode never does
+    # either (the scan is the design, not a fallback). That distinction is what
+    # makes ``scan`` and ``scan_fallback`` tellable apart, and ``scan_fallback``
+    # is the right answer for a skip: the index was expected and was not used.
     index_attempted = False
 
     # ── #11642 / #4051 V1: the ANN leg, from the POSTGRES RECORD ──────────
@@ -3952,9 +3958,18 @@ def run_vector_query(
     # set (#11087's pinned message semantic), so acting on that value would read
     # an engine catalogue reshape as "this store indexes nothing" and demote
     # every dense read to a scan. The behavioural half is None in exactly that
-    # lane. Both are equal in every other lane, and both are re-measured on every
-    # projection setup, so neither can be staler than the `#4997` line an
-    # operator already reads.
+    # lane. Both are equal in every other lane.
+    # ⚠️ RESIDUAL, disclosed rather than compared away (#13121 round 14): the
+    # inventory is filled ONLY by `_ensure_indexes` / `_create_vector_index_api`
+    # (projection/__init__.py:21668, :21724) — the only in-process re-measure is
+    # the destructive `rebuild_from_record`. So a long-lived projection (an SDK
+    # session, the MCP server) that outlives an OUT-OF-BAND
+    # `CREATE VECTOR INDEX` — precisely the remedy the `#4997` notice
+    # recommends — keeps scanning ``scan_fallback`` until its next setup, where
+    # before #13108 the NEXT CALL picked the index up. Results stay correct and
+    # the direction is fail-safe (a stale skip costs the scan that the refused
+    # round trip preceded anyway), but a stale line here is a stale DECISION, not
+    # merely the stale `#4997` MESSAGE an operator can read around.
     # None means NOT MEASURED (the inventory's fail-open lane): attempt as before
     # rather than assume absence, because a wrong skip would demote every read of
     # an indexed label to a scan.
