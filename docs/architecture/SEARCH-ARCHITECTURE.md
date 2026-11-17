@@ -68,8 +68,9 @@ once"*:**
 | `Subject` | **no** | same as `Object` | same as `Object`, column included: **no embedding column on `main` yet** (`#13265`) |
 
 **⇒ The arming order follows from the table: `Point`/operator → `Source`/`Event` → `Object`/`Subject`**, the
-last two gated on the status fold — not the order the ruling names the labels in, which would spend the
-longest stretch of the work on the two with the most still blocking them.
+last two gated on the status fold — not the order the ruling names the labels in (`Object`/`Subject`
+first), which would spend the longest stretch of the work on the two with the most still blocking them,
+and the shortest on the one that is already able to answer.
 
 **⇒ And *"armed and working"* is four conditions per label, in this order — it is not one switch:**
 **(1)** the vector is WRITTEN into the row (a writer that fills the payload column), **(2)** the index is
@@ -79,7 +80,7 @@ OFF — and off for a measured reason: the record has no backfill, so switching 
 material out of the dense pool — and it is the one condition this document cannot schedule: arming is
 **downstream of `#11691`'s arming gate and `#13082` P0-b's RAM cap**, not parallel to them, so "the code is
 ready" is not "we may flip it"). **A label missing any one of the four is not armed, however the other three read** — four green checks can
-each be about a different label.
+each be about a different label, which is the shape that produces a confident "done".
 
 **Sibling documents:** `STORAGE-ARCHITECTURE.md` owns authority per layer (§2.0/§3) and the cost model
 (§17.4); `CONSUMPTION-MODEL.md` owns metering; **this document owns where each search leg executes, and
