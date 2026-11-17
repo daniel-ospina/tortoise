@@ -61,9 +61,11 @@ Two writers reach the graph, and both were read:
 2. the **record → cache projection** (`cache_projection.py`, `NODE_TABLES` → 6 labels), which is what a
    rebuild materialises.
 
-The inventory below is the union. `d` = the label's record table in `cache_projection.NODE_TABLES`
-(so a `record_only` row-tier is *mechanically expressible* for it); `—` = graph-only bookkeeping with **no
-record table** (relevant in §5.2).
+The inventory below is the union. `d` = the label's record table in `cache_projection.NODE_TABLES` (a record
+HOME — ⚠️ **not a tier**: `cache_tier` is a column on `public.point` only, and `cache_projection.py:3633`
+applies the tier predicate `if table == "point"`, so a `record_only` row-tier is mechanically expressible for
+`:Point` alone and every other label needs its own migration — §5.3's third precondition); `—` = graph-only
+bookkeeping with **no record table** (relevant in §5.2).
 
 | # | shape (label) | written by | record table | node count in the measured corpus |
 |---|---|---|---|---|
@@ -83,7 +85,7 @@ record table** (relevant in §5.2).
 | 14 | `:DeliveryReceipt` (webhook) | `webhook_delivery.py:487` | — | 0 (not exercised) |
 | 15 | `:Batch`, `:PipelineStage`, `:PackInstall`, `:PackSelection` | `mining.py`, `pipeline.py`, `pack_state.py`, `hosted_api:32965` | — | 0 (not exercised) |
 | 16 | `:ContextSubscription` (webhook registration) | `webhook_delivery.py:406` (`CREATE (s:ContextSubscription {…})`) | — | 0 (not exercised) |
-| 17 | `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:317` (`MERGE (n:OnboardingState {org_id})`), `:322`/`:929` (`MERGE (s:OnboardingStep {org_id, step_id})`), `:324`/`:934` (`MERGE (n)-[:COMPLETED_STEP]->(s)`) | `COMPLETED_STEP` | 0 (not exercised) |
+| 17 | `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:317` (`MERGE (n:OnboardingState {org_id})`), `:322`/`:929` (`MERGE (s:OnboardingStep {org_id, step_id})`), `:324`/`:934` (`MERGE (n)-[:COMPLETED_STEP]->(s)`) | — (`COMPLETED_STEP` is an EDGE type, not a record table — `NODE_TABLES` has six labels and onboarding is not one of them) | 0 (not exercised) |
 | 18 | **found, NOT censused** — `:Pipeline` (`pipeline.py:525`), `:MeteringRecord` (`metering.py:108`, `:840`, `:1146`, `:1608`), `:MeteringUnmeteredIncrement` (`metering.py:616`), `:WebhookEvent` (`hosted_api.py:47787`), and the tenancy/registry labels `:Team` (`sdk.py:46612`), `:Membership` (`:47262`), `:APIKey` (`:47409`), `:TeamMeta` (`:46671`), `:Graph` (`:46753`), `:SignupToken` (`hosted_api.py:34901`), `:Invitation` (`hosted_api.py:30343`) | sdk / metering / pipeline | — | **not censused — a GAP, see §7** |
 
 ⛔ **Row 18 is a real gap, labelled as one.** This audit read the memory-substrate writers and the bookkeeping
@@ -324,18 +326,23 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 11b | `:Tag` | §2.5 | **yes** — `TAGGED` is how every tag is read | **graph** | the edge is the read; the node is its endpoint |
 | 12 | `_searchText` on a **non**-episodic `:Source` | FTS | **yes** | **graph** | the fulltext index's field set |
 | 13 | `Source.summary`/`_searchText` on an **episodic** Source | declined already (`#10853`) | **no** | **`record_only`** ✅ already shipped | §9.1's prose rule, per ROW |
-| 14 | `Point.mentions` (the held-phrase JSON tail prop, `projection/entities.py:1206`) | `projection/__init__.py:22118-22120` (`SET n.mentions = NULL` / `= $mentions` — an **RMW**, `none`); `sdk.py:18841` (`pt.get("mentions")`, a whole-node read) | **no** | **`record_only`** ⛔ gated — the two test pins refuse the declaration (§5.1) | nothing walks, filters or indexes it, and it is **not** an embedding input (`sdk.py:15975` composes from `quote`/`content` only) — but the move is blocked |
+| 14 | `Point.mentions` (the held-phrase JSON tail prop, `projection/entities.py:1206`) | `sdk.py:27210` (`get_point` — *"Returns dict of all properties"*, the whole-node read); `projection/__init__.py:22118-22120` — a **write-only** fold (the branch is computed in Python at `:22109` from the journal payload, so the `SET` reads no node; `none`); `sdk.py:18841` is **not** a reader of the stored shape — it reads the extractor PAYLOAD dict, `pt` bound at `:18769` | **no** | **`record_only`** ⛔ gated — the two test pins refuse the declaration (§5.1) | nothing walks, filters or indexes it, and it is **not** an embedding input (`sdk.py:15975` composes from `quote`/`content` only) — but the move is blocked |
 
-⚠️ **Row 14 was corrected in review, and the correction is the instructive part.** It read `prompt-side
-Point.aboutEntities, mentions` with a **`graph`** verdict whose reader was "`search_engine` flattening" — a
-reader with no `file:line` that does not exist. Two separate defects: (a) `aboutEntities` is not a node
-property at all — `projection/entities.py:1808` lists it in `_META_KEYS` under *"handled as graph edges"*, and
-the edge it becomes is `aboutSubject`, already censused at §2.5, so the row double-counted a censused shape;
-(b) `mentions` **is** stored (`projection/entities.py:1206`, `_POINT_JSON_RECORD_PROPS`), but nothing needs a
-graph capability to read it, and the embedding text is `quote` + edge-derived names (`embed_compose.py:284`,
-called at `sdk.py:15975`) — neither half is an input. The owner's rule therefore puts it at `record_only`,
-blocked by exactly what gates `story_arc`: the mechanism CAN deny a tail-only key (§5.1 measures it), and the
-two test pins are what refuse the declaration.
+⚠️ **Row 14 was corrected in review — twice, and the second correction is the instructive part.** It first
+read `prompt-side Point.aboutEntities, mentions` with a **`graph`** verdict whose reader was "`search_engine`
+flattening" — a reader with no `file:line` that does not exist. Two defects there: (a) `aboutEntities` is not
+a node property — `projection/entities.py:2423` lists **`about_entities`, `aboutEntities`** under *"structural
+/ edge-carried — never node props via passthrough"* (the snake entry at `:1812` sits in `_META_KEYS` as
+*"handled as graph edges"*), and the edge it becomes is `aboutSubject`, already censused at §2.5, so the row
+double-counted a censused shape; (b) `mentions` **is** stored (`projection/entities.py:1206`,
+`_POINT_JSON_RECORD_PROPS`), but nothing needs a graph capability to read it, and the embedding text is
+`quote` + edge-derived names (`embed_compose.py:284`, called at `sdk.py:15975`) — neither half is an input.
+⚠️ The FIRST correction then cited two things that are **not readers**: `sdk.py:18841` reads the extractor
+payload dict rather than a node, and `projection/__init__.py:22118-22120` is a write-only fold that its own
+definition of `RMW` (§2.7) does not cover. Both are replaced above by the real whole-node read, `sdk.py:27210`.
+The verdict was right the first time and the evidence was not — which is why every cite in this document is
+meant to be opened, not trusted. The move stays blocked by exactly what gates `story_arc`: the mechanism CAN
+deny a tail-only key (§5.1 measures it), and the two test pins are what refuse the declaration.
 
 ---
 
@@ -482,8 +489,9 @@ eviction policy — that is `#13084` and P0-c.
 |---|---|---|
 | **no record table** → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the ten other bookkeeping labels | a record home, then `cache_tier` (§5.2) |
 | **a policy pin** → the declaration is refused although the seam would honour it | `point.story_arc` | `#10429`: widen the completeness pin with a tail-only category (§5.1) |
+| **a record table but no tier COLUMN** → having a row is not having a tier | `:Session` telemetry row 7b (and every non-`:Point` label) | a `cache_tier` column on `public.session` (one migration per label, `cache_projection.py:3633`) |
 
-Neither is a census failure. Both are the mechanism's **precondition**, named so the next slice is executable
+None of these is a census failure. Each is the mechanism's **precondition**, named so the next slice is executable
 instead of another audit.
 
 ## 6. Arguable shapes — listed with the question that would settle each
