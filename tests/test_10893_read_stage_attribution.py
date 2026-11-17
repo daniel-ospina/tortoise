@@ -365,6 +365,17 @@ def test_the_terminal_mark_never_covers_a_graph_round_trip():
     and asserted empty, naming their lines — no site has that shape today (all
     six mark-then-leave), and if one appears this reddens for a human to extend
     the walk instead of under-covering it.
+
+    ⛔ WHAT THE ROUND-TRIP TEST RECOGNISES, AND WHAT IT DOES NOT (round-9 review
+    P3, measured). It matched only a ``Name``/``Attribute`` rooted at the local
+    ``graph`` parameter, but the method also reaches the store through
+    ``self.query(...)`` — so the SAME defect re-introduced through a handle-based
+    call would have stayed green. Both shapes are now recognised: a mutant that
+    inserts ``self.query(kind="Point")`` between a terminal mark and its return
+    is GREEN under the graph-only test and RED under this one. NOT covered, and
+    stated so this is not read as complete: an alias binding (``g = graph``) and
+    a store call made inside a callee the span merely hands ``graph`` to — a
+    name-based walk can resolve neither.
     """
     found, fn = _post_retrieval_returns()  # reuse the parse, ignore the returns
     assert found, "tortoise_fts_query must parse for this pin to mean anything"
@@ -380,13 +391,29 @@ def test_the_terminal_mark_never_covers_a_graph_round_trip():
             and stmt.value.args[0].id == "STAGE_RESPONSE"
         )
 
-    def mentions_graph(expr):
+    def mentions_store(expr):
+        """Any reference in ``expr`` that can reach the store.
+
+        Two shapes, both live in ``tortoise_fts_query`` today::
+
+            _decorate_fallback_hits(snap_hits, graph)   # the `graph` handle
+            points = self.query(kind=kind, ...)         # a handle-based call
+
+        The first cut matched only the ``graph`` handle, which left the second
+        shape a silent blind spot (round-9 review P3) — see the pin's docstring
+        for the mutant that demonstrates it and for what this still cannot see.
+        """
         for node in ast.walk(expr):
             if isinstance(node, ast.Name) and node.id == "graph":
                 return True
-            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
-                    and node.value.id == "graph":
-                return True
+            if isinstance(node, ast.Attribute):
+                if isinstance(node.value, ast.Name) and node.value.id == "graph":
+                    return True
+                # `self.query(...)` / `graph.query(...)` — a store round trip
+                # however the handle was obtained. Matching the ATTRIBUTE name
+                # (not just a `graph` base) is what closes the P3 gap.
+                if node.attr == "query":
+                    return True
         return False
 
     checked = 0
@@ -421,7 +448,7 @@ def test_the_terminal_mark_never_covers_a_graph_round_trip():
                 span = block[i + 1: (exit_at + 1 if exit_at is not None else len(block))]
                 if isinstance(nxt, ast.Return):
                     checked += 1  # the population guard counts the export arms
-                if any(mentions_graph(s) for s in span):
+                if any(mentions_store(s) for s in span):
                     offenders.append(nxt.lineno)
     assert checked >= 4, (
         f"only {checked} terminal-mark-then-return sites found — this pin is only "
