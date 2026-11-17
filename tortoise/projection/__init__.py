@@ -12630,12 +12630,68 @@ class FalkorProjection(
         return ev
 
     @tolerates_altered_numbers
-    def apply(self, event: dict, *, journal_object_surviving=None,
-              journal_object_deleted=None, journal_first_materialized=None,
-              journal_seq: int | None = None,
-              journal_existence=None,
-              journal_object_established=None,
-              about_links_deferred: bool = False) -> None:
+    def apply(self, event: dict, **kwargs) -> None:
+        """Fold one record into the cache, recording WHERE it landed (#12943).
+
+        A THIN WRAPPER, and the wrap is the point: the registry counts a fold
+        that RETURNED, never one that was attempted. `_apply_event` has several
+        early returns (a malformed event is skipped and writes nothing — measured,
+        `{"type": 123}` logged "skipping malformed event" and still left
+        `{'embedded:…|tortoise': 1}` in the registry) and every statement in it
+        can raise; counting on entry made the number answer "how many folds were
+        STARTED", which is the wrong direction for an operator comparing it with
+        the record's write count (review cycle 2, finding 1).
+
+        ⛔ The recording is skipped during a REPLAY: a rebuild writes this same
+        target on purpose, and counting it would let a repair make the live
+        picture look healthier than the traffic it repaired — the inverse of what
+        the instrument is for (`replay_window_open()`, #9553).
+
+        ⛔ And it is guarded AS A WHOLE, endpoint resolution included. This runs
+        AFTER the journal append (the record's commit point), so anything that
+        raises here produces exactly the record-written / cache-not-folded split
+        the registry exists to instrument. `_stable_endpoint` is NOT
+        exception-free by design (`_falkordb_version_cache_key` deliberately
+        leaves `OverflowError` uncaught on a non-finite port).
+        """
+        wrote = [True]      # a fold's NORMAL path writes; `_skip()` says otherwise
+        self._apply_event(event, _wrote=wrote, **kwargs)
+        if wrote[0] and not replay_window_open():
+            try:
+                from tortoise.cache_leg import note_cache_write_target
+                endpoint = getattr(self, "_cache_target_endpoint", None)
+                if endpoint is None:
+                    endpoint = self._stable_endpoint() or ()
+                    # Memoised: the endpoint cannot change for a live
+                    # projection (the client is built once), and this fold is
+                    # on the write path.
+                    self._cache_target_endpoint = endpoint
+                note_cache_write_target(endpoint, self.graph_name)
+            except Exception:  # noqa: BLE001, RUF100 — never break a live fold
+                pass
+
+    def _apply_event(self, event: dict, *, journal_object_surviving=None,
+                     journal_object_deleted=None,
+                     journal_first_materialized=None,
+                     journal_seq: int | None = None,
+                     journal_existence=None,
+                     journal_object_established=None,
+                     about_links_deferred: bool = False,
+                     _wrote: list[bool] | None = None) -> None:
+        def _skip() -> None:
+            """This call folded NOTHING — say so, then return.
+
+            #12943: the write-target registry counts writes LANDED on a graph,
+            and the fold has eight exits that write nothing (a malformed
+            envelope, an unwritable id, a re-stamp that folded no Point, and
+            the three recognized-not-folded arms at the tail). Counting them
+            would answer "how many folds were STARTED"; the one direction that
+            matters is the opposite — a record-written / cache-not-written split
+            must never read as a write that landed (#12943 review cycle 2,
+            finding 1, where the hook sat ABOVE the malformed-type guard).
+            """
+            if _wrote is not None:
+                _wrote[0] = False
         # #7951 §17.1 — THE SINGLE-WRITER GATE (fail-closed, default REFUSAL).
         # A fold is the cache WRITE of the record/cache split, so on a
         # journal-backed projection it is legal only when a sanctioned scope is
@@ -12658,44 +12714,6 @@ class FalkorProjection(
                 "engines must run inside `_replay_write_scope()`. event_type="
                 f"{(event or {}).get('type')!r}"
             )
-        # #12943 (reopened): RECORD WHERE THIS FOLD LANDS, once per live write.
-        # `apply` is THE fold every live door passes (SDK `_apply_and_journal`,
-        # `EventAPI._emit`, the raw event door, the onboarding metadata lane), so
-        # one hook here covers every door without a list that can go stale — and
-        # the door inventory is exactly what drifts.
-        #
-        # ⛔ NOT DURING A REPLAY. A rebuild writes this same target on purpose;
-        # counting it would let a repair make the live picture look healthier
-        # than the traffic it repaired, which is the inverse of what the
-        # instrument is for. `replay_window_open()` is the shipped predicate for
-        # "this fold came FROM the journal" (#9553).
-        #
-        # The store identity is the PROJECTION's own (`_stable_endpoint`), never
-        # the environment's: the whole #12943 class is "two variables chose two
-        # stores", so a fingerprint derived from the variable would agree with
-        # itself while the write went somewhere else.
-        # ⛔ THE WHOLE HOOK IS GUARDED, not only the counting call. This runs
-        # AFTER the journal append — the record's commit point — so anything
-        # that raises here produces exactly the record-written / cache-not-folded
-        # split the hook exists to instrument. `_stable_endpoint` is NOT
-        # exception-free by design (`_falkordb_version_cache_key` leaves
-        # `OverflowError` uncaught on a non-finite port, a deliberate
-        # construction-time loudness that this call site would turn into a
-        # half-written live write). Same rule as the sibling call site at
-        # `_probe_store`: everything that can throw is inside the try.
-        if not replay_window_open():
-            try:
-                from tortoise.cache_leg import note_cache_write_target
-                endpoint = getattr(self, "_cache_target_endpoint", None)
-                if endpoint is None:
-                    endpoint = self._stable_endpoint() or ()
-                    # Memoised: the endpoint cannot change for a live
-                    # projection (the client is built once), and this fold is
-                    # on the write path.
-                    self._cache_target_endpoint = endpoint
-                note_cache_write_target(endpoint, self.graph_name)
-            except Exception:  # noqa: BLE001, RUF100 — never break a live fold
-                pass
         # #3585 re-review (cycle 2, FIX A): `journal_object_surviving` is
         # ``(ids, names)`` of every Object the WHOLE journal leaves in place,
         # and `journal_object_deleted` the ids it hard-deletes. They are
@@ -12785,7 +12803,7 @@ class FalkorProjection(
                     value=raw.get("type"),
                     event_id=raw.get("event_id"),
                     where="FalkorProjection.apply")
-            return
+            return _skip()
         if t in ("PointAdded", "OperatorAdded"):
             # #331 (review r3): ev.get — missing 'point' key handled by the
             # isinstance guard, not KeyError.
@@ -12844,7 +12862,7 @@ class FalkorProjection(
                         field="point", field_present="point" in raw, value=p,
                         event_id=raw.get("event_id"),
                         where="FalkorProjection.apply")
-                return
+                return _skip()
             # #331 (review r2): parity with _apply_one — no id → nothing to
             # index by; skip rather than KeyError in _upsert.
             # #331 (review r4): str-only ids (non-str would break Cypher params).
@@ -12862,7 +12880,7 @@ class FalkorProjection(
                                    where="FalkorProjection.apply",
                                    absent_is_ordinary=False,
                                    drops_record=True)
-                return
+                return _skip()
             # Phase 1 stop-writes: strip context from v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
                 p.pop("context", None)
@@ -13019,6 +13037,7 @@ class FalkorProjection(
                     "new_id=%r) — inapplicable (no writable id / no new_id) "
                     "or the target was never created",
                     t, ev.get("event_id"), ev.get("id"), ev.get("new_id"))
+                _skip()
             return
         elif t == "PointsMerged":
             # #331 (review r2): `or []` also covers "merge_ids": null.
@@ -13208,6 +13227,7 @@ class FalkorProjection(
                         detail=_object_supersede_miss_detail(
                             _sup_shape, prefix="graph fold: "),
                     )
+                _skip()
             return
         elif t == "ObjectRegistered":
             self._upsert_object(ev)
@@ -13294,7 +13314,7 @@ class FalkorProjection(
             # ⚠️ `DirectEdgeCreated` is NO LONGER here: #8499 moved it into
             # `_APPLY_WARN_ONLY_TYPES` and gave it a real pass-2b fold, so this
             # engine now WARNS on it rather than passing it silently.
-            pass
+            _skip()
         elif t in _APPLY_WARN_ONLY_TYPES:
             # P1-fix (#3585 re-review): `DirectEdgeRepoint` IS recognized and
             # IS rebuilt — but only by `rebuild_all`'s DEFERRED pass-2b, which
@@ -13312,6 +13332,7 @@ class FalkorProjection(
             logger.warning(
                 "%r is folded by rebuild_all's deferred pass only — this "
                 "apply-based engine skipped it (rebuild-parity gap)", t)
+            _skip()
         else:
             # P2-1 (#3299): a record type outside the recognized vocabulary
             # must not be dropped silently. #3585 (R8): non-folded and NOT
@@ -13329,6 +13350,7 @@ class FalkorProjection(
                     detail="graph fold: unrecognized type",
                 )
             logger.warning("unrecognized event type %r — not folded (no fold arm for this type)", t)
+            _skip()
 
     def _episodic_point_ids(self) -> set[str]:
         """Ids of every ``:Point`` currently carrying ``is_episodic = true``.

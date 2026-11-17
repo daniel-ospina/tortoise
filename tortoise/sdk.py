@@ -12369,11 +12369,11 @@ def canonical_org_graph_name(tenant: str) -> str:
 def _uri_graph_name(db_uri: str | None) -> str | None:
     """The URI's own graph name, or ``None`` for an embedded construction.
 
-    The `urlparse(...).path.lstrip("/") or "tortoise"` step had THREE verbatim
-    copies in this module (`_get_proj`, `_graph_census`'s read, and
-    `_cache_graph_name`) — and `_derive_graph_name`'s own docstring exists
-    because a caller that names a graph outside a projection must derive it
-    IDENTICALLY. A drift in this step makes a caller compare against a name the
+    The `urlparse(...).path.lstrip("/") or "tortoise"` step was copied at two
+    sites in this module (`_get_proj`, and `check_connection`'s census read)
+    before `_cache_graph_name` became the third consumer — and
+    `_derive_graph_name`'s own docstring exists because a caller that names a
+    graph outside a projection must derive it IDENTICALLY. A drift in this step makes a caller compare against a name the
     projection never opens (a false mismatch, or a missed one), so it is one
     function now, used by all three.
     """
@@ -16225,7 +16225,16 @@ class TortoiseSDK:
         # Cheap: a name derivation that opens nothing (no projection, no
         # socket) plus one regex on the name.
         if _note_tenant_graph is not None:
-            _note_tenant_graph(cache_graph=self._cache_graph_name(),
+            # ⛔ THE DERIVATION IS INSIDE THE GUARD, not just the call: the hook
+            # cannot raise, but its ARGUMENT is evaluated first — and
+            # `_cache_graph_name` parses the URI, which raises `ValueError` on a
+            # malformed one (`docker://[::1/db`). #5148 protects the call, not
+            # the argument (review cycle 2, finding 4).
+            try:
+                _cache_graph = self._cache_graph_name()
+            except Exception:  # noqa: BLE001, RUF100
+                _cache_graph = None
+            _note_tenant_graph(cache_graph=_cache_graph,
                                org_id=org_id, graph_id=graph_id)
 
     def _cache_graph_name(self) -> str:
