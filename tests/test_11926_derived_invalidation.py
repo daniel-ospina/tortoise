@@ -3038,10 +3038,10 @@ def test_a_word_a_HUMAN_sets_mid_sweep_is_PRESERVED_and_reported(sdk):
     sdk.delete_entity(made["point_id"])
     real_get = sdk.get_entity
 
-    def racing(node_id):
+    def racing(node_id, *args, **kwargs):
         if node_id == g["id"]:
             return {"id": node_id, "objectKind": "goal", "goalState": "blocked"}
-        return real_get(node_id)
+        return real_get(node_id, *args, **kwargs)
 
     writes: list[tuple[str, dict]] = []
     real_update = sdk.update_knowledge
@@ -3209,13 +3209,13 @@ def test_a_goal_DELETED_mid_sweep_is_reported_GONE_not_repaired(sdk):
     sdk.delete_entity(made["point_id"])
     real_get = sdk.get_entity
 
-    def vanishing(node_id):
+    def vanishing(node_id, *args, **kwargs):
         if node_id == g["id"]:
             # the node leaves the graph between the scan and the door's read
             sdk._get_proj().g.query(
                 "MATCH (n {id:$id}) DELETE n", params={"id": node_id})
             return {}
-        return real_get(node_id)
+        return real_get(node_id, *args, **kwargs)
 
     sdk.get_entity = vanishing
     try:
@@ -3279,10 +3279,10 @@ def test_a_DOOR_reported_reconcile_error_is_a_FAILED_goal_not_a_clean_one(sdk):
     sdk.delete_entity(made["point_id"])
     real_get = sdk.get_entity
 
-    def failing(node_id):
+    def failing(node_id, *args, **kwargs):
         if node_id == g["id"]:
             raise RuntimeError("transient read failure")
-        return real_get(node_id)
+        return real_get(node_id, *args, **kwargs)
 
     sdk.get_entity = failing
     try:
