@@ -1496,6 +1496,18 @@ def _write_goal_state_cache(sdk: Any, goal_id: str, state: str) -> str | None:
     """
     cached = GOAL_STATE_CACHE[state]
     if cached is not None:
+        if _goal_retired_on_status(sdk, goal_id):
+            # ⛔ #13065 review finding 1: a goal retired on its `status` keeps no
+            # derived word (the retirement arm in `derived_invalidation` asserts
+            # exactly that, and the write boundary now REFUSES the pair), so
+            # stamping `met`/`unmet` here raised AFTER the judgement Point and
+            # its arrow had already landed — a partial write, and the exception
+            # reached the caller. A RETIRED goal's cache is not this module's to
+            # write at all: `reconcile_goal_state_cache` owns clearing a derived
+            # word (it knows the derived vocabulary), and writing NOTHING here
+            # cannot erase a human's own ending word (`abandoned`/`superseded`)
+            # the way an unconditional clear did.
+            return None
         # #12915 review F1: `update_entity` is RETIRED (#4282) and
         # `TortoiseSDK.__getattr__` RAISES on it, so this call made every
         # `met`/`unmet` judgement die inside the cache write — and
@@ -1505,6 +1517,23 @@ def _write_goal_state_cache(sdk: Any, goal_id: str, state: str) -> str | None:
         # `update_entity` relayed to, so the written props are unchanged.
         sdk.update_knowledge(goal_id, goalState=cached)
     return cached
+
+
+def _goal_retired_on_status(sdk: Any, goal_id: str) -> bool:
+    """Is the goal retired on its ``status`` axis (so its cache must be FREE)?
+
+    Reads ``status`` — never ``goalState``, which this module still does not
+    read — and applies the type-first terminal test so a malformed stored value
+    cannot turn a judgement into a ``TypeError`` (#13065 review finding 1).
+    """
+    try:
+        node = sdk.get_entity(goal_id) or {}
+    except Exception:  # pragma: no cover - a missing node is not fatal here
+        return False
+    status = node.get("status")
+    return ((issubclass(type(status), str)
+             and str.__str__(status) in _TERMINAL_EXCLUDED_STATUSES)
+            or bool(node.get("outdated")))
 
 
 def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:

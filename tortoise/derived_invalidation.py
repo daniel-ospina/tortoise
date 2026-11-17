@@ -1005,6 +1005,20 @@ def invalidate(
     return result
 
 
+def _retired_by_status(goal: dict) -> bool:
+    """Is this STORED goal retired on its ``status`` axis?
+
+    #13065 review finding 1. The type-first test is the same one the write
+    guard applies (``_is_lifecycle_word``): a membership test over a raw value
+    raises ``TypeError`` on an unhashable one, and a repair route that raises is
+    not a repair route.
+    """
+    status = goal.get("status")
+    ended_on_status = (issubclass(type(status), str)
+                       and str.__str__(status) in TERMINAL_EXCLUDED_STATUSES)
+    return ended_on_status or bool(goal.get("outdated"))
+
+
 def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     """Point a goal's ``goalState`` cache at what still stands, or clear it.
 
@@ -1102,6 +1116,24 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     if current is not None and current not in DERIVED_GOAL_STATES:
         return {"checked": True, "goalState": current, "preserved": True,
                 "from": None, "cleared": False}
+    if _retired_by_status(goal):
+        # ⛔ #13065 review finding 1: this reconcile is the PUBLIC, idempotent,
+        # documented repair route, so it must never raise — and a goal retired on
+        # its `status` keeps NO derived word (the retirement arm above asserts
+        # exactly that: `goalState` → ``None``). Writing the live word back onto
+        # a status-retired goal is the very pair the write boundary now refuses,
+        # so before this arm the repair RAISED and a legacy row could never be
+        # reconciled. The rule the module already settled is applied here: CLEAR
+        # the derived word, never restamp it on a retired goal.
+        if current is None:
+            return {"checked": True, "goalState": None, "from": None,
+                    "cleared": False,
+                    "reason": "goal retired by status — no derived word to clear"}
+        sdk.update_knowledge(goal_id, goalState=None)
+        return {"checked": True, "goalState": None, "from": None,
+                "cleared": True,
+                "reason": "goal retired by status — the derived word is cleared, "
+                          "never restamped"}
     remaining = latest_judgement(sdk, goal_id=goal_id)
     if remaining:
         state = remaining.get("judgementState")
