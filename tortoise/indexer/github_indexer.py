@@ -224,14 +224,14 @@ def _row_is_frozen(status, outdated) -> bool:
 
     The two LIFECYCLE terms of ``live.is_terminal_status`` are written once and
     never cleared: ``_upsert_object`` writes ``o.status`` ON CREATE only
-    (``projection/entities.py:5087`` — *"ON MATCH never touches it (the clobber
-    guard)"*), ``pipeline.stage_move_props`` clears only the pending pair
-    (``pipeline.py:129-131``), and no door writes ``outdated`` any more
-    (``commit_ops.py:131``). A row carrying either is therefore frozen, in one of
-    two ways:
+    (``projection/entities.py:5121-5123`` — *"status ON CREATE only — ON MATCH
+    never touches it (the clobber guard)"*), ``pipeline.stage_move_props`` clears
+    only the pending pair (``pipeline.py:129-131``), and no door writes
+    ``outdated`` any more (``commit_ops.py:131``). A row carrying either is
+    therefore frozen, in one of two ways:
 
     * ``status in commit_ops.OBJECT_TERMINAL_STATUSES`` → ``_fold_object_stage``
-      returns ``False`` BEFORE any position test (``entities.py:6204``), in BOTH
+      returns ``False`` BEFORE any position test (``entities.py:6219``), in BOTH
       directions (a reopen runs through the same fold), so the projection cannot
       move the row at all;
     * terminal on these terms but NOT latched by the fold (``status='outdated'``,
@@ -247,7 +247,8 @@ def _row_is_frozen(status, outdated) -> bool:
     (``live.TERMINAL_EXCLUDED_STATUSES``) is deliberately WIDER than the fold's
     ``OBJECT_TERMINAL_STATUSES``. ``_fold_object_stage`` does not fetch
     ``o.outdated`` and its set has no ``outdated`` member
-    (``entities.py:6196-6204``; ``commit_ops.py:75-82`` says so from the other
+    (``entities.py:6196-6199``, ``commit_ops.py:88``; ``commit_ops.py:82-83``
+    says so from the other
     side: the render-time probe *"adds `outdated` … which this fold does not"*).
     The wider set is correct HERE because the invariant this helper tests is "no
     writer can clear it", not "the fold latches on it" — see the second bullet
