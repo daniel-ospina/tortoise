@@ -1682,6 +1682,10 @@ REFUSAL_CODES: dict[str, int] = {
     "tools/ci_runner_topology.py": 4,
     "tools/capstone_ledger.py": 1,
     "tools/build_site_icons.py": 4,
+    "tools/record_runner.py": 2,
+    "tools/cypher_diff_harness.py": 2,
+    "tools/cypher_inventory.py": 2,
+    "tools/reap_empty_test_graphs.py": 2,
 }
 
 #: Why THAT code is the right one for THAT file — quoted in the failure message, so
@@ -1724,6 +1728,38 @@ REFUSAL_WHY: dict[str, str] = {
         "caller cannot tell 'the tool refused' from 'the interpreter is too old'; "
         "4 is never returned by anything but the guard. Deliberately stated as the "
         "SHAPE, not as a list of line numbers — a count in this field rots silently"
+    ),
+    "tools/record_runner.py": (
+        "1 is REFUSED — this runner's own verdict that a run must not be claimed, "
+        "which a caller reads as a statement about the RECORD — so an environment "
+        "refusal must not wear it; 2 is this tool's USAGE class, raised by "
+        "`_UsageParser.error` (a bad flag) and by `_refuse_impossible_bounds` "
+        "(a below-1 bound), while `main()` returns only 0/1 — so 2 is the one code "
+        "in this tool's set that cannot collide with a verdict about the record"
+    ),
+    "tools/cypher_diff_harness.py": (
+        "0/1/3 are this harness's ANSWERS (same / DIFFERS / no verdict), and "
+        "`.github/workflows/cypher-diff.yml`'s mismatch step passes ONLY on "
+        "rc == 1, because 1 is that job's evidence the harness CAN fail — so an "
+        "environment refusal exiting 1 is a FALSE PASS of the gate, not merely a "
+        "mislabelled failure. 2 is the tool's own 'could not run' (it returns 2 on "
+        "every setup failure), which is what an old interpreter IS, so the guard "
+        "reuses it on purpose. #13121 landed this guard with the exit-1 shape; "
+        "corrected here rather than re-added"
+    ),
+    "tools/cypher_inventory.py": (
+        "1 is `--check`'s DRIFT, so an environment refusal must not wear it — an "
+        "old interpreter would report drift against a doc nobody touched. 2 is "
+        "already this tool's 'could not run' (`check()` returns it when the doc is "
+        "absent), so reusing it cannot collide with a verdict"
+    ),
+    "tools/reap_empty_test_graphs.py": (
+        "1 is the tool's own FAILURE verdict (`main()` returns `1 if failed else 0` "
+        "for a reap whose deletions did not take), so an environment refusal must "
+        "not wear it; 2 is this tool's REFUSED (`main()` returns it when the report "
+        "cannot be built), reused on purpose. #13218 landed this guard below the "
+        "import block — a census red on main — and the hoist is pinned here so a "
+        "rewrite cannot drop it again (#11342)"
     ),
 }
 

@@ -2874,9 +2874,62 @@ class EventAPI:
         that cannot happen.
         """
         _refuse_caller_named_funnel_keys(props, "`add_object`")
+        # ⛔ #12869: the RECORD-side refusal, BEFORE the lock and the id
+        # resolution — by this method's own `#11948` rule, "a refusal that ran
+        # after `_registration_id` would have taken the lock for a write that
+        # cannot happen". That is not hypothetical on this path: on the ADOPT
+        # branch `_registration_id` -> `resolve_or_mint` -> `_adopt_idless_holder`
+        # STAMPS `n.id` onto an id-less holder, after which no landing test can
+        # tell the row was not already addressable — and the encoder then raises
+        # out of `EventLog.append`, leaving an id-bearing row with ZERO journal
+        # lines (the `#3590` class). Measured at the pre-fix head: MERGE, ADOPT
+        # and the projection-less lane all escaped with
+        # `TypeError: Object of type bytes is not JSON serializable`.
+        # It is a SEPARATE helper, not a flag on `_refuse_non_string_object_status`
+        # below, because the node-side refusals in that helper genuinely need the
+        # landing test — which can only be asked AFTER the id exists.
+        from .sdk import _refuse_unencodable_object_status
+        _refuse_unencodable_object_status(props, door="add_object", target=name)
         from .entity_identity import entity_create_lock
         with entity_create_lock("Object", name):
             oid = self._registration_id("Object", name, explicit_id=id)
+            # ⛔ #12869: THIS IS THE THIRD OBJECT WRITE DOOR, and a rule stated
+            # at two doors and silently absent at the third is the defect
+            # `#11835` review round 4 and `#11948` each measured — the latter in
+            # this very method's own docstring, one family over. `**props` is
+            # splatted onto the `ObjectRegistered` envelope and `_upsert_object`
+            # writes `status` ON CREATE, so without this line
+            # `add_object(…, status=['live'])` mints exactly the unaddressable
+            # row #12869 is about — after the other two doors started refusing
+            # it. Measured before this line: `status=123` / `['live']` / `True`
+            # all ACCEPTED here and stored.
+            # The landing question is the same one the other two arms ask — an
+            # adopted or merged node keeps its status (`ON CREATE` only) — so it
+            # is answered by the target's own existence, INSIDE the lock and
+            # AFTER `_registration_id` (which may stamp an id onto an adopted
+            # id-less holder: refusing before it would refuse a value the writer
+            # drops, and refusing after a stamp this door does not raise on is
+            # why the question is existence rather than `created`).
+            from .sdk import _refuse_non_string_object_status
+            # ⛔ `getattr(…, "g", None)` because a projection-less EventAPI is a
+            # DOCUMENTED lane (journal-only — `__main__`/`m0.py; see
+            # `_registration_id`'s own `getattr` and `_emit`'s branch below), and
+            # nothing can land on it: the answer is False, not an
+            # `AttributeError`. Measured: the first cut of this call raised
+            # `'NoneType' object has no attribute 'g'` where `main` accepted and
+            # journaled the call.
+            # `journals` was REMOVED from this call (#12869 review round 5, P1):
+            # the encoder question is asked above, before the lock, because a
+            # value with no JSON form is a RECORD question and the record is
+            # written on every path — asking it here, below `_registration_id`,
+            # made it unreachable on MERGE/ADOPT and cost a write on ADOPT.
+            _lands = getattr(self.projection, "g", None)
+            _refuse_non_string_object_status(
+                props, door="add_object", target=name,
+                lands=(lambda: not _lands.query(
+                    "MATCH (n:Object {id:$id}) RETURN count(n)",
+                    params={"id": oid},
+                ).result_set[0][0]) if _lands is not None else (lambda: False))
             from .entity_resolver import normalize_entity_name
             props.setdefault("canonical_name", normalize_entity_name(name))
             ev: dict = {"id": oid, "name": name, "createdAt": now_iso(), **props}

@@ -108,16 +108,24 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import would fail first, and the operator would get an
-# unattributed traceback instead of this sentence (the `tools/` entry-point
-# contract; `tests/test_entry_point_python_guard.py` pins it for the corpus).
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.11+-only import raises ImportError before a later guard could run.
+#
+# #4053/#11342: the refusal must not wear a VERDICT's status. This harness's
+# answers are 0 (same) / 1 (DIFFERS) / 3 (no verdict), and `raise
+# SystemExit(<message>)` exits 1 — so an old interpreter would report that the
+# two forms DIFFER, which `cypher-diff.yml` reads as proof the harness can fail.
+# 2 is this tool's own "could not run", which is what an old interpreter IS.
+# `SystemExit(<int>)` carries no message, so the refusal is printed explicitly.
+# Pinned by `tests/test_entry_point_python_guard.py::REFUSAL_CODES`.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    print(
         f"tools/cypher_diff_harness.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        "`uv run python tools/cypher_diff_harness.py`"
+        "`uv run python tools/cypher_diff_harness.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(2)
 
 import argparse
 import json
