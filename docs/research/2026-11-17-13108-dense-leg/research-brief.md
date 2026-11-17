@@ -66,8 +66,12 @@ without reading the source.
    (`ran=False`, `degraded=False`, `#5412`) or the declaration derives `leg_absent`.
    ⛔ **This is not a latency failure at all.** `sdk.tortoise_fts_query` encodes the query on the
    caller's thread **before** `degradation_chain` is called, so the encoder is outside every
-   budget below and cannot be what trips it — measured here: encode p50 **30.7 ms** at
-   concurrency 1 and **794 ms** at concurrency 16, changing nothing about the leg's own budget.
+   budget below and cannot be what trips it. ⛔ **No encode figure is quoted here**
+   (`#13121` review round 5, F5): the probe deliberately excludes the encoder
+   (`tools/dense_leg_probe_13108.py:33-40`) and `grep -c encode` over all ten committed
+   artifacts returns 0, so a millisecond number would be a claim with no artifact behind it.
+   The claim that matters is the CODE one, and it is verifiable at `sdk.py`: the encode call
+   precedes the chain, so its cost is charged to the caller's thread, not to the leg's budget.
 2. **It is submitted and runs out of budget.** Two budgets, both 500 ms by default: the
    per-leg driver timeout (`timeout_ms=500`, `search_engine.py:2832` for the vector leg,
    `:4673` `runner_timeout` in `degradation_chain`) and the collector's
@@ -145,10 +149,10 @@ Published, 384-dim `all-MiniLM-L6-v2`, cosine, k=10, 100k vectors, 500 queries:
 right answer** (~0.2 ms at 1k, ~1.9 ms at 10k in the same extrapolation).
 
 **This is where the external pass becomes evidence rather than background.** Our own
-measurement (§3) is **23 ms to scan 1,000 `:Object` vectors** — about **two orders of magnitude**
-above the literature's ~0.2 ms at the same size. So the cost we are paying is **not the
-algorithm's**: it is FalkorDB evaluating `vec.euclideanDistance` as a Cypher function per row and
-sorting the label. That reframes V3's option set — "get an index" and "make the scan not be a
+measurement (§3.4) is **≈13.3 ms to scan 1,000 `:Object` vectors** — about **65×** the
+literature's ~0.2 ms at the same size (and ≈70× once the two refused round trips are added back,
+which is what the pre-fix read paid). So the cost we are paying is **not the algorithm's**: it is
+FalkorDB evaluating `vec.euclideanDistance` as a Cypher function per row and sorting the label. That reframes V3's option set — "get an index" and "make the scan not be a
 per-row interpreter call" both address this, and the second one does not touch the recorded
 decision at all.
 
@@ -241,9 +245,15 @@ on one population under one load.
 
 | component | measured |
 |---|---|
-| two refused `queryNodes` round trips | **≈20 ms** (10.11 + 10.05) |
-| the scan itself (`vec.euclideanDistance` over 1,000 rows + sort) | **≈23.45 ms** |
+| two refused `queryNodes` round trips | **20.17–20.28 ms** (`index_attempt[0].elapsed_ms`: 10.18 + 9.97 in `fix-1000-paired-at-rest.json`; 10.19 + 10.06 in `probe-1000-at-rest-and-concurrent.json`) |
+| the scan itself (`vec.euclideanDistance` over 1,000 rows + sort) | **≈13.3 ms** — the `hint` arm of `fix-1000-paired-at-rest.json` (`object[hint]@c1` p50 **13.26 ms**), which is the same read with ONLY those two attempts removed (34.78 − 21.52) |
 | the indexed control, same corpus | **21.00 ms** (and **20.88 ms** with the same inventory supplied — the hint is a no-op for an indexed label) |
+
+⛔ **An earlier version of this table printed `the scan itself ≈23.45 ms` and a `10.11 + 10.05`
+split. Neither is in any committed artifact and the pair is arithmetically impossible beside a
+34.45 ms total (20 + 23.45 = 43.45).** `#13121` review round 5 (F3) caught it; the figures above
+are the artifact-backed decomposition, and the ratio derived from them elsewhere in this brief
+was restated with them.
 
 ⇒ on an unindexed label, **most of the read is producing a known error**. That is the defect §5
 removes, and it is independent of whether an index is ever created.
@@ -345,9 +355,10 @@ load ~130 the dense leg still timed out (§3.3).
   live label.
 
 ⚠️ **And a third option this measurement opens, which is neither index nor budget:** the scan is
-**~100× slower than a tuned exact scan of the same size** (§2.2). If the requirement is "the
-dense leg fits in 500 ms at 8,000 rows", a scan that costs 0.2–2 ms instead of 23 ms achieves it
-without touching V3 at all. That is a bigger change than this lane should make, and it is filed
+**≈65× slower than a tuned exact scan of the same size** (13.3 ms vs the §2.2 literature's
+0.18–0.19 ms per 10k rows) — and **≈70×** if the two refused round trips are still paid. If the
+requirement is "the dense leg fits in 500 ms at 8,000 rows", a scan that costs 0.2–2 ms instead
+of 13 ms achieves it without touching V3 at all. That is a bigger change than this lane should make, and it is filed
 as such rather than assumed.
 
 ---
@@ -367,7 +378,7 @@ as such rather than assumed.
 1. **V3's index question — for the owner.** §6 is the evidence; this lane does not create one.
 2. **The 45 % magnitude is not reproduced here** (§3.3). Reproducing it needs a census-sized
    label and a store shared with fleet traffic; both are named, neither is guessed at.
-3. **The scan's ~100× gap to a tuned exact scan** (§2.2, §6) — an alternative remedy with no
+3. **The scan's ≈65× gap to a tuned exact scan** (§2.2, §6) — an alternative remedy with no
    decision attached, unmeasured beyond the comparison above.
 4. **The default product caller still sees no degradation** — `leg_trace=None` everywhere
    (`#2952` is opt-in). Surfacing `degraded_read` on the product's own read is unaffected by this

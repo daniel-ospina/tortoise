@@ -641,6 +641,28 @@ def stop_external_load(procs: list[subprocess.Popen]) -> None:
 
 # ── main ────────────────────────────────────────────────────────────────────
 
+def population_measured(census: dict, labels: list[str]) -> dict:
+    """The population actually IN THE GRAPH, per census label.
+
+    ⛔ The two vocabularies differ and mixing them produces a field that reads as
+    measured and is empty: the census (:func:`label_census`) is keyed by LABEL
+    (``"Object"``, ``"Point"``), while ``--labels`` names ENTITY TYPES
+    (``object``, ``point``). Looking the entity type up directly answered
+    ``None`` for every arm — which is why `#13121` round 4's fix was a no-op and
+    round 5 caught it. :data:`LABEL_BY_ENTITY` is the ONE mapping, and it is the
+    same one :func:`probe_index_attempt` is called through.
+
+    ``None`` per label means the census could not be read for it (UNMEASURED),
+    never 0 — the distinction this whole file is built on.
+    """
+    out: dict = {}
+    for entity_type in labels:
+        label = LABEL_BY_ENTITY.get(entity_type, entity_type)
+        entry = (census.get("labels") or {}).get(label)
+        out[label] = (entry or {}).get("stored") if entry is not None else None
+    return out
+
+
 def worktree_state() -> dict:
     """The tree the figure was measured ON, not just the commit it names.
 
@@ -731,11 +753,14 @@ def run(args: argparse.Namespace) -> int:
         graph, query_vec, LABEL_BY_ENTITY.get(t, "Point"), args.limit,
         args.timeout_ms) for t in args.labels]
 
-    # The projection's OWN measured inventory (`_record_vector_index_inventory`):
-    # the served labels ∩ the engine's VECTOR-indexed labels. This is the set the
-    # `#4997` notice is derived from, so the hint can never be staler than the
-    # line an operator reads.
-    indexed = getattr(sdk._get_proj(), "_vector_indexed_labels", None)
+    # The projection's OWN measured inventory (`_record_vector_index_inventory`).
+    # ⛔ The BEHAVIOURAL half (`_vector_indexed_labels_for_reads`), because that
+    # is the one the shipped read actually consults (`tortoise/sdk.py` forwards
+    # it at all three call sites) — reading the REPORTING pair here made the
+    # `--compare-hint` arms two copies of the same path (`#13121` round 5 F2).
+    # It is also the half whose `None` lane is genuinely "not measured", which is
+    # exactly what `nohint` needs to mean.
+    indexed = getattr(sdk._get_proj(), "_vector_indexed_labels_for_reads", None)
 
     arms: dict = {}
     for entity_type in args.labels:
@@ -797,21 +822,25 @@ def run(args: argparse.Namespace) -> int:
                     time.sleep(args.load_warmup_s)
                 load = box_load()
                 # `hint` = the shipped read (projection's measured inventory);
-                # `nohint` = the SAME read with the inventory forced to None,
+                # `nohint` = the SAME read with that inventory forced to None,
                 # which IS the pre-#13108 behaviour (None = "not measured →
                 # attempt as before"). One process, one box, one load.
+                # ⚠️ The override must write `_vector_indexed_labels_for_reads`
+                # — the behavioural half the shipped read consults. Writing the
+                # REPORTING pair left both arms identical (`#13121` round 5 F2).
                 variants = {"hint": indexed}
                 if args.windows_compare_hint:
                     variants["nohint"] = None
                 for hint_name, hint in variants.items():
                     proj = sdk._get_proj()
-                    restore = getattr(proj, "_vector_indexed_labels", None)
-                    proj._vector_indexed_labels = hint
+                    restore = getattr(proj, "_vector_indexed_labels_for_reads",
+                                      None)
+                    proj._vector_indexed_labels_for_reads = hint
                     try:
                         arm = measure_windows(sdk, names, conc, args.limit,
                                               args.timeout_ms)
                     finally:
-                        proj._vector_indexed_labels = restore
+                        proj._vector_indexed_labels_for_reads = restore
                     arm["load"] = load
                     arm["external_load_procs"] = len(procs)
                     arm["index_hint"] = (sorted(hint) if hint is not None
@@ -839,16 +868,18 @@ def run(args: argparse.Namespace) -> int:
         "worktree": worktree_state(),
         "uri_graph": args.graph or sdk._graph_name,
         "config": {
-            # #13121 review round 4 (F4): the `--population` ARGUMENT, which is
-            # NOT the population measured on a `--no-seed` run over an
-            # already-seeded graph. Four artifacts said `population: 1000`
-            # beside their own `census` of 8,000 for exactly this reason; the
-            # reading below is the one to quote.
+            # #13121 review round 4 (F4), corrected in round 5 (F1): the
+            # `--population` ARGUMENT, which is NOT the population measured on a
+            # `--no-seed` run over an already-seeded graph. Four artifacts said
+            # `population: 1000` beside their own `census` of 8,000 for exactly
+            # this reason; the reading below is the one to quote.
+            # ⛔ The census is keyed by LABEL (`"Object"`, `"Point"`), the CLI by
+            # ENTITY TYPE (`object`, `point`). Looking the entity type up directly
+            # answered `None` for every arm — a field that reads as measured and
+            # is empty, which is the class this file refuses. `LABEL_BY_ENTITY`
+            # is the ONE mapping (it is what `probe_index_attempt` already uses).
             "population_arg": args.population,
-            "population_measured": {
-                label: (census.get("labels", {}).get(label) or {}).get("stored")
-                for label in args.labels
-            },
+            "population_measured": population_measured(census, args.labels),
             "reads": args.reads,
             "concurrency": list(args.concurrency),
             "limit": args.limit,

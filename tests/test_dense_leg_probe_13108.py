@@ -400,3 +400,55 @@ def test_a_tool_only_diff_selects_this_pin():
         "a probe-only diff does not select this file — its falsifiers never "
         f"run: surfaces={selected['surfaces']} full={selected['full']}"
     )
+
+
+# ── the report cannot mislabel the population it measured (round 5 F1) ──────
+
+def test_population_measured_resolves_ENTITY_TYPES_through_the_label_map():
+    """The census is keyed by LABEL; `--labels` names ENTITY TYPES.
+
+    Round 4 added `population_measured` to stop four artifacts saying
+    `population: 1000` beside their own 8,000-node census — and looked the
+    entity type up directly in a census keyed by label, so the field answered
+    `None` for every arm. A field that reads as measured and is empty is the
+    class this file refuses.
+    """
+    census = {"labels": {"Object": {"stored": 8000, "embedded": 8000},
+                         "Point": {"stored": 8000, "embedded": 8000}}}
+    got = probe.population_measured(census, ["object", "point"])
+
+    assert got == {"Object": 8000, "Point": 8000}
+    # The mapping is the one the probe already uses for the index attempt.
+    assert probe.LABEL_BY_ENTITY["object"] == "Object"
+    assert probe.LABEL_BY_ENTITY["document"] == "Source"
+
+
+def test_an_UNREADABLE_census_label_is_None_never_zero():
+    """UNMEASURED ≠ 0, here as everywhere else in this file."""
+    got = probe.population_measured({"labels": {}}, ["object"])
+
+    assert got == {"Object": None}
+
+
+# ── the hint override must touch the attribute the shipped read consults ───
+
+def test_the_hint_override_writes_the_BEHAVIOURAL_inventory():
+    """`--compare-hint` is only a pair if it moves the attribute the read reads.
+
+    `#13121` round 5 F2: the probe forced and read `_vector_indexed_labels` (the
+    REPORTING pair), while every shipped call site forwards
+    `_vector_indexed_labels_for_reads` — so both arms ran the identical path and
+    printed an "index_hint" that changed nothing.
+    """
+    import re
+    from pathlib import Path
+
+    source = Path("tools/dense_leg_probe_13108.py").read_text(encoding="utf-8")
+    written = re.findall(r"proj\.(_vector_indexed_labels[A-Za-z_]*)\s*=", source)
+    assert written, "the probe no longer overrides the inventory at all"
+    assert set(written) == {"_vector_indexed_labels_for_reads"}, (
+        "the hint override writes the REPORTED pair, which the shipped read "
+        f"does not consult — the comparison is a no-op: {sorted(set(written))}")
+    # …and it READS the same half, so the arms cannot both start from `None`.
+    assert "getattr(sdk._get_proj(), \"_vector_indexed_labels_for_reads\", None)" \
+        in source, "the probe's `indexed` must come from the behavioural half"
