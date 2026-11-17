@@ -94,8 +94,15 @@ on `rerun.sh`, or without touching the graph:
 uv run python tools/capstone_state_value.py judge \
     --packet docs/evidence/13038-capstone/judge-packet.json \
     --verdicts docs/evidence/13038-capstone/verdicts-baseline.json \
-    --out docs/evidence/13038-capstone
+    --out /tmp/capstone-rerender          # NOT the bundle directory — see below
 ```
+
+⚠️ **Point `--out` at a scratch directory, not at this bundle.** `judge` rebuilds the header from
+the packet's header, which was frozen *before* the reader ran — so writing to this directory would
+replace `run-local.json` / `scoreboard-local.md` with a lower-fidelity copy (`mode: file`, 62.8 s
+instead of the real `mode: fresh` · 150.2 s · 213.0 s) and silently make the `header` claims below
+false. It exits 0 while doing it. The same command into `/tmp` re-renders the identical six rows,
+which is the useful check.
 
 `judge` refuses a `--packet` that is not a judge packet (exit 2, nothing written). Without that
 guard a mistyped path — a `run-local.json`, a `verdicts-baseline.json` — rendered a **0-row**
