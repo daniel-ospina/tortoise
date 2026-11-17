@@ -20014,6 +20014,13 @@ class FalkorProjection(
         this is the only one that must discriminate index TYPE, which is why it
         reads column 2 — a column none of the others touch.
         """
+        # ⛔ A measurement describes THIS read (#13330 review). Clear the
+        # property-level verdict BEFORE any early return below, so a lane that
+        # never measures (an embedded store, a <4.x engine) cannot leave a
+        # PREVIOUS setup's answer standing in for a fresh one — a stale "absent"
+        # is exactly what lets the retirement sweep report a removal it did not
+        # measure.
+        self._vector_index_props = None
         # Gate (kept here, not only at the call site, so the method is
         # self-contained and directly testable): embedded redislite has no
         # index API at all, and a <4.x engine has none either. NOTE the

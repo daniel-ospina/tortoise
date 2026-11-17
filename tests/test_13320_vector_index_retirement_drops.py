@@ -863,3 +863,31 @@ def test_an_unparseable_post_drop_read_names_the_right_cause(monkeypatch, caplog
         f"the line must name the catalogue-shape cause: {line!r}")
     assert "read FAILED" not in line, (
         f"the read did not fail — it answered unparseably: {line!r}")
+
+
+def test_a_lane_that_cannot_measure_clears_the_previous_verdict():
+    """A measurement describes THIS read, not the last one (#13330 review).
+
+    `_record_vector_index_inventory` returns early on an embedded store and on a
+    <4.x engine. Without clearing first, the property-level verdict keeps the
+    PREVIOUS setup's answer, and a stale "absent" is exactly what lets the
+    retirement sweep report a removal it did not measure — the one claim this
+    change exists to make honest. Found by mutation-testing this work's own
+    commits: the clear was unpinned and the mutant survived, so the pin is here
+    rather than the defensiveness shipped unproven.
+    """
+    proj = _bare(_EngineLikeGraph())
+    proj._vector_index_props = {"Point": frozenset({"embedding"})}
+    proj._is_embedded = True
+    proj._record_vector_index_inventory()
+    assert proj._vector_index_props is None, (
+        "an embedded store skipped the measurement and kept a PREVIOUS verdict: "
+        f"{proj._vector_index_props!r}")
+
+    proj = _bare(_EngineLikeGraph())
+    proj._vector_index_props = {"Point": frozenset({"embedding"})}
+    proj._falkordb_version = (3, 99, 0)
+    proj._record_vector_index_inventory()
+    assert proj._vector_index_props is None, (
+        "a <4.x engine skipped the measurement and kept a PREVIOUS verdict: "
+        f"{proj._vector_index_props!r}")
