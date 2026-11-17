@@ -5877,7 +5877,7 @@ _EPIC_CITE_SOURCES = {
     # until that number was re-measured in the tree this head merges — and the `#12295`
     # de-conflict re-derived the row to the same pair. Measured in THIS merged tree
     # (`grep -n 'export function postCapture(\|export function postInstallProbe('
-    # tortoise/pi-hooks/tortoise-capture.ts` -> `:1023`/`:1015`). That is this source key's case in one
+    # tortoise/pi-hooks/tortoise-capture.ts` -> `:1030`/`:1022`). That is this source key's case in one
     # line: the pin is what turned an invisible re-stale into a red; a name is pinned,
     # its line is re-opened.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
