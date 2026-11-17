@@ -174,12 +174,20 @@ def test_question_class_is_measurably_degenerate():
         "longer builds")
     sec4 = _readme_section(
         "4. The three query classes, and the one that cannot be read as evidence")
-    assert f"{ev['oov_fraction'] * 100:.2f} %" in sec4, (
-        f"§4 does not carry the measured OOV fraction "
-        f"({ev['oov_fraction'] * 100:.2f} %)")
-    assert f"{ev['added_scaffold_tokens']} scaffold tokens" in sec4, (
-        "§4 does not carry the measured scaffold-token count "
-        f"({ev['added_scaffold_tokens']})")
+    # ⛔ ONE CONTIGUOUS PHRASE, NOT TWO NUMBERS. Pinning `96.46 %` and `650` as
+    # independent substrings left the sentence's POLARITY unguarded: rewriting
+    # "are absent from the corpus token pool" to "are present in" keeps both
+    # figures and stayed GREEN (measured) — the record would then publish the
+    # inverse of the fact that makes the class degenerate. The phrase carries the
+    # direction, so the direction is what is pinned.
+    assert (
+        f"**{ev['oov_fraction'] * 100:.2f} %** of the "
+        f"{ev['added_scaffold_tokens']} scaffold tokens it adds are absent from "
+        "the corpus token pool") in sec4, (
+        "§4 does not carry the measured degeneracy claim — expected "
+        f"\"**{ev['oov_fraction'] * 100:.2f} %** of the "
+        f"{ev['added_scaffold_tokens']} scaffold tokens it adds are absent from "
+        "the corpus token pool\"")
 
 
 # ── the decision rule — the invariant that protects the decision itself ─────
