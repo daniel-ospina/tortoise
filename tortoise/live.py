@@ -72,7 +72,7 @@ import json
 # proves every WRITE word is current-or-hidden and that no ending a writer may
 # set is served as current (#11824 S0 split the two sets — design §8); the READ
 # set's absolute width is a literal pin in ``tests/test_lifecycle_guards.py``.
-# Adding a status to the vocabulary without classifying it REDs that test.
+# An unclassified status REDs ``tests/test_terminal_status_vocabulary.py`` (not the pin above).
 # (A parity test, not import-time coercion, is the guard: the alternative —
 # declaring POINT_STATUS_VALUES here — would need sdk.py to stop declaring it,
 # and a circular import makes the reverse direction impossible.)
