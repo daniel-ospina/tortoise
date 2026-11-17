@@ -2393,8 +2393,12 @@ def list_backups(storage: BackupStorage, org_id: str,
       backend that stalls EVERY request stays in the 0 ms column (measured 9 of 40
       at w=8 with all keys at 500 ms — it does not drain). `map`'s `with` block then
       waits for the in-flight batch before the exception reaches the caller, so a
-      decisive failure can arrive up to one download timeout later than the serial
-      loop, which never started the keys after the failing one. That wait is
+      decisive failure can arrive up to one download CALL later than the serial
+      loop, which never started the keys after the failing one. ⚠️ That call is not
+      one timeout: `_s3()` passes neither a timeout nor a retry config, so botocore's
+      own defaults apply (60 s connect / 60 s read, cited at `hosted_api.py`'s #3820
+      note) and its default retries are wrapped INSIDE a single `get_object`, so the
+      worst case is a multiple of one timeout, not one. That wait is
       deliberate: returning while workers still hold connections would move the
       load onto a request that has already failed.
       ⛔ Do NOT replace this table with a conclusion. Three attempts were wrong and

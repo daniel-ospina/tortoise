@@ -2118,6 +2118,18 @@ def test_the_manifest_concurrency_bound_stays_under_the_client_pool(monkeypatch)
     assert pool >= _LIST_MANIFEST_MAX_INFLIGHT, (
         "the manifest fan-out exceeds the client's connection pool: every wave "
         "would drop its overflow connections and re-pay TCP+TLS")
+    # #13097: the pool must cover TWO listings, not one. `_backup_storage()` caches
+    # ONE `R2Storage` (one client), so the budget every concurrent `/v1/backups`
+    # request draws on is shared; the constant's own comment buys 32 so that two
+    # listings plus the sweep's writes fit. Without this assertion the guard is
+    # inert in exactly the direction it documents: raising the fan-out to 16 still
+    # satisfies `pool >= fanout` (32 >= 16) while two listings alone occupy the
+    # whole pool and every sweep upload drops its connection and re-pays TCP+TLS —
+    # the failure this constant exists to prevent. Measured: with the assertion
+    # removed, `_LIST_MANIFEST_MAX_INFLIGHT = 16` survives every test in this file.
+    assert pool > 2 * _LIST_MANIFEST_MAX_INFLIGHT, (
+        "the pool must cover TWO concurrent listings with headroom left for the "
+        "sweep's writes — they share this one cached client")
 
 
 def test_list_backups_surfaces_the_first_failure_in_INPUT_order():
