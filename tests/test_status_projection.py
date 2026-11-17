@@ -2209,46 +2209,49 @@ class TestNonScalarStatus12869:
     )
 
     @pytest.mark.parametrize("bad", _DROPPED)
-    def test_a_NON_PERSISTABLE_status_is_still_DROPPED_not_refused(
+    def test_a_NON_PERSISTABLE_status_is_REFUSED_at_both_doors(
             self, tmp_path, bad):
-        """`#7925` round 4 — the over-rejection this change must not ship.
+        """`#11824 S0` SUPERSEDES `#7925` round 4 here, and the reversal is
+        RECORDED rather than absorbed silently.
 
-        A dict cannot be stored by FalkorDB, so `#7369` degrades it to null
-        before dispatch: the node never carries it and the lifecycle guard never
-        chokes on it. Refusing it would reject a write both writers perform, and
-        that exact over-rejection was already fixed once in `#7925` (pinned at
-        the bundle level by
-        `test_direct_route_object_and_event_status_values_not_over_rejected`).
-        The refusal is therefore scoped by "would this LAND?", the same question
-        `sdk._status_is_stored_unhashable` asks.
+        This arm used to pin the opposite: a `dict`/`bytes`/`bytearray`/
+        `frozenset` status cannot be stored by FalkorDB, `#7369` degrades it to
+        null before dispatch, so `#7925`'s round 4 ruled it must stay ACCEPTED
+        rather than refused — refusing it "would reject a write the writer
+        performs".
 
-        FALSIFIABLE BY: replacing the `_value_ok(word)` scope with an
-        unconditional refusal reds every arm here (mutation M9/M10).
+        ⛔ **`#11824 S0` closed that door differently, and it is the trunk:** one
+        lifecycle door refuses EVERY non-string as its FIRST arm — shape before
+        vocabulary, the ordering S0's own docstring credits to `#12869`/`#12910`
+        — so the four shapes are now REFUSED at both Object doors, measured:
+        `status … was refused: a status must be a plain string, and <type> is not
+        one`. The `#7369` drop is still what happens when such a value reaches the
+        transport by another route; it is simply no longer reachable from a
+        caller's `status` at these doors. `#7925`'s over-rejection concern is
+        preserved where it still applies — `_refuse_non_string_object_status`
+        keeps its `lands`/`_value_ok` scoping for the shapes S0 does not answer
+        first — and the pin below asserts S0's outcome, not the older ruling.
 
-        ⛔ The first cut of this docstring said "dropping the
-        `_is_persistable_prop_value` conjunct reds this arm". MEASURED FALSE: the
-        predicate was that conjunct OR the transport gate, and reducing it to the
-        transport gate alone reds NOTHING (34 passed) — because the conjunct only
-        ever ADDED refusals, for values the transport drops anyway (`['a\x00b']`:
-        fold True, gate False, node stores nothing). So the REVIEW was right that
-        the claim was false, and the conjunct was the over-block: the predicate is
-        now the transport gate alone. `_DROPPED` also gained `bytes`,
-        `bytearray`, `frozenset` — all four are measured ACCEPTED-and-absent on
-        `main`, at the doors that do not journal.
+        FALSIFIABLE BY: deleting S0's shape-first arm in
+        `tortoise/lifecycle_vocabulary.py` reds every arm here (`DID NOT RAISE`).
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869drop.db"))
         try:
-            # …at the CREATE door
-            sdk.create_object("drop-create", "core:strategy", status=bad)
-            assert _carrier_row(sdk, "Object", "drop-create")[1] is None, (
-                "the dict was STORED — #7369 should have degraded it to null")
-            # …and at the UPDATE door
-            oid = _carrier_row(sdk, "Object", "drop-create")[0]
+            # …at the CREATE door: refused, and nothing lands.
+            with pytest.raises(ValueError, match="must be a plain string"):
+                sdk.create_object("drop-create", "core:strategy", status=bad)
+            assert _carrier_row(sdk, "Object", "drop-create") is None, (
+                "a refused create left a node behind — a refusal must not cost a "
+                "write (#9287/#10192)")
+            # …and at the UPDATE door: refused, and the row is untouched.
+            sdk.create_object("drop-update", "core:strategy")
+            oid = _carrier_row(sdk, "Object", "drop-update")[0]
             sdk.update_knowledge(oid, status="live")
-            assert _carrier_row(sdk, "Object", "drop-create")[1] == "live"
-            sdk.update_knowledge(oid, status=bad)
-            assert _carrier_row(sdk, "Object", "drop-create")[1] is None, (
-                "the dict landed on the row instead of being dropped")
+            assert _carrier_row(sdk, "Object", "drop-update")[1] == "live"
+            with pytest.raises(ValueError, match="must be a plain string"):
+                sdk.update_knowledge(oid, status=bad)
+            assert _carrier_row(sdk, "Object", "drop-update")[1] == "live", (
+                "the refused update was not atomic — the row changed")
         finally:
             sdk.close()
 
@@ -2276,7 +2279,7 @@ class TestNonScalarStatus12869:
             # (a) a live id-carrying holder: the ordinary MERGE
             sdk.create_object("held", "core:strategy")
             before = _carrier_row(sdk, "Object", "held")
-            sdk.create_object("held", "core:strategy", status=["retracted"])
+            sdk.create_object("held", "core:strategy", status="live")
             assert _carrier_row(sdk, "Object", "held") == before, (
                 "the re-create changed the merged row — the status was supposed "
                 f"to be dropped: {_carrier_row(sdk, 'Object', 'held')} != {before}")
@@ -2288,7 +2291,7 @@ class TestNonScalarStatus12869:
                 "CREATE (n:Object {name:'noid', objectKind:'core:strategy'})")
             assert _carrier_row(sdk, "Object", "noid")[0] is None, (
                 "the fixture is supposed to be an id-LESS holder")
-            sdk.create_object("noid", "core:strategy", status=["retracted"])
+            sdk.create_object("noid", "core:strategy", status="live")
             adopted = _carrier_row(sdk, "Object", "noid")
             assert adopted[0], (
                 "the adopt path did not stamp an id — it is the shape this arm "
@@ -2422,9 +2425,10 @@ class TestNonScalarStatus12869:
                 api.add_object("ao-obj", "core:strategy", status=bad)
             assert _carrier_row(sdk, "Object", "ao-obj") is None, (
                 "a refused add_object left a node behind")
-            # ...and a STRING is still accepted (the vocabulary stays open).
-            oid = api.add_object("ao-ok", "core:strategy", status="banana")
-            assert _carrier_row(sdk, "Object", "ao-ok")[1] == "banana"
+            # ...and a LEGAL word is still accepted (S0 closes the set to four; an
+            # undeclared word is refused at every door now, so the probe is a word).
+            oid = api.add_object("ao-ok", "core:strategy", status="live")
+            assert _carrier_row(sdk, "Object", "ao-ok")[1] == "live"
             assert isinstance(oid, str)
         finally:
             sdk.close()
@@ -2457,10 +2461,16 @@ class TestNonScalarStatus12869:
             assert sdk._get_proj().g.query(
                 "MATCH (n:Object {name:'good-first'}) RETURN count(n)"
             ).result_set[0][0] == 0
-            # A dict status is DROPPED by the writer, so it stays accepted.
+            # ⛔ A dict status is REFUSED now (#11824 S0's shape-first arm), and the
+            # validator must agree with the door on THAT too — the two authorities
+            # diverging is the defect this whole test is about, in either direction.
             assert sdk._validate_bundle({"entities": [
                 {"ref": "o", "type": "object", "name": "dict-ok",
-                 "status": {"a": 1}}]}) == []
+                 "status": {"a": 1}}]}), (
+                "the validator admitted a value the door refuses — the two "
+                "authorities disagree")
+            with pytest.raises(ValueError, match="must be a plain string"):
+                sdk.create_object("dict-ok", "core:strategy", status={"a": 1})
             # ⛔ AND THE VALIDATOR'S PREDICATE IS THE DOOR'S, NOT THE OR (#12869
             # review round 4, P3). This arm asked
             # `_is_persistable_prop_value(_mint) or _value_ok(_mint)`, so a value
@@ -2469,14 +2479,18 @@ class TestNonScalarStatus12869:
             # on a value the door stores nothing of, and saying so in a message
             # that asserted a refusal which does not happen. `('a\x00b',)` is
             # exactly that shape (measured: fold True, gate False).
+            # ⛔ AND SINCE #11824 S0 THE AGREEMENT IS ON A REFUSAL, not on a drop:
+            # a tuple is a non-string, so the door refuses it and the validator must
+            # report it rather than pass. The property this arm has always pinned is
+            # that the two authorities AGREE — it is the direction that changed.
             assert sdk._validate_bundle({"entities": [
                 {"ref": "t", "type": "object", "name": "tuple-ok",
-                 "status": ("a\x00b",)}]}) == [], (
-                "the validator refused a bundle the door accepts")
-            # …and the two authorities agree on it, on the real door:
-            sdk.create_object("tuple-ok", "core:strategy", status=("a\x00b",))
-            assert _carrier_row(sdk, "Object", "tuple-ok")[1] is None, (
-                "the door stored a value the validator is supposed to mirror")
+                 "status": ("a\x00b",)}]}), (
+                "the validator admitted a bundle the door refuses")
+            with pytest.raises(ValueError, match="must be a plain string"):
+                sdk.create_object("tuple-ok", "core:strategy", status=("a\x00b",))
+            assert _carrier_row(sdk, "Object", "tuple-ok") is None, (
+                "a refused create left a node behind")
         finally:
             sdk.close()
 
@@ -2544,7 +2558,8 @@ class TestNonScalarStatus12869:
                                **{"status": None, KHash("status"): ["live"]})
             # (d) ONE key is still fine: the helper is not a blanket refusal.
             sdk.update_knowledge(oid, status="archived")
-            assert _carrier_row(sdk, "Object", "pair-obj2")[1] == "archived"
+            assert _carrier_row(sdk, "Object", "pair-obj2")[1] == "deprecated", (
+                "#11824 S0 stores `archived` as its declared synonym `deprecated`")
         finally:
             sdk.close()
 
@@ -2621,7 +2636,8 @@ class TestNonScalarStatus12869:
             sdk.create_object("live-h", "core:strategy")
             oid2 = _carrier_row(sdk, "Object", "live-h")[0]
             sdk.update_knowledge(oid2, status=Fine("archived"))
-            assert _carrier_row(sdk, "Object", "live-h")[1] == "archived"
+            assert _carrier_row(sdk, "Object", "live-h")[1] == "deprecated", (
+                "S0 stores the declared synonym as `deprecated`")
         finally:
             sdk.close()
 
@@ -2654,7 +2670,8 @@ class TestNonScalarStatus12869:
             log_path = tmp_path / "enc.jsonl"
             api = EventAPI(EventLog(str(log_path)), initiated_by="user",
                            projection=sdk._get_proj())
-            with pytest.raises(ValueError, match=r"no JSON form|non-string"):
+            with pytest.raises(ValueError,
+                               match=r"no JSON form|must be a plain string"):
                 api.add_object("enc-obj", "core:strategy", status=bad)
             assert _carrier_row(sdk, "Object", "enc-obj") is None
             # …a dict IS encodable, so it is still dropped-and-accepted.
@@ -2712,7 +2729,11 @@ class TestNonScalarStatus12869:
                     "the ADOPT fixture must start id-less")
             before = (log_path.read_text().splitlines()
                       if log_path.exists() else [])
-            with pytest.raises(ValueError, match=r"no JSON form"):
+            # #11824 S0's shape arm can answer before `#12869`'s encoder refusal
+            # (both are designed `ValueError`s and both are write-free, which is
+            # what this test is about). Accept either wording; assert the property.
+            with pytest.raises(ValueError,
+                               match=r"no JSON form|must be a plain string"):
                 api.add_object(target, "core:strategy", status=b"live")
             after = (log_path.read_text().splitlines()
                      if log_path.exists() else [])
@@ -2768,13 +2789,27 @@ class TestNonScalarStatus12869:
             before = _carrier_row(sdk, "Object", "held")
             extra = ({"status": None, KHash("status"): ["live"]}
                      if key is None else {key: ["live"]})
-            sdk.create_object("held", "core:strategy", **extra)
+            # ⛔ #11824 S0 answers this shape at the DOOR, before the merge lane
+            # runs: the key renders as `status` and its value is a list, so the
+            # shape arm refuses it (MEASURED at the merged tree). The property this
+            # arm has always pinned is the one below — nothing lands and the row is
+            # still addressable — and a refusal satisfies it more strongly than the
+            # silent drop the pre-S0 tree performed.
+            # Two shapes reach this arm and they are refused for two different
+            # reasons at this head: the `pair` payload names the field TWICE
+            # (`CONFLICTING status write`), the single-key payloads carry a list
+            # (`must be a plain string`). Both are the door's designed
+            # `ValueError`, and both are write-free.
+            with pytest.raises(
+                    ValueError,
+                    match=r"must be a plain string|CONFLICTING status write"):
+                sdk.create_object("held", "core:strategy", **extra)
             assert _carrier_row(sdk, "Object", "held") == before, (
                 "a renderer-only status LANDED on the merge path — the row is "
                 f"now unaddressable: {_carrier_row(sdk, 'Object', 'held')}")
             # …and the row is still addressable: the whole point.
             sdk.update_knowledge(before[0], status="archived")
-            assert _carrier_row(sdk, "Object", "held")[1] == "archived"
+            assert _carrier_row(sdk, "Object", "held")[1] == "deprecated"
         finally:
             sdk.close()
 
@@ -2795,10 +2830,15 @@ class TestNonScalarStatus12869:
         try:
             sdk._get_proj().g.query(
                 "CREATE (n:Object {name:'adoptme', objectKind:'core:strategy'})")
-            sdk.create_object("adoptme", "core:strategy",
-                              **{KHash("status"): ["live"]})
+            with pytest.raises(ValueError, match="must be a plain string"):
+                sdk.create_object("adoptme", "core:strategy",
+                                  **{KHash("status"): ["live"]})
             adopted = _carrier_row(sdk, "Object", "adoptme")
-            assert adopted[0], "the adopt path did not stamp an id"
+            # ⛔ #11824 S0 refuses at the DOOR, before `resolve_or_mint` — so on
+            # this path there is no stamp to pay for (MEASURED: `id` stays None).
+            assert adopted[0] is None, (
+                "the ADOPT stamp landed even though the call was refused — a "
+                f"refusal that costs a write: {adopted}")
             assert adopted[1] is None, (
                 f"the adopted row took the renderer-only status: {adopted}")
         finally:
@@ -2826,7 +2866,11 @@ class TestNonScalarStatus12869:
 
         sdk = TortoiseSDK(str(tmp_path / "t12869subj.db"))
         try:
-            with pytest.raises(ValueError, match="Invalid status"):
+            # ⛔ #11824 S0's shape arm answers FIRST (before `#1423`'s own text and
+            # before any Subject write), so the message a caller sees is the door's
+            # — the divergence this test exists to prevent is closed even earlier
+            # than it asked for.
+            with pytest.raises(ValueError, match="must be a plain string"):
                 sdk.create_object("acme2", "core:organization",
                                   **{RStr("x"): ["live"]})
             assert sdk._get_proj().g.query(
@@ -2879,24 +2923,46 @@ class TestNonScalarStatus12869:
                 sdk._get_proj().g.query(
                     "CREATE (n:Object {name:$n, objectKind:'core:strategy'})",
                     params={"n": name})
-            # (1) The ambiguity refusal must not fire after the ADOPT stamp. The
-            #     node EXISTS, so this call's declared status is DROPPED by the
-            #     merge lane — there is nothing here to refuse.
-            sdk.create_object("noid-b", "core:strategy",
-                              **{"status": None, KHash("status"): ["live"]})
+            # (1) The ambiguity refusal must not fire after the ADOPT stamp.
+            #     ⛔ IT FIRES, AND IT DOES NOT COST THE WRITE (#11824 S0, measured
+            #     at the merged tree): the pair is refused at the door BEFORE
+            #     `resolve_or_mint`, so the id-less holder keeps `id = None` and the
+            #     journal gains no line. Pre-S0 this call was silently dropped on
+            #     the merge lane; a refusal is the stronger answer and the
+            #     atomicity property is the same one — nothing written for a call
+            #     the SDK rejected.
+            _journal = Path(str(tmp_path / "t12869adopt2.jsonl"))
+            _before = len(_journal.read_text().splitlines()) if _journal.exists() else 0
+            with pytest.raises(ValueError, match="CONFLICTING status write"):
+                sdk.create_object("noid-b", "core:strategy",
+                                  **{"status": None, KHash("status"): ["live"]})
             adopted = _carrier_row(sdk, "Object", "noid-b")
-            assert adopted[0], "the adopt path did not stamp an id"
+            assert adopted[0] is None, (
+                "the ADOPT stamp landed even though the call was REFUSED — a "
+                f"refusal that costs a write: {adopted}")
             assert adopted[1] is None, (
                 f"the adopted row took the renderer-only status: {adopted}")
+            _after = len(_journal.read_text().splitlines()) if _journal.exists() else 0
+            assert _after == _before, (
+                f"a REFUSED call wrote journal lines ({_before} -> {_after})")
             # (2) …and an unencodable status is NOT this door's refusal either:
             #     `_journal_entity_event` swallows the encoder failure and logs
             #     LIVE-ONLY (#4240), exactly as it does for `tags=frozenset(...)`,
             #     so narrowing `status` alone here narrowed on a mechanism that
             #     is not `status`-specific. The refusal lives at the ONE door
             #     that RAISES (`EventAPI.add_object`).
-            sdk.create_object("noid-a", "core:strategy", status=b"live")
+            # ⛔ #11824 S0 REFUSES an unencodable status at this door now (the
+            # shape arm is not journal-scoped), which is stricter than the
+            # "#4240 LIVE-ONLY lane" these two arms were written against. The
+            # property #12869 owns is the one asserted: the refusal costs no write
+            # — no id stamped, nothing stored — and it is a `ValueError`, not the
+            # encoder's `TypeError`.
+            with pytest.raises(ValueError, match="must be a plain string"):
+                sdk.create_object("noid-a", "core:strategy", status=b"live")
             enc = _carrier_row(sdk, "Object", "noid-a")
-            assert enc[0], "the adopt path did not stamp an id"
+            assert enc[0] is None, (
+                "the ADOPT stamp landed even though the call was REFUSED — a "
+                f"refusal that costs a write: {enc}")
             assert enc[1] is None, (
                 f"an unencodable status landed on the node: {enc}")
             # (3) …and on a node this call MINTS, where the status really would
@@ -2904,11 +2970,12 @@ class TestNonScalarStatus12869:
             #     LIVE-ONLY lane, uniformly for every unencodable prop. This is
             #     the arm that pins the create door's decision NOT to pass
             #     `journals`: re-adding it reds here (MEASURED).
-            sdk.create_object("enc-fresh", "core:strategy", status=b"live")
+            with pytest.raises(ValueError, match="must be a plain string"):
+                sdk.create_object("enc-fresh", "core:strategy", status=b"live")
             fresh = _carrier_row(sdk, "Object", "enc-fresh")
-            assert fresh[0], "the create did not mint a node"
-            assert fresh[1] is None, (
-                f"an unencodable status landed on a fresh node: {fresh}")
+            assert fresh is None, (
+                "a refused create left a node behind — a refusal must not cost "
+                f"a write (#9287/#10192): {fresh}")
         finally:
             sdk.close()
 
@@ -2967,7 +3034,7 @@ class TestNonScalarStatus12869:
 
     # ── NO OVER-BLOCK: the half of #10371 this change must not touch ──────
 
-    def test_an_arbitrary_STRING_status_still_stores_on_an_Object(
+    def test_an_arbitrary_STRING_status_is_refused_at_the_DOOR(
             self, tmp_path):
         """§4.3's open vocabulary is NOT narrowed by the type guard.
 
@@ -2983,13 +3050,27 @@ class TestNonScalarStatus12869:
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869v.db"))
         try:
-            sdk.create_object("upsilon-word", "core:strategy", status="banana")
-            assert _carrier_row(sdk, "Object", "upsilon-word")[1] == "banana"
-            oid = _carrier_row(sdk, "Object", "upsilon-word")[0]
-            sdk.update_knowledge(oid, status="plantain")
-            assert _carrier_row(sdk, "Object", "upsilon-word")[1] == "plantain", (
-                "an undeclared STRING was refused — the door became a vocabulary "
-                "(#10371 forbids exactly this)")
+            # ⛔ REVERSED BY TRUNK, not by this PR: `#11824 S0` closes the lifecycle
+            # axis to four words (`draft`/`live`/`deprecated`/`superseded`) and moves
+            # a pack's own words onto the pipeline-STAGE axis. So an undeclared word
+            # is now REFUSED at the door — measured — and the property left for this
+            # arm is that the refusal is the door's designed `ValueError` (naming the
+            # four words) and that it lands nothing, rather than that the word
+            # stores. The `#10371` concern this arm was built on (a type guard
+            # silently becoming a vocabulary) is answered by that being a RECORDED
+            # decision now, not an accident of a type test.
+            with pytest.raises(ValueError, match="not a lifecycle word for :Object"):
+                sdk.create_object("upsilon-word", "core:strategy", status="banana")
+            assert _carrier_row(sdk, "Object", "upsilon-word") is None, (
+                "the refused create left a node behind")
+            # …and the LEGAL words still store, which is the half that must not regress.
+            sdk.create_object("upsilon-legal", "core:strategy", status="live")
+            assert _carrier_row(sdk, "Object", "upsilon-legal")[1] == "live"
+            oid = _carrier_row(sdk, "Object", "upsilon-legal")[0]
+            with pytest.raises(ValueError, match="not a lifecycle word for :Object"):
+                sdk.update_knowledge(oid, status="plantain")
+            assert _carrier_row(sdk, "Object", "upsilon-legal")[1] == "live", (
+                "the refused update was not atomic — the row changed")
         finally:
             sdk.close()
 
@@ -3044,7 +3125,9 @@ class TestNonScalarStatus12869:
             assert _carrier_row(sdk, "Object", "psi")[1] == "live"
             oid = _carrier_row(sdk, "Object", "psi")[0]
             sdk.update_knowledge(oid, status=Word("archived"))
-            assert _carrier_row(sdk, "Object", "psi")[1] == "archived"
+            # #11824 S0: `archived` is a DECLARED SYNONYM of `deprecated` and stores as
+            # that word, silently (a synonym supplies no meaning we did not have).
+            assert _carrier_row(sdk, "Object", "psi")[1] == "deprecated"
         finally:
             sdk.close()
 
@@ -3064,8 +3147,10 @@ class TestNonScalarStatus12869:
         sdk = TortoiseSDK(str(tmp_path / "t12869nb.db"))
         try:
             sid = _make_carrier_entity(sdk, "Subject", "omega")
-            with pytest.raises(ValueError,
-                               match=r"Invalid status .* for a :Subject"):
+            # #11824 S0's shape arm answers first on this shape (a list), so the
+            # message is the door's; `#1423`'s own text still answers an illegal
+            # WORD, which the arm below pins.
+            with pytest.raises(ValueError, match="must be a plain string"):
                 sdk.update_knowledge(sid, status=["live"])
             pid = sdk.create_point(content="a probe point", kind="statement")
             pid = pid["id"] if isinstance(pid, dict) else pid
@@ -3232,9 +3317,15 @@ class TestNonScalarStatus12869:
             #     (so the target is the only hostile one) …
             with pytest.raises(ValueError) as ei:
                 sdk.update_knowledge(RaisingReprStr(amb_id), status=["live"])
-            assert "RaisingReprStr" in str(ei.value), (
-                "the type refusal did not use `_refusal_repr` on its target: "
-                + str(ei.value))
+            # ⛔ #11824 S0's door owns this shape now and its message names the
+            # VALUE'S TYPE only — the caller's target is never interpolated, which
+            # is stronger than rendering it safely. So the property pinned here is
+            # that the refusal stays a `ValueError` and no hostile `__repr__` leaks
+            # into it; reverting the door to an f-string over the target reds this
+            # with the repr's own `RuntimeError` (MEASURED: `id-repr-boom`).
+            assert "id-repr-boom" not in str(ei.value), (
+                "the type refusal interpolated a hostile repr: " + str(ei.value))
+            assert "must be a plain string" in str(ei.value), str(ei.value)
             assert _carrier_row(sdk, "Object", "rr-amb2")[1] == "live", (
                 "a refused status write changed the row")
 
@@ -3269,8 +3360,13 @@ class TestNonScalarStatus12869:
             with pytest.raises(ValueError) as ei:
                 sdk.update_knowledge(RaisingReprStr(stored_id),
                                      status=RaisingRepr())
-            assert "RaisingReprStr" in str(ei.value), (
-                "`_np_foreign` did not use `_np_safe_repr` on its id: "
+            # ⛔ #11824 S0's shape arm answers this shape first and its message
+            # names the VALUE'S TYPE only — the caller's id is never
+            # interpolated, which is stronger than rendering it safely. Reverting
+            # the door to an f-string over the target reds this with the repr's own
+            # `RuntimeError` (MEASURED: `id-repr-boom`).
+            assert "id-repr-boom" not in str(ei.value), (
+                "the stored-side refusal interpolated a hostile repr: "
                 + str(ei.value))
             assert _carrier_row(sdk, "Object", "rr-stored")[1] == ["archived"], (
                 "a refused stored-side write changed the row")
@@ -3401,9 +3497,15 @@ class TestNonScalarStatus12869:
             with pytest.raises(ValueError) as ei:
                 sdk.create_object("rr-name", "core:strategy",
                                   status=_BoomInt(123))
-            assert "unreadable (its metaclass raises)" in str(ei.value), (
-                "the refusal did not use `_refusal_type_name` on its class "
-                "name: " + str(ei.value))
+            # ⛔ THE CLASS-NAME AXIS, pinned at the site that now answers this
+            # shape: `#11824 S0`'s door renders the class name through its own
+            # `_render_type` (the sibling `#12910` added to `lifecycle_vocabulary.py`
+            # after this arm measured `RuntimeError: name-boom` escaping the door).
+            # The property is unchanged — a caller-controlled `__name__` must not
+            # replace the promised `ValueError` — and the message says so.
+            assert "unreadable class name" in str(ei.value), (
+                "the refusal did not contain the class-name lookup: "
+                + str(ei.value))
             assert "name-boom" not in str(ei.value)
             assert _carrier_row(sdk, "Object", "rr-name") is None, (
                 "a refused non-string create left a node behind")
@@ -3449,10 +3551,17 @@ class TestNonScalarStatus12869:
                 {"ref": "a", "type": "object", "name": "arr-ent",
                  "status": _HostileList(["x"])}]})
             assert _arr, "the validator did not refuse an array bundle status"
-            assert "an array is stored" in _arr[0]["message"], (
-                "the array arm's refusal did not answer: " + _arr[0]["message"])
+            # ⛔ THE LIFECYCLE ARM ANSWERS THIS PAYLOAD NOW (#11824 S0): an array is
+            # a non-string, so the shape refusal is the one the caller reads, and
+            # the sibling array arm below it is shadowed for this value. What this
+            # arm has always pinned is that a hostile `__repr__` cannot REPLACE the
+            # violations list with the caller's exception — and the operand is
+            # rendered through `_refusal_repr` on the way (that is why the class
+            # name appears at all).
+            assert "must be a plain string" in _arr[0]["message"], (
+                "the refusal did not answer as a refusal: " + _arr[0]["message"])
             assert "<_HostileList>" in _arr[0]["message"], (
-                "the array arm did not use `_refusal_repr` on the bundle "
+                "the bundle refusal did not use `_refusal_repr` on the bundle "
                 "value: " + _arr[0]["message"])
             assert "repr-boom" not in _arr[0]["message"]
         finally:
