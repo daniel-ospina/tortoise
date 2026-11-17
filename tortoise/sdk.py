@@ -32343,10 +32343,10 @@ class TortoiseSDK:
         # as the Subject one, so both are checked here, through the SAME question
         # (`_status_refusal_reason`) rather than a re-spelt vocabulary — a
         # divergence between this phase and the writer is exactly the
-        # partial-mutation class. `:Event` is no longer in that sentence: since
-        # #13100 its door refuses ANY `status` (the terminal half alone was
+        # partial-mutation class. `:Event` is no longer in that sentence either:
+        # since #13100 its door refuses ANY `status` (the terminal half alone was
         # #11825's interim boundary), and the arm BELOW mirrors that refusal at
-        # Phase 1 for the same partial-mutation reason.
+        # Phase 1 for the same reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
