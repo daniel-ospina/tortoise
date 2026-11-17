@@ -1653,18 +1653,24 @@ def test_the_restore_verb_still_exists():
 # check-migration-append-only:131`), and a correction to an applied migration
 # arrives as a NEW file, never an edit.
 #
-# 1. NEWEST BY VERSION, NOT BY STRING. `sorted(<Path>)` compares ASCII, and the
-#    naming gate accepts ANY digit count, so nothing enforces that prefixes share a
-#    width. A SHORTER prefix whose first digit is larger then wins the string
-#    compare while being the OLDER version — `9999999999999_x.sql` sorts after
-#    `20261117000003_x.sql` although 9.99e12 < 2.026e13 — so `candidates[-1]` is
-#    the SUPERSEDED definition and the gate asserts the old body: green while the
-#    live function lost its guard. Flyway orders versioned migrations by the
-#    PARSED VERSION for exactly this reason (documentation.red-gate.com →
-#    "Versioned migrations": ordered by version, `V2.10` after `V2.9`), as does a
-#    replay of this chain. Today's tree happens to agree under both orders (all 88
-#    prefixes are zero-padded to 14 or 4 digits), so this is protection for what
-#    the naming gate PERMITS, not for a drift present now.
+# 1. THE LIVE DEFINITION IS THE LAST ONE IN **FILENAME** ORDER, and only a name
+#    the CLI would APPLY can be it. `sorted(<Path>)` is exactly the order the
+#    applier uses — the Supabase CLI's filename pattern is `^([0-9]+)_`, and it
+#    applies migrations in filename (string) order: `supabase/tests/pglite/
+#    validate.mjs` enumerates `.sort()` "— Supabase's own migration order", and
+#    `test_migration_drift_gate.py::test_comparator_is_lexical_matching_cli_
+#    filename_order` pins the same rule for the drift gate. So a file whose
+#    basename does not match `^([0-9]+)_` is not a candidate at ALL: the CLI
+#    SKIPS it (`.github/scripts/check-migration-append-only` → "applied by
+#    NOBODY"), and a definition nobody applies can never be the live one.
+#    ⛔ NOT ordered by PARSED VERSION. A first cut of this selector sorted by the
+#    integer prefix, on the reasoning that a mixed-width prefix would let an older
+#    file win the string compare. That reasoning is backwards for THIS chain: the
+#    CLI's order IS the string compare, so the numeric pick is the superseded
+#    definition — measured, a `9999999999999_…` correction carrying no guard was
+#    passed over in favour of `20261117000003_…`, and the gate went GREEN over the
+#    body the applier does not leave live. Conformance is a FILTER, never a
+#    re-sort.
 # 2. THE BODY IS THE FUNCTION'S OWN, not first-function-to-last-function in the
 #    file. Multi-function migrations are ordinary here — measured at this head,
 #    `20260915000001_tenancy_team_to_org.sql` defines 13 functions, and three
@@ -1740,15 +1746,16 @@ def _strip_sql_comments(sql: str) -> str:
     return "".join(out)
 
 
-def _migration_version(path: Path) -> int:
-    """The number a replay orders this migration by — its version prefix.
+def _replayable_migration(path: Path) -> bool:
+    """Whether the CLI would APPLY this file at all.
 
-    ``-1`` for a file whose prefix is not a number. Such a file is not replayable
-    at all (`check-migration-append-only:131` refuses it), so it can never be the
-    live definition; the value only keeps the sort total.
+    The CLI's pattern is `^([0-9]+)_(.*)\.sql$` (`.github/scripts/
+    check-migration-append-only`) and anything else is silently SKIPPED by
+    `db push` — applied by nobody, so it cannot hold the live definition. This is
+    a FILTER, not a sort key: ordering is the CLI's filename compare (see
+    `_defining_migrations`).
     """
-    prefix = path.name.split("_", 1)[0]
-    return int(prefix) if prefix.isdigit() else -1
+    return re.fullmatch(r"[0-9]+_.*\.sql", path.name) is not None
 
 
 def _defining_migrations(
@@ -1756,9 +1763,11 @@ def _defining_migrations(
 ) -> list[Path]:
     """Every migration that DEFINES ``decl_rx``'s function, oldest → newest.
 
-    Ordered by ``(_migration_version, name)`` — a replay's order — so the last
-    element is the live definition. Selection is by CONTENT, never by filename:
-    the append-only rule guarantees the next correction lands under a new name.
+    Ordered by FILENAME — the CLI's own order (string compare), which is what a
+    replay and production actually run; see the header note above. Only names the
+    CLI would apply are candidates, so a non-conforming basename cannot become the
+    live definition. Selection is by CONTENT, never by filename beyond that: the
+    append-only rule guarantees the next correction lands under a new name.
 
     The declaration is searched for with comments stripped (`_strip_sql_comments`),
     so a migration whose HEADER merely quotes the DDL — in `--` prose OR in a
@@ -1767,9 +1776,10 @@ def _defining_migrations(
     """
     found = [
         p for p in migrations.glob("*.sql")
-        if decl_rx.search(_strip_sql_comments(p.read_text(encoding="utf-8")))
+        if _replayable_migration(p)
+        and decl_rx.search(_strip_sql_comments(p.read_text(encoding="utf-8")))
     ]
-    return sorted(found, key=lambda p: (_migration_version(p), p.name))
+    return sorted(found)
 
 
 def _function_body(sql: str, decl_rx: re.Pattern[str]) -> str | None:
@@ -1841,8 +1851,9 @@ def test_the_refresh_keeps_its_fail_closed_arm():
     # append-only rule (#1095) GUARANTEES the next correction arrives under a NEW
     # name — so a gate keyed on `zero` would keep asserting over a superseded body
     # and stay green while the live function lost its guard. The candidate set is
-    # therefore every migration that DEFINES the function, and the newest by
-    # VERSION (not by string — see `_migration_version`) is the live definition.
+    # therefore every migration that DEFINES the function, and the LAST one in the
+    # CLI's own FILENAME order is the live definition — see `_defining_migrations`
+    # for why that is a string compare and not a parsed-version sort.
     # The declaration pattern is module-level because the rows below pin IT; a test
     # that re-spelled the pattern would prove nothing about the gate.
     defs_rx = _RESIDENCY_DEFS_RX
@@ -1882,61 +1893,57 @@ def test_the_refresh_keeps_its_fail_closed_arm():
         "operator reads")
 
 
-def test_the_live_definition_is_the_newest_VERSION_not_the_last_NAME(tmp_path):
-    """#13346 review F2: selection must not depend on prefix WIDTH.
+def test_the_live_definition_is_the_LAST_BY_FILENAME_and_only_applied_names_qualify(tmp_path):
+    """The live definition is the last one the CLI APPLIES — filename order, no re-sort.
 
-    `check-migration-append-only:131` accepts ANY digit count (`^([0-9]+)_`), so
-    nothing enforces that version prefixes are padded to the same width — and
-    `sorted(<Path>)` compares ASCII, where a SHORTER prefix whose first digit is
-    larger wins: `9999999999999_x.sql` sorts AFTER `20261117000003_x.sql` while
-    its version (9.99e12) is OLDER than that file's (2.02e13). `candidates[-1]`
-    is then the SUPERSEDED definition — the gate asserts the old body and reports
-    green while the live function lost its guard.
+    `check-migration-append-only` accepts ANY digit count (`^([0-9]+)_`), so prefixes
+    need not share a width. Sorting by the PARSED VERSION therefore disagrees with
+    the applier, whose order is the FILENAME compare: `9999999999999_x.sql` sorts
+    after `20261117000003_x.sql` and is the one production runs last, even though
+    its number is smaller. A selector that sorts numerically picks the SUPERSEDED
+    definition — measured, a `9999999999999_…` correction carrying no guard was
+    passed over for `20261117000003_…`, and the gate reported GREEN over the body
+    the applier does not leave live.
 
-    ⚠️ MEASURED CORRECTION to the review's example, so the next reader does not
-    re-derive it: the review named a short-form `0017_…` correction as the
-    trigger, but `0017` is version **17**, older than every 14-digit file, so it
-    sorts FIRST in BOTH orders and can never be `candidates[-1]` — that pair does
-    not discriminate (`sort | tail -1` → the 14-digit file, numeric order → the
-    same). The hazard is real but its discriminating case is a differing-width
-    prefix, which is what this test pins.
+    Two properties, both of which the ordering has to satisfy:
+    * the LAST element is the filename-last APPLYABLE file (what the CLI runs last);
+    * a basename the CLI SKIPS — "applied by NOBODY" — is never a candidate, no
+      matter where it sorts.
 
-    Today's tree has 72 fourteen-digit and 16 four-digit prefixes, all
-    zero-padded to their own width, so both orders agree on it — the protection
-    exists for the case the naming gate permits, not for one present now.
+    Today's tree has 72 fourteen-digit and 16 four-digit prefixes, all zero-padded
+    to their own width, so the two orders agree on it; the protection is for what
+    the naming gate PERMITS.
     """
     migrations = tmp_path / "migrations"
     migrations.mkdir()
     decl = "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()"
-    # ⛔ the OLDER definition, named with a shorter prefix whose first digit is
-    # larger — legal under the naming gate, and last under a string compare
-    older = "9999999999999_postgres_residency_fix1.sql"
-    live_name = "20261117000003_postgres_residency_zero_vanished.sql"
+    body = "{decl}\nRETURNS void AS $$ BEGIN END; $$ LANGUAGE plpgsql;\n"
+    # ⛔ a LATER filename with a SHORTER prefix — the CLI applies it last
+    later_name = "9999999999999_postgres_residency_fix1.sql"
+    # ⛔ a name the CLI PATTERN rejects: `db push` skips it entirely
+    unapplied = "init_postgres_residency.sql"
     for name in (
-        "20261117000002_postgres_residency_gauge.sql",
-        live_name,
-        older,
+        "0001_postgres_residency_gauge.sql",
+        "20261117000003_postgres_residency_zero_vanished.sql",
+        later_name,
+        unapplied,
     ):
         (migrations / name).write_text(
-            f"-- {name}\n{decl}\nRETURNS void AS $$ BEGIN END; $$ LANGUAGE plpgsql;\n",
-            encoding="utf-8")
+            "-- " + name + "\n" + body.format(decl=decl), encoding="utf-8")
 
-    defs_rx = _RESIDENCY_DEFS_RX
-    got = [p.name for p in _defining_migrations(migrations, defs_rx)]
+    got = [p.name for p in _defining_migrations(migrations, _RESIDENCY_DEFS_RX)]
 
-    assert got[-1] == live_name, (
-        f"the live definition must be the newest by VERSION, not by string; "
-        f"selected {got[-1]!r} out of {got}")
-    # Non-vacuity, spelled out: the string compare this replaces picks the OLDER
-    # file. If this ever stops holding, the test has lost its subject.
-    assert sorted(got)[-1] == older, (
-        "the lexicographic order this gate used to apply no longer selects the "
-        f"older {older!r} — re-measure whether F2 still needs its protection")
-    assert _migration_version(migrations / "0017_x.sql") == 17
-    assert _migration_version(migrations / live_name) == 20261117000003
-    # A non-numeric prefix cannot be replayed at all (`check-migration-append-only`
-    # refuses it), so it must never be selected as the live definition.
-    assert _migration_version(migrations / "init_x.sql") == -1
+    assert unapplied not in got, (
+        f"a basename the CLI never applies cannot hold the live definition: {got}")
+    assert got == sorted(got), f"selection is not in the CLI's filename order: {got}"
+    assert got[-1] == later_name, (
+        "the live definition must be the LAST file in FILENAME order — the order the "
+        f"applier runs — not the numerically largest one; selected {got[-1]!r} of {got}")
+    # Non-vacuity: the numeric pick really is a different file here, so this test
+    # would notice a re-sort by version rather than only re-reading its own subject.
+    assert max(got, key=lambda n: int(n.split("_", 1)[0])) != later_name, (
+        "the numeric and filename orders no longer disagree on this fixture — "
+        "re-derive a fixture where they do")
 
 
 def test_the_body_scan_is_bounded_to_the_named_function():
