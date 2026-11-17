@@ -77,7 +77,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "search_engine.py:4097", _SE, 4097, "CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit"),
     (_AUDIT, "search_engine.py:2983", _SE, 2983, 'label = "Source" if entity_type == "document"'),
     (_AUDIT, "`:3050`", _SE, 3050, "the fulltext index is on Source._searchText"),
-    (_AUDIT, "cache_projection.py:2650-2657", _CP, 2650, "it is the ONLY field the Source FTS index"),
+    # ⚠️ RE-DERIVED, not deleted: row 13 of the audit was replaced by the LATER text `main` carries
+    # (`#13268`/`#13312` lineage — "four WRITERS, and the record door refuses to carry it"), which cites
+    # the WITNESS comparison ITSELF rather than the five comment lines that describe it, and says so.
+    # The token below follows the document: `cache_projection.py:2481-2487` is the `# ⛔ THE WITNESS`
+    # block through `summary == f"{SESSION_SOURCE_SUMMARY_PREFIX}{joined}"`, opened at :2481 in this
+    # tree (+2 from `#13224`). The old token named the comment block at :2650-2657, which the later
+    # row no longer cites.
+    (_AUDIT, "cache_projection.py:2481-2487", _CP, 2481, "# ⛔ THE WITNESS — `summary` is DECLINED on the node below"),
     (_AUDIT, "cache_projection.py:2660-2662", _CP, 2660, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
     # Row 387's bare range, quoting "un-indexes a restored session". Its sibling pins (`2660-2662`,
     # `2650-2657`) are different ranges and do not reach this one. NON-VACUOUS: the pre-fix document
