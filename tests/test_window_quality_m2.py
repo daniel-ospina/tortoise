@@ -1574,11 +1574,16 @@ def test_s91_records_that_the_s10_reopen_trigger_fired():
     # ⛔ `assert "reopened" in section` was SUBSTRING-SATISFIED by its own negation:
     # `§7 is therefore **not reopened**` contains "reopened", so the one pin written
     # for this claim could not fail (#13126 round 10). The direction is bound.
-    assert _scope_bound(section, "§7 is therefore", "reopened", window=60), (
+    # ⛔ CASE-INSENSITIVE, because §9.1 spells its negations in CAPS (`does NOT
+    # hold in every arm`, `NOT re-tested`, `NOT settle`): `**NOT reopened**` was
+    # green against both of these guards (#13126 round 11). The required token is
+    # the BOLD literal, which `**NOT reopened**` does not contain, and any
+    # "not/never/not-yet reopened" phrasing is refused outright.
+    assert _scope_bound(section, "§7 is therefore", "**reopened**", window=60), (
         "§9.1 no longer states that §7 is therefore REOPENED")
-    assert "not reopened" not in _flat(section), (
-        "§9.1 states that §7 is NOT reopened — the opposite of what this evidence "
-        "does, and the 'silent adoption' the same paragraph forbids")
+    assert not re.search(r"\b(?:not|never)\b(?:\s+\w+){0,2}\s+reopened", _flat(section), re.I), (
+        "§9.1 says §7 is NOT (or never) reopened — the opposite of what this "
+        "evidence does, and the 'silent adoption' the same paragraph forbids")
     tail = arch[arch.index("## 10. What would reopen this decision"):]
     assert "M2 showing a windowed graph loses retrieval quality" in tail, (
         "§10 no longer carries the trigger §9.1 cites")
@@ -2079,7 +2084,9 @@ def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
         # against a row that forbade one). A row may name a TUPLE of them.
         spellings = (forbidden,) if isinstance(forbidden, str) else forbidden
         for spelling in spellings:
-            if spelling in window_text:
+            # ⛔ case-insensitive: §9.1 negates in CAPS, so `not reopened` missed
+            # `**NOT reopened**` (#13126 round 11).
+            if spelling.lower() in window_text.lower():
                 bad.append(f"claim inverted at the site: {anchor!r} now reads "
                            f"{spelling!r}")
     assert not bad, "\n  ".join(bad)
@@ -2118,7 +2125,7 @@ def test_the_arming_decision_is_stated_and_cannot_be_inverted_green(artifact):
         (readme, "**Verdict: §7's window is NOT SAFE AS SPECIFIED — it must not be armed.**"),
         (readme, "**The window must not be armed on the strength of these numbers.**"),
         (arch, "it does not arm the window (§9.1)"),
-        (arch, "armed only when M2 says it is safe — which it does not"),
+        (arch, "armed only when M2 says it is safe — which it does not:"),
         (arch, "### 9.1 M2 — measured, and it does not arm the window"),
     ]
     missing = [frag for doc, frag in decisions if frag not in _flat(doc)]
@@ -2128,8 +2135,15 @@ def test_the_arming_decision_is_stated_and_cannot_be_inverted_green(artifact):
         + "; ".join(missing))
 
     # …and the inverted spellings must be absent, so a reworded flip reds too.
+    # ⛔ The pinned fragment ends in `not`, so any continuation that completes it
+    # into a different predicate inverted §7 while the assertion stayed true:
+    # `— which it does not contradict: §9.1 measures …` was green (#13126 round 11),
+    # and §7 is where this suite's own docstring says a reader deciding about the
+    # window stops reading. The bound now carries the colon, and the completions
+    # are refused by name.
     inverted = ("may now be armed", "should now be armed", "and it arms the window",
-                "SAFE AS SPECIFIED — it may")
+                "SAFE AS SPECIFIED — it may", "does not contradict",
+                "does not preclude", "does not rule out")
     found = [frag for frag in inverted
              if frag in _flat(readme) or frag in _flat(arch)]
     assert not found, f"the arming decision is stated inverted: {found}"
