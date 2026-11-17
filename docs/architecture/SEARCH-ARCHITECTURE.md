@@ -53,7 +53,7 @@ never in the same one** — a condition not met while implementation is
 in flight, so today nothing may be removed and nothing may stop being written — and `:Event`/`:Source` are neither protected by the KEEP ruling nor
 retired by this second one. ⚠️ **Two rules, stated as two:** that comment's authorisation to RETIRE a graph copy is
 scoped — `:Object`/`:Subject` only — while its record-first condition (the record must hold and index a
-label's vectors before anything else about that label's storage is decided) is SEQUENCING, addressed to
+label's vectors, and nothing else about that label's storage may be decided in the same release that lands them) is SEQUENCING, addressed to
 every label and scoping none, so a label-scoped authorisation never narrows it. **What it adds
 to this document is COVERAGE, not a new leg:** §3's mechanism, §6.1's filter guard and §6.2's
 text-index decision are unchanged, and the work it orders (the columns and the writer, the record-served
