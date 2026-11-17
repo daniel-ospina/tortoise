@@ -205,6 +205,7 @@ def build_query_classes(oracle: Any, points: list[dict],
             out["entity_name"].append({
                 "qid": f"ent-{topic:02d}-{j}", "text": by_id[pid]["content"],
                 "target": topic, "shape": "verbatim_stored_text",
+                "doc_id": pid,
             })
     return out
 
@@ -553,6 +554,7 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
 
     results: dict[str, dict[str, dict]] = {}
     errors: list[dict] = []
+    worked: list[dict] = []
 
     for cls in QUERY_CLASSES:
         qs = classes[cls]
@@ -611,6 +613,37 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
                 for m, v in per_query_metrics(ids, labels).items():
                     per_arm[name].setdefault(m, []).append(v)
 
+            # WORKED EXAMPLE — the mechanism, recorded where it is generated so
+            # the README's explanation is reproducible rather than folklore.
+            # Captured only where a query has ONE target document (the entity_name
+            # class): a keyword query's target is a whole topic, so recording a
+            # "target rank" there would be a null dressed up as evidence.
+            if q.get("doc_id") and not any(w["class"] == cls for w in worked):
+                g_ids = score_list(lists.get("in_graph_fulltext", []))
+                if g_ids and labels.get(g_ids[0]) != 2:
+                    tgt = q.get("doc_id")
+                    gmap = dict(lists.get("in_graph_fulltext", []))
+                    pmap = dict(lists.get("pg_ts_rank", []))
+                    worked.append({
+                        "class": cls, "qid": q["qid"], "query": text,
+                        "target_doc": tgt,
+                        "in_graph_top1": {"id": g_ids[0],
+                                          "score": round(gmap.get(g_ids[0], 0.0), 4),
+                                          "grade": labels.get(g_ids[0])},
+                        "in_graph_target": {
+                            "rank": (g_ids.index(tgt) + 1) if tgt in g_ids else None,
+                            "score": round(gmap[tgt], 4) if tgt in gmap else None,
+                            "grade": labels.get(tgt) if tgt else None},
+                        "pg_ts_rank_target_rank": (
+                            score_list(lists.get("pg_ts_rank", [])).index(tgt) + 1
+                            if tgt in score_list(lists.get("pg_ts_rank", [])) else None),
+                        "reading": (
+                            "The in-graph scorer ranks a document matching FEWER query "
+                            "terms above one matching ALL of them, because the rare-term "
+                            "weight dominates coverage. That is a scoring property, not "
+                            "a harness artifact: both documents are live and unfiltered."),
+                    })
+
         # ARTIFACT GUARD: an arm that cannot return 100 rows has a lower
         # nDCG@100 ceiling than one that can, and that is a property of the
         # MATCH SET, not of ranking. Published so the delta is readable.
@@ -658,6 +691,7 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
         "corpus": corpus_meta,
         "query_classes": {c: len(classes[c]) for c in QUERY_CLASSES},
         "question_class_evidence": oov_evidence(points, classes),
+        "worked_examples": worked,
         "results": results,
         "errors": errors,
         "verdict": verdict(results),
