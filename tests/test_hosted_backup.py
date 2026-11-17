@@ -21,9 +21,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from tortoise.hosted_backup import (
-    DUMP_FORMAT,
     _BOTOCORE_DEFAULT_MAX_POOL_CONNECTIONS,
     _LIST_MANIFEST_MAX_INFLIGHT,
+    DUMP_FORMAT,
     LockVerificationError,
     MemoryStorage,
     R2Storage,
