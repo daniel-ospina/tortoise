@@ -1,0 +1,559 @@
+#!/usr/bin/env python
+"""The dense leg's MECHANISM and LATENCY, per label, at rest and under load (#13108).
+
+WHY THIS EXISTS
+---------------
+`#13108` measured that **45 % of eval windows lose the dense leg** on a loaded box
+(`window_modes {hybrid: 2371, keyword_only: 1973}`) and that recall collapses with it.
+The *labelling* already exists and is correct (`#2952`'s
+:func:`tortoise.search_engine.declared_degraded_read`, `#4999`'s `mechanism` key), so the
+open question is not "did the read say it degraded" — it is **why the leg runs out of
+budget**, and the two candidate answers have OPPOSITE fixes:
+
+* **the unindexed scan** — `entity_type='object'` reads `:Object`, which carries no vector
+  index (`tools/dod_5090_probe.py` row 2: `indexed: ['Point']` only), so every object-ish
+  dense read is a full scan that first pays a FAILING index round trip. If this is the
+  cause, the fix is an index, and that is `STORAGE-ARCHITECTURE.md` §14.3 **V3** — an OWNER
+  decision `#11901` closed as *"not earned"* on a 390 s sweep. **This tool measures; it
+  indexes nothing.** Creating an index here would reverse a recorded decision on a hunch.
+* **budget-only** — the leg is merely slow, and the fix is the budget or a bounded retry.
+
+⛔ **A bug that only appears under contention cannot be reproduced on an idle box.** The
+dispatch that produced this file measured on a box at **load 124**. So the tool reports
+EVERY arm with the machine's own load average printed beside it, and refuses to let a
+"rest" number and a "loaded" number share a table without saying which is which.
+
+WHAT IS MEASURED, AND WHAT ISN'T
+--------------------------------
+MEASURED: the shipped read function, :func:`tortoise.search_engine.run_vector_query`, with
+``is_embedded=False`` (the docker/server path the product uses), a real query vector, a real
+FalkorDB, and ``leg_trace`` on — so every sample carries the **mechanism actually taken**
+(``index`` | ``scan`` | ``scan_fallback``, `#4999`) and the reason it stopped.
+
+NOT MEASURED, and deliberately: the query EMBEDDING. ``sdk.tortoise_fts_query`` encodes the
+query on the caller's thread **before** :func:`tortoise.search_engine.degradation_chain`
+(``sdk.py``: ``query_vec = model.encode(...)`` precedes the chain), so encoder cost is
+outside the 500 ms cap by construction and cannot be what trips it. This tool passes a
+vector that is already in the corpus, which removes the encoder from the sample entirely —
+that is the point, not a shortcut: it isolates the STORE half of the leg.
+
+THE ONE THING THE SEED DOES NOT DO
+----------------------------------
+Both labels are seeded with **the same names and the same vectors** (real names harvested by
+`tools/candidate_recall_11901.py`'s own ``harvest``/``build_population``, imported and never
+re-implemented), so the two arms differ in EXACTLY one thing: whether the engine holds a
+vector index for the label. The `:Object` seed goes through the REAL projection
+(``_upsert_object``); the `:Point` mirror is written raw from the object's own stored
+embedding, because its only job is to be the indexed control at the same volume.
+
+⛔ ON A FRESH GRAPH THIS TOOL CREATES ONE THING IT DOES NOT OWN: the `:Point` VECTOR index,
+via the projection's own `_ensure_indexes()`. That is the index the product already ships
+(`#4997`: ``indexed: ['Point']``) and it is what makes the control a control. **No index is
+created on `:Object`, `:Subject`, `:Event` or `:Source` — not by a flag, not by an argument.**
+
+USAGE
+-----
+::
+
+    uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"
+    uv run python tools/dense_leg_probe_13108.py --reads 100 --concurrency 1
+    uv run python tools/dense_leg_probe_13108.py --reads 100 --concurrency 16,64 --out /tmp/loaded.json
+
+``--concurrency`` is repeatable/comma-separated and is the tool's own load lever: it opens
+that many real concurrent dense reads against the one graph, which is what a capture fleet
+does to it. ``--external-load N`` additionally runs N real embedder processes (the capture
+write path's own work) for the duration of the arm, for the case where the contention that
+matters is CPU rather than the store.
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import json
+import os
+import statistics
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import-path bootstrap
+    sys.path.insert(0, str(REPO_ROOT))
+
+#: The production budget this issue is about (`search_engine.py`:2832 / :4673).
+DEFAULT_TIMEOUT_MS = 500
+
+#: `#4999`'s mechanism vocabulary, restated here as the CLOSED set a sample may report —
+#: so a mechanism this tool has never seen is a loud KeyError, not a silent bucket.
+MECHANISMS = ("index", "scan", "scan_fallback", "pgvector")
+
+
+# ── statistics (pure, and pinned by the tests) ──────────────────────────────
+
+def percentile(values: list[float], pct: float) -> float | None:
+    """Nearest-rank percentile. ``None`` for an empty sample, never ``0``.
+
+    An empty sample and a zero-millisecond sample are different facts (the same
+    distinction ``tools/dod_5090_probe.py``'s census draws between ``UNMEASURED``
+    and ``0``), and a percentile that answers ``0`` for "nothing ran" is exactly
+    the shape that reads as measured without being measured.
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    k = max(0, min(len(ordered) - 1,
+                   round((pct / 100.0) * (len(ordered) - 1))))
+    return ordered[k]
+
+
+def summarise(samples: list[dict]) -> dict:
+    """One arm's latency + mechanism + outcome distribution.
+
+    ``over_budget`` counts samples at or beyond ``timeout_ms`` — the ones the
+    collector's deadline would abandon (``reason="timeout"`` on the trace) or the
+    driver would kill (``query_failed``). Both are the same user-visible outcome:
+    the read proceeds without the dense leg.
+    """
+    lat = [s["elapsed_ms"] for s in samples]
+    mech = collections.Counter(s.get("mechanism") for s in samples)
+    reason = collections.Counter(s.get("reason") for s in samples)
+    return {
+        "n": len(samples),
+        "latency_ms": {
+            "p50": percentile(lat, 50),
+            "p95": percentile(lat, 95),
+            "p99": percentile(lat, 99),
+            "max": max(lat) if lat else None,
+            "mean": round(statistics.fmean(lat), 2) if lat else None,
+        },
+        "mechanism": {str(k): v for k, v in sorted(
+            mech.items(), key=lambda kv: str(kv[0]))},
+        "reason": {str(k): v for k, v in sorted(
+            reason.items(), key=lambda kv: str(kv[0]))},
+        "count": {
+            "zero_rows": sum(1 for s in samples if not s.get("rows")),
+            "rows_mean": (round(statistics.fmean(
+                [s.get("rows", 0) for s in samples]), 2) if samples else None),
+        },
+        "over_budget": sum(1 for s in samples
+                           if s["elapsed_ms"] >= s["timeout_ms"]),
+        "degraded": sum(1 for s in samples if s.get("degraded")),
+    }
+
+
+# ── seeding ─────────────────────────────────────────────────────────────────
+
+def _import_instrument():
+    """`#11901`'s population definitions, imported — never re-implemented."""
+    from tools.candidate_recall_11901 import build_population, harvest
+    return harvest, build_population
+
+
+def seed(sdk, population: int, sessions_dir: str) -> dict:
+    """Write the SAME ``population`` names + vectors to ``:Object`` (unindexed) and
+    ``:Point`` (indexed), and report what landed.
+
+    Returns ``{"names": [...], "objects": n, "points": n, "vectors": n}``.
+    """
+    harvest, build_population = _import_instrument()
+    sessions = Path(os.path.expanduser(sessions_dir))
+    harvested = harvest(sessions)
+    pop = build_population(harvested, population)
+    if not pop:
+        raise SystemExit("REFUSED: the harvest produced no names")
+
+    proj = sdk._get_proj()
+    # The real write path for the object arm: real property shape, real embedding,
+    # through the EMBED gate (#5008) exactly as production writes it.
+    for i, row in enumerate(pop):
+        row["id"] = f"obj-13108{i:06d}"
+        proj._upsert_object({"id": row["id"], "name": row["name"],
+                             "object_kind": "core:other"})
+
+    # The indexed control is a MIRROR of the same rows: same id suffix, same name,
+    # same vector. `_ensure_indexes()` (run by the projection's __init__) is what
+    # gives :Point its HNSW index — the ONE the product already ships (#4997).
+    rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.id STARTS WITH 'obj-13108' "
+        "RETURN o.id, o.name, o.embedding", params={}).result_set
+    written = 0
+    vectors = 0
+    for oid, name, emb in rows:
+        if emb is None:
+            continue
+        vectors += 1
+        pid = "pt-" + oid[4:]
+        proj.g.query(
+            "MERGE (p:Point {id: $id}) SET p.name = $name, p.embedding = vecf32($e)",
+            params={"id": pid, "name": name, "e": list(emb)})
+        written += 1
+    return {"names": [r["name"] for r in pop], "objects": len(rows),
+            "points": written, "vectors": vectors}
+
+
+def probe_index_attempt(graph, query_vec, label: str, limit: int,
+                        timeout_ms: int) -> dict:
+    """What a bare ``queryNodes`` on ``label`` costs — tells ``scan_fallback`` apart.
+
+    ``run_vector_query``'s ``scan_fallback`` mechanism says an index attempt FAILED
+    and the read fell back to a scan on the SAME call (`#4999`), but it does not say
+    WHICH failure, and on this engine the two are different facts:
+
+    * ``no-index`` — the label carries no vector index at all (``Object``). Every
+      read of that label pays this round trip and then a full scan, for ever.
+    * ``signature`` — the engine rejected the argument ORDER (`#1359`), which the
+      shipped leg retries with the other form; it is a per-engine constant, not
+      per-label, and it says nothing about an index.
+
+    Getting these two confused is how "the index is missing" becomes "the driver
+    call is wrong". Both signatures are tried in the shipped order and every
+    attempt is reported. ⚠️ **This engine does NOT distinguish them by message**:
+    an unindexed label and a wrong argument order both come back as
+    ``Invalid arguments for procedure 'db.idx.vector.queryNodes'`` (measured on
+    FalkorDB v4.20.6 — see the artifact). The distinguishing evidence is
+    therefore NOT the text but the census (:func:`label_census`): the same call
+    answers on a label the catalogue holds a VECTOR index for, and is refused on
+    one it does not. That is why the two are reported side by side and this
+    function refuses to infer a cause from the message alone.
+    """
+    forms = {
+        "A": (f"CALL db.idx.vector.queryNodes('{label}', 'embedding', "
+              "$query_vec, $limit) YIELD node RETURN node.id LIMIT $limit"),
+        "B": (f"CALL db.idx.vector.queryNodes('{label}', 'embedding', "
+              "$limit, vecf32($query_vec)) YIELD node RETURN node.id LIMIT $limit"),
+    }
+    start = time.monotonic()
+    attempts: list[dict] = []
+    outcome = "ok"
+    answered: str | None = None
+    for name, cypher in forms.items():
+        a0 = time.monotonic()
+        try:
+            graph.query(cypher, params={"query_vec": query_vec,
+                                        "limit": limit}, timeout=timeout_ms)
+        except Exception as e:  # a refusal is a RESULT here
+            msg = f"{type(e).__name__}: {e}"
+            attempts.append({"signature": name, "outcome": "refused",
+                             "elapsed_ms": round((time.monotonic() - a0) * 1000.0, 2),
+                             "raised": msg[:300]})
+            low = msg.lower()
+            if "invalid arguments" in low or "not registered" in low \
+                    or "unknown procedure" in low or "type mismatch" in low:
+                continue
+            break
+        attempts.append({"signature": name, "outcome": "ok",
+                         "elapsed_ms": round((time.monotonic() - a0) * 1000.0, 2),
+                         "raised": None})
+        outcome, answered = "ok", name
+        break
+    if answered is None:
+        # ⛔ NOT named a cause: message-wise this engine says the same thing for an
+        # unindexed label as for a bad argument order (see the docstring). The
+        # census, printed beside this record, is what separates them.
+        outcome = "refused-both-signatures"
+    return {"label": label, "outcome": outcome, "answered_signature": answered,
+            "attempts": attempts,
+            "elapsed_ms": round((time.monotonic() - start) * 1000.0, 2)}
+
+
+def label_census(sdk) -> dict:
+    """How many nodes per label, and does the engine hold a VECTOR index for it?
+
+    ⛔ Reported because ``stored`` alone is the 2026-09-24 error repeated: a
+    population with no embeddings is not the same fact as an index-less one, and
+    only the pair distinguishes them (`tools/dod_5090_probe.py` --census rule).
+    """
+    proj = sdk._get_proj()
+    out: dict = {"labels": {}, "vector_indexes": []}
+    for label in ("Object", "Point"):
+        rows = proj.g.query(
+            f"MATCH (n:{label}) RETURN count(*), count(n.embedding)",
+            params={}).result_set
+        total, embedded = (rows[0][0], rows[0][1]) if rows else (0, 0)
+        out["labels"][label] = {"stored": int(total or 0),
+                                "embedded": int(embedded or 0)}
+    try:
+        idx = proj.g.query("CALL db.indexes()", params={}).result_set
+    except Exception as e:  # UNMEASURED, never 0
+        out["vector_indexes"] = None
+        out["vector_indexes_error"] = f"{type(e).__name__}: {e}"
+        return out
+    for row in idx:
+        # FalkorDB's catalogue row: label, property, types, language, stopwords,
+        # entitytype, status, info(…). Read defensively — the shape is the
+        # engine's, not ours, and a census that assumes it is the `#5090` class.
+        text = " ".join(str(c) for c in row).upper()
+        if "VECTOR" in text:
+            out["vector_indexes"].append([str(c) for c in row[:4]])
+    return out
+
+
+# ── the measurement ─────────────────────────────────────────────────────────
+
+def _vector_query_once(graph, query_vec, entity_type: str, limit: int,
+                       timeout_ms: int) -> dict:
+    """ONE shipped dense read, with its trace: mechanism + latency + outcome."""
+    from tortoise.search_engine import (
+        VECTOR_MECHANISM_KEY,
+        run_vector_query,
+    )
+    trace: list[dict] = []
+    start = time.monotonic()
+    rows: list = []
+    raised = None
+    try:
+        rows = run_vector_query(graph, query_vec, limit=limit,
+                                timeout_ms=timeout_ms, is_embedded=False,
+                                entity_type=entity_type, leg_trace=trace)
+    except Exception as e:  # a raised leg is a SAMPLE, not a crash
+        raised = f"{type(e).__name__}: {e}"
+    elapsed = (time.monotonic() - start) * 1000.0
+    entry = trace[0] if trace else {}
+    mech = entry.get(VECTOR_MECHANISM_KEY)
+    if mech is not None and mech not in MECHANISMS:  # pragma: no cover - guard
+        raise SystemExit(f"UNKNOWN mechanism {mech!r} — not in {MECHANISMS}")
+    return {
+        "entity_type": entity_type,
+        "elapsed_ms": round(elapsed, 2),
+        "timeout_ms": timeout_ms,
+        "mechanism": mech,
+        "reason": entry.get("reason"),
+        "ran": entry.get("ran"),
+        "degraded": entry.get("degraded"),
+        "rows": len(rows),
+        "raised": raised,
+    }
+
+
+def measure(graph, query_vec, entity_type: str, reads: int, concurrency: int,
+            limit: int, timeout_ms: int) -> dict:
+    """``reads`` dense reads at ``concurrency`` real threads.
+
+    Concurrency is the honest load lever for THIS bug: the shipped read runs its
+    legs on a ``ThreadPoolExecutor`` worker and the store serialises work on the
+    graph, so N concurrent reads are exactly the shape a capture fleet presents —
+    not a synthetic CPU burn.
+    """
+    samples: list[dict] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(concurrency)
+    per_thread = [reads // concurrency + (1 if i < reads % concurrency else 0)
+                  for i in range(concurrency)]
+
+    def worker(n: int) -> None:
+        barrier.wait()
+        local: list[dict] = []
+        for _ in range(n):
+            local.append(_vector_query_once(graph, query_vec, entity_type,
+                                            limit, timeout_ms))
+        with lock:
+            samples.extend(local)
+
+    threads = [threading.Thread(target=worker, args=(per_thread[i],),
+                                daemon=True)
+               for i in range(concurrency)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    out = summarise(samples)
+    out["entity_type"] = entity_type
+    out["concurrency"] = concurrency
+    out["samples"] = sorted(samples, key=lambda s: s["elapsed_ms"])
+    return out
+
+
+# ── the box's own state (a load figure with no context is not a measurement) ─
+
+def box_load() -> dict:
+    try:
+        one, five, fifteen = os.getloadavg()
+    except OSError:  # pragma: no cover - non-POSIX
+        one = five = fifteen = None
+    return {
+        "loadavg": [round(one, 2), round(five, 2), round(fifteen, 2)]
+        if one is not None else None,
+        "cpus": os.cpu_count(),
+    }
+
+
+def spawn_external_load(n: int) -> list[subprocess.Popen]:
+    """``n`` real embedder processes — the capture write path's own work.
+
+    Real work, not a burn loop: each child encodes a batch of strings through the
+    SAME ``EmbeddingModel`` the product uses, so the contention it creates is the
+    contention a capture fleet creates (torch intra-op threads included).
+    """
+    code = (
+        "import sys\n"
+        "from tortoise.embeddings import EmbeddingModel\n"
+        "m = EmbeddingModel.get()\n"
+        "if m is None:\n"
+        "    sys.exit('no embedder')\n"
+        "batch = [f'entity name number {i} in a captured conversation'\n"
+        "         for i in range(256)]\n"
+        "while True:\n"
+        "    m.encode(batch)\n"
+    )
+    return [subprocess.Popen([sys.executable, "-c", code],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            for _ in range(n)]
+
+
+def stop_external_load(procs: list[subprocess.Popen]) -> None:
+    for p in procs:
+        p.terminate()
+    for p in procs:
+        try:
+            p.wait(timeout=10)
+        except Exception:
+            p.kill()
+
+
+# ── main ────────────────────────────────────────────────────────────────────
+
+def run(args: argparse.Namespace) -> int:
+    uri = os.environ.get("TORTOISE_DB_URI") or ""
+    if not uri.startswith(("docker://", "redis://")):
+        print("REFUSED: no live FalkorDB in TORTOISE_DB_URI — a latency figure "
+              "measured on the embedded backend is not a figure.\n"
+              "  uri=\"$(uv run python tools/test_lane.py uri)\" && eval \"$uri\"",
+              file=sys.stderr)
+        return 3
+
+    from tortoise.embeddings import EmbeddingModel
+    from tortoise.sdk import TortoiseSDK
+
+    model = EmbeddingModel.get()
+    if model is None:
+        print("REFUSED: no embedder — the object arm's population would carry no "
+              "vectors and the probe would measure an empty scan "
+              f"({EmbeddingModel.absent_reason()}).\n"
+              "  uv sync --extra embeddings --extra test --extra parity",
+              file=sys.stderr)
+        return 3
+
+    sdk = TortoiseSDK(namespace=args.namespace,
+                      graph_name=args.graph or f"dense13108_{int(time.time())}")
+
+    seeded = None
+    if not args.no_seed:
+        t0 = time.time()
+        seeded = seed(sdk, args.population, args.sessions_dir)
+        seeded["elapsed_s"] = round(time.time() - t0, 1)
+
+    census = label_census(sdk)
+    graph = sdk._get_proj().g
+
+    # The query vector is a population member's own vector: the encoder is out of
+    # the loop on purpose (see the module docstring — it runs OUTSIDE the cap in
+    # the shipped read, so including it here would measure the wrong thing).
+    rows = graph.query(
+        "MATCH (o:Object) WHERE o.id STARTS WITH 'obj-13108' AND o.embedding IS NOT NULL "
+        "RETURN o.embedding LIMIT 1", params={}).result_set
+    if not rows:
+        print("REFUSED: no embedded :Object in the graph — nothing to scan",
+              file=sys.stderr)
+        return 3
+    query_vec = list(rows[0][0])
+
+    index_attempts = [probe_index_attempt(graph, query_vec,
+                                        {"object": "Object", "point": "Point",
+                                         "subject": "Subject", "event": "Event",
+                                         "source": "Source"}.get(t, "Point"),
+                                        args.limit, args.timeout_ms)
+                      for t in args.labels]
+
+    arms: dict = {}
+    for entity_type in args.labels:
+        for conc in args.concurrency:
+            procs: list[subprocess.Popen] = []
+            try:
+                if args.external_load:
+                    procs = spawn_external_load(args.external_load)
+                    time.sleep(args.load_warmup_s)
+                load = box_load()
+                arm = measure(graph, query_vec, entity_type, args.reads, conc,
+                              args.limit, args.timeout_ms)
+                arm["load"] = load
+                arm["external_load_procs"] = len(procs)
+                arms[f"{entity_type}@c{conc}"] = arm
+                print(f"\n== {entity_type} @ concurrency {conc} "
+                      f"(load {load['loadavg']}/{load['cpus']} cpus, "
+                      f"{len(procs)} external embedder procs) ==")
+                print(f"  mechanism {arm['mechanism']}  reason {arm['reason']}")
+                print(f"  latency_ms p50 {arm['latency_ms']['p50']} "
+                      f"p95 {arm['latency_ms']['p95']} "
+                      f"p99 {arm['latency_ms']['p99']} "
+                      f"max {arm['latency_ms']['max']}")
+                print(f"  over {args.timeout_ms}ms: {arm['over_budget']}"
+                      f"/{arm['n']}  degraded: {arm['degraded']}"
+                      f"  zero-rows: {arm['count']['zero_rows']}")
+            finally:
+                stop_external_load(procs)
+
+    report = {
+        "issue": 13108,
+        "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "code_head": subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False).stdout.strip(),
+        "uri_graph": args.graph or sdk._graph_name,
+        "config": {
+            "population": args.population,
+            "reads": args.reads,
+            "concurrency": list(args.concurrency),
+            "limit": args.limit,
+            "timeout_ms": args.timeout_ms,
+            "labels": list(args.labels),
+            "external_load": args.external_load,
+            "sessions_dir": args.sessions_dir,
+        },
+        "box": box_load(),
+        "census": census,
+        "index_attempt": index_attempts,
+        "seed": seeded,
+        "arms": arms,
+    }
+    if args.out:
+        Path(args.out).write_text(json.dumps(report, indent=1, sort_keys=True))
+        print(f"\nwrote {args.out}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--population", type=int, default=1000,
+                   help="names written to BOTH labels (the eval's own 1,000)")
+    p.add_argument("--reads", type=int, default=100,
+                   help="dense reads per arm")
+    p.add_argument("--concurrency", default="1",
+                   help="comma-separated thread counts; 1 is the at-rest arm")
+    p.add_argument("--limit", type=int, default=3,
+                   help="the capture prior's own window")
+    p.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS)
+    p.add_argument("--labels", default="object,point",
+                   help="entity types to measure (object=unindexed, point=indexed)")
+    p.add_argument("--external-load", type=int, default=0,
+                   help="real embedder processes to run during the arm")
+    p.add_argument("--load-warmup-s", type=float, default=20.0)
+    p.add_argument("--sessions-dir", default="~/.tortoise/session-events")
+    p.add_argument("--namespace", default="dense13108")
+    p.add_argument("--graph", default=None)
+    p.add_argument("--no-seed", action="store_true",
+                   help="measure an already-seeded graph (the ids must still match)")
+    p.add_argument("--out", default=None)
+    ns = p.parse_args(argv)
+    ns.concurrency = [int(c) for c in str(ns.concurrency).split(",") if c]
+    ns.labels = [s for s in str(ns.labels).split(",") if s]
+    return run(ns)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
