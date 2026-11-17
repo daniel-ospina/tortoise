@@ -304,6 +304,16 @@ _MIXED_ARM_DOORS: set[str] = set()
 #: fold. Measured on #9124; this is the "19 writers that journal nothing" class
 #: in the issue's landing path, at the count the source actually holds.
 _NO_JOURNAL = {
+    # #13035: the goal-ending guard's STORED half. `_stored_goal_ending_view`
+    # issues ONE statement — `MATCH (n:<label> {id:$id}) OPTIONAL MATCH
+    # (s)-[:CORRECTS]->(n) RETURN n.status, n.goalState, coalesce(...),
+    # collect(s.id)` — with no SET/CREATE/MERGE/DELETE/REMOVE and no write
+    # procedure, and it appends NO record: it exists to grade the state a caller's
+    # write LEAVES, one read at most once per write, and it returns a dict. The
+    # resolver reports '<unresolved>' because `{label}` is interpolated, which is
+    # why it lands here rather than among the resolvable reads. It blesses no
+    # undeclared write.
+    "_stored_goal_ending_view",
     # ⛔ #9206/#9349 — `capture_session` LEFT this set, and the reason is the
     # history this list keeps: #9206 put it here after excluding
     # `_journal_write_failure_warning` (a receipt-warning STRING BUILDER) as a
