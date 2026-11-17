@@ -31985,16 +31985,13 @@ class TortoiseSDK:
         # above gives the flag, and the one the sibling `:Subject` arm inside
         # the endpoint loop could never provide.
         #
-        # `:Object` used to be deliberately EXEMPT ("its writer does not
-        # validate, it STORES the value"), so refusing it here would have
-        # rejected bundles the writer accepted. #11824 S0 closes that asymmetry:
-        # the Object writer validates against the SAME four-word lifecycle door
-        # as the Subject one, so both are checked here, through the SAME question
-        # (`_status_refusal_reason`) rather than a re-spelt vocabulary — a
-        # divergence between this phase and the writer is exactly the
+        # `:Object` is refused here since #11824 S0: its writer now validates
+        # against the SAME four-word lifecycle door (`_status_refusal_reason`,
+        # shared with `:Subject`), so a Phase 1 skip would reopen the
         # partial-mutation class. `:Event` is no longer in that sentence: since
-        # #11825 its door refuses the TERMINAL half, and the arm BELOW mirrors
-        # that refusal at Phase 1 for the same reason.
+        # #13100 its door refuses ANY `status` (the terminal half alone was
+        # #11825's interim boundary), and the arm BELOW mirrors that refusal at
+        # Phase 1 for the same partial-mutation reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
