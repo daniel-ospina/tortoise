@@ -108,13 +108,15 @@ def test_the_reason_set_is_closed_and_every_reason_is_reachable(sdk):
     # target-retired
     i, t, g = _world(sdk, tag="reason-target")
     _judge(sdk, i, t, g)
-    sdk.update_knowledge(t["id"], status="superseded")
+    # #12592: `superseded` names its successor (ONTOLOGY §4.3), so the fixture
+    # supplies one; the REASON this case proves reachable is unchanged.
+    sdk.update_knowledge(t["id"], status="superseded", supersededBy="t-successor")
     reachable["target-retired"] = _only(verdicts(sdk, goal_id=g["id"])).invalidation.reason
 
     # indicator-retired
     i, t, g = _world(sdk, tag="reason-indicator")
     _judge(sdk, i, t, g)
-    sdk.update_knowledge(i["id"], status="superseded")
+    sdk.update_knowledge(i["id"], status="superseded", supersededBy="i-successor")
     reachable["indicator-retired"] = _only(verdicts(sdk, goal_id=g["id"])).invalidation.reason
 
     # definition-changed
@@ -263,7 +265,7 @@ def test_a_target_that_no_longer_exists_is_retired_state(sdk):
 def test_a_retired_indicator_retires_the_state_derived_from_its_readings(sdk):
     i, t, g = _world(sdk, tag="indicator-retired")
     made = _judge(sdk, i, t, g)
-    sdk.update_knowledge(i["id"], status="superseded")
+    sdk.update_knowledge(i["id"], status="superseded", supersededBy="i-successor")
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation.reason == "indicator-retired"
     invalidate_stale(sdk, goal_id=g["id"])

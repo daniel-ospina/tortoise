@@ -841,7 +841,7 @@ class TestSecondReviewRoundBounded:
         _create_raw(sdk, "Subject", "sub-b", "Bob Smith", "subjectKind",
                     "naturalPerson", ts="2026-01-02")
         sdk.approve_merge("sub-b", action="merge")
-        sdk.update_knowledge("sub-a", status="superseded")
+        sdk.update_knowledge("sub-a", status="superseded", supersededBy="Bob Smith")
         g = sdk._get_proj().g
         assert resolve_entity_id(
             g, "Subject", "Bob Smith",
@@ -1632,7 +1632,7 @@ class TestThirdReviewRound:
         # path honours them — so the legacy spelling resolves even after the
         # retired carrier is superseded (a terminal node is excluded from the
         # live-holder union, so the alias is the only remaining evidence).
-        sdk.update_knowledge(out["candidate_id"], status="superseded")
+        sdk.update_knowledge(out["candidate_id"], status="superseded", supersededBy="the merging survivor")
         assert sdk.create_object("the owner", "document")["id"] == surv
 
     def test_the_alias_arm_survives_the_carriers_retirement(self, sdk_factory):
@@ -1647,7 +1647,7 @@ class TestThirdReviewRound:
             pytest.skip("resolved at create time — no merge to test")
         out = sdk.approve_merge(b["id"], "merge")
         assert out["survived_id"] == a
-        sdk.update_knowledge(b["id"], status="superseded")
+        sdk.update_knowledge(b["id"], status="superseded", supersededBy="the merging survivor")
         assert sdk.create_object("Acme Corporaton", "document")["id"] == a
         assert _count(sdk, "Object") == 2, "the merge must not delete either node"
 
@@ -1847,8 +1847,8 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
         candidate = sdk.create_object("Acme Corporaton", "document")["id"]
         assert candidate != survivor, "fixture drift: no merge to set up"
         sdk.approve_merge(candidate, action="merge")
-        sdk.update_knowledge(survivor, status="superseded")
-        sdk.update_knowledge(candidate, status="superseded")
+        sdk.update_knowledge(survivor, status="superseded", supersededBy="Acme Corporaton")
+        sdk.update_knowledge(candidate, status="superseded", supersededBy="Acme Corp")
         return survivor, candidate
 
     def test_a_retired_survivor_of_a_merge_keeps_the_bounded_exemption(self, tmp_path):
@@ -1916,8 +1916,8 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
         survivor = sdk.create_object("Acme Corp", "document")["id"]
         candidate = sdk.create_object("Acme Corporaton", "document")["id"]
         sdk.approve_merge(candidate, action="merge")
-        sdk.update_knowledge(survivor, status="superseded")
-        sdk.update_knowledge(candidate, status="superseded")
+        sdk.update_knowledge(survivor, status="superseded", supersededBy="Acme Corporaton")
+        sdk.update_knowledge(candidate, status="superseded", supersededBy="Acme Corp")
         before = _count(sdk, "Object")
 
         with pytest.raises(ValueError) as exc:
@@ -1960,7 +1960,7 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
         api = EventAPI(_Log(), initiated_by="extractor", agent_id="test",
                        projection=proj)
         holder = sdk.create_object("Acme Corp", "document")["id"]
-        sdk.update_knowledge(holder, status="superseded")
+        sdk.update_knowledge(holder, status="superseded", supersededBy="Acme Corp (retired)")
         before = _count(sdk, "Object")
 
         with pytest.raises(ValueError) as exc:
@@ -2068,7 +2068,7 @@ class TestThe12120ReadersOutsideTheEntityModule:
             sdk.approve_merge(candidate, action="merge")
             # ONLY the survivor is retired — the carrier stays live (the merge is
             # non-destructive). This is the shape that used to fail.
-            sdk.update_knowledge(survivor, status="superseded")
+            sdk.update_knowledge(survivor, status="superseded", supersededBy="Acme Corporaton")
             carrier = sdk._get_proj().g.query(
                 "MATCH (o:Object {id:$id}) RETURN o.status, o.resolved_from",
                 params={"id": candidate}).result_set
@@ -2214,7 +2214,7 @@ class TestThe12120FourthRoundReaders:
         sdk.approve_merge(candidate, action="merge")
         # The retired CARRIER only: the survivor stays live, which is the state a
         # re-review of the pair leaves behind (the merge is non-destructive).
-        sdk.update_knowledge(candidate, status="superseded")
+        sdk.update_knowledge(candidate, status="superseded", supersededBy="Acme Corp")
         clear_non_folded_entries()
 
         role = sdk.create_subject("the admin role", "role",
@@ -2245,8 +2245,8 @@ class TestThe12120FourthRoundReaders:
         candidate = sdk.create_object("Acme Corporaton", "document")["id"]
         assert candidate != survivor, "fixture drift: nothing to merge"
         sdk.approve_merge(candidate, action="merge")
-        sdk.update_knowledge(survivor, status="superseded")
-        sdk.update_knowledge(candidate, status="superseded")
+        sdk.update_knowledge(survivor, status="superseded", supersededBy="Acme Corporaton")
+        sdk.update_knowledge(candidate, status="superseded", supersededBy="Acme Corp")
 
         (exists, _terminal, _op, _unevaluable, live, _merges,
          _target) = sdk._entity_name_holders("Object", "Acme Corporaton")
@@ -2425,7 +2425,7 @@ class TestThe12120AboutEdgeStubIsFoldAware:
         sdk = sdk_factory()
         try:
             buried = sdk.create_subject("The Owner")["id"]
-            assert sdk.update_knowledge(buried, status="superseded") is not False
+            assert sdk.update_knowledge(buried, status="superseded", supersededBy="The Owner II") is not False
             sdk.create_event("ev-12055-4", "github.issue.open",
                              aboutSubject="the owner")
             g = sdk._get_proj().g
@@ -2867,7 +2867,7 @@ class TestThe12120ReviewRound6:
         try:
             g = sdk._get_proj().g
             dead = sdk.create_object("Acme Corp", "document")["id"]
-            sdk.update_knowledge(dead, status="superseded")
+            sdk.update_knowledge(dead, status="superseded", supersededBy="Acme Corp II")
             live = sdk.create_object("ACME CORP", "document")["id"]
             assert live != dead
             g.query("MATCH (o:Object {id:$id}) SET o.canonical_name='acme corp'",
@@ -3037,7 +3037,7 @@ class TestThe12120ReviewRound8:
                                method="fuzzy", similarity=0.9)
             # Retire the SURVIVOR only — the carrier stays live, so
             # `recall_state` still shows "The Widget".
-            sdk.update_knowledge(survivor, status="superseded")
+            sdk.update_knowledge(survivor, status="superseded", supersededBy="The Widget")
             target = sdk.create_object("Old Co", "document")["id"]
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Co", "supersedes_by": "The Widget",

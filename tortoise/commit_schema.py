@@ -1059,7 +1059,7 @@ class SupersessionRecord(BaseModel):
     an ObjectSuperseded event (projection folds it into Object.status) or,
     for POINT-level refs (E5 #1537 — ``superseded``/``supersedes_by`` are
     content-addressed ``pt_<sha>`` ids, dispatched by prefix at the write
-    sites), as a CORRECTS edge via the canonical ``supersede()``. Additive-
+    sites), as a CORRECTS edge via the canonical ``supersede_point()``. Additive-
     optional so old clients' payloads still validate (no migration) — with
     ONE deliberate exception (#2243): ``evidence`` is capped at 200 chars, so
     a client that previously sent longer evidence now gets a 422. The two ref
