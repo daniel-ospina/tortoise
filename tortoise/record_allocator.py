@@ -254,9 +254,14 @@ JOURNAL_MAX_SQL = (
 #: `floor_is_the_journals_count` while comparing the floor with `MAX(seq)`). A
 #: born-uncut graph has to be seeded with the journal's COUNT, because the count
 #: is how many positions already exist; `MAX(seq)` is the highest one issued.
-#: They agree on a dense axis and diverge the moment a seq is refused or a tail
-#: is lost — which is exactly the state the pre-flight exists to report, so
-#: answering one of them while naming the other is a false CLEAN.
+#: They agree on a dense axis and diverge in exactly ONE direction: a refused seq
+#: leaves a GAP, so `COUNT(*) < MAX(seq)`. The reverse is unrepresentable —
+#: `public.journal_event` has `PRIMARY KEY (org_id, graph_id, seq)` and
+#: `CHECK (seq > 0)` (`supabase/migrations/20261012000001_record_event_stream.sql`),
+#: so N distinct positive seqs with maximum M always satisfy N <= M, and deleting
+#: the tail lowers COUNT and MAX together instead of crossing them. A gap is the
+#: state the pre-flight exists to report, so answering one of them while naming
+#: the other is a false CLEAN.
 JOURNAL_COUNT_SQL = (
     "SELECT COUNT(*) FROM public.journal_event "
     "WHERE org_id = %s AND graph_id = %s"

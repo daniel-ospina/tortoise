@@ -1056,6 +1056,14 @@ def _refuse_a_divergent_allocation(write, *, journal_first: int,
     ahead of the rows. So a failure here is caught, reported on stderr, and the
     refusal says what is TRUE — attempted, not confirmed — plus what to check
     before writing again.
+
+    ⛔ AND AN UNATTEMPTED ROLLBACK IS NOT A ROLLBACK EITHER (#13043 review P3).
+    With no injected connection there is nothing to roll back, so
+    `rollback_failed` stays `None` — and the `None` arm below used to assert
+    "was rolled BACK" for it. `_journal_emit` always passes `conn=None`, so the
+    seam opens its own connection and this is unreachable today; it is closed
+    here so a future `conn=` caller cannot resurrect the false fact through the
+    branch that skips the rollback altogether.
     """
     from tortoise.record_writer import RecordWriteOutcome, _bounded_cause
 
@@ -1065,10 +1073,12 @@ def _refuse_a_divergent_allocation(write, *, journal_first: int,
     if allocated is None or allocated == journal_first:
         return
     connection = getattr(write, "connection", None)
+    rolled_back = False
     rollback_failed: BaseException | None = None
     if connection is not None:
         try:
             connection.rollback()
+            rolled_back = True
         except Exception as rollback_exc:  # noqa: BLE001, RUF100
             rollback_failed = rollback_exc
             print(
@@ -1082,12 +1092,21 @@ def _refuse_a_divergent_allocation(write, *, journal_first: int,
                 file=sys.stderr)
         with contextlib.suppress(Exception):
             connection.close()
-    allocation_sentence = (
-        "The allocation was rolled BACK (nothing burned, nothing renumbered)."
-        if rollback_failed is None else
-        "The allocation could NOT be confirmed rolled back — the counter may be "
-        "ONE AHEAD of the rows, which is the state that EATS rows, so do NOT "
-        "write again until `status` says which side is ahead.")
+    if rollback_failed is not None:
+        allocation_sentence = (
+            "The allocation could NOT be confirmed rolled back — the counter may "
+            "be ONE AHEAD of the rows, which is the state that EATS rows, so do "
+            "NOT write again until `status` says which side is ahead.")
+    elif not rolled_back:
+        allocation_sentence = (
+            "No rollback was attempted — the write carried no connection this "
+            "lane could roll back — so nothing here confirms the counter and the "
+            "rows agree: do NOT write again until `status` says which side is "
+            "ahead.")
+    else:
+        allocation_sentence = (
+            "The allocation was rolled BACK (nothing burned, nothing "
+            "renumbered).")
     raise CopyRefused(
         f"{session_id}: the ORDINAL ALLOCATOR issued position {allocated} but "
         f"the journal append reported {journal_first} — the two allocators "

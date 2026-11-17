@@ -476,6 +476,43 @@ def test_a_rollback_that_FAILS_is_reported_and_not_claimed_as_done(
     assert conn.closed is True, "the connection was left open on the failure arm"
 
 
+def test_a_refusal_with_no_connection_does_not_claim_it_rolled_back(
+        monkeypatch, tmp_path) -> None:
+    """⛔ #13043 review P3: the `connection is None` branch asserted a rollback.
+
+    `rollback_failed` stays `None` when the write carries no connection, and the
+    refusal's `None` arm said, as a FACT, "The allocation was rolled BACK
+    (nothing burned, nothing renumbered)" — a rollback that was never attempted,
+    in the one message an operator reads to decide whether to write again.
+
+    Unreachable through `_journal_emit` today (it passes `conn=None`, so the seam
+    opens and returns its own connection), which is why it is closed here rather
+    than left for a future `conn=` caller to trip over.
+
+    The mutant this reds: the `None` arm of `allocation_sentence` back to
+    "was rolled BACK" for every non-failed rollback, attempted or not.
+    """
+    import tortoise.record_writer as rw
+
+    _calls, _built = _patch_journal(monkeypatch, [7],
+                                    cutover_state=(4, "active"), allocate=True)
+    monkeypatch.setattr(
+        rw, "write_records",
+        lambda events, **kw: _AllocatedWrite(_outcome().APPLIED, len(events),
+                                             None, first_seq=5))
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
+    with pytest.raises(copy_mod.CopyRefused) as excinfo:
+        emit("s1", [{"a": 1}])
+
+    message = str(excinfo.value)
+    assert "issued position 5" in message, "this leg changes only the rollback"
+    assert "was rolled BACK" not in message, (
+        "the refusal claims an allocation was rolled back, and no rollback was "
+        f"even attempted (the write carried no connection): {message}")
+    assert "No rollback was attempted" in message, (
+        f"the refusal does not say what actually happened: {message}")
+
+
 def test_a_cut_over_graph_with_the_flag_off_is_refused_BEFORE_any_append(
         monkeypatch) -> None:
     """The mis-set pair whose cost is a journal that grows while no row lands.

@@ -344,7 +344,22 @@ def test_the_sweep_does_not_assert_a_floor_it_never_counted() -> None:
         "the entry still calls MAX(seq) the journal's row max")
     assert entry["floor_is_the_journals_count"] is None
     assert payload["floor_is_the_journals_count"] is None
-    assert payload["floor_is_the_journals_count_reason"]
+    reason = payload["floor_is_the_journals_count_reason"]
+    assert reason, "the sweep answered `null` without saying why"
+    # ⛔ THE REASON MUST NOT DISOWN THE NUMBER IN ITS OWN ENTRY (#13043 review P2).
+    # `journal_count` is read and emitted unconditionally (`:414`), but the reason
+    # used to say "`sweep` reads MAX(seq), not the journal's enumeration — pass
+    # --journal … to have the count reported beside it": an operator was told to
+    # re-run for a count the payload already carried, in the verb whose whole
+    # purpose is that its own output can be trusted. What is unknown is the
+    # COMPARISON (no floor was supplied), not the count.
+    assert entry["journal_count"] == 5, (
+        "the count is not in the entry, so the reason below would be honest")
+    assert "journal_count" in reason, (
+        f"the reason does not name the count it already reports: {reason!r}")
+    assert "have the count reported" not in reason, (
+        "the reason tells the operator to re-run for a count the payload "
+        f"already carries: {reason!r}")
 
 
 def test_the_null_floor_flag_states_the_cause_it_actually_had() -> None:
@@ -420,10 +435,15 @@ def test_the_floor_is_compared_with_the_journals_COUNT_not_with_MAX_seq() -> Non
     """⛔ ROUND-3 BLOCKING: the field says COUNT and the code compared `MAX(seq)`.
 
     The two are different quantities and they diverge exactly on the state this
-    verb exists to find — a refused seq (a GAP: `count < max`) or a lost tail
-    (`count > max`). Comparing the floor with `MAX(seq)` therefore answers the
-    wrong question and, because a DENSE journal makes the two coincide, it can
-    be wrong in the one direction that matters: reporting a false CLEAN.
+    verb exists to find — a refused seq, which leaves a GAP (`count < max`).
+    That is the ONLY direction that can exist: `public.journal_event` carries
+    `PRIMARY KEY (org_id, graph_id, seq)` and `CHECK (seq > 0)`, so `count > max`
+    is unrepresentable (N distinct positive seqs with maximum M satisfy N <= M)
+    and deleting the tail lowers COUNT and MAX together (#13043 review P3 — this
+    test previously captioned the reverse as "a lost tail"). Comparing the floor
+    with `MAX(seq)` therefore answers the wrong question and, because a DENSE
+    journal makes the two coincide, it can be wrong in the one direction that
+    matters: reporting a false CLEAN.
 
     The mutant this reds, in both directions: `args.floor == journal_count`
     back to `args.floor == entry["journal_max_seq"]`.
@@ -441,15 +461,29 @@ def test_the_floor_is_compared_with_the_journals_COUNT_not_with_MAX_seq() -> Non
         "the comparison used MAX(seq)")
     assert payload["floor_is_the_journals_count"] is True
 
-    # The other direction: 9 lines, highest is 5 (a lost/reused tail). A floor of
-    # 5 is NOT the count — and pre-fix, comparing with `MAX(seq)=5`, said True.
-    conn = _SweepConn(["g"], max_seq=5, count=9)
-    payload = _sweep(type("A", (), {"org_id": "o", "floor": 5,
+    # The other direction, and the reason the comparison is not merely a
+    # re-spelling of MAX(seq): a GAP higher up. 7 lines, highest is 9 — and the
+    # operator's stated floor is 9, which IS `MAX(seq)`.
+    #
+    # ⛔ THE FLOOR EQUALS THE MAX HERE ON PURPOSE. Pre-fix (`args.floor ==
+    # entry["journal_max_seq"]`) this state reads TRUE; post-fix (`== journal_count`)
+    # it reads FALSE.
+    #
+    # The earlier fixture here was `count=9, max=5`, captioned "a lost/reused
+    # tail" — it DID discriminate (measured: the mutant answers True), but the
+    # state it models is forbidden by `PRIMARY KEY (org_id, graph_id, seq)` +
+    # `CHECK (seq > 0)`, under which 9 distinct positive seqs cannot have a
+    # maximum of 5 (#13043 review P3: "valid discriminator, wrong rationale").
+    # A leg whose fixture cannot exist proves a property of an unreachable state,
+    # so it is retargeted at the gap direction — the only one that does.
+    conn = _SweepConn(["g"], max_seq=9, count=7)
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": 9,
                                     "journal": None})(), conn)
     entry = payload["uncut_graphs"][0]
     assert entry["floor_source"] == "operator"
+    assert (entry["journal_count"], entry["journal_max_seq"]) == (7, 9)
     assert entry["floor_is_the_journals_count"] is False, (
-        "a floor of 5 on a 9-line journal was reported as the count — the "
+        "a floor of 9 on a 7-line journal was reported as the count — the "
         "comparison used MAX(seq)")
 
 

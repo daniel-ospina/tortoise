@@ -396,9 +396,11 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             # so the field's one job ("is this the journal's count?") was
             # answered about `MAX(seq)` instead. Measured on a dense journal the
             # two coincide, which is why a false CLEAN survived: the divergence
-            # only shows up on the state the verb exists to find (a refused seq,
-            # a lost tail). Read the count, and report it beside the max so both
-            # numbers are in the output rather than one standing in for the
+            # only shows up on the state the verb exists to find (a refused seq
+            # leaves a GAP — `COUNT(*) < MAX(seq)`; the reverse cannot exist
+            # under the journal's `PRIMARY KEY (org_id, graph_id, seq)` +
+            # `CHECK (seq > 0)`). Read the count, and report it beside the max so
+            # both numbers are in the output rather than one standing in for the
             # other.
             cur.execute(ra.JOURNAL_COUNT_SQL, (args.org_id, graph_id))
             count_row = cur.fetchone()
