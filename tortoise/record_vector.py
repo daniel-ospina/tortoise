@@ -556,8 +556,11 @@ def journal_ready(scope: _Scope, *, record_dsn: str | None = None,
     it did before this issue) and emits ONE WARNING per process naming what is
     unchecked. The arming procedure makes the declaration part of the act: read
     `python -m tortoise record-reconcile --journal <path>` (it exits 3 with
-    `verdict=unprojected_journal` while the record lags), and declare the path
-    for any tenant the leg is armed for.
+    `verdict=unprojected_journal` while the record lags, and it REFUSES the leg
+    with exit 2 rather than reporting a clean pass when the path cannot be
+    counted), then declare the path AND `TORTOISE_RECORD_SINGLE_TENANT=1` for
+    any tenant the leg is armed for — the second is what lets the declaration be
+    applied at all (see below).
 
     FAIL-CLOSED once declared: an unreadable journal, an unreadable record, a
     missing dependency — every failure keeps the graph branch, which is a correct
