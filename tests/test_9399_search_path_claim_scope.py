@@ -391,9 +391,12 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
     # A line scan replaced one false red with a narrower one: wrapping the SAME
     # expression over three lines is valid Python with unchanged semantics, and
     # the scan refused it. The AST has no formatting, so a reflow cannot redden
-    # this, while every revert still does — dropping `+ tuple(ABOUT_EDGE_TYPES)`,
-    # deleting the join, or composing the alternation from literals all leave no
-    # `"|".join(...)` call whose argument mentions the constant.
+    # this, while the reverts that BREAK it still do — dropping
+    # `+ tuple(ABOUT_EDGE_TYPES)`, or deleting the join, leave no
+    # `"|".join(...)` call whose argument mentions the constant. Composing the
+    # alternation from literals reddens it too, but ONLY while no other
+    # `"|".join(...)` mentioning the constant remains — see the FIRST LIMIT below,
+    # which is the sentence this one must not contradict.
     # STATED LIMITS — not exhaustive; a shape test is only honest when it says
     # which shapes it cannot see, and the ones below are the ones found so far:
     #   * FALSE GREEN, the same limit the substring had: a DIFFERENT
