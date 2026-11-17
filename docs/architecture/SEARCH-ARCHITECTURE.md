@@ -313,7 +313,8 @@ opposite of the ordering in §5.
 > genuinely trails **at the head** is exact-name lookup (**+4.87 nDCG@10**, CI excluding 0, n=96) —
 > ⚠️ **but that class's head metric SATURATES**: every Postgres arm returns `nDCG@10 = 1.0000` on all
 > 96 queries, so +4.87 is the remaining headroom (baseline 0.9513 → ceiling 1.0), not a margin between
-> candidates; the candidates separate at depth there (0.9873 / 0.9947 / 1.0000). At
+> candidates; the candidates separate at depth there — `nDCG@100` 0.9873 (`pg_ts_rank` / `pg_ts_rank_cd`)
+> and 0.9947 (`pg_bm25`), with `pg_bm25` reaching `recall@100 = 1.0000` (two metrics, not one). At
 > depth it trails on the keyword class too (**+9.23 nDCG@100**, above), so "it only loses on names"
 > would be the wrong reading. The mechanism is
 > recorded with a worked example: a document matching 2 of a query's 7 terms scores 9.0 while the

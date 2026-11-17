@@ -191,7 +191,8 @@ Postgres arm — `pg_ts_rank`, `pg_ts_rank_cd`, `pg_ts_rank_simple`, `pg_bm25` �
 `pg_bm25` also returns `recall@100 = 1.0000` on all 96. So the +4.87 is the **entire remaining
 headroom** on the class (the baseline's 0.9513 is the only distance left to close), not a margin one
 candidate has over another; at the head this class cannot separate them, and the separation it does
-offer is at depth (0.9873 / 0.9947 / 1.0000). The same caveat §5's intro applies to depth — "an arm
+offer is at depth — `nDCG@100` 0.9873 (`pg_ts_rank` / `pg_ts_rank_cd`) and 0.9947 (`pg_bm25`), with
+`pg_bm25` reaching `recall@100 = 1.0000`: three figures across two metrics. The same caveat §5's intro applies to depth — "an arm
 that cannot return `LIMIT` rows has a lower `nDCG@100` ceiling for a reason that is not ranking" —
 applies here in the opposite direction, and it is recorded for the same reason: an unstated ceiling is
 read as a ranking result.
@@ -403,9 +404,10 @@ differ structurally from them, not only in timings. Five keys need reading with 
   `fulltext_index_build_s`, `graph_memory_usage`, `points` and `seed_s` only, while the Postgres seed
   records its own `server_version`. The comparability argument in §3 rests on WHICH graph build ran
   the measurement, so this is **one of** the deployment facts in the record that no committed file can
-  corroborate (§6's licence, `pg_search` version, `requires`/relocatability cell, the preload list and
-  `paradedb.min_rows_per_worker` are in neither artifact either — those are read from the image and
-  presence-pinned, which is a different kind of record than a value the artifact HOLDS); it is asserted
+  corroborate (§6's licence, its `requires`/relocatability cell and `paradedb.min_rows_per_worker` are
+  in neither artifact either; the `pg_search` version and the preload list ARE artifact-held —
+  `corpus.postgres_seed.pg_search` / `.shared_preload_libraries` — and are presence-pinned *as well*,
+  which is what makes this one a different kind of record); it is asserted
   from the lane, not pinned. `seed_graph` already shells `redis-cli INFO`
   for memory, so the next run can record `redis_version` beside it and a pin can follow.
 
