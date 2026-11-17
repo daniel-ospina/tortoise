@@ -20,6 +20,16 @@ from tortoise.sdk import TortoiseSDK
 sdk = TortoiseSDK()
 
 V1_OBJ = "obj-3607bd9d876997f7ea1f29d195"   # pre-existing "Beta memory API plan v1"
+# ⛔ #13065 review ROUND 22, finding 1 (P2): the successor's NAME, spelled once so
+# it cannot drift from what `create_object` is given. `supersededBy` is a
+# NAME-keyed column (ONTOLOGY §4.2/§4.3 — *"successor NAME (stored verbatim)"*),
+# and `assembly._probe_visible_successors` resolves it with
+# `MATCH (o:Object) WHERE o.name IN $names`. An ID there matches nothing, so the
+# reader degrades to the name-only annotation and prints the raw id — the state
+# `_supersede_entity` calls *"the same defect as storing none"*. This run used to
+# write `PLAN_ID` (an `obj-…` id) while its own step label said "successor
+# named".
+V2_NAME = "Beta memory API plan v2"
 SPEC_DATE = "2026-09-30"
 SHIP_V1, SHIP_V2 = "2026-10-15", "2026-11-15"
 METRIC_V1, METRIC_V2 = "25%", "40%"
@@ -66,7 +76,7 @@ TEAM_ID = rid(team)
 plan = step(
     "object: Beta memory API plan v2",
     sdk.create_object,
-    "Beta memory API plan v2",
+    V2_NAME,
     objectKind="plan",
     status="live",
     goalState="active",
@@ -172,13 +182,31 @@ if PLAN_ID:
     step("source -> plan v2 (references)", sdk.link_source_to_entity, SPEC_URL, PLAN_ID, "Object", "spec")
 
 # v1 is replaced entirely: it is no longer a live, actively pursued plan.
+# ⛔ #13065 review ROUND 14, finding 7 (P3) — this call used to be
+# `status='superseded', goalState='abandoned'`, which the write boundary now
+# REFUSES: the two axes' endings are the SAME endings spelled twice (`abandoned`
+# pairs with `deprecated`/`archived`/`retracted`; a row that was REPLACED is
+# `superseded` on both), and `goalState='superseded'` in turn demands the
+# successor be NAMED (`supersededBy`) — the same fact this run already records as
+# `replacedByPlanId`. Keeping `goalState` out is not an alternative here: v1 was
+# created with `goalState='active'`, so a `status`-only write would END it on one
+# axis and leave it running on the other, which is the divergence the guard
+# exists to stop. This is the reference run the AX write eval documents, so a
+# [FAIL] line here was the repo's own worked example demonstrating a refused call.
+v1_ending = {"status": "superseded", "goalState": "superseded"}
+if PLAN_ID:
+    # ⛔ THE NAME, NOT THE ID (round 22, finding 1): `PLAN_ID` is what `rid()`
+    # returned, and this graph's Object ids are `obj-…` — a pointer no name-keyed
+    # reader of `supersededBy` can resolve. `step()` swallows exceptions into
+    # `warnings` and prints `[FAIL]`, so the old shape could not red this run:
+    # the defect was silent in the one artifact the AX write eval documents.
+    v1_ending["supersededBy"] = V2_NAME
 step(
-    "update: plan v1 -> status superseded / goalState abandoned",
+    "update: plan v1 -> superseded on BOTH axes (successor named)",
     sdk.update,
     V1_OBJ,
-    status="superseded",
-    goalState="abandoned",
     replacedByPlanId=PLAN_ID,
+    **v1_ending,
 )
 
 # --------------------------------------------------------------- the corrections

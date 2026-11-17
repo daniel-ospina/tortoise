@@ -212,7 +212,7 @@ def test_create_event_journals_event_recorded(s1919):
     assert rec["eventId"] == eid
     assert rec["eventKind"] == "sessionCaptured"
     assert rec["name"] == "Launch party"
-    assert rec["eventStatus"] == "scheduled"
+    assert rec["eventStatus"] == "pending"
 
 
 def test_create_entity_event_journals_single_line(s1919):
@@ -224,14 +224,14 @@ def test_create_entity_event_journals_single_line(s1919):
     events, sdk = s1919
     node = sdk.create_entity(
         "event", "Board review",
-        eventKind="review", status="scheduled")["node"]
+        eventKind="review", source_ref="board-review")["node"]
     eid = node.get("eventId") or node.get("id")
     journal = _read_journal(events)
     recs = [ev for ev in journal if ev.get("type") == "EventRecorded"]
     assert len(recs) == 1, f"expected exactly one EventRecorded, got {recs}"
     assert recs[0]["eventId"] == eid
     assert recs[0]["eventKind"] == "review"
-    assert recs[0]["status"] == "scheduled"
+    assert recs[0]["source_ref"] == "board-review"
     assert recs[0]["name"] == "Board review"
     # replay persistence parity: the caller props land on the RESTORED node
     _rebuild(sdk, events)
@@ -239,9 +239,12 @@ def test_create_entity_event_journals_single_line(s1919):
     assert _count(g, "MATCH (e:Event {eventId:$eid}) RETURN count(e)",
                   params={"eid": eid}) == 1
     row = g.query(
-        "MATCH (e:Event {eventId:$eid}) RETURN e.name, e.eventKind, e.status",
+        "MATCH (e:Event {eventId:$eid}) "
+        "RETURN e.name, e.eventKind, e.source_ref, e.status",
         params={"eid": eid}).result_set[0]
-    assert row == ["Board review", "review", "scheduled"]
+    # #13100: `status` rides no Event — the caller prop that survives replay is
+    # an ordinary one, and the node carries no lifecycle word at all.
+    assert row == ["Board review", "review", "board-review", None]
 
 
 def test_create_event_without_log_path_is_noop_safe(s1919, tmp_path):
