@@ -844,14 +844,15 @@ def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
     ⚠ `apply` does NOT call it, and the residual is real rather than closed (review
     P2 #13272). `apply` refuses `--salvage`, and a non-salvage read RAISES on
     MID-FILE damage (`journal_segments.py:949-953`) — so a fold cannot skip a
-    record. But an unparseable TORN TAIL is tolerated by BOTH readers (the
-    segmented one only warns, `:954-957`; `EventLog.read_all` tolerates a
-    malformed line only at EOF, `log.py:2491-2493` + `_keep_torn` `:2501-2524`,
-    where the fragment is SKIPPED, counted in `torn_trailing_count` and its full
-    text retained in `torn_trailing_raw` for the #3316 classifier), so `apply` CAN
-    fold a journal that dropped a torn tail fragment, undisclosed, and it never
-    consults `torn_tail_revival_records()` — the #3316 contract that a torn tail
-    whose loss could REVIVE removed state must be refused before any wipe or fold
+    RECORD that was never sealed. But a torn fragment is tolerated by BOTH readers:
+    the segmented one only warns (`:954-957`), and `EventLog.read_all` tolerates a
+    malformed line at EOF (`log.py:2491-2493`) AND a MID-FILE fragment sealed by
+    `append` (`:2494-2498`) — both via `_keep_torn` (`:2508-2525`), where the
+    fragment is SKIPPED, counted in `torn_trailing_count`, and its full text kept
+    in `torn_trailing_raw` for the #3316 classifier. So `apply` CAN fold a journal
+    that dropped a fragment, undisclosed, and it never consults
+    `torn_tail_revival_records()` — the #3316 contract that a torn tail whose loss
+    could REVIVE removed state must be refused before any wipe or fold
     (`log.py:2355-2365`). That gap is pre-existing and out of this file's scope;
     this docstring states it instead of asserting the state cannot occur, because
     a maintainer reading "impossible" would not go looking for it.
@@ -864,11 +865,12 @@ def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
     # ⛔ TWO DAMAGE CLASSES, TWO DIFFERENT FACTS (review P2 #13272). A mid-file
     # skipped line SHIFTS every later position, so it voids the completeness
     # claim; a torn TAIL fragment was never a complete record, so it shifts
-    # nothing and `fully_consumed: true` is correct beside it. Rendering one
-    # sentence for both made this line contradict its own JSON in the same
-    # invocation (measured: `fully_consumed: True` printed directly above "this is
-    # NOT a completeness claim"). The tail class still matters — a dropped REMOVAL
-    # record is #3316's check — so it is named, just not as a positional lie.
+    # nothing and `fully_consumed: true` is correct for that input. Rendering one
+    # sentence for both made the payload's `fully_consumed` contradict the render
+    # of the SAME input (measured: torn-only, `fully_consumed: true` where the
+    # text said "this is NOT a completeness claim"). The tail class still matters —
+    # a dropped REMOVAL record is #3316's check — so it is named, just not as a
+    # positional lie.
     lines: list[str] = []
     if j["corrupt_lines"]:
         lines.append(

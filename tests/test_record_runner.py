@@ -677,12 +677,13 @@ def test_the_torn_tail_line_does_not_contradict_its_own_fully_consumed(
 
     A mid-file skipped line SHIFTS every later position, so it voids the
     completeness claim. A torn TAIL fragment was never a complete record, so it
-    shifts nothing — `fully_consumed: true` is correct beside it. Rendering the
-    mid-file sentence for both made `status` contradict its own JSON in one
-    invocation (measured: `fully_consumed: True` printed directly above "this is
-    NOT a completeness claim"). The tail class still MATTERS (a dropped removal
-    record is #3316's check, #13280), so it is named — just not as a positional
-    lie.
+    shifts nothing — `fully_consumed: true` is correct for that input. Rendering
+    the mid-file sentence for both made the PAYLOAD contradict the RENDER of the
+    same input (measured: torn-only, the JSON said `fully_consumed: true` while the
+    text said "this is NOT a completeness claim"; `emit` prints one or the other,
+    so they are two views of one run, never two adjacent printed lines). The tail
+    class still MATTERS (a dropped removal record is #3316's check, #13280), so it
+    is named — just not as a positional lie.
     """
     journal = Journal(path=FIXTURE,
                       records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
