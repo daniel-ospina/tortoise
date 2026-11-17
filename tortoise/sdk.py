@@ -31268,7 +31268,7 @@ class TortoiseSDK:
                 violations.append({
                     "section": "entities", "index": i,
                     "message": f"ingest: entities[{i}] would store a "
-                               f"non-string status {_mint!r} on the "
+                               f"non-string status {_refusal_repr(_mint)} on the "
                                f"{_elabel} — ONTOLOGY §4.3 declares `status` "
                                f"as a STRING, and the write door refuses a "
                                f"non-string (#12869), so this bundle would "
@@ -52895,7 +52895,7 @@ class TortoiseSDK:
             if _status_write_is_ambiguous(props):
                 raise ValueError(
                     f"create_entity refused a CONFLICTING status write for "
-                    f"{name!r}: more than one key in this call renders as "
+                    f"{_refusal_repr(name)}: more than one key in this call renders as "
                     f"`status`. A `str` subclass whose content and `__str__` "
                     f"differ is filed under one name by the live write and the "
                     f"other by the journal, so which word lands cannot be known "

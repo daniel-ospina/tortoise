@@ -2995,16 +2995,29 @@ class TestNonScalarStatus12869:
     # ── THE CONTRACT OF THE REFUSAL ITSELF: the exception CLASS ──────────────
 
     def test_every_new_refusal_survives_a_hostile_repr(self, tmp_path):
-        """P2-1 (#12910 review): the four refusals this PR adds name their
+        """P2-1 (#12910 review): every refusal this PR adds names its
         operands through `_refusal_repr` / `_np_safe_repr`, never the raw `!r`.
 
         The rule is already stated in this tree — `_refusal_repr`'s docstring:
         *"A refusal's contract is the exception CLASS — `ValueError` — so a
         `__repr__` that raises would replace it with its own class … ONE
-        definition for EVERY refusal that names a caller operand"*. The four
-        sites below were added with the raw `!r` anyway, and **nothing in the
+        definition for EVERY refusal that names a caller operand"*. The first
+        four sites were added with the raw `!r` anyway, and **nothing in the
         tree red on it** (`grep -r '_refusal_repr' tests/` was empty), so the
         contract was prose-only until this pin.
+
+        ⛔ AND IT TOOK A FIFTH. The Subject door's ambiguity refusal
+        (`sdk.py:52895`) shipped with the raw `{name!r}` after these four were
+        pinned, because the pin's coverage stopped at the sites the first
+        review round listed (`820c0ac48e`, P2). Arm (e) below is that site —
+        and it must enter through `create_subject`; see its own note for why
+        this arm's payload cannot reach the raise through an object-declared
+        create.
+
+        ⛔ AND A SIXTH. The bundle validator's non-string refusal
+        (`sdk.py:31271`) was still interpolating the bundle's `status` value
+        with the raw `!r`; its message sits in a violations list that `ingest`
+        raises on, so a hostile `__repr__` replaced that exception. Arm (f).
 
         ⛔ EACH OPERAND IS ITS OWN ARM, because they are evaluated in SOURCE
         ORDER inside one f-string — `{target!r}` before `{word!r}` — so an arm
@@ -3014,7 +3027,8 @@ class TestNonScalarStatus12869:
         FALSIFIABLE BY: reverting any ONE site to the raw `!r` reds its own arm
         with the caller's exception (`RuntimeError: repr-boom` /
         `RuntimeError: id-repr-boom`) instead of `ValueError` — MEASURED at the
-        pre-fix head. One arm per site, so no single revert can mask another.
+        pre-fix heads, per arm. One arm per site, so no single revert can mask
+        another.
         """
 
         class RaisingRepr:
@@ -3141,6 +3155,55 @@ class TestNonScalarStatus12869:
                 + str(ei.value))
             assert _carrier_row(sdk, "Object", "rr-stored")[1] == ["archived"], (
                 "a refused stored-side write changed the row")
+
+            # (e) the SUBJECT door's ambiguity refusal (`sdk.py:52895`) — the
+            #     FIFTH site, found by the `820c0ac48e` review AFTER the other
+            #     four were pinned. Its operand is the caller's `name`.
+            #     ⛔ THIS ARM'S PAYLOAD, NOT ITS DOOR, is why it enters through
+            #     `create_subject`. The Subject arm IS a door for a
+            #     `type='object'` create (`test_an_OBJECT_declared_create_
+            #     cannot_poison_a_SUBJECT_row` depends on exactly that), but
+            #     `**{"status": None, <KHash>"status": …}` makes the KIND GUARD
+            #     abstain (`subject_only_prop_abstention`), so `t` stays
+            #     `"object"` and the Object create door's own guard
+            #     (`_refuse_non_string_object_status`, which renders its target
+            #     safely) raises FIRST — an object-declared arm with THIS
+            #     payload would pin that site and pass with this one reverted
+            #     (MEASURED: its message is the object door's "which value
+            #     lands"). A subject-legal payload (`status='live'` + a second
+            #     rendering key) DOES route and reach this raise.
+            with pytest.raises(ValueError) as ei:
+                sdk.create_subject(RaisingReprStr("rr-subj-amb"),
+                                   "core:organization",
+                                   **{"status": None,
+                                      KHash("status"): "live"})
+            assert "RaisingReprStr" in str(ei.value), (
+                "the Subject door's ambiguity refusal did not use "
+                "`_refusal_repr` on its name: " + str(ei.value))
+            assert "repr-boom" not in str(ei.value)
+            assert _carrier_row(sdk, "Subject", "rr-subj-amb") is None, (
+                "a refused Subject create left a node behind")
+
+            # (f) the BUNDLE validator's non-string refusal (`sdk.py:31271`) —
+            #     the SIXTH site, found by the review of THIS delta. The message
+            #     is built into a violations list that `ingest` raises on, so a
+            #     hostile `__repr__` replaced THAT exception with its own
+            #     (MEASURED pre-fix: `RuntimeError: repr-boom` out of
+            #     `_validate_bundle`). The validator RETURNS violations, so the
+            #     arm asserts the call survives AND names the operand's type.
+            violations = sdk._validate_bundle({"entities": [
+                {"ref": "b", "type": "object", "name": "boom-ent",
+                 "status": RaisingReprInt(123)}]})
+            assert violations, (
+                "the validator did not refuse a non-string bundle status")
+            _msg = violations[0]["message"]
+            assert "RaisingReprInt" in _msg, (
+                "the validator's refusal did not use `_refusal_repr` on the "
+                "bundle value: " + _msg)
+            assert "repr-boom" not in _msg
+            assert sdk._get_proj().g.query(
+                "MATCH (n:Object {name:'boom-ent'}) RETURN count(n)"
+            ).result_set[0][0] == 0
         finally:
             sdk.close()
 

@@ -2690,9 +2690,9 @@ class _EntityHandlers:
             # **{KHash("status"): ['live']})` on an EXISTING node stored
             # `['live']` and made the row unaddressable by every SDK status
             # write — the exact poison #12869 removes, through the merge branch
-            # the guard skips by design. Same two-renderer contract as
-            # `live.py`: a key the STATUS arm would have handled is not an
-            # extra prop, whichever way the key is spelled.
+            # the guard skips by design. TWO tests: `k in skip` (content, via
+            # hash/eq) and `str(k)` (the live rendering). A key that ALSO
+            # overrides `__hash__` misses both — pre-existing, out of scope.
             if (k in skip or str(k) in skip) or v is None \
                     or not _is_persistable_prop_value(v):
                 continue
