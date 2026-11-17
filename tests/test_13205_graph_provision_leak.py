@@ -649,6 +649,18 @@ class TestTheSharedDoubleDerivesItsCertificate:
             "the derivation must certify an ordinary walk — otherwise the "
             "refusal arms would be satisfied by a double that refuses everything")
 
+    def test_an_EMPTY_page_is_the_end_of_the_walk_and_CERTIFIES(self):
+        cp = self._cp([])
+        rows, complete = cp.query_all(
+            "graphs", select=["id", "namespace"], cursor="id")
+        assert rows == []
+        assert complete is True, (
+            "an EMPTY page is the sound end-of-walk signal (production: `if not "
+            "page: exhausted = True; break`), so it CERTIFIES. Refusing it is "
+            "STRICTER than the store, and `_org_graph_names` RAISES on an "
+            "uncertified walk — so an org owning no custom graphs could never be "
+            "purged at all")
+
 
 # ── 3. the reaper: safe by construction ──────────────────────────────────────
 

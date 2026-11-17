@@ -2100,21 +2100,17 @@ class FakeControlPlane:
             # An EMPTY page is the sound end-of-walk signal (`if not page:
             # exhausted = True`) — the ONE thing the real walk trusts — so it
             # certifies unless a stated total says more rows exist.
+            #
+            # ⛔ AND THAT IS NOT A DETAIL: the real walk has TWO branches, and this
+            # double mirrors BOTH — `if not page: exhausted = True; break`
+            # (certifies) and, below, `advanceable = [c for c in cursors if c];
+            # if not advanceable: break` (refuses). Answering False here would be
+            # STRICTER than production in the direction that matters to a purge:
+            # `_org_graph_names` RAISES on an uncertified walk, so an org owning NO
+            # custom graphs could never be purged at all. Pinned both ways below
+            # (`TestTheSharedDoubleDerivesItsCertificate`).
             return total is None or total <= 0
         cursors = [r.get(cursor) if isinstance(r, dict) else None for r in rows]
-        if not rows:
-            # ⛔ AN EMPTY PAGE IS THE SOUND END-OF-WALK SIGNAL, so it CERTIFIES.
-            # The real walk has two branches here and this double used to mirror
-            # only one: `if not page: exhausted = True; break` (certifies), and
-            # separately `advanceable = [c for c in cursors if c]; if not
-            # advanceable: break` (refuses). Answering False for an empty page was
-            # therefore STRICTER than production in exactly the direction that
-            # matters to a purge: `_org_graph_names` raises on an uncertified walk,
-            # so an org owning NO custom graphs could never be purgeable. Measured
-            # with `#13249`'s deprovision suite when this rule was delegated to:
-            # `test_a_legacy_stored_name_is_dropped_alongside_the_canonical_one`
-            # went red on the empty `graphs` page.
-            return total is None or total <= 0
         if not any(cursors):
             return False
         # The stated-total arm compares DISTINCT CURSOR VALUES, not rows — the
