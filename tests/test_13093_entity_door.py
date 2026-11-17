@@ -860,6 +860,16 @@ def _effective_event_node_key_check(sql: str) -> str | None:
     claimed to be covered; a migration written that way must update this reader
     deliberately.
 
+    ⚠️ A STRING LITERAL THAT MERELY *MENTIONS* THE DDL IS READ AS DDL. The DECL
+    body and the comment scanner are literal-aware, but the DROP / RENAME /
+    OWNER-GONE scan is not, because the `EXECUTE 'ALTER TABLE …'` case must be
+    read. So a `COMMENT ON CONSTRAINT … IS 'DROP CONSTRAINT …'`, a `RAISE NOTICE`
+    naming the DDL, or a function body returning it can move the premise it does
+    not touch — measured, and the `COMMENT ON` form reports a WRONG expression.
+    This is DECLARED, not fixed: masking literals would need a second view of the
+    text, which is the change class that produced the last four findings. It fails
+    toward a red, never toward a green the record would disprove.
+
     ⚠️ TWO LIMITS THIS READER DOES NOT MODEL, both stated rather than implied:
     a `$tag$`-quoted STRING is not distinguished from a dollar-quoted BODY, and
     an `E'…'` backslash escape is not modelled — so an apostrophe inside one
@@ -1182,6 +1192,34 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
                   "\nALTER TABLE public.event RENAME node_key TO key;\n"):
         with pytest.raises(AssertionError, match="MOVED the premise's owner"):
             _effective_event_node_key_check(landed + moved)
+
+    # 1h-bis. A LITERAL THAT MENTIONS THE DDL IS READ AS DDL — a DECLARED limit,
+    #     pinned here so the next lane meets it as a fact instead of re-deriving
+    #     it. (The DECL body and the comment scanner ARE literal-aware; the
+    #     statement scan is not, because `EXECUTE 'ALTER TABLE …'` must be read.)
+    #     ⛔ IF THIS ARM EVER FAILS, the reader got smarter — delete it and the
+    #     limit bullet it pins; do not "fix" it by narrowing the assertion.
+    mention = landed + (
+        f"\nCOMMENT ON CONSTRAINT {_EVENT_KEY_CONSTRAINT} ON public.event\n"
+        f"    IS 'DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};';\n")
+    assert _effective_event_node_key_check(mention) is None, (
+        "KNOWN LIMIT (declared in _effective_event_node_key_check): a literal "
+        "that MENTIONS a drop is read as a drop — the reader is expected to "
+        "answer `None` here, and if that changed, delete this arm")
+
+    #     ⛔ AND AN `EXECUTE`-WRAPPED MOVE MUST NOT SWALLOW THE LITERAL'S CLOSING
+    #     QUOTE: the name atom is non-greedy, so a lookahead that omits `'` lets
+    #     `\S+?` run to the `;` and the message reports `event_v2'` — a target
+    #     that appears in no DDL, which is the message a lane would act on.
+    with pytest.raises(
+            AssertionError,
+            match=r"MOVED the premise's owner \(table `public\.event` -> "
+                  r"`event_v2`\)") as excinfo:
+        _effective_event_node_key_check(
+            landed + "\nDO $$ BEGIN EXECUTE 'ALTER TABLE public.event "
+                     "RENAME TO event_v2'; END $$;\n")
+    assert "event_v2'" not in str(excinfo.value), (
+        f"the moved-to name carried the literal's quote — {excinfo.value}")
 
     # 1i. A `CREATE TABLE` that declares the constraint as its LAST element: the
     #     body must stop at its OWN balanced close, not swallow the table's `)`.
