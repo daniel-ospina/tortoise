@@ -10,7 +10,7 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 24762
+    uv run python tools/hosted_api_cite_census.py --pivot 24864
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
@@ -141,11 +141,21 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site —
 #: and that pin is what reds when a forward merge grows the module, which is the
 #: remedy this constant relies on rather than a hand sweep.
-#: #12947 moved it 24692 -> 24731, and this PR's forward merge of main moved it
+#: #12947 moved it 24692 -> 24731, and a forward merge of main moved it
 #: 24731 -> 24762 (measured: `grep -n 'proj.g.query(LIFETIME_MEMORY_QUERY)'
 #: tortoise/hosted_api.py`), re-deriving the notes, the scorecard and this constant
 #: TOGETHER — the constant is the third of the three, and the pin reds when it lags.
-DEFAULT_PIVOT = 24762
+#: #13075, #13112 and #12914 then all edited `hosted_api.py` without re-deriving
+#: any of the three. The first two moved the site — 24762 -> 24789 (+27) and
+#: 24789 -> 24864 (+75), +102 together — and `--check` went red on `main`; #12914
+#: then replaced two comment lines above it 1-for-1 (net 0 lines, site unchanged)
+#: and re-derived nothing either, so the pin stayed red (tracked on #12755, third
+#: recurrence of the class). Re-derived here by `--refresh` for the two notes and
+#: the test's `_PIVOT`, and by hand for this constant: `_NOTES` has no row naming
+#: THIS file, so neither verb can see it — `_PIVOT` has one, a bare constant in a
+#: test file, so "not prose" is not the criterion and a row here would make the
+#: constant machine-re-stated. Not added in this repair, which is the red only.
+DEFAULT_PIVOT = 24864
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
