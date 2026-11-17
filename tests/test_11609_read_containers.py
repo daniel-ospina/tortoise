@@ -321,8 +321,11 @@ class TestSearchKnowledgeTagArm:
 
         monkeypatch.setattr(TortoiseSDK, "query_points_by_tag", fake)
         recorded: list = []
-        monkeypatch.setattr(sdk_mod, "_ledger_record",
-                            lambda label, page: recorded.append((label, list(page))))
+        # `kind=` (#13084) is keyword-only on the helper; the stub records the
+        # rows exactly as before and ignores the call-kind it now also receives.
+        monkeypatch.setattr(
+            sdk_mod, "_ledger_record",
+            lambda label, page, **kw: recorded.append((label, list(page))))
         return TortoiseSDK.__new__(TortoiseSDK), calls, recorded
 
     def test_retracted_points_are_excluded_by_default(self, monkeypatch):
