@@ -10,6 +10,14 @@ it. Measured on the tree before this change (2026-11-17):
 | MCP `tortoise_create_object(props={"goalState": …})` | already worked (the free-form bag reaches the SDK) — reported as measured, NOT claimed as this change's work |
 | SDK `sdk.create_object(..., goalState=…)` | already worked |
 
+⛔ **THE MCP DOOR NAMED IN THAT TABLE IS NOW RETIRED FROM THE SURFACE** (#13052,
+#4282 Phase 2 — `tortoise_create_object` was merged into `tortoise_create_entity`,
+whose handler is the served door). The handler still exists and still works, but
+`tools/list` no longer publishes it, so this file drives the SURVIVING doors:
+`tortoise_create_entity` (canonical) and `tortoise_create_point` (the legacy goal
+shape, ONTOLOGY §4.1). A test that kept calling the retired alias would pass while
+pinning a door no agent can reach.
+
 So the two defects were the SILENT DROP (REST) and the UNDECLARED field (MCP).
 This file pins one test per door in both directions, plus the two properties
 that keep the axes from drifting: the REST refusal and the MCP refusal name the
@@ -147,13 +155,13 @@ def _vocabulary_in(text: str) -> bool:
 
 def test_the_vocabulary_check_is_not_substring_blind():
     """`_vocabulary_in` is the only thing standing between the suite and a
-    refusal that lists six of seven members, so its own discriminating power is
+    refusal that lists every member but one, so its own discriminating power is
     pinned on the exact mutant that survived the bare-substring form: the
     message renders the set with `met` REMOVED, and `"met" in "'unmet'"` — the
     old test — is True (#13116 review Secondary 1, measured)."""
     omitted_met = (
         "Invalid goalState 'green'. A goal's achievement state is a closed "
-        "vocabulary: ['abandoned', 'active', 'blocked', 'guideline', "
+        "vocabulary: ['abandoned', 'active', 'blocked', "
         "'superseded', 'unmet']. (Lifecycle is the separate `status` field.)"
     )
     assert _vocabulary_in(omitted_met) is False, omitted_met
@@ -353,12 +361,12 @@ def test_no_create_channel_can_erase_a_stored_goal_state(tmp_path):
 
         # FOLD CHANNEL 2 — the MCP `props` bag (fails without the pop).
         prop_pt = mcp_server.tortoise_create_point(
-            "goal", "fold goal C", props={"goalState": "guideline"})
+            "goal", "fold goal C", props={"goalState": "unmet"})
         assert not prop_pt.get("error"), prop_pt
         wiped = mcp_server.tortoise_create_point(
             "goal", "fold goal C", props={"goalState": None})
         assert not wiped.get("error"), wiped
-        assert _stored(ha, prop_pt["id"]) == "guideline"
+        assert _stored(ha, prop_pt["id"]) == "unmet"
 
         # CONJUNCTION LEG (see the docstring: this pins neither guard alone — it
         # fails only when BOTH the pop and the tool-body guard are gone).
@@ -371,19 +379,20 @@ def test_no_create_channel_can_erase_a_stored_goal_state(tmp_path):
         assert _stored(ha, pt["id"]) == "blocked"
 
 
-# ── Door 2 — MCP `tortoise_create_object` ───────────────────────────────────
+# ── Door 2 — MCP `tortoise_create_entity` ─────────────────────────────────
 
 def test_mcp_create_persists_the_declared_goal_state_parameter(tmp_path):
     """The exact call the issue reports as rejected
-    (`goalState=` as a top-level keyword)."""
+    (`goalState=` as a top-level keyword), on the SERVED entity door."""
     from tortoise import mcp_server
 
     with _graph(str(tmp_path / "mcp-param.db")) as ha, _mcp_ctx():
-        out = mcp_server.tortoise_create_object(
-            "MCP-GOAL", "goal", goalState="blocked")
+        out = mcp_server.tortoise_create_entity(
+            "object", "MCP-GOAL", goalState="blocked")
+        node = out.get("node", out)
         assert isinstance(out, dict) and not out.get("error"), out
-        assert out["goalState"] == "blocked", out
-        assert _stored(ha, out["id"]) == "blocked"
+        assert node["goalState"] == "blocked", out
+        assert _stored(ha, node["id"]) == "blocked"
 
 
 def test_mcp_create_still_accepts_the_props_bag_form(tmp_path):
@@ -392,10 +401,11 @@ def test_mcp_create_still_accepts_the_props_bag_form(tmp_path):
     from tortoise import mcp_server
 
     with _graph(str(tmp_path / "mcp-props.db")) as ha, _mcp_ctx():
-        out = mcp_server.tortoise_create_object(
-            "MCP-PROPS-GOAL", "goal", props={"goalState": "guideline"})
+        out = mcp_server.tortoise_create_entity(
+            "object", "MCP-PROPS-GOAL", props={"goalState": "met"})
+        node = out.get("node", out)
         assert not out.get("error"), out
-        assert _stored(ha, out["id"]) == "guideline"
+        assert _stored(ha, node["id"]) == "met"
 
 
 def test_mcp_create_still_accepts_a_positional_props_bag(tmp_path):
@@ -405,19 +415,23 @@ def test_mcp_create_still_accepts_a_positional_props_bag(tmp_path):
     caller that passes the bag positionally. No in-repo caller does, so only
     this test can redden if the parameter order drifts back (#13116 review
     Secondary 2; measured on the pre-fix signature:
-    `tortoise_create_object("n", "goal", {"a": 1})`
+    `tortoise_create_entity("object", "n", {"a": 1})`
     -> `Invalid goalState {'a': 1}`, props never passed).
 
     A TEST, not a comment, because the signature is the whole defect: the
     `props=`-keyword pin above stays green under the re-ordered signature.
+
+    A LIVE word, because an ENDING one would need an agreeing `status` and this
+    pin is about ARGUMENT BINDING, not about the ending rule (#13065).
     """
     from tortoise import mcp_server
 
     with _graph(str(tmp_path / "mcp-props-positional.db")) as ha, _mcp_ctx():
-        out = mcp_server.tortoise_create_object(
-            "MCP-PROPS-POSITIONAL", "goal", {"goalState": "superseded"})
+        out = mcp_server.tortoise_create_entity(
+            "object", "MCP-PROPS-POSITIONAL", {"goalState": "blocked"})
+        node = out.get("node", out)
         assert isinstance(out, dict) and not out.get("error"), out
-        assert _stored(ha, out["id"]) == "superseded"
+        assert _stored(ha, node["id"]) == "blocked"
 
 
 def test_mcp_refuses_an_unknown_word_with_the_closed_set(tmp_path):
@@ -425,10 +439,10 @@ def test_mcp_refuses_an_unknown_word_with_the_closed_set(tmp_path):
 
     with _graph(str(tmp_path / "mcp-bad.db")) as ha, _mcp_ctx():
         for name, out in (
-            ("MCP-BAD", mcp_server.tortoise_create_object(
-                "MCP-BAD", "goal", goalState="green")),
-            ("MCP-BAD-2", mcp_server.tortoise_create_object(
-                "MCP-BAD-2", "goal", props={"goalState": "green"})),
+            ("MCP-BAD-1", mcp_server.tortoise_create_entity(
+                "object", "MCP-BAD-1", goalState="green")),
+            ("MCP-BAD-2", mcp_server.tortoise_create_entity(
+                "object", "MCP-BAD-2", props={"goalState": "green"})),
             ("MCP-BAD-3", mcp_server.tortoise_create_entity(
                 "object", "MCP-BAD-3", goalState="green")),
             ("MCP-BAD-4", mcp_server.tortoise_create_point(
@@ -454,20 +468,21 @@ def test_mcp_entity_and_point_doors_persist_the_declared_parameter(tmp_path):
     """The canonical entity door and the legacy goal-POINT door take the field
     too — the issue's own shape (#7856's objective map) is a goal Point, so a
     fix that declared it only on the object alias would leave both
-    undiscoverable."""
+    undiscoverable. The object alias is RETIRED from the surface (#13052), so it
+    is no longer a door these tests may lean on."""
     from tortoise import mcp_server
 
     with _graph(str(tmp_path / "mcp-entity.db")) as ha, _mcp_ctx():
         ent = mcp_server.tortoise_create_entity(
-            "object", "MCP-ENTITY-GOAL", goalState="superseded")
+            "object", "MCP-ENTITY-GOAL", goalState="blocked")
         assert not ent.get("error"), ent
         node = ent.get("node", ent)
-        assert _stored(ha, node["id"]) == "superseded"
+        assert _stored(ha, node["id"]) == "blocked"
 
         pt = mcp_server.tortoise_create_point(
-            "goal", "MCP-POINT-GOAL", goalState="guideline")
+            "goal", "MCP-POINT-GOAL", goalState="unmet")
         assert not pt.get("error"), pt
-        assert _stored(ha, pt["id"]) == "guideline"
+        assert _stored(ha, pt["id"]) == "unmet"
 
 
 def test_the_served_schema_advertises_goal_state_on_every_create_door():
@@ -475,17 +490,16 @@ def test_the_served_schema_advertises_goal_state_on_every_create_door():
     description, so an agent reading `tools/list` could not learn the field
     existed and reached for the keyword that did not exist.
 
-    All THREE create doors are pinned, not just the one the issue named: the
-    canonical door is `tortoise_create_entity` (the surface record recommends
-    merging the object alias into it), and a goal is a legacy POINT too
-    (ONTOLOGY §4.1), so declaring the field on the alias alone would leave the
-    recommended doors exactly as undiscoverable as before.
+    Every SERVED create door that can carry the field is pinned: the canonical
+    `tortoise_create_entity` and the goal-POINT door (ONTOLOGY §4.1).
+    `tortoise_create_object` is retired from the registry (#13052), so a row for
+    it would assert a door `tools/list` no longer publishes — the assertion
+    would KeyError on the retirement rather than on a missing parameter.
     """
     from tortoise import mcp_server
 
     tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
     for tool_name in (
-        "tortoise_create_object",
         "tortoise_create_entity",
         "tortoise_create_point",
     ):
@@ -493,32 +507,145 @@ def test_the_served_schema_advertises_goal_state_on_every_create_door():
         assert "goalState" in spec.parameters["properties"], (tool_name, spec.parameters)
     # A parameter, NOT a new surface: the doors keep their names and their
     # required arguments, and the SDK methods behind them are unchanged.
-    assert tools["tortoise_create_object"].parameters["required"] == [
-        "name", "objectKind"]
     assert tools["tortoise_create_entity"].parameters["required"] == [
         "type", "name"]
+    assert tools["tortoise_create_point"].parameters["required"] == [
+        "kind", "content"]
 
 
 # ── The two doors cannot drift apart ────────────────────────────────────────
 
-@pytest.mark.parametrize("word", sorted(GOAL_STATE_VALUES))
+#: The ``status`` each ENDING word must be paired with on a create (#13065:
+#: the two axes must AGREE, so an ending ``goalState`` alone is refused).
+#: ``superseded`` keeps its spelling on both axes; every other ended word
+#: spells ``abandoned`` — see `sdk._status_words_for_goal_ending`.
+_AGREEING_STATUS = {"superseded": "superseded", "abandoned": "deprecated"}
+
+
+@pytest.mark.parametrize("word", sorted(GOAL_STATE_VALUES - {"superseded"}))
 def test_both_doors_store_every_member_identically(tmp_path, word):
     """One vocabulary, one store, two spellings: every member must be settable
     and stored identically through the REST door and the MCP door (the issue's
     indicator 4). A door that accepted a word the other refused — or stored a
-    different one — is the drift this pins shut."""
+    different one — is the drift this pins shut.
+
+    An ENDING member carries its agreeing ``status`` on BOTH doors, because
+    #13065 refuses one field ending a goal the other leaves running — a pin on
+    the FOLDS' agreement, not a way around it.
+
+    ⛔ ``superseded`` is NOT in this list: #13065 also requires the ending to
+    NAME its successor (``supersededBy``), and ``CreateObjectRequest`` does not
+    declare that field, so the REST create door cannot express the state at all
+    — pydantic drops the unknown key, which is #13117's class, not a regression
+    of this change. Its own case is `test_superseded_needs_a_named_successor`.
+    """
     from tortoise import mcp_server
 
+    status = _AGREEING_STATUS.get(word)
+    rest_body: dict = {"name": f"REST-{word}", "objectKind": "goal",
+                       "goalState": word}
+    if status:
+        rest_body["status"] = status
+    mcp_props = {"status": status} if status else None
     with (_graph(str(tmp_path / f"both-{word}.db")) as ha,
           _rest_client() as client, _mcp_ctx()):
-        r = client.post("/v1/objects", json={
-            "name": f"REST-{word}", "objectKind": "goal", "goalState": word})
+        r = client.post("/v1/objects", json=rest_body)
         assert r.status_code == 200, r.text
-        mcp_out = mcp_server.tortoise_create_object(
-            f"MCP-{word}", "goal", goalState=word)
+        mcp_out = mcp_server.tortoise_create_entity(
+            "object", f"MCP-{word}", props=mcp_props, goalState=word)
+        node = mcp_out.get("node", mcp_out)
         assert not mcp_out.get("error"), mcp_out
         assert _stored(ha, r.json()["id"]) == word
-        assert _stored(ha, mcp_out["id"]) == word
+        assert _stored(ha, node["id"]) == word
+
+
+def test_superseded_needs_a_named_successor(tmp_path):
+    """#13065 makes the successor PART of the ``superseded`` ending.
+
+    The MCP door can express it (``props`` is free-form); the REST create model
+    cannot, because ``supersededBy`` is not a declared field and pydantic's
+    ``extra='ignore'`` drops it — #13117's class. So the REST answer must be the
+    422 that NAMES the missing successor (not a 200 that quietly stored
+    ``superseded`` with no successor, and not a 500). Both halves are pinned
+    here so the gap is visible and cannot regress silently in either direction.
+    """
+    from tortoise import mcp_server
+
+    with (_graph(str(tmp_path / "superseded.db")) as ha,
+          _rest_client() as client, _mcp_ctx()):
+        r = client.post("/v1/objects", json={
+            "name": "SUPERSEDED-REST", "objectKind": "goal",
+            "goalState": "superseded", "status": "superseded"})
+        assert r.status_code == 422, (r.status_code, r.text)
+        assert "names no successor" in r.text, r.text
+        assert _objects_named(ha, "SUPERSEDED-REST") == 0
+
+        out = mcp_server.tortoise_create_entity(
+            "object", "SUPERSEDED-MCP", goalState="superseded",
+            props={"status": "superseded", "supersededBy": "SUCCESSOR"})
+        node = out.get("node", out)
+        assert not out.get("error"), out
+        assert _stored(ha, node["id"]) == "superseded"
+
+
+def test_guideline_is_refused_on_every_door_with_its_removal_named(tmp_path):
+    """`guideline` LEFT the vocabulary (#13035, owner ruling 2026-11-16): whether
+    a goal is directional is a question about priority, not outcome.
+
+    This file used `guideline` as an ordinary member until that ruling landed,
+    so the removal is pinned rather than assumed — and the refusal must NAME the
+    removal (the AX rule: what failed, and what to do), not merely reject it as
+    an unknown word. Measured: the plain vocabulary sentence would send a reader
+    hunting for a typo in a word that used to be valid.
+    """
+    assert "guideline" not in GOAL_STATE_VALUES
+    from tortoise import mcp_server
+
+    with (_graph(str(tmp_path / "guideline.db")) as _ha,
+          _rest_client() as client, _mcp_ctx()):
+        r = client.post("/v1/objects", json={
+            "name": "GUIDELINE-REST", "objectKind": "goal",
+            "goalState": "guideline"})
+        assert r.status_code == 422, (r.status_code, r.text)
+        assert "REMOVED from this vocabulary" in r.text, r.text
+        assert "#13035" in r.text, r.text
+
+        for door in (mcp_server.tortoise_create_entity(
+                         "object", "GUIDELINE-MCP", goalState="guideline"),
+                     mcp_server.tortoise_create_point(
+                         "goal", "GUIDELINE-PT", goalState="guideline")):
+            assert door.get("error"), door
+            assert "REMOVED from this vocabulary" in door["error"], door
+
+
+@pytest.mark.parametrize("status,goal_state", [
+    (None, "abandoned"),
+    ("live", "superseded"),
+    ("live", "abandoned"),
+])
+def test_rest_refuses_an_ending_goal_state_the_status_contradicts(
+        tmp_path, status, goal_state):
+    """#13065's two-field rule, refused AT THE DOOR as a 422.
+
+    The guard lives in `sdk._sanitize_props`; reaching it through this route's
+    blanket ``except Exception`` answered a bare **500** (measured at #13116's
+    merge of `origin/main`: ``POST /v1/objects {"goalState": "abandoned"}`` ->
+    ``500 {"detail":"Internal server error"}``). #13110's own rule for the
+    vocabulary half is that a value the store cannot hold is a 4xx carrying the
+    sentence, never a 500 that names nothing; both create models now run the SDK
+    guard in a ``model_validator``, so this pins that the SAME shape holds for
+    the agreement half.
+    """
+    body: dict = {"name": "ENDING-MISMATCH", "objectKind": "goal",
+                  "goalState": goal_state}
+    if status is not None:
+        body["status"] = status
+    with _graph(str(tmp_path / "ending-mismatch.db")) as ha, _rest_client() as client:
+        r = client.post("/v1/objects", json=body)
+        assert r.status_code == 422, (r.status_code, r.text)
+        assert "ends the goal" in r.text, r.text
+        # …and nothing was written (fail-closed at the door, not after the write).
+        assert _objects_named(ha, "ENDING-MISMATCH") == 0
 
 
 def test_the_sdk_guard_is_the_only_home_of_the_vocabulary(tmp_path):

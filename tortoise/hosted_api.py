@@ -261,6 +261,8 @@ from tortoise.sdk import (
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk._capture_session)
     validate_goal_state,  # #13110: the ONE goal-achievement guard (REST refuses before the write)
+    # #13065: the status/goalState AGREEMENT refusal, ONE home for the same reason
+    _refuse_inconsistent_goal_ending,
 )
 from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
     redact_error,
@@ -11372,6 +11374,33 @@ from pydantic import (  # noqa: E402
 )
 
 
+def _refuse_goal_axes_disagreeing_at_the_door(
+        status: str | None, goal_state: str | None, surface: str) -> None:
+    """Refuse a CREATE whose two goal axes disagree — at the DOOR, as a 422.
+
+    #13110's placement rule, applied to #13065's two-field guard. The SDK runs
+    ``_refuse_inconsistent_goal_ending`` inside ``_sanitize_props``; left to
+    reach it, this route's blanket ``except Exception`` answers a bare 500 that
+    names nothing (measured at #13116's merge: ``POST /v1/objects
+    {"goalState": "abandoned"}`` was ``500 {"detail":"Internal server
+    error"}``). The vocabulary half of #13110 was refused here for exactly this
+    reason; the agreement half is the same failure shape and gets the same home.
+
+    The bag is built EXACTLY as the route forwards it — a ``None`` ``goalState``
+    is OMITTED (the #13110 no-clobber rule) and a falsy ``status`` is OMITTED
+    (the route's own ``if body.status``) — so this judges the state the write
+    actually lands, never a stricter one. An empty bag is a no-op, which is what
+    keeps ``{goalState: null}`` and a bare create working unchanged.
+    """
+    bag: dict[str, object] = {}
+    if status:
+        bag["status"] = status
+    if goal_state is not None:
+        bag["goalState"] = goal_state
+    if bag:
+        _refuse_inconsistent_goal_ending(bag, surface=surface)
+
+
 class CreatePointRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=10000)
     kind: str = Field(default="statement")
@@ -11431,6 +11460,25 @@ class CreatePointRequest(BaseModel):
         """
         validate_goal_state(v)  # raises ValueError → 422 naming the set
         return v
+
+    @model_validator(mode="after")
+    def goal_axes_agree(self):
+        """#13065's ending rule, refused HERE so the answer is a 422.
+
+        The route forwards these two fields to one SDK write, and the SDK's
+        ``_sanitize_props`` refuses an ending ``goalState`` beside a live
+        ``status``. Reaching it through the route's ``except Exception`` is a
+        bare 500, so the door runs the SAME guard (one home) before the write.
+
+        ⛔ The points door has NO ``status`` field (#13110 did not add one, and
+        this is not the place to), so the bag carries only ``goalState``: the
+        create reading then refuses an ENDING word outright — which is honest,
+        because this door cannot express the agreeing lifecycle status an
+        ending requires. It is a 422 naming both repairs, not a 500.
+        """
+        _refuse_goal_axes_disagreeing_at_the_door(
+            getattr(self, "status", None), self.goalState, "POST /v1/points")
+        return self
 
     @field_validator("kind")
     @classmethod
@@ -13525,6 +13573,19 @@ class CreateObjectRequest(BaseModel):
         """
         validate_goal_state(v)  # raises ValueError → 422 naming the set
         return v
+
+    @model_validator(mode="after")
+    def goal_axes_agree(self):
+        """#13065's ending rule, refused HERE so the answer is a 422.
+
+        Same home as the vocabulary refusal above and for the same reason: the
+        route's blanket ``except Exception`` turns the SDK's ValueError into a
+        bare 500 (measured at #13116's merge: ``{"goalState": "abandoned"}``
+        answered ``500``), so the door runs the SDK's own guard before the write.
+        """
+        _refuse_goal_axes_disagreeing_at_the_door(
+            self.status, self.goalState, "POST /v1/objects")
+        return self
 
 
 @app.post("/v1/objects")
@@ -49968,7 +50029,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 185 tracked files (457 distinct
+# ABSOLUTE line number from 189 tracked files (706 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

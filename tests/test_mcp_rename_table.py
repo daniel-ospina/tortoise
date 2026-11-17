@@ -167,6 +167,31 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_provenance": 'tortoise_check_confidence(claim_id, include_provenance=True)',
     "tortoise_review_connections": 'tortoise_review_link_candidates(kind="connections", mode=...)',
     "tortoise_traverse": 'tortoise_explore_connections(node_id, hops=...)',
+    # #11609 DOOR-RETIREMENT wave (lane E, #4282 Phase 2): SEVEN doors retired into
+    # containers the three Phase 2 waves had already ADVERTISED, so no container row
+    # arrives with them and the map grows by exactly the seven retired names —
+    # 53 + 7 = 60, which is `RETIRED_TOOL_REGISTRY`'s size and the row count
+    # `docs/product/mcp-rename-table.md` renders. Every destination below is a LIVE
+    # advertised name (`get_entity`, `review_link_candidates`, `list_knowledge`,
+    # `create_entity`), so no pointer here dead-ends.
+    "tortoise_get_session": 'tortoise_get_entity(id, type="session")',
+    "tortoise_find_cross_lens_candidates": (
+        'tortoise_review_link_candidates(kind="cross_lens", limit=..., threshold=...)'
+    ),
+    "tortoise_list_batch": 'tortoise_list_knowledge(kind="batch", id=...)',
+    "tortoise_create_subject": (
+        'tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})'
+    ),
+    "tortoise_create_object": (
+        'tortoise_create_entity(type="object", name=..., props={"objectKind": ...})'
+    ),
+    "tortoise_create_event": (
+        'tortoise_create_entity(type="event", name=..., props={"eventKind": ...})'
+    ),
+    "tortoise_create_document": (
+        'tortoise_create_entity(type="document", name=<title>, '
+        'props={"documentKind": ..., ...})'
+    ),
 }
 
 # The names whose 0.1 destination differs from the destination of their redirect.
@@ -574,13 +599,15 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     # 68 live − 14 + 6 = 60, since every retired name stays SERVED through the shim);
     # 46 after #11609 Phase 2 retired nine READ/QUERY doors (37 + 9 = 46 = the
     # manifest's `counts.retired`, derived there as 68 − 9 + 5 − 14 + 6 = 56 live).
-    # The pin moves with each landed container batch.
-    # 53 at THIS head, which composes ALL FOUR landed batches: 23 at the base
-    # + 14 (lane B's WRITE/MUTATE wave) + 9 (this PR's READ/QUERY wave) + 7 (lane C's
-    # SOURCES/MINE/SESSION wave) = 53, which is exactly `counts.retired` in
-    # `config/surface-manifest.yml` at this merge.
-    assert len(RETIRED_LITERAL) == 53, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 53"
+    # The pin moves with each landed batch.
+    # 53 after the FOUR container batches: 23 at the base + 14 (lane B's WRITE/MUTATE
+    # wave) + 9 (#12951's READ/QUERY wave) + 7 (lane C's SOURCES/MINE/SESSION wave).
+    # 60 at THIS head, adding the #11609 DOOR-RETIREMENT wave's seven — a wave that
+    # arrives with NO container row (its destinations were already advertised), so it
+    # contributes only retired names: 53 + 7 = 60, which is exactly `counts.retired`
+    # in `config/surface-manifest.yml` at this merge.
+    assert len(RETIRED_LITERAL) == 60, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 60"
     )
 
 
