@@ -187,19 +187,130 @@ def test_the_graph_ordering_branch_still_reaches_the_terminal_stage():
     assert source.index("_mark_read_stage(STAGE_ORDERING)") < branch
 
 
+def _post_retrieval_returns() -> list[tuple[int, str | None]]:
+    """Every ``return`` in ``tortoise_fts_query`` that runs AFTER the retrieval
+    mark, paired with the nearest ``_mark_read_stage`` in **its own block**.
+
+    The block matters (round-3 review F3 discipline): a global "nearest preceding
+    mark" scan passes when a *different arm's* terminal mark sits earlier in the
+    function, so deleting one arm's mark still read as green. A return's own
+    enclosing block is what actually decides which stage is open when it runs.
+
+    Nested functions are excluded: a ``return`` inside a closure is not a return
+    of the read path.
+    """
+    tree = ast.parse(_SDK.read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "tortoise_fts_query")
+
+    def mark_name(stmt):
+        if isinstance(stmt, ast.Expr):
+            call = stmt.value
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id == "_mark_read_stage" and call.args
+                    and isinstance(call.args[0], ast.Name)):
+                return call.args[0].id
+        return None
+
+    def enclosing_block(stmt, parent):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(parent, field, None)
+            if isinstance(block, list) and any(s is stmt for s in block):
+                return block
+        return None
+
+    found: list[tuple[int, str | None]] = []
+
+    def visit(node):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if isinstance(child, ast.Return):
+                block = enclosing_block(child, node)
+                before = [mark_name(s) for s in (block or [])[: (block.index(child) if block else 0)]]
+                before = [name for name in before if name]
+                found.append((child.lineno, before[-1] if before else None))
+            visit(child)
+
+    visit(fn)
+    return found, fn
+
+
 def test_the_post_retrieval_ordering_pass_has_its_own_stage():
-    """The graph rerank reads the graph, so it cannot be charged to a stage that
-    already returned (review F1). ``ep_annotation`` must close before it."""
-    assert STAGE_ORDERING in STAGE_SET
-    assert STAGE_ORDERING != STAGE_EP_ANNOTATION
-    timeline = begin()
-    with request_stages(timeline):
-        mark(STAGE_EP_ANNOTATION)
-        mark(STAGE_ORDERING)
-        spent = timeline.spent_ms()
-    assert STAGE_EP_ANNOTATION in spent, "the annotation read must be closed by the ordering mark"
-    assert STAGE_ORDERING not in spent
-    assert timeline.current() == STAGE_ORDERING
+    """The ordering pass is bracketed BETWEEN ``ep_annotation`` and the graph
+    branch, not merely somewhere in the function (round-3 review F3).
+
+    Round 2 pinned only ``index(ORDERING) < index('if order_by == "graph":')``,
+    which holds equally if ``ordering`` is marked where ``ep_annotation`` is —
+    i.e. the ordering RELATIONSHIP between them, the entire content of finding
+    F1, was unpinned. Swapping the two marks (reintroducing the defect) left
+    every row green; this pin reddens.
+    """
+    source = _SDK.read_text(encoding="utf-8")
+    annotation = source.index("_mark_read_stage(STAGE_EP_ANNOTATION)")
+    ordering = source.index("_mark_read_stage(STAGE_ORDERING)")
+    branch = source.index('if order_by == "graph":')
+    assert annotation < ordering < branch, (
+        "ep_annotation must close before the ordering pass opens, and the "
+        "ordering pass must be open before the graph branch returns"
+    )
+
+
+def test_fusion_brackets_only_the_rrf_call_and_no_graph_round_trip():
+    """#10893 review F1: ``fusion`` is documented as PURE CPU.
+
+    At round 2 it was opened and left open across ~10 graph round trips (recency
+    weights, kind/status/claim filters, the echo fold, the rerank pool fetch), so
+    a breach inside the ``exclude_status`` query published ``stage=fusion`` with
+    ``retrieval`` already closed and healthy — the operator rules out the graph
+    and blames the CPU. The window is pinned structurally: between the fusion
+    mark and the next mark it must contain ``rrf_fusion(`` and NO ``graph.query(``.
+    """
+    source = _SDK.read_text(encoding="utf-8")
+    start = source.index("_mark_read_stage(STAGE_FUSION)")
+    nxt = source.index("_mark_read_stage(", start + 1)
+    window = source[start:nxt]
+    assert "rrf_fusion(" in window, "fusion must bracket the RRF call itself"
+    assert "graph.query(" not in window, (
+        "a graph round trip sits inside the fusion window — a breach there would "
+        "be published as 'the CPU fusion is stuck'"
+    )
+
+
+def test_every_return_after_the_retrieval_mark_reaches_the_terminal_stage():
+    """#10893 review F2: ``response``'s contract says EVERY return path reaches it.
+
+    Round 2 marked only the graph branch, so four degraded/failure returns
+    (relevance floor, TF-IDF snapshot tier, legacy fallback, no_fallback) left
+    ``retrieval`` open — a stage that had already returned (``degradation_chain``
+    is above them). Those arms are reachable in the incident class this PR is
+    about: they are entered when every leg failed, which is what a store stall
+    or a per-leg deadline produces.
+
+    The pin is block-scoped: each post-retrieval return must carry a
+    ``STAGE_RESPONSE`` mark in its OWN enclosing block. A global nearest-mark
+    scan would pass on a mutant that deletes one arm's mark, because another
+    arm's mark sits earlier in the function — verified: that weaker version
+    stayed green, this one reddens.
+    """
+    found, fn = _post_retrieval_returns()
+    retrieval_mark = min(
+        n.lineno for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "_mark_read_stage" and n.args
+        and isinstance(n.args[0], ast.Name) and n.args[0].id == "STAGE_RETRIEVAL"
+    )
+    post = [(line, name) for line, name in found if line > retrieval_mark]
+    assert len(post) >= 4, (
+        "expected the degraded/failure returns behind the retrieval mark; found "
+        f"only {post} — this pin is only meaningful while they exist"
+    )
+    for line, name in post:
+        assert name == "STAGE_RESPONSE", (
+            f"tortoise_fts_query returns at line {line} with {name!r} in its own "
+            "block — a breach there would be blamed on a stage that had already "
+            "returned"
+        )
 
 
 def test_the_fold_guard_is_observable_while_the_restage_is_still_open():
@@ -245,6 +356,15 @@ def test_the_vocabulary_is_a_closed_set_of_named_stages():
     # non-member is a silent no-op, which is exactly how an instrument dies.
     assert {STAGE_PRE_HANDLER, STAGE_EMBED_GET, STAGE_EMBED_ENCODE,
             STAGE_RETRIEVAL, STAGE_RESPONSE} <= STAGE_SET
+    # The two stages this PR's review rounds added, each for a defect the
+    # original vocabulary could not express: `ordering` (the graph rerank is a
+    # read, not annotation) and the correction that the EP decoration read is
+    # not the last graph round trip. A stage that is not a member is a silent
+    # no-op at its call site, so membership is asserted, not assumed.
+    assert STAGE_ORDERING in STAGE_SET
+    assert STAGE_EP_ANNOTATION in STAGE_SET
+    assert STAGES.index(STAGE_EP_ANNOTATION) < STAGES.index(STAGE_ORDERING) \
+        < STAGES.index(STAGE_RESPONSE), "the timeline order is the read order"
 
 
 # ── 3. the boundary: nothing bound ⇒ nothing changes ───────────────────────
