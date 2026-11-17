@@ -48,9 +48,11 @@ from tortoise.ep import TortoiseEP
 from tortoise.live import EPISTEMIC_LABELS, epistemic_labels_of, epistemic_sweep
 from tortoise.ranking import (
     W4_CONTESTED_BOOST,
+    ENTITY_SIGNAL_SPECS,
     GapsRanker,
     GraphRanker,
     StateRanker,
+    fetch_entity_signals,
     resolve_contested_relevance,
 )
 from tortoise.sdk import TortoiseSDK
@@ -521,16 +523,38 @@ def test_object_signals_are_measured_by_a_non_point_about_edge(sdk):
 
 
 def test_object_signals_read_uses_the_shared_traversal_disjunction():
-    """Source pin for the aggregation read. It cannot join the id-anchored
-    ``epistemic_sweep`` parametrization above: the Object anchor is
-    ``:Object`` by construction (the caller routes ``entity_type == 'object'``)
-    and the widened position is the TRAVERSAL ``p``, so the correct assertion is
-    a disjunction, not a sweep."""
-    src = inspect.getsource(StateRanker._fetch_object_signals)
+    """Source pin for the aggregation read, RE-DERIVED (#12184) to the symbol
+    that now spells it. It cannot join the id-anchored ``epistemic_sweep``
+    parametrization above: the anchor is a label by construction (the caller
+    routes ``entity_type``) and the widened position is the TRAVERSAL ``p``, so
+    the correct assertion is a disjunction, not a sweep.
+
+    The body moved: ``StateRanker._fetch_object_signals`` is a one-line
+    delegation into the shared :func:`fetch_entity_signals` (one home for the
+    read, so ``GraphRanker`` and ``StateRanker`` cannot drift apart). The facts
+    this test owns are unchanged, so they are asserted against the symbol that
+    now carries them — and the anchor claim is re-derived rather than
+    re-pointed, because the label and the identity key are DATA now
+    (``ENTITY_SIGNAL_SPECS``): a bare literal would go on passing while the
+    spec said something else.
+    """
+    src = inspect.getsource(fetch_entity_signals)
     assert "epistemic_disjunction('p')" in src
     assert "(p:Point)" not in src, "the about-Point leg is hand-spelled again"
-    assert "MATCH (o:Object) WHERE o.id IN $ids" in src, (
-        "the Object anchor must keep its own label (per-label index)")
+    # The anchor must keep its OWN label and its own identity key (per-label
+    # index): asserted on the spec AND on the fact that the query is built from
+    # it, so neither half can drift alone.
+    assert ENTITY_SIGNAL_SPECS["object"][:2] == ("Object", "id"), (
+        "the Object anchor lost its own label/identity key, so the per-label "
+        f"index no longer answers for it: {ENTITY_SIGNAL_SPECS['object']!r}")
+    assert '"MATCH (n:" + label + ") WHERE n." + id_prop + " IN $ids "' in src, (
+        "the entity anchor is no longer built from ENTITY_SIGNAL_SPECS — a "
+        "hand-spelled label cannot follow the spec")
+    # …and the delegation is the whole point of the sharing: an inline copy would
+    # re-open the two-ranker drift this change closed.
+    assert 'return self._fetch_entity_signals(ids, "object")' in inspect.getsource(
+        StateRanker._fetch_object_signals
+    )
 
 
 def test_contested_relevance_reads_non_point_target_and_counter_claim(sdk):
