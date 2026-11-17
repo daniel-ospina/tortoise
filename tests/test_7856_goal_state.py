@@ -26,7 +26,7 @@ import tempfile
 
 import pytest
 
-from tortoise.sdk import GOAL_STATE_VALUES, TortoiseSDK
+from tortoise.sdk import GOAL_LIVE_STATES, GOAL_STATE_VALUES, TortoiseSDK
 
 
 @pytest.fixture
@@ -42,16 +42,21 @@ def sdk():
 
 def test_goal_state_vocabulary_is_the_intended_closed_set():
     """Pin the vocabulary so a drive-by edit cannot silently widen it. It is
-    the #7871 owner-proposed set + `guideline` (the value the objective map
-    already uses for the #6792-demoted CI 'target')."""
+    the #7871 owner-proposed set of SIX, and since #13035 exactly that set:
+    `guideline` was removed by owner ruling (2026-11-16) — whether a goal is
+    directional is a question about priority, not about outcome."""
     assert {
         "met", "active", "blocked", "unmet", "superseded", "abandoned",
-        "guideline",
     } == GOAL_STATE_VALUES
+    assert "guideline" not in GOAL_STATE_VALUES
 
 
-@pytest.mark.parametrize("state", sorted(GOAL_STATE_VALUES))
+@pytest.mark.parametrize("state", sorted(GOAL_LIVE_STATES))
 def test_goal_state_valid_value_accepted_and_persisted(sdk, state):
+    """Every LIVE word is writable on its own — the two ENDINGS are not, because
+    #13035 requires them to arrive with the `status` ending they spell (see
+    `tests/test_13035_goal_ending_consistency.py`; this file's subject is the
+    vocabulary, not the pairing rule)."""
     goal = sdk.create_object("REVENUE", objectKind="goal", goalState=state)
     assert goal["goalState"] == state
     # Persisted (not just echoed on the create return).
