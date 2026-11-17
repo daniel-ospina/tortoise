@@ -65,19 +65,19 @@ Sixteen superseded line-addresses did not open on the line their row quotes at `
 unit of that number is the ADDRESS, not the reader** — the re-derivation commit `f4fad2d8b027` records an
 `old -> new` mapping for each of the sixteen, so the figure is auditable there instead of remembered here.
 That is also why sixteen addresses are FIFTEEN cites below: the subject probe's four addresses
-(`:6711`, `:6710-6713`, `:6713`, `:6716-6729`) became three (`:6828-6831`, `:6656`, `:6834-6847`) — two of
-the four map onto the range `:6828-6831` — and one of those, `:6656`, is cited elsewhere in this document
-too. They had been advanced
+(`:6711`, `:6710-6713`, `:6713`, `:6716-6729`) became three (`:6828-6831`, `:6831`, `:6834-6847`) — three of
+the four map onto the range `:6828-6831`, the fourth being that range's `Event` leg — and the third is cited
+elsewhere in this document too. They had been advanced
 by a line delta rather than re-opened: the `search_engine.py` ones (`:3064`, `:4477-4481`, `:6352`) name
 lines that hold something else at **every** recent `main` head — no commit ever carried the FTS call at
 `:3064`, the walk at `:4477` or the operator leg at `:6352` — so the number was drifted forward, not
 read off. All sixteen were re-derived at the pin, and each is named here by the cite it became, with its
 file — `search_engine.py` FTS
-`:3039`, walk `:4426`, operator leg `:6297`, subject probe `:6828-6831` (plus `:6656`, cited in §2.1, and
+`:3078`, walk `:4587`, operator leg `:6470`, subject probe `:6828-6831` (plus its `Event` leg `:6831`, and
 `subject_binding_available()` at `:6834-6847`), label scan `:4350-4351`, HNSW
-`:3938`, label derivation `:2983`, index note `:3050`; `projection/__init__.py` `("Object", ["name"])`
-`:6830`; `sdk.py`'s second `capture_redactions` writer `:2705`; `audit.py`'s carrier probe `:2445`/`:2456`;
-and `mcp_server.py`'s `entity_type` passthrough `:5475` — and the drift figure
+`:4097`, label derivation `:2983`, index note `:3050`; `projection/__init__.py` `("Object", ["name"])`
+`:6830`; `sdk.py`'s second `capture_redactions` writer `:2866`; `audit.py`'s carrier probe `:2444`/`:2455`;
+and `mcp_server.py`'s `entity_type` passthrough `:5477` — and the drift figure
 above was re-measured afterwards. ⚠️ **The figure counts the file it is written in, so this revision moved it**:
 it **adds 18** resolved pairs and **drops 1** (the `hosted_api.py` commit-state-load cite superseded by the range beside it), a net **+17**;
 **11** of the 18 drift and the dropped pair drifted as well, a net **+10** — 98 (the `main` copy) + 10 = **108** — and
@@ -223,10 +223,10 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | `tortoise/sdk.py:15659` | `MATCH (p:Point {id:$id})-[:extractedFrom]->` — provenance walk to the Source anchor | **traversal** |
 | `tortoise/mcp_server.py:11158` / `:11161` | `MATCH (new:Point {id:$n})-[r]->(t)` / `(t)-[r]->(new:Point)` — edge discovery | **adjacency** |
 | `tortoise/projection/edges.py:1888` | `(p:Point {id:$pid})-[:TAGGED]->(t:Tag)` | **traversal** |
-| `tortoise/sdk.py:21978` | `(n:Point {id:$id})-[:TAGGED]->()` | **traversal** |
-| `tortoise/search_engine.py:4583-4587` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
+| `tortoise/sdk.py:23931` | `(n:Point {id:$id})-[:TAGGED]->()` | **traversal** |
+| `tortoise/search_engine.py:4587` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
 | `tortoise/search_engine.py:6470` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg's subquery PREVIEW | **adjacency** |
-| `tortoise/search_engine.py:6524` | `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)` — the operator-expansion leg's COUNT, the statement that follows `:6297` inside the same function | **adjacency** |
+| `tortoise/search_engine.py:6524` | `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)` — the operator-expansion leg's COUNT, the statement that follows `:6469` inside the same function | **adjacency** |
 | `tortoise/search_engine.py:6829` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:6828-6831`, consumed only by `subject_binding_available()` at `:6834-6847`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
 | `tortoise/search_engine.py:3078` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
 | `tortoise/search_engine.py:4511-4513` | `run_structural_query`'s `MATCH (n:{label}) WHERE …` — a plain label scan, no pattern | **none** |
@@ -234,7 +234,7 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | `tortoise/domain_validators.py:105` (and the same property-join shape at `:174-182`, `:197-205`) | `MATCH (req) WHERE (req:Point OR req:Object) AND (req.pointKind IN $req_kinds OR req.objectKind IN $req_kinds)`, then `OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow})` — **property-equality joins only**; no relationship appears in any pattern | **none** |
 | `tortoise/domain_validators.py:153-158` (`orphan_use_case`) | `OPTIONAL MATCH (uc)<-[:hasPart]-(op:Point {is_operator:true, op_type:'composedOf'})-[:hasPart]->(jtbd:Point)` — a **2-hop `hasPart` walk**, i.e. every parented use-case is found THROUGH the tree | **adjacency** |
 | `tortoise/domain_validators.py:241-243` | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT (n)--()` — the `orphaned_draft` rule (#131) tests **existence of any edge**, which is adjacency | **adjacency** |
-| **the whole-node accessor family** — `tortoise/sdk.py:24633`, `:25506`, `:27101`, `:27197`, `:27296` (`get_point`'s `_cache_answer`), `:40513`; `tortoise/record_serve.py:306` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
+| **the whole-node accessor family** — `tortoise/sdk.py:24633`, `:25506`, `:27101`, `:27197`, `:27296` (`get_point`'s `_cache_answer`), `:40513`; `tortoise/record_serve.py:396` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
 
 **Verdict: `graph`.** Eighteen reader rows, **fifteen of them capability-carrying** (three are deliberately
 `none`: `search_engine.py:4350-4351`, a plain label scan; `domain_validators.py:105`, a property-equality join;
