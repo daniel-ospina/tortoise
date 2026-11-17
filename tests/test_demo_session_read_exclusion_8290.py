@@ -761,6 +761,18 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
         "`test_the_census_sees_and_restates_its_docstring_pivot_example` — so it is "
         "NO LONGER a hand edit to remember.)")
 
+    # ... and the DOCSTRING's usage example — `_NOTES`' sixth pivot figure. The row
+    # keeps it maintainable, but a row alone only proves the MECHANISM against a
+    # throwaway copy: nothing on the REAL tree compared it to the site, so a hand edit
+    # would red only the nightly `--check` and leave this fast suite green. Every other
+    # spelling is pinned at PR time (scorecard's three via `_PIVOT_SPELLINGS`, `_PIVOT`
+    # via `pivot_is_the_lifetime_site`, `DEFAULT_PIVOT` above); this one is the last.
+    assert _stated(r"(?m)--pivot (\d+)$",
+                   _src("tools/hosted_api_cite_census.py")) == _PIVOT, (
+        f"the census module's `--pivot <line>` usage example no longer states the "
+        f"site {_PIVOT} — re-state it with "
+        "`uv run python tools/hosted_api_cite_census.py --refresh`")
+
     # the census command is the notes' stated remedy, so it must work and must not
     # collapse to nothing (that, and only that, about the population is pinned here)
     data = census(_PIVOT)
@@ -1135,7 +1147,7 @@ def test_the_census_sees_and_restates_its_own_fallback_pivot(tmp_path, monkeypat
 def test_the_census_sees_and_restates_its_docstring_pivot_example(tmp_path, monkeypatch):
     """The usage block's ``--pivot <line>`` example is a ROW, not a hand edit.
 
-    Why this exists (#13152 review, P2): the module docstring spells the pivot a FIFTH
+    Why this exists (#13152 review, P2): the module docstring spells the pivot a SIXTH
     time, and while it sat outside ``_NOTES`` the arm above recorded it as a RESIDUAL
     to be remembered rather than closing it — a stale example left ``--check`` at exit
     0 while the documented command printed

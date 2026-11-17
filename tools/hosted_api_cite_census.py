@@ -212,9 +212,10 @@ _NOTES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("census DEFAULT_PIVOT", _CENSUS,
      r"(?m)^DEFAULT_PIVOT = (\d+)$", ("pivot",)),
     # ⛔ AND THE DOCSTRING'S OWN USAGE EXAMPLE (#13152 review, P2): the block above
-    # spells the pivot a FIFTH time as `--pivot <line>`, and while it sat outside this
-    # table the very defect the row above closes survived one screen higher — a stale
-    # example left `--check` at exit 0 while the documented command printed
+    # spells the pivot a SIXTH time as `--pivot <line>` — the scorecard's three, plus
+    # `_PIVOT`, plus `DEFAULT_PIVOT`, plus this — and while it sat outside this table
+    # the very defect the row above closes survived one screen higher: a stale example
+    # left `--check` at exit 0 while the documented command printed
     # `pivot is the LIFETIME_MEMORY_QUERY site: False` over a correct tree. The test in
     # `tests/test_demo_session_read_exclusion_8290.py` used to RECORD that residual and
     # ask a future editor to "move it too"; the row is what removes the hand edit.
