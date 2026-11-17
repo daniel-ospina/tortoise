@@ -13086,6 +13086,12 @@ class FalkorProjection(
                 # so it must not count as a landed cache write — the sibling
                 # `PointAdded` unwritable-id branch does the same.
                 _skip()
+            else:
+                # No `point` payload at all: no statement is issued, so nothing
+                # is written. `_skip()`'s own list already claims "an
+                # unwritable or ABSENT id on the point/operator/promote arms"
+                # is marked — this is the `apply()` arm that made that true.
+                _skip()
         elif t == "OperatorPromoted":
             # #785/R16: restore the operator's live status on replay.
             # (#2256 review P1): promotion emitters journal FLAT get_point

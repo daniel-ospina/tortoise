@@ -1086,6 +1086,11 @@ def test_apply_keeps_the_signature_the_replay_engines_introspect(
     {"type": "PointsMerged"},                            # no merge_ids
     {"type": "ObjectSuperseded", "id": "no-such-object"},  # matched nothing
     {"type": "PointPromoted", "point": {"id": "\x00bad"}},  # unwritable id
+    # No `point` payload AT ALL: no statement is issued, so nothing is written.
+    # `_skip()`'s own list already claimed "an unwritable or ABSENT id on the
+    # point/operator/promote arms" was marked; this is the `apply()` arm that
+    # makes that claim true (#12943 review cycle 4 follow-up).
+    {"type": "PointPromoted"},
     # ── review cycle 4, P2: the DELEGATED folds that report their own
     # 0-row count straight through `_apply_event`, none of which called
     # `_skip()`. Measured on the head before this cycle: every one of these
