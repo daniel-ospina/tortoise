@@ -353,6 +353,17 @@ def test_the_artifact_records_that_the_loss_carries_no_signal(artifact, monkeypa
         "artifact records — with `" + RESIDENCY_FLAG_ENV + "` unset, a signal has "
         "been wired (or removed), so the record's 'and it is silent' half and "
         "§1.5's justification must be re-derived")
+    # ⛔ …AND THE FIELD IS STILL BOUND TO THE FLAG. Fixing the ambient-env problem by
+    # deleting the flag from the comparison is not a fix: with `residency_enabled()`
+    # never read, `residency_marker_armed` could be hardcoded `False` and this test
+    # stayed GREEN (measured: `1 passed` under exactly that mutant). Hermeticity and
+    # binding are two requirements, so the ARMED arm is asserted too — the field must
+    # MOVE when the flag moves, or nothing here reads the code that would end the
+    # record's silence.
+    monkeypatch.setenv(RESIDENCY_FLAG_ENV, "1")
+    assert _signal_available()["residency_marker_armed"] is True, (
+        f"`residency_marker_armed` did not move when {RESIDENCY_FLAG_ENV} was armed — "
+        f"the silence this pin certifies is not read from the code that would end it")
 
 
 def test_the_silence_claims_are_bound_to_the_code_that_makes_them():
@@ -745,6 +756,9 @@ def test_the_point_population_accounts_for_every_drop():
     queries = [r["query"] for r in pop]
     assert len(set(queries)) == len(queries), queries
     assert all(q.strip() for q in queries), queries
+    # …and each query really is a span of the text that SURVIVED, so "distinct"
+    # cannot be satisfied by a query the dropped text was discarded for.
+    assert all(q in src for q, src in zip(queries, (ok, dup), strict=True)), queries
     assert len(pop) == 2, pop                       # `ok` and the first `dup`
     assert stats["requested"] == 10
     assert stats["texts_considered"] == 5
@@ -1960,6 +1974,17 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
     pt_arms_n = len(pt_arms)
     pt_population = artifact["populations"]["point"]
 
+    # ⛔ `unattributed` exists ONLY in the legacy block shape, so the sentence that
+    # binds it is selected BEFORE the row list is built (see the row's own comment:
+    # evaluating it eagerly made the regeneration path raise `KeyError`).
+    if "unattributed" in pb:
+        pb_gap_row = (
+            readme, f"with the {pb['unattributed']} lost texts left `unattributed`",
+            "corpus.point_build unattributed (= requested - built)")
+    else:
+        pb_gap_row = (
+            readme, f"the {pb['requested'] - pb['built']} lost texts",
+            "corpus.point_build requested - built")
     rows = [
         # (document, fragment as the document states it, what it must derive from)
         (readme, tail, "the `:Object` tail series (found@deep, coverage 0.9→0.1)"),
@@ -2019,8 +2044,15 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
         (readme, f"{pb['requested']} texts are taken into the population builder "
                  f"and {pb['built']} Points come out",
          "corpus.point_build requested -> built"),
-        (readme, f"with the {pb['unattributed']} lost texts left `unattributed`",
-         "corpus.point_build unattributed (= requested - built)"),
+        # ⛔ SHAPE-AWARE, and built LAZILY. `unattributed` exists only in the LEGACY
+        # block shape; a run of the CURRENT instrument records the four filters and
+        # writes no such key. Filtering the row out AFTER this list is built did not
+        # help: the f-string below is evaluated while the LIST LITERAL is constructed,
+        # so the documented regeneration path still died with `KeyError: 'unattributed'`
+        # (#13126 round 5, Finding 1/P1 — re-measured on the shape the instrument emits:
+        # `1 failed, 56 passed`, `KeyError` at the removed filter's line). The row is
+        # therefore SELECTED, not filtered, and each shape binds its own sentence.
+        pb_gap_row,
         (readme, "It is **not** provenance evidence",
          "the provenance block is a drift control, not production evidence"),
         (readme, f"--seed` ({params['seed']})",
@@ -2061,13 +2093,6 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
         (changelog, f"{pt_population['nodes']} `:Point` claims",
          "artifact.populations.point.nodes"),
     ]
-    # ⛔ `unattributed` exists ONLY in the legacy block shape. A run of the CURRENT
-    # instrument records the four filters and writes no such key, and the
-    # `pb['unattributed']` read above made the record's own documented regeneration
-    # path die with `KeyError` instead of a verdict (#13126 round 5, Finding 1/P1).
-    if "unattributed" not in pb:
-        rows = [r for r in rows
-                if r[2] != "corpus.point_build unattributed (= requested - built)"]
     # the README quotes `signal` verbatim, and it is the evidence for half the
     # verdict ("— and it is SILENT"). Nothing compared the quote to the artifact,
     # so `"residency_marker_armed": true` in the fence left 51 green (#13126
