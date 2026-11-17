@@ -24,6 +24,7 @@ mirroring the SQL semantics the real functions execute
 """
 from __future__ import annotations
 
+import itertools
 import json
 import uuid
 from datetime import UTC, datetime
@@ -181,6 +182,12 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("oauth_refresh_tokens", "revoked_at"),
     ("org_memberships", "created_at"),
     ("org_memberships", "updated_at"),
+    # #13277's per-org residency gauge (`20261117000002_postgres_residency_gauge`).
+    # It landed on `main` without this pin, so `test_registry_matches_the_migrations`
+    # was RED there (#13316) — the set is DERIVED from the migrations, so a table
+    # that declares `timestamptz` belongs here the moment its migration exists.
+    ("org_postgres_residency", "measured_at"),
+    ("org_postgres_residency", "updated_at"),
     ("organizations", "backup_latest_at"),
     ("organizations", "backup_restored_at"),
     ("organizations", "created_at"),
@@ -2015,6 +2022,118 @@ class FakeControlPlane:
             rows_all = [r for r in rows_all if r.get("id") and r["id"] > last]
         page = rows_all[:limit] if limit is not None else rows_all
         return page, None
+
+    def query_all(self, table: str, *, select: list[str] | None = None,
+                  filters: list[tuple[str, str, object]] | None = None,
+                  cursor: str = "id", page_size: int = 100,
+                  max_pages: int = 100, timeout: object | None = None,
+                  ) -> tuple[list[dict], bool]:
+        """#4038 shape: walk EVERY matching row and certify completeness.
+
+        The fake has no ``db-max-rows`` cap and no proxy in front of it, so a
+        full read IS the whole set — returning ``complete=True`` is the honest
+        double, not a claim the real client may make. A test that needs a
+        TRUNCATED or uncertifiable walk must override this method (the same rule
+        :meth:`query_with_total` states), which is the only way to exercise the
+        complete-vs-truncated decision.
+
+        ⛔ THE ``cursor``-IN-``select`` PRECONDITION IS MIRRORED, not dropped.
+        The real seam raises ``ValueError`` when a caller asks for a walk but
+        leaves the cursor column out of ``select`` (the cursor is read from the
+        rows to advance) — and a fake that ``del``s the argument can never red
+        on it. That matters the moment a call site STARTS depending on it (this
+        was measured: ``_org_graph_names`` changed ``select=["namespace"]`` to
+        ``select=["id", "namespace"]`` precisely to satisfy it). Without the
+        mirror, dropping ``id`` back out leaves every caller's tests green while
+        the real store refuses the walk and the org is never purged.
+        """
+        if select is not None and cursor not in select:
+            raise ValueError(
+                f"query_all: select must include the cursor column {cursor!r} "
+                "— the cursor is read from the rows to continue the walk")
+        del page_size, max_pages  # no paging: the fake is uncapped
+        # ⛔ READ THROUGH `query_with_total` WHEN THE SEAM HAS IT — the real walk
+        # does (``supabase_control.py:679``), and a fake that bypassed it would
+        # SHADOW a subclass's total-aware override: the override becomes dead
+        # code and its test stays green while exercising the other branch. That
+        # defect was measured once already on this very fake (`test_billing`'s
+        # `_Cp`, which had to grow a `query_all: None` hatch because of it).
+        # No `limit`: the double is uncapped, so one page IS the whole set.
+        total_aware = getattr(self, "query_with_total", None)
+        if callable(total_aware):
+            rows, total = total_aware(
+                table, select=select, filters=filters, order=cursor,
+                timeout=timeout, count_exact=True)
+        else:
+            rows, total = self.query(table, select=select, filters=filters,
+                                     timeout=timeout), None
+        return list(rows), self._certifiable(rows, total, cursor)
+
+    @staticmethod
+    def _certifiable(rows, total, cursor: str) -> bool:
+        """Derive `complete` the way the real walk does — never assert it.
+
+        ``SupabaseControlPlane.query_all`` certifies only when ALL THREE of its
+        gates pass: (1) the walk could ADVANCE from every page it saw (a page
+        where NO row carries a cursor value leaves ``advanceable`` empty, so it
+        breaks with ``exhausted`` False); (2) every page is STRICTLY ASCENDING on
+        the cursor (`if any(a >= b for a, b in itertools.pairwise(advanceable)):
+        break` — a server that ignored `order` would otherwise step OVER rows and
+        still certify); and (3) a stated total, if any, was met. The uncapped
+        double reaches the end in one page, so "the page advances AND is
+        ascending" IS "the walk could finish".
+
+        ⛔ A MIXED PAGE IS NOT REFUSED — only a wholly uncursored one is. The
+        real check is ``advanceable = [c for c in cursors if c]; if not
+        advanceable: break``: a page carrying at least one cursor still ADVANCES
+        (from its cursored rows, which the others cannot move) and the uncursored
+        rows are kept in ``rows``. Requiring EVERY row to carry one would be
+        STRICTER than production and would refuse walks the real store completes
+        — the "an org can never be purged" direction, inverted. So this mirrors
+        the real rule exactly: refuse only a page with no cursor at all.
+
+        ⛔ AND IT IS LOAD-BEARING, not pedantry: three deprovision fixtures
+        passed ``graphs`` rows carrying only ``namespace`` — a page with NO
+        cursor anywhere, which the real walk refuses (``cursors=[None, …]`` →
+        never certified → ``_org_graph_names`` raises). They were green only
+        because this double certified unconditionally. The same argument the
+        `cursor`-in-`select` check above makes, applied to the half that actually
+        decides the certificate.
+        """
+        if not rows:
+            # An EMPTY page is the sound end-of-walk signal (`if not page:
+            # exhausted = True`) — the ONE thing the real walk trusts — so it
+            # certifies unless a stated total says more rows exist.
+            #
+            # ⛔ AND THAT IS NOT A DETAIL: the real walk has TWO branches, and this
+            # double mirrors BOTH — `if not page: exhausted = True; break`
+            # (certifies) and, below, `advanceable = [c for c in cursors if c];
+            # if not advanceable: break` (refuses). Answering False here would be
+            # STRICTER than production in the direction that matters to a purge:
+            # `_org_graph_names` RAISES on an uncertified walk, so an org owning NO
+            # custom graphs could never be purged at all. Pinned both ways below
+            # (`TestTheSharedDoubleDerivesItsCertificate`).
+            return total is None or total <= 0
+        cursors = [r.get(cursor) if isinstance(r, dict) else None for r in rows]
+        if not any(cursors):
+            return False
+        # The stated-total arm compares DISTINCT CURSOR VALUES, not rows — the
+        # real certificate is `len(seen) >= total` where `seen` is the set of
+        # cursor values (a page may carry a row whose cursor could not be read,
+        # and that row is kept in `rows` but cannot satisfy a total). Counting
+        # rows here would certify a walk production refuses.
+        # GATE 2 — STRICTLY ASCENDING. Mirrored because omitting it is the LOOSE
+        # direction: a duplicated or descending page certifies here while the
+        # store refuses the walk, and `_org_graph_names` deprovisions whatever the
+        # double certified. `tools/…`-independent: it is two lines of the real rule.
+        advanceable = [c for c in cursors if c]
+        if any(a >= b for a, b in itertools.pairwise(advanceable)):
+            return False
+        if total is None:
+            return True
+        # GATE 3 — the stated total counts DISTINCT CURSOR VALUES, not rows (the
+        # real certificate is `len(seen) >= total`, and `seen` is a set).
+        return len(set(advanceable)) >= total
 
     def _query_impl(self, table: str, *, select: list[str] | None = None,
                     filters: list[tuple[str, str, object]] | None = None,
