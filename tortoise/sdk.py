@@ -157,6 +157,7 @@ from .read_stages import (
     STAGE_EMBED_GET,
     STAGE_EP_ANNOTATION,
     STAGE_FUSION,
+    STAGE_ORDERING,
     STAGE_RESPONSE,
     STAGE_RETRIEVAL,
 )
@@ -44183,8 +44184,9 @@ class TortoiseSDK:
         result_ids = result_ids[:limit]
 
         # 6. EP annotation (Point only)
-        # #10893: the decoration read is the LAST graph round trip on this path
-        # and the one a breach never used to be able to name.
+        # #10893: the decoration read is the FIRST of the two graph round trips
+        # on this path (step 7's batch content fetch is the second), and the one
+        # a breach never used to be able to name.
         _mark_read_stage(STAGE_EP_ANNOTATION)
         ep_breakdowns = annotate_ep_batch(graph, result_ids) if entity_type == "point" else {}
 
@@ -44701,6 +44703,12 @@ class TortoiseSDK:
                 r.subject_unavailable = SUBJECT_BINDING_UNAVAILABLE
 
         # 9. Order results
+        # #10893 review F1: the ordering pass is a READ of its own on the graph
+        # branch (`GraphRanker.rerank` -> its own `_fetch_signals`, plus W4
+        # enrichment), so it gets its own stage. Without it those round trips
+        # were charged to `ep_annotation` AFTER that stage had returned — a
+        # confident lie, which is the one thing this instrument must not do.
+        _mark_read_stage(STAGE_ORDERING)
         if order_by == "graph":
             # #25: graph-informed rerank — weighted fusion of similarity +
             # persisted EP confidence + operator connectivity + recency decay.
@@ -44733,6 +44741,11 @@ class TortoiseSDK:
             # and makes no claim. A duck-typed `graph_ranker` whose read we
             # cannot observe makes no claim either (None ⇒ key absent).
             _consulted, _answered = _belief_read(ranker, ranked)
+            # #10893 review F1: this branch RETURNS here, so without a mark of
+            # its own it would never reach the terminal stage and a breach in
+            # response assembly would be published as `ordering` — blaming the
+            # rerank for time the answer took to be written out.
+            _mark_read_stage(STAGE_RESPONSE)
             return _with_read_status(_belief_label(
                 ranked, consulted=_consulted, answered=_answered))
         belief_consulted = False

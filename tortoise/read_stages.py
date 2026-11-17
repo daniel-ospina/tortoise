@@ -105,9 +105,19 @@ STAGE_RETRIEVAL = "retrieval"
 STAGE_FUSION = "fusion"
 #: ``annotate_ep_batch`` — the EP breakdown decoration read.
 STAGE_EP_ANNOTATION = "ep_annotation"
+#: The post-retrieval ordering pass. On ``order_by="graph"`` this is
+#: ``GraphRanker.rerank`` plus the W4 enrichment — real graph round trips, not
+#: response assembly — and on ``order_by="confidence"`` the belief sort.
+#: It exists as its own stage because #10893's review found the graph rerank
+#: being charged to ``ep_annotation`` after that stage had already returned:
+#: the rerank reads the graph, so a breach inside it is retrieval work that
+#: happened to run late, never "the annotation took ¬".
+STAGE_ORDERING = "ordering"
 #: Every marked stage finished; the remaining time is response assembly. Also the
 #: terminal stage, so a breach that lands here says "the work is done, the answer
-#: is late" rather than blaming a stage that had already returned.
+#: is late" rather than blaming a stage that had already returned. It must be
+#: reached on EVERY return path — a path that skips it publishes the last real
+#: stage as the cause of a breach that happened after it finished.
 STAGE_RESPONSE = "response"
 
 STAGES: tuple[str, ...] = (
@@ -118,6 +128,7 @@ STAGES: tuple[str, ...] = (
     STAGE_RETRIEVAL,
     STAGE_FUSION,
     STAGE_EP_ANNOTATION,
+    STAGE_ORDERING,
     STAGE_RESPONSE,
 )
 

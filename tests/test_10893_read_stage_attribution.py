@@ -47,6 +47,8 @@ from tortoise.mcp_auth import _TRANSPORT_WAIT_BOUND_MESSAGE
 from tortoise.read_stages import (
     STAGE_EMBED_ENCODE,
     STAGE_EMBED_GET,
+    STAGE_EP_ANNOTATION,
+    STAGE_ORDERING,
     STAGE_PRE_HANDLER,
     STAGE_RESPONSE,
     STAGE_RETRIEVAL,
@@ -132,19 +134,25 @@ def test_the_open_stage_is_distinct_from_the_spent_stages():
 def test_remecking_the_same_stage_folds_rather_than_duplicating():
     """A dense EXPANSION pass re-enters retrieval; the total must not double-count.
 
-    ⛔ ASSERTS THE VALUE, not the key set (review finding F3). The key set is
-    identical whether the fold guard is present or not, so a key-set assertion
-    left the guard unfalsifiable: without the guard, ``mark(RETRIEVAL)`` closes
-    the bucket and re-opens it, and the next ``mark`` closes it again — the
-    parts still sum to the same span, and every key still appears. What the
-    guard actually buys is that the bucket is written ONCE, so the value is the
-    span and not a re-derived sum of a re-opened bucket.
+    ⛔ THIS CASE IS NOT THE FOLD GUARD'S FALSIFIER, and it does not claim to be.
+    Round 1 added an assertion here for the guard (finding F3) and round 2 showed
+    it cannot fail for that claim: the guard's only write is to the RE-MARKED
+    bucket, so nothing it does can move ``embed_get``, and the key set is
+    identical with and without the guard. The case that does redden under
+    ``delete `if stage == self._stage: return` `` is the sibling below,
+    ``test_the_fold_guard_is_observable_while_the_restage_is_still_open``
+    (observed: WITH ``(True, 'retrieval')`` / MUTANT ``(False, 'retrieval')``).
+
+    What THIS case pins is the outcome that made the guard necessary in the
+    first place: a re-mark must not manufacture a stage that no wall clock
+    supports. ``response`` is marked last, so it is the open stage and must be
+    absent from ``spent_ms()`` — a stage that is still running is never reported
+    as finished.
     """
     timeline = begin()
     with request_stages(timeline):
         mark(STAGE_EMBED_GET)
         mark(STAGE_RETRIEVAL)
-        first = timeline.spent_ms()[STAGE_EMBED_GET]
         mark(STAGE_RETRIEVAL)  # the #2518 expansion pass — a no-op re-mark
         mark(STAGE_RESPONSE)
         spent = timeline.spent_ms()
@@ -153,10 +161,45 @@ def test_remecking_the_same_stage_folds_rather_than_duplicating():
     # the first mark, and on a real request that interval is the auth/middleware
     # cost — the very thing "the bound expired before any stage ran" reports.
     assert set(spent) == {STAGE_PRE_HANDLER, STAGE_EMBED_GET, STAGE_RETRIEVAL}
+    # The terminal stage is still OPEN at the snapshot, so it is not spent.
     assert STAGE_RESPONSE not in spent
-    # The re-mark did not reopen or re-write the bucket: the embed_get figure is
-    # the one observed before it, unchanged.
-    assert spent[STAGE_EMBED_GET] == first
+
+
+def test_the_graph_ordering_branch_still_reaches_the_terminal_stage():
+    """#10893 review F1: ``order_by="graph"`` returns from its own branch.
+
+    Round 1 marked ``response`` only on the fall-through path, so the graph
+    branch returned before the terminal mark and a breach during response
+    assembly published ``ep_annotation``/``ordering`` — a stage that had already
+    finished. That is the misattribution class this module exists to remove, so
+    the fix is pinned by control flow, not by the presence-only AST scan below:
+    the mark must precede the branch's own ``return``.
+    """
+    source = (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
+    branch = source.index('if order_by == "graph":')
+    terminal = source.index("return _with_read_status(_belief_label(", branch)
+    window = source[branch:terminal]
+    assert "_mark_read_stage(STAGE_RESPONSE)" in window, (
+        "the order_by='graph' branch returns without marking the terminal "
+        "stage — a breach after it finished would be blamed on the rerank"
+    )
+    # And the ordering pass itself is a named stage, not charged to the EP read.
+    assert source.index("_mark_read_stage(STAGE_ORDERING)") < branch
+
+
+def test_the_post_retrieval_ordering_pass_has_its_own_stage():
+    """The graph rerank reads the graph, so it cannot be charged to a stage that
+    already returned (review F1). ``ep_annotation`` must close before it."""
+    assert STAGE_ORDERING in STAGE_SET
+    assert STAGE_ORDERING != STAGE_EP_ANNOTATION
+    timeline = begin()
+    with request_stages(timeline):
+        mark(STAGE_EP_ANNOTATION)
+        mark(STAGE_ORDERING)
+        spent = timeline.spent_ms()
+    assert STAGE_EP_ANNOTATION in spent, "the annotation read must be closed by the ordering mark"
+    assert STAGE_ORDERING not in spent
+    assert timeline.current() == STAGE_ORDERING
 
 
 def test_the_fold_guard_is_observable_while_the_restage_is_still_open():
@@ -492,7 +535,8 @@ def test_the_search_path_marks_every_stage_the_issue_asked_about():
     each of those is marked. A missing mark is a stage the breach can never name."""
     marked = _marks_inside_fts_query()
     for constant in ("STAGE_EMBED_GET", "STAGE_EMBED_ENCODE", "STAGE_RETRIEVAL",
-                     "STAGE_FUSION", "STAGE_EP_ANNOTATION", "STAGE_RESPONSE"):
+                     "STAGE_FUSION", "STAGE_EP_ANNOTATION", "STAGE_ORDERING",
+                     "STAGE_RESPONSE"):
         assert constant in marked, f"{constant} is never marked in tortoise_fts_query"
 
 
