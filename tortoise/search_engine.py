@@ -3545,6 +3545,7 @@ def run_vector_query(
     provenance: str | None = None,
     pg_vector: Callable[[str, Sequence[float], int, tuple | None],
                         list[tuple[str, float, Any]] | None] | None = None,
+    vector_indexed_labels: frozenset[str] | set[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -3638,6 +3639,47 @@ def run_vector_query(
     (C2's ``#2518`` indicator-2 expansion pass uses it). The read then reports
     one vector leg — the same composition ``run_bm25_query``'s ``meter`` exists
     for (``#8488``).
+
+    vector_indexed_labels (#13108) — the labels the STORE has already been
+    MEASURED to carry a VECTOR index for
+    (``FalkorProjection._vector_indexed_labels_for_reads``, filled by
+    ``_record_vector_index_inventory``: the declared served set intersected with
+    the engine's own catalogue). When this is supplied and the read's label is
+    NOT in it, the two ``queryNodes`` attempts below are skipped and the read
+    goes straight to the brute-force scan.
+
+    ⛔ **SUPPLY THE BEHAVIOURAL HALF, NOT THE REPORTED PAIR.** The supplier must
+    hand over ``_vector_indexed_labels_for_reads``, never
+    ``_vector_indexed_labels``. The reporting half deliberately collapses "the
+    catalogue was returned but nothing in it parsed" into an EMPTY set (#11087's
+    pinned semantic, and the right one for a message); acting on that same value
+    would read an engine catalogue reshape as "this store indexes nothing" and
+    demote every dense read — ``:Point`` included, the label the product ships
+    indexed — to a full scan, with only an INFO pair as the signal. The
+    behavioural half is ``None`` in that lane, so the read attempts as before.
+    The two sets are equal in every other lane.
+
+    ⛔ WHY. On an unindexed label both attempts can only be REFUSED, and this
+    engine does not even say so distinctly — ``Invalid arguments for
+    procedure 'db.idx.vector.queryNodes'`` is what it answers for a missing index
+    AND for a wrong argument order (measured on
+    ``falkordb/falkordb-server:v4.20.6`` — the pin ``tools/test_lane.py`` launches
+    — with ``tools/dense_leg_probe_13108.py``). Paying them costs real time on
+    every such read: measured **34.78 ms p50 for an ``:Object`` dense read, of
+    which 20.17 ms is the two refused round trips** — 58.0 % of the leg spent
+    producing a known error (``fix-1000-paired-at-rest.json``: the 20.17 is
+    ``index_attempt[0].elapsed_ms``, 10.18 + 9.97, against that same artifact's
+    ``arms["object[nohint]@c1"].latency_ms.p50``). The scan that follows is
+    UNCHANGED, and
+    the read is still recorded :data:`MECHANISM_SCAN_FALLBACK` — `#4999`'s "an
+    index was expected and was not used" — so the alert surface and the
+    `#4997` unindexed-label notice keep their meaning. This is NOT the index
+    decision (``STORAGE-ARCHITECTURE.md`` §14.3 V3): it creates no index and
+    does not make a scan cheaper, it stops paying twice for the same absence.
+
+    Default ``None`` = attempt as before, so every existing caller is
+    byte-identical and a store that could not measure its catalogue (the
+    inventory's ``None`` lane) keeps the historic behaviour rather than a guess.
 
     pg_vector (#11642 / #4051 V1) is the ANN leg from the POSTGRES RECORD:
     a callable
@@ -3839,10 +3881,12 @@ def run_vector_query(
                          "scope un-embedded", e)
             _scope_hollow = True
 
-    # #4999: did THIS call attempt an index query? Embedded mode never does
-    # (the scan is the design, not a fallback); docker mode always does, and a
-    # failure falls through to the scan below. That distinction is what makes
-    # ``scan`` and ``scan_fallback`` tellable apart.
+    # #4999: did THIS call EXPECT an index it could not use? TWO lanes set it —
+    # the attempt below, and #13108's measured-absent skip — so docker mode does
+    # NOT always attempt one, it always EXPECTS one. Embedded mode never does
+    # either (the scan is the design, not a fallback). That distinction is what
+    # makes ``scan`` and ``scan_fallback`` tellable apart, and ``scan_fallback``
+    # is the right answer for a skip: the index was expected and was not used.
     index_attempted = False
 
     # ── #11642 / #4051 V1: the ANN leg, from the POSTGRES RECORD ──────────
@@ -3934,8 +3978,40 @@ def run_vector_query(
                         mechanism=MECHANISM_PGVECTOR)
                 return out
 
+    # ── #13108: do not pay for an index the store has already measured absent ──
+    # ⛔ The caller supplies `FalkorProjection._vector_indexed_labels_for_reads`
+    # — the BEHAVIOURAL half, never the reported pair above it. The reported pair
+    # collapses "the catalogue came back but nothing in it parsed" into an empty
+    # set (#11087's pinned message semantic), so acting on that value would read
+    # an engine catalogue reshape as "this store indexes nothing" and demote
+    # every dense read to a scan. The behavioural half is None in exactly that
+    # lane. Both are equal in every other lane.
+    # ⚠️ RESIDUAL, disclosed rather than compared away (#13121 round 14): the
+    # inventory is filled ONLY by `_ensure_indexes` / `_create_vector_index_api`
+    # (projection/__init__.py:21668, :21724) — the only in-process re-measure is
+    # the destructive `rebuild_from_record`. So a long-lived projection (an SDK
+    # session, the MCP server) that outlives an OUT-OF-BAND
+    # `CREATE VECTOR INDEX` — precisely the remedy the `#4997` notice
+    # recommends — keeps scanning ``scan_fallback`` until its next setup, where
+    # before #13108 the NEXT CALL picked the index up. Results stay correct and
+    # the direction is fail-safe (a stale skip costs the scan that the refused
+    # round trip preceded anyway), but a stale line here is a stale DECISION, not
+    # merely the stale `#4997` MESSAGE an operator can read around.
+    # None means NOT MEASURED (the inventory's fail-open lane): attempt as before
+    # rather than assume absence, because a wrong skip would demote every read of
+    # an indexed label to a scan.
+    _index_known_absent = (vector_indexed_labels is not None
+                           and label not in vector_indexed_labels)
+    if not is_embedded and _index_known_absent:
+        # #4999: this is still scan_FALLBACK, not `scan` — an index was expected
+        # for this label and was not used. Only the two doomed round trips go.
+        index_attempted = True
+        logger.debug(
+            "#13108: %s carries no vector index on this store — skipping the "
+            "queryNodes attempt and scanning (recorded scan_fallback)", label)
+
     # Docker/server mode → try index-accelerated vector search (#7777)
-    if not is_embedded:
+    if not is_embedded and not _index_known_absent:
         index_attempted = True
         # #689: retracted Points must not leak into vector results.
         # D10 (#5026): the Source label holds both the document node
@@ -4689,6 +4765,7 @@ def degradation_chain(
     scope_kinds: tuple[str, ...] | None = None,
     pg_vector: Callable[[str, Sequence[float], int, tuple | None],
                         list[tuple[str, float, Any]] | None] | None = None,
+    vector_indexed_labels: frozenset[str] | set[str] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -4771,6 +4848,12 @@ def degradation_chain(
         :func:`run_vector_query`, which then judges the dense leg's material
         against that scope instead of the whole entity label.
         Default None = pre-#4199 behavior.
+
+    vector_indexed_labels (#13108): optional set of labels the store has been
+        MEASURED to carry a VECTOR index for. Forwarded verbatim to
+        :func:`run_vector_query`, which skips the doomed index attempt for a
+        label that is absent from it. Default None = pre-#13108 behaviour
+        (attempt as before), merged into the submit kwargs only when supplied.
     """
     # #5404: this is the public orchestration entry point, and the collection
     # loop below swallows every strategy exception by design (a failed leg
@@ -4840,6 +4923,11 @@ def degradation_chain(
                 # the request thread by `record_vector.searcher()`, and this
                 # thread cannot read it (ContextVars do not cross threads).
                 _vec_kwargs["pg_vector"] = pg_vector
+            if vector_indexed_labels is not None:
+                # #13108: merged ONLY when supplied — same pinned-contract
+                # posture as `min_similarity`/`scope_kinds` above, so a default
+                # caller's submit kwargs stay byte-identical.
+                _vec_kwargs["vector_indexed_labels"] = vector_indexed_labels
             futures[executor.submit(
                 bind_metering_context(_retrieval_metering.bind_worker_context(
                     run_vector_query)), graph, query_vec,

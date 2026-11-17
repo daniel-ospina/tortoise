@@ -147,7 +147,8 @@ from .live import terminal_row_marker  # …and ONE way to name it
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
-from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
+from .live import status_as_reported, refuse_event_lifecycle_state  # #9974 R1 + #13100
+from .live import endpoint_permits_operator_promotion  # #13100: the re-homed live/draft gate
 # #10893: the read-stage timeline, so a breached wait budget can NAME the stage it
 # died in. `mark` is a NO-OP when no timeline is bound (every CLI, unit test and
 # in-process SDK user), so the hot read path pays one ContextVar read per
@@ -329,19 +330,44 @@ DECIDE_DEFAULT_CREDIBILITY = "medium"  # → Beta(3,1) via source_credibility
 # belief about a goal from its state, and `update_entity(id, status="met")`
 # was accepted (the #2977 OBJECT_STATUS_VALUES guard is not on main). The
 # vocabulary is the owner's closed set (the #7871 read-side comment: `met` /
-# `active` / `blocked` / `unmet` / `superseded` / `abandoned`) plus
-# `guideline` — the value the objective map already uses for the demoted
-# <10-min-CI "target" (tortoise#6792 form ruling: a guideline cannot outrank a
-# goal, so it is recorded as a goal state no reader treats as pass/fail).
+# `active` / `blocked` / `unmet` / `superseded` / `abandoned`) and, since
+# #13035, it is exactly that set: `guideline` was REMOVED by owner ruling
+# (2026-11-16) — whether a goal is directional is a question about PRIORITY,
+# not about outcome, so it was never an achievement state and the model's list
+# is six words (design: `docs/plans/2026-11-15-state-lifecycle-and-pipelines.md`
+# §5). Four of the six describe a LIVE commitment; the other two are the
+# lifecycle's endings spelled on this axis, and #13035 makes the write boundary
+# refuse a write that ends the goal on one field and leaves it running on the
+# other (see `_refuse_inconsistent_goal_ending`).
 GOAL_STATE_VALUES = frozenset({
     "met",         # achieved
     "active",      # being pursued
     "blocked",     # pursued but gated by an unmet dependency
     "unmet",       # not yet achieved and not yet being pursued
-    "superseded",  # replaced by a newer commitment
-    "abandoned",   # deliberately dropped
-    "guideline",   # directional, no pass/fail (owner ruling #6792)
+    "superseded",  # replaced by a newer commitment (an ENDING)
+    "abandoned",   # deliberately dropped (an ENDING)
 })
+
+#: The two ``goalState`` words that END a goal — the lifecycle's endings spelled
+#: on the achievement axis (#13035, design §5). ``abandoned`` IS ``deprecated``
+#: for a goal (ended, and nothing replaced it); ``superseded`` keeps its
+#: spelling on both axes (replaced by a named successor). The other four words
+#: (:data:`GOAL_LIVE_STATES`) describe a commitment that is still being pursued.
+GOAL_ENDING_STATES = frozenset({"abandoned", "superseded"})
+
+#: The ``goalState`` words that describe a LIVE commitment — DERIVED from the
+#: vocabulary, never re-spelled, so a change to the closed set cannot leave this
+#: companion behind (a hand-written copy is how `guideline` outlived its ruling).
+GOAL_LIVE_STATES = GOAL_STATE_VALUES - GOAL_ENDING_STATES
+
+#: The ``status`` word each ending is spelled as on the lifecycle axis (#13035).
+#: `abandoned` is `deprecated` under another name; `superseded` keeps the word.
+#: ⛔ DELETED (#13065 review ROUND 10, finding 2): nothing read it. The rule the
+#: code actually enforces is `_status_words_for_goal_ending`, which accepts ANY
+#: non-`superseded` terminal `status` for `abandoned` (so the legacy `outdated`
+#: retirement is not refused). A constant stating the STRICTER rule beside code
+#: enforcing the wider one is a trap for the next reader, and the axis table in
+#: this module's header now says what the code does.
 
 # #7856 defect 2: the objective map's TOP node was a `goal` POINT created
 # without an explicit status, so it defaulted to `draft`. A draft point that
@@ -5299,12 +5325,23 @@ _JOURNAL_ENVELOPE_KEYS = (
 #   built, overwriting it (measured on ``update_point``: a caller ``ts``,
 #   ``event_id`` and ``projection_version`` all reached the record).
 #
-# The set is spelled out rather than derived so an auditor sees it whole; it
-# must stay equal to `_JOURNAL_ENVELOPE_KEYS` minus ``id``.
+# The set is spelled out rather than derived so an auditor sees it whole, and it
+# must stay EQUAL to `_JOURNAL_ENVELOPE_KEYS` minus ``id`` — nothing derives it,
+# and ``seq`` is a member of BOTH (the tuple lists it, `:5242`), so the
+# subtraction leaves it reserved. ⛔ An earlier cut of this paragraph called the
+# set the tuple "minus ``id`` PLUS ``seq``, since `seq` is not in the envelope
+# tuple" — FALSE at `origin/main`, `942786899b` and here; do NOT re-apply it
+# (`seq` joined the tuple at `142f7c59bb`; the passthrough doors pin their own).
 #
 # ⛔ ``seq`` IS LOAD-BEARING HERE, not tidiness (#12894). `#9190` makes the
-# record CARRY its ordinal, so `record_projection._carried_position` READS a
-# record's `seq` and REFUSES the write when it disagrees with the enumeration.
+# record CARRY its ordinal, so `record_projection.replay` READS a record's `seq`
+# — **only when the caller declares the batch RECORD-sourced**
+# (``carried_positions=True``), and then REFUSES the write when the carried number
+# disagrees with the enumeration (#13043 review P1-3). On a journal-sourced batch
+# the enumeration IS the position and the prop is ignored, which is what keeps a
+# legacy line on disk from refusing its own write. `EventLog.append` and
+# `_emit_event`'s `**extra` strip the name at the chokepoints as well, so no NEW
+# line can carry one.
 # A caller prop named ``seq`` rode `event.update(extra)` onto the journal line
 # top level (neither this set nor `_JOURNAL_ENVELOPE_KEYS` named it), so
 # ``update_point(pid, seq=42)`` produced a line whose ``seq`` disagreed with
@@ -5935,6 +5972,930 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
     )
 
 
+# ── #13035: the two fields must AGREE about whether a goal has ended ───────
+#
+# THE DEFECT THIS CLOSES (measured on the pre-change tree): `goalState` was
+# validated against its own vocabulary and NEVER against `status`, while
+# `derived_invalidation`'s retirement arm retires a goal's derived caches on
+# `goalState in RETIRED_GOAL_STATES` (`{superseded, abandoned}`) and every other
+# reader asks `status`. So `goalState='abandoned'` with `status='live'` was
+# retired to the invalidation path and CURRENT to every reader — a word dead to
+# one surface and alive to another, which is the exact failure the two-axis
+# model exists to remove (design: `docs/plans/2026-11-15-state-lifecycle-and-
+# pipelines.md` §5).
+#
+# THE RULE (design §5, "One source of truth"): `status` ends the goal, and
+# `goalState` never ends it alone. The two endings are the lifecycle's endings
+# spelled on the achievement axis — `abandoned` IS `deprecated`, `superseded` is
+# `superseded` — so a write that ends the goal on ONE field and leaves it
+# running on the other is REFUSED, in either direction:
+#
+#   * `goalState` in GOAL_ENDING_STATES  ⇒ `status` must be that ending's own
+#     word (`_status_words_for_goal_ending`, the ONE authority — it accepts any
+#     non-`superseded` terminal status for `abandoned`), and `superseded` must
+#     additionally NAME its successor;
+#   * `status` in the ended set           ⇒ `goalState` must be the matching
+#     ending, or absent/None — a goal carrying no achievement word makes no
+#     claim to contradict, so ending it on `status` alone stays legal.
+#
+# WHY THE ENDED SET IS IMPORTED, NOT RE-SPELLED: `status in
+# live.TERMINAL_EXCLUDED_STATUSES` is the SAME predicate every read surface uses
+# to answer "is this still current", so the door and the readers cannot start
+# disagreeing about which words end a record (the #2901 rule: no reader, and no
+# door, re-declares a status set). `superseded` is the one ending whose spelling
+# is kept on both axes; every OTHER ended word spells `abandoned`.
+#
+# WHERE IT IS ENFORCED — the payload boundary (`_sanitize_props`, which every
+# SDK/MCP write door meets) plus the two UPDATE doors' target-aware probe, since
+# only they can answer "what does the node ALREADY say"
+# (`_stored_goal_ending_view`). The verb-shaped raw writers (`supersede_point`, `retract_point`,
+# `invalidate_point`) do not pass here, and one of them must not be taught to
+# write the word: `goalState` on a `:Point` is NOT journalled (#4094's class,
+# `derived_invalidation.py` — the sweep refuses to repair a Point for that
+# reason), so stamping it there would mint a live-only word a rebuild silently
+# drops. A goal OBJECT (and a `:Subject` goal) is aligned in ONE write through
+# the approved revise verb — `update_knowledge(goal, status=…, goalState=…)`,
+# whose props ARE journalled and DO survive `rebuild_all`.
+
+#: The sentinel meaning "this write stated nothing, and the node's own value has
+#: not been read yet" — distinguishes an ABSENT key from an explicit `None`
+#: (which is the documented CLEAR: "this field makes no claim").
+_GOAL_ENDING_UNSET = object()
+
+
+def _status_words_for_goal_ending(ending: str) -> frozenset[str]:
+    """The ``status`` words that spell ``ending`` on the lifecycle axis.
+
+    Derived from :data:`live.TERMINAL_EXCLUDED_STATUSES` — the shared predicate's
+    own set — so this door cannot disagree with the readers about which words
+    end a record. ``superseded`` is the one ending that keeps its spelling; every
+    other ended word (``deprecated``, ``archived``, ``retracted``, the legacy
+    ``outdated``) means *ended and nothing replaced it*, i.e. ``abandoned``.
+    """
+    if ending == _SUPERSEDED_STATUS:
+        return frozenset({_SUPERSEDED_STATUS})
+    return frozenset(set(TERMINAL_EXCLUDED_STATUSES) - {_SUPERSEDED_STATUS})
+
+
+def _successor_name_of(value: object) -> str | None:
+    """The successor NAME this value spells, or ``None`` — the ONE rule.
+
+    #13065 review rounds 15/16, finding 1 (P2, fail-open + recorded-decision
+    noncompliance). ``#12914`` is MERGED and its helper ``_successor_named_by``
+    already owns the question *"does this write name a successor?"*.
+    ``tortoise/sdk.py`` answered it a SECOND time on the achievement axis with a
+    LOOSER rule — ``value not in (None, "")`` — which admits ``"   "``, ``0``,
+    ``False`` and ``[]`` (all of which name nobody and all of which the merged
+    helper refuses, each for a MEASURED reason recorded in its docstring:
+    ``0``/``False``/``[]`` resolve to nothing in every ``_as_str``-style reader,
+    and a ``str`` subclass can answer ``strip()`` while storing ``''``), and it
+    accepted the ``superseded_by`` SNAKE spelling that is a SHADOW property no
+    camel-keyed reader of the successor resolves (#12782).
+
+    The owner's coordination brief on #13035 (2026-11-16) is a RECORDED
+    DECISION and it is explicit: *"Do **not** re-derive the successor
+    requirement. If #12914 has landed or is close, **reuse its helper** … so the
+    two axes cannot drift apart in what they demand"*. So this module now has
+    exactly ONE spelling of the rule, and both callers read it:
+    ``_successor_named_by`` (the merged write-side predicate) and the stored
+    half (:func:`_stored_goal_ending_view`'s ``successor``) — which had the
+    identical looser test (``carrier not in (None, "")``), so a stored
+    ``supersededBy="   "`` discharged the obligation too.
+
+    An exact ``str`` is required, not ``issubclass(type(value), str)``: the LIVE
+    WIRE is rendered by METHOD LOOKUPS on the caller's object, so a subclass can
+    render ``'""'`` while the journal keeps the content (#12592 cycle-7 P2).
+    """
+    return value if (type(value) is str and value.strip()) else None
+
+
+def _goal_successor_named(props: dict, stored_view) -> bool:
+    """Does this write — or the node — NAME the goal's successor?
+
+    The successor is never a field of ``goalState``: it is the ``supersededBy``
+    carrier on an Object/Subject goal (whose record derives ``status`` from those
+    columns) or the ``CORRECTS`` edge on a Point goal. ``supersededAt`` ALONE is
+    bookkeeping, not a name, so it does not satisfy this.
+
+    ⛔ A PRESENT carrier is not a NAMED successor: an empty string carries no
+    name, so it must not discharge the obligation. That is the SAME test the
+    stored half applies (``_stored_goal_ending_view``: ``named = carrier if
+    carrier not in (None, "") else None``) — since #13065 review P2 the write
+    side and the read side of one field agree. ``""`` stays a carrier for the
+    record's ``IS NOT NULL`` fold (#10192); it just does not name anybody.
+    """
+    from tortoise.record_projection import snake  # local: avoids import weight
+
+    named_in_write = False
+    # `value` is deliberately not unpacked: this scan asks only WHICH COLUMN the
+    # write touches, and answering *what it says* is `_successor_named_by`'s job
+    # (#12914) — see the block below. Iterating the keys keeps that split visible,
+    # and ruff's B007 had been flagging the vestigial binding on CI.
+    for key in props:
+        # ⛔ #13065 review round 6 finding 3 (P2): the carrier is recognised by
+        # BOTH renderers. `snake(key)` normalises the key's CONTENT, while the
+        # live write files the key by `str(key)` (`live.py`'s two-renderer
+        # contract) — so a key with content `'harmless'` and `__str__() ==
+        # 'supersededBy'` was invisible here, `named_in_write` stayed False, and
+        # the guard fell back to the STORED view: i.e. to the very column the
+        # write NULLS. Measured: `supersededBy` cleared where the plain-key
+        # control is refused. Whichever name the live write files it under is a
+        # name the guard must see.
+        try:
+            live_name = str(key)
+        except Exception:      # a hostile `__str__` cannot hide a carrier
+            live_name = "supersededBy"
+        if snake(key) != "superseded_by" and live_name != "supersededBy":
+            continue
+        named_in_write = True
+    if named_in_write:
+        # ⛔ #13065 review rounds 15/16, finding 1 (P2): the NAMING question is
+        # NOT answered here — ``#12914``'s merged ``_successor_named_by`` is the
+        # one authority for it, and this scan only decides WHETHER the write
+        # touches the carrier column at all (which is what selects between "the
+        # write's own value decides" and "read the stored half"). Answering it
+        # twice is how the achievement axis grew a looser rule than the one the
+        # update door applies: this loop used to accept ``"   "``, ``0``,
+        # ``False``, ``[]`` and the ``superseded_by`` shadow spelling, all of
+        # which name nobody, and ``create_object``/``create_subject`` have NO
+        # second check (the merged door's own SCOPE note says the create door is
+        # a disclosed residual) — so those rows were born ``superseded`` naming
+        # nobody.
+        #
+        # ⛔ NOT falling back to the stored view when the write names the
+        # carrier is load-bearing (#13065 review finding 2): a write that CLEARS
+        # the column must not discharge the obligation with the value it clears.
+        return _successor_named_by(props)
+    view = stored_view() or {}
+    return bool(view.get("successor"))
+
+
+def _is_lifecycle_word(value: object, vocabulary) -> bool:
+    """Is ``value`` a WORD of this closed lifecycle vocabulary?
+
+    ⛔ THE TYPE TEST COMES FIRST, and it is not cosmetic. The vocabularies are
+    ``frozenset``s, so ``value in vocabulary`` hashes the value: a list/dict
+    stored in ``status`` (or passed as ``goalState``) raises
+    ``TypeError: unhashable type`` — and this guard runs BEFORE the doors that
+    refuse an invalid status with the documented ``ValueError``, so the crash
+    replaced the refusal the primitive promises (#13065 CI, 27 ids; the shape is
+    pinned by ``test_a_non_string_or_absent_status_cannot_lift_a_dead_row[list]``).
+
+    ⛔ AND ``isinstance`` IS NOT ENOUGH — a ``str`` SUBCLASS can make the same
+    membership raise on its own ``__hash__``/``__eq__`` (``_UnhashHonest``: an
+    honest content that defines ``__eq__``, which nulls ``__hash__``), and it can
+    also ANSWER for a word it does not spell. So the value is normalised with
+    ``str.__str__`` — the settled idiom of the transition guard below: it cannot
+    consult an override and it returns a PLAIN ``str`` — and the gate is
+    ``issubclass(type(value), str)``, NOT ``isinstance``, because an object can
+    claim ``__class__ = str`` while ``str.__str__`` on it RAISES. Both shapes are
+    pinned by ``test_a_str_subclass_cannot_forge_a_dead_word_or_crash_the_guard``.
+
+    The DECISION stays the primitive's: a non-``str`` (or impostor, or
+    subclass whose content is not a word) answers ``False`` here, which
+    under-reaches — never over-refuses — and the write proceeds to the door that
+    owns it.
+    """
+    if not issubclass(type(value), str):
+        return False
+    return str.__str__(value) in vocabulary
+
+
+def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
+                                     goal_ending=None,
+                                     may_target_existing_node: bool = False) -> None:
+    """Refuse a goal write that ends it on one field and runs it on the other.
+
+    #13035. Operates on the STATE THE WRITE LEAVES — the value in ``props`` when
+    the caller supplies one, otherwise the node's STORED value — the #2782
+    posture the sibling money gate already applies. ``goal_ending`` is the
+    caller's ZERO-ARG PROBE for that stored side (``{"status", "goalState",
+    "successor"}``) and it is called AT MOST ONCE — but ⛔ NOT only when the bag
+    alone cannot answer. On the two UPDATE doors it is read only when the write
+    cannot answer by itself (a bag naming both fields WITH an ENDING `goalState`
+    pays nothing there — #13065 review ROUND 11, finding 3: a bag naming both
+    fields with a LIVE `goalState` DOES pay one read, because the legacy
+    `outdated` flag can end a row whose `status` says nothing, and this sentence
+    asserted the wider claim), which
+    matters because this runs on every SDK write); on a door that can land on an
+    ALREADY EXISTING node (``may_target_existing_node``) it is read
+    UNCONDITIONALLY, because there a stored ending can end the goal no matter
+    what the bag names. ⛔ Round-3 finding 4 superseded the "a bag naming both
+    fields never pays for a read" claim that stood here; it was corrected at the
+    ``create_point`` call site and left standing in this docstring (#13065
+    review round 5, P3 — measured: 1 stored read on a both-fields explicit-id
+    create). ``None`` means the CREATE reading,
+    where the node does not exist yet — so an absent ``status`` really is the
+    ordinary LIVE birth state and an absent ``goalState`` really is no claim.
+
+    ``may_target_existing_node`` is for the ONE create leg that can land on an
+    ALREADY EXISTING node — ``create_point`` with a caller-supplied ``id``, whose
+    journal fold MERGEs on that id. There the stored ``goalState`` is part of the
+    state the write leaves for EVERY status, not only a terminal one, because a
+    CREATE always LANDS a status (the default is ``"live"``):
+    ``create_point(id=<retired goal>)`` with no ``status`` writes
+    ``status="live"`` beside a stored ``goalState="abandoned"`` — the same
+    divergence from the other side (#13065 review P2). A GENUINELY fresh id
+    answers ``{}`` and refuses nothing, and an id-less create never reads.
+
+    REFUSED IN EITHER DIRECTION, with BOTH repairs named (the AX rule: say that
+    it refused, exactly what failed, and exactly what to do): add the ending to
+    the other field, or drop it from the one that carries it.
+
+    ⛔ THE PRESENCE TEST AND THE READS ARE SHAPE-INDEPENDENT (#13065 review
+    finding 3). `"goalState" in props` hashes the LITERAL name, so a `str`
+    SUBCLASS key that renders as ``goalState`` is missed by the test while the
+    live transport still files it under that column (`tortoise/live.py`'s
+    two-renderer contract, measured on the sibling guard at #11825/#9649: the
+    pair was written through the door that claims to refuse it). The read goes
+    through `lifecycle_props_by_rendering`, and a call that names a guarded
+    field MORE THAN ONCE is refused rather than guessed — `_status_write_is_ambiguous`'s
+    rule, applied to both guarded names.
+    """
+    rendered = lifecycle_props_by_rendering(props, ("status", "goalState"))
+    if not rendered:
+        return
+    doubled = sorted(
+        name for name in ("status", "goalState")
+        if len(keys_rendering_as(props, {name})) > 1)
+    if not doubled:
+        # ⛔ #13065 review round 6 finding 2 (P2): ONE KEY can populate BOTH
+        # guarded names. `_event_state_key_names` answers the UNION of the two
+        # renderers (`str(key)` for the live write, the CONTENT for the journal),
+        # so a key with content `'status'` and `__str__() == 'goalState'` sets
+        # both names in `rendered` while `doubled` (keys PER name) sees 1 and 1.
+        # The guard then graded the pair the bag spells and the writer filed it
+        # under `str(key)` only — measured: `('superseded','superseded')` admitted,
+        # node left `status=None` beside `goalState='superseded'`, the issue's own
+        # headline pair through the door that claims to refuse it. Fewer
+        # contributing keys than guarded names is that shape.
+        contributing = {key for name in rendered
+                        for key in keys_rendering_as(props, {name})}
+        if len(contributing) < len(rendered):
+            doubled = sorted(rendered)
+    # ⛔ #13065 review ROUND 15, finding 1 (P1): GRADE WHAT THE WRITE SENDS.
+    # Everything below grades BASE CONTENT (`str.__str__`, through
+    # `_is_lifecycle_word`), because that is the word the JOURNAL and the record
+    # hold — but the LIVE WIRE is rendered by METHOD LOOKUPS on the caller's
+    # object (`falkordb.helpers.quote_string` calls `len(v)` and `v.replace`). So
+    # a `str` subclass whose content is `active` and whose `replace()` answers
+    # `abandoned` was graded as `active` and STORED as `abandoned`. MEASURED, four
+    # writes on the reviewed head: `update_knowledge(goal,
+    # goalState=Rep0('active'))` left `status='live', goalState='abandoned'` — the
+    # issue's own headline pair, and a `failures` row under this suite's OWN
+    # acceptance predicate; the same through `create_object`, in both directions.
+    # This is the split `_update_entity`'s no-promote arm already closes for
+    # `status` (`props[_np_key] = str.__str__(props[_np_key])`, with the same
+    # measured rationale) and that `supersede_knowledge` closes for its operands
+    # (#12914 P1). `goalState` was the one column routed through a decision guard
+    # and left unbound. Rebinding is behaviour-neutral for an honest `str`: a
+    # plain subclass already stores its content today.
+    _rebind_guarded_words(props, rendered)
+    if doubled:
+        # ⛔ ONE WORDING WITH THE DOOR'S OWN CHECK (`update_entity`'s
+        # `_status_write_is_ambiguous` refusal, #12786): a caller that trips this
+        # at the payload boundary and a caller that trips it one branch below must
+        # see the SAME diagnosis, or the same shape gets two explanations.
+        fields = " and ".join(f"`{n}`" for n in doubled)
+        raise ValueError(
+            f"{surface} refused a CONFLICTING status write: more than one key in "
+            f"this call renders as {fields} and they ask for different words. "
+            f"A `str` subclass whose content and `__str__` differ is filed under "
+            f"one name by the live write and the other by the journal, so which "
+            f"word lands cannot be known here — and guessing it is a bypass "
+            f"(#13065 review finding 3). Pass each field ONCE, as a plain str, "
+            f"with the word you mean."
+        )
+
+    bag_goal = rendered.get("goalState", _GOAL_ENDING_UNSET)
+    bag_status = rendered.get("status", _GOAL_ENDING_UNSET)
+    goal_state, status = bag_goal, bag_status
+    _stored: dict = {}
+    _read = False
+
+    def _stored_view() -> dict:
+        nonlocal _read
+        if not _read:
+            _read = True
+            if goal_ending is not None:
+                _stored.update(goal_ending() or {})
+            if _stored.get("conflict") and (
+                    # ⛔ THE ARM IS SCOPED TO THE GOAL AXIS, the same way the
+                    # `_stored_ending` arm below is (round 6, finding 1), and for
+                    # the same reason. Rows that carry NO `goalState` and whose
+                    # write names none are not goals, so there is no goal ending
+                    # for them to disagree about — and the successor difference
+                    # among them is not a goal question at all: the `#12592`
+                    # successor guard answers it over EVERY bound row already.
+                    # Measured without this gate (the merge of this branch onto
+                    # `origin/main`): two `:Object`s sharing an id, both
+                    # `status='live'`, no `goalState` anywhere, one carrying
+                    # `supersededBy`, differing ONLY on that — `update_knowledge(
+                    # <id>, status='superseded')` was refused
+                    # "more than one node … disagree about the goal's ending"
+                    # instead of the successor guard's own "no successor",
+                    # reddening `test_12592_supersede_door.py::
+                    # test_the_verdict_is_over_every_bound_row`.
+                    # ⛔ NOT a weakening: when the bag NAMES `goalState` the goal
+                    # axis IS in play, so a stored disagreement is still refused
+                    # (otherwise the successor verdict would come from `rows[0]`,
+                    # the plan-order dependence round 12 pinned).
+                    bag_goal is not _GOAL_ENDING_UNSET
+                    or _stored.get("anyGoalState")):
+                # #13065 review finding 5: MORE THAN ONE node carries this id and
+                # they disagree about whether the goal ended. The write binds
+                # them ALL (the journal fold MERGEs on the id), so grading
+                # `rows[0]` would make the verdict PLAN-ORDER dependent — refuse
+                # rather than answer from one row. Raised from the view so a
+                # write that never needs the stored half never pays for it.
+                raise _duplicate_id_conflict_error(surface)
+        return _stored
+
+    def _status_restated_by_an_echo() -> bool:
+        """Does this write merely RESTATE the `status` the row already holds?
+
+        ⛔ #13065 review round 13, finding 1 (P2) — the `#3305`/F4-2 decision, one
+        axis over. A generic tenant PUT is a read-modify-write: it fetches the row
+        and sends it back with the fields it changed, so `status` arrives
+        UNCHANGED beside a new `content`. The live-word arm below fires on the
+        STATE the write leaves — which, for such a call on a goal ended by
+        `supersede_point`/`retract_point`/`invalidate_point`, is
+        `status=terminal` + `goalState=live`: the BENIGN legacy shape this PR's
+        own body calls benign and its sweep exists to keep serving. Measured
+        before this exemption: `update_knowledge(<that goal>, status='superseded',
+        content=…)` raised, though it changed nothing about the ending, and the
+        exemption that would have admitted it (`_status_entailed`, `#3305`)
+        is computed inside `_update_entity` ~700 lines AFTER this guard runs,
+        so it could never disarm it. In-tree decision, quoted:
+        *"An unchanged status cannot resurrect anything."*
+
+        ⛔ NOT a general weakening, and it cannot mint a divergence: both halves
+        must hold — the supplied `status` EQUALS the stored one and the bag does
+        NOT name `goalState` — so the state the write leaves is the state the row
+        already held. A caller moving either field is graded exactly as before.
+
+        ⛔ Both sides are read at their BASE CONTENT (`str.__str__`, the same rule
+        `#12907` cycle 3 applied to `_status_entailed`), never through the
+        caller's overrides — a `str` subclass answers `__eq__` for whichever side
+        it sits on, so an unnormalised comparison could call two different words
+        equal and admit a real ending. A side that is not a `str` at all makes
+        this NOT a restatement: fail-closed, the guard is asked rather than
+        skipped.
+        """
+        if bag_goal is not _GOAL_ENDING_UNSET:
+            # The write moves the achievement axis, so it is graded in full.
+            return False
+        if bag_status is _GOAL_ENDING_UNSET:
+            return False
+        stored_status = _stored_view().get("status")
+        if not (issubclass(type(bag_status), str)
+                and issubclass(type(stored_status), str)):
+            return False
+        return str.__str__(bag_status) == str.__str__(stored_status)
+
+    if may_target_existing_node and _stored_view() and (
+            _is_lifecycle_word(_stored.get("status"), TERMINAL_EXCLUDED_STATUSES)
+            or _is_lifecycle_word(_stored.get("goalState"), GOAL_ENDING_STATES)
+            # ⛔ #13065 review ROUND 10, finding 1 (P2): the LEGACY `outdated`
+            # half counts as ended HERE too. The two read predicates THIS diff
+            # introduces (`derived_invalidation._retired_by_status`,
+            # `goal_judgement._goal_retired_on_status`) are both
+            # `ended_on_status or bool(outdated)`; a door that read only `status`
+            # therefore disagreed with its own repairs about which rows are
+            # ended, and a goal retired by the flag got no stored-side check at
+            # all. Measured: `SET n.outdated=true` on a live goal, then
+            # `update_knowledge(goal, goalState='met')` LANDED and left
+            # `status=None, goalState='met', outdated=True` — retired on the
+            # reading axis, live on the achievement axis, the #13035 divergence
+            # through the chokepoint that claims to close it.
+            or bool(_stored.get("outdated"))):
+        # #13065 review finding 4: on a door that can land on an ALREADY
+        # EXISTING node, the STORED ending is part of the state the write
+        # leaves — even when the caller names BOTH fields. Otherwise
+        # `create_point(id=<retired goal>, goalState="met")` writes a coherent
+        # LIVE pair over an ended node and resurrects it, while the identical
+        # transition through `update_knowledge` is refused.
+        #
+        # ⛔ THIS ARM IS LAST (see the end of this function): the two branches
+        # above name the pair that failed and the repair for it, so a write they
+        # can already describe keeps their more specific refusal.
+        _stored_ending = True
+    else:
+        _stored_ending = False
+
+    if goal_state is _GOAL_ENDING_UNSET or status is _GOAL_ENDING_UNSET:
+        # The write does not name both endpoints. Ask the node for the missing one
+        # — and only when it can decide anything, so the ordinary write pays
+        # nothing: a `status` write that is NOT an ending needs no stored
+        # `goalState` (nothing is being ended), while ANY `goalState` write needs
+        # the stored `status`, because an ending is FINAL — a live achievement
+        # word written over an ended goal is the same divergence from the other
+        # side, and catching it is the only thing standing between two separate
+        # writes and the incoherent pair. On a CREATE (`goal_ending is None`) the
+        # node does not exist, so the missing side really is absent — and absent
+        # `status` is the ordinary LIVE birth state.
+        if (status is _GOAL_ENDING_UNSET
+                and goal_state is not _GOAL_ENDING_UNSET):
+            status = _stored_view().get("status")
+        elif (goal_state is _GOAL_ENDING_UNSET
+                and (may_target_existing_node
+                     or _is_lifecycle_word(status,
+                                           TERMINAL_EXCLUDED_STATUSES))):
+            goal_state = _stored_view().get("goalState")
+
+    if _is_lifecycle_word(goal_state, GOAL_ENDING_STATES):
+        wanted = _status_words_for_goal_ending(goal_state)
+        if not _is_lifecycle_word(status, wanted):
+            _also = ""
+            if _is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES):
+                _also = (f" The two endings are not interchangeable: "
+                         f"{sorted(wanted)} spell goalState={goal_state!r}, so "
+                         f"status={status!r} says the goal ended the OTHER way.")
+            raise ValueError(
+                f"REFUSED: goalState={goal_state!r} ends the goal, but "
+                f"status={status!r} leaves it running (through {surface}). "
+                f"#13035: a goal's two "
+                f"ending words are the lifecycle's endings spelled on the "
+                f"achievement axis, so `status` and `goalState` may not "
+                f"disagree about whether the goal ended — a goal "
+                f"retired on one field and left current on the other is "
+                f"retired to `derived_invalidation` and served as CURRENT by "
+                f"every other reader.{_also}\n"
+                f"Two ways to fix it, either is accepted:\n"
+                f"  1. add the ending to `status` — pass "
+                + ("status='superseded' together with the successor's NAME, "
+                    "supersededBy=<successor name>"
+                    if goal_state == _SUPERSEDED_STATUS else
+                    # ⛔ #13065 review ROUND 22, finding 2 (P3): CARRIER-AWARE,
+                    # the same clause the sibling successor repair carries. The
+                    # `superseded` arm was made carrier-aware in an earlier
+                    # round and the `abandoned` arm was left carrier-BLIND, so
+                    # its first-named repair was `status='archived'` — which
+                    # `_ALLOWED_TRANSITIONS` REFUSES on a `:Point` (*"terminal
+                    # (reserved — no v1 write path)"*, ONTOLOGY §5), i.e. the
+                    # first thing this message told a Point caller to do, the
+                    # same door then refused. Measured in the new suite
+                    # (`test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal`):
+                    # the pre-fix text raised `update_entity refused the status
+                    # transition 'live' -> 'archived'` from the call it
+                    # prescribed. `retracted` is a declared transition from
+                    # every live state on BOTH carriers, so it is named first on
+                    # the one carrier where `archived` is not reachable.
+                    "status='archived' on an Object/Subject goal, or "
+                    "status='retracted' on a :Point goal (whose declared "
+                    "transitions from a live state are exactly "
+                    "{retracted, superseded}, so 'archived' is REFUSED there as "
+                    "reserved); the legacy 'deprecated' spelling is accepted on "
+                    "goals whose door carries it")
+                + f";\n"
+                f"  2. drop the ending from `goalState` — pass a word that "
+                f"describes a live commitment {sorted(GOAL_LIVE_STATES)} (or "
+                f"goalState=None to state nothing about the achievement)."
+            )
+        if goal_state == _SUPERSEDED_STATUS and not _goal_successor_named(
+                props, _stored_view):
+            raise ValueError(
+                f"REFUSED: goalState='superseded' says the goal was REPLACED, "
+                f"and this write names no successor (through {surface}). "
+                f"#13035: "
+                f"`superseded` means `deprecated`'s opposite — something "
+                f"replaced it — so the successor is part of the ending, not "
+                f"an optional extra.\n"
+                f"Two ways to fix it, either is accepted:\n"
+                # ⛔ The column is NAME-keyed — ONTOLOGY §4.2/§4.3 *"successor
+                # NAME (stored verbatim)"* — and every reader of it resolves a
+                # NAME: `assembly._probe_visible_successors` is that probe, and
+                # it is keyed on the successor's NAME. Prescribing an id here
+                # would name a value no read surface can resolve — the defect
+                # `_supersede_entity` names in its own docstring (*"storing an id
+                # here would write a pointer no read surface can resolve, i.e.
+                # the same defect as storing none"*). The text is CALLER-facing,
+                # so it says what the caller needs: the value the field reads,
+                # and the verb that turns an id into one.
+                f"  1. name the successor — `supersededBy=<successor name>` on "
+                f"an Object (or Subject) goal (that column stores the "
+                f"successor's NAME, which is what every reader of it resolves, "
+                f"so an id matches nothing), or `supersede_point(goal, "
+                f"successor)` on a Point goal, which records it as the "
+                f"CORRECTS edge. If you only hold the successor's ID, "
+                f"`supersede_knowledge(<this id>, <successor id>)` is the verb "
+                f"that resolves it to the name;\n"
+                f"  2. if nothing replaced it, say so — pass "
+                f"goalState='abandoned' with a status that ENDS it on the door "
+                f"you are using: status='retracted' on a :Point goal (its "
+                f"declared transitions from a live state are exactly "
+                f"{{retracted, superseded}}, so the 'archived' ending is REFUSED "
+                f"there as reserved), or status='archived' on an "
+                f"Object/Subject goal. ⛔ Not the legacy 'deprecated' spelling: "
+                f"no Point door accepts it, so prescribing it would send a "
+                f"caller in a circle (measured: `ValueError: Invalid status "
+                f"'deprecated'`)."
+            )
+        return
+
+    if (_is_lifecycle_word(goal_state, GOAL_LIVE_STATES)
+            # ⛔ #13065 review ROUND 10, finding 1 (P2): the same two-half predicate
+            # the repairs use. A row retired by the LEGACY `outdated` flag is ended
+            # on the axis `derived_invalidation` reads, so a LIVE achievement word
+            # over it is the divergence this guard exists to refuse — measured
+            # before this arm: landed, leaving the row retired-and-live at once.
+            # ⛔ THE ORDER IS LOAD-BEARING: the `outdated` read is INSIDE this
+            # conjunct, i.e. AFTER the live-word test, so a write that carries no
+            # live `goalState` word (`status='live'`, a rename, a coherent ending
+            # pair) still pays NO stored read — the call-count pin exists because
+            # the first draft of this arm read on EVERY write.
+            and (_is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES)
+                 or bool(_stored_view().get("outdated")))
+            # ⛔ #13065 review round 13, finding 1 (P2): a `status` this write only
+            # RESTATES does not supply the ending, so it cannot be the half that
+            # trips this arm. The `#3305`/F4-2 decision (in-tree at
+            # `_update_entity`'s entailed-echo exemption) — *"An unchanged status
+            # cannot resurrect anything"* — is the same rule one axis over, and
+            # without this conjunct the generic tenant PUT was refused on the
+            # benign legacy shape (`status=terminal` + `goalState=live`) that
+            # `supersede_point`/`retract_point`/`invalidate_point` mint for every
+            # goal they end. Read the helper for why this cannot mint a
+            # divergence and why both sides are compared at base content.
+            and not _status_restated_by_an_echo()):
+        want = (_SUPERSEDED_STATUS
+                if status == _SUPERSEDED_STATUS else "abandoned")
+        _by_status = _is_lifecycle_word(status, TERMINAL_EXCLUDED_STATUSES)
+        # ⛔ #13065 review ROUND 11, finding 2 (P3): the headline and BOTH repairs
+        # must describe the carrier that actually ended the row. The round-10 fix
+        # let `outdated` end it while `status` stays None, and the message then
+        # said "status=None ends the goal" — false — with two repairs that are
+        # NO-OPS on that row (measured: `status='live'` alone leaves
+        # `outdated=True`, so the same refusal comes back; `goalState='abandoned'`
+        # alone is refused by the FIRST arm because `status` is still
+        # non-terminal). AX rule 2: say exactly what to do, in one step.
+        _headline = (f"status={status!r} ends the goal" if _by_status else
+                     "the stored row is ended by the LEGACY `outdated` flag")
+        _repair1 = (("end it the way THIS carrier allows: on an Object/Subject goal "
+                     "pass status='archived' together with goalState='abandoned' in ONE "
+                     "write; on a :Point goal that route is refused as a dead claim "
+                     "(#2498), so mint the replacement with "
+                     "create_point(..., status='archived') (or supersede_point(goal, "
+                     "successor)) and let the retired row keep its flag")
+                    if not _by_status else
+                    ("add the ending to `goalState` — pass goalState="
+                     f"{want!r}"
+                     # ⛔ ROUND 22, finding 1 (P2): NAME, not id — see the
+                     # successor arm's note above.
+                     + (" together with the successor's NAME, supersededBy=<successor "
+                        "name>" if want == _SUPERSEDED_STATUS else "")))
+        _repair2 = (("leave the achievement word alone — writing a LIVE word over a "
+                     "row the legacy flag already retired is what this guard refuses "
+                     "(`outdated=False` is server-managed, so it is not a repair "
+                     "this door can perform)")
+                    if not _by_status else
+                    ("drop the ending from `status` — pass status='live' (or "
+                     "'draft'), or leave `status` out of the call if you did "
+                     "not mean to end the goal. ⛔ On a row that is ALREADY dead "
+                     "a live `status` is refused as a dead claim (#2498), so "
+                     "there a live word is NOT a route: on that row the repair "
+                     "is 1 — align `goalState` with the ending it carries"))
+        raise ValueError(
+            f"REFUSED: {_headline}, but "
+            f"goalState={goal_state!r} "
+            f"still describes a live commitment (through {surface}). #13035: "
+            f"`status` ends the goal and `goalState` never ends it alone, so "
+            f"the ending has to be said on BOTH fields — otherwise the goal "
+            f"reads as ended to one surface and as a live commitment to the "
+            f"next reader that asks about its achievement.\n"
+            f"Two ways to fix it, either is accepted:\n"
+            f"  1. {_repair1};\n"
+            f"  2. {_repair2}."
+        )
+
+    if _stored_ending and (
+            # ⛔ #13065 review round 6 finding 1 (P1): SCOPED TO THE GOAL AXIS.
+            # The arm exists for `status`/`goalState` disagreement, and the
+            # ending it protects is the GOAL's. Firing on a stored TERMINAL
+            # `status` alone refused every re-create of an ended `:Point` —
+            # measured red on the pre-existing, CI-registered
+            # `test_5365_fail_open_visible.py::test_apply_supersessions_dead_
+            # sibling_makes_the_ref_a_noop`, and on the documented duplicate-id
+            # re-create route for a retracted STATEMENT (which carries no
+            # achievement word at all). A node with no `goalState` anywhere and a
+            # write that names none is not a goal, so there is no pair here to
+            # keep coherent — the plain lifecycle rule owns that shape.
+            # ⛔ `goal_state` is NOT a reliable "was it named" test HERE: the
+            # missing-side branch above already replaced the sentinel with the
+            # node's (possibly absent) word, so a plain statement re-create would
+            # have read `None is not sentinel` as "this is a goal". The BAG's own
+            # value is the one that still carries the sentinel.
+            bag_goal is not _GOAL_ENDING_UNSET
+            or _stored_view().get("goalState") is not None
+    ) and not (_is_lifecycle_word(status,
+                                 TERMINAL_EXCLUDED_STATUSES)
+              and _is_lifecycle_word(goal_state,
+                                     GOAL_ENDING_STATES)):
+        # #13065 review finding 4, LAST so the two branches above keep their more
+        # specific refusals. Reaching here means the requested pair is itself
+        # COHERENT and ends nothing — but the node this door can land on is
+        # ALREADY ENDED, and an ending is final. Without this the create door's
+        # injected default status made `create_point(id=<retired goal>,
+        # goalState="met")` a coherent LIVE pair written over an ending.
+        raise ValueError(
+            f"REFUSED: this node is ALREADY ENDED and this write would leave "
+            f"it running (through {surface} — an ending is final). #13035: "
+            f"`status`/`goalState` may not disagree about whether the goal "
+            f"ended, and an ending cannot be undone by writing a live pair "
+            f"over it: the node keeps the ending it had.\n"
+            f"Two ways to fix it, either is accepted:\n"
+            # ⛔ ROUND 22, findings 1 and 2: the same two defects the arms above
+            # fixed, in the family's LAST refusal. `archived` is not reachable
+            # on a `:Point` (ONTOLOGY §5), and `supersededBy` holds a NAME.
+            f"  1. keep the ending — pass status='archived' with "
+            f"goalState='abandoned' on an Object/Subject goal, or "
+            f"status='retracted' with goalState='abandoned' on a :Point goal "
+            f"(whose 'archived' ending is REFUSED there as reserved); or "
+            f"status='superseded' plus supersededBy=<successor name> (the column "
+            f"holds the successor's name, not its id);\n"
+            f"  2. if this is genuinely a NEW goal, give it its own id "
+            f"instead of reusing the ended one."
+        )
+
+
+def _rebind_guarded_words(props: dict, rendered: dict) -> None:
+    """Rewrite the two guarded values to the BASE CONTENT this guard graded.
+
+    #13065 review ROUND 15, finding 1 (P1). The guard's verdicts are taken from
+    ``str.__str__`` (base content, the word the journal and the record hold), and
+    the write used to send the caller's RENDERING instead — `falkordb`'s
+    `quote_string` calls `len(v)` and `v.replace`, both of which a `str` subclass
+    may override. That gap let a value whose content is ``active`` land as
+    ``abandoned``, i.e. the exact ``status``/``goalState`` divergence the whole
+    guard exists to refuse.
+
+    This closes it the way the file already closes it twice: `_update_entity`'s
+    no-promote arm rebinds the ``status`` rendering for the same measured reason,
+    and ``supersede_knowledge`` rebinds its operands at the entry (#12914 P1).
+    Every key that RENDERS as a guarded name is rewritten (a `str` subclass key is
+    filed by ``str(key)``, so the key and its rendering are separate facts), and a
+    value that is not genuinely ``str`` is left alone — the guard's own refusals
+    own that shape, and rewriting it would be a type change nobody asked for.
+
+    ``rendered`` is rewritten as well, and that half is not cosmetic: the guard's
+    own VERDICTS are read from it, and the two that dispatch past the content are
+    **equality tests** — ``_status_words_for_goal_ending``'s ``ending == 'superseded'``
+    and the successor arm's ``goal_state == 'superseded'``. ``str`` subclass may
+    override ``__eq__``, so a value whose CONTENT is an ``abandoned`` word could
+    answer "no" and be filed as ``superseded`` — MEASURED (#13065 round 16,
+    finding 1 P2): ``update_knowledge(goal, status='archived', goalState=<content
+    'superseded', __eq__-> False>)`` stored ``goalState='superseded'`` with
+    ``supersededBy=None``, i.e. the ending the guard's second arm exists to refuse.
+    Rebinding the map makes every later read compare BASE CONTENT.
+
+    Behaviour-neutral for every honest value, including a plain ``str`` subclass:
+    its content is what the store holds today.
+    """
+    for name in ("status", "goalState"):
+        word = rendered.get(name)
+        if not issubclass(type(word), str):
+            continue
+        rendered[name] = str.__str__(word)
+        for key in keys_rendering_as(props, {name}):
+            if issubclass(type(props[key]), str):
+                props[key] = str.__str__(props[key])
+
+
+def _ending_key(value: object) -> str:
+    """A hashable, forgery-proof KEY for one stored lifecycle value.
+
+    #13065 review round 5, finding 3. Two jobs, and the ORDER is the same one
+    :func:`_is_lifecycle_word` applies: a real ``str`` is normalised with
+    ``str.__str__`` (cannot consult an override, returns a PLAIN ``str``), so a
+    ``str`` SUBCLASS whose content differs — or which nulls ``__hash__`` — cannot
+    answer for a word it does not spell nor raise here; anything else is keyed by
+    its ``repr`` (guarded: a hostile ``__repr__`` falls back to the type name)
+    rather than by hashing the value, which is what raised ``TypeError``.
+    """
+    if issubclass(type(value), str):
+        return "s:" + str.__str__(value)
+    try:
+        return "r:" + repr(value)
+    except Exception:  # a hostile `__repr__` is still only a VALUE here
+        kind = type(value)
+        return "t:" + str(getattr(kind, "__module__", "?")) + "." + str(
+            getattr(kind, "__qualname__", "?"))
+
+
+def _duplicate_id_conflict_error(surface: str) -> ValueError:
+    """The ONE wording for "more than one node carries this id, and they
+    disagree about the goal's ending" (#13065 review finding 5).
+
+    Two callers raise it, and they must say the same thing: the guard's
+    `_stored_view` (an UPDATE door, which is handed the stored-side probe) and
+    :func:`_refuse_ending_dropped_by_a_re_mention` (a CREATE door, where the
+    probe does not exist — round 16, finding 2).
+    """
+    return ValueError(
+        f"REFUSED: more than one node carries this id and they "
+        f"disagree about the goal's ending (through {surface}). "
+        f"#13035: the write lands on EVERY node carrying the id, so "
+        f"the state it leaves cannot be named from one row."
+        f"\nOne way to fix it: resolve the duplicate ids first (the "
+        f"shape is mintable through `create_point(..., id=…)`), then "
+        f"re-issue the write."
+    )
+
+
+def _refuse_ending_dropped_by_a_re_mention(proj, id_val: str, props: dict, *,
+                                           label: str, surface: str) -> None:
+    """Refuse a re-mention CREATE that would land HALF an ending.
+
+    #13065 review round 5, finding 1 (P1). The Object/Subject fold MERGEs on the
+    id, so a create that resolves to an EXISTING holder re-uses that node — and
+    the projection writes ``status`` ON CREATE only
+    (``projection/entities.py``: ``o.status=$st`` in the ON CREATE clause), while
+    caller props land through the generic ``SET n += $prop`` on BOTH paths. So the
+    coherent pair ``status='archived', goalState='abandoned'`` passed
+    :func:`_refuse_inconsistent_goal_ending` unchanged (both endpoints agree in
+    the bag, and a CREATE runs no stored probe) and the fold applied ONE half:
+    ``goalState='abandoned'`` landed, ``status`` stayed absent (which reads LIVE).
+    That is the issue's own headline pair — retired to ``derived_invalidation``,
+    served as CURRENT by every ``status`` reader — through the one create door
+    :func:`test_no_WRITABLE_pair_leaves_the_two_surfaces_disagreeing` cannot mint
+    from (every create in its sweep starts from a fresh holder).
+
+    ⛔ Deliberately NARROW. It refuses only when the bag names ``goalState`` as an
+    ENDING and the node that already holds this id is NOT ended on its stored
+    ``status`` — the one shape where the field that LANDS diverges from the field
+    that silently does not. A bag that names no ``goalState`` ending cannot create
+    a divergence here (a dropped ``status`` leaves no ending behind), so it is not
+    refused; a node already ended on ``status`` keeps a coherent state, so it is
+    not refused either; and a fresh id is not refused, because there the CREATE
+    writes ``status`` and the pair lands whole.
+
+    ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT (#13065 review ROUND 7, finding 1,
+    P2) — ``props.get("goalState")`` hashed the LITERAL name while the live
+    transport files a key by ``str(key)``, so this arm was left a ONE-RENDERER
+    test when the sibling scan at :func:`_goal_successor_named` was fixed for
+    exactly that class in round 6. Measured: an existing goal plus
+    ``create_object(name, objectKind="goal", status="archived",
+    **{K("harmless", "goalState"): "abandoned"})`` was ADMITTED and left
+    ``status=None`` beside ``goalState='abandoned'`` — round 5 finding 1's own
+    headline pair, through the door that claims to refuse it. The read goes
+    through :func:`lifecycle_props_by_rendering` (the renderer UNION, first-wins
+    — over-detecting is the safe direction here, because the CONTENT rendering
+    is the one the durable journal keeps).
+    """
+    # ⛔ Read it the way the write FILES it, not the way the caller spelled it.
+    goal_state = lifecycle_props_by_rendering(props, ("goalState",)).get(
+        "goalState")
+    if not _is_lifecycle_word(goal_state, GOAL_ENDING_STATES):
+        return
+    view = _stored_goal_ending_view(proj, id_val, label=label) or {}
+    if not view:
+        # A fresh id writes both fields.
+        return
+    if view.get("conflict"):
+        # ⛔ #13065 review round 16, finding 2 (P2): this arm used to RETURN here,
+        # deferring to the guard's own `conflict` arm — where the verdict belongs.
+        # But that arm is UNREACHABLE on this call path: it reads the conflict
+        # from the caller's zero-arg probe (`goal_ending`), and the entity create
+        # funnel calls `_sanitize_props(props, reject_id=True,
+        # reject_belief_props=True)` with NO probe, so `_stored` stays `{}` and
+        # `.get("conflict")` is always falsy there. The stated reason for
+        # returning was false on the door that calls this function, so the shape
+        # was unguarded: on the duplicate-id fixture this file's own tests mint,
+        # `create_object(<name>, objectKind='goal', status='archived',
+        # goalState='abandoned')` landed `goalState` through the generic prop SET
+        # while the fold wrote `status` ON CREATE only — the #13065 headline pair.
+        # The right answer is the conflict arm's own ("resolve the duplicate ids
+        # first"), raised from HERE, where it can actually arrive.
+        raise _duplicate_id_conflict_error(surface)
+    if _is_lifecycle_word(view.get("status"), TERMINAL_EXCLUDED_STATUSES):
+        return
+    raise ValueError(
+        f"REFUSED: goalState={goal_state!r} would end the goal on a RE-MENTION "
+        f"create (through {surface}). #13035: `{surface}` folds onto the node "
+        f"that already holds this id, and that fold writes `status` at CREATION "
+        f"only — so this write lands the ending on `goalState` and leaves "
+        f"`status`={view.get('status')!r} (which reads LIVE) in place. The goal "
+        f"would be retired to `derived_invalidation` and served as CURRENT by "
+        f"every reader that asks about its status.\n"
+        f"Two ways to fix it, either is accepted:\n"
+        f"  1. end the existing node through the UPDATE door — "
+        f"`update_knowledge(<id>, status='archived', goalState='abandoned')` — "
+        f"which writes BOTH fields;\n"
+        f"  2. drop the ending from this create — a re-mention does not carry a "
+        f"lifecycle ending, and the node keeps the state it already had."
+    )
+
+
+def _stored_goal_ending_view(proj, id_val: str, *,
+                            label: str | None = None) -> dict:
+    """The goal-ending view a node ALREADY holds: ``status``/``goalState``/a
+    named successor — the stored half :func:`_refuse_inconsistent_goal_ending`
+    needs to answer for a write that names only one of the two fields.
+
+    One read, issued at most once per write and ONLY when the write alone cannot
+    answer (see the callers). ``label`` narrows the match where the door already
+    knows the label (``update_point``); the generic entity door does not, so it
+    matches on the identity property alone. A missing node answers ``{}`` — an
+    absent stored value is then the ordinary LIVE reading, exactly as the create
+    door treats it.
+
+    The successor is read from BOTH carriers of the model: the
+    ``supersededBy``/``superseded_by`` column an Object/Subject goal records, and
+    the ``CORRECTS`` edge a Point goal records (the edge points successor →
+    predecessor, so it arrives here as an INCOMING edge).
+    """
+    match = f"MATCH (n:{label} {{id:$id}})" if label else "MATCH (n {id:$id})"
+    rows = proj.g.query(
+        match + " OPTIONAL MATCH (s)-[:CORRECTS]->(n) "
+        "RETURN n.status, n.goalState, coalesce(n.supersededBy, n.superseded_by), "
+        "collect(s.id), n.outdated",
+        params={"id": id_val},
+    ).result_set
+    if not rows:
+        return {}
+    # ⛔ #13065 review finding 5: the write binds EVERY node carrying this id
+    # (the journal fold MERGEs on it), so answering from `rows[0]` made the
+    # admit/refuse verdict PLAN-ORDER dependent — measured with two :Point
+    # duplicates, where two identical statements in one process returned the
+    # rows in different orders. Disagreement is reported instead of picked: the
+    # guard refuses (see its `conflict` arm) rather than answer from one row.
+    # ⛔ #13065 review round 5, finding 3: the SET must not be built from the raw
+    # values. `{(row[0], row[1]) …}` hashes them, so an unhashable STORED value
+    # (`status=["live"]`, storable through the public door — `test_status_
+    # projection` records `status=["live"] STORED as-is`) raised
+    # `TypeError: unhashable type: 'list'` from inside `_sanitize_props`, on any
+    # write that needs the stored half, where the doors promise the documented
+    # `ValueError`. The write side was made type-safe for exactly this reason
+    # (`_is_lifecycle_word`); the STORED side is normalised by the same
+    # type-first rule and turned into a PLAIN `str` key, so nothing here hashes
+    # the raw value and a `str` SUBCLASS cannot forge one either.
+    # ⛔ #13065 review ROUND 11, finding 1 (P2): `outdated` belongs in the
+    # CONFLICT test too. It became part of "did this goal end?" in round 10, but
+    # the disagreement set still compared only `status`/`goalState` — so two
+    # nodes sharing one id that agree on those and differ ONLY on the flag set
+    # no `conflict`, and the verdict was taken from `rows[0]`'s flag: measured
+    # (two `:Point`s, one id, both `live`/`active`, flags False/True)
+    # `endings`=1, `conflict`=False, and `create_point(…, id=<that id>,
+    # status='live', goalState='met')` was ADMITTED on the first attempt and
+    # REFUSED on the re-run once the landed write shifted the row order — a
+    # plan-order-dependent verdict, exactly what the conflict arm exists to
+    # prevent. Every field the ended-predicate reads must be in this key.
+    # ⛔ #13065 review ROUND 12, findings 1 and 3: the key must mirror the
+    # PREDICATE, not the column list.
+    #   * the SUCCESSOR is "part of the ending" (this module's own text), and
+    #     `goalState='superseded'` is admitted or refused on whether one exists —
+    #     but it was still read from `rows[0]`, so two rows differing only on
+    #     `supersededBy`/`CORRECTS` gave a plan-order-dependent verdict (measured:
+    #     ADMITTED on one row, "names no successor" on two, no `conflict`);
+    #   * `outdated` is compared by the predicate as TRUTHINESS (`bool(...)`), so
+    #     the key must normalise it the same way — `repr` made `None` and `False`
+    #     (both NOT ended) "disagree" and refused a write that legitimately lands.
+    def _row_ending_key(row) -> str:
+        _carrier = row[2] if len(row) > 2 else None
+        _corrects = row[3] if len(row) > 3 else []
+        _flag = row[4] if len(row) > 4 else None
+        # ⛔ ONE rule for "is this a NAME" (:func:`_successor_name_of`, rounds
+        # 15/16 finding 1): the stored half used `not in (None, "")`, so a row
+        # carrying `supersededBy="   "` looked like it named somebody here and
+        # nowhere else.
+        _row_named = _successor_name_of(_carrier)
+        if _row_named is None and _corrects:
+            _row_named = next(
+                (n for n in (_successor_name_of(c) for c in _corrects) if n),
+                None)
+        return "\x00".join((
+            _ending_key(row[0]),
+            _ending_key(row[1]),
+            "outdated:1" if bool(_flag) else "outdated:0",
+            _ending_key(_row_named),
+        ))
+
+    endings = {_row_ending_key(row) for row in rows}
+    status, goal_state, carrier, corrects = rows[0][:4]
+    legacy_outdated = rows[0][4] if len(rows[0]) > 4 else None
+    named = _successor_name_of(carrier)
+    if named is None and corrects:
+        named = next((n for n in (_successor_name_of(c) for c in corrects) if n),
+                     None)
+    view = {"status": status, "goalState": goal_state, "successor": named,
+            # ⛔ #13065 review ROUND 10, finding 1 (P2): the LEGACY retirement
+            # flag is part of the stored ending, because the two read
+            # predicates this PR adds (`derived_invalidation._retired_by_status`,
+            # `goal_judgement._goal_retired_on_status`) both count it. A door
+            # that ignored it disagreed with its own repairs about which rows
+            # are ended — measured: a flag-retired goal admitted
+            # `update_knowledge(goal, goalState='met')`.
+            "outdated": legacy_outdated}
+    if len(endings) > 1:
+        view["conflict"] = True
+    # ⛔ Does ANY bound row carry an achievement word? The conflict arm is scoped
+    # to the goal axis (see the guard's `_stored_view`), and this is what tells it
+    # the axis is in play when the write itself names no `goalState`: a row with
+    # no `goalState` is not a goal, so a successor-only difference among such rows
+    # is the `#12592` successor guard's question, not this one.
+    view["anyGoalState"] = any(
+        (row[1] is not None) if len(row) > 1 else False for row in rows)
+    return view
+
 #: The property that NAMES the successor — the other half of ONTOLOGY §4.3's
 #: sentence (*"`superseded` means replaced: it names the successor"*) and of
 #: §4.2's Subject row (*"successor NAME (stored verbatim)"*). ⛔ A POINT'S
@@ -6026,7 +6987,13 @@ def _successor_named_by(props: dict) -> bool:
         # ``'v2'`` and this predicate answered True — a graph naming nobody with
         # the record disagreeing. With an exact ``str`` no override can exist, so
         # the guard, the journal and the wire agree by construction.
-        return type(value) is str and bool(value.strip())
+        # ⛔ #13065 review rounds 15/16, finding 1: the TEST now lives in
+        # :func:`_successor_name_of`, so the achievement axis and this door
+        # cannot answer "is this a name" differently (the owner's #13035 brief:
+        # *"reuse its helper … so the two axes cannot drift apart"*). The rule is
+        # unchanged — exact `str`, non-blank.
+        return _successor_name_of(value) is not None
+
     return False
 
 
@@ -7473,7 +8440,8 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
                     reject_belief_props: bool = False,
                     reject_claim_class: bool = False,
                     money_views: list[dict] | None = None,
-                    value_shapes: frozenset[str] | None = None) -> dict:
+                    value_shapes: frozenset[str] | None = None,
+                    goal_ending=None) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
@@ -7557,6 +8525,16 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     the read side stays lenient). `currency=None` on a carrier is caught
     because it LEAVES that half value, not because the bag "looks partial":
     deleting all four members together leaves no money and is admitted.
+
+    ``goal_ending`` (#13035): the STORED half of a goal's two ending fields,
+    for the same "grade the state the write leaves" reason as ``money_views``.
+    It is a ZERO-ARG CALLABLE returning ``{"status", "goalState",
+    "successor"}`` (see `_stored_goal_ending_view`) and it is called AT MOST
+    ONCE, and ONLY when the bag names one of the two fields and not the other —
+    so a write that restates both, or names neither, costs no read. ``None``
+    (the default) is the CREATE reading: the node does not exist yet, so an
+    absent ``status`` is the ordinary LIVE birth state and an absent
+    ``goalState`` is no claim. See `_refuse_inconsistent_goal_ending`.
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -8037,15 +9015,56 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # here — it is the documented no-SDK-guarantee path (see `api.py`
     # `add_point`), so the vocabulary is enforced at the SDK/MCP boundary, not
     # at the projection choke point that live writes and replay share.
-    if "goalState" in props and props["goalState"] is not None:
-        _goal_state = props["goalState"]
-        if not isinstance(_goal_state, str) or _goal_state not in GOAL_STATE_VALUES:
+    #
+    # ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT (#13065 review ROUND 8, finding 1,
+    # P2). `"goalState" in props` hashes the LITERAL name while the live
+    # transport files a key by `str(key)`, so a `str`-subclass key rendering as
+    # `goalState` skipped this boundary ENTIRELY and the word the owner REMOVED
+    # from the vocabulary landed on the node — measured: `K("harmless",
+    # "goalState"): "guideline"` was ADMITTED on `update_knowledge`,
+    # `create_object` and `create_entity`, read back as
+    # `goalState='guideline'`, while the literal spelling was refused. That made
+    # `test_guideline_is_refused_on_every_door` assert a boundary false on three
+    # of its four doors. The read goes through
+    # :func:`lifecycle_props_by_rendering` (the renderer UNION, first-wins) — the
+    # same fix the two ending guards took, applied to the gate they all sit
+    # behind.
+    _vocab_goal = lifecycle_props_by_rendering(props, ("goalState",)).get(
+        "goalState")
+    if _vocab_goal is not None:
+        _goal_state = _vocab_goal
+        # ⛔ #13065 review round 16, finding 4 (P3): this membership test HASHED
+        # the value, so a `goalState` that is an unhashable `str` SUBCLASS raised
+        # `TypeError: unhashable type` where the doors document `ValueError` —
+        # and it runs BEFORE the guard, so the type-safe helper the module
+        # already has never got the chance. `_is_lifecycle_word` is type-first
+        # for exactly this class; a non-`str` and a subclass that cannot hash
+        # both answer `False` here and get the documented refusal.
+        if not _is_lifecycle_word(_goal_state, GOAL_STATE_VALUES):
+            _hint = ""
+            if _goal_state == "guideline":
+                _hint = (
+                    " `guideline` was REMOVED from this vocabulary (#13035, "
+                    "owner ruling 2026-11-16): whether a goal is directional "
+                    "is a question about priority, not about outcome, so it "
+                    "was never an achievement state. Record the priority "
+                    "elsewhere — the four live words ("
+                    f"{sorted(GOAL_LIVE_STATES)}) and the two endings "
+                    f"({sorted(GOAL_ENDING_STATES)}) are the whole set."
+                )
             raise ValueError(
                 f"Invalid goalState {_goal_state!r}. A goal's achievement "
                 f"state is a closed vocabulary: {sorted(GOAL_STATE_VALUES)}. "
                 "(Lifecycle is the separate `status` field — goalState is not "
-                "draft/live/retracted/archived.)"
+                "draft/live/retracted/archived.)" + _hint
             )
+    # #13035: the two fields must AGREE about whether the goal has ended. This
+    # is the fail-closed boundary every SDK write surface shares, so a caller
+    # cannot mint a goal that `derived_invalidation` retires (it reads
+    # `goalState`) while every other reader serves it as current (they read
+    # `status`). See `_refuse_inconsistent_goal_ending`.
+    _refuse_inconsistent_goal_ending(props, surface="_sanitize_props",
+                                     goal_ending=goal_ending)
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
     return props
@@ -14375,6 +15394,17 @@ class TortoiseSDK:
             event["point"] = clean
         if id is not None:
             event["id"] = id
+        # ⛔ THE RESERVED POSITION NAME IS STRIPPED AT THE CHOKEPOINT TOO (#13043
+        # review P2-1). `_sanitize_props` refuses `seq` at prop INTAKE, but this
+        # function is reachable from doors that build their own payload
+        # (`_skip_sanitize=True`) or splat props straight into `**extra` — and the
+        # reservation was enforced at each of those intakes, which is how it took
+        # several review cycles and still missed one. One strip here covers a
+        # caller `seq` regardless of which door it came through, and
+        # `EventLog.append` covers the journal itself; the two are the only paths
+        # a record can ride to a position row.
+        if "seq" in extra:
+            extra = {k: v for k, v in extra.items() if k != "seq"}
         event.update(extra)
         # #11835 review F1 (P1): EVERY journalled vector declares its width —
         # including the ones that arrive through `extra` on this (`id=`) branch,
@@ -16116,6 +17146,67 @@ class TortoiseSDK:
                          (self._terminal_fold_refused_advisory(pid)
                           if _terminal_fold_refused else {}))},
                     _end_receipt)
+
+        # #13035 (review P1, PR #13065): THIS door can be an UPDATE in disguise
+        # when the caller supplies an `id`, so it grades the state it LEAVES the
+        # node in — the #2782 posture the sibling gates already apply.
+        #
+        # `create_point` preserves a caller-supplied `id` for operators
+        # (`explicit_id` above) and the statement it issues is a plain `CREATE`,
+        # so a colliding id mints a SECOND `:Point` and the journal's
+        # `PointAdded` is folded back onto the ORIGINAL node by replay's
+        # `_upsert_point_props` MERGE (`projection/entities.py:3128`) — the
+        # defect class this repo already recorded for the entity fold
+        # (`_update_entity`'s #9649/#10192 note: "the fold behind it MERGEs, so
+        # an ON-MATCH re-create reaches an EXISTING node too — a guard on
+        # `update_entity` alone is bypassable in one call"). Without the probe,
+        # `create_point(..., id=<goal>, status="archived")` leaves
+        # `status="archived"` beside a stored `goalState="met"`: exactly the
+        # pair BOTH update doors refuse, in the one direction that silences
+        # `derived_invalidation`'s retirement arm while every other reader serves
+        # the goal as ended.
+        #
+        # ⛔ Graded on `{**props, "status": status}`, not on the bag, because the
+        # CREATE always LANDS a `status` (the default is `"live"`, popped above).
+        # A bag naming only `goalState` therefore leaves a pair the bag never
+        # spelled, and asking the stored side about the ABSENT status would
+        # grade a state the write never leaves.
+        #
+        # ⛔⚠️ REVIEW ROUND 3, FINDING 4 SUPERSEDED THE COST NOTE THAT USED TO SIT
+        # HERE ("with the resolved status in the bag the probe is not even read
+        # for it"). It IS read on this leg, for EVERY explicit-id create,
+        # because the pair alone cannot answer whether the node it lands on is
+        # ALREADY ENDED — and an ending is final
+        # (`create_point(id=<ended goal>, goalState="active")` used to write a
+        # coherent LIVE pair over the ending and is now REFUSED). A genuinely
+        # fresh explicit id costs one read that answers `{}`, and an id-less
+        # create pays nothing (there is no node it could reach).
+        #
+        # ⛔ PLACED AFTER the dedup block, and that placement is load-bearing: a
+        # dedup HIT does not land `status` (it is popped before the fold, #1905)
+        # and forwards `props` to `update_point`, whose own guard grades THAT
+        # merged state — so grading the resolved `status` there would refuse a
+        # write that never writes it. Past the block, a status provably lands.
+        #
+        # ⛔ `may_target_existing_node=True` (review P2, #13065): the resolved
+        # status is a STATEMENT, not a no-op — the CREATE always writes one — so
+        # the stored `goalState` is part of the state this write LEAVES for a
+        # NON-terminal status too. Without the flag the guard only asked the
+        # store when the status it resolved was terminal, and
+        # `create_point(id=<retired goal>)` with NO `status` (resolved `"live"`)
+        # folded `status="live"` beside a stored `goalState="abandoned"` — the
+        # exact pair `test_no_WRITABLE_pair_leaves_the_two_surfaces_disagreeing`
+        # asserts cannot exist, through the one door that test does not mint
+        # from. A genuinely fresh explicit id still answers `{}` and refuses
+        # nothing.
+        if explicit_id is not None:
+            _refuse_inconsistent_goal_ending(
+                {**props, "status": status},
+                surface="create_point",
+                goal_ending=lambda: _stored_goal_ending_view(
+                    proj, explicit_id, label="Point"),
+                may_target_existing_node=True,
+            )
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
         if explicit_id is not None:
@@ -20875,7 +21966,12 @@ class TortoiseSDK:
                                     label=":Point"),
                                 value_shapes=_stored_value_shapes(
                                     proj.g, props, node_id=id,
-                                    label=":Point"))
+                                    label=":Point"),
+                                # #13035: the stored half of the goal-ending
+                                # pair — read ONLY if this write names one
+                                # endpoint and not the other.
+                                goal_ending=lambda: _stored_goal_ending_view(
+                                    proj, id, label="Point"))
         # ⛔ #11702 (review cycle 12, P2): THIS is the THIRD writer that moves a
         # belief pair, and it was the one that left the `n.confidence` mirror
         # behind. `reject_belief_props` refuses `credibility` and the baseline
@@ -22666,15 +23762,15 @@ class TortoiseSDK:
         # window rewrites and the non-terminal `draft -> live` promotion
         # included — because it delegates TERMINALITY to this one instrument.
         # Its `:Event` half is answered at its own call site by
-        # `refuse_terminal_event_state(props, ...)`, the PROPS-AWARE predicate
-        # that knows whether the RESULT status is terminal; this arm is
-        # label-only, so firing it for that door refused `draft -> live` on a
-        # hybrid — the prop lane #2788 pins and #11825's own
-        # `test_a_non_terminal_update_still_lands_on_a_multi_label_event`
-        # requires (measured at the merge head: 1 failed). So the arm is gated
-        # on a SECOND question, defaulted on for the doors that only ever write
-        # a terminal value, and switched off by the one door that decides from
-        # its props.
+        # `refuse_event_lifecycle_state(props, ...)`, the PROPS-AWARE predicate
+        # that reads the caller's DECLARED keys; this arm is
+        # label-only, so firing it for that door answered for the LABEL rather
+        # than the declaration — #11825's `test_a_non_terminal_update_still_lands_
+        # on_a_multi_label_event` required the prop lane there, and #13100 has
+        # since retracted that allowance at the DOOR, which is the site that owns
+        # the question. So the arm is gated on a SECOND question, defaulted on for
+        # the doors that only ever write a terminal value, and switched off by the
+        # one door that decides from its props.
         if (refuse_terminal and refuse_event_terminalization
                 and self._get_proj().g.query(
                 "MATCH (n:Point:Event {id:$id}) RETURN count(n)",
@@ -23283,7 +24379,7 @@ class TortoiseSDK:
         journal, the guard and the replay fold cannot drift from
         ``update_knowledge``'s:
 
-            status='superseded' + supersededBy=<successor NAME> + supersededAt
+            status='superseded' + supersededBy=<successor name> + supersededAt
 
         ⛔ THE CARRIER IS THE SUCCESSOR'S **NAME**, not its id, and that is what
         the readers require: §4.2/§4.3 define ``supersededBy`` as *"successor
@@ -23371,18 +24467,22 @@ class TortoiseSDK:
             # unencodable round trip, and lets the impostor land on the same
             # documented ``no :<label> <id>`` / cross-family ValueError.
             if not issubclass(type(node_id), str):
-                return {"rows": 0, "statuses": [], "names": []}
+                return {"rows": 0, "statuses": [], "names": [], "goals": []}
+            # `goalState` is read for the pairing guard's sake (#13065 review
+            # ROUND 15, finding 2): the write below ends the row on `status`, so
+            # the achievement word has to move with it.
             rows = proj.g.query(
                 f"MATCH (n:{label} {{id:$id}}) "
                 "RETURN count(n) AS rows, collect(n.status) AS statuses, "
-                "collect(n.name) AS names",
+                "collect(n.name) AS names, collect(n.goalState) AS goals",
                 params={"id": node_id},
             ).result_set
             if not rows or not rows[0][0]:
-                return {"rows": 0, "statuses": [], "names": []}
+                return {"rows": 0, "statuses": [], "names": [], "goals": []}
             return {"rows": rows[0][0],
                     "statuses": list(rows[0][1] or ()),
-                    "names": list(rows[0][2] or ())}
+                    "names": list(rows[0][2] or ()),
+                    "goals": list(rows[0][3] or ())}
 
         dead = _SUPERSESSION_DEAD_SETS[label]
         old = _rows(old_id)
@@ -23488,6 +24588,30 @@ class TortoiseSDK:
                 f"unambiguous, then re-send."
             )
         successor_name = names[0]
+        # ⛔ THE ACHIEVEMENT WORD MOVES WITH THE STATUS (#13065 review ROUND 15,
+        # finding 2 (P2)). The write below ends the row on `status='superseded'`
+        # and names its successor, but it used to leave `goalState` alone — so on
+        # a goal carrying ANY achievement word it hit the two-field guard
+        # (`status` terminal, `goalState` a live word, or an ending spelled the
+        # other way), and the refusal's two named repairs were UNPERFORMABLE
+        # through this door: neither `supersede_knowledge(old, new,
+        # transfer_edges, valid_from, valid_to_precision)` nor its MCP tool has a
+        # `goalState` parameter, and `mcp_server` calls this "the only public
+        # route for a family supersede". MEASURED on the reviewed head:
+        # ``supersede_knowledge(<plan Object, goalState='active'>, <successor>)``
+        # -> REFUSED "status='superseded' ends the goal, but goalState='active'
+        # still describes a live commitment"; the same call on a row with no
+        # achievement word landed. A shipped verb that cannot retire the most
+        # common goal shape is the AX-rule-2 class (a repair the door rejects),
+        # so the door aligns the pair itself: `superseded` is the ONE ending that
+        # keeps its spelling on both axes, and this verb IS the replacement.
+        #
+        # Only a row that ALREADY carries an achievement word is aligned — a row
+        # that makes no claim is left making none, since stamping a word would
+        # invent a commitment the caller never stated.
+        _goal_words = sorted({str.__str__(g) for g in old["goals"]
+                              if issubclass(type(g), str) and str.__str__(g)})
+        _alignment = ({"goalState": _SUPERSEDED_STATUS} if _goal_words else {})
         from .projection import _now_iso
         instant = _now_iso()
         # ⛔ ``dry_run`` IS THE MCP PREVIEW'S DOOR, NOT A PUBLIC MODE (#12914
@@ -23499,8 +24623,10 @@ class TortoiseSDK:
         # #12914 round-4 P1 measured, reported here instead of papered over. The
         # write below goes through ``update_knowledge`` -> ``_update_entity``, and
         # THAT door runs label-surface guards this one does not: the
-        # ``refuse_terminal_event_state`` probe (an ``:Event`` row cannot take a
-        # terminal ``status``) and the ``:Source`` closed-surface refusal (D30).
+        # ``refuse_event_lifecycle_state`` probe (an ``:Event`` row cannot take
+        # ANY ``status``, #13100 §8 — this branch widened it from the terminal
+        # subset, so the divergence below is wider than this comment first said)
+        # and the ``:Source`` closed-surface refusal (D30).
         # Measured on the round-4 head: for the HYBRID shapes ``:Object:Event``,
         # ``:Subject:Event``, ``:Object:Source`` and ``:Subject:Source`` the
         # preview answers ``would supersede`` and the write REFUSES. Before this
@@ -23517,7 +24643,7 @@ class TortoiseSDK:
                     "rows": old["rows"]}
         applied = self.update_knowledge(
             old_id, status=_SUPERSEDED_STATUS,
-            supersededBy=successor_name, supersededAt=instant)
+            supersededBy=successor_name, supersededAt=instant, **_alignment)
         if not applied:
             # The write path reports `{}` when it matched nothing. A supersession
             # that did not land must never be reported as one — the phantom-claim
@@ -25685,12 +26811,19 @@ class TortoiseSDK:
         live edge (the exact pollution the draft lifecycle prevents). The
         endpoint read is NOT Point-only: #7853 widened it to
         `epistemic_disjunction('s')`, so it covers all four epistemic labels
-        (`Point`, `Subject`, `Object`, `Event`) and a draft `:Event` endpoint
-        blocks promotion just as a draft `:Point` does. Unset-status operators
-        are LIVE under the canonical read model (projection coalesce default;
-        #944 review) and are skipped — never re-promoted into the event
+        (`Point`, `Subject`, `Object`, `Event`). An endpoint that is not live
+        blocks promotion — an explicitly non-``live`` stored word, a terminal one,
+        or (since #13100) a PLAN whose position is not terminal, because a plan
+        that has not reached a terminal stage has not happened. That last arm is
+        the live/draft suppression RE-HOMED off the ``:Event`` non-terminal
+        ``status`` this change retires; a legacy Event row that still carries the
+        word keeps suppressing through the status arm (#2977). Unset-status
+        operators are LIVE under the canonical read model (projection coalesce
+        default; #944 review) and are skipped — never re-promoted into the event
         stream.
         """
+        from .planned_occurrence import is_plan_kind, plan_position
+
         rows: list = []
         # #7853: n is id-anchored — sweep the epistemic labels so a draft
         # operator incident to an Event/Subject/Object endpoint is promoted.
@@ -25716,21 +26849,40 @@ class TortoiseSDK:
             eps = proj.g.query(
                 "MATCH (o:Point {id:$oid})-[r]->(s) "
                 f"WHERE {epistemic_disjunction('s')} "
-                "RETURN s.id, s.status, coalesce(s.outdated, false)",
+                "RETURN s.id, s.status, coalesce(s.outdated, false), "
+                "       s.objectKind, s.pipelineStageId, "
+                "       s.pipelineOutcome, coalesce(s.isClosed, false), "
+                "       s.pipelineStageKey",
                 params={"oid": oid},
             ).result_set
             if not eps:
                 continue  # no endpoints — nothing to gate on
-            # TWO arms, and BOTH are needed (``live.is_terminal_status`` alone is
-            # NOT the gate): the terminal predicate is the canonical mirror of
-            # the flag + terminal-status exclusion, and ``draft`` is not in
-            # ``TERMINAL_EXCLUDED_STATUSES`` — a draft endpoint is un-promoted,
-            # not dead, and admitting it here would re-open the pollution #944
-            # closed. Unset status stays LIVE (the legacy-node rule), which is
-            # what ``(st or "live")`` preserves.
+            # The gate itself is ONE predicate (``live.endpoint_permits_
+            # operator_promotion``), not a condition spelled at this call site:
+            # three arms are needed and missing any of them re-opens a closed
+            # pollution. ``is_terminal_status`` alone is not the gate (a draft
+            # endpoint is un-promoted, not dead — #944), and since #13100 the
+            # retired non-terminal ``:Event`` status is replaced by the plan's
+            # POSITION: a plan whose stage is a non-terminal one — and which the
+            # durable ``isClosed`` marker does not end, and which HAS a position
+            # at all — has not happened, so it suppresses exactly as
+            # ``status='scheduled'`` on an Event did. A stored legacy Event word still suppresses through the
+            # status arm (the reader net stays wider than the write door, #2977).
             all_live = all(
-                (st or "live") == "live" and not is_terminal_status(st, bool(od))
-                for _, st, od in eps
+                endpoint_permits_operator_promotion(
+                    st, bool(od),
+                    # ⛔ The plan's position is resolved by the ONE helper the
+                    # plan writers and the Q5 read also use (`plan_position`), not
+                    # from the stored `pipelineSlot` PROP: a plan ended through the
+                    # generic door carries a terminal `pipelineStageId` beside a
+                    # stale slot, and reading the prop kept a settled plan
+                    # suppressing promotion for ever.
+                    plan_state=(plan_position(stage_id, outcome=outcome,
+                                              is_closed=bool(closed),
+                                              pipeline_key=key)
+                                if is_plan_kind(kind) else None))
+                for (_, st, od, kind, stage_id, outcome, closed,
+                     key) in eps
             )
             if not all_live:
                 continue  # keep draft until every endpoint is live
@@ -30660,9 +31812,10 @@ class TortoiseSDK:
         # `:Object` is deliberately NOT refused: its writer does not validate,
         # it STORES the value (measured), so a refusal here would reject bundles
         # the writer accepts — the over-rejection class this PR already fixed
-        # once. `:Event` is no longer in that sentence: since #11825 its door
-        # refuses the TERMINAL half, and the arm BELOW mirrors that refusal at
-        # Phase 1 for the same partial-mutation reason.
+        # once. `:Event` is no longer in that sentence: since #13100 its door
+        # refuses ANY `status` (the terminal half alone was #11825's interim
+        # boundary), and the arm BELOW mirrors that refusal at Phase 1 for the
+        # same partial-mutation reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
@@ -30683,18 +31836,16 @@ class TortoiseSDK:
                            f"rejected at validation. Must be one of: "
                            f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}",
             })
-        # ── #11825: the `:Event` TERMINAL half, refused at Phase 1 ──
+        # ── #11825 / #13100: an `:Event` `status`, refused at Phase 1 ──
         # The same class as the `:Subject` vocabulary arm directly above, and
         # for the same measured reason: `create_event` now runs
-        # `live.refuse_terminal_event_state`, so an item carrying a terminal
-        # status raises in step 3 AFTER the point items have committed. The
-        # predicate is `live.is_terminal_status` — the ONE mirror of the Cypher
-        # terminal rule — so a status added to the vocabulary moves the door and
-        # this arm together (`#2901`/`#3301`). NON-terminal statuses are NOT
-        # refused: the door accepts them and `_promote_incident_operators` reads
-        # `draft`/`live` as its gate (#7853, #10828), so refusing here would be
-        # this file's own over-rejection class. `outdated` needs no arm: the loop
-        # above already refuses it bundle-wide on ANY point or entity item.
+        # `live.refuse_event_lifecycle_state`, so an item carrying ANY status
+        # raises in step 3 AFTER the point items have committed. Since #13100 it
+        # is the whole KEY that is refused (the terminal half alone was #11825's
+        # interim boundary), so this arm and the door cannot disagree on a value
+        # or a type — the arm refuses whatever the door would. `outdated` needs
+        # no arm here: the loop above already refuses it bundle-wide on ANY point
+        # or entity item.
         # ⛔ EMITTED UNCONDITIONALLY, and the duplicate for a DIRECT-route
         # operator connection is the accepted cost — the same bargain the
         # `:Subject` vocabulary arm above makes. Deferring to the connection arm
@@ -30770,61 +31921,37 @@ class TortoiseSDK:
                                 if k not in _merged})
             _status_values = [v for k, v in _merged.items()
                               if "status" in _event_state_key_names(k)]
-            own_status = None
             if not _status_values:
-                _declares_status, own_status = _item_declared_status(
+                _declares_status, _own_status = _item_declared_status(
                     item, _item_flatten_depth(item, "entities"))
-                _status_values = [own_status] if _declares_status else []
-            else:
-                own_status = _status_values[-1]
+                _status_values = [_own_status] if _declares_status else []
             # `status: None` is the DOCUMENTED clear route the door ACCEPTS, so it
             # is not a violation (review cycle 5, P2).
             _status_values = [v for v in _status_values if v is not None]
             if not _status_values:
                 continue
-            # The TYPE dimension (review cycle 6, P1): a PERSISTABLE non-string is
-            # refused by the door, a discarded one is accepted-and-dropped.
-            from .live import _status_is_discarded_by_every_writer as _is_discarded
-            _stored_bad = [v for v in _status_values
-                           if not isinstance(v, str)
-                           and not _is_discarded(v)]
-            if _stored_bad:
-                violations.append({
-                    "section": "entities", "index": i,
-                    "message": f"ingest: entities[{i}] declares status "
-                               f"{_stored_bad[0]!r} for an :Event — `status` on "
-                               f"the node is a STRING drawn from the "
-                               f"vocabulary, or `None` to clear it, so the "
-                               f"bundle is rejected at validation rather "
-                               f"than mid-write. WHAT TO DO: pass a string "
-                               f"(the door accepts `scheduled`/`draft`/"
-                               f"`live`), or drop `status`.",
-                })
-                continue
-            # ⛔ NAME THE DECLARATION THAT FAILED, not the LAST one. The test above
-            # is an `any`, and the writer applies EVERY key of the map, so an item
-            # can declare both names — one terminal, one not. Rendering
-            # `_status_values[-1]` then indicted the LEGAL value and advised the
-            # caller to pass it, with the offending terminal declaration absent
-            # from the message (measured, review: conflict-sweep lane F — an item
-            # declaring `superseded` and `live` produced "declares status 'live' …
-            # use a non-terminal value", naming only the value that was fine).
-            _terminal_hits = [
-                v for v in _status_values
-                if isinstance(v, str) and is_terminal_status(str.__str__(v))
-            ]
-            if not _terminal_hits:
-                continue
+            # ⛔ EXACT PARITY WITH THE DOOR, and since #13100 that is the WHOLE
+            # axis: the door refuses any non-`None` `status` on an `:Event`
+            # (`live.refuse_event_lifecycle_state`), so Phase 1 refuses any
+            # declaration too — whatever its VALUE or TYPE. The earlier split
+            # (terminal refused, non-terminal and non-persistable values
+            # accepted) mirrored the interim #11825 boundary, and keeping it
+            # would let Phase 1 call a bundle clean that step 3 raises on AFTER
+            # the point items committed — the #2422/#7925 partial-mutation class
+            # this arm exists to prevent.
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{', '.join(repr(v) for v in _terminal_hits)} for an "
+                           f"{', '.join(repr(v) for v in _status_values)} for an "
                            f":Event — an :Event "
-                           f"carries no lifecycle, so its door refuses the "
-                           f"terminal half mid-write and the bundle is rejected "
-                           f"at validation. WHAT TO DO: drop `status` from the "
-                           f"item, or use a non-terminal value (the door "
-                           f"accepts `scheduled`/`draft`/`live`).",
+                           f"carries no lifecycle at all (#13100), so its door "
+                           f"refuses the declaration mid-write and the bundle is "
+                           f"rejected at validation. WHAT TO DO: drop `status` "
+                           f"from the item. If the thing has not happened yet, "
+                           f"create a plan (`core:plan`) and record the :Event "
+                           f"when it does; for ingest bookkeeping use "
+                           f"`eventStatus` (`pending` -> `indexed`); to clear a "
+                           f"legacy word pass `status: None`.",
             })
         local: dict[str, tuple[str, dict]] = {}
         for section in ("sources", "points", "entities"):
@@ -32767,17 +33894,18 @@ class TortoiseSDK:
           ``SUBJECT_STATUS_VALUES`` before the name merge, so an invalid value
           (outside that set, non-string, or an explicit ``null``) on ANY entity
           item is a Phase-1 violation, while ``:Object``/``:Event`` statuses
-          are stored verbatim and stay accepted. ⛔ The ``:Event`` half of that
-          is now split, and the split is the whole point of #11825: a
-          NON-TERMINAL ``status`` (``scheduled``/``draft``/``live``) is still
-          stored verbatim, but the TERMINAL half is refused bundle-wide here
-          for exactly the reason the ``:Subject`` vocabulary is — the door
+          are stored verbatim and stay accepted. ⛔ A ``:Event`` status is
+          refused bundle-wide, and since #13100 (S7) that means ANY non-``None``
+          ``status`` — the terminal half alone was #11825's interim boundary, and
+          the non-terminal half is retired too because "will happen" is a PLAN's
+          job (`tortoise/planned_occurrence.py`). It is refused here for exactly
+          the reason the ``:Subject`` vocabulary is — the door
           (``create_event`` → ``create_entity(type='event')``) runs
-          ``live.refuse_terminal_event_state``, so leaving it to step 3 means the
-          point items commit and THEN the write raises (measured: a bundle with
-          one point and one ``status='superseded'`` event returned ``[]`` here
-          and raised a bare ``ValueError`` after ``Point 1`` was written — the
-          #2422/#7925 partial-mutation class, review cycle 3 P1). Props are read at the depth
+          ``live.refuse_event_lifecycle_state``, so leaving it to step 3 means the
+          point items commit and THEN the write raises (measured at #11825: a
+          bundle with one point and one ``status='superseded'`` event returned
+          ``[]`` here and raised a bare ``ValueError`` after ``Point 1`` was
+          written — the #2422/#7925 partial-mutation class, review cycle 3 P1). Props are read at the depth
           the ITEM'S write door flattens (``_item_prop_at_depth``): TWICE for a
           ``subject``/``object``/``event`` item (step 3 relays
           ``create_subject``/``create_object``/``create_event`` →
@@ -34890,7 +36018,7 @@ class TortoiseSDK:
             name=f"human approval of {artifact_ref}",
             eventKind="humanApproval",
             startedAt=now,
-            eventStatus="completed",
+            eventStatus="indexed",
         )
         event_id = event["eventId"]
         # Wire provenance: approver performs; uses artifact; aboutPoint each
@@ -35509,7 +36637,19 @@ class TortoiseSDK:
                                     # keeps the graph branch unchanged.
                                     # #11691: bound to this read's budget.
                                     pg_vector=_record_vector_searcher(
-                                        self, timeout_ms=_budget_ms))
+                                        self, timeout_ms=_budget_ms),
+                                    # #13108: the store's own measured index
+                                    # inventory, so an unindexed label skips the
+                                    # doomed queryNodes attempt (`None` = not
+                                    # measured → attempt as before). ⚠️ The
+                                    # BEHAVIOURAL half, not the reporting one:
+                                    # `_vector_indexed_labels` reports
+                                    # "measured-but-unparseable" as an empty
+                                    # set, and a reader must never skip an
+                                    # index attempt on that evidence.
+                                    vector_indexed_labels=getattr(
+                                        proj, "_vector_indexed_labels_for_reads",
+                                        None))
             for nid, _score in hits:
                 if nid == pid or nid not in pool:
                     continue
@@ -41752,7 +42892,7 @@ class TortoiseSDK:
                                 "prs": metadata.get("prs", []),
                                 "critical_decisions": metadata.get("critical_decisions", []),
                             }),
-                            "eventStatus": "completed",
+                            "eventStatus": "indexed",
                             "classificationLevel": "internal",
                             "format": "markdown",
                         }
@@ -43669,6 +44809,19 @@ class TortoiseSDK:
             # #1359: the recorded vector-index API (procedure vs Cypher-native)
             # lets run_vector_query skip the failing signature attempt.
             vector_index_api=getattr(proj, "_vector_index_api", None),
+            # #13108: the labels this STORE measured a VECTOR index for
+            # (`_record_vector_index_inventory`). A label absent from it skips
+            # two round trips that can only be REFUSED — measured at ≈58 % of an
+            # unindexed `:Object` read's store time. `None` (the inventory's
+            # not-measured lane) is forwarded as None, i.e. attempt as before.
+            # ⛔ The BEHAVIOURAL half (`…_for_reads`), never
+            # `_vector_indexed_labels`: the reporting half collapses "the
+            # catalogue was returned but unparseable" into an empty set, and
+            # skipping on that evidence would demote every dense read —
+            # `:Point` included — to a full scan after an engine catalogue
+            # reshape.
+            vector_indexed_labels=getattr(
+                proj, "_vector_indexed_labels_for_reads", None),
             excluded_statuses=() if include_terminal else None,
             leg_trace=status_trace,
             # A1 (#2070): the ask-lane numeric-token policy threads into the
@@ -46028,6 +47181,10 @@ class TortoiseSDK:
                 is_embedded=getattr(proj, "_is_embedded", True),
                 entity_type="point",
                 vector_index_api=getattr(proj, "_vector_index_api", None),
+                # #13108: the same measured inventory the shipped leg gets —
+                # the BEHAVIOURAL half (see the `degradation_chain` call site).
+                vector_indexed_labels=getattr(
+                    proj, "_vector_indexed_labels_for_reads", None),
                 excluded_statuses=excluded_statuses,
                 leg_trace=_exp_trace,
                 min_similarity=min_similarity,
@@ -46095,9 +47252,9 @@ class TortoiseSDK:
         is layer-bound: `:Point` carries `status` (live / superseded /
         retracted / draft / outdated / archived), `:Object` and `:Subject`
         carry their own `status` families (which include `deprecated`), and an
-        `:Event` carries NO `status` at all — its lifecycle is `eventStatus`,
-        a different vocabulary this field deliberately does not mix in, so an
-        `:Event` peer reports `""`. `""` therefore means "this peer's layer
+        `:Event` carries NO `status` at all — it has no lifecycle (#13100), and
+        `eventStatus` is an INGEST marker this field deliberately does not mix
+        in, so an `:Event` peer reports `""`. `""` therefore means "this peer's layer
         exposes no `status`", and it is now reached by LOOKING at the peer's
         label rather than by never asking.
 
@@ -49062,6 +50219,16 @@ class TortoiseSDK:
             _refuse_bare_lifecycle_carrier(
                 props, label=label, surface="create_entity")
         proj = self._get_proj()
+        # #13065 review round 5, finding 1 (P1): the fold behind this funnel
+        # MERGEs on the id, so a re-mention CREATE re-uses an EXISTING node — and
+        # that fold writes `status` at CREATION only while caller props land on
+        # both paths. A coherent ENDING pair therefore lands one half here and
+        # leaves the node retired on `goalState` / live on `status`. Refused
+        # before any write; see the helper for why the arm is this narrow.
+        if label in ("Object", "Subject"):
+            _refuse_ending_dropped_by_a_re_mention(
+                proj, id_val, props, label=label,
+                surface=f"create_{label.lower()}")
         # Build event dict. (#2296 review) The ENVELOPE owns `type`: the
         # `**props` splat would otherwise let a caller prop of that name become
         # the type BOTH the live fold and the journal record dispatch on —
@@ -50406,7 +51573,29 @@ class TortoiseSDK:
                                 value_shapes=_stored_value_shapes(
                                     self._get_proj().g, props,
                                     node_id=id_val,
-                                    keys=_entity_identity_probes()))
+                                    keys=_entity_identity_probes()),
+                                # #13035: the stored half of the goal-ending
+                                # pair — read ONLY if this write names one
+                                # endpoint and not the other. ⛔ The probe matches
+                                # `id` ONLY, while this door ALSO binds a node by
+                                # its secondary keys (`eventId`, `url` — see the
+                                # `#9649` block below), so a goal-carrying hybrid
+                                # (`:Point:Event`/`:Point:Source`) addressed by
+                                # one of those reads the stored side as ABSENT.
+                                # That is fixture-reachable, not
+                                # customer-reachable (no production writer mints
+                                # those hybrid labels), and it fails in the benign
+                                # direction: an absent stored value is the
+                                # ordinary LIVE reading, so the write is admitted
+                                # rather than over-refused. Every goal shape
+                                # (`goal`/`target`/`strategy`/`plan`, on a Point,
+                                # an Object or a Subject) is keyed by `id`, which
+                                # is why the question is answerable on the primary
+                                # key alone (#13065 review, note on the earlier
+                                # wording, which claimed `id` was the whole key
+                                # space THIS DOOR uses).
+                                goal_ending=lambda: _stored_goal_ending_view(
+                                    self._get_proj(), id_val))
         # ── #5475 (residual): the UPDATE door onto every label ──
         # ``update_entity`` is the documented tenant route onto Object /
         # Subject / Event / Document / Source nodes, and each of those carries
@@ -50816,12 +52005,14 @@ class TortoiseSDK:
                     props, label=_carrier_label, surface="update_entity",
                     stored_status=_carrier_rows[0][0])
                 break
-        # ── #11825: an `:Event` target, BEFORE the first write ──
+        # ── #11825 → #13100: an `:Event` target, BEFORE the first write ──
         # ⛔ THIS BLOCK MUST PRECEDE the Point status arm below, which WRITES
         # (`SET n += $s`) and only THEN drops the key from `props`. It used to sit
         # after that arm, so on a node carrying BOTH `:Point` and `:Event` the
         # Point arm consumed and cleared `status` before this guard ran — the
-        # guard then saw no declaration at all and the terminal status stood.
+        # guard then saw no declaration at all and the terminal status stood. The
+        # same ordering is what makes #13100's widened refusal (EVERY non-`None`
+        # `status`, not just the terminal half) atomic on that hybrid.
         # Measured (review cycle 9, P1): `update_entity(<:Point:Event>,
         # status="superseded")` was ACCEPTED, the node ended with
         # `status='superseded'` on an `:Event`, and the record (label="Point")
@@ -50864,13 +52055,18 @@ class TortoiseSDK:
                 "RETURN count(e)",
                 params={"id": id_val},
         ).result_set[0][0]:
-            refuse_terminal_event_state(props, door="update_entity")
-            # ⛔ No `props` surgery here on purpose: a NON-terminal status is a
-            # legal write on an `:Event` target (#2788's prop lane), and on a
-            # multi-label node the property is shared, so there is no "Point side"
-            # to keep it away from. The guard's whole job is the TERMINAL half,
-            # and it has it — measured: dropping the key here red 9 pins that
-            # legitimately land `draft`/`live` through this door.
+            refuse_event_lifecycle_state(props, door="update_entity")
+            # ⛔ No `props` surgery here on purpose. #13100 retired #2788's
+            # non-terminal prop lane, so this guard now refuses EVERY
+            # non-`None` `status` and returns only for a CLEAR (`status=None`,
+            # the documented un-mark route for a legacy row). On a multi-label
+            # node the property is SHARED, so there is no "Point side" to keep
+            # it away from — dropping the key here would turn that clear into a
+            # silent no-op instead of a `SET n += {status:null}` that removes the
+            # word, which is why it is left to the write arms below. (One shape
+            # cannot reach the clear route: a `:Point:Event` hybrid, whose Point
+            # arm refuses `None` as a non-vocabulary word — `Invalid status
+            # None`, a pre-existing Point-side behaviour, unchanged here.)
 
         # ── #9649: this door consults the lifecycle guard (#2498/#7819) ───────
         # Measured on the pre-change tree (issue #9649, comment `6839154493`, at
@@ -51118,14 +52314,14 @@ class TortoiseSDK:
                 and _pt_statuses_exact == (_rendered_status_exact,))
             for _lifecycle_id in (() if _status_entailed else _lifecycle_ids):
                 try:
-                    # ⛔ `refuse_event_terminalization=False` (#11825 merge): this
-                    # door writes a WINDOW or a non-terminal prop as often as it
-                    # writes a terminal status, so the guard's label-only `:Event`
-                    # arm is the wrong question here — it refused `draft -> live`
-                    # on a hybrid (the prop lane #2788 pins). The Event half is
-                    # answered ABOVE, by the props-aware
-                    # `refuse_terminal_event_state`, which refuses exactly the
-                    # TERMINAL values and lets a non-terminal one ride that lane.
+                    # ⛔ `refuse_event_terminalization=False` (#11825 merge): the
+                    # label-only `:Event` arm is the wrong QUESTION at this site —
+                    # it answered for the label where the door's question is the
+                    # caller's DECLARATION, and it was the prop lane #2788 used to
+                    # pin here that made the difference visible. (That lane is
+                    # retired: #13100 refuses any non-`None` `status` on an
+                    # `:Event` at the door, above.) The Event half is answered
+                    # ABOVE, by the props-aware `refuse_event_lifecycle_state`.
                     self._assert_lifecycle_guard(
                         _lifecycle_id, method="update_entity", missing_ok=True,
                         allow_operator=True,
@@ -52659,7 +53855,7 @@ class TortoiseSDK:
             # stored it. Refused BEFORE any write or journal emission, so a
             # refused create leaves nothing behind (the Point/Subject doors'
             # shape, #9287/#1423).
-            refuse_terminal_event_state(props, door="create_entity(type='event')")
+            refuse_event_lifecycle_state(props, door="create_entity(type='event')")
             # Legacy create_event about* wiring — preserved verbatim (#888 W2).
             # W5 Phase F (#2104, TOCTOU): an explicit deterministic id
             # (server-ONLY channel via the ``_server_id`` keyword — the
@@ -52809,7 +54005,7 @@ class TortoiseSDK:
             # `unfolded-mention` exemption.
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
-                "eventStatus": "scheduled", **props}, "EventRecorded",
+                "eventStatus": "pending", **props}, "EventRecorded",
                 is_episodic=is_episodic,
                 _journal_extra={"aboutLinks": about_links} if about_links else None)
             # The writes use the SAME resolution the record was built from: an
@@ -54912,7 +56108,7 @@ class TortoiseSDK:
                 "prs": metadata.get("prs", []),
                 "critical_decisions": metadata.get("critical_decisions", []),
             }),
-            "eventStatus": "completed",
+            "eventStatus": "indexed",
             "classificationLevel": "internal",
             "format": "markdown",
         }
@@ -55014,7 +56210,7 @@ class TortoiseSDK:
             "source_file": sf_rel,
             "format": "markdown",
             "classificationLevel": "internal",
-            "eventStatus": "completed",
+            "eventStatus": "indexed",
         }
         resolved, rejected = proj._upsert_event(
             inner, guard=True, guard_source_file=sf_rel)

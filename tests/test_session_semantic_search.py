@@ -83,7 +83,7 @@ def _index_session_raw(sdk, event_id: str, name: str, *,
         "agent": agent,
         "keywords": keywords or [],
         "topics": topics or ["general"],
-        "eventStatus": "completed",
+        "eventStatus": "indexed",
         "classificationLevel": "internal",
     }
     if started_at is not None:
@@ -113,7 +113,7 @@ def _index_session_with_embedding(sdk, event_id: str, name: str, *,
         "agent": agent,
         "keywords": keywords,
         "topics": topics,
-        "eventStatus": "completed",
+        "eventStatus": "indexed",
         "classificationLevel": "internal",
     }
     if started_at is not None:
