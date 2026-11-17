@@ -3535,6 +3535,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # before the `core` row was added). CORE_ALSO (not TOOL_CARVEOUTS) because the suite
              # is hermetic: no DB, no URI, no network — `open_record`/`read_checkpoint` are
              # replaced, and the one live proof is the PR body's, not the suite's.
+             # ⛔ PINNED, BECAUSE FOR A WHILE IT WAS NOT (review P2): this row landed with the
+             # argument above and NOTHING reddened if it was deleted — the suite's tests import
+             # the module directly, `--integrity` is satisfied by the separate classification
+             # and `durations` rows, and no `ci_selection` test named the runner. So the claim
+             # whose failure mode is "the whole suite silently does not run on the thing it
+             # pins" was the one claim with no evidence behind it. Pinned by
+             # tests/test_ci_selection.py::test_record_runner_tool_change_selects_core_not_tier1
+             # (tool arm + module arm; the module arm alone is carried by the `core` row in
+             # `config/ci-surfaces.yml`, which is why both are asserted).
              "tools/record_runner.py",
              # #11609: the surface ARCHIVE and its gate. `tools/archive_surface.py` is the only
              # writer of `archive/MANIFEST.json` and the only thing that can lower the guard
