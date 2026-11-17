@@ -558,7 +558,10 @@ def test_a_satisfied_condition_is_not_quoted_as_the_obstacle(dim):
         if not satisfied:
             continue
         for phrase in _RELEASED_PHRASES[token]:
-            assert phrase not in reason, (
+            # Casfolded for the reason above: a stale premise quoted
+            # sentence-initial is the same defect with a capital letter.
+            assert " ".join(phrase.split()).casefold() not in " ".join(
+                reason.split()).casefold(), (
                 f"{dim.dimension!r}: release condition {token!r} is SATISFIED "
                 f"({evidence}) but its phrase {phrase!r} is still quoted as the "
                 f"current obstacle in blocked_reason:\n  {reason}")
@@ -594,7 +597,8 @@ def test_an_unsatisfied_condition_phrase_is_live_against_its_block(dim, token):
         pytest.skip(f"{token} is SATISFIED — the complementary arm covers it")
     assert dim.blocked_reason, f"{dim.dimension} cites {token} but has no reason"
     flat = " ".join(str(dim.blocked_reason).split())
-    live = [p for p in _RELEASED_PHRASES[token] if " ".join(p.split()) in flat]
+    live = [p for p in _RELEASED_PHRASES[token]
+            if " ".join(p.split()).casefold() in flat.casefold()]
     assert live, (
         f"{dim.dimension} is blocked on the UNSATISFIED condition {token!r} "
         f"({why}), but NONE of its registered phrases appears in the live "
@@ -767,7 +771,18 @@ def _premise_offenders(text: str) -> list[str]:
             continue
         for sentence in _scannable(flat):
             for phrase in _RELEASED_ASSERTIONS:
-                if " ".join(phrase.split()) in sentence:
+                # ⛔ CASEFOLDED. Reviewer round 2 measured the case-sensitive form
+                # as blind to the most natural restatement of a premise: with
+                # "No per-org RESIDENCY GAUGE exists that this gate can afford on
+                # a write path." at the head of the live ``blocked_reason`` the
+                # suite was COMPLETELY GREEN, while the identical sentence with a
+                # lowercase ``n`` REDdened. That is not the documented
+                # paraphrase limit — it is the SAME registered string, differing
+                # only in the case of its first letter, i.e. the shape any lane
+                # writes when it restates a premise as a sentence. Measured: zero
+                # false-red candidates across the scanned surfaces under a
+                # casefolded matcher.
+                if " ".join(phrase.split()).casefold() in sentence.casefold():
                     hits.append(f"{phrase!r} in: {sentence[:90]}")
     return hits
 
