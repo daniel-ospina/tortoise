@@ -2112,6 +2112,19 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
     #     namespace alphabet.
     corpus: list[str] = ["team-001", "test_x", "tortoise_testing", "test-x",
                          "registry",
+                         # #13205: the org arm DELEGATES its composition to
+                         # `sdk.org_graph_name`, which strips a leading
+                         # `org_`/`team_` before composing so a namespace that
+                         # already carries one cannot mint a second (the
+                         # measured `team_team_…` production graph). The
+                         # stripped literals live in a HELPER, so the AST
+                         # collector below — which reads conditions in these
+                         # two sources only — cannot see them; these probes are
+                         # the deliberate edit that keeps the parity loop
+                         # covering the arm. Add a probe whenever the prefix
+                         # set changes.
+                         "org_x", "team_x", "org_org_x", "team_team_x",
+                         "team_test_x", "org_test_x", "team_tortoise_testing",
                          "01J8ZZK4M7HQ3X9Z8R2K6VWPB",
                          "01HZX9K4M7HQ3X9Z8R2K6VWPC", "01ULID"]
     corpus += sorted(predicate_lits)

@@ -92,12 +92,24 @@ USAGE
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first, and the operator would get an
+# unattributed traceback instead of this sentence (the `tools/` entry-point
+# contract; `tests/test_entry_point_python_guard.py` pins it for the corpus).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/cypher_inventory.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/cypher_inventory.py`"
+    )
+
 import argparse
 import ast
 import json
 import re
 import subprocess
-import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path

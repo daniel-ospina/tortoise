@@ -10232,6 +10232,20 @@ ROWED_BY_THIS_FOLD = (
     "test_closes_landing.py",
     "test_metering_capture_usage_reader.py",
     "test_rail_detach.py",
+    # #13110 (PR #13116) — the fold that registered `goalState` on both public doors.
+    # `test_13110_goalstate_doors.py` is a file this fold ADDED; the second is `main`'s own
+    # file, which the round-5 review reported rowless and this fold registered — `main` has
+    # since done so itself (#13144: the `api` + `core` surface rows AND the `durations:`
+    # row), so the ENTRY-RULE guard is kept on it while the registration is `main`'s.
+    # ⛔ This fold ALSO put it on `sdk`, and that row was then DROPPED because its stated
+    # reason was FALSE: `tortoise/sdk.py` is a `SHARED_MODULES` entry, so an `sdk.py` diff
+    # selects the FULL matrix — no row can rescue a leg there — and no `sdk` pattern is a
+    # subject of this file. The measurement is pinned by
+    # `test_an_sdk_diff_is_the_full_matrix_and_the_second_row_has_its_subjects_elsewhere`.
+    # ⛔ The rebase onto #13144 earlier made this fold's own `durations:` copy a DUPLICATE
+    # mapping key, which `--integrity` reds rather than silently keeping the last value.
+    "test_13110_goalstate_doors.py",
+    "test_13034_currency_rule_reads_position.py",
 )
 
 
@@ -10246,6 +10260,119 @@ def test_every_fast_file_this_fold_rows_carries_a_durations_row():
         "ENTRY RULE requires the row to EXIST (#3400/#4348) — add it with the "
         "`new in …` note; `tools/ci_timing.py --refresh-durations` fills the value "
         "from a push-to-main junit sweep later.")
+
+
+def test_the_entry_rule_bites_on_the_two_rows_this_fold_registered():
+    """Non-vacuity for #13110's two added rows — the state the round-5 review found.
+
+    Reconstructed from the LIVE map by dropping rows, the same way the #2148 pin above
+    reconstructs its own pre-fix state: the assertion is then about the map this PR
+    shipped, and a later reader can re-derive it without an invented fixture.
+    `--integrity` cannot stand in for this: the coverage check is a 0.90 RATIO with ~70
+    files of headroom, so it was green over both missing rows.
+
+    ⛔ ONE row at a time, never both together. `pre_fix = {k: v for k, v in real.items()
+    if k not in added}` removes both names UNCONDITIONALLY, so both are absent from the
+    reconstruction whatever the map holds and the assertion is INVARIANT — green under
+    the very row deletion it claimed to pin (the #13116 round-6 review falsified it by
+    deleting `config/ci-surfaces.yml`'s row). Dropping a single name keeps the
+    reconstruction a function of the map, so each deletion reds here, naming the row.
+    The flat-weight half of the ENTRY RULE is the sibling pin's business
+    (`test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading`).
+
+    ⛔ Both files must be IN the guarded set for the pin above to see them at all — that
+    is the half of this defect the rows alone do not fix (measured: with the rows added
+    and the set untouched, the entry-rule pin stayed green over any future file nobody
+    listed).
+
+    ⛔ NEITHER `durations:` row is this fold's any more, and that is the point: `test_13034`'s
+    row — and its `api` + `core` surface rows, and its `sdk` row that this fold then DROPPED
+    (a false reason; see the sibling pin below) — all landed on `main` at #13144 while this
+    branch was open, and the rebase dropped this fold's duplicate `durations:` key (two keys
+    for one file is a red — a YAML loader keeps the LAST, silently discarding the first).
+    This pin is unaffected: it asks whether a row EXISTS and whether dropping exactly one
+    names exactly that file, and both hold against main's row.
+    """
+    from tools.ci_selection import load_manifest
+    real = load_manifest()["durations"]
+    added = (
+        "test_13110_goalstate_doors.py",
+        "test_13034_currency_rule_reads_position.py",
+    )
+    assert set(added) <= set(ROWED_BY_THIS_FOLD), (
+        "the two rows this fold added must be in the guarded set, otherwise the "
+        "ENTRY RULE pin cannot see them: "
+        f"{sorted(set(added) - set(ROWED_BY_THIS_FOLD))}")
+    for name in added:
+        assert name in real, (
+            f"#13110 put {name} in a fast surface but shipped no `durations:` row, so "
+            "it packs at the flat default — add the row")
+        holed = {k: v for k, v in real.items() if k != name}
+        rowless = [f for f in ROWED_BY_THIS_FOLD if f not in holed]
+        assert rowless == [name], (
+            "dropping ONE row from the live map must name exactly that file as the "
+            f"rowless one the #13116 round-5 review reported. Dropped {name}; the "
+            f"reconstruction named {rowless} — so either {name} has no row to drop "
+            "or another member of the guarded set is missing one, and this pin "
+            "cannot distinguish the reported defect from that state")
+
+
+def test_an_sdk_diff_is_the_full_matrix_and_the_second_row_has_its_subjects_elsewhere():
+    """#13116: WHY `test_13034_currency_rule_reads_position.py` is NOT on the `sdk` surface.
+
+    `main`'s `api` + `core` rows (#13144) are its registration. This fold briefly added a
+    third, on `sdk`, justified in the manifest by *"an `sdk.py` change runs this guard in NO
+    leg"* — which is FALSE, and the falsifier is one call: `tortoise/sdk.py` is a
+    `SHARED_MODULES` entry, so a diff touching it selects the FULL matrix whatever any
+    surface list says. That is why the claim is pinned as a MEASUREMENT here rather than
+    left as prose: the prose version was already in the tree, marked "Measured, not
+    assumed", and it was wrong.
+
+    The other half is that the dropped row bought nothing real. The file's subjects are
+    `tortoise/live.py` / `tortoise/pipeline.py` (→ `core`) and `tortoise/hosted_api.py` /
+    `tortoise/mcp_auth.py` (→ `api`), and NO `sdk` pattern (`ids` / `models` / `crypto` /
+    `reader` / `retrieval` / `ask_lane` / `schemas` / `transport` / `temporal_leg`) is among
+    them — so an `sdk`-pattern-only diff selects `['sdk']` and correctly leaves this file
+    out. If a future change gives the file a real `sdk`-pattern subject, register it then
+    and update the last assertion, which is written to make you do so deliberately.
+    """
+    from tools.ci_selection import load_manifest, select
+
+    name = "test_13034_currency_rule_reads_position.py"
+    manifest = load_manifest()
+
+    # main's rows ARE the registration — and `--integrity`'s "classified SOMEWHERE" is a
+    # weaker question than "registered on the surface its subjects select".
+    for surface in ("api", "core"):
+        assert name in manifest["surfaces"][surface], (
+            f"`main` (#13144) registers this file on `{surface}`; without that row the "
+            "surface's own subjects run no guard (the #1349/#3332 silent-drop class)")
+    for path, surface in (("tortoise/live.py", "core"),
+                          ("tortoise/pipeline.py", "core"),
+                          ("tortoise/hosted_api.py", "api"),
+                          ("tortoise/mcp_auth.py", "api")):
+        picked = select([path], "pull_request", manifest, {})
+        assert surface in picked["surfaces"], (path, picked["surfaces"])
+        assert picked["test_files"] == "ALL" or name in picked["test_files"], (
+            f"a `{path}`-only diff is one of this file's subjects, so it must run the "
+            f"guard — `main`'s `{surface}` row is what selects it")
+
+    # THE FALSIFIER: `sdk.py` is SHARED_MODULES, i.e. the FULL matrix. No surface row can
+    # rescue a leg there, which is exactly what the dropped `sdk` note claimed it did.
+    whole = select(["tortoise/sdk.py"], "pull_request", manifest, {})
+    assert whole["full"] is True and whole["test_files"] == "ALL", (
+        "`tortoise/sdk.py` must select the FULL matrix (`SHARED_MODULES`) — the dropped "
+        "`sdk`-surface note claimed an `sdk.py` diff runs a guard in NO leg, and that is "
+        "not a state this repo can be in")
+
+    # And an `sdk`-PATTERN-only diff leaves it out, correctly: no arm of the file is there.
+    sdk_only = select(["tortoise/retrieval.py"], "pull_request", manifest, {})
+    assert sdk_only["surfaces"] == ["sdk"], sdk_only["surfaces"]
+    assert name not in (sdk_only["test_files"] or []), (
+        "an `sdk`-pattern-only diff selects `sdk` alone, and this file has no subject "
+        "there — so a row on that surface buys coverage of nothing. If this reds because "
+        "the file gained a real `sdk`-pattern subject, register it deliberately and "
+        "update this pin; do not re-add the row on the old rationale.")
 
 
 def test_the_added_file_row_guard_bites_at_the_pre_fix_head():

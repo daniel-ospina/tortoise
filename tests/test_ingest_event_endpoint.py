@@ -709,15 +709,16 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     it is WRITER AGREEMENT rather than over-rejection. Asserting the old shape
     would pin a divergence the slice exists to remove.
 
-    ⛔ The `:Event` half is a REFUSAL now too (#13100, this branch), which is why
-    the merge resolution of this file is a COMPOSITE and neither side's whole
-    body survives: `:Event` carries no lifecycle at all, so
-    `live.refuse_event_lifecycle_state` refuses ANY `status` declaration —
-    whatever its value or type — and Phase 1 must mirror that or the bundle is
-    called clean and then half-commits (the #2422/#7925 class). The old
-    "accepted, value DROPPED" Event direction this test pinned is therefore
-    false of the merged code; the accepted direction that survives is an Event
-    that declares NO `status`, and that is the positive control below.
+    ⛔ The `:Event` half is a REFUSAL now too (#13100 and #11825): an `:Event`
+    carries no lifecycle at ALL, so `live.refuse_event_lifecycle_state` refuses
+    ANY `status` declaration — whatever its value or type — and Phase 1 must
+    mirror that or the bundle is called clean and then half-commits (the
+    #2422/#7925 class). The old "accepted, value DROPPED" Event direction this
+    test pinned is therefore false of the merged code; the accepted direction that
+    survives is an Event that declares NO `status`, and that is the positive
+    control below. The arm is not "reject every non-`str`" — it is "an `:Event`
+    carries no lifecycle, whatever the value or its type"; the documented clear
+    route stays `status: None`.
     """
     # The WRITER's answer for the same value — the authority Phase 1 mirrors.
     with pytest.raises(ValueError, match="must be a plain string"):
@@ -728,7 +729,8 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
                       "status": {"a": 1}},
                      {"ref": "o2", "type": "object", "name": "Beta"},
                      # The `:Event` half — no lifecycle at all, so ANY declared
-                     # `status` is refused at Phase 1 as well (#13100).
+                     # `status` is refused at Phase 1 as well (#13100), a
+                     # non-persistable one included.
                      {"ref": "e1", "type": "event", "name": "Happened",
                       "eventKind": "sessionCaptured", "status": {"a": 1}}],
         "connections": [{"from": "o1", "to": "o2", "operator": "IMPL"}],
@@ -752,6 +754,21 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     assert sdk._validate_bundle(event_no_status) == []
     sdk.ingest(event_no_status)
     assert _count(sdk, "MATCH (n:Event {name:'Plain'}) RETURN count(n)") == 1
+
+    # …and the Event's declaration ALONE is refused too, so this isolates the
+    # Event arm from the :Object one above (S0's version of this test asserted
+    # the opposite here — a DROPPED value on an accepted bundle — which is
+    # #11825's TERMINAL-half boundary that #13100 replaced with the whole axis).
+    event_only = {"entities": [
+        {"ref": "o", "type": "object", "name": "Solo"},
+        {"ref": "e1", "type": "event", "name": "OnlyEvent",
+         "eventKind": "sessionCaptured", "status": {"a": 1}},
+    ]}
+    ev_msgs = [v["message"] for v in sdk._validate_bundle(event_only)]
+    assert any("declares status" in m and ":Event" in m for m in ev_msgs), ev_msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(event_only)
+    assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 0
 
 
 @pytest.mark.parametrize("spelling", ["top", "nested"])
