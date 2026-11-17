@@ -1215,17 +1215,27 @@ def _psql_install_run() -> str:
     return match[0]["run"]
 
 
-def _run_install_step(tmp_path, psql_body: str | None):
+def _run_install_step(tmp_path, psql_body: str | None, stub_ls: bool = False):
     """Execute that step hermetically: `sudo`/`dpkg` are stubs, the client is the variable.
 
     `psql_body=None` puts NO `psql` on PATH. Nothing here touches the network or a
     database — the step's own shell is the code under test.
+
+    `stub_ls=True` also shadows `ls`, which is what keeps the MISSING-client arm
+    hermetic: the step's fallback is `ls -d /usr/lib/postgresql/*/bin`, so on a box
+    that carries a real versioned client (installed but not exposed) that fallback
+    would resolve a working `psql` and the refusal would never be reached. The
+    shipped runner reaches it, so the guard must be able to reach it here.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for name in ("sudo", "dpkg"):
         stub = bin_dir / name
         stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    if stub_ls:
+        stub = bin_dir / "ls"
+        stub.write_text("#!/bin/sh\nexit 1\n")
         stub.chmod(0o755)
     if psql_body is not None:
         fake = bin_dir / "psql"
@@ -1284,6 +1294,38 @@ def test_a_resolvable_but_broken_psql_fails_the_install_step(tmp_path):
     assert "()" not in proc.stdout
     # And it must NOT have repaired PATH for the later steps on a failed probe.
     assert github_path.read_text() == ""
+
+
+def test_a_missing_client_fails_with_the_word_psql_in_the_remedy(tmp_path):
+    """The MISSING-client arm: the refusal must still print the word `psql`.
+
+    This is the other half of the review's finding 1, and it is the arm a static
+    backtick sweep cannot reach: the sweep proves no line DOUBLE-quotes a backtick,
+    while this proves what the operator actually reads on the only path that reaches
+    the line. Pre-fix the message was `echo "::error::… no `psql` binary resolves …"`,
+    so bash ran `psql` (absent here), printed `command not found` into the middle of
+    the diagnostic, and the remedy read `no  binary resolves` — losing the one word a
+    human repairing the runner needs. Measured on that spelling: stdout
+    `::error::postgresql-client is installed but no  binary resolves …` plus two
+    `bash: line N: psql: command not found` lines.
+    """
+    proc, github_path = _run_install_step(tmp_path, None, stub_ls=True)
+    combined = proc.stdout + proc.stderr
+
+    assert proc.returncode != 0, (
+        f"no resolvable `psql` must red the step; stdout={proc.stdout} stderr={proc.stderr}"
+    )
+    assert "no `psql` binary resolves" in proc.stdout, (
+        "the `::error::` message must keep its backticks LITERAL — double-quoted they "
+        f"command-substitute the word away; stdout={proc.stdout}"
+    )
+    assert "command not found" not in combined, (
+        "bash's own error leaked into the diagnostic, which is the signature of a "
+        f"command-substituted `::error::` message; stdout={proc.stdout} stderr={proc.stderr}"
+    )
+    assert github_path.read_text() == "", (
+        "nothing resolved, so nothing may be appended to $GITHUB_PATH"
+    )
 
 
 def test_a_working_client_still_passes_and_repairs_path(tmp_path):
