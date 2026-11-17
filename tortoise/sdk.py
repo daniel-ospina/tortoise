@@ -46829,9 +46829,23 @@ class TortoiseSDK:
         # 6. EP annotation (Point only)
         # #10893: the decoration read is the FIRST of the two graph round trips
         # on this path (step 7's batch content fetch is the second), and the one
-        # a breach never used to be able to name.
+        # a breach never used to be able to name. #13294: it is also the FIRST
+        # and the SECOND of the two stages those reads are charged to — the
+        # annotation to ``ep_annotation``, everything after it to ``retrieval``.
         _mark_read_stage(STAGE_EP_ANNOTATION)
         ep_breakdowns = annotate_ep_batch(graph, result_ids) if entity_type == "point" else {}
+        # #13294: ``ep_annotation`` is the ANNOTATION READ and nothing else, so it
+        # closes the moment that read returns. Step 7's batch content fetch below
+        # and its epistemic-state read are graph round trips on the SAME path, and
+        # they reopen ``retrieval`` — the stage documented as "all three legs PLUS
+        # whatever the graph answers" (``read_stages.py``) — which ``ordering``
+        # then closes at step 9. Leaving ``ep_annotation`` open across them
+        # published the DOMINANT graph read of a search as "the annotation took
+        # 12 s" with ``retrieval`` closed and healthy: the inference the
+        # instrument exists to remove, in the shape ``fusion`` had before #10893
+        # F1. The two stages that sit between a sub-read and a later graph read
+        # obey ONE rule, and it is written on ``STAGE_ORDERING``.
+        _mark_read_stage(STAGE_RETRIEVAL)
 
         # 7. Fetch entity content in BATCH (not N+1)
         entity_data: dict[str, dict] = {}
