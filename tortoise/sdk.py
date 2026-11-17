@@ -5271,13 +5271,21 @@ _JOURNAL_ENVELOPE_KEYS = (
 #   built, overwriting it (measured on ``update_point``: a caller ``ts``,
 #   ``event_id`` and ``projection_version`` all reached the record).
 #
-# The set is spelled out rather than derived so an auditor sees it whole; it is
-# `_JOURNAL_ENVELOPE_KEYS` minus ``id`` **plus ``seq``** — and `seq` is not in the
-# envelope tuple because it is not an envelope name: it is the record's POSITION,
-# reserved for the reason below. (An earlier sentence said the set "must stay
-# equal to `_JOURNAL_ENVELOPE_KEYS` minus `id`", which stopped being true when
-# `seq` was added here — corrected rather than left as a claim a reader would
-# check and find false.)
+# The set is spelled out rather than derived so an auditor sees it whole, and it
+# must stay EQUAL to `_JOURNAL_ENVELOPE_KEYS` minus ``id`` — nothing derives it, so
+# a name added to that tuple has to be added here by hand. ``seq`` is in BOTH:
+# the tuple lists it (`:5242`) for the position reason below, and this set
+# subtracts only ``id``, so ``seq`` is reserved.
+# ⛔ An earlier cut of this paragraph claimed the set was the tuple "minus ``id``
+# **plus ``seq``**, since `seq` is not in the envelope tuple" and deleted the
+# "must stay equal" sentence as "stopped being true". That was FALSE when it was
+# written and is removed rather than re-worded: `seq` has been a member of
+# `_JOURNAL_ENVELOPE_KEYS` at every head that carries this guard (measured at
+# `origin/main`, at `942786899b` and here), and
+# `set(_JOURNAL_ENVELOPE_KEYS) - {'id'} == set(_RESERVED_ENVELOPE_PROPS)` holds, so
+# the deleted sentence was the correct one. Do not re-apply that claim: a reader
+# who believed it would drop `seq` from the envelope tuple, which is what makes
+# `_refuse_caller_named_envelope_keys` refuse a caller `seq`.
 #
 # ⛔ ``seq`` IS LOAD-BEARING HERE, not tidiness (#12894). `#9190` makes the
 # record CARRY its ordinal, so `record_projection.replay` READS a record's `seq`
