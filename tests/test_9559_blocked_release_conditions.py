@@ -2015,6 +2015,8 @@ def test_the_body_scan_honours_a_named_dollar_tag():
 
 
 # --------------------------------------------------------------------------- #
+# The live-definition WINDOW: the last declaration in the file is the live one.
+# --------------------------------------------------------------------------- #
 def test_the_body_window_is_the_LIVE_definition_not_the_first_one():
     """A file that defines the function twice leaves the SECOND definition live.
 
@@ -2050,10 +2052,9 @@ def test_the_body_window_is_the_LIVE_definition_not_the_first_one():
         f"the window missed the live (last) definition: {live_guarded!r}")
 
 
-
+# --------------------------------------------------------------------------- #
 # The two REVIEW findings on this selector — both "the gate asserts over text the
 # server does not execute", one spelling further in than the defect it replaced.
-# --------------------------------------------------------------------------- #
 def test_the_selector_is_closed_over_the_definition_spelling_space(tmp_path):
     """The gate's OWN pattern sees every legal spelling of the definition.
 
