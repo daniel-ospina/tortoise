@@ -424,13 +424,21 @@ directions:** `#9559` (`a218f8867b`) ADDED the two door calls this PR removes, s
 **1569 / 258** — `main`'s **1571 / 260** minus this branch's two — and a lane that carried either
 parent's figure forward (or reused this branch's pre-merge cut) would have written a pin `--check`
 then accepted. Only running the tool says which tree you are holding.
-⚠️ Those five `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as the row
+⚠️ THREE of those `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as the row
 below and from the same commit: `tortoise/record_writer.py:1723` is a COMMENT line containing
 `MERGE (s:Source {url:$id})`, and this census counts LINES — so the tool reads 2,343 / 143 where it
 read 2,342 / 142, and `rg` reads 2,330 / 142, 2,064 and 2,402 where it read 2,329 / 141, 2,063 and
-2,401. The 13-occurrence one-file whole-text gap and the ten-prose/three-Cypher split are UNCHANGED
-(the added match is single-line, not cross-line), and §1's `record_projection.py:4777` citation is
-corrected to `:4830` because that same commit moved it.
+2,401. ⛔ The other TWO did NOT move AT `#13265`, and the reason is the predicate, not the commit:
+`1,622` / `108` and `1,628` bare are DOOR figures — they move with door-CALL conversions, not with
+comment lines, which is why `#13249` took them `1,624` / `1,630` → `1,622` / `1,628` — and `#13265`
+added **0** door calls and exactly **1** verb
+occurrence (`git show 34bd33d22a -- tortoise/ | grep '^+' | grep -cE '\.(ro_)?(query|execute)\s*\('`
+→ `0`; `… | grep -oiE '\b(MATCH|MERGE)\s*\('` → `1`). The 13-occurrence one-file whole-text gap and
+the ten-prose/three-Cypher split are UNCHANGED (the added match is single-line, not cross-line), and
+§1's `record_projection.py:4777` citation is RETIRED rather than re-pinned: it read `:4830` after
+`#13265` moved the comment line again, and §1's own rule above is *enumerate by command, never by
+citing `file:line` in this paragraph* — re-pinning it here would restore the rot that rule exists to
+prevent (the same line has moved once more since).
 ⚠️ That regeneration is not decorative at this head: `main`'s `#13115` (`9f327e1435`) moved code
 inside files that already carried sites, so re-cutting the appendix moves ROWS while every SCALAR
 stays put. Measured on THIS cut against `origin/main` **`34bd33d22a`**: exactly **one row** differs
