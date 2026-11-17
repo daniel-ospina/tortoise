@@ -355,9 +355,10 @@ surfaces:
   # the shared answer. DUAL-REGISTERED with `core` (the row that existed was
   # `core`-only until the #13074 review measured this), and BOTH arms are
   # load-bearing: the census's own `_CENSUS_MODULES` names
-  # `tortoise/hosted_api.py` FIRST (`tests/test_13034_currency_rule_reads_position.py`
-  # `:600-611`, and `:717-731` asserts `"tortoise/hosted_api.py":
-  # "_terminal_excluded"`), and `hosted_api.py` is an EXACT `api`
+  # `tortoise/hosted_api.py` as one of its six consumers
+  # (`tests/test_13034_currency_rule_reads_position.py` `:606-611`), and the
+  # presence arm at `:708-722` asserts the literal `"tortoise/hosted_api.py":
+  # "_terminal_excluded"` (`:714`), and `hosted_api.py` is an EXACT `api`
   # SOURCE_PATTERNS match that REPLACES the `core` fallback in `select()`.
   # MEASURED on a `core`-only row, with this manifest and `tools/ci_selection.py`
   # (`select(['tortoise/hosted_api.py'], 'pull_request', manifest)`):

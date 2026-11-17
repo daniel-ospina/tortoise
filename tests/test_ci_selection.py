@@ -22973,9 +22973,10 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
 
     `tests/test_13034_currency_rule_reads_position.py` was registered `core`
     ONLY. Its cross-cutting guard is a repo-wide census over `_CENSUS_MODULES`
-    (`:600-611`), whose FIRST named consumer is `tortoise/hosted_api.py` — the
-    file #13034 converted — and whose second arm (`:717-731`) asserts
-    `"tortoise/hosted_api.py": "_terminal_excluded"` is still true.
+    (`:606-611`), which names `tortoise/hosted_api.py` as one of its six
+    consumers — the file #13034 converted — and whose presence arm (`:708-722`,
+    literal at `:714`) asserts `"tortoise/hosted_api.py": "_terminal_excluded"`
+    is still true.
 
     `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match, and a named
     match REPLACES the `core` fallback in `select()` (`core` is added only when
