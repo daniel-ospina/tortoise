@@ -6022,18 +6022,38 @@ def tortoise_invalidate(id: str, corrected_by_id: str,
     return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"), id, corrected_by_id)
 
 
-def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True,
+def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool | None = None,
                        dry_run: bool = False) -> dict:
-    """Atomically replace old Point with new — CORRECTS edge + outdated flag.
+    """Replace a node with a successor, keeping the history — the arm follows the OLD node's label.
 
-    transfer_edges=True (default): full supersede — all edges move from old to
-    new. transfer_edges=False: invalidate behavior — mark old outdated with a
-    CORRECTS edge only (no edge transfer). Absorbs tortoise_invalidate.
-    Returns {invalidated, id, corrected_by} (+ edges_transferred when
-    transfer_edges=True).
+    A Point gets the full supersede: CORRECTS edge + outdated flag + edge transfer.
+    An Object/Subject gets the family supersede: status + successor NAME + instant,
+    with no edge transfer.
 
-    dry_run=True previews exactly which edges would transfer and changes
-    nothing; dry_run=False (default) applies the supersede.
+    transfer_edges=None (default, NOT SUPPLIED): the SDK picks the arm by the
+    OLD node's label. transfer_edges=True: full supersede — all edges move from
+    old to new. transfer_edges=False: invalidate behavior — mark old outdated
+    with a CORRECTS edge only (no edge transfer). Both explicit values are
+    POINT-ONLY and are REFUSED on an Object/Subject. Absorbs tortoise_invalidate.
+    Returns {invalidated, id, corrected_by} (+ edges_transferred when the
+    supersede arm ran) for a Point, {superseded, id, label, superseded_by,
+    superseded_at} for an Object/Subject.
+
+    ⛔ The default is `None`, not `True` (#12914 review P3 + re-review finding 2):
+    passing `True` is a CALLER CHOICE the Object/Subject arm cannot honour, so it
+    is REFUSED there rather than silently dropped — and this container must not
+    manufacture that choice on the caller's behalf by defaulting to it. It passes
+    the value through UNCHANGED; the SDK owns the one dispatch rule.
+
+    dry_run=True previews what would change — the same arm and the same FAMILY-ARM
+    checks, nothing written — and reports the node count the write would touch.
+    ⛔ It is NOT refusal parity with the write on every shape: the write continues
+    into `update_knowledge` -> `_update_entity`, whose label-surface guards an
+    `:Event` row and a `:Source` row fail, and the preview does not run those. On
+    the hybrid shapes `:Object:Event` / `:Subject:Event` / `:Object:Source` /
+    `:Subject:Source` the preview says "would supersede" and the write refuses
+    (fail-closed, nothing written; tortoise#13114). dry_run=False (default)
+    applies the supersede.
     """
     if dry_run:
         return _safe(_preview_supersede, _get_org_sdk(),
@@ -8194,21 +8214,38 @@ def tortoise_update_knowledge(id: str, props: Any = None,
 
 
 def tortoise_supersede_knowledge(old_id: str, new_id: str,
-                                 transfer_edges: bool = True,
+                                 transfer_edges: bool | None = None,
                                  dry_run: bool = False) -> dict:
     """Replace a node with a successor — dispatching on the LINK POLICY (#4282 row 23).
 
-      transfer_edges=True  (default) → FULL SUPERSEED. CORRECTS edge, outdated flag,
-                                       and every edge moves from old to new.
-                                       Was `tortoise_supersede`.
-      transfer_edges=False           → INVALIDATE ONLY. Outdated flag + a CORRECTS
-                                       edge; nothing is transferred. This is the
-                                       whole of `tortoise_invalidate`, so that door
-                                       retires here rather than into a fourth verb.
+      transfer_edges=None (default, NOT SUPPLIED) → the SDK picks the arm by the
+                                       OLD node's label: a full supersede for a
+                                       :Point, the family supersede for an
+                                       :Object/:Subject.
+      transfer_edges=True            → FULL SUPERSEED (Point only). CORRECTS edge,
+                                       outdated flag, and every edge moves from
+                                       old to new. Was `tortoise_supersede`.
+      transfer_edges=False           → INVALIDATE ONLY (Point only). Outdated flag
+                                       + a CORRECTS edge; nothing is transferred.
+                                       This is the whole of `tortoise_invalidate`,
+                                       so that door retires here rather than into a
+                                       fourth verb.
 
-    dry_run=True previews the transition — which edges would move — and changes
-    nothing; it runs the same guards, so a rejected input is rejected in the
-    preview too.
+    ⛔ The default is `None`, not `True` (#12914 re-review finding 2): either
+    boolean is a Point-arm choice the family arm refuses, so defaulting to `True`
+    made every Object/Subject call here hit that refusal — a regression on the
+    only public route for a family supersede. The value is passed through
+    UNCHANGED; the SDK owns the one dispatch rule.
+
+    dry_run=True previews what would change — the same arm and the same FAMILY-ARM
+    checks, nothing written — and reports the node count the write would touch (and
+    the rows it would bind on the family arm, which transfers no edges).
+    ⛔ It is NOT refusal parity with the write on every shape: the write continues
+    into `update_knowledge` -> `_update_entity`, whose label-surface guards an
+    `:Event` row and a `:Source` row fail, and the preview does not run those. On
+    the hybrid shapes `:Object:Event` / `:Subject:Event` / `:Object:Source` /
+    `:Subject:Source` the preview says "would supersede" and the write refuses
+    (fail-closed, nothing written; tortoise#13114).
     """
     return tortoise_supersede(old_id, new_id, transfer_edges=transfer_edges,
                               dry_run=dry_run)
@@ -11046,12 +11083,62 @@ def _preview_invalidate(sdk, id: str, corrected_by_id: str) -> dict:
     )
 
 
+def _preview_family_supersede(sdk, label: str, old_id: str, new_id: str) -> dict:
+    """Preview the `:Object`/`:Subject` arm of `tortoise_supersede` (#12914).
+
+    The guards are NOT restated here: this calls ``_supersede_entity(dry_run=True)``,
+    which runs every FAMILY-ARM check — same family, not self, source not already
+    terminal, successor current + named + unambiguous, no stranded sibling label —
+    and skips only the write. A preview that restated them would be the second
+    source of truth this lane exists to remove, and a preview that restated them
+    WRONG is exactly what the round-3 finding measured (it refused a supersede the
+    write accepted).
+
+    ⛔ RESIDUAL (#12914 round-4 P1, filed not fixed): the family WRITE continues
+    into ``update_knowledge`` -> ``_update_entity``, whose label-surface guards
+    (``refuse_terminal_event_state`` on an ``:Event`` row, the ``:Source``
+    closed-surface refusal) are NOT part of ``_supersede_entity``'s own checks. On
+    the HYBRID shapes ``:Object:Event`` / ``:Subject:Event`` / ``:Object:Source`` /
+    ``:Subject:Source`` this preview therefore answers `would supersede` and the
+    write refuses. Fail-closed (nothing is written), single-label rows unaffected.
+
+    ``superseded_at`` is the instant the write WOULD stamp; the real write mints its
+    own, so a caller must not reserve this value.
+    """
+    out = sdk._supersede_entity(label, old_id, new_id, dry_run=True)
+    return _preview_result(
+        "tortoise_supersede", f"family supersede ({label}: status + successor name)",
+        found=True, superseded=True, label=label,
+        target={"id": old_id, "superseded_by": out["superseded_by"]},
+        # ⛔ NOT a hardcoded 1 (#12914 round-4 P2): the family write is a bare
+        # `MATCH (n:<label> {id:$id}) SET n += $props`, which binds EVERY row the
+        # id names — the same fan-out the Point preview above mirrors instead of
+        # hardcoding. Measured on the round-4 head: two `:Object` rows sharing one
+        # id, preview said `nodes_affected: 1`, and the write terminalized BOTH.
+        nodes_affected=out["rows"], edges_removed=0, edges_added=0,
+        superseded_at=out["superseded_at"],
+    )
+
+
 def _preview_supersede(sdk, old_id: str, new_id: str,
-                       transfer_edges: bool = True) -> dict:
+                       transfer_edges: bool | None = None) -> dict:
     """Preview `tortoise_supersede`.
 
-    transfer_edges=False is the invalidate behaviour and reuses that preview.
-    transfer_edges=True enumerates the edges the writer repoints, leg by leg:
+    ⛔ THE ARM IS CHOSEN BY THE OLD NODE'S LABEL, EXACTLY AS THE WRITE CHOOSES IT
+    (#12914 round-3 finding 2). An `:Object`/`:Subject` takes
+    `_preview_family_supersede`; a `:Point` takes the edge walk below. Before this
+    the preview was Point-only, so `dry_run=True` refused — with the Point doors'
+    `No point <id>` — the very family supersede the write accepts, and the `dry_run`
+    contract two functions up ("it runs the same guards, so a rejected input is
+    rejected in the preview too") was false in the OTHER direction.
+
+    `transfer_edges=None` (the not-supplied default) is the only value that takes
+    either arm; every supplied value keeps its meaning — `False` is the invalidate
+    behaviour and reuses that preview, and on a family node anything else is
+    REFUSED through the write's own helper rather than restated here.
+
+    On a `:Point`, `transfer_edges=True` enumerates the edges the writer repoints,
+    leg by leg:
       * 2a operator -> old, EXCEPT `alreadyDecided` (kept on the dead prior).
         The writer MERGEs (idx-keyed; an idx-less edge merges on the bare
         pattern — #6180): a pre-existing edge at the successor is
@@ -11115,7 +11202,17 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     `edges_already_present_at_new` names those no-ops; both are multiplied by
     `successor_nodes` when a duplicate successor id fans the writer out.
     """
-    if not transfer_edges:
+    # ⛔ THE FAMILY ARM IS DECIDED FIRST, BEFORE THE INVALIDATE SHORTCUT (#12914
+    # round-3 finding 2). `_preview_invalidate` is a POINT writer, so routing a
+    # family node through it answers a Point refusal (`No point <id>`) for an
+    # Object the write accepts. The label read is the SAME one the write dispatches
+    # on (`_supersession_label`, Point wins a #3311 hybrid tie), and the keyword
+    # refusal is the write's OWN helper — never a restatement of its message.
+    label = sdk._supersession_label(old_id)
+    if label in ("Object", "Subject"):
+        sdk._refuse_family_transfer_edges(label, old_id, transfer_edges)
+        return _preview_family_supersede(sdk, label, old_id, new_id)
+    if transfer_edges is not None and not transfer_edges:
         out = _preview_invalidate(sdk, old_id, new_id)
         out["tool"] = "tortoise_supersede"
         out["would"] = "invalidate (transfer_edges=false)"

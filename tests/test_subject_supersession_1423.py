@@ -19,7 +19,7 @@ owned status is already the generic entity surface's job. The fold
 (`FalkorProjection._fold_entity_mutation`) applies `SET n += $state` on EVERY
 canonical label in all four replay engines, and `_update_entity`'s non-Point
 branch already journaled a replayable record for a `:Subject` status write.
-Measured before this landed: `update_entity(subject, status='superseded',
+Measured before this landed: `update_knowledge(subject, status='superseded',
 supersededBy=..., supersededAt=...)` round-tripped byte-identically through
 `rebuild_all`. Only the PRODUCER and the read filter were missing.
 
@@ -364,8 +364,13 @@ class TestKeepFirstAndNeverGuess:
         """No VISIBLE successor ⇒ burying the target would leave nothing a
         recall surface can show. Mirrors the Object lane's gate."""
         sdk, proj, _events, _journal_path = env
+        # #12592: the bare word is refused now (ONTOLOGY §4.2 — `superseded`
+        # names the successor), so the terminal Target is written with a
+        # successor name. What this case measures is unchanged: the SUCCESSOR
+        # being terminal is what makes the fold refuse.
         sdk._update_entity(node_id(sdk, "Subject", "Team Beta"),
-                           status="superseded")
+                           status="superseded",
+                           supersededBy="Team Beta II")
         applied, warns, skips = _apply(proj, sdk, [RECORD])
         assert applied == 0
         assert any("no visible successor" in w for w in warns), warns
@@ -413,7 +418,12 @@ class TestSubjectStatusWriteIsValidated:
         sdk, proj, _events, _journal_path = env
         sid = node_id(sdk, "Subject", "Team Alpha")
         for st in ("draft", "live", "superseded", "deprecated", "archived"):
-            sdk.update_knowledge(sid, status=st)
+            # ⛔ #12592 ADDS A PARTNER REQUIREMENT to one member of this list and
+            # leaves the anti-vacuity claim untouched: `superseded` names its
+            # successor (ONTOLOGY §4.2), the other four need none.
+            extra = ({"supersededBy": "Team Alpha II"} if st == "superseded"
+                     else {})
+            sdk.update_knowledge(sid, status=st, **extra)
             (got,), = _subject_row(proj, "Team Alpha", "status")
             assert got == st, (st, got)
 
