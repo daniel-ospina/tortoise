@@ -599,8 +599,8 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
     (derived-or-absent, never a fabricated ``'live'``), while the Point fold still
     writes ``coalesce($st, n.status, 'live')``. Hence the NULL checks. This is
     also why an EPISTEMIC-LABEL widening (#7927) needs no per-label status
-    branch: ``:Event`` stores ``eventStatus`` and no ``status`` at all, so it
-    reads LIVE here exactly as a status-less Point does.
+    branch: ``:Event`` carries no ``status`` at all — the write door refuses one
+    (#13100) — so it reads LIVE here exactly as a status-less Point does.
     """
     terminal = _terminal_excluded(clause)
     if include_draft:
@@ -640,11 +640,11 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
 #     bound (0.73s -> 1.50s against a 1.2s limit) — a Point-only id set must
 #     stay ONE anchored read.
 #
-# ``:Event`` writers stamp ``eventStatus`` and do not FOLD ``status`` (its
-# lifecycle has no status fold — ``consistency._STATUS_COMPARED_LABELS``), though
-# a writer-supplied ``status`` can still land, because ``_EVENT_HANDLED`` omits
-# the key (``projection/entities.py`` says so, and ``_promote_incident_operators``
-# reads it). That does NOT need a
+# ``:Event`` writers stamp the ``eventStatus`` INGEST marker and never a
+# ``status`` (its lifecycle has no status fold —
+# ``consistency._STATUS_COMPARED_LABELS``, and since #13100 the write door
+# refuses a ``status`` on an Event outright; a legacy row can still carry one).
+# That does NOT need a
 # per-label branch on a widened leg: ``_live_only`` treats an ABSENT status as
 # LIVE (``_terminal_excluded``'s NULL check), so an Event passes the same
 # predicate a Point does, and the draft filter is a no-op for it by
@@ -667,8 +667,10 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
 EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")
 
 #: The epistemic labels whose layer CARRIES a ``status`` family — every one but
-#: ``:Event``, whose lifecycle is ``eventStatus`` (a different vocabulary a
-#: ``status``-rendering read deliberately does not mix in).
+#: ``:Event``, which has NO lifecycle at all: a dated fact does not end, and the
+#: write door refuses a ``status`` on it (#13100). ``eventStatus`` is the ingest
+#: marker (``pending`` / ``indexed``), not a lifecycle word, and a
+#: ``status``-rendering read deliberately does not mix it in.
 #:
 #: This is the declaration behind the ``related_status`` / ``provenance``
 #: contract: an ABSENT status READS live (``_terminal_excluded``'s NULL arm, and
@@ -705,28 +707,42 @@ def status_as_reported(value: str | None, *, label: str | None = None) -> str:
     return "live"
 
 
-#: The ONE refusal predicate behind #11825, as a sentence so every door that
-#: imports it cannot drift in what it claims to enforce.
-_EVENT_TERMINAL_STATE_REFUSAL = (
-    "an :Event is a dated fact and carries no lifecycle (ONTOLOGY §4.5: the "
-    "Event-carries-state question was answered `no` in #2725). The belief "
-    "layer strips a terminal Event from every factor while every retrieval leg "
-    "keeps serving it, so the write is the half-state #11825 records. "
-    "WHAT TO DO: to record a correction, write a NEW :Event (a dated fact is "
-    "corrected by a later fact, never by a status flip on an earlier one); for "
-    "ingest state use `eventStatus` (`scheduled` -> `completed`), which is a "
-    "plain prop and not a lifecycle; to un-mark a legacy terminal status on an "
-    "existing Event, pass `status='live'` or `status=None`."
+#: The ONE refusal predicate behind #13100 (was #11825's terminal half), as a
+#: sentence so every door that imports it cannot drift in what it claims to
+#: enforce.
+_EVENT_LIFECYCLE_STATE_REFUSAL = (
+    "an :Event is a dated fact and carries NO lifecycle (#13100 / S7: the "
+    "approved model, §8 — `there is no third case`). A thing that has not "
+    "happened yet is not an event. "
+    "WHAT TO DO: if it has not happened, create a PLAN (`core:plan`, "
+    "`tortoise/planned_occurrence.py`) and settle it when it does; when it "
+    "happens, write a NEW :Event and link it to the plan (`aboutObject`). To "
+    "record a correction, write a NEW :Event — a dated fact is corrected by a "
+    "later fact, never by a status flip on an earlier one. For ingest "
+    "bookkeeping use `eventStatus` (`pending` -> `indexed`), which is a plain "
+    "prop and not a lifecycle. To un-mark a legacy status on a plain :Event, "
+    "pass `status=None` to the UPDATE door (`update_knowledge`) — ⛔ it is the "
+    "one door that REMOVES a property; the record doors (`add_event`, "
+    "`emit_belief`) drop a null on the way to the fold, so a clear sent there "
+    "writes nothing. On a :Point:Event HYBRID there is NO status door that "
+    "un-marks a terminal word: `update_knowledge` refuses `None` (the Point "
+    "vocabulary has no null word) and refuses a dead claim, `update_point` only "
+    "promotes draft->live, and the retraction verbs refuse a node carrying "
+    ":Event. A hybrid's non-terminal `status` is that Point's own currency "
+    "(`update_point(id, status='live')`), never an Event state; to correct what a "
+    "dated fact says, write a NEW :Event — a dated fact is corrected by a later "
+    "fact, not by a status flip."
 )
 
 
 def _status_is_discarded_by_every_writer(value: object) -> bool:
     """True only when every writer DISCARDS ``value`` on its way to the node.
 
-    The question :func:`refuse_terminal_event_state` asks before typing a
-    non-string ``status``: a value no writer keeps leaves the node with no
-    ``status``, so it cannot be a terminal half-state and refusing it would be
-    #7925 round 4's over-rejection class. ⛔ But THREE paths can carry a
+    The question :func:`refuse_event_lifecycle_state` asks before typing a
+    non-boolean ``outdated``: a value no writer keeps leaves the node with no
+    flag, so it cannot make the Event terminal and refusing it would be #7925
+    round 4's over-rejection class. (It is no longer asked of ``status`` — since
+    #13100 the declaration itself is refused, whatever its value.) ⛔ But THREE paths can carry a
     ``status`` to the store and each has its OWN predicate, so asking one of
     them is not enough — measured at review cycle 3, after the first revision
     asked only the fold's:
@@ -942,37 +958,58 @@ def _event_state_declarations(props) -> tuple[list, list]:
     return status_values, outdated_values
 
 
-def refuse_terminal_event_state(props, *, door: str) -> None:
-    """Refuse the TERMINAL half of the status vocabulary on an `:Event`.
+def refuse_event_lifecycle_state(props, *, door: str) -> None:
+    """Refuse EVERY lifecycle ``status`` on an ``:Event`` — the whole word set.
 
     Write-side ONLY, and deliberately NOT an Event status family: `:Event`
-    stays outside `STATUS_CARRYING_EPISTEMIC_LABELS`, and
-    ``status_as_reported`` still reports ``''`` for an Event — this function
-    says which stored values are FORBIDDEN, not which ones the layer owns. A
-    non-terminal `status` (`draft`, `live`, and whatever else a caller passes)
-    keeps riding the prop lane exactly as #2788 pins it, because
-    ``_promote_incident_operators`` reads it as the live/draft gate (#7853,
-    #10828).
+    stays outside `STATUS_CARRYING_EPISTEMIC_LABELS`, and ``status_as_reported``
+    still reports ``''`` for an Event — this function says which writes are
+    FORBIDDEN, not which states the layer owns.
 
-    ⛔ The predicate is NOT a hand-written list OR a second composition. The
-    DECISION is delegated to :func:`is_terminal_status` — this module's declared
-    Python mirror of the Cypher terminal predicate, which is what ``ep.py``'s
-    factor selection applies — so a status added to the vocabulary, or a change
-    to the flag half, moves ONE function and both the reader and this writer
-    follow it. That is the #2901/#3301 lesson (a per-surface re-declaration
-    drifts silently) applied to a WRITE gate rather than a read one.
+    ## Why the whole vocabulary, and not just the terminal half
 
-    Why this is the right boundary and an allowlist is not: `#8166` is the
-    mirror defect (an undeclared status on `:Object` reads as CURRENT because
-    the read vocabulary is a denylist) and its remedy is to validate against a
-    DECLARED lifecycle — which `:Object` has (§4.2) and `:Event` does not (§4.5).
-    Inventing an Event vocabulary here would be the lifecycle this ruling says
-    must not exist, and would refuse `status='scheduled'`, which main pins
-    (`tests/test_operator_dedup_parity.py::test_create_entity_event_journals_single_line`).
+    #11825 refused only the TERMINAL half and documented the reason: a
+    non-terminal `status` (`draft`, `live`, `scheduled`) kept riding the prop
+    lane because ``_promote_incident_operators`` read it as the live/draft gate
+    (#7853, #10828). That interim boundary left the real defect standing — the
+    two mutable progress words #13100 names — because it conserved the very
+    conflation it was fixing: an ``:Event`` could still say "not yet", which is
+    a PLAN's job (`tortoise/planned_occurrence.py`), and the field carrying that
+    word was load-bearing for promotion.
+
+    #13100 (S7) retires the field instead of narrowing it, on the approved
+    design of record (§8): *an event is a dated fact, and a thing that has not
+    happened yet is not an event — it is a plan … there is no third case.* Two
+    consequences, both deliberate:
+
+    * **``status=None`` is still accepted** — it is the documented un-mark route
+      for a legacy row that already carries a word (the reader net stays wider
+      than the write door, #2977), and a null write REMOVES the property.
+    * **Suppression is re-homed, not dropped.** The live/draft gate that used
+      this prop now suppresses on the plan's POSITION
+      (:func:`endpoint_permits_operator_promotion`), and it still reads a stored
+      legacy word, so a pre-retirement row keeps blocking promotion. Neither
+      half silently disappears with the field.
+
+    ## Not a vocabulary, and not an allowlist of values either
+
+    This is a **key** refusal, not a value check: any non-``None`` ``status`` is
+    refused, whatever its type. The value-based scoping #11825 needed
+    (:func:`_status_is_discarded_by_every_writer`, kept below for the
+    ``outdated`` half that still uses it) existed to avoid over-rejecting a
+    bundle whose value no writer keeps. That reasoning no longer applies here,
+    because the defect is the DECLARATION, not the value: a caller passing
+    ``status=<anything>`` on a dated fact is asking for a lifecycle the model
+    does not have, and a silently-dropped value is the "accepted and
+    half-honoured" shape #11825 records. The refusal says what to do instead.
+
+    ⛔ A ``str`` subclass cannot bypass this — there is nothing to compare, so
+    no ``__eq__``/``__hash__`` override can help. The one shape check that
+    remains is ``outdated``'s (below), where the value still decides.
 
     ⛔ RECIPROCAL INVARIANT (do not relax this guard alone): the retrieval legs
     omit `:Event` from `search_engine._STATUS_FILTERED_LABELS` BECAUSE this guard
-    makes a terminal Event unwritable. Relaxing the guard requires adding
+    makes a statused Event unwritable. Relaxing the guard requires adding
     `Event` to `_STATUS_FILTERED_LABELS` AND giving
     `search_engine._status_vocab_for` an `Event` arm in the SAME change (it
     currently falls through to the Object arm, which would exclude the wrong
@@ -989,85 +1026,37 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
     TERMINAL while :func:`is_terminal_status` reads them as live. The
     documented "out of contract; no in-repo writer can produce such a value"
     was measurably false once this door existed, so the value is refused rather
-    than half-read (review cycle 1, P1).
-
-    ⛔ The STATUS half is typed by what the writers can KEEP, not by "is a
-    string": a value no writer keeps can never land on the node, so it cannot
-    make an ``:Event`` terminal — refusing it would reject a bundle the writer
-    accepts, the over-rejection class #7925 review round 4 already fixed once
-    (re-pinned by ``tests/test_ingest_event_endpoint.py::``
-    ``test_direct_route_object_and_event_status_values_not_over_rejected``,
-    #9974 R1: dropped now means ABSENT, not a fabricated 'live').
-    ``_status_is_discarded_by_every_writer`` asks that question of ALL THREE
-    write paths (fold allowlist, transport ``_value_ok``, journal JSON encoder),
-    so a list (persistable, unhashable), an int, an ``np.int64`` and a ``bytes``
-    are all still refused while a plain ``dict`` rides the drop. What such a
-    value DOES depends on the door and both outcomes are legal: the FOLD skips
-    the key (``_persist_extra_props``), so an existing status survives
-    untouched, while the LIVE write door hands it to the ``#7369`` transport
-    gate, which nulls it — and ``SET n += {status: null}`` REMOVES the property,
-    i.e. it CLEARS, an outcome this function already permits by design
-    (``status=None`` clears). Neither can PRODUCE a terminal state, which is the
-    only thing this gate is about.
+    than half-read (review cycle 1, P1). The "#7925 round 4" over-rejection
+    scoping is kept for THIS half only: a value every writer discards clears the
+    property rather than storing it, so it cannot make the Event terminal.
 
     ``props`` is the caller's property map. The SDK doors flatten it first
     (``_coerce_props``), so a nested ``props={"status": …}`` reaches here as a
-    top-level key. At ``add_event`` the flatten never runs and a nested map is
-    inert for the FOLD's persistable-value filter — but that is NOT the whole
-    story, and the first revision of this docstring claimed it was: ``add_event``
-    splats ``**extra`` onto the record, and the ``EventRecorded`` fold UNWRAPS a
-    caller key literally named ``event`` (``inner = event.get("event", event)``),
-    so ``add_event(id, kind, event={"status": "superseded"})`` rode that lane
-    straight past a top-level check (measured, review cycle 2 P0). The chokepoint
-    in ``api._emit`` therefore unwraps the same key before asking this function,
-    which is what makes the answer independent of which kwargs shape arrives.
-    ``door`` names the surface in the refusal, per `docs/ax/ax-principles.md`
-    (#10183): refused, exactly what failed, exactly what to do.
+    top-level key. At ``add_event`` the flatten never runs, and the
+    ``EventRecorded`` fold UNWRAPS a caller key literally named ``event``
+    (``inner = event.get("event", event)``), so
+    ``add_event(id, kind, event={"status": "superseded"})`` rode that lane
+    straight past a top-level check (measured, #11825 review cycle 2 P0). The
+    chokepoint in ``api._emit`` therefore unwraps the same key before asking
+    this function, which is what makes the answer independent of which kwargs
+    shape arrives. ``door`` names the surface in the refusal, per
+    `docs/ax/ax-principles.md` (#10183): refused, exactly what failed, exactly
+    what to do.
     """
     status_values, outdated_values = _event_state_declarations(props)
-    # Both keys are typed here, because this is the ONE `:Event` writer with no
-    # ``_sanitize_props`` intake to do it. A non-STRING status is not merely
-    # undeclared: an unhashable one (a list, a dict) reached the membership test
-    # below and raised a bare ``TypeError: unhashable type`` — a 500-class with
-    # no door name and no remedy, measured at this door (review cycle 2, P2) —
-    # while a hashable non-string (an int) glided through and stored a status no
-    # vocabulary can name. Refused symmetrically with ``outdated`` below.
-    #
-    # ⛔ BUT ONLY WHEN **EVERY** WRITER DISCARDS IT — the over-rejection this
-    # scope fixes is a recorded contract, not a preference. A value no writer
-    # keeps can never make an Event terminal, and refusing it only rejects a
-    # bundle the writer accepts. That is #7925 review round 4's over-rejection
-    # class — the reason the array refusal is scoped by
-    # ``sdk._status_is_stored_unhashable`` rather than by "not a string" — and
-    # pinning it as "not a string" here reddened
-    # ``tests/test_ingest_event_endpoint.py::``
-    # ``test_direct_route_object_and_event_status_values_not_over_rejected``.
-    #
-    # ⛔ "Discarded" is a THREE-predicate question, not one
-    # (``_status_is_discarded_by_every_writer``): the fold's allowlist, the live
-    # write transport's ``_value_ok``, and the journal's JSON encoder each keep
-    # or reject a different set, and asking only the fold's — as the first
-    # revision of this scope did — let an ``np.int64`` be STORED and a ``bytes``
-    # turn a named refusal into a bare ``TypeError`` (review cycle 3, P2).
-    #
-    # ⛔ EVERY DECLARATION is judged, in BOTH directions (review cycle 8, P0).
-    # The writer applies every key of the map, so two keys that both render to
-    # ``status`` are BOTH written; a last-one-wins guard let a terminal value be
-    # MASKED by a later non-terminal one and the terminal value was stored — live
-    # and again after `rebuild_all` — at six of the seven doors. This is also why
-    # the door cannot disagree with the Phase-1 arm, which already tests every
-    # declaration.
+    # EVERY declaration is judged, not the last one (the #11825 review cycle 8
+    # P0 class): the writer applies every key of the map, so a guard that
+    # stopped at the first non-refused value let a second one through at six of
+    # the seven doors.
     for _value in status_values:
-        if _value is None or isinstance(_value, str):
+        if _value is None:
+            # Clearing a legacy word is the documented un-mark route, and
+            # `SET n += {status: null}` removes the property.
             continue
-        if not _status_is_discarded_by_every_writer(_value):
-            raise ValueError(
-                f"Refused: `status={_value!r}` is not a legal value on an :Event "
-                f"({door}). `status` is a STRING drawn from the vocabulary, or "
-                f"`None` to clear it. WHAT TO DO: pass a string (to record a "
-                f"correction, write a NEW :Event; for ingest state use "
-                f"`eventStatus`)."
-            )
+        raise ValueError(
+            f"Refused: `status={_value!r}` is not writable on an :Event "
+            f"({door}). {_EVENT_LIFECYCLE_STATE_REFUSAL}"
+        )
     for _value in outdated_values:
         if _value is None or isinstance(_value, bool):
             continue
@@ -1081,27 +1070,109 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
                 f"writes props without `_sanitize_props`. WHAT TO DO: pass `True`, "
                 f"`False`, or omit the key."
             )
-    # ⛔ A ``str`` SUBCLASS can LIE about all three methods the terminal test
-    # uses, and it reaches here as a perfectly legal ``isinstance(value, str)``:
-    # ``__hash__ = None`` raises inside the frozenset membership, a constant
-    # ``__hash__`` lands in the wrong bucket so a terminal word tests False, and
-    # ``__eq__`` can answer False outright. Measured at review cycle 3 — the
-    # value was then STORED as ``'superseded'``, i.e. the guard became a bypass
-    # instead of a refusal. ``str.__str__`` returns a plain ``str`` and does not
-    # consult any of the subclass's overrides, so the test runs on the value the
-    # store would actually hold.
-    for _value in status_values:
-        if isinstance(_value, str) and is_terminal_status(str.__str__(_value)):
-            raise ValueError(
-                f"Refused: `status={_value!r}` is not writable on an :Event "
-                f"({door}). {_EVENT_TERMINAL_STATE_REFUSAL}"
-            )
     for _value in outdated_values:
         if _value is True:
             raise ValueError(
                 f"Refused: `outdated={_value!r}` is not writable on an "
-                f":Event ({door}). {_EVENT_TERMINAL_STATE_REFUSAL}"
+                f":Event ({door}). {_EVENT_LIFECYCLE_STATE_REFUSAL}"
             )
+
+
+#: A plan that has not reached a terminal stage has not happened, so an operator
+#: incident to it must not be promoted — the suppression #13100 re-homes from an
+#: ``:Event``'s retired non-terminal ``status``. Read through
+#: :func:`endpoint_permits_operator_promotion`; ``planned_occurrence`` owns the
+#: kind and stage declarations, and this module takes them as arguments so the
+#: predicate stays importable from a leaf.
+def endpoint_permits_operator_promotion(
+    status, outdated=False, *, plan_state=None,
+) -> bool:
+    """True when one operator endpoint lets a draft operator be promoted.
+
+    The ONE predicate behind ``sdk._promote_incident_operators``' all-endpoints
+    gate, so the four-label sweep and its rules cannot drift. Three arms:
+
+    * **dead** — :func:`is_terminal_status` (status word or flag) ends it. EP
+      strips the node, so a promotion would leave a live operator over a dead
+      input.
+    * **not live** — an explicitly non-``live`` stored word keeps the endpoint
+      out. An ABSENT status reads live (the legacy-node rule, #9974 R1). This is
+      the arm that still honours a **legacy** ``:Event`` row carrying ``draft``:
+      the write door refuses that shape now (#13100), and the reader keeps
+      reading it, because a stored fact is not corrected by refusing new writes
+      (#2977 — the net stays wider than the door).
+    * **planned, not happened** — a plan whose position is a non-terminal,
+      still-resolving stage has not occurred yet, so it suppresses exactly as the
+      retired ``:Event`` ``status='scheduled'`` did.
+
+      ⛔ ``plan_state`` is the dict ``planned_occurrence.plan_position`` returns,
+      i.e. the WRITER's own answer (whether the record has ENDED — the durable
+      marker OR a stage that resolves terminal — and, separately, whether a stage
+      MOVE could be validated) — never the stored ``pipelineSlot`` prop, which is a
+      cache that a generic-door ending leaves stale. Passing the resolved state
+      is why this predicate takes a dict rather than a slot string: the earlier
+      signature let a settled plan keep suppressing promotion for ever, and let
+      the caller re-derive terminality at the call site (the drift #2901 exists
+      to stop).
+
+      Two bounds, so a plan is not suppressed for ever: an ENDED plan (marker or
+      terminal stage) is a settled record, and a plan with **no position at all**
+      is not evidence of anything (an extractor-minted ``core:plan`` Object was
+      promoted over before this change; inventing a "not yet" for it would block
+      that operator). So the arm fires on exactly one condition: the plan HAS a
+      position and has NOT ended.
+
+      ⛔ Both UNRESOLVABLE axes fail CLOSED, deliberately. An unknown
+      ``pipelineStageId`` resolves to no slot exactly as a cleared/foreign
+      ``pipelineStageKey`` does, and either is ONE supported, customer-callable
+      write (``update_knowledge(id, pipelineStageId="Held")`` /
+      ``pipelineStageKey=None``). Reading either as "no position, so no evidence"
+      switched the suppression off for an occurrence that demonstrably has not
+      happened — and did so PERMANENTLY for the stage-id axis, because the plan
+      writers and ``advance_stage`` refuse every move on such a plan, so it can
+      never reach a terminal stage. Neither axis loses the repair route (both
+      are repaired by writing a declared stage id, which
+      ``planned_occurrence._unresolvable_message`` prescribes), so denying here
+      is recoverable; the durability bounds above are unchanged.
+
+    ⛔ The **not live** arm is EVALUATED FIRST, and that order is load-bearing —
+    see the ordering note at the code below. The bullet order above is the
+    SEMANTIC reading, not the evaluation order.
+    """
+    # ⛔ ORDER IS LOAD-BEARING: the NOT-LIVE arm runs first, exactly as the
+    # inline gate this predicate was extracted from did
+    # (`origin/main:tortoise/sdk.py`: `(st or "live") == "live" and not
+    # is_terminal_status(st, bool(od))` — equality FIRST, so `and`
+    # short-circuited). `is_terminal_status` is a `frozenset` MEMBERSHIP test
+    # (`(status or "") in TERMINAL_EXCLUDED_STATUSES`), and membership HASHES
+    # the value, so a stored ARRAY `status` raises `TypeError: unhashable type`.
+    # That value is reachable by ONE supported write: an array is PERSISTABLE,
+    # so `update_knowledge(id, status=[…])` stores it verbatim on an `:Object`
+    # (#8926), and `:Object` is an operator endpoint since #7853 widened the
+    # four-label sweep. Running the membership test first turned the old silent
+    # suppression into an unnamed 500 out of `tortoise_promote_point` (#10183).
+    # The equality arm answers every non-`live` value WITHOUT hashing it, so
+    # this order keeps each input's pre-#13100 answer: `""`/`0`/`None` still
+    # read live, a list still suppresses, terminal words still deny. Normalising
+    # the array to a word instead would be WRONG — `(None or "live") == "live"`
+    # promotes the array row, which the pre-change gate never did.
+    if (status or "live") != "live":
+        return False
+    if is_terminal_status(status, bool(outdated)):
+        return False
+    if plan_state is not None:
+        # A plan that HAS a position and has not ENDED has not happened yet.
+        # ⛔ The discriminant is NOT the resolved SLOT or `unresolvable`: a plan
+        # whose stored stage key is missing, or whose stage id is not declared,
+        # has no slot — and treating either as fail-open let one supported write
+        # on the plan switch the suppression off for an occurrence that has not
+        # happened (the key axis was fixed that way; the stage-id axis is the
+        # identical reachability through the identical door). `ended` already
+        # encodes every terminal answer (the durable marker, and a stage that
+        # RESOLVES terminal), so the slot adds nothing here but the hole.
+        not_yet = plan_state["has_position"] and not plan_state["ended"]
+        return not not_yet
+    return True
 
 
 #: The keys an epistemic node's identity may live under, in resolution order

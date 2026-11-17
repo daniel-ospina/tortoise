@@ -252,7 +252,7 @@ on refusal — the pattern is already pinned by `tests/test_validity_windows.py:
   undeclared rel type and an inverted window. The parity contract is **the refuse/allow verdict
   plus the message when the window is the only fault** (a rel-type fault legitimately wins in both).
 - Read `old_vf` and the successor's `validFrom`/`createdAt` with the preview's **own** net-new
-  queries — `succ_rows` (`:4451`) returns `ID(n)` only and its `[0]` indexing is relied on by
+  queries — `succ_rows` (`:4506`) returns `ID(n)` only and its `[0]` indexing is relied on by
   downstream passes, so it must not be perturbed. Then call the helper with `valid_from=None` (the
   MCP surface exposes no kwarg) and `now=_now_iso()` (the writer's clock; only reached when the
   successor is undated, where preview↔writer message equality is not asserted — test 14).
