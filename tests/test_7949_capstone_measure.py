@@ -4364,8 +4364,8 @@ _BUNDLE_RULES = (
     ("the Object writer's objectKind default", "projection_entities",
      ("the writer stamps",),
      # ⛔ The anchor is the FULL ON CREATE default, not the `coalesce($ok` prefix
-     # (#12342 review). `entities.py` carries the prefix TWICE — `:5086` is the
-     # `ON CREATE SET` that writes `'other'`, `:5102` is the `ON MATCH SET` that
+     # (#12342 review). `entities.py` carries the prefix TWICE — `:5101` is the
+     # `ON CREATE SET` that writes `'other'`, `:5117` is the `ON MATCH SET` that
      # keeps `o.objectKind` — so `coalesce($ok` alone passes on EITHER, and a
      # re-derivation of this cite onto `:5102` would stay GREEN while the
      # sentence's claim (the writer stamps the `'other'` DEFAULT) goes false.

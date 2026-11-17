@@ -2259,7 +2259,8 @@ class TestNonScalarStatus12869:
         `create_object(status=np.int64(5))` through and the node **stored 5**: the
         exact poisoning #12869 exists to stop, one library type over. The
         transport's predicate (`projection._value_ok`, the `#7369` gate) is the
-        half that catches it, so the refusal is the OR of the two.
+        half that catches it, so the refusal asks THAT one — `_value_ok` ALONE.
+        The OR of the two was measured wrong in BOTH directions and deleted.
 
         FALSIFIABLE BY: returning to `_is_persistable_prop_value` alone reds this
         arm (the value is accepted and 5 lands on the node).
