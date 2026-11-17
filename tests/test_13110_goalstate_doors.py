@@ -325,10 +325,12 @@ def test_no_create_channel_can_erase_a_stored_goal_state(tmp_path):
     passes with the pop removed (door guard intact) AND it passes with the tool
     body forwarding `None` unconditionally (pop intact). So it pins their
     CONJUNCTION only: "no channel erases while at least one guard stands". It is
-    not fold coverage and it is not door-guard coverage; the door guard is pinned
-    by `test_mcp_refuses_an_unknown_word_with_the_closed_set` and
-    `test_mcp_entity_and_point_doors_persist_the_declared_parameter`. Do not
-    read this leg as licence to remove the pop.
+    not fold coverage and it is not door-guard coverage, so do not read this leg
+    as licence to remove the pop — no assertion here can see either guard alone.
+    Which test DOES pin a given door guard is deliberately not claimed here: two
+    rounds burned on wording that attributed coverage to the wrong test. If you
+    are about to simplify a guard, mutate it and run the suite; do not trust a
+    pointer in this docstring.
 
     Measured before the pop: `create_point("goal", …, goalState=None,
     dedup=True)` on an existing `met` goal left `goalState` UNSET, while
