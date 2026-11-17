@@ -1417,10 +1417,10 @@ class TestLifecycleCarrierCoherence:
             sdk.close()
 
     @pytest.mark.parametrize("target,expected", [
-        (["live"], "refused a non-string status"),
+        (["live"], "must be a plain string"),
         ({"a": 1}, "is TERMINAL for a :Object"),
-        (123, "refused a non-string status"),
-        (True, "refused a non-string status"),
+        (123, "must be a plain string"),
+        (True, "must be a plain string"),
         (None, "is TERMINAL for a :Object"),
         (_LyingEq(), "is TERMINAL for a :Object"),
     ], ids=["list", "dict", "int", "bool", "none", "lying-eq"])
@@ -1707,10 +1707,10 @@ class TestLifecycleCarrierCoherence:
             sdk.close()
 
     @pytest.mark.parametrize("target,expected", [
-        (["live"], "refused a non-string status"),
+        (["live"], "must be a plain string"),
         ({"a": 1}, "is TERMINAL for a :Object"),
-        (123, "refused a non-string status"),
-        (True, "refused a non-string status"),
+        (123, "must be a plain string"),
+        (True, "must be a plain string"),
         (None, "is TERMINAL for a :Object"),
         (_LyingEq(), "is TERMINAL for a :Object"),
     ], ids=["list", "dict", "int", "bool", "none", "lying-eq"])
@@ -1864,9 +1864,9 @@ class TestLifecycleCarrierCoherence:
             sdk.close()
 
     @pytest.mark.parametrize("target,expected", [
-        (["live"], "refused a non-string status"),
+        (["live"], "must be a plain string"),
         ({"a": 1}, "STORED status is"),
-        (123, "refused a non-string status"),
+        (123, "must be a plain string"),
     ], ids=["list", "dict", "int"])
     def test_a_non_string_stored_status_does_not_crash_the_dead_set(
             self, tmp_path, target, expected):
@@ -2138,7 +2138,7 @@ class TestNonScalarStatus12869:
         try:
             oid = _make_carrier_entity(sdk, "Object", "upsilon")
             before = _carrier_row(sdk, "Object", "upsilon")
-            with pytest.raises(ValueError, match="refused a non-string status"):
+            with pytest.raises(ValueError, match="must be a plain string"):
                 sdk.update_knowledge(oid, status=bad)
             assert _carrier_row(sdk, "Object", "upsilon") == before, (
                 "the refused write was not atomic — the row changed: "
@@ -2161,7 +2161,7 @@ class TestNonScalarStatus12869:
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869c.db"))
         try:
-            with pytest.raises(ValueError, match="refused a non-string"):
+            with pytest.raises(ValueError, match="must be a plain string"):
                 sdk.create_object("phi", "core:strategy", status=bad)
             assert _carrier_row(sdk, "Object", "phi") is None, (
                 "a refused create left a node behind — a refusal must not cost "
@@ -2188,7 +2188,7 @@ class TestNonScalarStatus12869:
         try:
             sdk.create_object("rho", "core:strategy")
             oid = _carrier_row(sdk, "Object", "rho")[0]
-            with pytest.raises(ValueError, match="refused a non-string status"):
+            with pytest.raises(ValueError, match="must be a plain string"):
                 sdk.update_knowledge(oid, status=["live"])
             assert _carrier_row(sdk, "Object", "rho")[1] is None, (
                 "the list reached the row — the stored side is unprotected")
@@ -2205,7 +2205,7 @@ class TestNonScalarStatus12869:
     _STORED_TARGETS = (
         pytest.param("live", "STORED status is", id="string-target"),
         pytest.param(None, "STORED status is", id="null-clear-target"),
-        pytest.param(123, "refused a non-string status", id="non-string-target"),
+        pytest.param(123, "must be a plain string", id="non-string-target"),
     )
 
     @pytest.mark.parametrize("bad", _DROPPED)
@@ -2312,7 +2312,7 @@ class TestNonScalarStatus12869:
                 return sdk._get_proj().g.query(
                     "MATCH (n:Object) RETURN count(n)").result_set[0][0]
             before = count()
-            with pytest.raises(ValueError, match="refused a non-string"):
+            with pytest.raises(ValueError, match="must be a plain string"):
                 sdk.create_object("never-made", "core:strategy", status=bad)
             assert count() == before, (
                 "a REFUSED create left a node behind — a refusal must not cost "
@@ -2385,13 +2385,13 @@ class TestNonScalarStatus12869:
         np = pytest.importorskip("numpy")
         sdk = TortoiseSDK(str(tmp_path / "t12869np.db"))
         try:
-            with pytest.raises(ValueError, match="refused a non-string"):
+            with pytest.raises(ValueError, match="must be a plain string"):
                 sdk.create_object("np-obj", "core:strategy",
                                   status=np.int64(5))
             assert _carrier_row(sdk, "Object", "np-obj") is None
             sdk.create_object("np-obj2", "core:strategy")
             oid = _carrier_row(sdk, "Object", "np-obj2")[0]
-            with pytest.raises(ValueError, match="refused a non-string"):
+            with pytest.raises(ValueError, match="must be a plain string"):
                 sdk.update_knowledge(oid, status=np.int64(7))
             assert _carrier_row(sdk, "Object", "np-obj2")[1] is None
         finally:
@@ -2837,7 +2837,7 @@ class TestNonScalarStatus12869:
             # message is a refusal that writes nothing; what must not happen is
             # an Object-or-Subject row holding the list.
             with pytest.raises(ValueError,
-                               match=r"refused a non-string|Invalid status"):
+                               match=r"must be a plain string|Invalid status"):
                 sdk.create_object("acme3", "core:organization",
                                   status=["live"])
             # …and a legal word still goes to the Subject layer.
