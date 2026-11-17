@@ -34716,11 +34716,14 @@ def _drop_org_acl_users(org_id: str) -> None:
     docstring calls orphaning "the live credentials forever". So the read is a
     certified `query_all` walk (cursor `id`, which must ride in `select`).
 
-    ⛔ AN UNCERTIFIED WALK IS NOT PROMOTED TO A FAILURE HERE. C4/#2113 is a
-    RECORDED DECISION — "Best-effort per graph (a committed purge never fails on
-    a drop)" — and this function's job is to drop users, not to adjudicate the
-    purge. The ONE site that reaches this read (the supabase lane of
-    `_purge_deleted_orgs_locked`) calls `_drop_org_graphs_strict` immediately
+    ⛔ AN UNCERTIFIED WALK IS NOT PROMOTED TO A FAILURE HERE. This function has
+    carried the policy "Best-effort per graph (a committed purge never fails on
+    a drop)" since C4 landed it (`e2131c6847`, PR #2220) — it is a REVIEW
+    FINDING RECORDED IN THIS DOCSTRING, not an issue-level decision: it is not
+    stated on #2113 or in the C4 plan, so cite THE COMMIT when this policy is
+    argued, and do not claim an issue said it. Its job is to drop users, not to
+    adjudicate the purge. The ONE site that reaches this read (the supabase lane
+    of `_purge_deleted_orgs_locked`) calls `_drop_org_graphs_strict` immediately
     after, whose `_org_graph_names` walk certifies the SAME table with the SAME
     filter, cursor and page bounds and RAISES when it cannot — so when the two
     walks refuse TOGETHER, the graph drops and the row cascade never run and the
@@ -34750,10 +34753,11 @@ def _drop_org_acl_users(org_id: str) -> None:
     know whether the sibling will certify — so nothing announces the LOSS once
     it has happened.
     Same #13287, and WORSE than the partial case rather than "ten times" it: the
-    partial arm loses only the rows past one page (`PAGE_READ_SIZE` = 1000, so
-    ZERO for an org within a page and a shrinking fraction as the org grows),
-    while this arm loses the WHOLE set — and it is the likelier trigger, an
-    ordinary 5xx rather than a store anomaly. One enumeration (deriving the gids
+    partial arm loses only the rows past one page (`PAGE_READ_SIZE` = 1000 — so
+    ZERO for an org within a page, and a fraction that GROWS TOWARD THE WHOLE SET
+    as the org grows, since it is `1 - 1000/N`), while this arm loses the whole
+    set at every size — and it is the likelier trigger, an ordinary 5xx rather
+    than a store anomaly. One enumeration (deriving the gids
     from the certified namespace list) closes both arms; until then the `except`
     arm is a fail-open and is recorded as such.
     """

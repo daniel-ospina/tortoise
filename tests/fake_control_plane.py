@@ -181,10 +181,10 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("oauth_refresh_tokens", "revoked_at"),
     ("org_memberships", "created_at"),
     ("org_memberships", "updated_at"),
-    # `#13277` (`20261117000002_postgres_residency_gauge.sql`) declares both, and
-    # the registry is DERIVED — `test_registry_matches_the_migrations` replays every
-    # migration and asserts equality, so the migration landed on `main` with this
-    # pin red until the two columns were named here (`#13249`).
+    # #13277's per-org residency gauge (`20261117000002_postgres_residency_gauge`).
+    # It landed on `main` without this pin, so `test_registry_matches_the_migrations`
+    # was RED there (#13316) — the set is DERIVED from the migrations, so a table
+    # that declares `timestamptz` belongs here the moment its migration exists.
     ("org_postgres_residency", "measured_at"),
     ("org_postgres_residency", "updated_at"),
     ("organizations", "backup_latest_at"),
@@ -2096,6 +2096,11 @@ class FakeControlPlane:
         `cursor`-in-`select` check above makes, applied to the half that actually
         decides the certificate.
         """
+        if not rows:
+            # An EMPTY page is the sound end-of-walk signal (`if not page:
+            # exhausted = True`) — the ONE thing the real walk trusts — so it
+            # certifies unless a stated total says more rows exist.
+            return total is None or total <= 0
         cursors = [r.get(cursor) if isinstance(r, dict) else None for r in rows]
         if not rows:
             # ⛔ AN EMPTY PAGE IS THE SOUND END-OF-WALK SIGNAL, so it CERTIFIES.
@@ -2112,7 +2117,14 @@ class FakeControlPlane:
             return total is None or total <= 0
         if not any(cursors):
             return False
-        return total is None or len(rows) >= total
+        # The stated-total arm compares DISTINCT CURSOR VALUES, not rows — the
+        # real certificate is `len(seen) >= total` where `seen` is the set of
+        # cursor values (a page may carry a row whose cursor could not be read,
+        # and that row is kept in `rows` but cannot satisfy a total). Counting
+        # rows here would certify a walk production refuses.
+        if total is None:
+            return True
+        return len({c for c in cursors if c}) >= total
 
     def _query_impl(self, table: str, *, select: list[str] | None = None,
                     filters: list[tuple[str, str, object]] | None = None,
