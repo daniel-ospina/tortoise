@@ -462,13 +462,21 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # arms skip), never to a silently-embedded green, and nothing leaks into a
     # later docker-lane test.
     "test_12360_underscore_or_terms.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
-    # #13139 root 2, the SAME file the `ci-surfaces.yml` registration in this PR
-    # registers — and a SECOND table it has to be triaged into, which is why the
-    # registration alone did not un-red the board.
+    # #13158 — its OWN tracker, not a number borrowed from another gate: the SAME
+    # file the `ci-surfaces.yml` registration registers, and a SECOND table it has
+    # to be triaged into, which is why the registration alone did not un-red the
+    # board. ⛔ NOT `#13139`'s root 2, which is `tools/surface_manifest.py check`'s
+    # `tortoise_query` `served_from` digest drift and has nothing to do with this
+    # table (a citation that pointed at the PR's own "not in scope" red).
     # `test_13034_currency_rule_reads_position.py` merged (#13075) with neither its
-    # manifest row NOR this entry, so `test (i)` (and every shard that carries
-    # this module) reds with "undeclared TORTOISE_DB_URI mutation(s)" naming all
-    # SIX raw sites: the module-level live probe's set (`:66`), restore (`:75`)
+    # manifest row NOR this entry, so the fast shard that carries this module reds
+    # with "undeclared TORTOISE_DB_URI mutation(s)" naming all SIX raw sites.
+    # That shard is `test (j)` — MEASURED, not read off a neighbouring note:
+    # `split_fast_gate(fast_pool(manifest), durations, fast_shard_count())` puts
+    # the module in shard index 9 of 11, on main's manifest (1,238 fast files) and
+    # on this head's (1,239) alike, and run 44025094904's `test (j)` job
+    # (133859918399) is the one that reds on this file. The sites: the
+    # module-level live probe's set (`:66`), restore (`:75`)
     # and pop-when-unset (`:77`), plus the autouse `_isolated_db_uri` fixture's
     # set (`:86`), restore (`:89`) and pop (`:91`). DELIBERATE_URI is the point on
     # both halves: the probe decides whether the live arms run AT ALL (an
@@ -479,27 +487,35 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # into a later docker-lane test: the probe restores in a `finally` at import
     # and the fixture restores after its `yield`. Raw `os.environ` sites only —
     # this file has no `monkeypatch` mutation to declare.
-    "test_13034_currency_rule_reads_position.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
-    "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    # ⛔ NO `del` arm here, unlike the sibling rows above: the form
+    # `os\.environ(?:…|del\s+os\.environ\[…\])` puts the del alternative AFTER the
+    # literal `os\.environ`, so it can only match `os.environdel os.environ[…` —
+    # measured unreachable, and this file has no `del` site to declare. A future
+    # `del` reds as undeclared instead, which is the honest, file-scoped,
+    # fail-closed answer; `test_a_declaration_that_claims_del_can_match_del` keeps
+    # the dead arm from being copied back. The same inert arm was deleted from the
+    # 32 sibling rows that carried it (#13146 F4) — it matched nothing anywhere.
+    "test_13034_currency_rule_reads_position.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
+    "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
     # modules run a module-level live-FalkorDB FULLTEXT probe (set+restore at
     # import; DELIBERATE_URI — the probe asserts the docker lane) and a
     # per-test fresh-URI sdk fixture (monkeypatch.setenv IS the test input —
     # dedicated per-test graph, DELETED at teardown).
-    "test_assembly_fixtures.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_assembly_fixtures.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                     r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],
     "test_assembly_pure.py": [r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # _docker_sdk fixture: per-test fresh-URI graph (setenv IS the test input)
-    "test_assembly_sdk.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_assembly_sdk.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                               r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],
-    "test_directional_impl.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
-    "test_directional_impl_fix.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_directional_impl.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
+    "test_directional_impl_fix.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
     # #7108: module-level live probe (os.environ set + restore, DELIBERATE_URI —
     # the probe is what asserts the docker lane is reachable at all) + a per-test
     # fresh-URI fixture (raw os.environ set + save/restore) giving each test its
     # OWN graph, so the operator-scope assertions cannot see a neighbour's
     # residue. No monkeypatch site is declared, because this file has none.
-    "test_7108_operator_scope_predicate.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_7108_operator_scope_predicate.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
     # #6151: the annotation band's graph read. Module-level live probe
     # (os.environ set + save/restore at import; DELIBERATE_URI — the probe IS
     # what asserts the docker lane, because the mechanism's whole claim is the
@@ -507,7 +523,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # pure function test cannot observe: it is handed the value directly) plus a
     # per-test fresh-URI fixture whose `monkeypatch.setenv` auto-restores at
     # teardown, so no lane leaks into a later docker-lane test.
-    "test_6151_annotation_band.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_6151_annotation_band.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                       r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],
     # #8169: the SUPPORT direction's belief-level instrument — the same SHAPE as
     # its two siblings above (a module-level live probe with a `finally` restore
@@ -515,22 +531,22 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # auto-restores at teardown), and the same reason the probe exists: the claim
     # under test is the SETTLED posterior, which no pure-function test can
     # observe. DELIBERATE_URI.
-    "test_8169_support_direction_moves_belief.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_8169_support_direction_moves_belief.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                                    r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # C3-1 #2567: docker-lane coverage-loop tests — module-level live probe
     # (set + restore) + per-test fresh-graph fixture (the test_entity_key_
     # expansion pattern; the monkeypatch.setenv is auto-restored).
-    "test_coverage_loop.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_coverage_loop.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # C4 #2517: docker-lane source-session re-injection tests — module-level
     # live probe (set + restore) + per-test fresh-graph fixture (the
     # test_coverage_loop pattern; the monkeypatch.setenv auto-restores).
-    "test_session_reinjection.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_session_reinjection.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                      r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
-    "test_ep_directional.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_ep_directional.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
-    "test_event_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
-    "test_entity_key_expansion.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_event_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
+    "test_entity_key_expansion.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                       r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # #2518 entity-key expansion: module live-FalkorDB probe (DELIBERATE_URI) + per-test docker force
     # #8658: the product hit's provenance keys. Module-level live-FalkorDB probe
     # (set + save/restore in `finally` at import, so nothing leaks — the raw-site
@@ -539,7 +555,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # nothing about a read path that only exists there) + a per-test
     # `monkeypatch.setenv` fresh-graph fixture (setenv IS the test input — each
     # test gets its OWN graph, auto-restored at teardown).
-    "test_8658_product_hit_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_8658_product_hit_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                               r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #2683 Slice A arm WIRING: the same shape as the two siblings above and as
     # `test_time_aware_eval_2520.py` — a module-level live-FalkorDB probe (set +
@@ -548,26 +564,26 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # would prove nothing about a seam that only exists there) plus a per-test
     # `monkeypatch.setenv` fresh-graph fixture (the setenv IS the test input —
     # each test gets its OWN graph, auto-restored at teardown).
-    "test_evidence_assembly_wiring_2683.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_evidence_assembly_wiring_2683.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                                 r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # C6 #2520: time-aware query expansion — module-level live-FalkorDB probe
     # (set + restore) + per-test fresh-graph fixture (the test_coverage_loop
     # pattern; the monkeypatch.setenv auto-restores).
-    "test_time_aware_sdk_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
-    "test_time_aware_eval_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_time_aware_sdk_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
+    "test_time_aware_eval_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
-    "test_time_aware_run_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
-    "test_hnsw_vector_index.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
-    "test_ingest.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
-    "test_integration_search.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
-    "test_search_engine.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
-    "test_session_capture_e2e.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_time_aware_run_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
+    "test_hnsw_vector_index.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
+    "test_ingest.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
+    "test_integration_search.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
+    "test_search_engine.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
+    "test_session_capture_e2e.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
     # #9061: keyed by tests/-relative path — this module lives in tests/e2e/,
     # and a bare-name key matched it only because a lookup fallback stripped
     # the directory, which authorizes ANY same-named file in any directory (the
     # fallback is gone; `test_declaration_path_rejects_undeclared` pins that a
     # subdirectory twin is not authorized).
-    "e2e/test_billing_upgrade.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "e2e/test_billing_upgrade.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
     # ── DELIBERATE_URI: fixtures/tests that force the docker lane directly ──
     # #10164: the per-test `graph` fixture has TWO handles on one database — it
     # seeds a `:Document` through `proj` and then runs the migration through a
@@ -613,7 +629,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
                                      # matches only the trailing branch - the same multi-line
                                      # shape and the same remedy as test_backup.py above.
                                      r'monkeypatch\.setenv\(\s*$'],
-    "test_namespace_uri_mode.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_namespace_uri_mode.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                      r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                      r'monkeypatch\.setenv\(\s*$'],
     # #7357: the ACL admin client only builds a client when a URI is present, so
@@ -624,8 +640,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_7357_transport_legibility.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                           r'monkeypatch\.setenv\(\s*$'],
     "test_session_index_health.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
-    "test_tortoise_client.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
-    "test_2206_confidence_surfaces.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],  # #2206: module-level live-FalkorDB probe + per-test isolated-graph fixture (set/restore, never leaves a mutation)
+    "test_tortoise_client.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
+    "test_2206_confidence_surfaces.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],  # #2206: module-level live-FalkorDB probe + per-test isolated-graph fixture (set/restore, never leaves a mutation)
     # #10137: the belief-order suite is the SAME shape as #2206's above — a
     # module-level live-FalkorDB probe (set + save/restore in `finally`, so the
     # import leaves no mutation) plus an autouse per-test isolated-graph fixture
@@ -633,7 +649,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # docker-lane test). DELIBERATE_URI: the probe IS what decides whether the
     # module's cases run against a server at all — a URI-less probe would report
     # "unavailable" and skip every case on a lane that has one.
-    "test_belief_order_10137.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_belief_order_10137.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
     # ── E2E-8 conformance (Task 8): the leg env control IS the test input —
     #    the embedded leg delenvs the URI, the docker leg setenvs it (the
     #    E2E-1 pattern); declared so the guard stays green ────────────────
@@ -652,7 +668,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_subject_binding_1370.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # ── Mixed lanes: CLI/HTTP surfaces force BOTH lanes deliberately ────────
     "test_cli_context.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
-                            r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+                            r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
     "test_cli_serve.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],
     # ⛔ ONE `test_cli_config_show.py` row only. The #10726 fold carried the
     # #10655 row AND this lane's own row for the same module; both values were
@@ -669,7 +685,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── test_config: config-resolution unit surface (carve-out stem at Task
     #    5; declared so the guard stays green in the interim) ────────────────
     "test_config.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
-                       r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+                       r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
     # ── Task 4 tripwire surface: the probe-flips unit test forces the
     #    docker lane via monkeypatch (DELIBERATE_URI — the env control IS
     #    the test input); the subprocess session tests pass env through
@@ -682,7 +698,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # #3414: module-level live-FalkorDB probe (set + try/finally restore)
     # PLUS an autouse per-test isolated-graph fixture (set/restore); never
     # leaves a mutation behind.
-    "test_3276_has_ep_measured.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_3276_has_ep_measured.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])'],
     # #3056/#2974: the BGSAVE tests deliberately point the endpoint at a
     # URI (never the embedded defaults) — fixture-param monkeypatch, so
     # pytest auto-undoes every mutation at teardown. INTENT IS NOT UNIFORM
@@ -802,7 +818,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # same shape as test_3276_has_ep_measured.py above, and it never leaves a
     # mutation behind (the probe restores in finally, pytest undoes the fixture).
     # DELIBERATE_URI.
-    "test_3815_mitigation_moves_weight.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+    "test_3815_mitigation_moves_weight.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\'])',
                                              r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #2500: main() assigns os.environ["TORTOISE_DB_URI"] before constructing the
     # SDK, so the test pins the docker URI and restores it at teardown — the
@@ -1643,6 +1659,49 @@ def test_declaration_keys_are_unambiguous():
     assert not moved, (
         "bare-name declaration key(s) whose top-level module no longer exists "
         f"— dead declarations: {moved}")
+
+
+#: The arm a declaration pattern uses to claim the `del os.environ[...]` form,
+#: spelled as it appears INSIDE a pattern string (`del\s+`). A substring test,
+#: not a regex: the subject here is the pattern TEXT, not a mutation site.
+_CLAIMS_DEL_ARM = "del\\s+"
+#: The del form itself, spelled as it appears in a test module — the string a
+#: claiming pattern must be able to match. Mirrors `_MUTATION_RE`'s del arm,
+#: including the `_os` alias the assignment/pop arms admit by substring.
+_DEL_FORM = 'del os.environ["TORTOISE_DB_URI"]'
+
+
+def test_a_declaration_that_claims_del_can_match_del():
+    r"""A declaration claiming the `del` form must be able to match it.
+
+    #13146 review finding F4: 33 rows carried the arm
+
+        os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(…)|del\s+os\.environ\[…\])
+
+    which sits AFTER the literal `os\.environ`, so it could only ever match the
+    string `os.environdel os.environ["TORTOISE_DB_URI"]` — measured: `re.search`
+    on the real del form is False, on that concatenation True. None of those 33
+    files has a `del` site, so nothing was mis-authorized (the arm fails CLOSED:
+    a future `del` reds as undeclared, which is the right triage), but the row
+    read as pre-authorising a form it cannot.
+
+    ⚠️ This pin passes VACUOUSLY today — the arm was deleted from all 33 rows in
+    the commit that added this test, so no row claims `del` at all. It exists so
+    the next row that adds the form must add a WORKING one: the reachable
+    spelling is the alternative placed OUTSIDE the `os\.environ(?:…)` group
+    (`(?:os\.environ\[…\]\s*=|os\.environ\.pop\(…)|del\s+os\.environ\[…\]`).
+    Structural, not behavioural, for the reason `test_the_census_regex_carries_
+    no_end_of_input_anchor` records: an INERT arm cannot be caught by any
+    assertion about mutation sites.
+    """
+    unreachable = sorted(
+        key for key, patterns in DELIBERATE_URI_MUTATIONS.items()
+        for p in patterns
+        if _CLAIMS_DEL_ARM in p and not re.search(p, _DEL_FORM))
+    assert not unreachable, (
+        "declaration row(s) claim the `del` form with a pattern that cannot "
+        f"match {_DEL_FORM!r} — the arm is inert, so the row pre-authorises "
+        "nothing and reads as if it did: " + "; ".join(unreachable))
 
 
 def test_the_cost_skip_cannot_hide_a_uri_agnostic_leak():
