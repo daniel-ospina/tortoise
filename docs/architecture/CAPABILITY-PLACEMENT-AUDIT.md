@@ -326,7 +326,7 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 | `:EpMeta` | `sdk.py:36069`; `ep.py:473` | **none** |
 | `:Meta` | `residency.py:244`, `:292`; `sdk.py:55647` (reads); `:298` is a `DETACH DELETE`, not a read | **none** |
 | `:WhySnapshot` | `why_snapshot.py:237` (read); `:303`/`:350` are the retention `DELETE` prunes, not reads | **none** |
-| `:CommitRecord` | `hosted_api.py:22228-22232` (the live commit path's read — it consumes `x.value_nodes_declared` as a predicate); `commit_idempotency.py:57` (read), `:65` — `MATCH … SET r.status=$status RETURN r.session_id, r.status, r.write_ops_billed, r.written_at, r.value_nodes_declared`, a **read-modify-write** (`CommitRecordStore.update` consumes all five returned columns, so `RMW` is the right word — an earlier draft called it read-free, which was wrong), and `:194` — the idempotency `DELETE`, whose `WHERE r.status = 'partial' AND coalesce(r.write_ops_billed, 0) = 0 AND r.value_nodes_declared IS NULL` **consumes three node properties as predicates**, so by this table's own criterion it is a reader (an earlier draft called it "not a read"); `hosted_api.py:21691` (`SET r.telemetry=$t, r.budget_warn=$warn`) and `:23760` (`SET r.write_ops_billed=1`, a LITERAL — not a parameter) have **no `RETURN`** and assign parameters/literals, so they read nothing of the node and are WRITERS (§1 row 13). ⚠️ Three drafts of this row called writers readers, then over-corrected `:65` to read-free, then called `:194` read-free; the table now separates read / RMW / predicate-consuming DELETE / writer, site by site | **none** |
+| `:CommitRecord` | `hosted_api.py:22228-22232` (the live commit path's read — it consumes `x.value_nodes_declared` as a predicate); `commit_idempotency.py:57` (read), `:65` — `MATCH … SET r.status=$status RETURN r.session_id, r.status, r.write_ops_billed, r.written_at, r.value_nodes_declared`, a **read-modify-write** (`CommitRecordStore.update` consumes all five returned columns, so `RMW` is the right word — an earlier draft called it read-free, which was wrong), and `:194` — the idempotency `DELETE`, whose `WHERE r.status = 'partial' AND coalesce(r.write_ops_billed, 0) = 0 AND r.value_nodes_declared IS NULL` **consumes three node properties as predicates**, so by this table's own criterion it is a reader (an earlier draft called it "not a read"); `hosted_api.py:21691-21692` (`MATCH (r:CommitRecord …)` then `SET r.telemetry=$t, r.budget_warn=$warn`) and `:23760-23761` (`SET r.write_ops_billed=1`, a LITERAL — not a parameter) have **no `RETURN`** and assign parameters/literals, so they read nothing of the node and are WRITERS (§1 row 13). ⚠️ Three drafts of this row called writers readers, then over-corrected `:65` to read-free, then called `:194` read-free; the table now separates read / RMW / predicate-consuming DELETE / writer, site by site | **none** |
 | `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`); `:502` is the `MAX_RECEIPTS` `DETACH DELETE`, `:487` the CREATE — neither is a reader | **none** |
 | `:Batch` | `mining.py:94`, `:178`; `projection/__init__.py:14295` | **none** |
 | `:PipelineStage` | `pipeline.py:349` (read); `:685`/`:731`/`:754-756` are `SET` statements — writes with no read of the node, not `RMW` and not reads | **none** |
@@ -416,13 +416,13 @@ figure is derived from the width, never read off the rendered column.
 | `:Session` | 7 | 303 | 303 (text-dominated) | 0.04 % |
 | `:Object` | 2 | 198 | 198 (text-dominated) | 0.03 % |
 | `:Subject` | 2 | 139 | 139 (text-dominated) | 0.02 % |
-| `:GraphEventMeta` / `:EpMeta` | 2 | 4 | 4 (text-dominated) | 0.001 % |
+| `:GraphEventMeta` / `:EpMeta` | 2 | 4 | 4 (INTEGER scalars — stored is ~24 B, see the caption) | 0.001 % |
 | **total (rendered)** | | **683,022** | | |
 
-⚠️ **The `stored footprint` cells above the `:Point` rows are the RENDERED figure, and they are a few percent
+⚠️ **The `stored footprint` cells for the non-`:Point` rows BELOW are the RENDERED figure, and they are a few percent
 low — read them as rendered.** The two columns coincide only for a **string**: an integer scalar stores 8 bytes
 while rendering shorter, so e.g. `:GraphEvent.seq` is 67 × 8 = **536 B stored** against **125 B rendered**
-(`measurement-before.json`), and the label totals inherit that gap. Seven of these labels are text-dominated, so
+(`measurement-before.json`), and the label totals inherit that gap. Six of those labels are text-dominated, so
 the error is within a few percent and **no conclusion in §4 or §5 depends on it** — but a cell that is neither a
 rendered nor a stored figure is exactly what this table exists to avoid, so it is labelled rather than implied.
 The `:Point` rows, where the vector and the prose live, are the ones that are exact (a string) or width-derived
@@ -437,8 +437,10 @@ and `content` (93,287 B rendered and stored, 13.7 %)**. ⚠️ **Those two are c
 basis** (101,376 vs 93,287 B) — on the rendered basis the vector is not comparable at all, which is exactly
 the ~4.7× over-report the paragraph above warns about. Quoting 14.8 % for a stored figure against a rendered
 total was wrong and was corrected in review. Both families are `graph` verdicts (§3 rows 1–3).
-`:GraphEvent` is **1.87 %** of payload but is the **largest non-Point resident** and the only label with no
-capability reader at all; its ~190 B/node payload understates it, because §9.1's own measurement puts it at
+`:GraphEvent` is **1.87 %** of payload but is the **largest non-Point resident**, and among §1's rows 1–7 — the
+memory substrate itself — it is the only one with **no** capability reader (the twelve bookkeeping labels of §2.7
+have none either, so it is emphatically not the only label in the document); its ~190 B/node payload understates
+it, because §9.1's own measurement puts it at
 **801 B/turn** once block overhead is counted.
 
 **The audit's honest conclusion is therefore not "most of the graph can leave":** it is *"the shapes that
@@ -502,7 +504,7 @@ draft gave, and that draft's mechanism was wrong.** ⚠️ **An earlier draft sa
 `rebuild_all` DELETE the property from every legacy `:Point`. That is false.** `_POINT_DENY`
 (`projection/entities.py:2472`) has one operational consumer on the WRITE path: it is passed as a skip set into
 `_persist_extra_props(…, self._POINT_HANDLED | self._POINT_DENY, …)` at `:3183-3192`, which **drops the key from
-the `SET n += $extra` map** — nothing is REMOVEd. It has three other executable readers, and naming them is the
+the `SET n += $extra` map** — nothing is REMOVEd. It has four other executable readers, and naming them is the
 point: two warning filters in the same file (`:3228`, `for key in self._POINT_DENY - self._POINT_HANDLED`; `:3278`,
 `or key in self._POINT_DENY or key in self._META_KEYS`) and two in `tortoise/consistency.py` (`:136` re-exports it,
 `:260` builds `_DENY_REASON` entries from it). ⚠️ **An earlier draft of this paragraph wrote "`rg -n '_POINT_DENY'
