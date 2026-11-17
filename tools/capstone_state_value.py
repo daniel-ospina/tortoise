@@ -644,18 +644,7 @@ class LocalTarget:
                 [],
                 role=role,
             )
-        served = [
-            {
-                "id": r.get("id"),
-                "what": _served_row(r)["what"],
-                "kind": r.get("point_kind"),
-                "status": r.get("status"),
-                "score": (r.get("scores") or {}).get("rrf"),
-                "match": r.get("match_source"),
-                "supersedes": [s.get("id") for s in (r.get("supersedes") or [])],
-            }
-            for r in rows
-        ]
+        served = [_served_row(r) for r in rows]
         legs = [
             {
                 "leg": t.get("leg"),
@@ -2259,47 +2248,49 @@ def cmd_run(args: argparse.Namespace) -> int:
     elif args.verdicts_out and judged:
         verdicts_target = Path(args.verdicts_out).resolve()
 
+    def refuse(message: str, code: int = 1) -> int:
+        """Every post-ingestion refusal goes through here, so `--drop-graph` cannot be skipped.
+
+        The publish gate used to drop the graph and its three siblings did not: a run refused
+        for a bad `--verdicts-out` left the throwaway graph it had just ingested behind, while
+        the README said a refused run cleans up (#13303 cycle 11). `drop()` is best-effort and
+        never raises, so routing all four here cannot change a documented exit code.
+        """
+        if args.drop_graph:
+            print(f"capstone: cleanup — {target.drop()}", file=sys.stderr)
+        print(message, file=sys.stderr)
+        return code
+
     if verdicts_target is not None:
         if verdicts_target.is_dir():
-            print(
+            return refuse(
                 f"capstone: refusing --verdicts-out {verdicts_target} — that is a directory, "
-                "not a verdicts file",
-                file=sys.stderr,
+                "not a verdicts file"
             )
-            return 1
         if verdicts_target.parent.resolve() == DEFAULT_OUT.resolve():
             # Only the baseline may live in the bundle, and only from the run whose board
             # is published beside it. Any other name would overwrite `run-local.json`,
             # `scoreboard-local.md` or `judge-packet.json`.
             if verdicts_target.name != "verdicts-baseline.json":
-                print(
+                return refuse(
                     f"capstone: refusing to write {verdicts_target.name} into the evidence "
                     f"bundle {DEFAULT_OUT} — the bundle holds exactly four files and this is "
-                    "not one of them; write elsewhere",
-                    file=sys.stderr,
+                    "not one of them; write elsewhere"
                 )
-                return 1
             if not publishing:
-                print(
+                return refuse(
                     f"capstone: refusing to write verdicts into the bundle {DEFAULT_OUT} — "
-                    "these verdicts are not the ones published beside it",
-                    file=sys.stderr,
+                    "these verdicts are not the ones published beside it"
                 )
-                return 1
     if not may_publish(board, out_dir):
         if not args.json:
             print(render_markdown(board))
-        if args.drop_graph:
-            # Otherwise a refused run leaves the graph it just ingested behind.
-            print(f"capstone: cleanup — {target.drop()}", file=sys.stderr)
-        print(
+        return refuse(
             f"\ncapstone: REFUSING to publish this board into the evidence bundle "
             f"{DEFAULT_OUT} — the tally is {board['tally']}, so it is not a complete "
             "baseline. NOTHING was written into the bundle; point --out at a scratch "
-            "directory to inspect it.",
-            file=sys.stderr,
+            "directory to inspect it."
         )
-        return 1
 
     packet_path.write_text(json.dumps(packet, indent=2, default=str))
     run_json = out_dir / f"run-{target.kind}.json"
