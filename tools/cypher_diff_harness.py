@@ -555,6 +555,10 @@ def _family(value: Any) -> str:
     """The value's scalar FAMILY — the unit row-shape comparison uses."""
     if value is None:
         return "null"
+    if value is NAN:
+        # the module's own NaN stand-in: a NaN IS a number, so `_family` keeps its
+        # vocabulary complete (`type(NAN).__name__` would answer `_NaN`)
+        return "number"
     if isinstance(value, bool):
         return "bool"
     if isinstance(value, (int, Decimal)) and not isinstance(value, bool):
@@ -646,7 +650,11 @@ def _skeleton(shape: Any) -> Any:
     if kind == "leaf":
         return ("leaf",)
     if kind == "entry":
-        return ("entry", shape[1][0])          # the key is structure — keep it
+        # ⛔ the key AND the value's skeleton: returning the key alone dropped the
+        # whole value subtree, so every map below the top level had ONE skeleton and
+        # a pure structure change (`{'a': [1]}` vs `{'a': [1, 2]}`) was labelled
+        # `family` where the value pass belongs (`#13098` review P3)
+        return ("entry", shape[1][0], _skeleton(shape[1][1]))
     return (kind, tuple(_skeleton(child) for child in shape[1]))
 
 
@@ -655,6 +663,12 @@ def _key_identity(key: Any) -> str:
 
     ⛔ `str(k)` made `1` and `"1"` one entry, so the map silently lost a key. The
     NUL separator cannot appear in a real key: `jsonb` forbids `\u0000` in strings.
+
+    ⛔ A KNOWN LABEL INCONSISTENCY: a key is structure, so `{1: "x"}` vs `{"1": "x"}`
+    reads `value` (the identities differ) while `{True: "x"}` vs `{1: "x"}` reads
+    `family` (the identities differ too, but `_norm` cannot see it, so the "cannot
+    normalise it away" arm fires). Same class of change, two labels; both red, and
+    unreachable — both engines yield `str` keys (`#13098` review P3).
     """
     return f"{type(key).__name__}\x00{key}"
 
@@ -707,6 +721,13 @@ def _norm_row(row: Sequence[Any]) -> tuple:
     record answers `float`/`Decimal` while FalkorDB answers the `int` the property
     was written with. A tuple compares element-wise with `==`, so numerics compare
     numerically and nested lists/dicts compare by value.
+
+    ⛔ `==` therefore equates `bool` and `number` (`0 == False`) where the value pass
+    separates them by family, so an `ordered` candidate whose rows differ only by
+    swapping a bool for a number in the same position is not reported. Pre-existing,
+    not reachable by any declared candidate (none compares a bool column against a
+    number one), and recorded here rather than fixed by changing the order pass
+    (`#13098` review P3).
     """
     return tuple(_norm(v) for v in row)
 
@@ -747,7 +768,13 @@ def _render_canonical(value: Any) -> Any:
         # collapsed `1` and `"1"` into one entry, losing a key from the fingerprint
         # (`#13098` review P2/P3).
         return {_key_identity(k): _render_canonical(v) for k, v in value.items()}
-    return value if isinstance(value, int) else str(value)
+    if isinstance(value, int):
+        return value
+    # ⛔ TYPE-TAGGED, for the same reason as `_key_identity`: a `date`/`bytes` cell
+    # and the string that spells it rendered alike, so two different rows shared one
+    # fingerprint (`#13098` review P3). A real `str` leaf returns above, un-tagged, so
+    # no string can produce this rendering.
+    return f"{type(value).__name__}\x00{value}"
 
 
 def _sort_key(row: Sequence[Any]) -> tuple:
@@ -831,9 +858,11 @@ def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
             # must not be conflated (`#13098` review P2/P3). `_skeleton` erases the
             # leaves, so "same structure, a leaf changed" is exactly `family`;
             # everything else falls through to the value comparison — except when
-            # normalisation cannot see the difference at all (`True` key vs `1` key,
-            # list vs tuple), where calling it `value` would report NOTHING and that
-            # would be a false PASS.
+            # `_norm` cannot see the difference at all (`{True: "x"}` vs `{1: "x"}`),
+            # where calling it `value` would report NOTHING and that would be a false
+            # PASS. (A `tuple` and a `list` of the same items are ONE family by
+            # design, in `_family`, `_norm` and `_render_canonical` alike — no
+            # difference is reported, deliberately.)
             if c_fam == s_fam and c_fam in ("list", "dict", "set", "frozenset"):
                 c_shape, s_shape = _family_shape(c_val), _family_shape(s_val)
                 if c_shape != s_shape:

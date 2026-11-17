@@ -452,7 +452,13 @@ def test_a_shape_change_is_a_VALUE_difference_not_a_family_one():
                                  columns=("id", "v"), ordered=False)
     cols = ["id", "v"]
     pairs = (([1], [1, 2]), ([1, 2], [1, 2, 3]), ({"a": 1}, {"a": 1, "b": 2}),
-             ({"a": 1}, {"b": 1}), ([], [1]), ({}, {"a": 1}), ([1], []))
+             ({"a": 1}, {"b": 1}), ([], [1]), ({}, {"a": 1}), ([1], []),
+             # ⛔ ONE LEVEL DOWN too: `_skeleton`'s entry arm dropped the value
+             # subtree, so every map below the top level had one skeleton and a pure
+             # structure change was labelled `family` (`#13098` review P3)
+             ({"a": [1]}, {"a": [1, 2]}), ({"a": {"x": 1}}, {"a": {"x": 1, "y": 2}}),
+             ({"a": {"x": 1}}, {"a": {"y": 1}}), ({"a": {}}, {"a": {"x": 1}}),
+             ({"a": {"x": 1}}, {"a": [1]}))
     for cypher_val, sql_val in pairs:
         result = harness.diff(candidate, [("a", cypher_val)], cols,
                              [("a", sql_val)], cols, ["a"])
@@ -524,6 +530,14 @@ def test_a_non_string_dict_key_does_not_take_the_diff_down():
     right = harness.diff(candidate, [("a", {1: "x", "1": "z"})], cols,
                         [("a", {1: "x", "1": "z"})], cols, ["a"])
     assert left["fingerprint"] != right["fingerprint"], "a map key was dropped from the rendering"
+    # ⛔ and a NON-JSON leaf (`date`, `bytes`) must not collide with the string that
+    # spells it — the same identity loss, one line below the NaN arm
+    import datetime
+
+    for value, spelling in ((datetime.date(2020, 1, 1), "2020-01-01"), (b"x", "x")):
+        left = harness.diff(candidate, [("a", value)], cols, [("a", value)], cols, ["a"])
+        right = harness.diff(candidate, [("a", spelling)], cols, [("a", spelling)], cols, ["a"])
+        assert left["fingerprint"] != right["fingerprint"], (value, spelling)
 
 def test_a_projection_that_drifts_on_both_sides_still_reddens_against_the_declaration():
     """`Candidate.columns` is a CONTRACT, not a comment (`#13098` review P3).
