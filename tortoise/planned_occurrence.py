@@ -152,8 +152,8 @@ _STAGE_OWNED_PROPS: tuple[str, ...] = (
 _KEY_UNSPECIFIED = object()
 
 
-def plan_position(stage_id, slot=None, outcome=None, *,
-                  is_closed=False, declared: dict | None = None,
+def plan_position(stage_id, *, outcome=None, is_closed=False,
+                  declared: dict | None = None,
                   pipeline_key=_KEY_UNSPECIFIED) -> dict:
     """The plan's current position, resolved the way the WRITE resolves it.
 
@@ -220,6 +220,7 @@ def plan_position(stage_id, slot=None, outcome=None, *,
         bound_elsewhere = (pipeline_key is None
                            or str.__str__(pipeline_key) != PLAN_PIPELINE_KEY)
     unresolvable = bool(stage_id) and (stage is None or bound_elsewhere)
+    resolved_slot = stage.slot if stage is not None else None
     # ⛔ WHICH input failed, because the repairs differ: an unknown STAGE ID is
     # fixed by writing a declared id, a bad KEY by repairing the binding. One
     # message for both prescribed a no-op repair for the first and promised "still
@@ -237,7 +238,7 @@ def plan_position(stage_id, slot=None, outcome=None, *,
         # generic-door ending leaves stale, and reporting it as "the stage itself
         # resolves to …" told a caller an ENDED plan was "still open (active)"
         # while the row resolved terminal. None = it does not resolve.
-        "slot": stage.slot if stage is not None else None,
+        "slot": resolved_slot,
         # ⛔ An UNRESOLVABLE row must not report a stale outcome: `ended: False`
         # beside `outcome: 'lost'` is the same mixed-cache contradiction round 3
         # removed from `ended`, one field over.
@@ -358,7 +359,7 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     # pipelineStageId='held')`, a stale/absent slot prop — get its :Event written
     # and journaled before the terminal guard refused, so every retry compounded
     # an occurrence behind a refusal.
-    pos = plan_position(cur.get("stageId"), cur.get("slot"), cur.get("outcome"),
+    pos = plan_position(cur.get("stageId"), outcome=cur.get("outcome"),
                         is_closed=bool(cur.get("isClosed")),
                         pipeline_key=cur.get("pipelineKey"))
     if pos["ended"]:
@@ -452,7 +453,7 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
             f"call `record_occurrence`, which writes the :Event and settles the "
             f"plan at {STAGE_HELD!r}.")
     plan_id, cur = _resolve_plan(sdk, plan_ref)
-    pos = plan_position(cur.get("stageId"), cur.get("slot"), cur.get("outcome"),
+    pos = plan_position(cur.get("stageId"), outcome=cur.get("outcome"),
                         is_closed=bool(cur.get("isClosed")),
                         pipeline_key=cur.get("pipelineKey"))
     if pos["ended"]:
@@ -596,13 +597,18 @@ def planned_without_occurrence(graph) -> list[dict]:
     rows = graph.query(
         "MATCH (p:Object) WHERE p.objectKind IN $kinds "
         "OPTIONAL MATCH (e:Event)-[:aboutObject]->(p) "
-        "WITH p, collect(DISTINCT e.id) AS occurrences "
-        "RETURN p.id, p.name, p.pipelineStageId, p.pipelineSlot, "
+        # ⛔ count(e), NOT collect(DISTINCT e.id): `collect` DROPS a null, and an
+        # `:Event` minted by the session/ingest writers carries `eventId` only —
+        # `id` is absent. Counting a property therefore reported a plan with a
+        # real linked occurrence as "planned and never happened", the exact
+        # inversion this read exists to prevent.
+        "WITH p, count(e) AS occurrences "
+        "RETURN p.id, p.name, p.pipelineStageId, "
         "       p.pipelineOutcome, coalesce(p.isClosed, false), "
         "       p.pipelineStageKey, occurrences",
         params={"kinds": sorted(PLAN_KINDS)}).result_set
     out: list[dict] = []
-    for pid, name, stage, slot, outcome, closed, key, occurrences in rows:
+    for pid, name, stage, outcome, closed, key, occurrences in rows:
         # The link is the proof. A plan whose plan-side words say "held" but
         # with no Event wired to it has no occurrence in the graph, and this
         # read does not take the plan's word for it.
@@ -612,7 +618,7 @@ def planned_without_occurrence(graph) -> list[dict]:
         # the read cannot answer from a different input than they do: the stored
         # `pipelineSlot` PROP is not the writer's answer (a plan ended through the
         # generic door carries a terminal `pipelineStageId` beside a stale slot).
-        pos = plan_position(stage, slot, outcome, is_closed=bool(closed),
+        pos = plan_position(stage, outcome=outcome, is_closed=bool(closed),
                             pipeline_key=key)
         out.append({
             "id": pid,

@@ -25038,7 +25038,7 @@ class TortoiseSDK:
                     # generic door carries a terminal `pipelineStageId` beside a
                     # stale slot, and reading the prop kept a settled plan
                     # suppressing promotion for ever.
-                    plan_state=(plan_position(stage_id, slot, outcome,
+                    plan_state=(plan_position(stage_id, outcome=outcome,
                                               is_closed=bool(closed),
                                               pipeline_key=key)
                                 if is_plan_kind(kind) else None))

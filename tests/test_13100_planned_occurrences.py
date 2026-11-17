@@ -597,6 +597,32 @@ class TestThePromotionSuppressionIsRehomed:
         sdk.update_knowledge(plan["id"], isClosed=True)
         assert op in _promote(sdk, point)
 
+    def test_a_BROKEN_KEY_does_not_turn_the_suppression_off(self, sdk):
+        """R2's first clause, and the reason the discriminant is the resolved SLOT.
+
+        `unresolvable` was used as a fail-open blanket, so one supported write on
+        the plan (`update_knowledge(id, pipelineStageKey=None)`) put a *mid-pipeline*
+        plan's operator back to `live` — over an occurrence that demonstrably has
+        not happened.
+        """
+        point = sdk.create_point("statement", "a live point")["id"]
+        plan = PO.create_plan(sdk, "Scheduled, key cleared")
+        op = f"op-brokenkey-{plan['id']}"
+        _operator_over(sdk, (point, plan["id"]), op)
+        sdk.update_knowledge(plan["id"], pipelineStageKey=None)
+        assert op not in _promote(sdk, point), (
+            "a broken stage key switched the suppression off for a mid-pipeline plan")
+
+    def test_an_UNRESOLVABLE_STAGE_does_not_suppress(self, sdk):
+        """The fail-open half: a stage id that does not resolve has no slot, so
+        there is no evidence the plan is mid-pipeline."""
+        point = sdk.create_point("statement", "a live point")["id"]
+        plan = PO.create_plan(sdk, "Unknown stage id")
+        op = f"op-badstage-{plan['id']}"
+        _operator_over(sdk, (point, plan["id"]), op)
+        sdk.update_knowledge(plan["id"], pipelineStageId="Held")
+        assert op in _promote(sdk, point)
+
     def test_the_LEGACY_event_path_still_suppresses(self, sdk):
         """The acceptance bullet says "on the Event path", not "on draft Points".
 
@@ -668,6 +694,24 @@ class TestPlannedButNeverHappened:
                 params={"p": plan["id"]})
         rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
         assert rows["Closed by marker"]["ended"] is True
+
+    def test_an_event_with_ONLY_an_eventId_still_counts_as_an_occurrence(self, sdk):
+        """The link is counted as a NODE, not as an `id` property.
+
+        The session/ingest writers mint `Event` nodes carrying `eventId` only, so
+        counting `e.id` (a property `collect` DROPS when null) reported a plan with
+        a real linked occurrence as "planned and never happened" — the exact
+        inversion this read exists to prevent.
+        """
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Occurrence with an eventId-only Event")
+        g.query("CREATE (e:Event {eventId:'sess-noid', eventKind:'AgentSession'})")
+        g.query("MATCH (e:Event {eventId:'sess-noid'}), (p:Object {id:$p}) "
+                "CREATE (e)-[:aboutObject]->(p)", params={"p": plan["id"]})
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 1
+        assert [r["name"] for r in PO.planned_without_occurrence(g)] == []
 
     def test_a_legacy_status_word_does_not_change_the_answer(self, sdk):
         """The read must not consult a mutable status — so a legacy word on the
