@@ -49,16 +49,24 @@ jobs:
       RECORD_DSN: "postgresql://postgres:s3cret@127.0.0.1:5432/cypher_diff"
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
       - name: install (every extra named)
         run: uv sync --extra embeddings --extra parity --extra postgres
-      - name: bootstrap the record from the product's own migrations
+      # ⛔ THE HARNESS RUNS BEFORE THE CENSUS ON PURPOSE. The census pins are
+      # ABSOLUTE counts over `tortoise/**`, so any product commit that lands
+      # between this branch's merge-base and the merge commit moves them — and a
+      # `pull_request` job checks out the MERGE commit. With the census first, a
+      # base-drift pin stops the job before either harness step runs, so the
+      # assertion this job EXISTS for ("the harness can fail") is never executed
+      # and a census red masks whether the harness works at all. Ordered last, a
+      # drifted pin still reds the job (it must — the doc's numbers are then
+      # wrong) but it can no longer hide the differential evidence. The refresh
+      # procedure is §7 of `docs/architecture/CYPHER-INVENTORY.md`.
+      - name: install postgresql-client (the `psql` that `--bootstrap-record` drives)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
-      - name: census pins match the doc
-        run: uv run python tools/cypher_inventory.py --check
       - name: agreement run (must be EMPTY, exit 0)
         run: |
-          for c in point-by-id point-listing; do
+          for c in point-by-id point-listing point-by-absent-id; do
             uv run python tools/cypher_diff_harness.py \
               --graph-uri "$GRAPH_URI" --record-dsn "$RECORD_DSN" \
               --bootstrap-record --candidate "$c"
@@ -75,3 +83,5 @@ jobs:
             echo "::error::the mutated run returned $rc; the harness must report a difference (1). A 0 here means the harness cannot fail."
             exit 1
           fi
+      - name: census pins match the doc (LAST — a base-drift pin must not mask the runs above)
+        run: uv run python tools/cypher_inventory.py --check

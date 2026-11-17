@@ -63,7 +63,48 @@ def test_the_census_reconciles_arithmetically():
     totals = census.rg_totals(("tortoise",))
     ast_door_calls = len(result["sites"]) + result["non_cypher_door_calls"]
     assert totals["lines_door_calls"] - totals["door_occurrences_without_a_call"] == ast_door_calls
-    assert result["ast_door_calls"] == ast_door_calls
+    # ⛔ The THIRD reconciliation line the report prints and the doc claims —
+    # `occurrences sharing a line with a CALL` = regex occurrences on call lines
+    # MINUS the AST's own node count. Both sides are measured independently (a
+    # line regex vs an AST walk), so this can fail: a comment mentioning a door
+    # beside a real call reddens it. The assertion this replaced was
+    # `result["ast_door_calls"] == ast_door_calls`, which compared a dict field
+    # with the exact expression that produced it — dead by construction
+    # (`#13098` review P2-4).
+    assert (totals["lines_door_calls"] - totals["door_occurrences_without_a_call"]
+            - ast_door_calls) == 0
+
+
+def test_the_census_pin_can_report_drift(tmp_path):
+    """The pin's FAILURE path is asserted, not just its happy path.
+
+    `test_the_doc_counts_match_the_census` only asserts `returncode == 0`, so
+    making `check()` permanently unable to redden (its drift guard replaced by
+    `if False:`) left this suite green — the vacuous-pin class the module's own
+    docstring cites (`#11859`), and the `#13098` review's F1. Each arm below is a
+    way the pin is supposed to fail.
+    """
+    result = census.census(("tortoise",))
+    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    assert census.check(ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md", result) == 0
+
+    def write(text: str):
+        path = tmp_path / "doc.md"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    # (a) a pin one off — DRIFT
+    drifted = write(doc_text.replace("<!-- cypher-inventory:sites = ", "<!-- cypher-inventory:sites = 1", 1))
+    assert census.check(drifted, result) == 1
+    # (b) a pin removed — MISSING
+    missing_line = next(line for line in doc_text.splitlines()
+                        if line.startswith("<!-- cypher-inventory:candidates ="))
+    assert census.check(write(doc_text.replace(missing_line + "\n", "")), result) == 1
+    # (c) a pin the tool no longer computes — STALE
+    assert census.check(write(doc_text + "\n<!-- cypher-inventory:shape_retired = 1 -->\n"),
+                        result) == 1
+    # (d) no doc at all — could not run, which is 2 and never 0
+    assert census.check(tmp_path / "absent.md", result) == 2
 
 
 def test_a_lambda_body_is_part_of_its_enclosing_function():
@@ -223,3 +264,152 @@ def test_a_credential_never_reaches_the_output():
     redacted = harness._redact("postgresql://postgres:s3cret@127.0.0.1:15499/db")
     assert "s3cret" not in redacted
     assert "postgres:***@" in redacted
+
+
+def test_a_password_containing_an_at_sign_is_redacted_whole():
+    """`@` is legal unencoded in a password, and the authority ends at the LAST one.
+
+    The pre-fix `_redact` split on the FIRST `@`, so
+    `postgresql://postgres:p@ssw0rd@host/db` printed `ssw0rd` — the tail of a
+    working credential, in CI logs, on every run (`#13098` review). libpq and
+    redis-py both split userinfo at the last `@`, so this is reachable with a
+    real generated DSN.
+    """
+    leaked = harness._redact("postgresql://postgres:p@ssw0rd@127.0.0.1:15499/db")
+    assert "ssw0rd" not in leaked, f"the password tail reached the output: {leaked}"
+    assert "p@ssw0rd" not in leaked
+    assert leaked == "postgresql://postgres:***@127.0.0.1:15499/db"
+
+
+def test_the_benchmark_reports_no_verdict_and_still_checks_the_corpus(monkeypatch):
+    """`--bench` is a measurement: it must not exit 0, and it must still refuse a
+    corpus that lacks a declared edge.
+
+    Exit 0 is this tool's word for "the two forms are the same answer". `--bench`
+    diffed nothing and used to return 0 — before the corpus-edge check, too — so
+    a caller keying on 0 read a timing run as agreement (`#13098` review).
+    """
+    monkeypatch.setattr(harness, "seed_graph", lambda *_a, **_k: {"graph": "g", "points": 6})
+    monkeypatch.setattr(harness, "seed_record", lambda *_a, **_k: {"points": 6})
+    monkeypatch.setattr(harness, "run_cypher",
+                        lambda *_a, **_k: ([("p-null-content",), ("p-retired",), ("p-null-created",)], ["id"]))
+    monkeypatch.setattr(harness, "run_sql",
+                        lambda *_a, **_k: ([("p-null-content",), ("p-retired",), ("p-null-created",)], ["id"]))
+    monkeypatch.setattr(harness, "bench", lambda *_a, **_k: {"candidate": "point-listing"})
+    argv = ["--graph-uri", "docker://:p@127.0.0.1:1",
+            "--record-dsn", "postgresql://u:p@127.0.0.1/db",
+            "--bench", "10"]
+
+    # (a) the corpus edge is present -> the bench runs, and it does NOT report equal
+    assert harness.main(argv + ["--candidate", "point-listing"]) == harness.EXIT_NO_VERDICT
+    assert harness.EXIT_NO_VERDICT != 0
+
+    # (b) the corpus edge is ABSENT -> refused with 2, and `bench` never ran
+    monkeypatch.setattr(harness, "run_cypher", lambda *_a, **_k: ([], ["id"]))
+    monkeypatch.setattr(harness, "run_sql", lambda *_a, **_k: ([], ["id"]))
+    ran = []
+    monkeypatch.setattr(harness, "bench", lambda *_a, **_k: ran.append(1) or {})
+    assert harness.main(argv + ["--candidate", "point-listing"]) == 2
+    assert ran == [], "a corpus missing a declared edge must be refused BEFORE it is measured"
+
+
+def test_a_listing_is_not_a_verdict(capsys):
+    """`--list` prints candidates and compares nothing, so it is not exit 0 either."""
+    assert harness.main(["--list"]) == harness.EXIT_NO_VERDICT
+    assert "point-by-id" in capsys.readouterr().out
+
+
+def test_every_declared_corpus_edge_exists_in_the_shared_corpus():
+    """A `requires` name that no corpus row provides would refuse EVERY run."""
+    ids = {row["id"] for row in harness.CORPUS}
+    for name, candidate in harness.CANDIDATES.items():
+        for edge in candidate.requires:
+            assert edge in ids, f"{name} requires {edge!r}, which no corpus row provides"
+
+
+def test_the_empty_result_is_compared_by_a_candidate_not_merely_declared(monkeypatch):
+    """The EMPTY result must be an edge the harness actually asks both stores for.
+
+    The docstring used to declare an empty-tenant edge that no candidate
+    queried, so a port that turned an empty answer into an error or `None`
+    would not have been caught (`#13098` review F2).
+    """
+    candidate = harness.CANDIDATES["point-by-absent-id"]
+    # no `requires` entry can assert an ABSENCE, so the candidate's honesty rests
+    # on the id being absent from every fixture — including a future corpus edit
+    assert candidate.requires == ()
+    assert candidate.params == {"id": harness.ABSENT_ID}
+    assert harness.ABSENT_ID not in {row["id"] for row in harness.CORPUS}
+    # zero rows on both sides, same columns: that IS the same answer
+    result = harness.diff(candidate, [], ["id", "content", "point_kind"],
+                          [], ["id", "content", "point_kind"], [])
+    assert result["equal"] is True and result["row_count"] == {"cypher": 0, "sql": 0}
+    # ⛔ an empty answer whose projection is MISSING is not the same answer — the
+    # shape a port returning `None`/a bare empty instead of no-rows would have
+    assert harness.diff(candidate, [], [], [],
+                        ["id", "content", "point_kind"], [])["equal"] is False
+    # and the CLI path reaches that verdict end to end: empty stores -> exit 0
+    monkeypatch.setattr(harness, "seed_graph", lambda *_a, **_k: {"graph": "g", "points": 0})
+    monkeypatch.setattr(harness, "seed_record", lambda *_a, **_k: {"points": 0})
+    monkeypatch.setattr(harness, "run_cypher",
+                        lambda *_a, **_k: ([], ["id", "content", "point_kind"]))
+    monkeypatch.setattr(harness, "run_sql",
+                        lambda *_a, **_k: ([], ["id", "content", "point_kind"]))
+    assert harness.main(["--graph-uri", "docker://:p@127.0.0.1:1",
+                         "--record-dsn", "postgresql://u:p@127.0.0.1/db",
+                         "--candidate", "point-by-absent-id"]) == 0
+
+
+def test_a_missing_psql_is_could_not_run_not_a_difference(monkeypatch, capsys):
+    """A setup failure must never be reported as `1` = "the two forms DIFFER".
+
+    `bootstrap_record` called `subprocess.run(["psql", …])` outside any `try`, so
+    a box without the client raised `FileNotFoundError`, escaped `main()`, and
+    the interpreter exited **1** — this tool's code for a FINDING. The harness
+    would report its own missing dependency as a porting defect (`#13098`
+    review).
+    """
+    def _missing(*_a, **_k):
+        raise FileNotFoundError(2, "No such file or directory", "psql")
+
+    monkeypatch.setattr(harness.subprocess, "run", _missing)
+    assert harness.bootstrap_record("postgresql://u:p@127.0.0.1/db") == 2
+    assert "could not run" in capsys.readouterr().err
+
+
+def test_bootstrap_refuses_when_the_record_schema_never_materialises(monkeypatch, capsys):
+    """`public.point` absent after the migrations is 2, never 0.
+
+    The function used to `return 0` unconditionally, so `bootstrapped 0/85
+    migrations` reported success and the caller's `rc != 0` guard was dead code.
+    A partial apply IS tolerated (the record builds on the control-plane schema),
+    but only while the schema the corpus needs exists.
+    """
+    class _Proc:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    monkeypatch.setattr(harness.subprocess, "run", lambda *_a, **_k: _Proc())
+    assert harness.bootstrap_record("postgresql://u:p@127.0.0.1/db") == 2
+    assert "no public.point" in capsys.readouterr().err
+
+
+def test_bootstrap_tolerates_a_partial_apply_that_does_build_the_record(monkeypatch):
+    """A file that fails does not stop the record from existing — and that is 0."""
+    class _Proc:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    calls = {"n": 0}
+
+    def _run(argv, **_k):
+        calls["n"] += 1
+        if "-tAc" in argv:                       # the to_regclass probe
+            return _Proc(0, "public.point\n")
+        if "-f" in argv and "0001_user_teams" in argv[-1]:
+            return _Proc(1, "", "psql:…: ERROR: schema \"auth\" does not exist")
+        return _Proc()
+
+    monkeypatch.setattr(harness.subprocess, "run", _run)
+    assert harness.bootstrap_record("postgresql://u:p@127.0.0.1/db") == 0
+    assert calls["n"] > 1

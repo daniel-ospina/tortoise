@@ -46,20 +46,28 @@ a census that hides its blind spots reads as complete):
 SHAPE (precedence order, first match wins — the order encodes "what the
 statement NEEDS", which is the issue's question)
 ================================================
-`fulltext` → `vector` → `ddl` → `traversal` → `adjacency` → `ep` → `plain`
+`ddl` → `fulltext` → `vector` → `traversal` → `adjacency` → `ep` → `plain`
 
+⛔ `ddl` is FIRST because a statement that CREATES a fulltext or vector index names
+one (`CALL db.idx.fulltext.createNodeIndex(…)`), so the DDL arm has to claim it
+before the `fulltext`/`vector` arms see the name — while a `queryNodes`/`query`
+QUERY matches no DDL arm and falls through to `fulltext`/`vector`. The earlier
+telling of this list put `fulltext` and `vector` ahead of `ddl`, which was the
+reverse of what `classify()` does and of what `test_shape_precedence` pins
+(`#13098` review F4).
+
+* `ddl` — index/constraint creation and index listing.
+* `fulltext` — `db.idx.fulltext.*`.
+* `vector` — `db.idx.vector.*` (the move §3 already decided).
 * `traversal` — a VARIABLE-LENGTH relationship (`-[…*1..2]`, `[*]`, `*..`) or
   `shortestPath`: needs a walk.
 * `adjacency` — an edge pattern WITHOUT variable length: a pattern match over
   adjacency. `#13098` calls this "case by case, measured" and §3 keeps the
   multi-hop shapes, so the verdict is `measure`, never a flip.
-* `fulltext` — `db.idx.fulltext.*`.
 * `ep` — the epistemic scalars (`ep_*`, `posterior_*`, `baseline_*`,
   `confidence`): recomputed in Python over a closed component (§6.3).
 * `plain` — no edge pattern and none of the above: point lookups, listings,
   filters, aggregates, ordered reads. **These are SQL-shaped.**
-* `ddl` — index/constraint creation and index listing.
-* `vector` — `db.idx.vector.*` (the move §3 already decided).
 
 ROLE separates a read from a write, because the verdict is shape × role: a
 `plain` READ is a migration candidate; a `plain` WRITE maintains the derived

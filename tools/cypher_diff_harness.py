@@ -14,10 +14,16 @@ exercises its edge cases"*. This is that diff. For one candidate statement it:
 3. diffs **rows · order · null handling · row shape**, and prints the graph lane
    and the record DSN it used.
 
-Exit codes are the verdict, and there is no third one: **0 = equal**, **1 =
-different**, **2 = could not run** (no lane, no DSN, a missing corpus edge case,
-an unexpected error). `2` is never a pass — a harness that cannot run must not
-read as agreement.
+Exit codes are the verdict: **0 = equal**, **1 = different**, **2 = could not run**
+(no lane, no DSN, a missing corpus edge case, an unexpected error), **3 = no
+verdict was produced** — the invocation did not diff the two forms at all
+(`--bench` measures, `--list` lists). `2` is never a pass, and neither is `3`:
+a harness that cannot run, or did not compare, must not read as agreement.
+⛔ `3` exists because `--bench` used to `return 0` before the corpus-edge check
+and without ever calling `diff()`, so a caller keying on `0` read a MEASUREMENT
+as an agreement — the same defect class this module's own header argues against
+("a harness that cannot run must not read as agreement"), one branch over
+(`#13098` review).
 
 WHAT "THE SAME" MEANS — the comparison rule, in one home
 ========================================================
@@ -65,11 +71,11 @@ pin. The shared corpus is:
 | `p-null-created` | no `created_at` | NULL in an ORDER BY |
 | `p-unicode` | emoji + a `|` + a trailing space | encoding / a digest that must not be mangled |
 | `p-retired` | `valid_to` set | a retracted row (`#11827`'s retire columns) |
-| (absent tenant) | no rows for `org-other` | the EMPTY result |
+| (absent id) | `p-absent` in NEITHER store | the EMPTY result — both forms must answer 0 rows *and* name their columns |
 
 USAGE
 =====
-    # 0 = equal · 1 = different · 2 = could not run
+    # 0 = equal · 1 = different · 2 = could not run · 3 = no verdict (a benchmark
     uv run python tools/cypher_diff_harness.py \
         --graph-uri "docker://:pw@127.0.0.1:16404" \
         --record-dsn "postgresql://postgres:s3cret@127.0.0.1:15499/cypher_diff" \
@@ -104,11 +110,24 @@ from typing import Any, Callable, Iterable, Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: The tenant the corpus is seeded under. Two values on purpose: `GRAPH`/`ORG`
-#: pair for the seeded tenant, and a second tenant with NO rows for the empty
-#: result (`EMPTY_ORG`).
+#: Exit code for "this invocation produced no verdict" — `--bench` measures and
+#: `--list` lists; neither diffs the two forms. Distinct from `2` (could not run)
+#: so a caller can tell "it did not compare" from "it tried and failed".
+EXIT_NO_VERDICT = 3
+
+#: The tenant the corpus is seeded under. `EMPTY_TENANT` is a SECOND org/graph
+#: chain with no points in it: it exists so the record carries more than one
+#: org and the tenancy chain this fires on is exercised twice.
+#: ⛔ It is NOT what exercises the EMPTY RESULT — no candidate queries it, by
+#: design. That edge is `point-by-absent-id`, which asks BOTH stores for a row
+#: neither has. An earlier docstring claimed an `org-other` empty-tenant query
+#: that no code performed (`#13098` review F2); the claim now names the
+#: candidate that makes it true.
 TENANT = {"org_id": "org-diff", "graph_id": "graph-diff"}
 EMPTY_TENANT = {"org_id": "org-diff-empty", "graph_id": "graph-diff-empty"}
+
+#: An id no corpus row and no padding row carries — the EMPTY-result fixture.
+ABSENT_ID = "p-absent"
 
 #: Retired rows: the record's retire columns (#11827) are `valid_to`/`expired_at`;
 #: the cache answers a point by id regardless, so a corpus row that carries
@@ -139,6 +158,11 @@ class Candidate:
     #: names of corpus rows this candidate's corpus must contain (refused if absent)
     requires: tuple[str, ...] = ()
     notes: str = ""
+    #: the statement parameters THIS candidate binds (merged with the tenant).
+    #: It used to be a name check in `main` (`if candidate.name == "point-by-id"`),
+    #: which silently left `$id` unbound for any other anchored candidate — a
+    #: missing-parameter ERROR reported as "could not run" rather than a diff.
+    params: dict[str, str] = field(default_factory=dict)
     #: extra SQL predicate the `--mutate` flag can bend, per mutation name
     mutations: dict[str, str] = field(default_factory=dict)
 
@@ -157,6 +181,7 @@ CANDIDATES: dict[str, Candidate] = {
         columns=("id", "content", "point_kind"),
         ordered=False,
         requires=("p-null-content",),
+        params={"id": "p-null-content"},
         mutations={
             # a projection that silently drops the null-content row is the classic
             # "no answer reads as an absence" defect (§17.3)
@@ -165,6 +190,32 @@ CANDIDATES: dict[str, Candidate] = {
         notes=(
             "The anchored read behind GET /v1/points/{id} — `record_serve`'s "
             "`point-by-id` coordinate. Both forms are anchored on the same id."
+        ),
+    ),
+    # ⛔ THE EMPTY RESULT, compared rather than declared (`#13098` review F2):
+    # the id exists in neither store, so the two forms must both answer zero
+    # rows AND still report their column list. A port that turned an empty
+    # answer into an error, or into `None`, does not come back `equal` here.
+    "point-by-absent-id": Candidate(
+        name="point-by-absent-id",
+        cypher=(
+            "MATCH (n:Point {id:$id}) "
+            "RETURN n.id AS id, n.content AS content, n.point_kind AS point_kind"
+        ),
+        sql=(
+            "SELECT id, content, point_kind FROM public.point "
+            "WHERE org_id = %(org_id)s AND graph_id = %(graph_id)s AND id = %(id)s"
+        ),
+        columns=("id", "content", "point_kind"),
+        ordered=False,
+        requires=(),
+        params={"id": ABSENT_ID},
+        notes=(
+            "The EMPTY result: `p-absent` is in NEITHER store, so both forms must "
+            "answer zero rows with their columns intact. MEASURED on a real "
+            "FalkorDB lane (2026-11-17): an empty match still returns the header "
+            "(`cols=['id','content','point_kind']`), so the row-shape comparison "
+            "is not vacuous on this path."
         ),
     ),
     "point-listing": Candidate(
@@ -321,28 +372,94 @@ def seed_record(dsn: str) -> dict[str, Any]:
     return {"points": int(total)}
 
 
+#: What the PRODUCT assumes and a bare Postgres does not have: Supabase owns the
+#: `auth` schema and the three request roles, and the migrations reference both.
+#: ⛔ MEASURED (2026-11-17, `pgvector/pgvector:pg16`, 85 committed migrations):
+#: WITHOUT this block 69 of 85 files fail — including the two that create
+#: `public.node_identity` — so `public.point` never materialises and every seed
+#: refuses with "the record DSN has no public.point". WITH it, 84 of 85 apply
+#: and the record schema is complete; the one remaining failure is
+#: `blog_cms.sql`, which needs Supabase Storage's `storage.buckets` and is not
+#: part of the record. Applying it is idempotent, so a re-run is safe.
+SUPABASE_PREREQS = """
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE SCHEMA IF NOT EXISTS auth;
+CREATE TABLE IF NOT EXISTS auth.users (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  email text,
+  raw_user_meta_data jsonb DEFAULT '{}'::jsonb
+);
+CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $$
+  SELECT nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+$$;
+CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $$
+  SELECT nullif(current_setting('request.jwt.claim.role', true), '')
+$$;
+CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS $$
+  SELECT coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb, '{}'::jsonb)
+$$;
+DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE service_role NOLOGIN BYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+"""
+
+
 def bootstrap_record(dsn: str) -> int:
     """Apply the product's own migrations to a fresh Postgres — a REAL record DSN.
 
-    The full migration set is applied in filename order with `ON_ERROR_STOP=0`
-    per file and every failure REPORTED: the record schema builds on the
-    control-plane schema (roles `anon`/`authenticated`/`service_role`, `public.
-    graphs`, `public.node_identity`), so a partial apply is expected on a bare
-    server and must be visible rather than silent.
+    The Supabase-managed prerequisites are created first (`SUPABASE_PREREQS`),
+    then the full migration set is applied in filename order with
+    `ON_ERROR_STOP=1` per file — so a file that fails STOPS at its first error
+    rather than half-applying the rest of that file — and every failure is
+    REPORTED. A partial apply is tolerated (the record schema builds on the
+    control-plane schema and on Supabase Storage), but it is tolerated only
+    while the thing the corpus needs exists: `public.point` is checked at the
+    end and its absence is **2 = could not run**, never 0.
+
+    Returns 0 only when the record schema materialised; 2 when `psql` is absent
+    or the schema did not build.
     """
     migrations = sorted((ROOT / "supabase" / "migrations").glob("*.sql"))
     failures: list[str] = []
-    for path in migrations:
-        proc = subprocess.run(
-            ["psql", dsn, "-q", "-v", "ON_ERROR_STOP=1", "-f", str(path)],
+    try:
+        prereq = subprocess.run(
+            ["psql", dsn, "-q", "-v", "ON_ERROR_STOP=1", "-c", SUPABASE_PREREQS],
             capture_output=True, text=True,
         )
-        if proc.returncode != 0:
-            first = (proc.stderr or "").strip().splitlines()
-            failures.append(f"{path.name}: {first[0] if first else 'failed'}")
+        if prereq.returncode != 0:
+            print(f"cypher-diff: could not run — the Supabase prerequisites did not apply: "
+                  f"{(prereq.stderr or '').strip()[:400]}", file=sys.stderr)
+            return 2
+        for path in migrations:
+            proc = subprocess.run(
+                ["psql", dsn, "-q", "-v", "ON_ERROR_STOP=1", "-f", str(path)],
+                capture_output=True, text=True,
+            )
+            if proc.returncode != 0:
+                first = (proc.stderr or "").strip().splitlines()
+                failures.append(f"{path.name}: {first[0] if first else 'failed'}")
+        # The schema the corpus actually needs, read back from the server — not
+        # inferred from "the loop finished".
+        present = subprocess.run(
+            ["psql", dsn, "-tAc", "SELECT to_regclass('public.point')"],
+            capture_output=True, text=True,
+        )
+    except OSError as exc:
+        # ⛔ `psql` not on PATH used to escape as FileNotFoundError, which the
+        # interpreter reports as exit **1** — this tool's own code for "the two
+        # forms DIFFER". A missing client is "could not run" (2), never a
+        # finding.
+        print(f"cypher-diff: could not run — `psql` is not usable here: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     print(f"bootstrapped {len(migrations) - len(failures)}/{len(migrations)} migrations")
     for failure in failures[:20]:
         print(f"  FAILED {failure}")
+    if present.returncode != 0 or not (present.stdout or "").strip():
+        print("cypher-diff: could not run — the record has no public.point after "
+              "bootstrapping, so every corpus seed would refuse; the migrations "
+              "above are the reason", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -541,7 +658,7 @@ def bench(graph_uri: str, graph_name: str, dsn: str, candidate: Candidate,
             )
     finally:
         conn.close()
-    params = _scoped_params({"id": "p-null-content"}) if candidate.name == "point-by-id" else _scoped_params({})
+    params = _scoped_params(candidate.params)
 
     def timeit(fn) -> list[float]:
         samples = []
@@ -628,7 +745,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         for name, candidate in CANDIDATES.items():
             print(f"{name}: {candidate.notes}")
-        return 0
+        # a listing is not a diff — see EXIT_NO_VERDICT
+        return EXIT_NO_VERDICT
 
     if not args.graph_uri or not args.record_dsn:
         print("cypher-diff: could not run — both --graph-uri and --record-dsn are required "
@@ -664,17 +782,11 @@ def main(argv: list[str] | None = None) -> int:
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
-    if args.bench:
-        # the measurement a flip depends on — run only for one candidate
-        if args.candidate == "all":
-            print("cypher-diff: --bench takes one --candidate", file=sys.stderr)
-            return 2
-        measurement = bench(args.graph_uri, args.graph_name, args.record_dsn,
-                            CANDIDATES[args.candidate], args.bench, args.bench_iters)
-        print(json.dumps(measurement, indent=2))
-        return 0
-
     names = list(CANDIDATES) if args.candidate == "all" else [args.candidate]
+    # ⛔ THE CORPUS-EDGE CHECK RUNS ON EVERY PATH, INCLUDING `--bench`. It used to
+    # sit BELOW the bench branch, so a corpus that lacked a declared edge was
+    # measured instead of refused — the "a pin that cannot fail for the thing it
+    # names" defect, one branch over (`#13098` review).
     for name in names:
         absent = [edge for edge in CANDIDATES[name].requires
                   if edge not in seeded_graph or edge not in seeded_record]
@@ -684,6 +796,20 @@ def main(argv: list[str] | None = None) -> int:
                   f"record={sorted(seeded_record)}); the diff would be vacuous for them",
                   file=sys.stderr)
             return 2
+
+    if args.bench:
+        # the measurement a flip depends on — run only for one candidate
+        if args.candidate == "all":
+            print("cypher-diff: --bench takes one --candidate", file=sys.stderr)
+            return 2
+        measurement = bench(args.graph_uri, args.graph_name, args.record_dsn,
+                            CANDIDATES[args.candidate], args.bench, args.bench_iters)
+        print(json.dumps(measurement, indent=2))
+        # ⛔ NOT 0. `0` is this tool's word for "the two forms are the same
+        # answer", and a benchmark is not that measurement: it times one form, it
+        # diffs nothing, and it never compared the two. A caller (or a future CI
+        # step) keying on 0 must not read a timing run as agreement.
+        return EXIT_NO_VERDICT
     results = []
     for name in names:
         candidate = CANDIDATES[name]
@@ -693,19 +819,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"cypher-diff: {exc}", file=sys.stderr)
             return 2
         try:
-            if candidate.name == "point-by-id":
-                cypher_rows, cypher_cols = run_cypher(
-                    args.graph_uri, args.graph_name,
-                    _scoped_cypher(candidate.cypher), _scoped_params({"id": "p-null-content"}),
-                )
-                sql_rows, sql_cols = run_sql(args.record_dsn, sql,
-                                             _scoped_params({"id": "p-null-content"}))
-            else:
-                cypher_rows, cypher_cols = run_cypher(
-                    args.graph_uri, args.graph_name,
-                    _scoped_cypher(candidate.cypher), _scoped_params({}),
-                )
-                sql_rows, sql_cols = run_sql(args.record_dsn, sql, _scoped_params({}))
+            cypher_rows, cypher_cols = run_cypher(
+                args.graph_uri, args.graph_name,
+                _scoped_cypher(candidate.cypher), _scoped_params(candidate.params),
+            )
+            sql_rows, sql_cols = run_sql(args.record_dsn, sql,
+                                         _scoped_params(candidate.params))
         except Exception as exc:  # noqa: BLE001
             print(f"cypher-diff: could not run {name} — {type(exc).__name__}: {exc}",
                   file=sys.stderr)
@@ -743,7 +862,14 @@ def _redact(dsn: str) -> str:
         return dsn
     scheme, rest = dsn.split("://", 1)
     if "@" in rest:
-        creds, host = rest.split("@", 1)
+        # ⛔ The authority ends at the LAST `@`, not the first: both libpq and
+        # redis-py split userinfo that way, and a generated password routinely
+        # contains a raw `@`. Splitting on the first one PRINTED THE TAIL OF THE
+        # PASSWORD (`postgres:p@ssw0rd@host` -> `postgres:***@ssw0rd@host`),
+        # which is the one thing the secret-hygiene rule forbids outright
+        # (`#13098` review; MEASURED, and `test_a_credential_never_reaches_the_
+        # output` stayed green over it because its password had no `@`).
+        creds, host = rest.rsplit("@", 1)
         user = creds.split(":", 1)[0]
         return f"{scheme}://{user}:***@{host}"
     return dsn
