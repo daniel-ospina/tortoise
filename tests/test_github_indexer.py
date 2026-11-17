@@ -513,10 +513,10 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     mirror — GitHub says `open` for a row the projection refuses to move — is
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term NO WRITER CAN CLEAR (`_upsert_object` writes `o.status` ON CREATE only,
-    `entities.py:5087`), so each poll minted another `-reopened`
+    `entities.py:5121-5123`), so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
-    (`entities.py:6204`).
+    (`entities.py:6219-6220`).
 
     A LATCHED row now answers `None` — this module's "no opinion" — so no
     transition is minted in EITHER direction, the only stable answer while the
@@ -533,6 +533,16 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
         "a terminal LIFECYCLE word (what the `archived` door stores)": (
             "SET o.status='deprecated', o.pipelineStageId='in_progress', "
             "o.pipelineSlot='active', o.isClosed=false"),
+        # ⛔ THE SHAPE THAT DISCRIMINATES `_status_is_latched` (#13289 review
+        # round 5, P2). Both rows above carry a LIVE position, where the
+        # `_row_is_frozen` arm answers `None` too — so with arm 1 DELETED, or with
+        # it merely MOVED BELOW the position test, every other assertion in this
+        # file still passed and the unbounded `-reopened` loop for a latched word
+        # at a `terminal` position was unpinned. Measured: arm 1 removed ->
+        # `None` becomes `closed`, and GitHub `open` mints `-reopened` per poll.
+        "a terminal LIFECYCLE word at an ENDED position": (
+            "SET o.status='deprecated', o.pipelineStageId='done', "
+            "o.pipelineSlot='terminal', o.isClosed=true"),
     }
     for why, mutate in frozen.items():
         proj = sdk._get_proj()
@@ -689,6 +699,38 @@ def test_a_stale_pipelineSlot_prop_does_not_outvote_the_declaration(sdk):
         f"an OPEN issue on an OPEN row minted a transition ({mints})")
 
 
+def test_a_FALSY_stageId_is_not_treated_as_unresolvable(sdk):
+    """#13289 review round 5 (P1): the arm must mirror the fold's TRUTHINESS test.
+
+    `apply_stage_fold` resolves the current stage with `cur_id = cur.get("stageId")`
+    then `if cur_id:` (`pipeline.py:490`) — an EMPTY/falsy `stageId` is SKIPPED, not
+    refused, so its guards are bypassed and the move is ADMITTED. `_declared_stage_slot`
+    returns `None` for it (no stage carries that id), so an `is not None` test on the
+    "position unresolvable" arm answered "no opinion" for a row the fold would have
+    moved — and the transition was dropped for ever. `main` answered "open", minted
+    the close, and the fold applied it: that is the regression this pins.
+
+    Reachable through a supported write: `_sanitize_props` keeps `''`, so
+    `update_knowledge(id, pipelineStageId='')` leaves the row in this shape.
+    """
+    oid = "github-issue-acme/repo1-1"
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) SET o.pipelineStageId='', "
+        "o.pipelineSlot=null, o.isClosed=false")
+    assert GitHubIndexer._object_state_to_issue_state(proj, oid) == "open", (
+        "an EMPTY `stageId` is skipped by the fold, not refused — answering 'no "
+        "opinion' drops a transition the fold would apply")
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-20T08:00:00Z",
+        updated_at="2026-07-20T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)]
+    assert mints == [1, 0], (
+        f"the close was not recorded exactly once then converged ({mints})")
+
+
 def test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration(sdk):
     """#13289 review F2 (P2): absent key and unrecognised key are DIFFERENT questions.
 
@@ -788,7 +830,8 @@ def test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration(sdk):
         f"`None` arm must not swallow a row whose position DOES resolve")
     # ⛔ And the STALE-PROP mirror (#13289 F4): F2's prop fallback is right for a row
     # a PACK fold owns, but no pack fold can address an indexed issue Object
-    # (`github_map` writes no `objectKind`), so the connector fold is the only fold
+    # (no pack declares a `pipeline:` for `pm:issue`, which is what
+    # `github_map.py:274` writes), so the connector fold is the only fold
     # this row will ever see — and it refuses the foreign key. Nothing clears that
     # prop, so answering from it freezes the row in the OTHER direction: below, the
     # prop says `terminal` while GitHub says OPEN, and the reader answering "closed"

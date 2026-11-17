@@ -292,13 +292,14 @@ def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
     The fold resolves the Object's current stage by ID through the pipeline's own
     declaration (`pipeline.apply_stage_fold` → ``pipe.by_id(cur_id)``), so reading
     the stored ``pipelineSlot`` PROP alone describes a different object than the
-    one the fold refuses to move. ``None`` means "cannot resolve": the caller
-    then answers from the props it has, and the row is not called ended on this
-    arm.
+    one the fold refuses to move.
 
-    ⛔ ``None`` also means an **unrecognised** key, and for that case the caller's
-    prop fallback is the CORRECT answer — a pack's own fold writes the prop
-    (`stage_move_props`), so a pack row resolves through it. See below.
+    ⛔ ``None`` means "cannot resolve", and the caller does NOT fall back to the
+    prop when a `stageId` is present — that is `#13289` F4's correction to F2, and
+    restoring the fallback reintroduces the `-reopened` loop. A row whose id
+    resolves to no slot by declaration is one of `apply_stage_fold`'s two
+    refusals (`cross-pipeline`, `unresolvable-current-stage`), so the reader
+    answers `None`; the prop is consulted only when there is no `stageId` at all.
     """
     if stage_id is None:
         return None
@@ -314,8 +315,8 @@ def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
         decl = _PIPELINE_DECLS.get(key)
         if decl is None:
             # The docstring above promises no guessing, and this is what that
-            # costs: no opinion on this arm. The caller falls back to the stored
-            # `pipelineSlot` prop, which the pack's OWN fold wrote.
+            # costs: no opinion on this arm. The caller does NOT fall back to the
+            # prop when a `stageId` is present (F4) — it answers `None`.
             return None
     else:
         # An ABSENT key falls back to the CONNECTOR's own declaration, because
@@ -327,7 +328,11 @@ def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
         # declaration is what lets the read agree with the fold on a row whose
         # `pipelineSlot` PROP was never written: measured, that row read as OPEN
         # and minted a `-closed` on every poll (1/1/1) while the fold refused it
-        # as terminal.
+        # as terminal. ⚠️ "Resolves CORE" is true of the CONNECTOR fold, which is
+        # the only one that can see an indexed issue Object — `apply_stage_fold`
+        # resolves a keyless id against the `decl` its CALLER passed
+        # (`pipeline.py:483`, `:496`), so a PACK fold would resolve it against the
+        # pack's own declaration.
         decl = _PIPELINE_DECLS.get(CORE_WORK_ITEM_PIPELINE_KEY)
     if not decl:
         return None
@@ -1196,10 +1201,13 @@ class GitHubIndexer:
         ⛔ #13289 (F1): both axes must be read to agree with the FOLD — but they
         cannot be answered the same WAY. The position axis is what the fold moves,
         so it is the axis this read may diff on. The two lifecycle terms (`status`
-        in the terminal vocabulary, the legacy `outdated` flag) are written once
-        and never cleared, so any row carrying one is FROZEN and this read must
-        answer `None` ("no opinion") rather than `"closed"` — see
-        `_row_is_frozen`. Answering `"closed"` there was the fix's own regression:
+        in the FOLD's latch set, the legacy `outdated` flag) are NOT one question,
+        and the rule is per-direction, not per-term: a LATCHED word answers `None`
+        always (`_status_is_latched` — the fold refuses both ways); the WIDE terms
+        answer the POSITION, and `None` only where the position is live
+        (`_row_is_frozen` — the close fold is unreachable for them, the reopen fold
+        is not). "Written once and never cleared" was the earlier, WRONG summary:
+        a coherent un-supersede does clear `superseded` (`sdk.py:53952-53962`). Answering `"closed"` there was the fix's own regression:
         it is a SUPERSET of the fold's guard set, and a superset re-fires exactly
         as a subset does.
         """
@@ -1294,7 +1302,8 @@ class GitHubIndexer:
         # `objectKind`": `github_map.issue_to_object` writes `object_kind:
         # "pm:issue"` (`github_map.py:274`). It is that no pack declares a PIPELINE
         # for that kind — `packs/dev/manifest.yaml` maps `issue` → `pm:issue` under
-        # `equivalentTo:` and has no `pipelines:` block at all — so no pack fold
+        # `equivalentTo:` and declares no `pipeline:` for that kindDef at all — so
+        # no pack fold
         # exists that could ever see this row. The connector fold is the only one,
         # and it refuses a foreign key with `cross-pipeline`. Nothing clears that
         # prop, so the
@@ -1314,7 +1323,15 @@ class GitHubIndexer:
         # `planned_occurrence.plan_position` refuses to call an unresolvable row
         # open/upcoming for the same reason ("a pre-check must not attempt one
         # either"). `-created` is guarded separately by `_event_in_graph`.
-        if stage_id is not None and declared_slot is None:
+        # ⛔ TRUTHINESS, matching `apply_stage_fold`'s own `if cur_id:`
+        # (`pipeline.py:490`) — NOT `is not None`. An empty/falsy `stageId` is
+        # SKIPPED by the fold, not refused, so its guards are bypassed and the move
+        # is ADMITTED; `_declared_stage_slot` returns `None` for it (no stage has
+        # that id), so an `is not None` test here answered "no opinion" for a row
+        # the fold would have moved and dropped the transition for ever. Reached by
+        # a supported write: `update_knowledge(id, pipelineStageId='')` survives
+        # `_sanitize_props`.
+        if stage_id and declared_slot is None:
             return None
         position_ended = is_position_ended(
             is_closed=is_closed,
@@ -1342,7 +1359,15 @@ class GitHubIndexer:
         # that arm declines, so the order below is load-bearing.
         if position_ended:
             return "closed"
-        if _row_is_frozen(status, outdated):
+        # ⚠️ Only when there IS a position to have answered from. A legacy pre-S0
+        # row (`status='completed'`, no pipeline props) that also carries
+        # `outdated` would otherwise stop here and drop the reopen the fold DOES
+        # apply (`_reopen_targets_closed`, `entities.py:6149-6153`, needs only one
+        # registered incarnation and no live holder). With no position this read
+        # falls through to `_STATUS_TO_STATE` instead, which is where a legacy
+        # row's answer has always lived.
+        if (stage_id is not None or slot is not None or is_closed is not None) \
+                and _row_is_frozen(status, outdated):
             return None
         if stage_id is not None or slot is not None:
             return "open"
