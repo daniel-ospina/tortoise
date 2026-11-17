@@ -6047,7 +6047,11 @@ def _goal_successor_named(props: dict, stored_view) -> bool:
     from tortoise.record_projection import snake  # local: avoids import weight
 
     named_in_write = False
-    for key, value in props.items():
+    # `value` is deliberately not unpacked: this scan asks only WHICH COLUMN the
+    # write touches, and answering *what it says* is `_successor_named_by`'s job
+    # (#12914) — see the block below. Iterating the keys keeps that split visible,
+    # and ruff's B007 had been flagging the vestigial binding on CI.
+    for key in props:
         # ⛔ #13065 review round 6 finding 3 (P2): the carrier is recognised by
         # BOTH renderers. `snake(key)` normalises the key's CONTENT, while the
         # live write files the key by `str(key)` (`live.py`'s two-renderer
