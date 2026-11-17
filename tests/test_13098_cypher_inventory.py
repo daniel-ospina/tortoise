@@ -74,11 +74,16 @@ def test_the_census_reconciles_arithmetically():
     # sum, because a balanced pair of opposite errors (one line where the regex
     # sees two occurrences and the AST holds one node, another off in the other
     # direction) leaves the totals closing perfectly and is caught only here.
-    # Non-vacuity measured: putting a docstring `.query(` on a line that already
-    # carries a real door call takes this counter 0 -> 1, and the partition above
-    # still balances. The counter is deliberately NOT printed in the report: the
-    # doc frames the printed third row as the DERIVED residual, and that framing
-    # is correct as written.
+    # Non-vacuity MEASURED, and stated for exactly what it shows: putting a
+    # docstring `.query(` on a line that already carries a real door call takes
+    # this counter 0 -> 1. That mutant ALSO reddens the assertion above (the
+    # occurrence leaves `door_occurrences_without_a_call`, so `regex − non-call`
+    # grows by one) — so what it proves is that this counter can be non-zero, NOT
+    # that it is the only arm that sees a divergence. What only this counter sees
+    # is the BALANCED case: two lines that are wrong in opposite directions leave
+    # every total above closing perfectly, and no assertion on those totals can
+    # ever notice (`#13098` review P3 caught this comment claiming more than the
+    # mutant showed).
     assert totals["lines_where_regex_and_ast_disagree"] == 0, (
         "the door regex and the AST disagree on how many door calls ONE LINE carries — the "
         "totals can still close over that, which is exactly why this arm exists: "

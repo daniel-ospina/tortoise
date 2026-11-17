@@ -620,8 +620,10 @@ def report(result: dict) -> str:
     add(f"    regex door-pattern occurrences          {totals['lines_door_calls']}")
     add(f"    − occurrences on a line with no door CALL (comments/docstrings)"
         f"  {totals['door_occurrences_without_a_call']}")
-    add(f"    − occurrences sharing a line with a CALL (comments beside code)"
-        f"  {totals['lines_door_calls'] - totals['door_occurrences_without_a_call'] - result['ast_door_calls']}")
+    add(f"    = occurrences on a line WITH a door CALL"
+        f"                 {totals['door_occurrences_on_call_lines']}")
+    add(f"    − of those, the AST did not record (residual)"
+        f"         {totals['door_occurrences_on_call_lines'] - result['ast_door_calls']}")
     add(f"    = AST door calls                        {result['ast_door_calls']}")
     add(f"    = classified Cypher {len(sites)} + non-Cypher {result['non_cypher_door_calls']}"
         f"  {len(sites) + result['non_cypher_door_calls']}")
@@ -674,14 +676,18 @@ def check(doc: Path, result: dict) -> int:
         "ast_door_calls": len(sites) + result["non_cypher_door_calls"],
         "partial": result["partial"],
     }
-    plain_roles = shape_matrix(sites).get("plain", {})
-    # §0 publishes the split — "854 (573 read, 281 write)" — and a role swap is the
-    # one direction this census's verdict flips (a write published as a migration
-    # candidate), so both halves are pinned, not just their sum.
-    actual["shape_plain_read"] = plain_roles.get("read", 0)
-    actual["shape_plain_write"] = plain_roles.get("write", 0)
-    for shape, roles in shape_matrix(sites).items():
+    matrix = shape_matrix(sites)
+    for shape, roles in matrix.items():
         actual[f"shape_{shape}"] = sum(roles.values())
+        # ⛔ The ROLE SPLIT is pinned for EVERY shape, not only `plain`. A role swap
+        # leaves the shape TOTAL untouched, and §3 publishes `adjacency` 189/100 and
+        # `ep` 21/11 as numbers no pin carried — so the exact regression the census
+        # exists to catch (a graph write published as `read`, i.e. as a migration
+        # candidate) was invisible for every shape except `plain` (`#13098` review
+        # P2). `plain` was pinned first because it is the one whose reads ARE the
+        # candidate list; the rule is not specific to it.
+        for role, count in roles.items():
+            actual[f"shape_{shape}_{role}"] = count
     drift = {
         key: (pinned.get(key), value)
         for key, value in actual.items()
