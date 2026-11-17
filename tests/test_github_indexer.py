@@ -739,6 +739,51 @@ def test_a_POSITIONLESS_wide_term_row_answers_one_direction_only(sdk):
             f"{gh_state['state']!r} issue, got {mints}")
 
 
+def test_an_EMPTY_stored_position_prop_does_not_count_as_a_position(sdk):
+    """#13289 review round 8 (P2): `''` is not a position, so it must not withhold.
+
+    The wide arm gated on `stage_id is not None or slot is not None`, which counts a
+    stored EMPTY prop as a position. `apply_stage_fold` resolves the current stage
+    with `if cur_id:` (`pipeline.py:490`) and never reads `pipelineSlot` at all, so
+    an empty prop is no evidence the fold can see — the row is still position-less
+    and the word answer `"closed"` is the safe one (a reopen folds, measured).
+
+    Reachable: `update_knowledge(id, pipelineStageId='')` and
+    `update_knowledge(id, pipelineSlot='')` are both admitted and stored verbatim.
+    """
+    oid = "github-issue-acme/repo1-1"
+    shapes = {
+        "an EMPTY `pipelineStageId`": (
+            "SET o.status='completed', o.outdated=true, o.pipelineStageId='', "
+            "o.pipelineSlot=null, o.isClosed=false"),
+        "an EMPTY `pipelineSlot`": (
+            "SET o.status='completed', o.outdated=true, o.pipelineStageId=null, "
+            "o.pipelineSlot='', o.isClosed=false"),
+    }
+    for why, mutate in shapes.items():
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (o:Object) DETACH DELETE o")
+        proj.g.query("MATCH (e:Event) DETACH DELETE e")
+        t = MockGitHubTransport(issues=[gh_issue(1)])
+        _run(_indexer(t), sdk)
+        proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) {mutate}")
+        got = GitHubIndexer._object_state_to_issue_state(proj, oid)
+        assert got == "closed", (
+            f"{why}: an empty stored prop is not a position the fold can see, so the "
+            f"word answer must stand; got {got!r} — the reopen is dropped for ever")
+        t.issues_by_repo["acme/repo1"] = [gh_issue(
+            1, state="open", updated_at="2026-07-26T08:00:00Z")]
+        mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+        assert mints == [1, 0, 0], (
+            f"{why}: the reopen must be recorded exactly once then converge ({mints})")
+        stage, slot = proj.g.query(
+            f"MATCH (o:Object {{id:'{oid}'}}) "
+            "RETURN o.pipelineStageId, o.pipelineSlot").result_set[0]
+        assert (stage, slot) == ("in_progress", "active"), (
+            f"{why}: the fold did not actually move the row, so 'one mint then "
+            f"converge' is untested ({stage!r}, {slot!r})")
+
+
 def test_a_stale_pipelineSlot_prop_does_not_outvote_the_declaration(sdk):
     """#13289 review F1, second instance: the fold NEVER reads `pipelineSlot`.
 

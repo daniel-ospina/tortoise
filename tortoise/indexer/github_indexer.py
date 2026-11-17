@@ -248,7 +248,7 @@ def _row_is_frozen(status, outdated) -> bool:
     resumes the moment it does because the answer is derived from the stored row
     and never cached. What ``_upsert_object`` guarantees is narrower and is the
     part this module relies on: ``o.status`` is written ON CREATE only
-    (``projection/entities.py:5121-5123`` — *"status ON CREATE only — ON MATCH
+    (``projection/entities.py:5128-5130`` — *"status ON CREATE only — ON MATCH
     never touches it (the clobber guard)"*), so an unrelated re-mention cannot
     reset the word out from under a poll.
 
@@ -258,14 +258,18 @@ def _row_is_frozen(status, outdated) -> bool:
     """
     # ⛔ HASHING GUARD (#13289 review F6): `live.is_terminal_status` is a
     # `frozenset` membership test, and membership HASHES the value — so a stored
-    # ARRAY `status` raises `TypeError: unhashable type`. That value is ONE
-    # supported write away (`update_knowledge(id, status=['live'])` stores it
-    # verbatim; `live.py` documents the same hazard for
-    # `endpoint_permits_operator_promotion`), and the FOLD tolerates it because its
-    # own `excluded` is a LIST (an `==` scan, no hash). A raise here is not a quiet
-    # skip of one row: `_project_issue` runs BEFORE the Object write and the
-    # exception lands in the per-issue handler, so that issue is dropped on EVERY
-    # poll while the run still reports success.
+    # ARRAY `status` raises `TypeError: unhashable type`. ⚠️ NOT reachable through a
+    # current door: `update_knowledge(id, status=['live'])`, `create_object(...,
+    # status=['live'])` and `create_entity('Object', ..., status=['live'])` all
+    # REFUSE it (`lifecycle_vocabulary.py:279-286`; `sdk.py:53785-53791`). It is the
+    # LEGACY population — rows written before that door existed, which
+    # `lifecycle_vocabulary.py:263-264` records explicitly ("`status=['live']` *used
+    # to be* STORED on an `:Object`") — and this repo deliberately keeps readers
+    # wider than the door (`live.py:100-108`). The FOLD tolerates it because its own
+    # `excluded` is a LIST (an `==` scan, no hash). A raise here is not a quiet skip
+    # of one row: `_project_issue` runs BEFORE the Object write and the exception
+    # lands in the per-issue handler, so that issue is dropped on EVERY poll while
+    # the run still reports success.
     # Spelling the two terms out (rather than calling the shared helper) keeps the
     # reader agreeing with the fold on that row instead of introducing a crash path
     # it did not have. A non-string status is simply not a vocabulary word.
@@ -297,9 +301,9 @@ def _status_is_latched(status) -> bool:
     would have applied; answering ``"closed"`` for both loops the close. The
     reader answers each term by what its own direction can actually reach.
     """
-    # ⛔ HASHING GUARD (#13289 review F6) — see `_row_is_frozen`. `status` is
-    # stored VERBATIM by the public doors, so it can be a list/dict, and membership
-    # in the `frozenset` would raise. The fold's own list-based `in` does not, so a
+    # ⛔ HASHING GUARD (#13289 review F6) — see `_row_is_frozen`. A LEGACY row can
+    # carry a list/dict `status` (the current doors refuse one), and membership in
+    # the `frozenset` would raise. The fold's own list-based `in` does not, so a
     # non-string status is simply not a latched word here either.
     return isinstance(status, str) and status in OBJECT_TERMINAL_STATUSES
 
@@ -1287,7 +1291,7 @@ class GitHubIndexer:
         # transition in EITHER direction, which is the only stable answer while the
         # projection refuses to move it.
         # ⛔ The two folds do NOT refuse alike, so the WIDER terms are handled below,
-        # after the position is known — see `_status_is_latched`'s docstring and the
+        # after the position is known — see `_status_is_latched`'s docstring and
         # the wide-term arm below: answering `None` for `outdated` here (round 4,
         # finding 2) was a
         # SILENT FALSE NEGATIVE — it dropped a reopen the projection WOULD apply.
@@ -1392,7 +1396,7 @@ class GitHubIndexer:
         # `entities.py:6159-6162`: one registered incarnation, no live holder). With no
         # stage position this read falls through to `_STATUS_TO_STATE`, which is where
         # a legacy row's answer has always lived.
-        # ⛔ The test is `stage_id`/`slot`, NOT `is_closed` (round-6 review, P2). By this
+        # ⛔ The test is `stage_id`/`slot`, NOT `is_closed` (round-7 review, P2). By this
         # point `is_position_ended` has already answered for any TRUTHY marker, so
         # `is_closed` here is necessarily falsy — and a stored `False` carries the SAME
         # position answer as an absent value, so an `is_closed is not None` conjunct
@@ -1402,7 +1406,18 @@ class GitHubIndexer:
         # and CONVERGED (the reopen fold applies), and read `None` here — dropping that
         # reopen for ever. A silent false negative, the direction that loses data.
         if _row_is_frozen(status, outdated):
-            if stage_id is not None or slot is not None:
+            # ⛔ TRUTHINESS, not `is not None` (#13289 review round 8, P2). A stored
+            # EMPTY `pipelineStageId`/`pipelineSlot` is not a position on any axis
+            # that reads one: `apply_stage_fold` resolves the current stage with
+            # `if cur_id:` (`pipeline.py:490`) and never reads `pipelineSlot` at all.
+            # `is not None` therefore counted `''` as a stage position and took the
+            # `None` branch, dropping the reopen the fold DOES apply — the same
+            # false-negative this arm exists to remove, one field over. Measured:
+            # `status='completed'` + flag + `pipelineStageId=''`, GitHub open —
+            # `None`/`[0,0,0]` under `is not None`, `"closed"`/`[1,0,0]` (row moves to
+            # `in_progress/active`) under truthiness. `''` is reachable:
+            # `update_knowledge(id, pipelineStageId='')` is admitted and stored.
+            if stage_id or slot:
                 return None
             # ⛔ A POSITION-LESS legacy row is the same asymmetry in one fewer
             # dimension: the REOPEN fold can still be dispatched and applies, the
