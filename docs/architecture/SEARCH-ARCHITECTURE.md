@@ -34,6 +34,58 @@ speed matters but is **not** the top criterion. That ranking is **this document'
 owner ruling** (no artefact carries the sentence), and every ordering below follows it; §5 states it as Q1–Q5
 so a reader can disagree with the ranking explicitly rather than inherit it.
 
+**Decision (owner, 2026-11-17) — the embeddings of every label the search serves belong in Postgres, including the ones that carry no index today, and the search is to
+be aligned with that** (`#13220`). The owner's words: *"if indexing improves search for
+Object/Subject/Event of course we want that, and we just need it in Postgres and the search aligned with
+that and everything armed and working"* … *"we should likely also index source also in postgres"*. ⚠️ **Note the owner's own hedge — *"likely"* — and that this document records it as ANSWERED anyway:** no alternative was named, and the mechanism is identical to the labels decided without a hedge, so the word is read as pacing (*"we should probably do this too"*) rather than as doubt about whether. What stays open is not **whether** a `Source` gets a vector but **which text** one with no session narrative embeds — V2's remaining design choice, named in the `STORAGE-ARCHITECTURE.md` §14.3 V2 row this sentence cites next. A reader who takes *"likely"* as real doubt should reopen that choice, not this decision. **This
+answers the two questions that were still open in `STORAGE-ARCHITECTURE.md` §14.3:** **V2** — a `:Source`
+gets one — and **V3's remaining half** — `:Object`/`:Subject` get one, with `:Event` named
+beside them. ⚠️ **It is a PLACEMENT ruling, and placement is what makes it cheap:** the record's
+mechanism is an `embedding_vec` column plus a pgvector index on the table that owns the rows, the shape
+`public.point`/`public.source`/`public.event` already carry — **`#11901`'s *"not earned"* verdict answered
+the FalkorDB question** (four more HNSW structures, five total, on provisioned RAM with no eviction —
+`STORAGE-ARCHITECTURE.md` §12.1c) **and does not reach a pgvector index.** ⛔ **The same day's SECOND ruling
+reopens the KEEP half — for the GRAPH COPY only** (owner, 2026-11-17, `#11395` comment `6956793300`,
+`OVERRIDES:` recorded there): the `:Object`/`:Subject` embeddings
+may be removed from the graph and stop being written there **once the record holds and indexes them** —
+record first, graph removal second, in a later release, never the other way round. `:Event`/`:Source` were
+never named by the KEEP ruling, and were already retirable once the record serves them. **What it adds
+to this document is COVERAGE, not a new leg:** §3's mechanism, §6.1's filter guard and §6.2's
+text-index decision are unchanged, and the work it orders (the columns and the writer, the record-served
+dense leg, the arming) is not a question this document decides.
+
+⛔ **The read half is not a switch for `:Object`/`:Subject`, and the way it fails looks like a WIN.** `search_engine._STATUS_FILTERED_LABELS` is `("Point", "Object", "Subject")` (`search_engine.py:148`), so both graph branches drop a superseded / deprecated / archived / retracted entity out of the dense leg — and the record cannot yet express that: `record_vector._STATUS_COLUMN` has no entry for either label (`record_vector.py:337`, so `_status_predicates` emits NO clause for them), and the fold it would have to read (`public.object_current_status` / `subject_current_status`, `20261012000004_record_procedural.sql:56`) answers only `live` / `superseded`, collapsing `deprecated` / `archived` / `retracted` to `live`; `chk_object_props_no_derived` refuses a status column in the props tail. ⛔ **And the value is not reachable by filtering `op='restatus'`** — `classify_entity_mutation_op` labels a mutation by precedence (`supersededBy` > `name` > `status`), so `update_entity(obj, name=…, status='archived')` journals `op='rename'` CARRYING `state.status='archived'`; `cache_projection.py:3026` states the rule — *a consumer wanting every status transition must read `state["status"]` and must NOT filter on `op`* — after that exact filter answered LIVE for an archived node. **So adding those two labels to `record_vector.LABEL_SERVED` before that gap is closed returns exactly the rows `#689` exists to hide, and it reports as better recall.** The status fold comes first; `_status_predicates`'s own docstring is the standing rule (*the record leg must not be a loophole around `#689`*). ⛔ **And there are TWO record-side dependencies, not one — closing the vocabulary alone would not open the gate.** `#10193`: the record's own application role has **no SELECT on the procedural views**, so `public.object_current_status`/`subject_current_status` are unreadable at runtime and the cache restates the fold in Python instead (`cache_projection.DERIVED_FROM_RECORD`, `:1061`, fed by `read_record_view`, `:3674`) — and that restatement derives only *pointer present → `superseded`*, silent → `live`, i.e. **it inherits the same two-value blind spot**. `#11296`: neither the fold nor the restatement can represent `deprecated`/`archived`/`retracted`. So the gate opens only when BOTH hold: the views are readable by the app role, and whichever path the read takes can express four terminal states.
+
+**What that means per label — the gates are not the same, so *"every served label"* is not *"every label at
+once"*:**
+
+| label | the record leg answers it (`record_vector.LABEL_SERVED`) | terminal-status gate on the dense leg | what has to be true before the record can serve it |
+|---|---|---|---|
+| `Point`, operator | **yes** — the `point` table, with the operator identity predicate | **yes**, and expressible: `_STATUS_COLUMN['point']` reads `status` (+ the legacy `outdated` flag) | no *structural* blocker — the status gate is already expressible in SQL. What remains is the record's own **no-backfill shortfall** (`record_vector.ARMING_ENV`'s comment, `record_vector.py:160`: a record holds a vector only for content written *after* the move is deployed; `cutover_armed`, :410, is the switch that decides it), which is why this is a cutover SWITCH and not a default |
+| `Source`, `Document` | **yes** — the `source` table, split on `document_kind` | no — `Source` is not in `_STATUS_FILTERED_LABELS` | the vector has to ARRIVE: the column and the HNSW index already exist (`20261109000001_record_embedding_vector.sql`, `#11660`) |
+| `Event` | **yes** — the `event` table | no — `Event` is not in the list either | same as `Source`: column and index exist, the vector has to arrive |
+| `Object` | **no** | **yes, and NOT expressible** — no status column, and the fold answers only `live`/`superseded` | the status fold first (paragraph above), then the column and the label — `object` has **no embedding column on `main`** as of 2026-11-17 (`#13265`'s migration), which is the widest gap of any label here |
+| `Subject` | **no** | same as `Object` | same as `Object`, column included: **no embedding column on `main`** as of 2026-11-17 (`#13265`) |
+
+**⇒ The arming order follows from the table: `Point`/operator → `Source`/`Event` → `Object`/`Subject`** — and it is a **READINESS** order, not a rollout order, because the switch cannot do what the word suggests: `cutover_armed()` reads ONE process-wide flag (`record_vector.ARMING_ENV`) and `searcher()` returns a callable that takes `entity_type` per call, so the flip turns on **every** label in `LABEL_SERVED` at once. There is no per-label arming today; the only per-label control is editing `LABEL_SERVED`, which is a deploy and not a flag. The consequence is the one that matters for sequencing: **the weakest served label gates the flip** — `Document` (`document_kind IS NOT NULL`) being unready blocks arming for `Point`, so the order below is what must be true per label BEFORE the single flip, never a way to arm one label while another stays on the graph, the
+last two gated on the status fold — not the order the ruling names the labels in (`Object`/`Subject`
+first), which would spend the longest stretch of the work on the two with the most still blocking them,
+and the shortest on the one that is already able to answer.
+
+**⇒ And *"armed and working"* is four conditions per label, in this order — it is not one switch:**
+**(1)** the vector is WRITTEN into the row (a writer that fills the payload column), **(2)** the index is
+PRESENT on that column, **(3)** the label is SERVED by the read (`LABEL_SERVED`, with its status predicate if
+the label is in `_STATUS_FILTERED_LABELS`), and **(4)** the cutover SWITCH is on (`cutover_armed`, default
+OFF — and off for a measured reason: the record has no backfill, so switching early drops pre-existing
+material out of the dense pool — and it is the one condition this document cannot schedule: arming is
+**downstream of `#11691`'s arming gate and `#13082` P0-b's RAM cap**, not parallel to them, so "the code is
+ready" is not "we may flip it"). **A label missing any one of the four is not armed, however the other three read** — four green checks can
+each be about a different label, which is the shape that produces a confident "done".
+
+**⇒ And *"working"* is not condition (4) reaching ON — it is the leg's behaviour AFTER the switch, per label, and this document owes it a definition because the ruling names it separately:** the read answers as `pgvector` rather than falling through (`MECHANISM_PGVECTOR`, recorded where the record leg answers; `scan_fallback` **after** arming is the signature of *armed and not working* — the one observable that survives every other check being green). **A `VectorShortfall` that does not raise is necessary and never sufficient** — the assertion is snapshot-blind to a record that is merely behind (§9), so it cannot certify this on its own. And **M1 stays the SHIP gate it is defined as**, not a monitor: it is re-run whenever the writer, the index or a status predicate changes, and what is watched continuously is the trace (mechanism per label), because a recall number nobody re-measures is a memory, not a measurement. **"Working" is a standing condition rather than a ship gate** — *"and working"* is present tense — so a label can be armed on day one and stop working on day twenty, and the trace is the only place that shows it. This is the distinction the four conditions draw one line up: **armed is a state you can check once; working is a state you have to keep checking.**
+
+**⛔ And *"everything"* needs a ruler, because the code carries two label lists that disagree.** The set the search can be **asked** for is the seven lowercase types gated in `security.VALID_ENTITY_TYPES` and again in `sdk.py`'s `entity_type` check — `point`, `event`, `subject`, `document`, `object`, `operator`, `source`. The pack registry declares a **different** seven, capitalized, in `pack_registry.VALID_ENTITY_TYPES` — `Subject`, `Object`, `Action`, `Point`, `Event`, `Document`, `Source`. They differ in both directions: `operator` is searchable (and record-served) yet absent from the registry list, while **`Action` is in the registry list and is not searchable at all** — it appears **zero** times in `search_engine.py` and has no `LABEL_SERVED` key. So the per-label table above is total over the **search** set (five served + the two gated), and *"everything armed"* means that set: a registry-typed entity the search cannot be asked for is not an unarmed label, it is a label outside this question. Naming the ruler matters because the two lists will drift — a launch that adds an eighth search type without touching either list is the shape that makes *"everything"* unfalsifiable.
+
 **Sibling documents:** `STORAGE-ARCHITECTURE.md` owns authority per layer (§2.0/§3) and the cost model
 (§17.4); `CONSUMPTION-MODEL.md` owns metering; **this document owns where each search leg executes, and
 what the graph engine holds.**
@@ -159,7 +211,7 @@ shows a RAM-resident index returning better answers at this scale.
 | job | home | change |
 |---|---|---|
 | authoritative state (claims, entities, connections, operators, text, embeddings, turns, narrative) | **Postgres** | none — already the record |
-| **vector search** — ANN over embeddings | **Postgres** (`pgvector` + HNSW) | **MOVES** — was `db.idx.vector.queryNodes` (2 executing sites) |
+| **vector search** — ANN over embeddings, on EVERY served label (`Point`, `Event`, `Object`, `Source`, `Subject`, and the `Document` rows that are `:Source`'s other kind — 2026-11-17, above) | **Postgres** (`pgvector` + HNSW) | **MOVES** — was `db.idx.vector.queryNodes` (2 executing sites), and was one label's index |
 | **text search** — over 7 fields / 5 labels | **FalkorDB** (`db.idx.fulltext` — RediSearch's TF-IDF scorer, documented as BM25-style behaviour in `tortoise/sparse.py`) | **stays** — see §6.2; the move is deferred behind M3 |
 | **multi-hop traversal** (2-hop epistemic minimum: claim → operator → claim) | **FalkorDB** (Cypher) | none |
 | **writes, projections, backup/restore** | **FalkorDB** (Cypher) | none |
@@ -179,11 +231,12 @@ behind them. Everything else in the search path is unchanged.
 
 **What the move costs, stated so it is not discovered late:**
 
-- `public.point/source/event.embedding` is **`jsonb`** and **stays `jsonb`**, and **`pgvector` appears in 1 of 86
-  migrations** (`20261109000001_record_embedding_vector.sql`, `#11642`; the denominator is 86 at this head — `#11827`'s
+- `public.point/source/event.embedding` (and, since #13220, `public.object/subject.embedding`) is **`jsonb`** and **stays `jsonb`**, and **`pgvector` appears in 2 of 87
+  migrations** (`20261109000001_record_embedding_vector.sql`, `#11642`, and `20261117000001_record_object_subject_embedding.sql`,
+  `#13220` — the `object`/`subject` fingerprint columns, GENERATED vectors and HNSW indexes, owner ruling 2026-11-17; the denominator is 87 at this head — `#11827`'s
   `20261110000001_record_point_retire_as_of_11827.sql` added no vector, and neither do the 83rd, #12764's
   `20261114000001_per_org_postgres_bytes.sql`, nor the 84th and 85th, #12894's
-  `20261116000001_record_cursor_allocator.sql` and `20261116000002_record_cursor_meter_grant.sql`) — so this WAS a full index build and a
+  `20261116000001_record_cursor_allocator.sql` and `20261116000002_record_cursor_meter_grant.sql`, the 86th IS one (#13220's), and the 87th, #13277's `20261117000002_postgres_residency_gauge.sql`, adds none) — so this WAS a full index build and a
   backfill, not a query edit. ⛔ **UPDATE AT THIS HEAD (`#11642`, measured on pgvector 0.8.7 / Postgres 16.15):**
   the payload column is deliberately NOT converted — a `jsonb → vector(384)` type change would rewrite the
   record's write and read seams and could not represent the caller-supplied embeddings of other widths that
@@ -571,11 +624,17 @@ prints it.
 
 | # | measurement | decides |
 |---|---|---|
-| **M1** | vector move: recall@10 vs exact ground truth, p95, **and the shortfall rate at 1 % / 10 % / 50 % selectivity** | whether the move ships — a recall-only test is not sufficient (§6.1) |
+| **M1** | vector move: recall@10 vs exact ground truth, p95, **and the shortfall rate at 1 % / 10 % / 50 % selectivity** — **measured PER LABEL over the served set, because the labels do not start from the same place:** `Point`/`Operator` were already ANN-served (the graph's one HNSW index), `Event`/`Source`/`Document` were unindexed graph-side and move to `pgvector` when the record serves them, and `Object`/`Subject` stay on `scan_fallback` until the status-fold gap closes (§ above). | whether the move ships — a recall-only test is not sufficient (§6.1), and neither is a `Point`-only one: grading the move on the label that was already indexed says nothing about the labels whose mechanism is the point of the move. The line-set that makes it decisive contains **known-terminal** entities: without them, a leg that returns rows it should hide looks identical to one that hides correctly (`#689`) |
 | **M2** | **retrieval quality under a windowed vs complete graph**, on a fixed query set | the gate that ARMS §7 (post-measurement) — the literature has no answer; the result is §9.1 |
 | **M3** | text ranking: a BM25-capable Postgres option vs the current `db.idx.fulltext` scores, **score distributions** + the `#8933` identifier fixture | whether the text index ever moves (§6.2) |
 | **M4** | rebuild peak memory and latency per tenant at the real window size, **and whether a KEPT `db.idx.fulltext` or range index blocks a restore the way the removed vector index did (§7)** | the 6× headroom (§7), the #1 risk — and whether §7's window is a feasibility question after all |
 | **M5** | the **miss rate** per tenant (a DIFFERENT M5 from `STORAGE-ARCHITECTURE.md` §15's, which asks where the vector index lives and was answered 2026-11-07) | the compute/IOPS/egress tier |
+
+⛔ **What M1 does NOT cover, and must not be read as covering: model identity.** Neither leg compares `embedding_model`/`embedding_revision` — the dimension is the only gate on either side (`record_embedding_vector` returns NULL for anything that is not 384 long, the same semantics as the graph's `required_embedding_dim`, `#4280`), and no record table carries a model column (`grep embedding_model supabase/migrations/*.sql` → nothing). So a corpus holding vectors from two models is ranked **across two spaces** after the move exactly as it is today, with a plausible-looking ranked list either way. The move is neutral on this — it neither creates nor fixes it — but "aligned" does not include it, and M1's line-set needs at least one stale-model row or the measurement cannot see the difference at all.
+
+⛔ **Nor does the shortfall assertion measure lag — it is snapshot-blind to it in the ordinary case.** The assertion counts what the filter selects **on the same connection and in the same transaction** as the read it checks (`record_vector.py:677-686`: `count(*)` on the same table, same cursor) — but that transaction pins no snapshot here: this read sets no isolation (`record_serve.open_record` and the `_default_connect` beneath it pin only a transaction-local `statement_timeout`), so the pair sits at the connection default — READ COMMITTED unless the DSN says otherwise — and each statement then takes a fresh snapshot, so a projection committing between the two makes the count exceed the rows and raise a spurious `VectorShortfall`. (The `#12894` guard, `record_projection.py:7669-7670`, binds the ALLOCATION path, not this read.) That is the ONE way this assertion can see lag, and it sees it as a failure rather than as lag. So a record that has *not yet applied* the journal reports `available == len(rows)` and raises nothing: the shortfall it exists to catch (§6.1) and a record that is merely behind are the same reading. Atomicity is **caller-dependent, not structural** — the projection seam spans the journal append only if the caller injects an open connection (`record_writer.py:1744`), and `last_applied_seq` (mechanism 2 of `STORAGE-ARCHITECTURE.md` §3's divergence list) exists in `consistency.py` and is not read by this leg. So *aligned* has a **temporal axis** that no instrument here measures yet, and the correct action is to measure whether a caller leaves the pair non-atomic before adding a watermark read — not to assume it does, and not to assume it cannot.
+
+⛔ **And do not "improve" the fallback's telemetry — its ambiguity is a decision (`#4999`).** When the record leg raises, the read falls through to the graph branches and is recorded as `scan_fallback` — **the same value** a never-served label carries. A fifth mechanism distinguishing "record leg failed" from "label was never served" looks like an obvious fix and is not: the alert surface's question is *"an index was expected and was not used"*, and splitting the value splits that question into two series, one of which fires on `:Object`/`:Subject` by design. The fallback's cost changes with the **sequencing**, not with its label: once the record serves the leg (**step 1**) it is a brute-force scan over the retained `embedding` property — latency, not correctness — and if that property goes away with the graph copy (**step 2**, a later release) the same exception returns an **empty answer with `reason=no_embeddings`, not an error**: the graph branch returns `[]` without raising (`search_engine.py:4335-4337`, `:4348-4360`), so it degrades silently unless the trace is actually read — the same "reports as a WIN" class this document exists to catch.
 
 ### 9.1 M2 — measured, and it does not arm the window
 

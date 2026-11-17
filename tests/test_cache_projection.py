@@ -311,12 +311,45 @@ def test_no_derived_property_has_a_record_column():
     record row cannot carry one. A future schema that adds one reds THIS test
     and `test_record_schema_placement.py` together, rather than silently
     promoting a recomputed value to authority.
+
+    ⛔ ONE DECLARED EXCEPTION, AND IT IS DECLARED IN CODE RATHER THAN EXEMPTED
+    HERE (#13220). `record_projection.DERIVED_COLUMNS` names the DERIVED values
+    that DO have a column and still may not be carried by a payload —
+    `object.embedding` / `subject.embedding`, which the owner's 2026-11-17 ruling
+    requires INDEXED IN POSTGRES (impossible without storing them) and which
+    only the record's own derivation may write. Subtracting that declaration —
+    rather than relaxing the loop — keeps this test's property intact: a DERIVED
+    property with a column that is NOT declared there still reds it, and the
+    next `DERIVED_COLUMNS` entry has to be argued for in the module that owns the
+    payload refusal.
     """
+    declared = {(table, column)
+                for table, columns in rp.DERIVED_COLUMNS.items()
+                for column in columns}
     stray = []
     for table, prop in _rows("D"):
-        if rp.snake(prop) in TABLE_COLUMNS.get(table, ()):
+        column = rp.snake(prop)
+        if column in TABLE_COLUMNS.get(table, ()) and (table, column) not in declared:
             stray.append((table, prop))
     assert not stray, f"a DERIVED property has a record column: {stray}"
+
+
+def test_every_declared_derived_column_really_is_a_derived_property():
+    """The exception list cannot rot into an exemption (#13220).
+
+    Both directions, like the type-contract pin's named set: a `DERIVED_COLUMNS`
+    entry for a property §17.5 calls PRIMARY is a lane claiming a refusal it does
+    not need, and an entry for a column no migration declares is dead text.
+    """
+    derived = {(table, rp.snake(prop)) for table, prop in _rows("D")}
+    for table, columns in rp.DERIVED_COLUMNS.items():
+        for column in columns:
+            assert (table, column) in derived, (
+                f"record_projection.DERIVED_COLUMNS names {table}.{column}, "
+                "which §17.5 does not classify DERIVED/VOLATILE")
+            assert column in TABLE_COLUMNS.get(table, ()), (
+                f"record_projection.DERIVED_COLUMNS names {table}.{column}, "
+                "which no migration declares")
 
 
 def test_a_derived_name_in_the_props_tail_is_refused():
@@ -336,24 +369,30 @@ def test_a_derived_name_in_the_props_tail_is_refused():
 
 
 def test_a_derived_column_on_a_record_row_projects_nothing():
-    """A FORWARD GUARD — today no DERIVED row has a column, so it cannot fire.
+    """A DERIVED column must never be PROJECTED as a PRIMARY claim.
 
-    `test_no_derived_property_has_a_record_column` asserts the precondition:
-    `#7968`'s schema pin makes a DERIVED/VOLATILE name with a record column
-    impossible, so the column door is shut by construction. The `props`-tail
-    door is the reachable one and is exercised (non-vacuously) by
-    `test_a_derived_name_in_the_props_tail_is_refused`. This test is kept as the
-    guard for the day a future schema gives a DERIVED name a column: it asserts
-    that precondition explicitly, so it can never pass by the loop body simply
-    never running.
+    ⛔ THIS GUARD IS LIVE SINCE #13220. It was written as a forward guard ("today
+    no DERIVED row has a column, so it cannot fire") and that day arrived:
+    `object.embedding`/`subject.embedding` are declared columns
+    (`record_projection.DERIVED_COLUMNS`) because the owner's 2026-11-17 ruling
+    requires them indexed in Postgres. What must stay true is the property this
+    test owns — the CACHE projection still projects neither the column nor the
+    graph spelling, i.e. a recomputed value does not become a node property with
+    a PRIMARY claim because the record happens to store it.
     """
     with_column = [
         (table, prop) for table, prop in _rows("D")
         if rp.snake(prop) in TABLE_COLUMNS.get(table, ())
     ]
-    assert with_column == [], (
-        "a DERIVED property now HAS a record column — the column door is live "
-        f"and this test's body must decide it: {with_column}"
+    declared = {(table, column)
+                for table, columns in rp.DERIVED_COLUMNS.items()
+                for column in columns}
+    undeclared = [(table, prop) for table, prop in with_column
+                  if (table, rp.snake(prop)) not in declared]
+    assert not undeclared, (
+        "a DERIVED property now HAS a record column that "
+        "`record_projection.DERIVED_COLUMNS` does not declare — the column door "
+        f"is live and this test's body must decide it: {undeclared}"
     )
     leaked = []
     for table, prop in _rows("D"):
