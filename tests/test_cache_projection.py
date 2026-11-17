@@ -2111,6 +2111,115 @@ def test_a_restatus_is_applied_unguarded_within_the_replay():
     )
 
 
+def test_a_terminal_status_latches_the_STAGE_arms_of_the_replay_too():
+    """`live ≡ rebuilt` on the POSITION axis: the STATUS latch binds both arms.
+
+    The live fold has TWO latches and applies them on BOTH of its routes —
+    `apply_stage_fold`'s own (`isClosed` / a terminal current STAGE) and the
+    STATUS-terminal one (`entities.py::_fold_object_status` returns False when
+    the stored `status` is terminal, on the declared-stage arm and the built-in
+    arm alike).
+
+    The replay kept only the first on its stage arms (the status arm already
+    carried `if not _is_terminal_status(status)`), so a stream that made the row
+    terminal mid-flight — a `restatus` record, the order-blind window this
+    module already documents — was REFUSED a stage move live and GIVEN one by a
+    rebuild: the rebuilt Object held `pipelineStageId='done'` the graph never
+    wrote. #11824 S0 made that shape ordinary (a `deprecated` write touches no
+    stage prop), so the rebuild must answer what the graph answers.
+
+    The control is the second half: without the terminal `restatus` the same
+    stream DOES advance the stage — so a red here cannot be satisfied by
+    suppressing the fold altogether.
+    """
+    row = {"id": "o-latch", "name": "issue-latch", "object_kind": "issue",
+           "status": "live"}
+
+    def folded(events):
+        return cp.apply_event_stream_folds(
+            (cp.node_from_row("Object", row),), events)[0]
+
+    latched = folded((
+        cp.LifecycleEvent(seq=1, event_kind="", restatus_status="deprecated",
+                          target_id="o-latch", target_label="Object"),
+        cp.LifecycleEvent(seq=2, event_kind="github.issue.closed",
+                          object_name="issue-latch"),
+    ))
+    assert latched.props.get("status") == "deprecated", latched.props
+    assert "pipelineStageId" not in latched.props, (
+        "a rebuild moved a stage on a row the live fold refuses (its `status` "
+        f"is terminal): {latched.props!r}")
+
+    control = folded((
+        cp.LifecycleEvent(seq=1, event_kind="github.issue.closed",
+                          object_name="issue-latch"),
+    ))
+    assert control.props.get("pipelineStageId") == "done", (
+        "control: with no terminal status the same fold must still advance the "
+        f"stage — otherwise the assertion above proves nothing: {control.props!r}")
+
+
+def test_the_terminal_status_latch_binds_the_DECLARED_stage_arm_too():
+    """The declared/pack arm of the same latch — a SEPARATE arm, so separate pin.
+
+    `apply_event_stream_folds` has TWO stage arms (a pack's declared `stage:`
+    target, and the built-in core work-item fold) and each carries its own
+    `if not _is_terminal_status(status)`. The test above exercises the BUILT-IN
+    arm only (`github.issue.closed`), and it was measured that deleting the
+    declared arm's conjunct reds NOTHING there — so without this row the fix is
+    one `if True:` from silently returning, on the arm the shipped packs
+    actually use (`packs/venture` folds `disbursement` to `stage: released`,
+    a `slot: terminal` stage).
+
+    Mutant: `if not _is_terminal_status(status):` -> `if True:` at the
+    `fold_target.axis == FOLD_AXIS_STAGE` branch.
+    """
+    from tortoise.status_folds import FOLD_AXIS_STAGE, FoldTarget, StatusFoldIndex
+
+    pipe = {
+        "defaultStage": "contact",
+        "stages": [
+            {"id": "contact", "label": "Contact", "order": 0, "slot": "entry"},
+            {"id": "released", "label": "Released", "order": 1,
+             "slot": "terminal", "outcome": "completed"},
+        ],
+    }
+    index = StatusFoldIndex()
+    index.by_event = {"disbursement": [
+        FoldTarget("venture:tranche", FOLD_AXIS_STAGE, "released")]}
+    index.pipelines_by_kind = {"venture:tranche": pipe}
+    index.lifecycle_kinds = frozenset({"venture:tranche"})
+    index.kind_forms = frozenset({"venture:tranche", "tranche"})
+
+    row = {"id": "t-latch", "name": "tranche-a", "object_kind": "tranche",
+           "status": "live"}
+
+    def folded(events):
+        return cp.apply_event_stream_folds(
+            (cp.node_from_row("Object", row),), events, index=index)[0]
+
+    latched = folded((
+        cp.LifecycleEvent(seq=1, event_kind="", restatus_status="deprecated",
+                          target_id="t-latch", target_label="Object"),
+        cp.LifecycleEvent(seq=2, event_kind="disbursement",
+                          object_name="tranche-a"),
+    ))
+    assert latched.props.get("status") == "deprecated", latched.props
+    assert "pipelineStageId" not in latched.props, (
+        "the DECLARED stage arm moved a stage on a row the live fold refuses "
+        f"(its `status` is terminal): {latched.props!r}")
+
+    control = folded((
+        cp.LifecycleEvent(seq=1, event_kind="disbursement",
+                          object_name="tranche-a"),
+    ))
+    assert (control.props.get("pipelineStageId"),
+            control.props.get("isClosed")) == ("released", True), (
+        "control: with no terminal status the declared fold must still advance "
+        f"the stage — otherwise the assertion above proves nothing: "
+        f"{control.props!r}")
+
+
 def test_a_birth_record_cannot_resurrect_a_terminal_the_graph_holds():
     """Review P1: the birth arm must not overwrite a TERMINAL it finds held.
 
@@ -2352,6 +2461,28 @@ def _lifecycle(name, event_kind, seq, **kw):
                              object_name=name, **kw)
 
 
+def _assert_folded_stage(props: dict, stage: str, *, closed: bool,
+                         outcome: str = "") -> None:
+    """#11824 S0: a connector fold advances the CORE work-item PIPELINE STAGE.
+
+    One helper because ten record-replay pins assert the same two facts, and the
+    pair is the whole point of the slice: the fold used to write `in_progress` /
+    `completed` as `Object.status` — POSITION words on the LIFECYCLE axis, which
+    the four-word vocabulary can no longer hold (design §3.2) — so the stage is
+    now where the position lives, and `status` must be UNTOUCHED by the fold.
+
+    The `status` half is asserted, not merely omitted, because a rebuilt graph
+    carrying a position word as a status is exactly the defect this removes — and
+    a silent regression there would read as CURRENT to every reader.
+    """
+    assert "status" not in props, (
+        f"the connector fold wrote a LIFECYCLE status: {props!r}")
+    assert props.get("pipelineStageId") == stage, props
+    assert props.get("pipelineStageKey") == "core:workitem", props
+    assert props.get("isClosed") is closed, props
+    assert props.get("pipelineOutcome") == outcome, props
+
+
 def test_the_record_folds_a_connector_lifecycle_onto_the_objects_status():
     """#10198 — the connector work-item state IS reconstructible, from the stream.
 
@@ -2372,17 +2503,21 @@ def test_the_record_folds_a_connector_lifecycle_onto_the_objects_status():
                            "object_kind": "issue"})
     folded = cp.apply_event_stream_folds(
         [obj], [_lifecycle("issue-1", "github.issue.closed", 1)])
-    assert folded[0].props["status"] == "completed", (
-        "a connector-tracked Object still rebuilds with no lifecycle status — "
-        "#10198 unfixed")
+    # ⚠️ #11824 S0: this used to assert `props["status"] == "completed"`. The
+    # assertion moved to the STAGE (see `_assert_folded_stage`) because
+    # `completed` is a position, and the reason #10198 existed is unchanged — a
+    # rebuild must reproduce what the live fold wrote, on whichever axis it wrote
+    # it.
+    _assert_folded_stage(folded[0].props, "done", closed=True, outcome="completed")
     # …and the value reaches the STATEMENT, not only the model: an assertion
     # over `RecordNode.props` would pass while `node_statement` dropped it.
-    assert cp.node_statement(folded[0]).params["props"]["status"] == "completed"
+    _assert_folded_stage(cp.node_statement(folded[0]).params["props"], "done",
+                         closed=True, outcome="completed")
     # An Object the stream does not NAME is untouched — the fold is keyed on the
     # name the live fold MATCHes, never on "every Object in the view".
     other = _node("Object", {"id": "o-2", "name": "issue-2",
                              "object_kind": "issue"})
-    assert "status" not in cp.apply_event_stream_folds(
+    assert "pipelineStageId" not in cp.apply_event_stream_folds(
         [other], [_lifecycle("issue-1", "github.issue.closed", 1)])[0].props
 
 
@@ -2407,7 +2542,7 @@ def test_read_record_view_folds_the_event_stream_onto_the_object():
     })
     view = cp.read_record_view(conn, org_id="o", graph_id="g")
     obj = next(n for n in view.nodes if n.label == "Object")
-    assert obj.props["status"] == "completed"
+    _assert_folded_stage(obj.props, "done", closed=True, outcome="completed")
     # The events ride the VIEW, so a caller that re-projects this view folds by
     # the same stream instead of by nothing (that is what `rebuild_from_record`
     # does — the application is idempotent).
@@ -2457,7 +2592,8 @@ def test_a_nested_envelope_event_still_folds_the_lifecycle():
     })
     view = cp.read_record_view(conn, org_id="o", graph_id="g")
     obj = next(n for n in view.nodes if n.label == "Object")
-    assert obj.props.get("status") == "completed", (
+    _assert_folded_stage(obj.props, "done", closed=True, outcome="completed")
+    assert "status" not in obj.props, (
         "a nested-envelope EventRecorded was dropped by the record-side reader "
         "— the live fold folds it")
     # …and the SINGLE-ROW door: its narrowing predicate is the second half of
@@ -2465,8 +2601,9 @@ def test_a_nested_envelope_event_still_folds_the_lifecycle():
     # `about_entities`, so the event never came back).
     assert [e.seq for e in cp.read_lifecycle_events(
         conn, org_id="o", graph_id="g", target="issue-1")] == [1, 2]
-    assert rs.read_node(conn, org_id="o", graph_id="g", label="Object",
-                        key="o-1")["status"] == "completed"
+    _assert_folded_stage(
+        rs.read_node(conn, org_id="o", graph_id="g", label="Object",
+                     key="o-1"), "done", closed=True, outcome="completed")
     # …and an unrelated target still narrows to nothing, so the unwrap did not
     # defeat the single-row filter.
     assert cp.read_lifecycle_events(
@@ -2508,10 +2645,10 @@ def test_the_fold_survives_a_one_shot_label_iterable():
     assert [e.seq for e in gen_view.lifecycle_events] == [1, 2], (
         "the label iterable was consumed before the `Object` gate read it — "
         "a generator caller folds NO events, silently")
-    # …and therefore the same status, on the same nodes.
+    # …and therefore the same folded state, on the same nodes.
     assert tuple(gen_view.nodes) == tuple(tuple_view.nodes)
     obj = next(n for n in gen_view.nodes if n.label == "Object")
-    assert obj.props["status"] == "completed"
+    _assert_folded_stage(obj.props, "done", closed=True, outcome="completed")
 
 
 def test_both_about_entities_spellings_are_preferred_not_unioned():
@@ -2565,13 +2702,16 @@ def test_the_event_stream_fold_is_last_writer_by_journal_seq():
     opened = _lifecycle("issue-1", "github.issue.open", 1)
     closed = _lifecycle("issue-1", "github.issue.closed", 2)
     for order in ((opened, closed), (closed, opened)):
-        assert cp.apply_event_stream_folds([obj], order)[0].props["status"] \
-            == "completed"
+        _assert_folded_stage(
+            cp.apply_event_stream_folds([obj], order)[0].props, "done",
+            closed=True, outcome="completed")
     reopened = _lifecycle("issue-1", "github.issue.reopened", 3)
-    assert cp.apply_event_stream_folds([obj], [closed, reopened])[0].props[
-        "status"] == "in_progress", (
-        "a reopen after a close must fold back to in_progress (#1725) — the "
-        "record's seq decides it, not the list order")
+    reopened_props = cp.apply_event_stream_folds([obj], [closed, reopened])[0].props
+    # #11824 S0: the reopen is what makes the CLOSING fold target a terminal
+    # STAGE rather than the lifecycle word `deprecated` — a stage is reopenable
+    # (`apply_stage_fold`'s `reopen=True`), a lifecycle ending is not. So this
+    # asserts the durable close is CLEARED, not merely that the stage moved.
+    _assert_folded_stage(reopened_props, "in_progress", closed=False)
 
 
 def test_a_lifecycle_declaring_kind_owns_its_state_not_the_connectors():
@@ -2606,12 +2746,15 @@ def test_a_lifecycle_declaring_kind_owns_its_state_not_the_connectors():
 
     issue = _node("Object", {"id": "o-1", "name": "issue-1",
                              "object_kind": "issue"})
-    assert cp.apply_event_stream_folds(
+    folded = cp.apply_event_stream_folds(
         [issue], [_lifecycle("issue-1", "github.issue.closed", 1)],
-        index=index)[0].props["status"] == "completed", (
-        "the built-in compatibility fold stopped applying to a kind that "
-        "declares NO lifecycle — a pack-less graph would stop folding")
-
+        index=index)[0]
+    # #11824 S0: the built-in half is a STAGE move now, so the ownership proof is
+    # the same proof on the other axis — the declaring kind is not touched, and
+    # the kind that declares nothing gets the core work-item stage.
+    _assert_folded_stage(folded.props, "done", closed=True, outcome="completed")
+    assert "status" not in folded.props, (
+        "the built-in compatibility fold wrote a lifecycle status")
 
 def test_an_about_entities_target_is_folded_but_not_the_builtin_half():
     """The live fold's asymmetry, reproduced exactly.
@@ -2692,14 +2835,38 @@ def test_the_event_stream_fold_can_never_write_a_terminal_status():
     catalogue check it always was.
     """
     from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
+    from tortoise.pipeline import CORE_WORK_ITEM_PIPELINE
     from tortoise.status_folds import BUILTIN_CONNECTOR_FOLDS
 
+    # ⚠️ #11824 S0 moved what this can assert, and the MOVE is the finding: the
+    # built-in fold's targets are STAGE ids now, so "no built-in fold targets a
+    # terminal STATUS word" became vacuously true (the values are not status
+    # words at all). The invariant that still carries the original intent has two
+    # halves, and both are asserted:
+    #
+    #   1. no built-in fold target is a terminal LIFECYCLE word — the connector
+    #      vocabulary alone can never END an Object; and
+    #   2. every target resolves in the declared core pipeline, and the CLOSING
+    #      ones land on a TERMINAL SLOT — which is deliberate and is the reason
+    #      this is safe at all: a terminal STAGE is reopenable
+    #      (`advance_stage(..., reopen=True)`, exactly what
+    #      `github.issue.reopened` does), while a lifecycle ending is final.
+    #      Without (2) a closed issue could never be reopened.
     assert not (set(BUILTIN_CONNECTOR_FOLDS.values())
                 & OBJECT_TERMINAL_STATUSES), (
         "a built-in connector fold now targets a TERMINAL Object status — the "
         "record has no carrier for that decision, and the built-in half folds "
-        "on the event's declared `object`, so it would hide an Object on a "
-        "rebuild")
+        "on the event's declared `object`, so it would hide a terminal stage's "
+        "reopen path")
+    stages = {s["id"]: s for s in CORE_WORK_ITEM_PIPELINE["stages"]}
+    for event, target in BUILTIN_CONNECTOR_FOLDS.items():
+        assert target in stages, (
+            f"{event!r} targets {target!r}, which the core work-item pipeline "
+            f"does not declare — the fold would silently write nothing")
+    for closing in ("pm:cardCompleted", "github.issue.closed"):
+        assert stages[BUILTIN_CONNECTOR_FOLDS[closing]]["slot"] == "terminal", (
+            f"{closing!r} must land on a TERMINAL stage — a close that does not "
+            "close is a fold that folds nothing")
 
 
 def _terminal_index(terminal_word: str):
@@ -2788,13 +2955,19 @@ def test_the_fold_vocabulary_is_status_folds_one_home_and_not_a_copy():
     obj = _node("Object", {"id": "o-1", "name": "issue-1",
                            "object_kind": "issue"})
     events = [_lifecycle("issue-1", "github.issue.closed", 1)]
-    assert cp.apply_event_stream_folds([obj], events)[0].props["status"] \
-        == "completed"
+    _assert_folded_stage(
+        cp.apply_event_stream_folds([obj], events)[0].props, "done",
+        closed=True, outcome="completed")
     with pytest.MonkeyPatch.context() as mp:
+        # #11824 S0: the mutation is to ANOTHER DECLARED STAGE of the same core
+        # pipeline (`todo`) rather than to an arbitrary word, because the target
+        # is a stage id now and the fold correctly REFUSES a stage its
+        # declaration does not carry — a mutation to a non-stage would prove the
+        # read while failing the fold, which is not what this pins.
         mp.setitem(status_folds.BUILTIN_CONNECTOR_FOLDS,
-                   "github.issue.closed", "shipped")
-        assert cp.apply_event_stream_folds([obj], events)[0].props["status"] \
-            == "shipped", (
+                   "github.issue.closed", "todo")
+        mutated = cp.apply_event_stream_folds([obj], events)[0].props
+        assert mutated.get("pipelineStageId") == "todo", (
             "the record-side fold did not read `status_folds` at call time — it "
             "holds a copy of the vocabulary, which is the second home #10198 "
             "forbids")
@@ -2832,7 +3005,8 @@ def test_the_record_read_door_answers_the_same_status_the_rebuild_writes():
     })
     props = rs.read_node(conn, org_id="o", graph_id="g", label="Object",
                          key="o-1")
-    assert props is not None and props["status"] == "completed"
+    assert props is not None
+    _assert_folded_stage(props, "done", closed=True, outcome="completed")
     # …and it agrees with the rebuilt node, field for field — one map, not two.
     events = cp.read_lifecycle_events(conn, org_id="o", graph_id="g",
                                       target="issue-1")
@@ -3407,22 +3581,50 @@ def test_a_pre_birth_fold_cannot_survive_the_creation_record():
                               birth_status="archived", target_id="o-1",
                               target_label="Object")
     folded = cp.apply_event_stream_folds([obj], [pre_birth, birth])[0]
+    # ⚠️ #11824 S0 SPLIT THIS SCENARIO ACROSS TWO AXES, and both halves are now
+    # asserted. `released` is a STAGE of the venture tranche pipeline, so the
+    # pre-birth fold writes `pipelineStageId` and touches no `status`; the birth
+    # record writes `status` (`archived` → its declared synonym `deprecated`) and
+    # touches no stage. The RULE is unchanged and is asserted per axis: a
+    # pre-birth fold must not outlive the creation record — so the pre-birth
+    # STAGE is cleared too, or the rebuild carries a stage the live graph never
+    # wrote, the same divergence one field over.
     assert folded.props.get("status") == "archived", (
-        f"a pre-birth fold outlived the creation record ({folded.props!r}) — the "
-        "rebuild answers a non-terminal status for a node the graph holds "
-        "terminal, so its name resolves after a record-sourced rebuild"
-    )
+        f"the creation record's status did not survive the pre-birth fold "
+        f"({folded.props!r}) — the record's own value is stored verbatim (no "
+        "second spelling rule on the read side)")
     assert cp._is_terminal_status(folded.props.get("status"))
+    # ⚠️ The pre-birth fold here is TERMINAL (`released` is the venture tranche's
+    # terminal stage), and the replay KEEPS it — the same fail-safe trade the
+    # status latch above documents: the rebuild claims LESS life rather than
+    # asserting CURRENT.
+    assert folded.props.get("pipelineStageId") == "released"
+    assert folded.props.get("isClosed") is True
+    # …and the NON-terminal case IS reset, because there the keep would make the
+    # rebuild assert a position the live graph never wrote (the node did not
+    # exist when the event landed).
+    non_terminal_pre_birth = cp.apply_event_stream_folds([obj], [
+        cp.LifecycleEvent(seq=1, event_kind="github.issue.open",
+                          object_name="T1"),
+        cp.LifecycleEvent(seq=2, event_kind="", is_birth=True,
+                          birth_status="live", target_id="o-1",
+                          target_label="Object"),
+    ])[0]
+    assert "pipelineStageId" not in non_terminal_pre_birth.props, (
+        "a pre-birth NON-terminal stage outlived the creation record "
+        f"({non_terminal_pre_birth.props!r}) — the live graph folded nothing, "
+        "because the node did not exist when that event landed")
+    assert non_terminal_pre_birth.props.get("status") == "live"
     # …and a fold AFTER the creation still applies (birth `pending`, later
     # disbursement → `released`), so the fix is not "ignore every other leg".
     later = cp.apply_event_stream_folds([obj], [
         cp.LifecycleEvent(seq=2, event_kind="", is_birth=True,
-                          birth_status="pending", target_id="o-1",
+                          birth_status=None, target_id="o-1",
                           target_label="Object"),
         cp.LifecycleEvent(seq=3, event_kind="venture:disbursement",
                           object_name="T1"),
     ])[0]
-    assert later.props.get("status") == "released", (
+    assert later.props.get("pipelineStageId") == "released", (
         f"a post-creation fold stopped applying ({later.props!r})"
     )
     # …and a SILENT birth clears whatever preceded it, deriving nothing.
@@ -3436,6 +3638,13 @@ def test_a_pre_birth_fold_cannot_survive_the_creation_record():
         f"a silent creation record left a pre-birth fold in place "
         f"({silent.props!r})"
     )
+    # ⚠️ The pre-birth fold HERE is terminal (`released`), so — exactly like the
+    # status latch above — the replay KEEPS it rather than clearing it: the same
+    # deliberate trade, landing in the same fail-safe direction (the rebuild
+    # claims LESS life). The NON-terminal reset is asserted further up.
+    assert silent.props.get("pipelineStageId") == "released", (
+        f"a silent creation record cleared a TERMINAL pre-birth stage "
+        f"({silent.props!r}) — the fail-safe keeps the ending")
 
 
 def test_the_birth_status_is_on_create_only_like_the_live_fold():
@@ -3537,7 +3746,11 @@ def test_the_connector_fold_never_writes_a_subject_status():
                            object_name="acme"),),
     )
     by_label = {n.label: n for n in folded}
-    assert by_label["Object"].props.get("status") == "completed"
+    # #11824 S0: the Object side is a STAGE move now, so the label gate is proved
+    # on the stage axis — and the Subject must carry NEITHER a status NOR a
+    # stage, which is the same "the live fold cannot produce that value" claim.
+    _assert_folded_stage(by_label["Object"].props, "done", closed=True,
+                         outcome="completed")
     assert "status" not in by_label["Subject"].props, (
         "the connector fold wrote a lifecycle word onto the :Subject of the same "
         "name — the live fold cannot produce that value. ⚠️ Reconciliation "
@@ -3545,6 +3758,9 @@ def test_the_connector_fold_never_writes_a_subject_status():
         "props); what it cannot do is discriminate a fabricated value once both "
         "sides agree — so the gate must prevent this, not report it"
     )
+    assert "pipelineStageId" not in by_label["Subject"].props, (
+        "the connector fold wrote a PIPELINE STAGE onto the :Subject of the same "
+        "name — the live fold matches `:Object` only")
 
 
 def test_read_node_folds_an_object_whose_name_is_the_empty_string():

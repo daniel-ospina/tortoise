@@ -293,11 +293,23 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_the_recall_lane(sdk, ret
     ⛔ Measured RED before this case existed: `_retirement` tested the narrower
     `commit_ops.OBJECT_TERMINAL_STATUSES`, which OMITS `outdated`, so an input
     retired with the legacy word returned ``None`` — HEALTHY — and the derived
-    state kept counting. `sdk.update_knowledge(<object>, status='outdated')` is an
-    accepted public write, and #11825 measured that the SDK accepts terminal
-    statuses on Objects — so this is the issue's own headline ("a conclusion
-    whose justification is gone"), reachable through a public door, not a
-    theoretical spelling.
+    state kept counting.
+
+    ⚠️ **UPDATED BY #11824 S0, and the change is the POINT of this edit, not a
+    workaround.** This test used to retire the input with
+    `sdk.update_knowledge(<object>, status='outdated')` — an accepted PUBLIC write
+    when it was written. S0 closes that door: `outdated` says the record ended
+    without saying whether anything was put in its place, so it now names TWO
+    words (`deprecated` / `superseded`) and is REFUSED with that choice named.
+    So the test asserts both halves:
+
+      1. the public door REFUSES `outdated` (S0's own contract, asserted here so
+         the moved pin documents itself), and
+      2. a LEGACY row that ALREADY holds `outdated` — written out-of-band, which
+         is what every pre-S0 graph carries and what S0 explicitly does not
+         backfill (#11824 §1) — still retires the derived state. That is the
+         half this test was actually about, and it must keep working now that
+         no door can produce the word.
 
     ⚠️ THE INVARIANT IS STALENESS, NOT READER UNANIMITY, and this docstring said the
     opposite until a review falsified it against the source: the OBJECT family is
@@ -308,19 +320,50 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_the_recall_lane(sdk, ret
     only in the POINT-terminal set"*). Retiring anyway is correct because a state
     derived from an input carrying the legacy invalidate word is exactly the stale
     conclusion #11926 exists to retire, and re-derivation mints a fresh claim —
-    nothing is lost.
+    nothing is lost. ⚠️ #11824 S0 changed the PRODUCER of that word, never this
+    reader: the split is still the read side's shape, and the population it
+    serves is now exactly the legacy rows this test writes out of band.
     """
     i, t, g = _world(sdk, tag=f"legacy-outdated-{retire}")
     made = _judge(sdk, i, t, g)
     node = {"target": t, "indicator": i, "goal": g}[retire]
-    # A GOAL carries an achievement word as well, and #13035 refuses a goal ended
-    # on `status` and left running on `goalState` — so the legacy word arrives
-    # with the matching ending in the SAME write (`outdated` is one of the
-    # `abandoned` family's spellings). The other two inputs have no goalState,
-    # so nothing is paired for them.
+    # 1. no door may MINT the word any more (#11824 S0).
+    #
+    # ⛔ THE PATTERN MUST BE THE `outdated` ARM'S OWN TEXT (#13143 review, finding
+    # 3). A `match="outdated"` proved NOTHING: `_render` interpolates the refused
+    # value into EVERY refusal, so the generic fall-through satisfied it and
+    # deleting the arm shipped green. `supersededBy` and `supersede_point` appear
+    # ONLY in `_OUTDATED_REPAIR`, and they are what makes the refusal PERFORMABLE
+    # (AX rule 2): the word names a choice — which of the two endings — so the
+    # door refuses it and hands the caller both routes rather than picking one
+    # for them.
+    #
+    # ⛔ THE GOAL ARM MUST SATISFY #13035 TO REACH THIS ARM AT ALL. Measured on the
+    # merged tree: a goal still carrying `goalState='met'` is refused FIRST — "ends
+    # the goal, but goalState='met' still describes a live commitment" — so the
+    # `outdated` arm is unreachable and the pattern below never runs. That is
+    # #13035 working as designed, not a hole: the ending has to be said on BOTH
+    # fields. So the goal arm states it, exactly as main's arm did, and what the
+    # assertion then sees IS the lifecycle-word refusal.
     pairing = {"goalState": "abandoned"} if retire == "goal" else {}
-    sdk.update_knowledge(node["id"], status="outdated", **pairing)
-    # the write landed; this assertion is what the sweep will read back
+    with pytest.raises(ValueError, match=r"supersededBy.*supersede_point") as exc:
+        sdk.update_knowledge(node["id"], status="outdated", **pairing)
+    assert "TWO different lifecycle words" in str(exc.value), str(exc.value)
+    # 2. the LEGACY population: write the stored word out of band, exactly as a
+    #    pre-S0 graph holds it, and assert the sweep still retires on it.
+    #
+    # ⛔ BOTH HALVES OF THIS MERGE ARE KEPT (#13035 meets #11824 S0). #13035
+    # refuses a goal that is ENDED on `status` and left RUNNING on `goalState`,
+    # so the legacy word arrives with its matching ending in the SAME write —
+    # `outdated` is one of the `abandoned` family's spellings. That pairing
+    # cannot go through the door any more (step 1 above is precisely why), so
+    # the row is written RAW: the population being modelled is the pre-S0 one.
+    # The other two inputs carry no goalState, so nothing is paired for them.
+    _goal_state = ", n.goalState = 'abandoned'" if retire == "goal" else ""
+    sdk._get_proj().g.query(
+        f"MATCH (n {{id:$id}}) SET n.status = 'outdated'{_goal_state}",
+        params={"id": node["id"]},
+    )
     assert sdk.get_entity(node["id"])["status"] == "outdated"
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation.reason == reason, v.invalidation

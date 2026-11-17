@@ -2581,6 +2581,12 @@ surfaces:
   # claims the diff. DB-free at the door level: every record is a fake and the SDK
   # arm reuses `test_record_serve.py`'s recording doubles.
   - test_12941_read_your_writes.py
+  # #13034's `test_13034_currency_rule_reads_position.py` is registered on `core`
+  # FURTHER DOWN this file, in the block the main-red repair (#13139 / #13144)
+  # added with its own rationale. This branch registered it here first; the
+  # merge into `main` then left BOTH rows, which `--integrity` reports as
+  # `duplicate entry ... at .surfaces.core[]`. One row, one home — do not re-add
+  # it here.
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
   # (where `TIER_DISPLAY_NAMES` now lives) is a `core` source. The `tier1` row is
