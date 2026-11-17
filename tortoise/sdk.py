@@ -6298,8 +6298,23 @@ def _refuse_ending_dropped_by_a_re_mention(proj, id_val: str, props: dict, *,
     refused; a node already ended on ``status`` keeps a coherent state, so it is
     not refused either; and a fresh id is not refused, because there the CREATE
     writes ``status`` and the pair lands whole.
+
+    ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT (#13065 review ROUND 7, finding 1,
+    P2) — ``props.get("goalState")`` hashed the LITERAL name while the live
+    transport files a key by ``str(key)``, so this arm was left a ONE-RENDERER
+    test when the sibling scan at :func:`_goal_successor_named` was fixed for
+    exactly that class in round 6. Measured: an existing goal plus
+    ``create_object(name, objectKind="goal", status="archived",
+    **{K("harmless", "goalState"): "abandoned"})`` was ADMITTED and left
+    ``status=None`` beside ``goalState='abandoned'`` — round 5 finding 1's own
+    headline pair, through the door that claims to refuse it. The read goes
+    through :func:`lifecycle_props_by_rendering` (the renderer UNION, first-wins
+    — over-detecting is the safe direction here, because the CONTENT rendering
+    is the one the durable journal keeps).
     """
-    goal_state = props.get("goalState")
+    # ⛔ Read it the way the write FILES it, not the way the caller spelled it.
+    goal_state = lifecycle_props_by_rendering(props, ("goalState",)).get(
+        "goalState")
     if not _is_lifecycle_word(goal_state, GOAL_ENDING_STATES):
         return
     view = _stored_goal_ending_view(proj, id_val, label=label) or {}

@@ -743,6 +743,44 @@ def test_a_RE_MENTION_create_cannot_land_HALF_an_ending(sdk):
                                   bool(node.get("outdated")))
 
 
+def test_a_RE_MENTION_create_with_a_RENDERED_goalState_key_is_refused(sdk):
+    """#13065 review ROUND 7, finding 1 (P2) — the re-mention arm's OWN presence
+    test was left on ONE renderer.
+
+    Round 5 finding 1 added the re-mention refusal; round 6 finding 3 taught the
+    sibling successor scan to see BOTH renderers; this arm kept
+    ``props.get("goalState")``, which hashes the literal name. MEASURED before
+    the fix: an existing goal plus
+    ``create_object(name, objectKind="goal", status="archived",
+    **{Rendered("harmless"): "abandoned"})`` was ADMITTED and left
+    ``status=None`` beside ``goalState='abandoned'`` — the same headline pair,
+    through the same door, one spelling over.
+
+    The plain-key control lives in
+    :func:`test_a_RE_MENTION_create_cannot_land_HALF_an_ending`; this is the arm
+    that test could not mint (it only spells the key the literal way).
+    """
+    class Rendered(str):
+        def __str__(self):                      # files as `goalState`
+            return "goalState"
+
+        def __hash__(self):                     # ...and misses `in props`
+            return hash("not-the-literal-name")
+
+    goal = _goal(sdk, tag="re-mention-rendered")   # goalState='active', no status
+    with pytest.raises(ValueError) as exc:
+        sdk.create_object("CI is fast [re-mention-rendered]", objectKind="goal",
+                          status="archived", **{Rendered("harmless"): "abandoned"})
+    msg = str(exc.value)
+    assert "REFUSED" in msg
+    assert "RE-MENTION" in msg, msg
+    # nothing landed: the node keeps the state it had, on BOTH fields
+    node = sdk.get_entity(goal["id"])
+    assert node["goalState"] == "active"
+    assert not live.is_terminal_status(node.get("status"),
+                                       bool(node.get("outdated")))
+
+
 def test_an_UNHASHABLE_stored_status_reaches_the_documented_ValueError(sdk):
     """#13065 review round 5, finding 3 (P2) — the STORED side, not just the bag.
 
