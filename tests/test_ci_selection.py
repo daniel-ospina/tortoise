@@ -23013,10 +23013,13 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     before #13144 — which is what the docstring above means by "UNLISTED on
     `main`" and what commit `a36581fd` retired by name — so do not re-read this
     clause as "main had a `core` row". ⛔ That parenthetical is bound to the
-    pre-#13144 main it was measured at: the SAME `grep -c` against `origin/main`
-    reads **6** at this head, because `origin/main` IS `3d437429e9`. Re-running it
-    against today's `origin/main` does not falsify the clause — it measures a
-    different commit, and #13144 is the one that landed the rows.
+    pre-#13144 main it was measured at: the SAME `grep -c` against `3d437429e9`
+    reads **6**. (It also reads **6** against `origin/main` at the head this
+    sentence was last re-derived — `745c71c265` — so the count alone does not
+    tell a reader which commit they are looking at; the `3d437429e9` in the
+    clause above is the bound one.) Re-running it against today's `origin/main`
+    does not falsify the clause — it measures a different commit, and #13144 is
+    the one that landed the rows.
     On that `core`-only manifest: `select(['tortoise/hosted_api.py'],
     'pull_request', manifest)` -> `surfaces=['api', 'onboarding']`, `full: False`,
     and this file ABSENT from `test_files`. (⛔ On the manifest WITH the `api` row
@@ -23035,9 +23038,13 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     because `main`'s cut carries its own comment block above the row). The
     `['api', 'core']`
     siblings, each at its OWN rows: `test_12941_read_your_writes.py` at `:352` /
-    `:2574`, and `test_11892_health_quota.py` at `:1849` / `:2565` (both
-    re-derived on the merged tree: taking `main`'s `ci-surfaces.yml` moved them
-    from the `:1816` / `:2532` / `:2541` this docstring previously carried).
+    `:2582`, and `test_11892_health_quota.py` at `:1849` / `:2573` (all
+    re-derived at THIS head, not carried: the `core` list has moved twice under
+    this docstring, once from `:1816` / `:2532` / `:2541` and once again from
+    `:1849` / `:2565` / `:2574` — #13137 inserted 8 lines at `+2553` above them.
+    The `api` cites above (`:351`, `:352`, `:1109`) have not moved across either
+    shift: both insertions landed in the `core` list and the `durations` map,
+    below the `api` list.)
     ⛔ NOT "the only hosted-door guard registered
     single-surface": `main` registered this file on **zero** surfaces when
     #13075 landed it (both rows were added later, by #13144),
