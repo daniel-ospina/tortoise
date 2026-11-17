@@ -181,6 +181,12 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("oauth_refresh_tokens", "revoked_at"),
     ("org_memberships", "created_at"),
     ("org_memberships", "updated_at"),
+    # #13277's per-org residency gauge (`20261117000002_postgres_residency_gauge`).
+    # It landed on `main` without this pin, so `test_registry_matches_the_migrations`
+    # was RED there (#13316) — the set is DERIVED from the migrations, so a table
+    # that declares `timestamptz` belongs here the moment its migration exists.
+    ("org_postgres_residency", "measured_at"),
+    ("org_postgres_residency", "updated_at"),
     ("organizations", "backup_latest_at"),
     ("organizations", "backup_restored_at"),
     ("organizations", "created_at"),
