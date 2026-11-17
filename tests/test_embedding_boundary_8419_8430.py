@@ -356,9 +356,11 @@ def test_the_document_embedding_is_composed_from_the_text_the_node_stores(tmp_pa
     reproduce (#8419 indicator 1).
     """
     seen: list[str] = []
+    calls: list[dict] = []
 
-    def _encoder(text, _dim=None):
+    def _encoder(text, _dim=None, **kwargs):
         seen.append(text)
+        calls.append(kwargs)
         return _vector(0.0)
 
     with mock.patch("tortoise.embeddings.encode_for_row", _encoder):
@@ -384,6 +386,12 @@ def test_the_document_embedding_is_composed_from_the_text_the_node_stores(tmp_pa
                 f"{node['searchText']!r} (#8419)")
             assert "long body text" not in seen[0], (
                 "the retired `content` prop is still an embedding input")
+            assert calls == [{"bounded": True}], (
+                "the document fold must carry #13224's write bound: the vector's "
+                f"INPUT was reconciled by #8419, the bound is orthogonal and "
+                f"both are load-bearing (encoder kwargs seen: {calls!r}). "
+                "Dropping it restores an unbounded embedder wait on every "
+                "document write, repair and `DocumentCreated` replay.")
             assert node["content"] is None, (
                 "premise: D10 does not store `content` — if it ever does, the "
                 "objection to embedding it changes and this pin must be redone")

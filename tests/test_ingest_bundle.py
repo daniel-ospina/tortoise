@@ -623,13 +623,44 @@ class TestPromotionPolicy:
 
     def test_create_point_rejects_non_canonical_status(self, sdk):
         # Fail-closed vocabulary validation on the create path (PR #1073
-        # re-review P0/P1): a non-canonical status must not be storable — it
-        # would otherwise be treated as EP-live by _live_only. Non-str values
-        # (including unhashable list/dict) raise ValueError, not TypeError.
-        for bad in ("Live", "draft ", "live\n", ["live"], {"x": 1}, None):
+        # re-review P0/P1): a non-canonical status must not be STORED — it
+        # would otherwise be treated as EP-live by _live_only.
+        #
+        # ⛔ RE-HOMED, NOT RELAXED (#11824 S0, re-measured at this head). S0
+        # splits the old one-shape refusal into THREE outcomes, and this arm
+        # used to pin the first two as refusals:
+        #
+        #   1. a re-spelling of a legal word — case, or surrounding whitespace
+        #      (`'Live'`, `'draft '`, `'live\n'`) — is NORMALISED and the write
+        #      PROCEEDS, silently, because the intent is unambiguous and only
+        #      the form is off (`lifecycle_vocabulary`'s declared axis 1).
+        #   2. a declared synonym (`archived`/`retracted`) stores `deprecated`.
+        #   3. a value that is not an exact `str` is REFUSED — the shape below.
+        #
+        # So the property this test exists for is asserted in BOTH directions:
+        # nothing non-canonical reaches the row (case 1 stores the canonical
+        # word, not the caller's spelling), and a non-string is still refused.
+        # Measured at this head: `'Live'` → `'live'`, `'draft '` → `'draft'`,
+        # `'live\n'` → `'live'`; `['live']` / `{'x': 1}` / `None` raise
+        # `ValueError: status … was refused: a status must be a plain string`.
+        # ⚠️ The GATED ingest path still refuses every case variant (see
+        # `test_gated_rejects_case_variant_status` below): it compares the RAW
+        # spelling, which is the promotion policy's own rule — this arm is about
+        # what the create door STORES.
+        for spelling, canonical in (("Live", "live"), ("draft ", "draft"),
+                                    ("live\n", "live")):
+            made = sdk.create_point("claim", "re-spelled status", status=spelling)
+            assert made["status"] == canonical, (
+                f"the create door must STORE the canonical word for {spelling!r}, "
+                f"not the caller's spelling — got {made['status']!r}")
+            assert sdk.get_point(made["id"])["status"] == canonical
+
+        # Non-str values (including unhashable list/dict) raise ValueError, not
+        # TypeError.
+        for bad in (["live"], {"x": 1}, None):
             with pytest.raises(ValueError) as exc:
                 sdk.create_point("claim", "junk status", status=bad)
-            assert "Invalid status" in str(exc.value)
+            assert "must be a plain string" in str(exc.value), str(exc.value)
 
     def test_auto_not_retroactive_on_dedup(self, sdk):
         # "Promotes when its FIRST edge is created": a re-ingest under auto

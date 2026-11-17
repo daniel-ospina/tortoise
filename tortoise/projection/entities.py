@@ -4857,8 +4857,14 @@ class _EntityHandlers:
         embedding = None
         try:
             from tortoise.embeddings import encode_for_row
+            # #13224: `bounded=True` — a DERIVED entity vector, recomputed from
+            # the payload text on replay, so it is repairable from the graph and
+            # a live request may decline to wait for a cold embedder. Scoped
+            # here and to the three sibling entity folds ONLY: a Point's vector
+            # is record truth (#5004) and is never dropped. The bound is
+            # suppressed under a replay scope, so a rebuild stays deterministic.
             embedding = encode_for_row(
-                name, self.required_embedding_dim)
+                name, self.required_embedding_dim, bounded=True)
         except Exception:
             pass
         # #1918: canonical id must win on MATCH too — parity with the #1155
@@ -5044,8 +5050,9 @@ class _EntityHandlers:
         embedding = None
         try:
             from tortoise.embeddings import encode_for_row
+            # #13224: DERIVED vector — see `_upsert_subject` for the scope.
             embedding = encode_for_row(
-                name, self.required_embedding_dim)
+                name, self.required_embedding_dim, bounded=True)
         except Exception:
             pass
         # #1155-P1: canonical id must win on MATCH too. The produces-edge
@@ -5422,11 +5429,24 @@ class _EntityHandlers:
         # repair, and DocumentCreated REPLAY. The legacy branch is unchanged
         # (flag absent → compute as today, SC4).
         embedding = None
+        # Re-cut resolution (#13290 × #13224) — NOT a side pick. This PR's
+        # composition (`st`, the `_searchText` surface) and main's write bound
+        # (`bounded=True`, the #13224 DERIVED-vector scope) are orthogonal and
+        # both are load-bearing:
+        #   * take main's side alone -> discards #8419's whole deliverable (the
+        #     vector and the `_searchText` FTS leg must describe the SAME text);
+        #   * take this PR's side alone -> silently restores an UNBOUNDED embedder
+        #     wait on every document write, repair and `DocumentCreated` replay,
+        #     which is the exact stall #13224/#13229 removed. Nothing in this
+        #     PR's test set would red on that loss, because this PR replaced the
+        #     code path, so no test on either side pins `bounded` on `st`.
         if not ev.get("suppress_embedding") and st and st.strip():
             # #5008: through the EMBED gate — an identifier-only text earns no vector.
             try:
                 from tortoise.embeddings import encode_for_row
-                embedding = encode_for_row(st, self.required_embedding_dim)
+                # #13224: DERIVED vector — see `_upsert_subject` for the scope.
+                embedding = encode_for_row(
+                    st, self.required_embedding_dim, bounded=True)
             except Exception:
                 pass
         # #125 capture fields — use ev.get(field) with NO default so None →
@@ -5789,8 +5809,9 @@ class _EntityHandlers:
                 # #5008: through the EMBED gate — an identifier-only text earns no vector.
                 try:
                     from tortoise.embeddings import encode_for_row
+                    # #13224: DERIVED vector — see `_upsert_subject` for the scope.
                     embedding = encode_for_row(
-                        event_content, self.required_embedding_dim)
+                        event_content, self.required_embedding_dim, bounded=True)
                 except Exception:
                     pass
         props = {
