@@ -52892,10 +52892,17 @@ class TortoiseSDK:
             # refused — the same unaddressable-row class this issue is about. The
             # identical payload at a genuinely-Object door was already refused.
             _subj_named = lifecycle_props_by_rendering(props, {"status"})
+            # ⛔ THE OPERAND GOES THROUGH `_refusal_repr` (#12910 review, F1).
+            # `name` is the CALLER's object — `create_object` relays it here
+            # untouched — so a `str` subclass whose `__repr__` raises replaced
+            # this refusal with its own exception class (measured:
+            # `RuntimeError: id-repr-boom` where the door promises `ValueError`).
+            # The rule is `_refusal_repr`'s own docstring; this was the FIFTH
+            # site this PR added and the only one left on the raw `!r`.
             if _status_write_is_ambiguous(props):
                 raise ValueError(
                     f"create_entity refused a CONFLICTING status write for "
-                    f"{name!r}: more than one key in this call renders as "
+                    f"{_refusal_repr(name)}: more than one key in this call renders as "
                     f"`status`. A `str` subclass whose content and `__str__` "
                     f"differ is filed under one name by the live write and the "
                     f"other by the journal, so which word lands cannot be known "

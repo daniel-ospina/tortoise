@@ -2686,6 +2686,56 @@ class TestNonScalarStatus12869:
         finally:
             sdk.close()
 
+    def test_a_CONTENT_rendered_status_does_NOT_land_under_its_str_name(
+            self, tmp_path):
+        """#12910 review F2: the skip test is the RENDERER UNION, not two names.
+
+        `skip` is a `frozenset` of plain `str`, so the three spellings a key can
+        be filed under are the HASH (`k in skip`), the LIVE transport
+        (`str(k)`, `projection._map_key_ok`) and the JOURNAL's content
+        rendering (`str.__str__(k)`, what the durable record keeps). The earlier
+        form asked the first two, so this shape — content `status`, overridden
+        `__hash__`, a `__str__` that renders something else — fell through to
+        `SET n += $extra`: the journalled record carried `status`, and the live
+        node got a property under the `__str__` name that no durable record has.
+        MEASURED before the fix: `harmless='archived'` on the node, `status` in
+        the journal.
+
+        This pins what the guard owns: the value is not written as an EXTRA prop
+        under a name the record does not use. (It does NOT make the live node
+        carry the status — `_upsert_object` reads `ev.get("status")`, a literal
+        hash lookup — which is the pre-existing live≠replay residual stated at
+        the site, not created here.)
+
+        FALSIFIABLE BY: reverting the site to `(k in skip or str(k) in skip)`
+        reds this arm — `harmless` lands again.
+        """
+        class Dual(str):
+            """Content `status`, a different bucket, and another `__str__`."""
+
+            def __hash__(self):
+                return 424242
+
+            def __str__(self):
+                return "harmless"
+
+        sdk = TortoiseSDK(str(tmp_path / "t12869content.db"))
+        try:
+            sdk.create_object("held", "core:strategy")
+            before = _carrier_row(sdk, "Object", "held")
+            sdk.create_object("held", "core:strategy",
+                              **{Dual("status"): "archived"})
+            row = sdk._get_proj().g.query(
+                "MATCH (n:Object {name:'held'}) "
+                "RETURN n.harmless, n.status").result_set[0]
+            assert row[0] is None, (
+                "a content-rendered status landed under its `__str__` name — "
+                f"no durable record has that property: harmless={row[0]!r}")
+            assert _carrier_row(sdk, "Object", "held") == before, (
+                "the merge path changed the row it was given")
+        finally:
+            sdk.close()
+
     def test_an_OBJECT_declared_create_cannot_poison_a_SUBJECT_row(
             self, tmp_path):
         """The kind-redirect makes the Subject arm a door for `type='object'`.
@@ -2995,21 +3045,34 @@ class TestNonScalarStatus12869:
     # ── THE CONTRACT OF THE REFUSAL ITSELF: the exception CLASS ──────────────
 
     def test_every_new_refusal_survives_a_hostile_repr(self, tmp_path):
-        """P2-1 (#12910 review): the four refusals this PR adds name their
-        operands through `_refusal_repr` / `_np_safe_repr`, never the raw `!r`.
+        """P2-1 (#12910 review): every refusal this PR adds names its operands
+        through `_refusal_repr` / `_np_safe_repr`, never the raw `!r`.
 
         The rule is already stated in this tree — `_refusal_repr`'s docstring:
         *"A refusal's contract is the exception CLASS — `ValueError` — so a
         `__repr__` that raises would replace it with its own class … ONE
-        definition for EVERY refusal that names a caller operand"*. The four
-        sites below were added with the raw `!r` anyway, and **nothing in the
-        tree red on it** (`grep -r '_refusal_repr' tests/` was empty), so the
-        contract was prose-only until this pin.
+        definition for EVERY refusal that names a caller operand"*. The sites
+        below were added with the raw `!r` anyway, and **nothing in the tree red
+        on it** (`grep -r '_refusal_repr' tests/` was empty), so the contract was
+        prose-only until this pin.
 
         ⛔ EACH OPERAND IS ITS OWN ARM, because they are evaluated in SOURCE
         ORDER inside one f-string — `{target!r}` before `{word!r}` — so an arm
         that makes only the VALUE hostile cannot see a broken TARGET, and an
         arm that makes only the TARGET hostile cannot see a broken VALUE.
+
+        ⛔ ARM (e) IS A FIFTH SITE — `create_entity`'s SUBJECT arm carries its
+        own ambiguity refusal (#12910 review F1), and it is only reachable
+        through the `t == "subject"` branch: `create_subject`. An
+        object-declared create of an organization kind does NOT get here —
+        MEASURED: `create_object(RaisingReprStr(...), "core:organization", …)`
+        is refused EARLIER by the Object helper at the create door, whose
+        message already satisfies this assertion, so an Object-door arm would
+        be VACUOUS (the trap the update-door arm in `b27b65a2f9` fell into). It
+        asserts the CONFLICTING word as well as the class: with the guard
+        DELETED the NEXT check also raises `ValueError` (`Invalid status None`),
+        so the message is the only thing that distinguishes the mechanism from
+        its absence.
 
         FALSIFIABLE BY: reverting any ONE site to the raw `!r` reds its own arm
         with the caller's exception (`RuntimeError: repr-boom` /
@@ -3141,6 +3204,29 @@ class TestNonScalarStatus12869:
                 + str(ei.value))
             assert _carrier_row(sdk, "Object", "rr-stored")[1] == ["archived"], (
                 "a refused stored-side write changed the row")
+
+            # (e) `create_entity`'s SUBJECT arm (#12910 review F1) — a FIFTH site
+            #     this PR adds, and the guard it carries, which no arm reached
+            #     before. ⛔ ENTERED THROUGH `create_subject`, the only route to
+            #     the `t == "subject"` branch: an object-declared organization
+            #     create is refused EARLIER by the Object helper (MEASURED), so
+            #     that route would pass with this site reverted.
+            with pytest.raises(ValueError) as ei:
+                sdk.create_subject(RaisingReprStr("rr-subj"),
+                                   "core:organization",
+                                   **{"status": None, KHash("status"): "live"})
+            assert "CONFLICTING status write" in str(ei.value), (
+                "the Subject door's ambiguity guard did not fire — deleting it "
+                "leaves `Invalid status None` from the NEXT check, which is "
+                "also a ValueError, so the message is the only discriminator: "
+                + str(ei.value))
+            assert "RaisingReprStr" in str(ei.value), (
+                "the Subject arm's ambiguity refusal did not use "
+                "`_refusal_repr` on its target: " + str(ei.value))
+            assert "id-repr-boom" not in str(ei.value)
+            assert sdk._get_proj().g.query(
+                "MATCH (n:Subject) RETURN count(n)").result_set[0][0] == 0, (
+                "a refused conflicting Subject create left a row behind")
         finally:
             sdk.close()
 
