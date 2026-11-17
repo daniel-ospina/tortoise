@@ -34700,18 +34700,36 @@ def _drop_org_acl_users(org_id: str) -> None:
     forever). Registry: enumerate Graph nodes by org_id (incl. the default
     node's gid — its drop hook is a harmless no-op, the default graph has
     no ACL user). Supabase: the graphs table holds custom rows only.
-    Best-effort per graph (a committed purge never fails on a drop)."""
+    Best-effort per graph (a committed purge never fails on a drop).
+
+    ⛔ THE ENUMERATION IS NOT BEST-EFFORT (#13205 review round 7). Every graph
+    the purge is about to delete came from a CERTIFIED walk of this same table
+    (:func:`_org_graph_names`), so an uncertified walk here reads a SUBSET: the
+    tail graphs' `tenant_<gid>` users are never dropped, and
+    `purge_org_control_plane` then cascades away the rows that carried those
+    gids — orphaned global credentials that nothing can name or reap. That is
+    what this function's own docstring calls orphaning "the live credentials
+    forever". A single `query` page is exactly that subset (PostgREST caps it at
+    the deployment's `max_rows` and reports nothing), so the read is a
+    `query_all` walk and an uncertified one RAISES: the per-org try/except in
+    the purge sweep then keeps the org row as the #926 retry anchor. The
+    per-GRAPH drops stay best-effort — only "which graphs exist" must be
+    complete.
+    """
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
     )
+    incomplete = False
+    ids: list = []
     try:
         if is_supabase_enabled():
-            rows = get_control_plane().query(
+            rows, complete = get_control_plane().query_all(
                 "graphs", select=["id"],
-                filters=[("org_id", "eq", org_id)],
+                filters=[("org_id", "eq", org_id)], cursor="id",
             )
             ids = [r["id"] for r in rows]
+            incomplete = not complete
         else:
             rows = _make_sdk(namespace="registry")._get_registry().query(
                 "MATCH (g:Graph {org_id:$tid}) RETURN g.id",
@@ -34723,6 +34741,12 @@ def _drop_org_acl_users(org_id: str) -> None:
             "team ACL-user enumeration failed for %s (best-effort): %s",
             org_id, e)
         return
+    if incomplete:
+        raise RuntimeError(
+            f"the graphs walk for org {org_id} could not be certified complete "
+            f"— the purge would drop a SUBSET of the org's per-graph ACL users "
+            f"and then delete the rows that name them, orphaning global "
+            f"credentials nothing can reap")
     for gid in ids:
         try:  # noqa: SIM105
             _acl_user_drop_hook(gid)

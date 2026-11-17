@@ -249,6 +249,30 @@ class TestDeprovisionOnDelete:
         with pytest.raises(RuntimeError, match="could not be certified complete"):
             ha._org_graph_names("o1", "org_o1")
 
+    def test_a_truncated_ACL_enumeration_REFUSES_rather_than_orphaning_users(self, monkeypatch):
+        """⛔ The ACL drop is the SECOND `graphs` read in the same purge
+        (review round 7). It was a single page too, so a >`max_rows` org lost the
+        tail graphs' `tenant_<gid>` users AND the rows that named them — orphaned
+        global credentials nothing can reap, the outcome this function's own
+        docstring calls "orphans the live credentials forever". The enumeration
+        must be certified; the per-graph drops stay best-effort."""
+        from tortoise import hosted_api as ha
+
+        dropped: list[str] = []
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: self._fake_cp(
+                                [{"id": "o1"}],
+                                graphs=[{"id": "g_1"}], complete=False))
+        monkeypatch.setattr(ha, "_acl_user_drop_hook",
+                            lambda gid: dropped.append(gid))
+        with pytest.raises(RuntimeError, match="ACL users"):
+            ha._drop_org_acl_users("o1")
+        assert dropped == [], (
+            "a partial enumeration is not a licence to drop a subset and then "
+            "delete the rows that name the rest")
+
     def test_an_unreadable_enumeration_REFUSES_rather_than_erasing_a_subset(self, monkeypatch):
         """⛔ A failure to ask is not an answer (review round 4, P1).
 
