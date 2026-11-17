@@ -1054,9 +1054,13 @@ surfaces:
   # — one of the FOUR `@_needs_db` classes — so it runs where a FalkorDB is reachable (the
   # matrix legs provision one and export `TORTOISE_TEST_DOCKER_PORT`) and SKIPS GREEN
   # anywhere else (#1349's skip-is-green half, the same shape the `core` row below records).
-  # ⛔ Not `mcp_auth.py`: `--surface-audit` reported that co-import only while the row was
-  # `core`-only, and the `test_12592_supersede_door.py` row that still carries the shape is
-  # main-side noise — the behavioural pin here is `hosted_api.py` alone.
+  # ⛔ `mcp_auth.py` is a SECOND reason for this row, not noise: it is a first-class `api`
+  # SOURCE_PATTERNS entry (`tools/ci_selection.py:1197`), the MCP-tag arm imports it
+  # DIRECTLY (`from tortoise.mcp_auth import _current_org_id, _current_org_limits,
+  # _transport_mode`), and MEASURED with this row absent, `select(['tortoise/mcp_auth.py'])`
+  # resolves `['api']` with this file ABSENT — an `mcp_auth.py`-only diff would drop it. So
+  # the behavioural pins are `hosted_api.py` AND `mcp_auth.py`; `--surface-audit` merely
+  # named the second only while the row was `core`-only.
   - test_13034_currency_rule_reads_position.py
   # #12477/#2876: the health surfaces must not read green over a failing data plane. Added
   # to `main` by `ea5d476e9b` (#12488) WITHOUT a manifest row, so `--integrity` reported it
@@ -5163,7 +5167,7 @@ surfaces:
   # live FalkorDB" and the live classes are `skipif(not FALKORDB_AVAILABLE)` — on a leg with
   # no database they SKIP GREEN rather than fail, and a `durations` row is exactly what a
   # verifier reads INSTEAD of the test (the reason `test_consent_key_runbook_10488.py`'s row
-  # documents itself). The predicate-matrix and census classes are pure Python. The weight
+  # documents itself). The predicate-matrix, census and MCP-tag classes are pure Python. The weight
   # below is still the flat default, and the reading shows COST, never the skip.
   # ⛔ Neither registration makes the DB half EXECUTE: the `api` row's motivating arm is a
   # method of the `@_needs_db` `TestAClosedObjectIsNeverCurrent`, so both rows buy
