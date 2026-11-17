@@ -378,7 +378,8 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
     # …and the constant must be CONSUMED BY the alternation, not merely defined:
     # a dead constant would leave the document's justification false while the
     # assertion above stayed green. What is pinned here is exactly that — the
-    # constant reaches a `"|".join(...)` — and no more (see the STATED LIMITS).
+    # constant reaches a `"|".join(...)` — and nothing beyond that (the limits
+    # below are not exhaustive).
     # ⛔ THE BEHAVIOUR, NOT THE SPELLING (#13387): `8ba6de4438` (#13124) composed
     # the alternation with extra predicates — `"|".join(tuple(extra_preds) +
     # tuple(ABOUT_EDGE_TYPES))` — while still joining the constant, and a literal
@@ -393,8 +394,8 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
     # this, while every revert still does — dropping `+ tuple(ABOUT_EDGE_TYPES)`,
     # deleting the join, or composing the alternation from literals all leave no
     # `"|".join(...)` call whose argument mentions the constant.
-    # STATED LIMITS — all three directions, because a shape test is only honest
-    # when it says which shapes it cannot see:
+    # STATED LIMITS — not exhaustive; a shape test is only honest when it says
+    # which shapes it cannot see, and the ones below are the ones found so far:
     #   * FALSE GREEN, the same limit the substring had: a DIFFERENT
     #     `"|".join` that mentions `ABOUT_EDGE_TYPES` satisfies it. The quote
     #     regex above independently refuses the constant's VALUE going missing,
@@ -407,6 +408,11 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
     #   * FALSE GREEN on a discarded result: a `preds` computed and then never
     #     read stays green. That was equally true of the substring, and pinning
     #     it needs dataflow, not a shape test.
+    #   * FALSE RED on a hoisted separator: `_sep = "|"` then `_sep.join(...)` is
+    #     correct and refused, because the receiver must be the literal `"|"`.
+    #   * FALSE GREEN on a shadowed name: the match is name-only, so a same-scope
+    #     `ABOUT_EDGE_TYPES = ("aboutSubject",)` would satisfy it — the sibling
+    #     regex above is what refuses that one, since it pins the value.
     joins_the_constant = any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
