@@ -80,7 +80,7 @@ file — `search_engine.py` FTS
 and `mcp_server.py`'s `entity_type` passthrough `:5475` — and the drift figure
 above was re-measured afterwards. ⚠️ **The figure counts the file it is written in, so this revision moved it**:
 it contributes **14** resolved pairs, **8** of which drift — 98 (the `main` copy) + 8 = **106** — and every one of
-the 15 was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds.
+the 14 was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of §0) instead of enumerated here.
@@ -630,8 +630,8 @@ and `content` (93,287 B rendered and stored, 13.7 %)**. ⚠️ **Those two are c
 basis** (101,376 vs 93,287 B) — on the rendered basis the vector is not comparable at all, which is exactly
 the ~4.7× over-report the paragraph above warns about. Quoting 14.8 % for a stored figure against a rendered
 total was wrong and was corrected in review. Both families are `graph` verdicts (§3 rows 1–3).
-`:GraphEvent` is **1.87 %** of payload but is the **largest non-Point resident**, and among the memory substrate — §1's rows 1–6, which is where the substrate is, row 7 being
-bookkeeping — it is the only one with **no** capability reader (the twelve bookkeeping labels of §2.7
+`:GraphEvent` is **1.87 %** of payload but is the **largest non-Point resident**, and among §1's **rows 1–7** — the memory substrate (rows 1–6) plus the change feed that
+is row 7 — it is the only one with **no** capability reader (the twelve bookkeeping labels of §2.7
 have none either, so it is emphatically not the only label in the document); its ~190 B/node payload understates
 it, because §9.1's own measurement puts it at
 **801 B/turn** once block overhead is counted.
@@ -842,7 +842,7 @@ below: adjacency in the statement is not adjacency the PROPERTY needs. What surv
 finding — all four ARE read, and a remedy that assumed otherwise *(`"if nothing reads them but a test, they are dead
 weight … drop, not tier"`)* would have deleted data two shipped audit classes depend on.
 
-What remains a placement question is the **remainder plus the four siblings plus `harness` and `actor_user_id`** — `capture_ok`, `capture_extractor`,
+What remains a placement question is the **remainder plus the four siblings** — `capture_ok`, `capture_extractor`,
 `capture_lane`, `entity_links_attempted`, `capture_redactions`, `machine_id`, `model`, `client_captured_at*`,
 `value_nodes_*`, `draft_count`, `commit_count`, `harness`, `actor_user_id`:
 
