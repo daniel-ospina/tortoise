@@ -1114,6 +1114,16 @@ def test_no_redirect_stems_registry_exact():
         # `carve_out:`, TEST_NO_REDIRECT_STEMS and this declaration — so the pin
         # reding on the addition is the pin working as designed.
         "test_why_snapshot_8099",
+        # #13224: the cold-embedder WRITE BOUND (`encode_for_row(bounded=True)`'s ceiling on
+        # the WAIT, the replay-scope exemption, the once-per-process cold-write report).
+        # Every case builds a `TortoiseSDK(<tmp_path>)` path store and reads the graph back
+        # off it, and the end-to-end arm drives `tests.test_hosted_api.client` (embedded
+        # registry), so the load-bearing reason is the REDIRECT: a URI-set lane would discard
+        # the path and connect the construction to the server, grading a graph this file never
+        # seeded. The module carries NO module-level `embedded_only` marker. Registered in all
+        # THREE homes — config/ci-surfaces.yml `carve_out:`, TEST_NO_REDIRECT_STEMS and this
+        # declaration — so the pin reding on the addition is the pin working as designed.
+        "test_13224_cold_embedder_write_bound",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
