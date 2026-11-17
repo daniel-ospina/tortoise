@@ -1006,12 +1006,16 @@ def _record_vector_searcher(sdk=None, timeout_ms=None):
     a search must not become a 500 because a retrieval accelerator is missing.
 
     ⛔ ``timeout_ms`` IS THE READ'S OWN BUDGET, AND IT IS BOUND HERE (#11691).
-    ``record_vector.searcher`` threads it into the returned closure, so the
-    record's ``statement_timeout`` becomes ``min(RECORD_STATEMENT_TIMEOUT_MS,
-    timeout_ms)``. The reason it is bound at CONSTRUCTION rather than passed per
-    call: the callable's FOUR-argument shape is what keeps both legs' rows going
-    through ONE ordering pass (``#6214``/``#10121``), and a fifth, per-call budget
-    argument would re-open exactly the drift the shape prevents.
+    ``record_vector.searcher`` threads it into the returned closure, which divides
+    it once (``record_vector.record_statement_ms``: two bounded statements per
+    read, so each gets a third) and hands the quotient to the door, where the
+    applied ``statement_timeout`` is ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``.
+    The division is what leaves the graph branch time to answer after a
+    cancellation; see that function for the arithmetic. The reason it is bound at
+    CONSTRUCTION rather than passed per call: the callable's FOUR-argument shape is
+    what keeps both legs' rows going through ONE ordering pass
+    (``#6214``/``#10121``), and a fifth, per-call budget argument would re-open
+    exactly the drift the shape prevents.
 
     Why it is needed at all: ``run_vector_query`` bounds the GRAPH branches at
     500 ms while this leg inherited ``record_serve``'s 15 s statement bound and a
@@ -43651,7 +43655,9 @@ class TortoiseSDK:
         _mark_read_stage(STAGE_RETRIEVAL)
         # #11691: the SAME budget `degradation_chain` gives every leg's
         # `timeout_ms` below, so the RECORD dense leg's statement bound is
-        # `min(record door, this)` instead of the door's 15 s. Derived with the
+        # `min(record door, a third of this)` instead of the door's 15 s — the
+        # third is `record_vector.record_statement_ms`, which reserves the rest of
+        # the read for the graph branch after a cancellation. Derived with the
         # identical expression degradation_chain uses (`int(elevated or
         # VECTOR_LEG_BUDGET_MS)`) rather than a second guess at it.
         _leg_budget_ms = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)

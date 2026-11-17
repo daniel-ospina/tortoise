@@ -751,6 +751,13 @@ def open_record(record_dsn: str | None = None,
     is a trap rather than tidiness: Postgres reads ``statement_timeout = 0`` as
     **NO TIMEOUT AT ALL**, so a caller whose budget rounded or defaulted to 0
     would silently acquire the UNBOUNDED read the constant exists to prevent.
+
+    ⚠️ ONE STATEMENT, NOT ONE READ. What this door applies is a per-STATEMENT
+    bound (Postgres's semantics), so a caller that issues several statements has a
+    leg bounded by ``n x`` what it asked for. The caller that needs a whole-leg
+    ceiling therefore divides its own budget before asking — see
+    :func:`tortoise.record_vector.record_statement_ms` — rather than relying on
+    this parameter to mean "the read".
     """
     # ⚠️ The resolver is imported under a DISTINCT name: the parameter above is
     # also called `record_dsn`, and a same-named import rebinds the name so the
@@ -799,12 +806,17 @@ def open_record(record_dsn: str | None = None,
         raise RecordUnavailable(
             f"the record could not be opened ({type(e).__name__}) — an absence "
             f"is NOT established") from e
-    # The applied bound: the door's ceiling, tightened by the caller and never
-    # widened by it — see the docstring (#11691).
-    bound_ms = int(RECORD_STATEMENT_TIMEOUT_MS)
-    if statement_timeout_ms is not None:
-        bound_ms = max(1, min(bound_ms, int(statement_timeout_ms)))
     try:
+        # The applied bound: the door's ceiling, tightened by the caller and never
+        # widened by it — see the docstring (#11691). ⛔ COMPUTED INSIDE THE TRY
+        # THAT CLOSES `conn`: `int(statement_timeout_ms)` is a raise between "a
+        # pooled socket exists" and "anything closes it", and an unguarded raise
+        # there leaks a live handle from the pool on every bad call. The door is
+        # PUBLIC — every in-tree caller passes an int today, which is why it is
+        # cheap to keep the leak unreachable from the next one.
+        bound_ms = int(RECORD_STATEMENT_TIMEOUT_MS)
+        if statement_timeout_ms is not None:
+            bound_ms = max(1, min(bound_ms, int(statement_timeout_ms)))
         cur = conn.cursor()
         # ⛔ TRANSACTION-LOCAL, because the handle is now POOLED (#9558).
         # `_default_connect` may return a handle an earlier call returned, and a

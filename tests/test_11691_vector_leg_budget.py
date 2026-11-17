@@ -20,7 +20,8 @@ by construction (`#6214`/`#10121`). A fifth, per-call budget argument would be
 that same drift re-opened in a new position: a caller that omitted it would
 silently be back on the 15 s door. So the budget is bound where the callable is
 CONSTRUCTED (`record_vector.searcher(..., timeout_ms=…)`), the door applies
-``min(RECORD_STATEMENT_TIMEOUT_MS, timeout_ms)``, and the shape does not move.
+``min(RECORD_STATEMENT_TIMEOUT_MS, record_statement_ms(timeout_ms))``, and the
+shape does not move.
 
 WHAT THE FALSIFIER ACTUALLY MODELS. The fake record door below does not assert
 the bound and then agree with itself: it BEHAVES like a statement bounded by
@@ -30,6 +31,18 @@ that by answering from the graph leg and NAMING the fallback. Delete the
 threading and the fake is handed the door's 15 s, the query "runs" 30x past the
 read's budget, and this file reds on the applied bound (the 15 s sleep itself is
 refused rather than simulated — see `_Cursor`).
+
+⛔ TWO CLOCKS, NOT ONE (PR #13133 review P1). ``statement_timeout`` bounds a
+STATEMENT and the timer starts when the statement does — after the pool borrow,
+the connect and the ``set_config`` round trips. So a leg bound to the WHOLE read
+budget is cancelled AT the fused read's deadline, the graph branch that must
+answer after it has no time left, and `degradation_chain` records
+``reason="timeout"`` and discards the rows: the issue's latency half fixed, its
+rows-and-named-fallback half not. That is why the budget is DIVIDED before it
+reaches the door (``record_vector.record_statement_ms``: two bounded statements
+per read, a third each) and why the second pin below drives the real collector
+instead of calling `run_vector_query` directly — the direct call has no deadline,
+so it cannot see this class at all.
 """
 from __future__ import annotations
 
@@ -50,6 +63,12 @@ BUDGET_MS = 500
 
 #: What the read door applies when nobody tightens it.
 DOOR_MS = 15000
+
+#: The fused read's collector takes only futures that are DONE when its deadline
+#: expires, so the record leg cannot be given the whole budget (review P1):
+#: `record_vector.record_statement_ms` divides it by the number of bounded
+#: statements the leg may issue, and the remainder is the graph branch's reserve.
+LEG_STATEMENT_MS = BUDGET_MS // record_vector.RECORD_LEG_STATEMENTS_PER_READ
 
 
 class _QueryCanceled(Exception):
@@ -196,12 +215,14 @@ def test_the_record_leg_is_bound_by_the_reads_own_budget(monkeypatch, armed):
         f"the record leg was bounded at {state.get('over_budget')} ms for a "
         f"{BUDGET_MS} ms read: the budget is not reaching the door "
         f"(applied {state.get('applied_ms')})")
-    assert state["applied_ms"] == min(DOOR_MS, BUDGET_MS), (
+    assert state["applied_ms"] == min(DOOR_MS, LEG_STATEMENT_MS), (
         f"the door applied {state.get('applied_ms')} ms; a read's budget must "
-        f"tighten the door's ceiling and never widen it")
+        f"tighten the door's ceiling and never widen it, and it must reach the "
+        f"door DIVIDED ({LEG_STATEMENT_MS} ms per statement for a {BUDGET_MS} ms "
+        f"read)")
 
     # (2) THE READ SURVIVES IT — inside a bounded multiple of its own budget.
-    assert state.get("read_cancelled_after_ms") == BUDGET_MS, (
+    assert state.get("read_cancelled_after_ms") == LEG_STATEMENT_MS, (
         "the query was not the one that was cancelled — the leg never ran")
     assert elapsed_ms < BUDGET_MS * 3, (
         f"the read took {elapsed_ms:.0f} ms for a {BUDGET_MS} ms budget: the "
@@ -220,6 +241,71 @@ def test_the_record_leg_is_bound_by_the_reads_own_budget(monkeypatch, armed):
         f"took (#4999), got mechanisms={mechanisms}")
     assert all(e.get("reason") != "timeout" for e in vector_entries), (
         "the leg answered; a `timeout` entry would discard a result it had")
+
+
+def test_the_fused_read_keeps_the_graphs_answer_inside_its_own_budget(monkeypatch, armed):
+    """The COLLECTOR's clock, not just the statement's (PR #13133 review P1).
+
+    `#11691`'s acceptance has two halves: (a) the leg is bound by
+    ``min(door, read budget)``, and (b) *a slow record yields a NAMED
+    `scan_fallback` to the graph INSIDE the read's budget*. The direct
+    `run_vector_query` call above proves (a) and the naming, and cannot see (b):
+    it has no deadline, so a leg that is cancelled AT the read's budget still
+    answers there.
+
+    The path that ships is `degradation_chain`, and its collector takes only
+    futures that are ALREADY done when its deadline expires — otherwise the
+    strategy is recorded ``reason="timeout"`` and its rows are DISCARDED. Since
+    the record leg's timer starts at the statement (after the borrow, the connect
+    and the `set_config` round trips), a leg on the whole budget is cancelled too
+    late for the graph branch to answer.
+
+    RED if `record_vector.record_statement_ms` stops dividing: the leg sleeps the
+    read's whole budget, the collector times out first, and both the rows and the
+    `scan_fallback` entry go with it — the state the issue was filed about.
+    """
+    state: dict = {"statements": []}
+    _wire_record_door(monkeypatch, state)
+    searcher = record_vector.searcher(carried=armed, timeout_ms=BUDGET_MS)
+    assert searcher is not None, "the leg must be armed for this pin to mean anything"
+
+    graph = _FakeGraph()
+    trace: list[dict] = []
+    started = time.monotonic()
+    fused = search_engine.degradation_chain(
+        graph, "what did the record cost", None, [0.5] * 384,
+        {"fts": False, "vector": True, "structural": False},
+        entity_type="point", limit=5, elevated_timeout_ms=BUDGET_MS,
+        leg_trace=trace, pg_vector=searcher)
+    elapsed_ms = (time.monotonic() - started) * 1000.0
+
+    assert [pid for pid, _score in fused.get("vector", [])] == [graph.ID], (
+        f"the fused read lost the graph's answer to the record leg's "
+        f"cancellation: {fused}. A leg cancelled at the read's own deadline "
+        f"leaves the collector nothing — that is the defect, not a slow test.")
+    vector_entries = [e for e in trace if e.get("leg") == "vector"]
+    assert vector_entries, f"the fused read recorded no vector leg at all: {trace}"
+    mechanisms = [e.get(search_engine.VECTOR_MECHANISM_KEY) for e in vector_entries]
+    assert MECHANISM_SCAN_FALLBACK in mechanisms, (
+        f"the fused read must NAME the fallback it took (#4999), got {mechanisms}")
+    assert all(e.get("reason") != "timeout" for e in vector_entries), (
+        f"the leg answered, so a `timeout` entry discards a result it had: {trace}")
+    # ⛔ THE DISCRIMINATOR IS ARITHMETIC, not the wall clock: with the budget
+    # divided, at most TWO statements (the kNN read, and the shortfall `count(*)`
+    # on the short path) fit STRICTLY INSIDE the read, which is what leaves the
+    # graph branch a reserve after the cancellation. Give the leg the whole
+    # budget and two statements equal the read — no reserve, and whether the
+    # collector's post-deadline rescan happens to salvage the answer becomes a
+    # race (measured: it does, 501 ms in, which is why a wall-clock assertion
+    # alone would pin nothing here).
+    assert state["applied_ms"] * 2 < BUDGET_MS, (
+        f"the leg may issue two statements of {state['applied_ms']} ms inside a "
+        f"{BUDGET_MS} ms read — that spends the WHOLE budget on the record and "
+        f"leaves the graph fallback nothing to answer from")
+    # A gross-regression backstop only, loose on purpose: the box runs a fleet and
+    # this call includes a real sleep.
+    assert elapsed_ms < BUDGET_MS * 2, (
+        f"the fused read took {elapsed_ms:.0f} ms for a {BUDGET_MS} ms budget")
 
 
 def test_the_same_leg_unbounded_costs_the_door_bound(monkeypatch, armed):
@@ -331,10 +417,20 @@ def test_every_construction_site_passes_a_budget():
         f"expected the three known construction sites, found {len(sites)} — "
         f"a new one must pass the read's budget too")
     for node in sites:
-        keywords = {kw.arg for kw in node.keywords}
-        assert "timeout_ms" in keywords, (
+        keyword = next((kw for kw in node.keywords if kw.arg == "timeout_ms"), None)
+        assert keyword is not None, (
             f"the call at sdk.py:{node.lineno} does not bind the read's budget, "
             f"so its record leg keeps the door's {DOOR_MS} ms bound")
+        # ⛔ `timeout_ms=` PRESENT IS NOT `timeout_ms=` BOUND (PR #13133 review F7).
+        # A site rewritten to the bare call spelled out — `timeout_ms=None` — is
+        # exactly the drift this pin exists for, and a membership test passes it:
+        # `None` is what leaves the door's 15 s in place.
+        assert not (isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is None), (
+            f"the call at sdk.py:{node.lineno} binds `timeout_ms=None`, which is "
+            f"the unbudgeted call written out: its record leg is back on the "
+            f"door's {DOOR_MS} ms inside a {BUDGET_MS} ms read, and nothing at "
+            f"runtime would say so")
 
 
 def sdk_module_file() -> str:
@@ -346,16 +442,27 @@ def sdk_module_file() -> str:
 # ── deliverable 2: the numbers are arithmetic on committed files ───────────
 
 def test_the_committed_measurement_prices_itself_from_pricing_json():
-    """Every dollar in the evidence doc re-derives from the two artifacts.
+    """Every dollar in the evidence ARTIFACT re-derives from `product/pricing.json`.
 
     ⛔ The same discipline `docs/evidence/9558-record-write-cost/README.md` states:
     *"every number here is arithmetic on a committed file"*. A figure typed into
-    the prose instead of derived from `measurement.json` × `product/pricing.json`
+    the artifact instead of derived from `measurement.json` × `product/pricing.json`
     is a number nobody can correct — and the rates are the owner's, so a hand-copy
     goes stale silently the day a rate moves. This pin recomputes the whole money
-    half from the two JSON files: the storage principal at BOTH published rates,
-    the per-tier flow at the volumes `pricing.json` itself lists, and the bytes
-    the production figure is scaled from.
+    half of `measurement.json` from the two JSON files: the storage principal at
+    BOTH published rates, the per-tier flow at the volumes `pricing.json` itself
+    lists, and the bytes the production figure is scaled from.
+
+    ⚠️ WHAT THIS DOES NOT READ, stated rather than implied (PR #13133 review P2):
+    `README.md`'s PROSE. The docstring used to say *"every dollar in the evidence
+    doc"*, which was wider than the read — the test opens `measurement.json` and
+    `pricing.json` and never `README.md`, so a figure retyped into the prose (the
+    `$0.029/month` / `+3.987 ms` / `39.07 MiB` family) can drift and this stays
+    green. Pinning prose figures means parsing prose: the shapes there are
+    formatted (`$0.0089`) rather than round-tripped, so a regex arm would pin the
+    formatting as much as the value. The narrower claim is the honest one; the
+    prose is derived from the artifact by the harness above, and a reader is told
+    which half is machine-checked.
     """
     import json
     import pathlib

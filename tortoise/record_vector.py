@@ -185,6 +185,43 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
 #: backfilled FIRST, not after.
 ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 
+#: How many bounded STATEMENTS the record leg may issue inside one read's budget,
+#: and therefore what the read's budget is divided by (#11691).
+#:
+#: ⛔ WHY THE LEG DOES NOT SIMPLY GET THE WHOLE BUDGET. ``statement_timeout``
+#: bounds EACH STATEMENT, not the transaction (Postgres semantics), and this leg
+#: may issue TWO of them: the kNN read, and — on the SHORT path, which is the
+#: COMMON one, because a live tenant legitimately holds fewer rows than the limit
+#: — the shortfall ``count(*)``. Handing each the read's full budget would let the
+#: leg spend 2x it. And even ONE statement at the full budget is too much, for a
+#: reason that is about the caller rather than the SQL: the fused read's collector
+#: (`search_engine.degradation_chain`) takes only futures that are ALREADY done
+#: when its own deadline expires and records the rest as ``reason="timeout"``,
+#: discarding their rows. The record leg's timer starts at the STATEMENT, which is
+#: strictly after the pool borrow, the connect and the two ``set_config`` round
+#: trips — so a leg bound to the whole budget is cancelled AT the deadline, the
+#: GRAPH branch that must answer after it has no time left, and the read still
+#: pays a ``timeout`` with no rows. With a third of the budget per statement, two
+#: statements spend at most two thirds and the remaining third is the reserve the
+#: graph fallback is answered from — which is what makes the named
+#: ``scan_fallback`` land INSIDE the read's budget instead of after it.
+RECORD_LEG_STATEMENTS_PER_READ = 3
+
+
+def record_statement_ms(read_budget_ms: int | None) -> int | None:
+    """The per-statement bound for this leg inside a read of ``read_budget_ms``.
+
+    ``None`` (an unbudgeted caller: health, replay, backup, restore — the reads
+    that legitimately take seconds) stays ``None``, which leaves the door's own
+    ceiling untouched. A budget is divided by
+    :data:`RECORD_LEG_STATEMENTS_PER_READ` and never rounds down to ``0``:
+    Postgres reads ``statement_timeout = 0`` as NO TIMEOUT AT ALL, so the floor is
+    1 ms and :func:`tortoise.record_serve.open_record` clamps again on its side.
+    """
+    if read_budget_ms is None:
+        return None
+    return max(1, int(read_budget_ms) // RECORD_LEG_STATEMENTS_PER_READ)
+
 
 class RecordVectorError(RuntimeError):
     """The record could not answer the dense leg. NOT an absence."""
@@ -419,9 +456,20 @@ def searcher(
     cap does not save the caller: one slow record query turned a 500 ms search
     into a multi-second one and the leg was recorded as ``timeout``, discarding a
     result it may have had. With the budget bound here the statement timeout is
-    ``min(RECORD_STATEMENT_TIMEOUT_MS, timeout_ms)``, so the query is cancelled
-    inside the read's budget, the graph branch answers, and the trace records the
-    NAMED fallback (``scan_fallback``) instead.
+    ``min(RECORD_STATEMENT_TIMEOUT_MS, record_statement_ms(timeout_ms))`` — the
+    door's ceiling, tightened, and then DIVIDED by
+    :data:`RECORD_LEG_STATEMENTS_PER_READ` — so the query is cancelled with part
+    of the read's budget still on the clock, the graph branch answers inside that
+    remainder, and the trace records the NAMED fallback (``scan_fallback``)
+    instead of a ``timeout`` with no rows.
+
+    ⚠️ ``timeout_ms`` IS THE READ'S BUDGET, NOT THE STATEMENT'S, and the
+    difference is not cosmetic: the leg may issue TWO bounded statements (the kNN
+    read and, on the short path, the shortfall ``count(*)``), so a budget applied
+    whole to each of them would let one leg spend twice the read. The division
+    happens in ONE place (:func:`record_statement_ms`), so the arithmetic that
+    keeps the fallback inside the deadline has a single home rather than a
+    constant copied into every caller.
 
     ``None`` (the default) leaves the door's own bound in place, unchanged — the
     reconstruction reads (health, replay, backup, restore) legitimately need
@@ -490,7 +538,7 @@ def vector_search(
     excluded_statuses: tuple | None = None,
     timeout_ms: int | None = None,
 ) -> list[tuple[str, float, Any]] | None:
-    """The kNN read — ONE statement, tenant-scoped, shortfall asserted.
+    """The kNN read — bounded per STATEMENT, tenant-scoped, shortfall asserted.
 
     THREE outcomes, and the third is the one that is easy to get wrong:
 
@@ -506,14 +554,25 @@ def vector_search(
     :class:`VectorShortfall` when it answered with fewer rows than the filter
     selects (so the caller reports an incomplete answer rather than a small one).
 
-    ``timeout_ms`` is the READ's budget (#11691). It is forwarded to
-    :func:`tortoise.record_serve.open_record`, which applies
-    ``min(RECORD_STATEMENT_TIMEOUT_MS, timeout_ms)`` — the door's ceiling
-    tightened, never widened. ``None`` keeps the door bound. A query cancelled by
-    it raises (``QueryCanceled``) and surfaces as :class:`RecordVectorError`, i.e.
-    the caller's NAMED graph fallback rather than a silent multi-second stall:
-    without the bound a slow record read ran to 15 s while the read's own cap was
-    500 ms, and the leg was then recorded as ``timeout`` with its rows discarded.
+    ``timeout_ms`` is the READ's budget (#11691) — not the statement's. It is
+    divided once (:func:`record_statement_ms`) and the quotient is what
+    :func:`tortoise.record_serve.open_record` applies, as
+    ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``: the door's ceiling, tightened,
+    never widened. ``None`` keeps the door bound. A query cancelled by it raises
+    (``QueryCanceled``) and surfaces as :class:`RecordVectorError`, i.e. the
+    caller's NAMED graph fallback rather than a silent multi-second stall: without
+    the bound a slow record read ran to 15 s while the read's own cap was 500 ms,
+    and the leg was then recorded as ``timeout`` with its rows discarded.
+
+    ⛔ TWO STATEMENTS, NAMED RATHER THAN IMPLIED. ``statement_timeout`` bounds
+    each statement, and the SHORT path below issues a SECOND one (the shortfall
+    ``count(*)``). That is why the read's budget is split into
+    :data:`RECORD_LEG_STATEMENTS_PER_READ` shares instead of being applied whole:
+    at most two statements spend at most two thirds of the read, and the last
+    third is what the graph branch answers from after a cancellation. Reducing
+    the leg to a single statement is not available — the shortfall assertion is
+    what stops a truncated kNN answer being rendered as a small corpus (§6.1) — so
+    the second statement is bounded by arithmetic rather than removed.
     """
     mapping = LABEL_SERVED.get(entity_type)
     if mapping is None:
@@ -552,8 +611,12 @@ def vector_search(
         # as it was before #11691 — no kwarg, the door's own bound — so the
         # unbudgeted path is byte-identical (and the pins that stub `open_record`
         # with a one-argument double stay honest about what the leg asks for).
+        # A budget is the READ's, so it is divided here and only the quotient
+        # reaches the door — see `record_statement_ms` for why (two statements,
+        # one deadline).
         conn = (open_record(record_dsn) if timeout_ms is None
-                else open_record(record_dsn, statement_timeout_ms=timeout_ms))
+                else open_record(record_dsn,
+                                 statement_timeout_ms=record_statement_ms(timeout_ms)))
     except Exception as e:  # noqa: BLE001, RUF100 — every failure is "the record did not answer"
         raise RecordVectorError(
             f"the record could not be opened ({type(e).__name__}) — the dense "
