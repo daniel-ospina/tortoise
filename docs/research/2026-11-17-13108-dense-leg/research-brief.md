@@ -176,8 +176,9 @@ the ratios below self-inconsistent — `#13121` round 7 F2).
 
 **This is where the external pass becomes evidence rather than background.** Our own
 measurement (§3.4) is **≈13.26 ms to scan 1,000 `:Object` vectors** — **≈71×** the literature's
-0.186 ms at the same size (**≈180×** once the two refused round trips are added back,
-13.26 + 20.17 = 33.43 ms, which is what the pre-fix read paid). So the cost we are paying is
+0.186 ms at the same size (**≈180×** once the two refused round trips are added back:
+13.26 + 20.17 = 33.43 ms of decomposed parts against the same artifact's **34.78 ms** whole-arm p50,
+i.e. within a run's own spread). So the cost we are paying is
 **not the algorithm's**: it is
 FalkorDB evaluating `vec.euclideanDistance` as a Cypher function per row and sorting the label. That reframes V3's option set — "get an index" and "make the scan not be a
 per-row interpreter call" both address this, and the second one does not touch the recorded
@@ -312,16 +313,20 @@ on one population under one load.
 
 | component | measured |
 |---|---|
+| the `:Object` PRE-FIX read (`nohint` — inventory forced to None) | **34.78 ms** — `arms["object[nohint]@c1"].latency_ms.p50` in `fix-1000-paired-at-rest.json`; this is the total the two rows below decompose, and what §3.1's 58.0 % is a share OF |
 | two refused `queryNodes` round trips | **20.17–20.28 ms** (`index_attempt[0].elapsed_ms`: 10.18 + 9.97 in `fix-1000-paired-at-rest.json`; 10.19 + 10.06 in `probe-1000-at-rest-and-concurrent.json`) |
 | the scan itself (`vec.euclideanDistance` over 1,000 rows + sort) | **13.26 ms** — the `hint` arm of `fix-1000-paired-at-rest.json` (`object[hint]@c1` p50), which is the same read with ONLY those two attempts removed |
 | the indexed control, same corpus, `nohint` (inventory forced to None = pre-#13108) | **20.88 ms** |
 | the indexed control, same corpus, `hint` (inventory supplied — the shipped path) | **21.00 ms** — a 0.12 ms difference, i.e. the hint is a no-op for an indexed label, as it must be |
 
 ⛔ **An earlier version of this table printed `the scan itself ≈23.45 ms` and a `10.11 + 10.05`
-split. Neither is in any committed artifact and the pair is arithmetically impossible beside a
-34.45 ms total (20 + 23.45 = 43.45).** `#13121` review round 5 (F3) caught it; the figures above
-are the artifact-backed decomposition, and the ratio derived from them elsewhere in this brief
-was restated with them.
+split. Neither is in any committed artifact, and the pair is arithmetically impossible beside the
+TOTAL it was offered for (20 + 23.45 = 43.45 > 34.78).** `#13121` review round 5 (F3) caught it;
+round 14 (finding 3) caught the second half — the yardstick it was checked against had itself changed
+RUNS: the earlier table quoted **34.45 ms**, which is `probe-1000-at-rest-and-concurrent.json`'s
+`:Object` p50, while its 20.17 ms and 13.26 ms came from `fix-1000-paired-at-rest.json` (whose own
+`:Object` p50 is the **34.78 ms** in the first row). This table is ONE run's decomposition, the
+artifact-backed one, and the ratio derived from it elsewhere in this brief was restated with it.
 
 ⇒ on an unindexed label, **most of the read is producing a known error**. That is the defect §5
 removes, and it is independent of whether an index is ever created.
