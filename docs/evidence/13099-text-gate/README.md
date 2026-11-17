@@ -221,7 +221,7 @@ pg_ts_rank       p-0000022  rank 1
 
 A document matching **two** of the query's seven terms outranks — by 2.17× — the document that
 matches **all seven**, because the two rare terms (`cap`, `dominated`, shared with a NEAR topic)
-carry more weight than six common ones. That is the shipped scorer's behaviour, not a harness
+carry more weight than five common ones. That is the shipped scorer's behaviour, not a harness
 artifact: both documents are `status=live` and pass the same product filter, and the compound is
 split identically on both sides (`cap-dominated` alone matches **0** documents; `dominated` matches
 the target first).
