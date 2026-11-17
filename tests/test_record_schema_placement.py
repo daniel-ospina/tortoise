@@ -1867,10 +1867,23 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
 #: so a `DROP CONSTRAINT IF EXISTS chk_…` and the prose that names the
 #: constraint (migration headers do) both miss — only a real declaration is
 #: captured.
-_PROPS_BAN_PIN_RE = re.compile(
-    r"(ADD\s+)?CONSTRAINT\s+chk_(\w+)_props_no_derived\s+CHECK\b(.{0,400})",
-    re.S | re.I,
+#: The constraint HEADER, deliberately with NO body in the pattern: the body is
+#: taken from the text that FOLLOWS each header, up to the NEXT header.
+#: ⛔ WHY (measured false pass, review of #13265 P2). The first form captured the
+#: body inline — `CHECK\b(.{0,400})` with `re.S` — and `finditer` resumes only
+#: after a WHOLE match, i.e. past those 400 characters. A re-declaration starting
+#: inside the previous one's window was therefore never matched, and the pin read
+#: the body it had already captured. On a three-declaration text (object, then
+#: subject, then subject SHRUNK to `ARRAY['status']`) the old pattern saw **0**
+#: subject declarations and the new one sees **2** — so the shrinking
+#: re-declaration went from invisible to in-force-and-red. Declarations in this
+#: tree sit ~200-600 characters apart, the same order as the window itself.
+_PROPS_BAN_PIN_HEADER_RE = re.compile(
+    r"(ADD\s+)?CONSTRAINT\s+chk_(\w+)_props_no_derived\s+CHECK\b",
+    re.I,
 )
+#: How far past a header its body can run when it has NO successor to stop at.
+_PROPS_BAN_BODY_CHARS = 400
 
 
 def props_ban_pins(text: str) -> dict[str, list[tuple[bool, str]]]:
@@ -1880,10 +1893,17 @@ def props_ban_pins(text: str) -> dict[str, list[tuple[bool, str]]]:
     DDL form was `ADD CONSTRAINT …` (a FORWARD re-declaration, which under
     append-only history SUPERSEDES the in-`CREATE TABLE` one) and False for a
     bare `CONSTRAINT … CHECK` inside a `CREATE TABLE` body.
+
+    ⚠️ A body ENDS AT THE NEXT DECLARATION, not at a fixed width — see
+    `_PROPS_BAN_PIN_HEADER_RE` for the measured false pass a fixed width produced.
     """
+    headers = list(_PROPS_BAN_PIN_HEADER_RE.finditer(text))
     pins: dict[str, list[tuple[bool, str]]] = {}
-    for m in _PROPS_BAN_PIN_RE.finditer(text):
-        pins.setdefault(m.group(2), []).append((bool(m.group(1)), m.group(3)))
+    for index, match in enumerate(headers):
+        stop = (headers[index + 1].start() if index + 1 < len(headers)
+                else len(text))
+        body = text[match.end():min(stop, match.end() + _PROPS_BAN_BODY_CHARS)]
+        pins.setdefault(match.group(2), []).append((bool(match.group(1)), body))
     return pins
 
 
@@ -1945,6 +1965,42 @@ def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col
         f"the LAST re-declaration of chk_{table}_props_no_derived no longer names "
         f"'{col}' — a later migration re-opened the name even though the column now "
         f"exists. Definition read: {definitions[-1]!r}")
+
+
+def test_a_redeclaration_that_FOLLOWS_another_closely_is_STILL_READ():
+    """A body capture that swallows the NEXT declaration is a false pass.
+
+    ⛔ MEASURED (review of #13265 P2). With the body captured inside the pattern
+    (`CHECK\b(.{0,400})`, `re.S`, greedy) `finditer` resumes past the whole
+    match, so a declaration starting inside the previous one's 400-character
+    window was never matched: on the text below the old pattern saw **0**
+    `subject` declarations (both sat inside the `object` one's window) and the
+    pin read whatever body it had already captured. With the third declaration
+    SHRINKING the ban to `ARRAY['status']`, that made the pin certify a
+    constraint the database no longer had — F8's failure one level down, where
+    the READ SET is right and the PARSER drops it.
+
+    The count is asserted as well as the last body, so a regression that
+    re-narrows the window to some other fixed width reds here.
+    """
+    text = (
+        "ALTER TABLE public.object ADD CONSTRAINT chk_object_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding']));\n"
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding']));\n"
+        "ALTER TABLE public.subject DROP CONSTRAINT IF EXISTS chk_subject_props_no_derived;\n"
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['status']));\n")
+    pins = props_ban_pins(text)
+    assert set(pins) == {"object", "subject"}, (
+        f"a declaration was swallowed by the one before it: {sorted(pins)}")
+    assert len(pins["subject"]) == 2, (
+        "only one chk_subject_props_no_derived was read although two are "
+        f"declared — the body capture is consuming the next header: {pins['subject']!r}")
+    assert "'embedding'" in pins["subject"][0][1]
+    assert "'embedding'" not in pins["subject"][-1][1], (
+        "the LAST (in-force) declaration no longer refuses 'embedding' and this "
+        f"read did not notice: {pins['subject'][-1][1]!r}")
 
 
 def test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table_one():

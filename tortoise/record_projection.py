@@ -3064,11 +3064,32 @@ GENERATED_COLUMNS: frozenset[str] = frozenset({
 #: volatile_property_is_ever_stored` is the capstone that demanded this: without
 #: it the column alone made a carried `embedding` storable as authority.
 #:
-#: ⚠️ `event`/`source` are NOT here, and that is not an oversight: their
-#: `embedding` is a PRIMARY property the journal DOES carry (`#5004`'s stamp, a
-#: caller's vector through `add_event(**extra)`), so a carried value is a value
-#: the graph also honours — refusing it there would make the record poorer than
-#: the history (Interface A's failure).
+#: ⚠️ `event`/`source` are NOT here, and that is not an oversight — but this is
+#: TWO different reasons, and stating one for both was false for the second
+#: (review of #13265 P3, verified in the fold):
+#:
+#:   * **`event`** — a PRIMARY property the journal DOES carry (`#5004`'s stamp,
+#:     a caller's vector through `add_event(**extra)`) and `_upsert_event`
+#:     HONOURS it (`embedding = inner.get("embedding")`), so refusing it here
+#:     would make the record poorer than the history (Interface A's failure).
+#:     `derived_embedding_columns` closes the other side: `EventRecorded` derives
+#:     NOTHING when the record already carries a vector, so the two routes cannot
+#:     disagree.
+#:   * **`source`** — the same NAME, a different property. `_upsert_source`
+#:     computes no vector at all and `_upsert_document` derives one
+#:     unconditionally from `title`+`content` WITHOUT ever reading a carried
+#:     `embedding`, so no `:Source` writer honours one and a `source.embedding` is
+#:     not "record-truth the graph also holds".
+#:     ⚠️ CONSEQUENCE, stated because nothing pins it: for a `DocumentCreated`
+#:     record the derived binding runs AFTER the split (`col_values[column] =
+#:     value` in `_declared_mutations`), so a CARRIED `source.embedding` is
+#:     OVERWRITTEN by the derived vector on the derived route — the value the
+#:     graph holds, so that route is the parity-correct one — while a replay that
+#:     passes NO `derived` (today: `tools/record_runner.py`) keeps the carried
+#:     value: one journal line, two different `public.source.embedding` values
+#:     depending on route. Deriving is the right side to be on; making the
+#:     no-derived route agree is the `record_runner` half of the follow-up the
+#:     migration header names.
 DERIVED_COLUMNS: dict[str, frozenset[str]] = {
     "object": frozenset({"embedding"}),
     "subject": frozenset({"embedding"}),

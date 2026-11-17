@@ -150,14 +150,35 @@ def point_rows(tenant):
 
 @pytest.fixture(autouse=True)
 def _clean_tenant(schema):
-    """Every test starts from a known tenant, and leaves none behind."""
+    """Every test starts from a known tenant, and leaves none behind.
+
+    ⛔ THE SWEEP RUNS BEFORE **AND AFTER** THE TEST. Only the leading half was
+    here, so the docstring promised a teardown the fixture did not do: #13220's
+    test left `object=2 subject=2` behind, measured after the whole file ran on a
+    virgin `pgvector/pgvector:pg16` (review of #13265 P2) — and
+    `test-record-postgres` runs these files in ONE container, so a row that
+    survives here is ambient state the next file can pass on.
+
+    ⛔ `object`/`subject` are swept because that test writes them (the tuple only
+    ever named the two tables the point tests used). ⛔ The rollback is because
+    the test ends on a NEGATIVE CONTROL — an `INSERT` the props CHECK refuses —
+    which leaves the transaction aborted, and a plain `DELETE` in teardown would
+    raise InFailedSqlTransaction instead of cleaning.
+    """
     conn = schema
-    with conn.cursor() as cur:
-        for table in ("point", "node_identity"):
-            cur.execute(
-                f"DELETE FROM public.{table} WHERE org_id=%s AND graph_id=%s",
-                (ORG, GRAPH))
+
+    def _sweep() -> None:
+        conn.rollback()
+        with conn.cursor() as cur:
+            for table in ("point", "node_identity", "object", "subject"):
+                cur.execute(
+                    f"DELETE FROM public.{table} WHERE org_id=%s AND graph_id=%s",
+                    (ORG, GRAPH))
+        conn.commit()
+
+    _sweep()
     yield
+    _sweep()
 
 
 def _unit(hot: int) -> list[float]:
