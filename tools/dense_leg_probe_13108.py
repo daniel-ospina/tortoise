@@ -107,6 +107,11 @@ if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import-path bootstrap
 #: The production budget this issue is about (`search_engine.py`:2832 / :4673).
 DEFAULT_TIMEOUT_MS = 500
 
+#: entity_type -> the label `security.entity_label` resolves it to (the census's
+#: own translation, restated here only for the probe's printouts).
+LABEL_BY_ENTITY = {"object": "Object", "point": "Point", "subject": "Subject",
+                   "event": "Event", "source": "Source", "document": "Source"}
+
 #: `#4999`'s mechanism vocabulary, restated here as the CLOSED set a sample may
 #: report — so a mechanism this tool has never seen REFUSES the arm
 #: (:class:`UnknownMechanism`) instead of joining a silent bucket.
@@ -254,18 +259,29 @@ def seed(sdk, population: int, sessions_dir: str) -> dict:
         "RETURN o.id, o.name, o.embedding", params={}).result_set
     written = 0
     vectors = 0
+    batch: list[dict] = []
     for oid, name, emb in rows:
         if emb is None:
             continue
         vectors += 1
-        pid = "pt-" + oid[4:]
-        proj.g.query(
-            "MERGE (p:Point {id: $id}) SET p.name = $name, p.embedding = vecf32($e)",
-            params={"id": pid, "name": name, "e": list(emb)})
-        written += 1
+        batch.append({"id": "pt-" + oid[4:], "name": name, "e": list(emb)})
+        if len(batch) >= 500:
+            written += _write_point_batch(proj.g, batch)
+            batch = []
+    if batch:
+        written += _write_point_batch(proj.g, batch)
     return {"names": [r["name"] for r in pop], "objects": len(rows),
             "points": written, "vectors": vectors,
             "harvest_stats": dict(harvest_stats)}
+
+
+def _write_point_batch(graph, batch: list[dict]) -> int:
+    """``UNWIND`` the mirror rows — one round trip per 500, not per row."""
+    graph.query(
+        "UNWIND $rows AS row MERGE (p:Point {id: row.id}) "
+        "SET p.name = row.name, p.embedding = vecf32(row.e)",
+        params={"rows": batch})
+    return len(batch)
 
 
 def probe_index_attempt(graph, query_vec, label: str, limit: int,
@@ -384,7 +400,8 @@ def label_census(sdk) -> dict:
 # ── the measurement ─────────────────────────────────────────────────────────
 
 def _vector_query_once(graph, query_vec, entity_type: str, limit: int,
-                       timeout_ms: int) -> dict:
+                       timeout_ms: int,
+                       vector_indexed_labels=None) -> dict:
     """ONE shipped dense read, with its trace: mechanism + latency + outcome."""
     from tortoise.search_engine import (
         VECTOR_MECHANISM_KEY,
@@ -397,7 +414,9 @@ def _vector_query_once(graph, query_vec, entity_type: str, limit: int,
     try:
         rows = run_vector_query(graph, query_vec, limit=limit,
                                 timeout_ms=timeout_ms, is_embedded=False,
-                                entity_type=entity_type, leg_trace=trace)
+                                entity_type=entity_type, leg_trace=trace,
+                                **({"vector_indexed_labels": vector_indexed_labels}
+                                   if vector_indexed_labels is not None else {}))
     except Exception as e:  # a raised leg is a SAMPLE, not a crash
         raised = f"{type(e).__name__}: {e}"
     elapsed = (time.monotonic() - start) * 1000.0
@@ -422,7 +441,7 @@ def _vector_query_once(graph, query_vec, entity_type: str, limit: int,
 
 
 def measure(graph, query_vec, entity_type: str, reads: int, concurrency: int,
-            limit: int, timeout_ms: int) -> dict:
+            limit: int, timeout_ms: int, vector_indexed_labels=None) -> dict:
     """``reads`` dense reads at ``concurrency`` real threads.
 
     Concurrency is the honest load lever for THIS bug: the shipped read runs its
@@ -443,7 +462,8 @@ def measure(graph, query_vec, entity_type: str, reads: int, concurrency: int,
         try:
             for _ in range(n):
                 local.append(_vector_query_once(graph, query_vec, entity_type,
-                                                limit, timeout_ms))
+                                                limit, timeout_ms,
+                                                vector_indexed_labels))
         except BaseException as e:
             # ⛔ A raised sample is recorded on the worker's own thread and turned
             # into a refused arm below. Letting anything escape a thread is how
@@ -472,6 +492,102 @@ def measure(graph, query_vec, entity_type: str, reads: int, concurrency: int,
     out["concurrency"] = concurrency
     out["samples"] = sorted(samples, key=lambda s: s["elapsed_ms"])
     return out
+
+
+# ── the eval's own window, run concurrently ─────────────────────────────────
+
+def measure_windows(sdk, names: list[str], concurrency: int, limit: int,
+                    timeout_ms: int) -> dict:
+    """The EVAL'S OWN window (`tools/candidate_recall_11901.py`), run at concurrency.
+
+    One window = the shipped read at ``limit`` + `#2952`'s STRICT predicate
+    (:func:`tortoise.search_engine.require_hybrid_read`) over its trace — the
+    exact pair the eval's ``window()`` uses, so a mode share measured here is
+    the same quantity as the artifact's ``window_modes``.
+
+    ⛔ The eval runs its windows SEQUENTIALLY, so it presents the graph with one
+    read at a time. A capture fleet does not: many entities are in flight at
+    once and they share one store. That is the difference this arm exists to
+    measure — and it is measured, not asserted: the same code, the same corpus,
+    the same predicate, only the concurrency differs.
+    """
+    from tortoise.exceptions import HybridReadUnavailableError
+    from tortoise.extractor_v2 import _sanitise_query_text
+    from tortoise.search_engine import require_hybrid_read
+
+    modes = collections.Counter()
+    reasons = collections.Counter()
+    mechanisms = collections.Counter()
+    lat: list[float] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(concurrency)
+    per_thread = [len(names) // concurrency + (1 if i < len(names) % concurrency
+                                                else 0)
+                  for i in range(concurrency)]
+
+    def worker(n: int, offset: int) -> None:
+        barrier.wait()
+        local_modes: collections.Counter = collections.Counter()
+        local_reasons: collections.Counter = collections.Counter()
+        local_mech: collections.Counter = collections.Counter()
+        local_lat: list[float] = []
+        for i in range(offset, offset + n):
+            trace: list[dict] = []
+            t0 = time.monotonic()
+            try:
+                sdk.tortoise_fts_query(
+                    _sanitise_query_text(names[i % len(names)]),
+                    entity_type="object", limit=limit, include_terminal=True,
+                    _record_reads=False, _valid_time_rerank=False,
+                    leg_trace=trace)
+            except Exception as e:  # a raised read is a SAMPLED failure
+                local_reasons[f"raised:{type(e).__name__}"] += 1
+                local_modes["keyword_only"] += 1
+                local_lat.append((time.monotonic() - t0) * 1000.0)
+                continue
+            local_lat.append((time.monotonic() - t0) * 1000.0)
+            for entry in trace or []:
+                if entry.get("leg") == "vector":
+                    local_mech[str(entry.get("mechanism"))] += 1
+                    local_reasons[str(entry.get("reason"))] += 1
+            try:
+                require_hybrid_read(trace)
+            except HybridReadUnavailableError:
+                local_modes["keyword_only"] += 1
+            else:
+                local_modes["hybrid"] += 1
+        with lock:
+            modes.update(local_modes)
+            reasons.update(local_reasons)
+            mechanisms.update(local_mech)
+            lat.extend(local_lat)
+
+    threads, offsets = [], 0
+    for n_in in per_thread:
+        threads.append(threading.Thread(target=worker, args=(n_in, offsets),
+                                        daemon=True))
+        offsets += n_in
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    total = modes.get("hybrid", 0) + modes.get("keyword_only", 0)
+    return {
+        "concurrency": concurrency,
+        "windows": total,
+        "window_modes": dict(sorted(modes.items())),
+        "keyword_only_share": (round(modes.get("keyword_only", 0) / total, 4)
+                               if total else None),
+        "vector_reason": dict(sorted(reasons.items())),
+        "vector_mechanism": dict(sorted(mechanisms.items())),
+        "latency_ms": {
+            "p50": percentile(lat, 50),
+            "p95": percentile(lat, 95),
+            "p99": percentile(lat, 99),
+            "max": max(lat) if lat else None,
+        },
+    }
 
 
 # ── the box's own state (a load figure with no context is not a measurement) ─
@@ -569,12 +685,15 @@ def run(args: argparse.Namespace) -> int:
         return 3
     query_vec = list(rows[0][0])
 
-    index_attempts = [probe_index_attempt(graph, query_vec,
-                                        {"object": "Object", "point": "Point",
-                                         "subject": "Subject", "event": "Event",
-                                         "source": "Source"}.get(t, "Point"),
-                                        args.limit, args.timeout_ms)
-                      for t in args.labels]
+    index_attempts = [probe_index_attempt(
+        graph, query_vec, LABEL_BY_ENTITY.get(t, "Point"), args.limit,
+        args.timeout_ms) for t in args.labels]
+
+    # The projection's OWN measured inventory (`_record_vector_index_inventory`):
+    # the served labels ∩ the engine's VECTOR-indexed labels. This is the set the
+    # `#4997` notice is derived from, so the hint can never be staler than the
+    # line an operator reads.
+    indexed = getattr(sdk._get_proj(), "_vector_indexed_labels", None)
 
     arms: dict = {}
     for entity_type in args.labels:
@@ -585,22 +704,86 @@ def run(args: argparse.Namespace) -> int:
                     procs = spawn_external_load(args.external_load)
                     time.sleep(args.load_warmup_s)
                 load = box_load()
-                arm = measure(graph, query_vec, entity_type, args.reads, conc,
-                              args.limit, args.timeout_ms)
-                arm["load"] = load
-                arm["external_load_procs"] = len(procs)
-                arms[f"{entity_type}@c{conc}"] = arm
-                print(f"\n== {entity_type} @ concurrency {conc} "
-                      f"(load {load['loadavg']}/{load['cpus']} cpus, "
-                      f"{len(procs)} external embedder procs) ==")
-                print(f"  mechanism {arm['mechanism']}  reason {arm['reason']}")
-                print(f"  latency_ms p50 {arm['latency_ms']['p50']} "
-                      f"p95 {arm['latency_ms']['p95']} "
-                      f"p99 {arm['latency_ms']['p99']} "
-                      f"max {arm['latency_ms']['max']}")
-                print(f"  over {args.timeout_ms}ms: {arm['over_budget']}"
-                      f"/{arm['n']}  degraded: {arm['degraded']}"
-                      f"  zero-rows: {arm['count']['zero_rows']}")
+                label = LABEL_BY_ENTITY.get(entity_type, "Point")
+                hints = {"hint": indexed}
+                if args.compare_hint:
+                    hints["nohint"] = None
+                for hint_name, hint in hints.items():
+                    arm = measure(graph, query_vec, entity_type, args.reads,
+                                  conc, args.limit, args.timeout_ms, hint)
+                    arm["load"] = load
+                    arm["external_load_procs"] = len(procs)
+                    arm["index_hint"] = (sorted(hint) if hint is not None
+                                         else None)
+                    arm["label"] = label
+                    key = f"{entity_type}[{hint_name}]@c{conc}"
+                    arms[key] = arm
+                    print(f"\n== {entity_type} [{hint_name}] @ concurrency "
+                          f"{conc} (load {load['loadavg']}/{load['cpus']} cpus, "
+                          f"{len(procs)} external embedder procs) ==")
+                    print(f"  mechanism {arm['mechanism']}  "
+                          f"reason {arm['reason']}")
+                    print(f"  latency_ms p50 {arm['latency_ms']['p50']} "
+                          f"p95 {arm['latency_ms']['p95']} "
+                          f"p99 {arm['latency_ms']['p99']} "
+                          f"max {arm['latency_ms']['max']}")
+                    print(f"  over {args.timeout_ms}ms: {arm['over_budget']}"
+                          f"/{arm['n']}  degraded: {arm['degraded']}"
+                          f"  zero-rows: {arm['count']['zero_rows']}")
+            finally:
+                stop_external_load(procs)
+
+    # ── the eval's own window, at concurrency (the issue's `window_modes`) ──
+    windows: dict = {}
+    if args.windows:
+        names = ([r["name"] for r in seeded["names"]] if seeded
+                 else [])
+        if not names:
+            names = [r[0] for r in graph.query(
+                "MATCH (o:Object) WHERE o.id STARTS WITH 'obj-13108' "
+                "RETURN o.name ORDER BY o.id", params={}).result_set]
+        names = names[:args.windows]
+        for conc in args.concurrency:
+            # ⛔ THE LOAD MUST BE ALIVE DURING THE WINDOWS TOO. Measured the hard
+            # way: an earlier version stopped the external load before this loop,
+            # so the `window_modes` split was taken on an idle box while the arms
+            # above it were taken under load — two different machines in one table.
+            procs: list[subprocess.Popen] = []
+            try:
+                if args.external_load:
+                    procs = spawn_external_load(args.external_load)
+                    time.sleep(args.load_warmup_s)
+                load = box_load()
+                # `hint` = the shipped read (projection's measured inventory);
+                # `nohint` = the SAME read with the inventory forced to None,
+                # which IS the pre-#13108 behaviour (None = "not measured →
+                # attempt as before"). One process, one box, one load.
+                variants = {"hint": indexed}
+                if args.windows_compare_hint:
+                    variants["nohint"] = None
+                for hint_name, hint in variants.items():
+                    proj = sdk._get_proj()
+                    restore = getattr(proj, "_vector_indexed_labels", None)
+                    proj._vector_indexed_labels = hint
+                    try:
+                        arm = measure_windows(sdk, names, conc, args.limit,
+                                              args.timeout_ms)
+                    finally:
+                        proj._vector_indexed_labels = restore
+                    arm["load"] = load
+                    arm["external_load_procs"] = len(procs)
+                    arm["index_hint"] = (sorted(hint) if hint is not None
+                                         else None)
+                    windows[f"windows[{hint_name}]@c{conc}"] = arm
+                    print(f"\n== eval windows [{hint_name}] @ concurrency "
+                          f"{conc} (load {load['loadavg']}/{load['cpus']} cpus, "
+                          f"{len(procs)} external procs) ==")
+                    print(f"  {arm['window_modes']}  keyword-only share "
+                          f"{arm['keyword_only_share']}")
+                    print(f"  vector reason {arm['vector_reason']}")
+                    print(f"  latency_ms p50 {arm['latency_ms']['p50']} "
+                          f"p95 {arm['latency_ms']['p95']} "
+                          f"max {arm['latency_ms']['max']}")
             finally:
                 stop_external_load(procs)
 
@@ -624,6 +807,7 @@ def run(args: argparse.Namespace) -> int:
         "box": box_load(),
         "census": census,
         "index_attempt": index_attempts,
+        "windows": windows,
         "seed": seeded,
         "arms": arms,
     }
@@ -644,10 +828,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=3,
                    help="the capture prior's own window")
     p.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS)
+    p.add_argument("--compare-hint", action="store_true",
+                   help="also measure each arm WITHOUT the measured index "
+                        "inventory — the paired before/after of #13108's fix")
     p.add_argument("--labels", default="object,point",
                    help="entity types to measure (object=unindexed, point=indexed)")
     p.add_argument("--external-load", type=int, default=0,
                    help="real embedder processes to run during the arm")
+    p.add_argument("--windows-compare-hint", action="store_true",
+                   help="run the window arm twice — with the measured inventory "
+                        "and with it forced to None (pre-#13108 behaviour) — "
+                        "under ONE load, so the pair is matched")
+    p.add_argument("--windows", type=int, default=0,
+                   help="also run N of the EVAL'S OWN windows at each --concurrency "
+                        "(the `window_modes` split, on the real read path)")
     p.add_argument("--load-warmup-s", type=float, default=20.0)
     p.add_argument("--sessions-dir", default="~/.tortoise/session-events")
     p.add_argument("--namespace", default="dense13108")
