@@ -2281,7 +2281,7 @@ renumbering the tail, exactly as the gap at 36 was.
 point deny set is the wrong instrument for `story_arc`: it said adding the key "would make a
 `rebuild_all` DELETE the property from every legacy `:Point`, which is a graph-side `REMOVE n.story_arc`
 that NO instrument ships today". `_POINT_DENY` is a skip set consumed by `_persist_extra_props`, which
-omits denied keys and issues only `SET n += $extra` — nothing derives a `REMOVE`/`DELETE` from it. The
+omits denied keys and issues `SET n += $extra` (plus any caller-supplied `SET` clauses spliced beside it) — nothing derives a `REMOVE`/`DELETE` from it. The
 mechanism the bullet now states: a deny set cannot bound the destruction this tree documents (the
 whole-graph restore wipe), while a graph-side clear **does** ship, row-scoped —
 `update_point(<id>, story_arc=None)` (`#11325`). The bullet's citations were `file.py:NNNN`, the form

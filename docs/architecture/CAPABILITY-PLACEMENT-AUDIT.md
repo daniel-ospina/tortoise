@@ -61,8 +61,9 @@ re-derivable. ⛔ **No count of the rows that "carry a handle" is quoted here on
 on whether a bare module name counts as one, and it has already been read three different ways (15, 14 and
 13 of the 18 rows in §1). What IS checkable is the five rows carrying no re-findable handle at all: rows
 10 (`residency.py:284`), 11 (`why_snapshot.py:484`) and 14 (`webhook_delivery.py:487`) give a number and
-nothing else; row 15 gives bare module names beside `hosted_api:32965`, which is not even a `path.py`
-spelling; and row 18 declares itself `found, NOT censused` — a GAP, see §7. Those five drift silently and
+nothing else; row 15 gives bare module names beside `hosted_api:32965` and one bare `pack_manifest_store.py:467`
+— neither cite a re-findable handle; and row 18 declares itself `found, NOT censused` — a GAP, see §7. Those
+five drift silently and
 no symbol will be there to re-find: for them the number IS the citation, and it is stale on any head but
 this one. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
 Cypher — but the row's own WRITE cite is not.) Re-derive each cite from the text
