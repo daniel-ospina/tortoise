@@ -454,7 +454,7 @@ justification. **Verdict: `graph`.**
 | reader (`file:line`) | what it does | capability |
 |---|---|---|
 | `tortoise/event_store.py:991-993` (`read_after`, whose `def` is `:922`) | `e.seq > $after` **ordered range scan**, optional type filter, `LIMIT`/dedupe | **none** |
-| `tortoise/event_store.py:645`, `:1105` | `min(e.seq)` / `max(e.seq)` over `:GraphEvent` — aggregates | **none** |
+| `tortoise/event_store.py:645`, `:1105` | `:645` is `MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)` (both aggregates); `:1105` is the `min(e.seq)` half of the `:1103-1110` RMW | **none** |
 | `tortoise/event_store.py:801`, `:879` | per-page key existences inside the emit path | **none** |
 | `tortoise/event_store.py:1043` | `MATCH (n:GraphEvent) RETURN count(n)` — the overflow path's whole-label total, counted BEFORE `purge_overflow` (`:1038`) decides the excess. An aggregate, not a key existence and not a delete; the two purge deletes are `:1029`/`:1053`, on the row below | **none** |
 | `tortoise/event_store.py:1029` (`purge_expired`) / `:1053` (`purge_overflow`) | predicate deletes — `WHERE n.ts < $cutoff` and `ORDER BY n.seq ASC LIMIT $overflow` + `DETACH DELETE` (the **def** lines are `:1014`/`:1038`) | **none** |
@@ -792,7 +792,7 @@ eviction policy — that is `#13084` and P0-c.
 | precondition | shapes it blocks | what unblocks it |
 |---|---|---|
 | **no record table** → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the eleven other bookkeeping labels | a record home, then `cache_tier` (§5.2) |
-| **a policy pin** → the declaration is refused although the seam would honour it | `point.story_arc` **and** `Point.mentions` (§3 row 14) — ONE precondition, TWO shapes | `#10429`: widen the completeness pin with a tail-only category (§5.1). ⚠️ The pin asserts the WHOLE dict (`tests/test_cache_projection.py:186-195` compares `{source, event}` to `CACHE_FORBIDDEN_COLUMNS`), so it refuses any new entry regardless of label — which is why it blocks both shapes and why naming only `story_arc` here was an error |
+| **a policy pin** → the declaration is refused although the seam would honour it | `point.story_arc` **and** `Point.mentions` (§3 row 14) — ONE precondition, TWO shapes | `#10429`: widen the completeness pin with a tail-only category (§5.1). ⚠️ What refuses any new entry regardless of label is the *exact-dict* pin, not the completeness pin (`tests/test_cache_projection.py:186-195` compares `{source, event}` to the WHOLE `CACHE_FORBIDDEN_COLUMNS`) — which is why it blocks both shapes and why naming only `story_arc` here was an error |
 | **a record table but no tier COLUMN** → having a row is not having a tier | every non-`:Point` label whose move is **whole-label** (none in this census — §3 rows 1/4/5/6/8 all read a capability and are all `graph`; §1's record-table column is NOT a move criterion, and reading it as one is the error this cell corrects) | a `cache_tier` column (one migration per label) **plus** the `if table == "point"` arm at `cache_projection.py:3633` widened; ⚠️ this does **not** unblock row 7b, which is a **property-level** move the row-level tier cannot express (§6.1) |
 
 None of these is a census failure. Each is the mechanism's **precondition**, named so the next slice is executable
@@ -867,8 +867,7 @@ contrast.)
   read inside a `SET` (`sdk.py:4018-4021`); `capture_ok`/`capture_extractor`/`capture_lane` by both of those
   reads and by the retrofit audit's `RETURN`; and
   `draft_count`/`commit_count` are read inside that same commit-statement `SET`
-  (`hosted_api.py:22237-22240`). The four siblings are named across three more reads, each time as a SIBLING — `entity_links_attempted` by the
-retrofit audit alone:
+  (`hosted_api.py:22237-22240`). The four siblings are named across three reads — `entity_links_attempted` by the retrofit audit alone:
   the session LIST (`hosted_api.py:23958`, `:23959`, `:23965`, `:23969`), the retrofit audit
   (`session_schema.py:860-861`, `:916-917`) and the session-DETAIL point lookup (`sdk.py:52227-52251`);
   `harness`'s NAMED readers are the filter-and-counts at `hosted_api.py:25703`/`:25708` **plus four id-keyed
