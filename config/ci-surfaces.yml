@@ -359,8 +359,12 @@ surfaces:
   # without this arm such a diff selects `api`+`onboarding` and never runs the
   # guard — the #1349/#2938/#3154 silent-drop class. The `core` arm (lower in
   # this file, the row #13141 registered) covers a `tortoise/live.py`-only
-  # diff, where the rule itself changes. DB-free: the endpoint pin drives
-  # the route against a fresh embedded SDK, no server and no docker.
+  # diff, where the rule itself changes. ⛔ WHICH pin actually runs here: the
+  # §5 CENSUS pin is DB-free and is the one that guards a `hosted_api.py`-only
+  # PR — measured on the URI-less tier-2 leg, the whole file is `23 passed,
+  # 90 skipped`. The endpoint pin does NOT run there: `_fresh_sdk()` sets
+  # `sdk._db_uri = _live_utils.docker_uri(GRAPH)` with `db_path=None`, so it
+  # needs a live Docker FalkorDB and SKIPS without one.
   - test_13034_currency_rule_reads_position.py
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it

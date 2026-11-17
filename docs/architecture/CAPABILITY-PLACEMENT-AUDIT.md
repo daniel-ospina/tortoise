@@ -50,9 +50,14 @@ written and reviewed at (its merge of `origin/main` `c4f6170cc302`). Open them t
 they drift **by construction**: a `main` integration that inserts a line above a cited site moves every
 cite below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
 52 of this document's 163 `file:line` pairs no longer name the same line, and not one of them names a
-symbol that went away. So the **symbol** is the citation and the number is a convenience: re-derive the
-line from the symbol rather than trusting the number, which is the rule §9.1 of
-`STORAGE-ARCHITECTURE.md` applies to its own cites. The **byte** figures do not drift this way: they
+symbol that went away. ⛔ **That is a fact about the drift, not a licence to re-derive from a symbol.**
+Most rows do carry a handle — the writer named beside the cite, or the Cypher quoted on it (29 of the
+32 census rows) — and that handle is what makes the line re-derivable. But **three rows carry the
+number and nothing else** (row 10 `residency.py:284`, row 11 `why_snapshot.py:484`, row 14
+`webhook_delivery.py:487`), so those drift silently and no symbol will be there to re-find: for them
+the number IS the citation, and it is stale on any head but this one. Re-derive each cite from the text
+its own row carries, which is the rule §9.1 of `STORAGE-ARCHITECTURE.md` applies to its own cites.
+The **byte** figures do not drift this way: they
 are re-derivable from the committed JSON arms at any head (§1.1, §4).
 
 ---
