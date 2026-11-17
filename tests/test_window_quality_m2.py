@@ -47,6 +47,7 @@ sys.path.insert(0, str(ROOT))
 
 from tools.window_quality_m2 import (  # noqa: E402
     DEEP_LIMIT,
+    _signal_available,
     EVICT_SEED_OFFSET,
     ID_PREFIX,
     KS,
@@ -321,12 +322,60 @@ def test_the_artifact_records_a_keyword_only_lexical_run(artifact):
 
 
 def test_the_artifact_records_that_the_loss_carries_no_signal(artifact):
-    """§5 Q2 is violated by construction, and the record's claim rests on this."""
+    """§5 Q2 is violated by construction, and the record's claim rests on this.
+
+    ⛔ The four claims that carry the "**and it is silent**" half of the verdict
+    were read by NOTHING (#13126 round 4): starting `_fts_rows` to pass
+    `read_status_out`, flipping `TORTOISE_RESIDENCY` on, marking `whole-graph` as
+    SERVED in `record_serve`, or landing a §7 reason string in the tree each left
+    52 green. The record's `signal` block is *supposed* to move when the code
+    moves — the instrument's own docstring promises "Resolved from the CODE, not
+    asserted, so a later change that wires a signal moves this field instead of
+    leaving the doc claiming silence forever" — but the field cannot move, because
+    the committed artifact is never regenerated and nothing reds. So the ARTIFACT
+    is compared to what `_signal_available()` resolves TODAY: the day a signal is
+    wired, this reds and the record is corrected in that PR.
+    """
     assert artifact["signal"] == {
         "capture_prior_read_status": False,
         "capture_prior_truncation": False,
         "residency_marker_armed": False,
     }
+    assert artifact["signal"] == _signal_available(), (
+        "the code now resolves a different silence state than the committed "
+        "artifact records — a signal has been wired (or removed), so the record's "
+        "'and it is silent' half and §1.5's justification must be re-derived")
+
+
+def test_the_silence_claims_are_bound_to_the_code_that_makes_them():
+    """The ARCHITECTURAL half of "and it is silent", which prose cannot keep true.
+
+    ⛔ Same class, measured green under mutation (#13126 round 4): flipping
+    `record_serve.ANCHORED_READS["whole-graph"]` to SERVED, or landing either of
+    §7's two reason strings anywhere in the tree, redded nothing. §9.1's crux is
+    that a demoted candidate has no record-served set read to repair from, and
+    route 3 in the record prices the work as "the two §7 reason strings, the
+    residency marker armed, and a record-served text read" — so a reader deciding
+    whether to arm the window is reading these three facts.
+    """
+    import tortoise.record_serve as record_serve
+
+    status = record_serve.ANCHORED_READS["whole-graph"]
+    status = getattr(status, "status", status)
+    assert status is record_serve.NOT_SERVED or status == record_serve.NOT_SERVED, (
+        f"`whole-graph` is now {status!r} in record_serve — if a record-served set "
+        f"read exists, §9.1's 'no set read to repair from' and the record's route 3 "
+        f"both change; correct them in that PR")
+    # …and the two reason strings §7 requires still appear NOWHERE in the tree.
+    reason_strings = ("truncated_boundary", "insufficient_graph")
+    offenders = sorted(
+        f"{path.relative_to(ROOT)}" for path in (ROOT / "tortoise").rglob("*.py")
+        if any(s in path.read_text(encoding="utf-8", errors="ignore")
+               for s in reason_strings))
+    assert not offenders, (
+        f"a §7 reason string now appears in {offenders} — the record's Finding 5 "
+        f"('the two reason strings appear nowhere in the tree') is stale, and §7's "
+        f"signal requirement is closer than the record says")
 
 
 def test_no_arm_returns_a_demoted_node(artifact):
@@ -1763,6 +1812,23 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
     params = artifact["params"]
     pb = artifact["corpus"]["point_build"]
 
+    # ⛔ The quantity the record NOMINATES as load-bearing — "the strong form of
+    # (1) and the one the verdict rests on" — is quoted in five places and was
+    # bound by nothing: `0.0` -> `0.1` everywhere left 52 green (#13126 round 4).
+    # The artifact cannot move (a dedicated test pins it), so a stale PROSE copy
+    # was the whole exposure, and it reads as "the window leaks" rather than
+    # "the window costs".
+    demoted_rates = {
+        a["found_deep_of_demoted"]
+        for arm, a in list(obj.items()) + list(pt.items())
+        if arm != "complete"
+    }
+    assert demoted_rates == {0.0}, demoted_rates
+    demoted = f"{0.0:.1f}"
+    # the `:Point` `empty` census, in the two spellings the other documents use
+    pt_arms_n = len(pt_arms)
+    pt_population = artifact["populations"]["point"]
+
     rows = [
         # (document, fragment as the document states it, what it must derive from)
         (readme, tail, "the `:Object` tail series (found@deep, coverage 0.9→0.1)"),
@@ -1826,6 +1892,29 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
          "corpus.point_build unattributed (= requested - built)"),
         (readme, "It is **not** provenance evidence",
          "the provenance block is a drift control, not production evidence"),
+        (readme, f"--seed` ({params['seed']})",
+         "artifact.params.seed (the recipe's own seed)"),
+        # ── round 4 ────────────────────────────────────────────────────────
+        (readme, f"`found_deep_of_demoted` is **{demoted}** in every **windowed**",
+         "every windowed arm's found_deep_of_demoted"),
+        (readme, f"so its {demoted} is arithmetic, not",
+         "the complete `:Point` arm's zero denominator"),
+        (arch, f"`found_deep_of_demoted` is {demoted} in every **windowed** arm",
+         "every windowed arm's found_deep_of_demoted"),
+        (arch, f"so its {demoted} is a zero denominator",
+         "the complete arm's zero denominator"),
+        (changelog, f"`found_deep_of_demoted` is {demoted} in every **windowed**",
+         "every windowed arm's found_deep_of_demoted"),
+        (readme, f"`:Point` `empty` is **{pt['complete']['empty']:.1f} in",
+         "point/complete empty"),
+        (changelog, f"`empty` is {pt['complete']['empty']:.1f} in all {pt_arms_n} arms",
+         "point/complete empty and the `:Point` arm count"),
+        (changelog,
+         f"{obj['tail@0.5']['recall@3'] * 100:.1f} vs "
+         f"{obj['random@0.5']['recall@3'] * 100:.1f} at 0.50",
+         "object tail@0.5 vs random@0.5 recall@3 (the changelog's own copy)"),
+        (changelog, f"{pt_population['nodes']} `:Point` claims",
+         "artifact.populations.point.nodes"),
     ]
     # the README quotes `signal` verbatim, and it is the evidence for half the
     # verdict ("— and it is SILENT"). Nothing compared the quote to the artifact,
