@@ -393,7 +393,7 @@ def test_real_write_paths_not_flagged(sdk):
        params={"id": op["id"]})
     sdk.mitigate_operator(op["id"], "Relevant because...", strength=0.3)
 
-    sdk.create_source("https://example.com/tiered", "news", tier="T2")
+    sdk.register_source("https://example.com/tiered", "news", tier="T2")
     ev = sdk.create_point("statement", "evidence", status="live")
     _q(sdk, "MATCH (e:Point {id:$eid}), (s:Source {url:$url}) "
             "CREATE (e)-[:extractedFrom]->(s)",

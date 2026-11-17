@@ -58,8 +58,8 @@ def _source_rows(sdk) -> list[list]:
 def test_two_url_variants_register_one_source():
     """ACCEPTANCE: trailing slash + tracking param + fragment ⇒ ONE :Source."""
     with fresh_sdk() as sdk:
-        sdk.create_source("https://docs.example.com/a/b/", "document")
-        sdk.create_source(
+        sdk.register_source("https://docs.example.com/a/b/", "document")
+        sdk.register_source(
             "https://docs.example.com/a/b?utm_source=news#section", "document"
         )
         rows = _source_rows(sdk)
@@ -75,22 +75,22 @@ def test_two_url_variants_register_one_source():
 
 def test_variant_after_canonical_form_merges():
     with fresh_sdk() as sdk:
-        sdk.create_source("https://e.com/a/b", "document")  # already canonical
-        sdk.create_source("https://e.com/a/b/", "document")  # variant
-        sdk.create_source("HTTPS://E.COM/a/b", "document")  # another variant
+        sdk.register_source("https://e.com/a/b", "document")  # already canonical
+        sdk.register_source("https://e.com/a/b/", "document")  # variant
+        sdk.register_source("HTTPS://E.COM/a/b", "document")  # another variant
         assert len(_source_rows(sdk)) == 1
 
 
 def test_host_case_and_default_port_collapse():
     with fresh_sdk() as sdk:
-        sdk.create_source("https://Example.com:443/p", "document")
-        sdk.create_source("https://example.com/p", "document")
+        sdk.register_source("https://Example.com:443/p", "document")
+        sdk.register_source("https://example.com/p", "document")
         assert len(_source_rows(sdk)) == 1
 
 
 def test_non_network_identity_is_not_aliased():
     with fresh_sdk() as sdk:
-        sdk.create_source("session:abc-123", "agentSession")
+        sdk.register_source("session:abc-123", "agentSession")
         rows = _source_rows(sdk)
         assert len(rows) == 1
         assert rows[0][0] == "session:abc-123"
@@ -100,16 +100,16 @@ def test_non_network_identity_is_not_aliased():
 def test_distinct_documents_are_not_merged():
     """The false-merge guard: different paths must stay different Sources."""
     with fresh_sdk() as sdk:
-        sdk.create_source("https://e.com/a", "document")
-        sdk.create_source("https://e.com/b", "document")
-        sdk.create_source("http://e.com/a", "document")  # scheme preserved
+        sdk.register_source("https://e.com/a", "document")
+        sdk.register_source("https://e.com/b", "document")
+        sdk.register_source("http://e.com/a", "document")  # scheme preserved
         assert len(_source_rows(sdk)) == 3
 
 
 def test_point_stub_path_does_not_mint_a_second_source():
     """create_point(extractedFrom=<variant>) resolves to the registered node."""
     with fresh_sdk() as sdk:
-        sdk.create_source("https://e.com/c/d/", "document")
+        sdk.register_source("https://e.com/c/d/", "document")
         sdk.create_point("statement", "a claim", extractedFrom="https://e.com/c/d")
         rows = _source_rows(sdk)
         assert len(rows) == 1, rows
@@ -122,8 +122,8 @@ def test_point_stub_path_does_not_mint_a_second_source():
 def test_reader_resolves_a_variant():
     """A by-url mutator addresses the node the write registered (S0b)."""
     with fresh_sdk() as sdk:
-        sdk.create_source("https://e.com/j/k/", "document")
-        sdk.set_source_tier("https://e.com/j/k?utm_source=x", "high")
+        sdk.register_source("https://e.com/j/k/", "document")
+        sdk.manage_source_trust(url="https://e.com/j/k?utm_source=x", tier="high")
         assert len(_source_rows(sdk)) == 1
         tiers = sdk._get_proj().g.query(
             "MATCH (s:Source) RETURN s.credibilityTier"
@@ -143,7 +143,7 @@ def test_legacy_node_is_adopted_on_touch_not_duplicated():
             params={"url": raw},
         )
         assert _source_rows(sdk)[0][1] is None  # no canonicalUrl yet
-        sdk.create_source(raw, "document")
+        sdk.register_source(raw, "document")
         rows = _source_rows(sdk)
         assert len(rows) == 1, rows  # adopted, not duplicated
         assert rows[0][1] == "https://legacy.example.com/x"
@@ -165,7 +165,7 @@ def test_connector_source_path_does_not_mint_a_second_source():
              "sourceUrl": "https://github.com/acme/repo/issues/5"},
             "evt-1",
         )
-        sdk.create_source(
+        sdk.register_source(
             "https://github.com/acme/repo/issues/5?utm_source=slack", "document"
         )
         rows = _source_rows(sdk)
@@ -307,7 +307,7 @@ def test_legacy_canonically_spelled_node_is_adopted_on_variant_touch():
             params={"url": legacy},
         )
         assert _source_rows(sdk)[0][1] is None  # no canonicalUrl yet
-        sdk.create_source("https://conn.example.com/pull/5?utm_source=x", "document")
+        sdk.register_source("https://conn.example.com/pull/5?utm_source=x", "document")
         rows = _source_rows(sdk)
         assert len(rows) == 1, rows
         assert rows[0][1] == legacy
@@ -316,8 +316,8 @@ def test_legacy_canonically_spelled_node_is_adopted_on_variant_touch():
 def test_content_hash_change_is_a_new_version_not_a_new_source():
     with fresh_sdk() as sdk:
         url = "https://versioned.example.com/doc"
-        sdk.create_source(url, "document", contentHash="aaa")
-        sdk.create_source(url, "document", contentHash="bbb")
+        sdk.register_source(url, "document", contentHash="aaa")
+        sdk.register_source(url, "document", contentHash="bbb")
         rows = _source_rows(sdk)
         assert len(rows) == 1
         assert rows[0][3] == 2  # version bumped on the same node
@@ -327,8 +327,8 @@ def test_anchored_then_anchorless_does_not_wipe_hash():
     """#3998 contract preserved: an absent anchor must not wipe a stored one."""
     with fresh_sdk() as sdk:
         url = "https://anchor.example.com/doc"
-        sdk.create_source(url, "document", contentHash="keepme")
-        sdk.create_source(url, "document")  # no hash
+        sdk.register_source(url, "document", contentHash="keepme")
+        sdk.register_source(url, "document")  # no hash
         rows = sdk._get_proj().g.query(
             "MATCH (s:Source {url:$url}) RETURN s.contentHash, s.version",
             params={"url": url},

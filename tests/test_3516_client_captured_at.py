@@ -1071,7 +1071,7 @@ def test_source_round_trips_through_the_http_boundary(tmp_path, monkeypatch):
     sdk = ha_mod._make_sdk(namespace="registry")
     _seed_team_graphs(sdk, org, "pro", None)
     try:
-        key = sdk.apikey_create(org, "11111111-2222-3333-4444-555555555555")
+        key = sdk._apikey_create(org, "11111111-2222-3333-4444-555555555555")
         h = {"Authorization": f"Bearer {key['api_key']}"}
         # Read at request time by the middleware (`hosted_api` passes
         # `mcp_auth._TRANSPORT_WAIT_BOUND_S` into `await_under_wait_bound`), so
@@ -1237,7 +1237,7 @@ def test_the_floor_inputs_are_served_on_the_session_read_path(tmp_path):
     sdk = ha_mod._make_sdk(namespace="registry")
     _seed_team_graphs(sdk, org, "pro", None)
     try:
-        key = sdk.apikey_create(org, "11111111-2222-3333-4444-555555555555")
+        key = sdk._apikey_create(org, "11111111-2222-3333-4444-555555555555")
         h = {"Authorization": f"Bearer {key['api_key']}"}
         with verdict_client(ha_mod.app,
                             raise_server_exceptions=False) as tc:
@@ -1298,7 +1298,7 @@ def test_the_floor_inputs_are_served_on_the_session_LIST_path(tmp_path):
     sdk = ha_mod._make_sdk(namespace="registry")
     _seed_team_graphs(sdk, org, "pro", None)
     try:
-        key = sdk.apikey_create(org, "11111111-2222-3333-4444-555555555555")
+        key = sdk._apikey_create(org, "11111111-2222-3333-4444-555555555555")
         h = {"Authorization": f"Bearer {key['api_key']}"}
         with verdict_client(ha_mod.app,
                             raise_server_exceptions=False) as tc:

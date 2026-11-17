@@ -106,6 +106,23 @@ def _supersede_object(sdk, old_name: str, new_name: str) -> None:
         session_id="sess_11826_supersede")
 
 
+def _legacy_successorless_supersede(sdk, node_id: str) -> None:
+    """Write the SUCCESSORLESS superseded shape the way an EXISTING graph holds it.
+
+    ⛔ #12592 CLOSED THE DOOR THAT USED TO MINT THIS. ``update_knowledge(obj,
+    status='superseded')`` is now REFUSED (ONTOLOGY §4.3: the word names its
+    successor), so this shape can no longer be produced by the SDK — but it is
+    still IN every graph an older SDK or a raw producer wrote, and this check
+    exists to find it. Writing it raw is therefore the honest fixture: it measures
+    the LEGACY STATE the instrument must repair, not a state the engine can still
+    create. (Before #12592 these three cases drove the generic door and their
+    docstrings cited #11824's AX table for the acceptance; that table's entry is
+    reversed, and the fixture is what has to move with it.)
+    """
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded'",
+       {"i": node_id})
+
+
 # ── 1. the measured defect gets an instrument ─────────────────────
 
 
@@ -224,13 +241,19 @@ def test_the_check_exists_even_when_it_finds_nothing(sdk):
 
 
 def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
-    """The anchor is ``status='superseded'``, and the GENERIC door reaches that
-    status with no successor at all.
+    """The anchor is ``status='superseded'``, and a graph can hold that status
+    with no successor at all.
 
-    ``#11824``'s AX table records that ``update_entity(object,
-    status='superseded')`` is accepted ON PURPOSE (the mirror shape is out of the
-    guard — refusing it would over-block), so this is a state the engine produces,
-    not a hypothetical. The emitted repair must then name the step that can
+    ``#11824``'s AX table recorded that ``update_knowledge(object,
+    status='superseded')`` was accepted ON PURPOSE. ⛔ ``#12592`` REVERSED that
+    half — ONTOLOGY §4.3 says the word names its successor, so the live door
+    refuses the bare status — but the STATE is unchanged for real graphs: rows
+    written by an older SDK, a raw producer, or a pre-guard journal still carry it,
+    which is exactly the population this check exists for. The fixture therefore
+    writes the shape RAW (:func:`_legacy_successorless_supersede`) instead of
+    through the door.
+
+    The emitted repair must then name the step that can
     actually be taken: a successor "named by its supersededBy" does not exist in
     this state, so the plain transfer wording would be an unperformable repair
     (#7819's rule) — and ``archived`` must NOT be offered as the repair, because
@@ -241,11 +264,10 @@ def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
     v1 = _obj(sdk, "PolicyV1")
     op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
 
-    # The door the code deliberately permits (measured on this head).
-    sdk.update_entity(v1["id"], status="superseded")
+    _legacy_successorless_supersede(sdk, v1["id"])
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.status, o.supersededBy",
               {"i": v1["id"]}) == [["superseded", None]], \
-        "fixture drifted: this door no longer produces a successorless supersede"
+        "fixture drifted: the legacy shape must be a successorless supersede"
 
     issues = [i for i in _issues(sdk, "superseded_object_active_edges")
               if i.node_id == v1["id"]]
@@ -287,7 +309,7 @@ def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
     assert "ONE left is skipped as degenerate" in issue.fix, (
         "this row is a two-input operator, so its archive clause must name the "
         "arm that actually fires: " + issue.fix)
-    sdk.update_entity(v1["id"], status="archived")
+    sdk.update_knowledge(v1["id"], status="archived")
     assert _issues(sdk, "superseded_object_active_edges") == [], \
         "archiving did not clear the finding — the string's warning is now wrong"
     run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
@@ -447,7 +469,7 @@ def test_a_successorless_direct_edge_names_the_wiring_it_silences(sdk):
     assert "may CARRY to the successor" in fix, fix
     # Archiving does silence the CHECK (the finding goes away) — the clause says
     # so, and this measures it rather than trusting the sentence.
-    sdk.update_entity(o["id"], status="archived")
+    sdk.update_knowledge(o["id"], status="archived")
     assert _issues(sdk, "superseded_object_active_edges") == [], \
         "archiving did not clear the finding — the clause's premise is wrong"
 
@@ -501,7 +523,7 @@ def test_a_successorless_neutral_operator_loses_no_belief_by_archiving(sdk):
     assert "may CARRY to the successor" not in fix, (
         "a neutral operator carries nothing, so §3.1's disposition here is DROP: "
         + fix)
-    sdk.update_entity(v1["id"], status="archived")
+    sdk.update_knowledge(v1["id"], status="archived")
     assert _issues(sdk, "superseded_object_active_edges") == [], \
         "archiving did not clear the finding — the clause's premise is wrong"
 
@@ -642,7 +664,7 @@ def test_a_shaped_and_neutral_endpoint_gets_the_shape_clause_not_the_neutral_one
     actor = sdk.create_entity("subject", "AcmeCorp")["node"]
     v1 = _obj(sdk, "PolicyV1")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     # Shaped AND neutral, successorless → the archive clause is emitted.
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
             "o.supersededBy = 'PolicyGone'", {"i": v1["id"]})
@@ -755,7 +777,7 @@ def test_a_supersession_chain_points_the_repair_at_the_live_head(sdk):
 def test_a_terminal_successor_with_no_chain_is_not_told_to_follow_one(sdk):
     """A successor can be terminal WITHOUT a supersession — then there is no chain.
 
-    `update_entity(object, status='archived')` is a legal Object write and leaves
+    `update_knowledge(object, status='archived')` is a legal Object write and leaves
     `supersededBy` absent, so "target the LIVE head of that chain" would name a node
     that does not exist (the #7819 rule this module refuses to emit).
     """
@@ -763,8 +785,8 @@ def test_a_terminal_successor_with_no_chain_is_not_told_to_follow_one(sdk):
     v1 = _obj(sdk, "PolicyV1")
     arc = _obj(sdk, "ArcA2")
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
-    sdk.update_entity(v1["id"], status="superseded", **{"supersededBy": "ArcA2"})
-    sdk.update_entity(arc["id"], status="archived")
+    sdk.update_knowledge(v1["id"], status="superseded", **{"supersededBy": "ArcA2"})
+    sdk.update_knowledge(arc["id"], status="archived")
     # ⚠️ #11824 S0: `archived` is a DECLARED SYNONYM of `deprecated` and the write
     # door stores the canonical word, so the row holds `deprecated`. It is still a
     # TERMINAL Object with no chain, which is what this test is about.
@@ -937,7 +959,7 @@ def test_an_op_type_only_operator_is_not_mistaken_for_a_direct_edge(sdk):
            {"a": op["id"], "b": eid, "i": i})
     _q(sdk, "MATCH (x:Point {id:$i}) SET x.status = 'live', x.direction = '->'",
        {"i": op["id"]})
-    sdk.update_entity(o1["id"], status="superseded", **{"supersededBy": "PolicyV2"})
+    sdk.update_knowledge(o1["id"], status="superseded", **{"supersededBy": "PolicyV2"})
     assert _q(sdk, "MATCH (p:Point {id:$i}) RETURN p.is_operator, p.op_type",
               {"i": op["id"]}) == [[False, "IMPL"]], \
         "fixture drifted: this is no longer the op_type-only shape"
@@ -970,13 +992,13 @@ def test_a_self_pointer_is_not_a_successor(sdk):
 
     A plain name match is satisfied by the node that carries the name by
     definition, so without ``carrier.id <> sup.id`` a self-pointer read as
-    RESOLVED and nothing in the audit mentioned it (measured: ``update_entity(obj,
+    RESOLVED and nothing in the audit mentioned it (measured: ``update_knowledge(obj,
     supersededBy='<its own name>')`` is accepted). The repairable fact is the same
     one a dangling name is — name the real successor.
     """
     v1 = _obj(sdk, "PolicyV1")
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded'", {"i": v1["id"]})
-    sdk.update_entity(v1["id"], **{"supersededBy": "PolicyV1"})
+    sdk.update_knowledge(v1["id"], **{"supersededBy": "PolicyV1"})
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
               {"i": v1["id"]}) == [["PolicyV1"]], \
         "fixture drifted: the self-pointer was refused by the door"
@@ -1063,7 +1085,7 @@ def test_a_chain_whose_tail_is_terminal_names_no_live_head(sdk):
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
     _supersede_object(sdk, "PolicyV2", "PolicyV3")
-    sdk.update_entity(v3["id"], status="retracted")
+    sdk.update_knowledge(v3["id"], status="retracted")
     assert _q(sdk, "MATCH (o:Object) WHERE o.status = 'live' RETURN count(o)", {}) \
         == [[0]], "fixture drifted: a live Object exists to target"
 
@@ -1127,7 +1149,7 @@ def test_a_chains_self_loop_is_not_walked(sdk):
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="superseded", **{"supersededBy": "PolicyV2"})
+    sdk.update_knowledge(v2["id"], status="superseded", **{"supersededBy": "PolicyV2"})
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
               {"i": v2["id"]}) == [["PolicyV2"]], "fixture drifted"
 
@@ -1316,7 +1338,7 @@ def test_an_ep_dead_source_does_not_claim_belief_was_active(sdk):
     from tortoise.live import is_terminal_status
     assert is_terminal_status("live", True), \
         "EP's source liveness is _live_only, which is terminal for a flagged node"
-    sdk.update_entity(v1["id"], status="superseded", **{"supersededBy": "Gone"})
+    sdk.update_knowledge(v1["id"], status="superseded", **{"supersededBy": "Gone"})
 
     assert [i for i in _issues(sdk, "superseded_object_active_edges")
             if i.node_id == v1["id"]] == [], (
@@ -1368,7 +1390,7 @@ def test_a_shaped_non_point_endpoint_is_in_neither_arm(sdk):
     v1 = _obj(sdk, "PolicyV1")
     _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     assert sdk.compute_confidence(factors=[v1["id"]],
                                  require_calibration=False)["confidences"] == {}
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
@@ -1395,8 +1417,8 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
     actor = sdk.create_entity("subject", "AcmeCorp")["node"]
     v1 = _obj(sdk, "PolicyV1")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
-    sdk.update_entity(v1["id"], status="superseded")  # NO successor at all
+    sdk.update_knowledge(actor["id"], is_operator=True)
+    _legacy_successorless_supersede(sdk, v1["id"])  # NO successor at all
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
               {"i": v1["id"]}) == [[None]], "fixture drifted"
 
@@ -1423,7 +1445,7 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
     assert f"tortoise_update_entity('{v1['id']}', {{'is_operator': False}})" not in fix
     # ...and the call must clear BOTH halves of the shape: the flag alone is a
     # no-op where ``op_type`` carries it (measured: the row came back verbatim).
-    sdk.update_entity(actor["id"], is_operator=False, op_type=None)
+    sdk.update_knowledge(actor["id"], is_operator=False, op_type=None)
     assert _q(sdk, "MATCH (a {id:$i}) RETURN a.is_operator, a.op_type",
               {"i": actor["id"]}) == [[False, None]], \
         "the emitted call did not clear BOTH halves of the shape"
@@ -1480,13 +1502,13 @@ def test_a_non_point_operator_is_not_an_operator_input(sdk):
     carrying ``is_operator=true`` is in NEITHER arm and no factor exists. Reading the
     flag alone took the operator arm, which told the reader to stamp an ``idx`` no
     factor would ever read. Door-reachable: ``create_direct_edge`` then
-    ``update_entity(..., is_operator=True)``.
+    ``update_knowledge(..., is_operator=True)``.
     """
     actor = sdk.create_entity("subject", "AcmeCorp")["node"]
     v1 = _obj(sdk, "PolicyV1")
     _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     assert _q(sdk, "MATCH (a {id:$i}) RETURN labels(a), a.is_operator",
               {"i": actor["id"]}) == [[["Subject"], True]], \
         "fixture drifted: the subject is not operator-shaped"
@@ -1508,7 +1530,7 @@ def test_a_non_point_operator_is_not_an_operator_input(sdk):
 def test_a_legacy_outdated_successor_is_terminal_too(sdk):
     """EP's terminal test is the status vocab OR the legacy ``outdated`` flag.
 
-    ``update_entity(outdated=...)`` is refused on an Object (server-managed), so
+    ``update_knowledge(outdated=...)`` is refused on an Object (server-managed), so
     only a raw/legacy write reaches the state — but ``is_terminal_status(status,
     outdated)`` is True for it, so the ordinary "re-point and it works" arm left the
     factor degenerate while a re-audit read CLEAN.
@@ -1683,7 +1705,7 @@ def test_an_op_type_only_successor_is_read_by_the_operator_arm(sdk):
 
 
 def test_an_unnamed_object_is_not_reported_as_the_string_none(sdk):
-    """``update_entity(obj, name=None)`` is accepted, so a name can be absent.
+    """``update_knowledge(obj, name=None)`` is accepted, so a name can be absent.
 
     An f-string then interpolated Python's ``None`` into the finding, naming a node
     that exists nowhere in the graph.
@@ -1691,7 +1713,7 @@ def test_an_unnamed_object_is_not_reported_as_the_string_none(sdk):
     v1 = _obj(sdk, "PolicyA")
     p = sdk.create_point("statement", "the gateway enforces the policy")
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
-    sdk.update_entity(v1["id"], name=None, status="superseded",
+    sdk.update_knowledge(v1["id"], name=None, status="superseded",
                       **{"supersededBy": "Gone"})
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.name", {"i": v1["id"]}) == [[None]]
 
@@ -1718,7 +1740,7 @@ def test_a_subject_carrier_makes_the_pointer_not_dangling(sdk):
     """
     v1 = _obj(sdk, "PolicyA")
     sdk.create_entity("subject", "AcmeCorp")
-    sdk.update_entity(v1["id"], status="superseded", **{"supersededBy": "AcmeCorp"})
+    sdk.update_knowledge(v1["id"], status="superseded", **{"supersededBy": "AcmeCorp"})
 
     dangling = [i for i in _issues(sdk, "superseded_by_unresolvable")
                 if i.node_id == v1["id"]]
@@ -1881,7 +1903,7 @@ def test_historical_knowledge_renders_an_absent_status_as_live(sdk):
 def test_a_string_flag_on_a_point_is_not_an_operator_input(sdk):
     """``is_operator='false'`` is a DOOR, and ``bool()`` is not EP's comparison.
 
-    ``update_entity(p, is_operator='false')`` is accepted and the property then holds
+    ``update_knowledge(p, is_operator='false')`` is accepted and the property then holds
     the STRING ``'false'`` (measured, on a ``:Point`` and on a ``:Object``). The
     engine compares with STRICT type semantics — ``RETURN 'false' = true, 'false' =
     false, 0 = false, 1 = true`` → ``[False, False, False, False]`` — so EP's
@@ -1895,7 +1917,7 @@ def test_a_string_flag_on_a_point_is_not_an_operator_input(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", p["id"], v1["id"])
-    sdk.update_entity(p["id"], is_operator="false")
+    sdk.update_knowledge(p["id"], is_operator="false")
     assert _q(sdk, "MATCH (a:Point {id:$i}) RETURN a.is_operator", {"i": p["id"]}) \
         == [["false"]], "fixture drifted: the flag is not the string 'false'"
     assert _q(sdk, "RETURN 'false' = true, 'false' = false, 0 = false, 1 = true", {}) \
@@ -1938,7 +1960,7 @@ def test_a_zero_flag_successor_is_operator_shaped(sdk):
     v1 = _obj(sdk, "PolicyA")
     v2 = _obj(sdk, "PolicyB")
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
-    sdk.update_entity(v2["id"], is_operator=0)
+    sdk.update_knowledge(v2["id"], is_operator=0)
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.is_operator", {"i": v2["id"]}) \
         == [[0]], "fixture drifted: the flag is not the integer 0"
     _supersede_object(sdk, "PolicyA", "PolicyB")
@@ -2042,7 +2064,7 @@ def test_clearing_the_shape_without_moving_the_edge_restores_nothing(sdk):
     v1 = _obj(sdk, "PolicyV1")
     _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
 
     issues = [i for i in _issues(sdk, "superseded_object_active_edges")
@@ -2054,7 +2076,7 @@ def test_clearing_the_shape_without_moving_the_edge_restores_nothing(sdk):
         "the repair must still move the edge: " + fix)
 
     # Measured, in the order the fix now spells it: flag first, edge second.
-    sdk.update_entity(actor["id"], is_operator=False)
+    sdk.update_knowledge(actor["id"], is_operator=False)
     assert sdk.compute_confidence(factors=[actor["id"]],
                                  require_calibration=False)["confidences"] == {}, (
         "fixture drifted: clearing the flag restored the support by itself")
@@ -2082,8 +2104,8 @@ def test_the_successorless_shaped_arm_does_not_promise_the_flag_restores(sdk):
     actor = sdk.create_entity("subject", "AcmeCorp")["node"]
     v1 = _obj(sdk, "PolicyV1")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
-    sdk.update_entity(v1["id"], status="superseded")  # NO successor
+    sdk.update_knowledge(actor["id"], is_operator=True)
+    _legacy_successorless_supersede(sdk, v1["id"])  # NO successor
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
               {"i": v1["id"]}) == [[None]], "fixture drifted"
 
@@ -2094,7 +2116,7 @@ def test_the_successorless_shaped_arm_does_not_promise_the_flag_restores(sdk):
     assert "Clearing the shape is NOT sufficient" in fix, fix
     assert "delete this edge" in fix, (
         "with no successor the only complete repair is the delete: " + fix)
-    sdk.update_entity(actor["id"], is_operator=False)
+    sdk.update_knowledge(actor["id"], is_operator=False)
     assert sdk.compute_confidence(factors=[actor["id"]],
                                  require_calibration=False)["confidences"] == {}, (
         "fixture drifted: clearing the flag restored the support by itself")
@@ -2106,7 +2128,7 @@ def test_the_successorless_shaped_arm_does_not_promise_the_flag_restores(sdk):
 def test_an_integer_one_flag_is_in_neither_arm(sdk):
     """``is_operator=1`` is a door, and this engine does NOT compare ``1 = true``.
 
-    ``update_entity(p, is_operator=1)`` stores the INTEGER ``1`` (measured), and
+    ``update_knowledge(p, is_operator=1)`` stores the INTEGER ``1`` (measured), and
     ``RETURN 1 = true, 1 = false, 0 = false`` → ``[False, False, False]`` — the same
     strictness that makes ``'false'`` neither arm. So EP's operator arm
     (``is_operator = true``) matches nothing, ``_non_op`` refuses it too (``1 =
@@ -2120,7 +2142,7 @@ def test_an_integer_one_flag_is_in_neither_arm(sdk):
     v1 = _obj(sdk, "PolicyV1")
     _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", p["id"], v1["id"])
-    sdk.update_entity(p["id"], is_operator=1, direction="->")
+    sdk.update_knowledge(p["id"], is_operator=1, direction="->")
     assert _q(sdk, "MATCH (a:Point {id:$i}) RETURN a.is_operator", {"i": p["id"]}) \
         == [[1]], "fixture drifted: the flag is not the integer 1"
     assert _q(sdk, "RETURN 1 = true, 1 = false, 0 = false", {}) == \
@@ -2620,11 +2642,11 @@ def test_a_NEUTRAL_neither_arm_row_scopes_the_DROP_to_here(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
     # Terminal AND chainless: `neither_drops` needs an unread successor with no live
     # head, and an archived Object with no ``supersededBy`` has neither.
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
               {"i": v2["id"]}) == [[None]], "fixture drifted: the successor has a chain"
 
@@ -2652,7 +2674,7 @@ def test_a_shaped_neutral_row_is_not_told_to_move_the_edge(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
     # ⛔ A SECOND carrier of the successor name, so the ambiguity ``prefix`` exists
     # at all: on a single-carrier row ``prefix`` is "" by construction, and the
@@ -2697,7 +2719,7 @@ def test_a_shaped_row_does_not_name_a_refused_successor(sdk):
     v1 = _obj(sdk, "PolicyV1")
     _obj(sdk, "PolicyV2", is_operator=True)
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
@@ -2723,7 +2745,7 @@ def test_a_neutral_shaped_row_gets_no_chain_tail(sdk):
     _obj(sdk, "PolicyV2")
     _obj(sdk, "PolicyV3")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
     _supersede_object(sdk, "PolicyV2", "PolicyV3")
 
@@ -2771,7 +2793,7 @@ def test_a_non_live_successor_is_not_the_destination(sdk):
             sdk.create_operator("IMPL", p["id"], [v1["id"]])
         _supersede_object(sdk, f"PolicyV1-{lane}-{status}",
                           f"PolicyV2-{lane}-{status}")
-        sdk.update_entity(v2["id"], status=status)
+        sdk.update_knowledge(v2["id"], status=status)
 
         issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                      if i.node_id == v1["id"])
@@ -2797,7 +2819,7 @@ def test_an_id_less_flowing_row_also_routes_the_destination(sdk):
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
             "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == "PolicyV1")
@@ -2849,7 +2871,7 @@ def test_a_terminal_successor_does_not_get_the_carry_disposition(sdk):
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="retracted")
+    sdk.update_knowledge(v2["id"], status="retracted")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -2874,7 +2896,7 @@ def test_a_terminal_successor_does_not_get_the_carry_disposition(sdk):
     w2 = _obj(sdk, "DraftV2")
     sdk.create_operator("IMPL", q["id"], [w1["id"]])
     _supersede_object(sdk, "DraftV1", "DraftV2")
-    sdk.update_entity(w2["id"], status="draft")
+    sdk.update_knowledge(w2["id"], status="draft")
     draft_fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
                      if i.node_id == w1["id"]).fix
     assert "promote" in draft_fix.lower(), draft_fix
@@ -2897,7 +2919,7 @@ def test_a_direct_draft_successor_states_the_direct_mechanism(sdk):
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", p["id"], v1["id"])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+    sdk.update_knowledge(v2["id"], status=DRAFT_TIER)
 
     fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
                if i.node_id == v1["id"]).fix
@@ -2914,7 +2936,7 @@ def test_a_direct_draft_successor_states_the_direct_mechanism(sdk):
     w2 = _obj(sdk, "DraftV2")
     sdk.create_operator("IMPL", q["id"], [w1["id"]])
     _supersede_object(sdk, "DraftV1", "DraftV2")
-    sdk.update_entity(w2["id"], status=DRAFT_TIER)
+    sdk.update_knowledge(w2["id"], status=DRAFT_TIER)
     op_fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
                   if i.node_id == w1["id"]).fix
     assert "arity ladder stated above" in op_fix, op_fix
@@ -2933,7 +2955,7 @@ def test_an_all_dead_ambiguous_name_warns_the_reader(sdk):
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
     # …then EVERY carrier goes dead, and a second genuine node carries the name.
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
     _q(sdk, "CREATE (:Object {id:'dead-twin', name:'PolicyV2', objectKind:'other', "
             "status:'archived'})", {})
 
@@ -2960,7 +2982,7 @@ def test_a_neutral_row_with_a_TERMINAL_successor_keeps_DROP(sdk):
     op = sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
     assert _q(sdk, "MATCH (o {id:$i}) RETURN o.direction", {"i": op["id"]}) == [["-"]]
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3018,7 +3040,7 @@ def test_the_neutral_shaped_prefix_clause_is_operator_lane_accurate(sdk):
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
     _q(sdk, "CREATE (:Object {id:'live-twin', name:'PolicyV2', objectKind:'other', "
             "status:'live', op_type:'IMPL'})", {})
 
@@ -3049,7 +3071,7 @@ def test_the_direct_ambiguous_confirm_clause_demands_no_op_type(sdk):
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
     sdk.create_direct_edge("IMPL", dec["id"], v1["id"])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.op_type = 'IMPL'", {"i": v2["id"]})
     _q(sdk, "CREATE (:Object {id:'live-twin2', name:'PolicyV2', objectKind:'other', "
             "status:'live'})", {})
@@ -3079,7 +3101,7 @@ def test_a_neutral_row_with_a_DRAFT_successor_keeps_DROP(sdk):
     op = sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
     assert _q(sdk, "MATCH (o {id:$i}) RETURN o.direction", {"i": op["id"]}) == [["-"]]
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="draft")
+    sdk.update_knowledge(v2["id"], status="draft")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3105,7 +3127,7 @@ def test_a_neutral_id_less_row_gets_no_chain_tail(sdk):
     sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
             "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == "PolicyV1")
@@ -3185,9 +3207,9 @@ def test_a_neither_arm_draft_row_names_the_promotion_as_a_precondition(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="draft")
+    sdk.update_knowledge(v2["id"], status="draft")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3212,9 +3234,9 @@ def test_a_neither_arm_row_with_a_TERMINAL_successor_keeps_DROP(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3242,7 +3264,7 @@ def test_a_draft_successor_carrying_the_legacy_outdated_flag_is_not_promoted(sdk
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="draft")
+    sdk.update_knowledge(v2["id"], status="draft")
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.outdated = true", {"i": v2["id"]})
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.outdated", {"i": v2["id"]}) == [[True]]
 
@@ -3285,9 +3307,9 @@ def test_the_operator_lane_states_no_CONFIDENCE_COUNT(sdk):
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
     # The SUPERSEDED endpoint is one EP's input selection refuses: an operator-shaped
     # (flag present, not ``false``) Object is not an admitted input.
-    sdk.update_entity(v1["id"], is_operator=True)
+    sdk.update_knowledge(v1["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1-opsup", "PolicyV2-opsup")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3323,7 +3345,7 @@ def test_a_SOURCE_slot_input_with_a_dead_successor_is_told_a_CLAIM_successor(sdk
               {"i": op["id"]}) == [[0]], \
         "fixture drifted: the superseded Object is no longer the idx-0 source"
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3348,10 +3370,10 @@ def test_a_neither_arm_row_with_a_LIVE_head_is_told_to_carry(sdk):
     v2 = _obj(sdk, "PolicyV2")
     v3 = _obj(sdk, "PolicyV3")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
     _supersede_object(sdk, "PolicyV2", "PolicyV3")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='live'", {"i": v3["id"]})
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.status", {"i": v3["id"]}) == [["live"]]
 
@@ -3375,9 +3397,9 @@ def test_a_neither_arm_draft_row_is_told_to_clear_the_shape_too(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="draft")
+    sdk.update_knowledge(v2["id"], status="draft")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3412,7 +3434,7 @@ def test_a_dead_input_on_a_three_input_operator_is_not_told_it_builds_no_factor(
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_operator("IMPL", p["id"], [v1["id"], p2["id"]])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3438,7 +3460,7 @@ def test_the_ambiguous_operator_clause_states_the_arity_ladder(sdk):
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_operator("IMPL", p["id"], [v1["id"], p2["id"]])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
     _q(sdk, "CREATE (:Object {id:'dead-twin', name:'PolicyV2', "
             "objectKind:'other', status:'retracted'})", {})
 
@@ -3467,7 +3489,7 @@ def test_the_draft_strings_state_the_arity_ladder(sdk):
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_operator("IMPL", p["id"], [v1["id"], p2["id"]])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="draft")
+    sdk.update_knowledge(v2["id"], status="draft")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3498,8 +3520,8 @@ def test_a_neither_arm_draft_row_states_the_three_way_mechanism(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
-    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+    sdk.update_knowledge(actor["id"], is_operator=True)
+    sdk.update_knowledge(v2["id"], status=DRAFT_TIER)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
@@ -3529,8 +3551,8 @@ def test_a_neutral_neither_arm_row_does_not_offer_a_dead_write(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
-    sdk.update_entity(actor["id"], is_operator=True)
-    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+    sdk.update_knowledge(actor["id"], is_operator=True)
+    sdk.update_knowledge(v2["id"], status=DRAFT_TIER)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
 
     fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
@@ -3581,7 +3603,7 @@ def test_the_id_less_arm_separates_the_tail_and_puts_the_prefix_first(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", p["id"], v1["id"])
-    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+    sdk.update_knowledge(v2["id"], status=DRAFT_TIER)
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
             "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
 
@@ -3636,7 +3658,7 @@ def test_a_direct_row_whose_SUPERSEDED_endpoint_is_shaped_claims_no_belief(sdk):
             f"a shaped superseded endpoint never carried belief ({shape}): {before}")
 
         _supersede_object(sdk, f"PolicyV1-{shape}", f"PolicyV2-{shape}")
-        sdk.update_entity(v2["id"], status="archived")
+        sdk.update_knowledge(v2["id"], status="archived")
         after = next(i for i in _issues(sdk, "superseded_object_active_edges")
                      if i.node_id == v1["id"])
         fix = after.fix
@@ -3661,7 +3683,7 @@ def test_the_direct_and_neither_arm_draft_rows_cite_no_ladder(sdk):
     v2 = _obj(sdk, "PolicyV2-direct-draftladder")
     sdk.create_direct_edge("IMPL", p["id"], v1["id"])
     _supersede_object(sdk, "PolicyV1-direct-draftladder", "PolicyV2-direct-draftladder")
-    sdk.update_entity(v2["id"], status="draft")
+    sdk.update_knowledge(v2["id"], status="draft")
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
     assert "ONCE PROMOTED" in issue.fix, issue.fix
@@ -3674,9 +3696,9 @@ def test_the_direct_and_neither_arm_draft_rows_cite_no_ladder(sdk):
     w1 = _obj(sdk, "PolicyW1")
     w2 = _obj(sdk, "PolicyW2")
     sdk.create_direct_edge("IMPL", actor["id"], w1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyW1", "PolicyW2")
-    sdk.update_entity(w2["id"], status="draft")
+    sdk.update_knowledge(w2["id"], status="draft")
     issue2 = next(i for i in _issues(sdk, "superseded_object_active_edges")
                   if i.node_id == w1["id"])
     assert "ONCE PROMOTED" in issue2.fix, issue2.fix
@@ -3701,7 +3723,7 @@ def test_a_shaped_superseded_endpoint_is_told_what_the_repair_RESTORES(sdk):
     before = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
     assert before["confidences"] == {}, before
     _supersede_object(sdk, "PolicyV1-supshaped", "PolicyV2-supshaped")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3725,10 +3747,10 @@ def test_a_neither_arm_re_point_moves_no_belief_only_WHILE_shaped(sdk):
     v2 = _obj(sdk, "PolicyV2")
     v3 = _obj(sdk, "PolicyV3")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
     _supersede_object(sdk, "PolicyV2", "PolicyV3")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='live'", {"i": v3["id"]})
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
@@ -3754,10 +3776,10 @@ def test_a_neither_arm_row_never_quotes_a_measurement_from_a_readable_lane(sdk):
     v2 = _obj(sdk, "PolicyV2")
     v3 = _obj(sdk, "PolicyV3")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
     _supersede_object(sdk, "PolicyV2", "PolicyV3")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='live'", {"i": v3["id"]})
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
@@ -3780,9 +3802,9 @@ def test_a_neither_arm_draft_detail_quotes_no_readable_lane_figure(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="draft")
+    sdk.update_knowledge(v2["id"], status="draft")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3804,7 +3826,7 @@ def test_one_row_quotes_one_measurement_for_one_operation(sdk):
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", p["id"], v1["id"])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="draft")
+    sdk.update_knowledge(v2["id"], status="draft")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3828,7 +3850,7 @@ def test_a_withdrawn_operator_successor_is_not_the_write_target(sdk):
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_operator("IMPL", p["id"], [v1["id"]])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
 
     fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
                if i.node_id == v1["id"]).fix
@@ -3878,9 +3900,9 @@ def test_a_neither_arm_draft_fix_does_not_claim_the_edge_write_alone_repairs(sdk
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="draft")
+    sdk.update_knowledge(v2["id"], status="draft")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3902,7 +3924,7 @@ def test_a_neither_arm_successorless_repair_restores_the_belief(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2-successor")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded'", {"i": v1["id"]})
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
               {"i": v1["id"]}) == [[None]]
@@ -3914,8 +3936,8 @@ def test_a_neither_arm_successorless_repair_restores_the_belief(sdk):
     assert f"tortoise_update_entity('{actor['id']}', " in fix, fix
 
     # Perform exactly what the string orders.
-    sdk.update_entity(v1["id"], supersededBy="PolicyV2-successor")
-    sdk.update_entity(actor["id"], is_operator=False, op_type=None)
+    sdk.update_knowledge(v1["id"], supersededBy="PolicyV2-successor")
+    sdk.update_knowledge(actor["id"], is_operator=False, op_type=None)
     sdk.create_direct_edge("IMPL", actor["id"], v2["id"])
     _q(sdk, "MATCH (a {id:$a})-[r:IMPL]->(o:Object {id:$v}) DELETE r",
        {"a": actor["id"], "v": v1["id"]})
@@ -3940,10 +3962,10 @@ def test_a_neither_arm_terminal_detail_names_the_shape_precondition(sdk):
     v2 = _obj(sdk, "PolicyV2")
     _obj(sdk, "PolicyV3")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
     _supersede_object(sdk, "PolicyV2", "PolicyV3")
-    sdk.update_entity(v2["id"], status="archived")
+    sdk.update_knowledge(v2["id"], status="archived")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
@@ -3968,7 +3990,7 @@ def test_an_ambiguous_name_is_not_asserted_as_a_single_destination(sdk):
     v1 = _obj(sdk, "PolicyV1")
     _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
     _q(sdk, "CREATE (:Object {id:'twin-PolicyV2', name:'PolicyV2', "
             "objectKind:'other', status:'live'})", {})
@@ -3989,7 +4011,7 @@ def test_the_successorless_neither_arm_orders_the_shape_as_an_imperative(sdk):
     actor = sdk.create_entity("subject", "AcmeCorp")["node"]
     v1 = _obj(sdk, "PolicyV1")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded'", {"i": v1["id"]})
 
     fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
@@ -4031,7 +4053,7 @@ def test_an_id_less_neither_arm_row_names_the_shape_step(sdk):
     v1 = _obj(sdk, "PolicyV1")
     _obj(sdk, "PolicyV2")  # the live successor the name resolves to
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
             "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
 
@@ -4062,11 +4084,11 @@ def test_an_id_less_neither_arm_repair_restores_the_belief(sdk):
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
-    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_knowledge(actor["id"], is_operator=True)
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
             "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
 
-    sdk.update_entity(actor["id"], is_operator=False, op_type=None)
+    sdk.update_knowledge(actor["id"], is_operator=False, op_type=None)
     sdk.create_direct_edge("IMPL", actor["id"], v2["id"])
     _q(sdk, "MATCH (a {id:$a})-[r:IMPL]->(o:Object {name:'PolicyV1'}) DELETE r",
        {"a": actor["id"]})
@@ -4088,7 +4110,7 @@ def test_the_direct_draft_detail_quotes_this_rows_own_figure(sdk):
     v2 = _obj(sdk, "PolicyV2")
     sdk.create_direct_edge("IMPL", p["id"], v1["id"])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    sdk.update_entity(v2["id"], status="draft")
+    sdk.update_knowledge(v2["id"], status="draft")
 
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])

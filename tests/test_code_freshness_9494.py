@@ -560,7 +560,9 @@ class _FakeSDK:
         proj.g.query.return_value = MagicMock(result_set=[[1]])
         return proj
 
-    def taxonomy(self):
+    # #11609: `taxonomy()` retired into the orientation container; this stub mirrors
+# the call `monitoring.metrics` actually makes (`graph_overview(section='taxonomy')`).
+    def graph_overview(self, section=None, **kwargs):
         return {"Point": 0}
 
 

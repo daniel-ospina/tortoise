@@ -6064,6 +6064,32 @@ class _EntityHandlers:
         #     raised `NonFoldedEventsError` on replay while replaying cleanly on
         #     the tree that minted the ghost.
         if (name and object_is_entity and not object_id
+                and builtin_stage is not None
+                and builtin_fold_reopens(event_kind)):
+            # ── #11824 S0 × #13034: a REOPEN must be able to NAME its row ──
+            # The block below re-resolves the explicit `object` and, when the
+            # name has carriers and NONE of them is live, takes the exempt
+            # `unfolded-mention` no-op — "this fold may not resurrect it (R5)".
+            # That is right for a lifecycle ending and WRONG for the position
+            # axis: `github.issue.reopened` exists to clear a terminal STAGE,
+            # and #13034 made the currency predicate read the position axis, so
+            # a closed Object is exactly the row that is no longer live. Left to
+            # the live-only resolver the reopen could never find its own target
+            # — the fold deadlocked, and the row stayed `done`/`isClosed=True`
+            # for ever (measured on the re-cut tree, before this arm).
+            #
+            # So the reopen asks by name REGARDLESS of state (design §6: asking
+            # by name is the request) — the same `live_only=False` shape
+            # `pipeline.current_stage` / `pipeline._resolve_object` take for the
+            # same reason (#13034). It does not widen the door: this is the ONLY
+            # caller that passes it, `_fold_object_stage` still refuses a row
+            # whose STATUS is terminal (a lifecycle ending is final — only a
+            # position ending is reopenable), and a name held by 2+ carriers
+            # still resolves to nothing and gets recorded.
+            object_id = resolve_fold_name(
+                self.g, "Object", name, context="status fold reopen",
+                live_only=False)
+        if (name and object_is_entity and not object_id
                 and (declared or builtin_stage is not None)):
             # ⛔ The exemption is decided by the LIVE count, not by "any
             # holder exists" (#3590 review, finding 1 — fail-open).

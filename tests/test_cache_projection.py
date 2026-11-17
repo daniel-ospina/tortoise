@@ -2833,6 +2833,50 @@ def test_a_terminal_pack_fold_latches_instead_of_being_resurrected():
         index=index)[0].props["status"] == "superseded"
 
 
+def test_a_replayed_terminal_status_latches_the_stage_fold_as_it_does_live():
+    """#13143 review, finding 2 — the STATUS latch binds the POSITION arms too.
+
+    The live fold refuses a stage move on any row whose stored status is
+    TERMINAL, independently of `isClosed` and of the current slot
+    (`projection/entities.py::_fold_object_stage`). `pipeline.apply_stage_fold`
+    has no view of `status`, so the replay's stage arms need that conjunct
+    explicitly — without it a stream that makes `status` terminal (the
+    documented order-blind window: the record's own `status` is applied as an
+    unguarded `restatus`) moved the stage on a rebuild and NOT live, i.e.
+    `live ≢ rebuilt` on the very axis #11824 S0 introduces.
+
+    Non-vacuity: the control below proves the arm still folds a non-terminal
+    stream, so this cannot pass by disabling the fold.
+    """
+    row = {"id": "o-7", "name": "issue-7", "object_kind": "issue"}
+
+    def folded(events):
+        return cp.apply_event_stream_folds(
+            (cp.node_from_row("Object", row),), events)[0]
+
+    latched = folded((
+        cp.LifecycleEvent(seq=1, event_kind="", restatus_status="archived",
+                          target_id="o-7", target_label="Object"),
+        cp.LifecycleEvent(seq=2, event_kind="github.issue.closed",
+                          object_name="issue-7"),
+    ))
+    assert latched.props.get("status") == "archived", latched.props
+    assert not latched.props.get("pipelineStageId"), (
+        "a connector fold moved the STAGE of a row whose replayed status is "
+        "TERMINAL — the live fold refuses that move (`status in excluded`), so "
+        "the rebuild would hold a position the graph never wrote: "
+        f"{latched.props.get('pipelineStageId')!r}")
+    assert not latched.props.get("isClosed"), (
+        "a refused stage move still wrote the durable `isClosed` marker")
+
+    # …and the control: with no terminal status in the stream the same event
+    # DOES advance the stage, so the latch above is not the arm switching off.
+    control = folded((cp.LifecycleEvent(seq=2, event_kind="github.issue.closed",
+                                        object_name="issue-7"),))
+    _assert_folded_stage(control.props, "done", closed=True,
+                         outcome="completed")
+
+
 def test_the_fold_vocabulary_is_status_folds_one_home_and_not_a_copy():
     """`status_folds.py` is the ONE home (#2729); this module must READ it.
 

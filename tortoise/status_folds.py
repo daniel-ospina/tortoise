@@ -68,6 +68,10 @@ from __future__ import annotations
 import logging
 from typing import NamedTuple
 
+from .lifecycle_vocabulary import (
+    LIFECYCLE_STATUS_SET as _LIFECYCLE_STATUS_SET,
+    LIFECYCLE_STATUS_SYNONYMS as _LIFECYCLE_STATUS_SYNONYMS,
+)
 from .pipeline import (
     CORE_WORK_ITEM_PIPELINE as _CORE_WORK_ITEM_PIPELINE,
     CORE_WORK_ITEM_PIPELINE_KEY as _CORE_WORK_ITEM_PIPELINE_KEY,
@@ -317,6 +321,37 @@ def validate_status_decl(
                         f"this kind owns its own state (the built-in connector "
                         f"fold does not apply to it), but the spelling is "
                         f"ambiguous to a reader; rename or record the intent"
+                    )
+                # ── #13143 review finding 4: a `statuses:` declaration whose
+                # words the WRITE door refuses ──
+                # #11824 S0 closed the lifecycle axis at four words for every
+                # knowledge kind, so a kind that still declares its own words as
+                # STATUSES has declared a vocabulary nothing can write: the door
+                # refuses `active` as a POSITION word and a pack word like
+                # `prospective` as "not a lifecycle word", while
+                # `_declares_state` still counts this kind as owning its state
+                # (suppressing the built-in fold) and it declares no `pipeline`,
+                # so no `stage:` target exists either. Install used to be green
+                # and silent over a kind whose state could never move, and the
+                # the failure surfaced as a runtime `ValueError` on the tenant's
+                # FIRST status write. This validator's own sibling rules (a fold
+                # target must be declared; `folds` requires an axis) exist to
+                # refuse at install what the door refuses at write time, so the
+                # mismatch is reported here — as a WARNING, not an error, so a
+                # pre-existing pack still installs.
+                unmigrated = sorted(
+                    w for w in str_statuses
+                    if w.strip().lower() not in _LIFECYCLE_STATUS_SET
+                    and w.strip().lower() not in _LIFECYCLE_STATUS_SYNONYMS)
+                if unmigrated:
+                    warnings.append(
+                        f"kindDefs '{kind}': 'statuses' declares "
+                        f"{', '.join(unmigrated)}, which the lifecycle write "
+                        f"door REFUSES — a pack's own words live on the POSITION "
+                        f"axis since #11824 S0. Declare a 'pipeline:' and move "
+                        f"these words to stage ids (and their `folds[]` targets "
+                        f"to `stage:`), or the kind's state can never move and "
+                        f"every write naming one of them raises"
                     )
 
     folds_present = "folds" in spec

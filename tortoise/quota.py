@@ -953,7 +953,7 @@ def refuse_document_writer_demotion(g, doc_id: str, document_kind,
         f"direction through `{surface}` (#5140 — metering a node a caller can "
         f"un-meter is not a cap). Delete the document and re-ingest it if it "
         f"really is a transcript; to record that a source became unavailable, "
-        f"use `create_source(..., raw_state=...)`."
+        f"use `register_source(..., raw_state=...)`."
     )
 
 
@@ -1031,7 +1031,7 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             #             cap-EXEMPT — this count was the ONE outlier that
             #             omitted the exclusion every recovery-mint lane
             #             already carries (hosted_api.session_key both lanes,
-            #             sdk.signup_token_recover, recover_team_key), so a
+            #             sdk._signup_token_recover, recover_team_key), so a
             #             session credential silently burned a paid durable
             #             slot. The exclusion is NULL-TOLERANT: a NULL/legacy
             #             created_via is a DURABLE row and COUNTS

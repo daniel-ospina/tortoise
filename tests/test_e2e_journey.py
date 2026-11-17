@@ -28,7 +28,7 @@ class TestE2E1SignupProvision:
 
     def test_provisioned_team_exists(self, provision_test_user):
         u = provision_test_user(tier="free")
-        team = u["sdk"].org_get(u["org_id"])
+        team = u["sdk"]._org_get(u["org_id"])
         assert team is not None
         assert team["tier"] == "free"
         # No max_teams field (user-level capability)
@@ -80,7 +80,7 @@ class TestE2E3KeyRecovery:
                     "u": u["user_id"], "now": "2026-08-08T00:00:00+00:00"},
         )
         # Key verifies (recovery path works without a pre-existing usable key)
-        assert sdk.apikey_verify(key) is not None
+        assert sdk._apikey_verify(key) is not None
 
     def test_recovery_key_persistent_not_24h(self, provision_test_user):
         u = provision_test_user()
@@ -118,8 +118,8 @@ class TestE2E10Decoupling:
         team_a = sdk.org_create("team-a")
         team_b = sdk.org_create("team-b")
         user_id = "shared-user-1"
-        ma = sdk.membership_create(team_a["id"], user_id, "owner")
-        mb = sdk.membership_create(team_b["id"], user_id, "admin")  # SDK roles: owner|admin
+        ma = sdk._membership_create(team_a["id"], user_id, "owner")
+        mb = sdk._membership_create(team_b["id"], user_id, "admin")  # SDK roles: owner|admin
         # #4282 deleted membership_list; #12901 wave 1 then retired membership_get.
         # The M:N contract is READ straight off the registry here rather than
         # through a public door, which is what the assertions actually claim.

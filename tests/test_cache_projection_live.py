@@ -546,20 +546,26 @@ def test_a_record_sourced_rebuild_keeps_a_superseded_entity_terminal():
     )
 
 
-def test_a_connector_tracked_object_rebuilds_to_the_status_the_live_fold_wrote():
+def test_a_connector_tracked_object_rebuilds_to_the_STAGE_the_live_fold_wrote():
     """#10198's verification, measured on ONE engine against the LIVE writer.
 
     The live writer is the real `_fold_object_status` (not a fixture constant),
     so this compares the record-side fold with the fold it claims to reproduce:
 
-        live:   github.issue.open -> github.issue.closed -> status='completed'
-        rebuild from the record's event stream -> the SAME status
+        live:   github.issue.open -> github.issue.closed -> stage 'done',
+                isClosed=True (the core work-item pipeline)
+        rebuild from the record's event stream -> the SAME position
 
-    MEASURED before this change: the live node held `status='completed'` and the
-    rebuilt node carried NO `status` at all — which `live._terminal_excluded`
-    reads as LIVE (its documented legacy-node rule), so a closed work item came
-    back as CURRENT state and `reconciliation` reported a permanent
-    `field_mismatches` on `status`.
+    ⛔ THE AXIS MOVED AT #11824 S0, the invariant did not. The fold used to write
+    `status='completed'`; `in_progress`/`completed` are POSITION words that the
+    four-word lifecycle door refuses, so the fold now advances a STAGE and the
+    `status` field stays untouched (a lifecycle word written by a connector
+    event is the defect S0 removes). The divergence this test exists for is
+    unchanged in shape: the rebuilt node must carry the SAME position the live
+    graph holds, because a closed work item that comes back CURRENT is the
+    #2164/#3309 class on the record path — and `live._terminal_excluded` now
+    reads the position axis too (#13034), so an absent stage AND an absent
+    status both read as live.
     """
     proj = _projection()
     proj.g.query(
@@ -568,9 +574,13 @@ def test_a_connector_tracked_object_rebuilds_to_the_status_the_live_fold_wrote()
     proj._fold_object_status("issue-1", "github.issue.open")
     proj._fold_object_status("issue-1", "github.issue.closed")
     live = _props(proj, "Object", "id", "o-issue")
-    assert live.get("status") == "completed", (
-        "the live fold did not write `completed` — the comparison below would "
-        "be vacuous")
+    assert (live.get("pipelineStageId"), live.get("pipelineSlot"),
+            bool(live.get("isClosed"))) == ("done", "terminal", True), (
+        "the live fold did not advance the work item to its TERMINAL stage — "
+        f"the comparison below would be vacuous: {live!r}")
+    assert live.get("status") is None, (
+        "the connector fold wrote a LIFECYCLE word as well as the stage: "
+        f"{live.get('status')!r}")
 
     view = cp.RecordView(
         nodes=(cp.node_from_row("Object", {
@@ -587,18 +597,23 @@ def test_a_connector_tracked_object_rebuilds_to_the_status_the_live_fold_wrote()
     proj._wipe_all_nodes(confirm_destructive=True, operation="test-destroy")
     proj.rebuild_from_record(view, confirm_destructive=True)
     rebuilt = _props(proj, "Object", "id", "o-issue")
-    assert rebuilt.get("status") == live["status"] == "completed", (
-        "the rebuilt :Object does not carry the connector lifecycle status the "
-        "live graph held (#10198)")
+    assert (rebuilt.get("pipelineStageId"), rebuilt.get("pipelineSlot"),
+            bool(rebuilt.get("isClosed"))) == ("done", "terminal", True), (
+        "the rebuilt :Object does not carry the POSITION the live graph held "
+        f"(#10198 / #11824 S0): {rebuilt!r}")
+    assert rebuilt.get("status") == live.get("status") is None, (
+        "the rebuild fabricated a lifecycle word: " f"{rebuilt.get('status')!r}")
 
     # ── the same events WITHOUT the stream: the defect this closes ─────────
     proj._wipe_all_nodes(confirm_destructive=True, operation="test-destroy")
     proj.rebuild_from_record(
         cp.RecordView(nodes=view.nodes), confirm_destructive=True)
-    assert "status" not in _props(proj, "Object", "id", "o-issue"), (
+    without = _props(proj, "Object", "id", "o-issue")
+    assert "pipelineStageId" not in without and "status" not in without, (
         "this is the pre-#10198 shape and it must stay measurable: with no event "
-        "stream the record has no lifecycle signal and the cache must not "
-        "fabricate one — the row-level derivation only covers supersession")
+        "stream the record has no POSITION signal (and no lifecycle word) and "
+        "the cache must not fabricate one — the row-level derivation only "
+        f"covers supersession: {without!r}")
 
 
 def test_a_superseded_work_item_is_not_resurrected_by_a_connector_event():

@@ -145,7 +145,7 @@ class TestReadPathPremise:
         ``s.id = coalesce($id, $url)`` ON CREATE, so it is id-addressable."""
         sdk, _ = env
         url = "https://example.com/keyed"
-        sdk.create_source(url, "document")
+        sdk.register_source(url, "document")
         node_id, _ = _stub(sdk._get_proj(), url)
         assert node_id == url
 
@@ -369,7 +369,7 @@ class TestUrlKeyedSourceIsWritable:
         sdk.create_point("statement", "the claim", extractedFrom=url)
         assert _stub(sdk._get_proj(), url)[1] is None
 
-        returned = sdk.update_entity(url, status="retired")
+        returned = sdk.update_knowledge(url, status="retired")
 
         assert _stub(sdk._get_proj(), url)[1] == "retired", (
             "update_entity on a url-keyed Source wrote nothing — the stored "
@@ -418,7 +418,7 @@ class TestUrlKeyedSourceIsWritable:
         _corpus_source(sdk, tmp_path, old, "doc_ret")
         assert _stub(proj, old)[0] is None, "corpus Source must be url-only"
 
-        returned = sdk.update_entity(old, url=new)
+        returned = sdk.update_knowledge(old, url=new)
 
         assert returned.get("url") == new, (
             "a re-keying update returned the no-write sentinel for a write "
@@ -601,7 +601,7 @@ class TestFoldHonoursTheOrSet:
         _corpus_source(sdk, tmp_path, url, "doc_1")
         assert _stub(proj, url)[0] is None, "corpus Source must be url-only"
 
-        sdk.update_entity(url, status="retired")
+        sdk.update_knowledge(url, status="retired")
         assert _stub(proj, url)[1] == "retired"
 
         caplog.clear()
@@ -664,7 +664,7 @@ class TestTheStateReadBackIsTheSameStatement:
         _corpus_source(sdk, tmp_path, old, "doc_rekey")
         assert _stub(proj, old)[0] is None, "corpus Source must be url-only"
 
-        sdk.update_entity(old, name="Renamed", url=new)
+        sdk.update_knowledge(old, name="Renamed", url=new)
 
         recs = [r for r in _mutations(events) if r.get("label") == "Source"]
         assert recs, (
@@ -698,9 +698,9 @@ class TestNoRegressionOnExistingShapes:
         ``create_source`` sets ``id = url``, the ambiguous shape."""
         sdk, events = env
         url = "https://example.com/keyed"
-        sdk.create_source(url, "document")
+        sdk.register_source(url, "document")
 
-        sdk.update_entity(url, status="retired")
+        sdk.update_knowledge(url, status="retired")
 
         recs = [r for r in _mutations(events) if r.get("id") == url]
         assert len(recs) == 1, (
@@ -712,7 +712,7 @@ class TestNoRegressionOnExistingShapes:
         journal two delete records."""
         sdk, events = env
         url = "https://example.com/keyed"
-        sdk.create_source(url, "document")
+        sdk.register_source(url, "document")
 
         assert sdk.delete(url) is True
         recs = [r for r in _mutations(events)
@@ -729,7 +729,7 @@ class TestNoRegressionOnExistingShapes:
         sdk, events = env
         sdk.create_point("statement", "an unrelated claim")
 
-        assert sdk.update_entity("no-such-id", status="retired") == {}
+        assert sdk.update_knowledge("no-such-id", status="retired") == {}
         assert sdk.update("no-such-id", status="retired") == {}
         assert sdk.delete("no-such-id") is False
         assert _mutations(events) == []
@@ -743,7 +743,7 @@ class TestNoRegressionOnExistingShapes:
         pt = sdk.create_point("statement", "claim", annotator_bias=0.5)
         pid = pt["id"]
 
-        sdk.update_entity(pid, annotator_bias=0.77)
+        sdk.update_knowledge(pid, annotator_bias=0.77)
 
         assert _rows(sdk._get_proj(),
                      "MATCH (p:Point {id:$i}) RETURN p.annotator_bias",
@@ -823,7 +823,7 @@ class TestPassTwoMintOrderingResidual:
         sdk, events = env
         url = "https://example.com/report"
         sdk.create_point("statement", "the claim", extractedFrom=url)
-        sdk.update_entity(url, status="retired")
+        sdk.update_knowledge(url, status="retired")
 
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
@@ -860,7 +860,7 @@ class TestPassTwoMintOrderingResidual:
         sdk, events = env
         url = "https://example.com/report"
         sdk.create_point("statement", "the claim", extractedFrom=url)
-        sdk.update_entity(url, status="retired")
+        sdk.update_knowledge(url, status="retired")
 
         caplog.clear()
         with caplog.at_level(logging.WARNING):

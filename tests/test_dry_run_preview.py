@@ -22,6 +22,7 @@ import datetime as _dt
 import inspect
 import os
 import sys
+from typing import ClassVar
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -364,7 +365,7 @@ class TestBlastRadius:
         preview = _preview_supersede(sdk, old, new)
         assert preview["edges_transferred_from_old"] == 2
         assert preview["edges_created_at_new"] == 1
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
         # ⛔ The field that mirrors the writer is `edges_transferred_from_old`,
         # NOT `edges_created_at_new`. The writer's `edges_transferred` is its
         # OLD-SIDE row count — it books the second parallel edge even though the
@@ -417,7 +418,7 @@ class TestBlastRadius:
         preview = _preview_supersede(sdk, old, new)
         assert preview["edges_created_at_new"] == 4, preview
         assert preview["edges_transferred_from_old"] == 2, preview
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
         assert real["edges_transferred"] == 2
         typed = [e for e in preview["edges"]
                  if e["type"] == "IMPL" and e["from"] == op["id"]]
@@ -441,7 +442,7 @@ class TestBlastRadius:
         from tortoise.mcp_server import _preview_supersede
         before = _edge_keys_at(sdk, new)
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
         net_new = _edge_keys_at(sdk, new) - before
         assert preview["edges_created_at_new"] == len(net_new), (
             preview, real, net_new)
@@ -609,7 +610,7 @@ class TestBlastRadius:
         assert preview["edges_created_at_new"] == 0, preview
         # Parity: the writer's own end-state agrees with the preview — no
         # self-edge on any successor node, no transferred aboutPoint edge.
-        sdk.supersede(old, "newdup7822")
+        sdk.supersede_knowledge(old, "newdup7822")
         assert proj.g.query(
             "MATCH (a:Point {id:'newdup7822'})-[:aboutPoint]->"
             "(b:Point {id:'newdup7822'}) RETURN count(*)").result_set[0][0] == 0
@@ -684,7 +685,7 @@ class TestBlastRadius:
 
         before_keys = _edge_keys_at(sdk, new)
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
 
         net_new = _edge_keys_at(sdk, new) - before_keys
         assert preview["edges_created_at_new"] == len(net_new), (
@@ -761,7 +762,7 @@ class TestBlastRadius:
 
         before = _edge_keys_at(sdk, new)
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
         net_new = _edge_keys_at(sdk, new) - before
 
         # 1. the transfer is NOT a drop — pre-fix this list held the edge.
@@ -836,7 +837,7 @@ class TestBlastRadius:
         new = _seed_point(sdk, "new-context")
         before = _edge_keys_at(sdk, new)
         preview = _preview_supersede(sdk, mit["id"], new)
-        real = sdk.supersede(mit["id"], new)
+        real = sdk.supersede_knowledge(mit["id"], new)
         net_new = _edge_keys_at(sdk, new) - before
         assert preview["edges_created_at_new"] == len(net_new), (
             f"preview said {preview['edges_created_at_new']} net-new, "
@@ -955,7 +956,7 @@ class TestBlastRadius:
         from tortoise.mcp_server import _preview_supersede
 
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
 
         assert preview["edges_transferred_from_old"] == real["edges_transferred"], (
             "a pre-existing repoint target makes the writer's out-pass MERGE a "
@@ -988,7 +989,7 @@ class TestBlastRadius:
         from tortoise.mcp_server import _preview_supersede
 
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
 
         p, w = preview["edges_transferred_from_old"], real["edges_transferred"]
         assert p == 3, ("preview: self-loop dropped + old->x merged + the "
@@ -1028,7 +1029,7 @@ class TestBlastRadius:
 
         before_at_old = _edge_keys_at(sdk, old)
         preview = _preview_supersede(sdk, old, new)
-        real = sdk.supersede(old, new)
+        real = sdk.supersede_knowledge(old, new)
         after_at_old = _edge_keys_at(sdk, old)
 
         # GROUND TRUTH: two edges were incident to `old` (the self-loop and the
@@ -1066,7 +1067,7 @@ class TestBlastRadius:
         assert preview["edges_transferred_from_old"] == 2, preview
         assert preview["edges_remaining_at_old"] == 1, preview
 
-        sdk.supersede(old, new)
+        sdk.supersede_knowledge(old, new)
         remaining = _edge_keys_at(sdk, old)  # excludes the CORRECTS edge
         assert len(remaining) == preview["edges_remaining_at_old"], remaining
         assert any(rtype == "related" for _, rtype, _, _ in remaining), remaining
@@ -1089,6 +1090,34 @@ class TestBlastRadius:
 
         preview = _preview_supersede(sdk, "olddup2", new)
         assert preview["nodes_affected"] == 2, preview
+
+    def test_family_supersede_preview_counts_a_duplicate_old_id(self, sdk):
+        """The FAMILY write is a bare `MATCH (n:<label> {id:$id}) SET n += $props`
+        — it stamps EVERY bound row, so the family preview's `nodes_affected` must
+        count them rather than hardcode 1 (#12914 round-4 P2: it hardcoded 1 and
+        reported two `:Object` rows sharing one id as ONE). Twin of the Point pin
+        above, and it pins the other half of the same fix: `rows` is a
+        PREVIEW-only key computed for this count and must never leak into the
+        write's public result.
+
+        Mutation: restore `nodes_affected=1` -> reds on the count; move
+        `"rows": old["rows"]` into the write's return -> reds on the key.
+        """
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (a:Object {id:'objdup1', name:'Dup v1', status:'live'})")
+        proj.g.query(
+            "CREATE (b:Object {id:'objdup1', name:'Dup v1', status:'live'})")
+        proj.g.query(
+            "CREATE (c:Object {id:'objnew1', name:'Dup v2', status:'live'})")
+
+        from tortoise.mcp_server import _preview_family_supersede
+
+        preview = _preview_family_supersede(sdk, "Object", "objdup1", "objnew1")
+        assert preview["nodes_affected"] == 2, preview
+
+        out = sdk.supersede_knowledge("objdup1", "objnew1")
+        assert "rows" not in out, out
 
     def test_delete_entity_preview_uses_the_canonical_id_property_table(
             self, mcp, sdk, monkeypatch):
@@ -1298,6 +1327,31 @@ class TestDryRunIsMeteredAsARead:
             monkeypatch, "tortoise_delete", {"dry_run": True}
         ) == [("k1", "team-x")]
 
+    def test_the_SPELLING_of_false_is_not_metered_as_a_preview(
+            self, monkeypatch):
+        """`bool("false")` is True; pydantic's coercion of it is `False`.
+
+        ⛔ The metering reads the RAW pre-validation dict, so a truthiness test
+        counted `dry_run="false"` — a spelling the served schema ACCEPTS and
+        coerces to `False`, so the handler takes the WRITE branch — as a preview
+        read. The read counter then records a preview for a call that wrote.
+        The predicate is `_coerces_to_true`, on both halves: `"true"` is still a
+        preview (the reason the coercion exists at all), `"false"`/`"0"`/`"no"`
+        are not.
+
+        ⛔ `" true "` is absent ON PURPOSE: the coercion does not strip, so
+        pydantic REJECTS that spelling and the call never dispatches — metering
+        it either way would assert a behaviour no caller can reach.
+        """
+        for truthy in (True, "true", "TRUE", "1", 1):
+            assert self._dispatch_reads(
+                monkeypatch, "tortoise_delete", {"dry_run": truthy}
+            ) == [("k1", "team-x")], f"{truthy!r} is a preview"
+        for falsy in (False, "false", "0", "no", 0, None):
+            assert self._dispatch_reads(
+                monkeypatch, "tortoise_delete", {"dry_run": falsy}
+            ) == [], f"{falsy!r} takes the WRITE branch, so it is not a read"
+
 
 class TestPreviewToolSetIsDeclared:
     """`_dry_run_tool_names()` is the metering gate (#4057 review P2): the read
@@ -1305,10 +1359,46 @@ class TestPreviewToolSetIsDeclared:
     that does not declare it. Pin the derivation against the REAL signatures
     so the gate cannot go stale."""
 
+    #: #11609 Phase 2: three of the six destructive doors were absorbed by a
+    #: container, and the PREVIEW follows the capability rather than the name —
+    #: the CONTAINER must declare `dry_run` (it does).
+    #: ⛔ But it does NOT follow that the retired door may be dropped from the
+    #: set: a retired name still ANSWERS (see
+    #: `test_a_RETIRED_door_that_still_ANSWERS_keeps_its_preview`), so it owns its
+    #: own preview reading while it does. Both halves are asserted below.
+    CONTAINER_OF: ClassVar[dict[str, str]] = {
+        "tortoise_supersede": "tortoise_supersede_knowledge",
+        "tortoise_invalidate": "tortoise_update_knowledge",
+        "tortoise_retract_point": "tortoise_update_knowledge",
+    }
+
     def test_the_six_preview_tools_declare_dry_run(self):
         import tortoise.mcp_server as m
         names = m._dry_run_tool_names()
-        assert set(DESTRUCTIVE_TOOLS) <= names, sorted(names)
+        live = {self.CONTAINER_OF.get(t, t) for t in DESTRUCTIVE_TOOLS}
+        assert live <= names, sorted(live - names)
+
+    def test_a_RETIRED_door_that_still_ANSWERS_keeps_its_preview(self):
+        """`tools/call` on a retired name still runs the ORIGINAL handler.
+
+        ⛔ The `CONTAINER_OF` mapping above is right about ADVERTISING and wrong
+        about ANSWERING, and the difference is a false write-ack. A retired name
+        is absent from `tools/list`, but `_RetiredToolTransform` resolves it on
+        `get_tool` and `build_retired_tools` builds its shim from the ORIGINAL
+        module handler — so `dry_run=True` on the old door really does preview,
+        and a set derived from `TOOL_REGISTRY` alone called that preview
+        `committed: "unknown"` + "this call is NOT safe to repeat".
+
+        Measured at the #11609 Phase-2 head: all three mapped names above are
+        retired, still answering, still declare `dry_run`, and all three were
+        missing from the set — the CI red was
+        `test_wait_bound_write_ack.py::test_a_COERCED_true_is_a_preview_and_a_coerced_false_is_not`.
+        """
+        import tortoise.mcp_server as m
+        names = m._dry_run_tool_names()
+        missing = sorted(set(self.CONTAINER_OF) - names)
+        assert not missing, (
+            f"retired-but-answering preview doors missing from the set: {missing}")
 
     def test_a_write_tool_without_dry_run_is_not_in_the_set(self):
         import tortoise.mcp_server as m

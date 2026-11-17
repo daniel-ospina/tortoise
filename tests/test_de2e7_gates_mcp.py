@@ -78,15 +78,36 @@ class TestDe2e7:
         assert calls, "gh runner must be invoked for the issue body + deps"
 
     def test_phase4_tools_registered(self):
-        from tortoise.tool_registry import TOOL_REGISTRY
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
         names = {t.name for t in TOOL_REGISTRY}
-        phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
-                  "tortoise_approve_merge", "tortoise_promote_point",
-                  "tortoise_belief_timeline"}
+
+        # #4282 Phase 2: `tortoise_promote_point` retired into the
+        # `tortoise_refresh_confidence` container (scope='promote', point_id=...)
+        # — the capability is what this pin follows, not the surface shape.
+        # #11609 Phase 2 retired the other two #787 doors the same way:
+        # `tortoise_list_dedup_candidates` → `tortoise_review_link_candidates`
+        # (`kind='dedup'`) and `tortoise_belief_timeline` → `tortoise_check_confidence`
+        # (`topic=`). Both still ANSWER through their #3883 shims, so the capability pin
+        # follows the containers; it does not assert names the approved target removes.
+        phase4 = {"tortoise_review_link_candidates",
+                  "tortoise_approve_merge", "tortoise_refresh_confidence",
+                  "tortoise_check_confidence"}
         assert phase4 <= names, phase4 - names
+        # #11609 lane C: `tortoise_mine_conversations` is retired into the SESSION
+        # container, so it is SERVED but no longer ADVERTISED (#3883 keeps the old
+        # name answering). Pin both halves — the shim and its destination.
+        retired_names = {t.name for t in RETIRED_TOOL_REGISTRY}
+        assert "tortoise_mine_conversations" in retired_names, "the retired shim left the registry"
+        assert "tortoise_mine_knowledge_from_session" in names, "Missing #787 container" 
         by_name = {t.name: t for t in TOOL_REGISTRY}
-        assert by_name["tortoise_promote_point"].sdk_method == "promote_point"
-        assert by_name["tortoise_belief_timeline"].sdk_method == "belief_timeline"
+        assert "scope='promote'" in by_name["tortoise_refresh_confidence"].description
+        assert by_name["tortoise_review_link_candidates"].sdk_method == "review_link_candidates"
+        assert by_name["tortoise_check_confidence"].sdk_method == "check_confidence"
+        # The retired doors still DRIVE their original SDK methods, which is what
+        # makes each container above the same answer rather than a new capability.
+        retired_by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+        assert retired_by_name["tortoise_promote_point"].sdk_method == "promote_point"
+        assert retired_by_name["tortoise_belief_timeline"].sdk_method == "belief_timeline"
 
     def test_mcp_handler_error_contract(self, monkeypatch):
         """J-6: handlers return {error: message} on failure — the REAL SDK

@@ -4,8 +4,8 @@ so a terminal row was resurrected by a prop edit.
 Measured on ``main`` at ``6916a6cd89`` (2026-11-13), embedded engine, throwaway
 nodes, deleted after:
 
-    update_entity(<archived Object>,  status='live') -> ACCEPTED  RESURRECTED
-    update_entity(<archived Subject>, status='live') -> ACCEPTED  RESURRECTED
+    update_knowledge(<archived Object>,  status='live') -> ACCEPTED  RESURRECTED
+    update_knowledge(<archived Subject>, status='live') -> ACCEPTED  RESURRECTED
 
 That is the #9649 defect class on two more labels. #12325 closed
 ``update_entity``'s ``:Point`` arm, and ``_assert_lifecycle_guard`` is
@@ -71,7 +71,7 @@ What this suite pins:
 * the verdict is over EVERY row the write binds (#7822's fan-out rule, applied to
   the non-Point arms): a live sibling must not authorise a write that also lands
   on the terminal one;
-* the refusal's repair is PERFORMABLE — it does not name ``supersede()``, which is
+* the refusal's repair is PERFORMABLE — it does not name ``supersede_knowledge()``, which is
   ``:Point``-only and raises ``No point <id>`` for these labels (the AX-rule-2
   defect #10183 records; the missing SDK door is #12592);
 * nothing leaks onto the Point arm, which owns its own vocabulary and table.
@@ -176,7 +176,7 @@ def test_a_terminal_row_is_not_resurrected_by_a_prop_edit(sdk, maker, label, dea
     stored = _DEAD_SPELLINGS[dead]
     node = maker(sdk, dead)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="live")
+        sdk.update_knowledge(node, status="live")
     message = str(exc.value)
     # AX rule 2 (#10183): that it refused, on what, and what to do instead.
     assert "update_entity refused the status transition" in message
@@ -196,34 +196,40 @@ def test_the_refusal_names_the_family_section_of_the_model(sdk):
     """
     obj, subj = _object(sdk, "archived"), _subject(sdk, "archived")
     with pytest.raises(ValueError) as obj_exc:
-        sdk.update_entity(obj, status="live")
+        sdk.update_knowledge(obj, status="live")
     assert "ONTOLOGY §4.3" in str(obj_exc.value)
     assert "ONTOLOGY §4.1" not in str(obj_exc.value), \
         "§4.1 is the Point family — the Object refusal must not cite it"
     with pytest.raises(ValueError) as subj_exc:
-        sdk.update_entity(subj, status="live")
+        sdk.update_knowledge(subj, status="live")
     assert "ONTOLOGY §4.2" in str(subj_exc.value)
 
 
 def test_the_named_repair_is_performable(sdk):
-    """⛔ The message must NOT offer `supersede()`.
+    """⛔ The message must NOT offer `supersede_knowledge()` as the way back.
 
-    `TortoiseSDK.supersede` routes to `supersede_point`/`invalidate_point`, both
-    `:Point`-only, and raises `No point <id>` for an Object. Naming it would be an
-    unperformable prescription — the AX-rule-2 defect #10183 exists to stop. The
-    real route today is the record path, and the missing SDK verb is #12592.
+    `TortoiseSDK.supersede` now DISPATCHES for an Object/Subject (#12592) — the
+    missing verb this test used to name — but a supersession is written from the
+    LIVE side: that door runs the family lifecycle guard and refuses a TERMINAL
+    source (#2498, terminalization is one-way). So it is still not the repair for
+    a dead row, and naming it here would be an unperformable prescription — the
+    AX-rule-2 defect #10183 exists to stop. The route that exists is minting the
+    replacement, and that is what the message names.
     """
     node = _object(sdk, "archived")
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="live")
+        sdk.update_knowledge(node, status="live")
     message = str(exc.value)
-    assert "supersede()" not in message, \
-        "that door raises No point <id> for an Object — do not prescribe it"
     assert "apply_supersessions" in message
+    assert "supersede_knowledge()" not in message, \
+        "that door refuses a terminal source — do not prescribe it"
     # And the prescription that IS named really exists:
     from tortoise.commit_ops import apply_supersessions  # noqa: F401
-    with pytest.raises(ValueError, match="No point"):
-        sdk.supersede(node, "some-successor")   # Point-only, as the message says
+    # ⛔ #12592: the door EXISTS for this label now, and still refuses the dead
+    # row — the refusal is the one-way rule, never `No point` (which is what this
+    # assertion pinned before the family path existed).
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.supersede_knowledge(node, "some-successor")
 
 
 # ── the vocabulary door (#11824 S0): these words are REFUSED as a `status` ──
@@ -270,7 +276,7 @@ def test_a_position_word_is_refused_as_a_status_with_a_stage_repair(sdk, word):
     """
     node = _object(sdk, "live")
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status=word)
+        sdk.update_knowledge(node, status=word)
     message = str(exc.value)
     assert message.startswith(f"status {word!r} was refused")
     assert "advance_stage" in message, \
@@ -295,7 +301,7 @@ def test_a_pack_or_connector_word_is_now_refused_as_a_status(sdk, word):
     """
     node = _object(sdk, "live")
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status=word)
+        sdk.update_knowledge(node, status=word)
     message = str(exc.value)
     assert message.startswith(f"status {word!r} was refused")
     assert "not a lifecycle word for :Object" in message
@@ -320,7 +326,7 @@ def test_a_pack_word_on_a_DEAD_row_is_refused_by_the_vocabulary_door(sdk, word):
     """
     node = _object(sdk, "archived")
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status=word)
+        sdk.update_knowledge(node, status=word)
     message = str(exc.value)
     assert message.startswith(f"status {word!r} was refused"), \
         "the VOCABULARY door refuses first — not this module's transition guard"
@@ -386,7 +392,7 @@ def test_a_subject_stores_a_declared_synonym_as_deprecated(sdk):
     have, so there is nothing to echo back).
     """
     node = _subject(sdk, "live")
-    sdk.update_entity(node, status="retracted")
+    sdk.update_knowledge(node, status="retracted")
     assert _stored(sdk, node)["status"] == DEAD_WORD
 
 
@@ -403,7 +409,7 @@ def test_a_subject_still_refuses_an_undeclared_word(sdk, word):
     """
     node = _subject(sdk, "live")
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status=word)
+        sdk.update_knowledge(node, status=word)
     message = str(exc.value)
     assert message.startswith(f"status {word!r} was refused")
     assert "not a lifecycle word for :Subject" in message
@@ -431,12 +437,12 @@ def test_an_undeclared_word_is_now_refused_the_hole_is_closed(sdk):
 
     ⚠️ A caller that wrote a legacy word through this door must move with it:
     ``tests/test_11926_derived_invalidation.py`` writes
-    ``update_entity(<Object>, status='outdated')``, and ``outdated`` is now
+    ``update_knowledge(<Object>, status='outdated')``, and ``outdated`` is now
     REFUSED because it names a CHOICE between ``deprecated`` and ``superseded``.
     """
     node = _object(sdk, "live")
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="banana")
+        sdk.update_knowledge(node, status="banana")
     assert "not a lifecycle word for :Object" in str(exc.value)
     assert _stored(sdk, node)["status"] == "live"
 
@@ -452,7 +458,7 @@ def test_an_entailed_status_beside_a_real_edit_is_accepted(sdk, maker):
     the content edit is not read as a transition.
     """
     node = maker(sdk, "archived")
-    assert sdk.update_entity(node, status="archived", description="a note")
+    assert sdk.update_knowledge(node, status="archived", description="a note")
     assert _stored(sdk, node)["status"] == DEAD_WORD
 
 
@@ -460,8 +466,85 @@ def test_an_entailed_status_beside_a_real_edit_is_accepted(sdk, maker):
 def test_a_content_revision_without_a_status_is_untouched(sdk, maker):
     """The block keys on a supplied `status` only — it must not gate content."""
     node = maker(sdk, "archived")
-    assert sdk.update_entity(node, description="revision only")
+    assert sdk.update_knowledge(node, description="revision only")
     assert _stored(sdk, node)["status"] == DEAD_WORD
+
+
+# ── ``status=None`` is the DELETE sentinel, not a word (#13143 review, f1) ──
+
+
+def test_a_status_none_write_is_the_declared_delete_on_a_live_object(sdk):
+    """``status=None`` REMOVES the property — it does not raise.
+
+    The vocabulary door's first arm refuses every non-``str``, which is what
+    pins ``status=['live']``. ``None`` is NOT that shape: it is the DECLARED
+    DELETE sentinel (``_sanitize_props``: "``None`` REMOVES the property
+    outright"), and three modules state as fact that
+    ``update_entity(…, status=None)`` is an applied REMOVAL on a non-terminal
+    row (``record_reconcile.py:85-87``, ``cache_projection.py:1262-1266``,
+    ``sdk.py``'s ``_item_declared_status`` note). Closing the vocabulary without
+    exempting it would have been the ⛔ #1934 class — a legal write turned into a
+    refusal — and an unannounced one. Measured before the exemption: a raised
+    ``ValueError`` ("a status must be a plain string, and NoneType is not one").
+
+    Pinned on BOTH non-Point doors, because the create door carried the same
+    arm.
+    """
+    node = _object(sdk, "live")
+    sdk.update_knowledge(node, description="a note", status=None)
+    assert _stored(sdk, node)["status"] is None, (
+        "`status=None` did not remove the property — the vocabulary door "
+        "refused a documented DELETE")
+    # The create door too: an Object created with no declared status.
+    made = sdk.create_object(name="no-status-object", status=None)
+    assert _stored(sdk, made["id"])["status"] is None
+
+
+def test_a_status_none_write_cannot_lift_a_DEAD_word(sdk):
+    """The other half: the delete is NOT a resurrection route.
+
+    ``record_reconcile`` states the gate: an applied clear is allowed "only
+    while the row is NOT terminal". A dead row keeps its word, so
+    ``status=None`` still raises there — the exemption restores the documented
+    delete, it does not open a hole in the lifecycle.
+    """
+    node = _object(sdk, "archived")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(node, status=None)
+    assert "is TERMINAL" in str(exc.value), str(exc.value)
+    assert _stored(sdk, node)["status"] == DEAD_WORD
+
+
+# ── the measurement device counts WRITES, never questions (#13143 f5) ──
+
+
+def test_the_outcome_counters_count_a_write_and_not_a_VALIDATION(sdk):
+    """``STATUS_WRITE_OUTCOMES`` must not be inflated by Phase-1 validation.
+
+    ``status_refusal_reason`` is the ingest validator's QUESTION ("would the
+    writer refuse this?"), and it is asked once per bundle ITEM. Counting it
+    made a large rejected bundle dominate a device whose documented job is to
+    describe CALLERS ("is the vocabulary too narrow?", "how many calls arrive in
+    the wrong spelling?"), and the PR's own quoted measurement was therefore not
+    the number the module documents.
+    """
+    from tortoise.lifecycle_vocabulary import (
+        STATUS_WRITE_OUTCOMES,
+        status_refusal_reason,
+    )
+
+    before = dict(STATUS_WRITE_OUTCOMES)
+    # A QUESTION, both arms — refused and accepted — counts nothing.
+    assert status_refusal_reason("banana") is not None
+    assert status_refusal_reason("live") is None
+    assert dict(STATUS_WRITE_OUTCOMES) == before, (
+        "a validation ASK moved the write door's counters")
+    # A WRITE still counts, on both outcomes.
+    sdk.update_knowledge(_object(sdk, "live"), status="LIVE")
+    assert STATUS_WRITE_OUTCOMES["normalised"] == before["normalised"] + 1
+    with pytest.raises(ValueError):
+        sdk.update_knowledge(_object(sdk, "live"), status="banana")
+    assert STATUS_WRITE_OUTCOMES["refused"] == before["refused"] + 1
 
 
 # ── DEAD -> DEAD is legal: the per-family delta from Points ──
@@ -485,12 +568,12 @@ def test_a_dead_row_may_be_re_filed_between_dead_words(sdk):
     ``superseded -> archived`` — is this transition, spelled through the synonym.
     """
     node = _object(sdk, "superseded")
-    sdk.update_entity(node, status="deprecated")
+    sdk.update_knowledge(node, status="deprecated")
     assert _stored(sdk, node)["status"] == DEAD_WORD
-    sdk.update_entity(node, status="archived")   # the same move, as a synonym
+    sdk.update_knowledge(node, status="archived")   # the same move, as a synonym
     assert _stored(sdk, node)["status"] == DEAD_WORD
     with pytest.raises(ValueError):
-        sdk.update_entity(node, status="live")   # ...and it is still dead
+        sdk.update_knowledge(node, status="live")   # ...and it is still dead
 
 
 def test_a_live_row_is_retired_by_a_status_write(sdk):
@@ -500,7 +583,7 @@ def test_a_live_row_is_retired_by_a_status_write(sdk):
     ``deprecated`` — the write is accepted, the spelling is not what lands.
     """
     node = _object(sdk, "live")
-    sdk.update_entity(node, status="archived")
+    sdk.update_knowledge(node, status="archived")
     assert _stored(sdk, node)["status"] == DEAD_WORD
 
 
@@ -516,9 +599,9 @@ def test_an_object_moves_between_the_two_non_terminal_lifecycle_words(sdk):
     terminal-only check must not break.
     """
     node = _object(sdk, "live")
-    sdk.update_entity(node, status="draft")
+    sdk.update_knowledge(node, status="draft")
     assert _stored(sdk, node)["status"] == "draft"
-    sdk.update_entity(node, status="live")
+    sdk.update_knowledge(node, status="live")
     assert _stored(sdk, node)["status"] == "live"
 
 
@@ -533,7 +616,7 @@ def test_a_live_sibling_does_not_authorise_a_terminal_one(sdk):
     g.query("CREATE (:Object {id:$id, name:'fan-dead', status:'archived'})",
             params={"id": shared})
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(shared, status="live")
+        sdk.update_knowledge(shared, status="live")
     assert "archived" in str(exc.value)
     statuses = g.query(
         "MATCH (n:Object {id:$id}) RETURN n.status ORDER BY n.status",
@@ -557,7 +640,7 @@ def test_a_live_sibling_does_not_authorise_a_terminal_one(sdk):
 def _superseded_with_carriers(s, maker, successor="v2") -> str:
     """A `superseded` row carrying the successor pair — what a real fold writes."""
     node = maker(s, "superseded")
-    s.update_entity(node, supersededBy=successor,
+    s.update_knowledge(node, supersededBy=successor,
                     supersededAt="2026-01-01T00:00:00Z")
     return node
 
@@ -585,7 +668,7 @@ def test_the_record_carried_un_supersede_is_admitted(sdk, maker, label):
     """
     node = _superseded_with_carriers(sdk, maker)
     assert _carriers(sdk, node) == ("v2", "2026-01-01T00:00:00Z")
-    sdk.update_entity(node, status="live", supersededBy=None, supersededAt=None)
+    sdk.update_knowledge(node, status="live", supersededBy=None, supersededAt=None)
     assert _stored(sdk, node)["status"] == "live"
     assert _carriers(sdk, node) == (None, None), \
         "the clear must reach the properties the cache derives status from"
@@ -609,7 +692,7 @@ def test_the_snake_spelling_cannot_un_supersede_yet(sdk, maker):
     """
     node = _superseded_with_carriers(sdk, maker)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="live", superseded_by=None,
+        sdk.update_knowledge(node, status="live", superseded_by=None,
                           superseded_at=None)
     assert "'superseded' -> 'live'" in str(exc.value)
     assert _stored(sdk, node)["status"] == "superseded"
@@ -627,7 +710,7 @@ def test_a_status_only_live_on_a_carried_supersession_is_still_refused(sdk):
     """
     node = _superseded_with_carriers(sdk, _object)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="live")
+        sdk.update_knowledge(node, status="live")
     message = str(exc.value)
     assert "'superseded' -> 'live'" in message
     assert "supersededBy=None" in message, \
@@ -648,7 +731,7 @@ def test_a_PARTIAL_carrier_clear_is_still_refused(sdk, cleared):
     """
     node = _superseded_with_carriers(sdk, _object)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="live", **{cleared: None})
+        sdk.update_knowledge(node, status="live", **{cleared: None})
     assert "'superseded' -> 'live'" in str(exc.value)
     assert _stored(sdk, node)["status"] == "superseded"
 
@@ -666,7 +749,7 @@ def test_an_empty_string_carrier_is_not_a_clear(sdk):
     """
     node = _superseded_with_carriers(sdk, _object)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="live", supersededBy="",
+        sdk.update_knowledge(node, status="live", supersededBy="",
                           supersededAt=None)
     assert "lifecycle CARRIER" in str(exc.value), \
         "`''` is a carrier, not a clear — the CARRIER door is what refuses it"
@@ -684,13 +767,13 @@ def test_a_carrier_less_supersession_is_not_un_superseded(sdk):
     transition table by one more shape.
 
     ⛔ And the refusal must NOT prescribe the clear here (review cycle 1, P1):
-    `update_entity(status='live', supersededBy=None, supersededAt=None)` is
+    `update_knowledge(status='live', supersededBy=None, supersededAt=None)` is
     REFUSED on this row — there is nothing carried to clear — so offering it
     would be an unperformable prescription, the AX-rule-2 defect #10183.
     """
     node = _object(sdk, "superseded")
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="live")
+        sdk.update_knowledge(node, status="live")
     message = str(exc.value)
     assert "'superseded' -> 'live'" in message
     assert "supersededBy=None" not in message, \
@@ -708,7 +791,7 @@ def test_a_mixed_dead_set_gets_no_un_supersede_hint(sdk):
             params={"id": shared})
     try:
         with pytest.raises(ValueError) as exc:
-            sdk.update_entity(shared, status="live", supersededBy=None,
+            sdk.update_knowledge(shared, status="live", supersededBy=None,
                               supersededAt=None)
         assert "supersededBy=None" not in str(exc.value), \
             "the clear is refused on a mixed dead set — do not prescribe it"
@@ -758,10 +841,10 @@ def test_a_key_whose_renderings_name_DIFFERENT_carriers_is_refused(
     node = _object(sdk, "superseded")
     # The carrier the LIVE write names is the one whose clear would be
     # recorded under the OTHER property — that is the admitted shape.
-    sdk.update_entity(node, **{rendering: "2026-01-01T00:00:00Z"})
+    sdk.update_knowledge(node, **{rendering: "2026-01-01T00:00:00Z"})
     held = _carriers(sdk, node)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, **{"status": "live",
+        sdk.update_knowledge(node, **{"status": "live",
                                    _alias_key(content, rendering): None})
     assert "'superseded' -> 'live'" in str(exc.value)
     assert _stored(sdk, node)["status"] == "superseded"
@@ -787,7 +870,7 @@ def test_two_keys_rendering_as_status_with_different_words_is_refused(sdk, order
              if order == "shadow-first"
              else {"status": "live", shadow: "superseded"})
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, **props)
+        sdk.update_knowledge(node, **props)
     assert "CONFLICTING status write" in str(exc.value), \
         "the refusal must name the ambiguity, not report a transition verdict"
     assert _stored(sdk, node)["status"] == "superseded"
@@ -815,7 +898,7 @@ def test_only_the_object_hint_offers_a_pack_word(sdk, maker, label,
     """
     node = _superseded_with_carriers(sdk, maker)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="live")
+        sdk.update_knowledge(node, status="live")
     message = str(exc.value)
     assert "supersededBy=None" in message, \
         "the coherent clear IS performable on both families — always name it"
@@ -824,7 +907,7 @@ def test_only_the_object_hint_offers_a_pack_word(sdk, maker, label,
     if label == "Subject":
         # The reason it is unperformable, asserted rather than asserted-about.
         with pytest.raises(ValueError):
-            sdk.update_entity(node, status="active", supersededBy=None,
+            sdk.update_knowledge(node, status="active", supersededBy=None,
                               supersededAt=None)
         assert _stored(sdk, node)["status"] == "superseded"
 
@@ -862,7 +945,7 @@ def test_a_key_that_renders_differently_does_not_clear_a_carrier(
 
     node = _superseded_with_carriers(sdk, _object)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="live", supersededAt=None,
+        sdk.update_knowledge(node, status="live", supersededAt=None,
                           **{_Shadow(content): None})
     assert "'superseded' -> 'live'" in str(exc.value)
     assert _stored(sdk, node)["status"] == "superseded"
@@ -904,7 +987,7 @@ def test_a_status_key_whose_live_rendering_differs_is_not_an_un_supersede(
 
     node = _superseded_with_carriers(sdk, maker)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, supersededBy=None, supersededAt=None,
+        sdk.update_knowledge(node, supersededBy=None, supersededAt=None,
                           **{_Shadow(content): "live"})
     assert "'superseded' -> 'live'" in str(exc.value)
     assert _stored(sdk, node)["status"] == "superseded", \
@@ -932,7 +1015,7 @@ def test_a_value_whose_repr_lies_cannot_disguise_a_conflicting_status_write(sdk)
 
     node = _superseded_with_carriers(sdk, _object)
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, **{_alias_key("superseded", "status"):
+        sdk.update_knowledge(node, **{_alias_key("superseded", "status"):
                                    "superseded",
                                    "status": _LiarRepr("live")})
     assert "CONFLICTING status write" in str(exc.value)
@@ -951,10 +1034,10 @@ def test_an_archived_row_is_not_resurrected_by_clearing_a_legacy_carrier(sdk):
     stored word AND the refusal's origin are both `'deprecated'` here.
     """
     node = _superseded_with_carriers(sdk, _object)
-    sdk.update_entity(node, status="archived")            # dead -> dead: legal
+    sdk.update_knowledge(node, status="archived")            # dead -> dead: legal
     assert _stored(sdk, node)["status"] == DEAD_WORD
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(node, status="live", supersededBy=None,
+        sdk.update_knowledge(node, status="live", supersededBy=None,
                           supersededAt=None)
     assert f"{DEAD_WORD!r} -> 'live'" in str(exc.value)
     assert _stored(sdk, node)["status"] == DEAD_WORD
@@ -973,7 +1056,7 @@ def test_a_point_with_an_object_word_is_refused_by_the_point_vocabulary(sdk):
     """
     pid = sdk.create_point("statement", "pt", dedup=False)["id"]
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(pid, status="completed")
+        sdk.update_knowledge(pid, status="completed")
     message = str(exc.value)
     assert "status 'completed' was refused" in message
     assert "advance_stage" in message, \
@@ -992,7 +1075,7 @@ def test_a_point_keeps_its_declared_transitions(sdk):
     so nothing leaves a dead Point, which the second half pins.
     """
     pid = sdk.create_point("statement", "pt-live", dedup=False)["id"]
-    sdk.update_entity(pid, status="retracted")
+    sdk.update_knowledge(pid, status="retracted")
     assert _stored(sdk, pid)["status"] == DEAD_WORD
     with pytest.raises(ValueError):
-        sdk.update_entity(pid, status="live")   # terminal: no outgoing edge
+        sdk.update_knowledge(pid, status="live")   # terminal: no outgoing edge

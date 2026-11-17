@@ -1104,7 +1104,7 @@ class _RenderingLie(str):
     `v.replace(...)` on the CALLER'S object. So a subclass could agree with the
     stored word by content (the entailed shortcut rightly reads "no transition
     asked for") and still store a different word. Measured at `70b37dcfc5` on an
-    `archived` Object: `update_entity(oid, status=_RenderingLie('archived'))`
+    `archived` Object: `update_knowledge(oid, status=_RenderingLie('archived'))`
     returned normally and the row read `live` — a resurrection the guard never saw.
     """
 
@@ -1179,7 +1179,7 @@ class TestLifecycleCarrierCoherence:
             before_row = _carrier_row(sdk, label, "zeta")
             before = len(_records(journal))
             with pytest.raises(ValueError) as exc:
-                sdk.update_entity(oid, **carriers)
+                sdk.update_knowledge(oid, **carriers)
             msg = str(exc.value)
             carrier_keys = sorted(k for k in carriers if k.startswith("superseded"))
             assert carrier_keys[0] in msg, (
@@ -1276,7 +1276,7 @@ class TestLifecycleCarrierCoherence:
                           event_log_path=str(journal))
         try:
             oid = _make_carrier_entity(sdk, label, "alpha")
-            sdk.update_entity(oid, status="superseded", supersededBy="alpha-v2",
+            sdk.update_knowledge(oid, status="superseded", supersededBy="alpha-v2",
                               supersededAt="2026-01-01T00:00:00Z")
             row = _carrier_row(sdk, label, "alpha")
             assert row[1:] == ("superseded", "alpha-v2",
@@ -1322,7 +1322,7 @@ class TestLifecycleCarrierCoherence:
                           event_log_path=str(journal))
         try:
             oid = _make_carrier_entity(sdk, "Object", "beta")
-            sdk.update_entity(oid, status="superseded", supersededBy="beta-v2",
+            sdk.update_knowledge(oid, status="superseded", supersededBy="beta-v2",
                               supersededAt="2026-01-01T00:00:00Z")
             superseded_row = _carrier_row(sdk, "Object", "beta")
             assert superseded_row[1:] == ("superseded", "beta-v2",
@@ -1332,7 +1332,7 @@ class TestLifecycleCarrierCoherence:
             # ── the STATUS-ONLY shape is the incoherent one, and it is refused ──
             journal_before = len(_records(journal))
             with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
-                sdk.update_entity(oid, status="live")
+                sdk.update_knowledge(oid, status="live")
             assert _carrier_row(sdk, "Object", "beta") == superseded_row, (
                 "a REFUSED status-only lift still moved the row — the refusal "
                 "must leave it exactly as it stood")
@@ -1341,7 +1341,7 @@ class TestLifecycleCarrierCoherence:
                 "refusal must land before any write reaches the stream")
 
             # ── the COHERENT shape lifts it: both carriers go NULL ──
-            sdk.update_entity(oid, status="live", supersededBy=None,
+            sdk.update_knowledge(oid, status="live", supersededBy=None,
                               supersededAt=None)
             lifted = _carrier_row(sdk, "Object", "beta")
             assert lifted[1:] == ("live", None, None), (
@@ -1351,7 +1351,7 @@ class TestLifecycleCarrierCoherence:
             # ── and the SNAKE spelling of a clear is accepted too (`None` is not
             # a carrier under either spelling). Its EFFECT is NOT pinned here: a
             # snake carrier SET is what writes the shadow property (#12782).
-            sdk.update_entity(oid, superseded_by=None, superseded_at=None)
+            sdk.update_knowledge(oid, superseded_by=None, superseded_at=None)
 
             # ── a BARE carrier CLEAR (no `status` key at all) is still ACCEPTED
             # on a superseded row and leaves the row TERMINAL: with no status
@@ -1360,10 +1360,10 @@ class TestLifecycleCarrierCoherence:
             # the assertion #12790 dropped when it rewrote this test: the
             # BEHAVIOUR never changed, only its pin did (#12882 review F2).
             bare = _make_carrier_entity(sdk, "Object", "gamma")
-            sdk.update_entity(bare, status="superseded",
+            sdk.update_knowledge(bare, status="superseded",
                               supersededBy="gamma-v2",
                               supersededAt="2026-01-01T00:00:00Z")
-            sdk.update_entity(bare, supersededBy=None, supersededAt=None)
+            sdk.update_knowledge(bare, supersededBy=None, supersededAt=None)
             cleared = _carrier_row(sdk, "Object", "gamma")
             assert cleared[1:] == ("superseded", None, None), (
                 "the bare carrier CLEAR did not clear both columns while "
@@ -1417,8 +1417,17 @@ class TestLifecycleCarrierCoherence:
             # with a performable repair ("Pass the word itself, as a string.")
             # rather than with the dead-set message. The ROW assertion below is
             # the invariant both doors must keep, and it is unchanged.
-            with pytest.raises(ValueError, match="was refused"):
-                sdk.update_entity(oid, status=target)
+            #
+            # ⛔ EXCEPT `None`, which is not a word at all (#13143 review,
+            # finding 1): it is the DECLARED DELETE sentinel, so the vocabulary
+            # door passes it and the refusal below is the one that always owned
+            # this shape — the TRANSITION guard ("is TERMINAL"). Same outcome,
+            # same untouched row, different door: a delete is not a spelling
+            # question, and the row is dead either way.
+            with pytest.raises(ValueError,
+                               match=("is TERMINAL" if target is None
+                                      else "was refused")):
+                sdk.update_knowledge(oid, status=target)
             assert _carrier_row(sdk, "Object", "delta") == before, (
                 "a refused resurrection moved the row: " +
                 repr(_carrier_row(sdk, "Object", "delta")))
@@ -1463,7 +1472,7 @@ class TestLifecycleCarrierCoherence:
             before = _carrier_row(sdk, "Object", "epsilon")
             assert before[1] == "archived", before
             try:
-                sdk.update_entity(oid, status=target)
+                sdk.update_knowledge(oid, status=target)
             except ValueError as exc:
                 assert "was refused" in str(exc), exc
             after = _carrier_row(sdk, "Object", "epsilon")
@@ -1510,7 +1519,7 @@ class TestLifecycleCarrierCoherence:
             # message renders the value — so this still pins #12906 P3 exactly:
             # a caller-controlled `__repr__` must not escape as its own class.
             with pytest.raises(ValueError, match="was refused"):
-                sdk.update_entity(oid, status=_BoomRepr())
+                sdk.update_knowledge(oid, status=_BoomRepr())
             assert _carrier_row(sdk, "Object", "zeta") == before, before
 
             # ⛔ AND THE ID OPERAND (review cycle 9 P3): the same message
@@ -1521,7 +1530,7 @@ class TestLifecycleCarrierCoherence:
                     raise RuntimeError("id-repr-boom")
 
             with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
-                sdk.update_entity(_IdLie(oid), status="live")
+                sdk.update_knowledge(_IdLie(oid), status="live")
             assert _carrier_row(sdk, "Object", "zeta") == before, before
             # ⛔ AND THE CONFLICTING-WRITE door, ONE BRANCH ABOVE it (review cycle
             # 10 P3): that refusal renders `id_val` too, so the same id object
@@ -1532,7 +1541,7 @@ class TestLifecycleCarrierCoherence:
                     return "status"
 
             with pytest.raises(ValueError, match="CONFLICTING status write"):
-                sdk.update_entity(
+                sdk.update_knowledge(
                     _IdLie(oid),
                     **{_StatusKey("superseded"): "superseded", "status": "live"})
             assert _carrier_row(sdk, "Object", "zeta") == before, before
@@ -1624,7 +1633,7 @@ class TestLifecycleCarrierCoherence:
                 # gate — the two devices this test exists to require. The
                 # dead-row assertion is unchanged.
                 with pytest.raises(ValueError, match="was refused"):
-                    sdk.update_entity(oid, status=target)
+                    sdk.update_knowledge(oid, status=target)
                 assert _carrier_row(sdk, "Object", "eta") == before, (
                     f"a {label} target moved the dead row: "
                     + repr(_carrier_row(sdk, "Object", "eta")))
@@ -1634,7 +1643,7 @@ class TestLifecycleCarrierCoherence:
             # the re-assert is still ACCEPTED — and the store now writes the
             # canonical word (that IS the door's contract, and it is silent per
             # AX §1). What must not happen is the row going CURRENT.
-            sdk.update_entity(oid, status=_PlainSub("archived"))
+            sdk.update_knowledge(oid, status=_PlainSub("archived"))
             after = _carrier_row(sdk, "Object", "eta")
             assert after == (before[0], "deprecated") + tuple(before[2:]), (
                 "a plain `str` subclass re-asserting the dead word did not land "
@@ -1673,7 +1682,7 @@ class TestLifecycleCarrierCoherence:
         sdk = TortoiseSDK(str(tmp_path / "t12882c.db"))
         try:
             oid = _make_carrier_entity(sdk, "Object", "zeta")
-            sdk.update_entity(oid, status="superseded",
+            sdk.update_knowledge(oid, status="superseded",
                               supersededBy="zeta-v2")
             assert _carrier_row(sdk, "Object", "zeta")[1:] == (
                 "superseded", "zeta-v2", None)
@@ -1682,8 +1691,13 @@ class TestLifecycleCarrierCoherence:
             # which precedes the coherence allowance — so this composed shape can
             # no longer ride into the row at all, which is a STRONGER result than
             # the allowance's `str` requirement.
-            with pytest.raises(ValueError, match="was refused"):
-                sdk.update_entity(oid, status=target,
+            # ⛔ `None` takes the TRANSITION guard instead (see the sibling pin):
+            # it is the DELETE sentinel, not a spelling, and the composed clear
+            # still cannot make a dead row current.
+            with pytest.raises(ValueError,
+                               match=("is TERMINAL" if target is None
+                                      else "was refused")):
+                sdk.update_knowledge(oid, status=target,
                                   supersededBy=None, supersededAt=None)
             assert _carrier_row(sdk, "Object", "zeta") == before, (
                 "a refused composed write moved the row: "
@@ -1713,11 +1727,11 @@ class TestLifecycleCarrierCoherence:
         sdk = TortoiseSDK(str(tmp_path / "t10192v.db"))
         try:
             oid = _make_carrier_entity(sdk, "Object", "epsilon")
-            sdk.update_entity(oid, status="live")
+            sdk.update_knowledge(oid, status="live")
             assert _carrier_row(sdk, "Object", "epsilon")[1] == "live"
             before = _carrier_row(sdk, "Object", "epsilon")
             with pytest.raises(ValueError, match="was refused"):
-                sdk.update_entity(oid, status=["live"])
+                sdk.update_knowledge(oid, status=["live"])
             assert _carrier_row(sdk, "Object", "epsilon") == before, (
                 "a REFUSED non-string status moved a live row: "
                 + repr(_carrier_row(sdk, "Object", "epsilon")))
@@ -1762,7 +1776,7 @@ class TestLifecycleCarrierCoherence:
             # promises a refusal is the defect this pins shut. A non-string
             # TARGET is refused by the vocabulary door, cleanly.
             with pytest.raises(ValueError, match="was refused"):
-                sdk.update_entity(oid, status=target)
+                sdk.update_knowledge(oid, status=target)
             assert _carrier_row(sdk, "Object", "kappa") == before
         finally:
             sdk.close()
@@ -1778,16 +1792,16 @@ class TestLifecycleCarrierCoherence:
         sdk = TortoiseSDK(str(tmp_path / "t10192s.db"))
         try:
             oid = _make_carrier_entity(sdk, "Object", "gamma")
-            sdk.update_entity(oid, status="superseded", supersededBy="gamma-v2")
+            sdk.update_knowledge(oid, status="superseded", supersededBy="gamma-v2")
             assert _carrier_row(sdk, "Object", "gamma")[1:] == ("superseded",
                                                                 "gamma-v2",
                                                                 None)
-            sdk.update_entity(oid, supersededAt="2026-02-02T00:00:00Z")
+            sdk.update_knowledge(oid, supersededAt="2026-02-02T00:00:00Z")
             assert _carrier_row(sdk, "Object", "gamma")[1:] == (
                 "superseded", "gamma-v2", "2026-02-02T00:00:00Z")
             # Same under the snake spelling: the guard reads the RESULT status,
             # so it is a coherence guard and not a ban on a property name.
-            sdk.update_entity(oid, superseded_by="gamma-v3")
+            sdk.update_knowledge(oid, superseded_by="gamma-v3")
             assert _carrier_row(sdk, "Object", "gamma")[1:] == (
                 "superseded", "gamma-v2", "2026-02-02T00:00:00Z")
         finally:
@@ -1817,19 +1831,33 @@ class TestLifecycleCarrierCoherence:
             f"the guard does not treat {spelling!r} as a carrier; it would "
             "write public.object.superseded_by without a status (#10192)")
 
-    def test_the_mirror_shape_is_not_refused(self, tmp_path):
-        """`status='superseded'` with NO carrier is OUT of scope, by decision.
+    def test_the_mirror_shape_is_not_refused_by_the_carrier_guard(self, tmp_path):
+        """`status='superseded'` with NO carrier: OUT of the CARRIER guard's
+        scope, and REFUSED by the #12592 dual.
 
-        It makes a rebuild REVIVE a node rather than bury a live one, it is a
-        shape in use, and it is already named as #9974's window. Refusing it
-        here would be the over-block the change's scope contract forbids.
+        ⛔ Two different rules, and this case exists to keep them apart.
+        #10192's guard asks "does a CARRIER have the status it implies" — it kept
+        this mirror shape out of scope by decision, and it STILL does (the refusal
+        below is not its message). What refuses it now is the dual rule
+        ONTOLOGY §4.3 states for the word itself: *"`superseded` means replaced:
+        it names the successor"*, so a row that says the word and names nothing is
+        a state the model does not have — #12592. The write is refused ATOMICALLY,
+        so the shape cannot be minted through this door at all; a graph that
+        already holds it (an older SDK, a raw producer, a pre-guard journal) is
+        untouched, and the REPLAY half of §4.3 still restores it (pinned in
+        `tests/test_12592_supersede_door.py`).
         """
         sdk = TortoiseSDK(str(tmp_path / "t10192m.db"))
         try:
             oid = _make_carrier_entity(sdk, "Subject", "delta")
-            sdk.update_entity(oid, status="superseded")
-            assert _carrier_row(sdk, "Subject", "delta")[1:] == (
-                "superseded", None, None)
+            before = _carrier_row(sdk, "Subject", "delta")
+            with pytest.raises(ValueError) as exc:
+                sdk.update_knowledge(oid, status="superseded")
+            # ⛔ NOT the carrier guard's message: that rule is untouched here.
+            assert "lifecycle CARRIER" not in str(exc.value), str(exc.value)
+            assert "no successor" in str(exc.value), str(exc.value)
+            assert _carrier_row(sdk, "Subject", "delta") == before, (
+                "the refused write moved the row")
         finally:
             sdk.close()
 
@@ -1910,13 +1938,13 @@ class TestLifecycleCarrierCoherence:
         try:
             oid = _make_carrier_entity(sdk, "Object", "epsilon")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
-                sdk.update_entity(oid, supersededBy="v2")
+                sdk.update_knowledge(oid, supersededBy="v2")
             assert _carrier_row(sdk, "Object", "epsilon")[1] is None, (
                 "the graph's reading of the refused node must stay LIVE "
                 "(#9974 R1: an absent status IS live, and a stored 'live' "
                 "would mean something DID fabricate one)")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
-                sdk.update_entity(oid, superseded_by="v2")
+                sdk.update_knowledge(oid, superseded_by="v2")
             assert _carrier_row(sdk, "Object", "epsilon")[1] is None, (
                 "a snake-spelled carrier was ACCEPTED on a live node — the "
                 "guard is inert against it (review P1)")

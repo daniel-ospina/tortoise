@@ -1793,6 +1793,29 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # this file's suite (the same #1349/#3332/#3616 silent-drop class as
              # queue_resweep/batch_open above).
              "tools/next_work.py",
+             # #13099: `tools/text_gate_13099.py` is the text-index quality gate's
+             # harness (the measurement `SEARCH-ARCHITECTURE.md` §6.2's stop
+             # condition rests on), and `tests/test_text_gate_13099.py` — the pins
+             # for its corpus determinism, its verbatim query reuse and its
+             # CI-DIRECTION decision rule — is registered `core`. `tools/` is in
+             # `NON_PYTHON_PREFIXES`, so without this entry a harness-only change is
+             # filtered out BEFORE the "not matched -> core" fallback and takes the
+             # docs-only early return: `select(["tools/text_gate_13099.py"])` yields
+             # NO surface.
+             # ⛔ COVERAGE DOES NOT VANISH THERE, and this entry must not be
+             # justified as if it did: the pin is also `tier1`-registered, and
+             # `python-ci.yml` runs the tier-1 smoke on every PR, so the file still
+             # reaches `test_files` without this entry — MEASURED, without it:
+             # `surfaces: []` AND the pin still in `test_files` (via tier-1); with
+             # it: `surfaces: ['core']`. What was missing is that the OWNING surface
+             # did not select it — coverage held by accident of the tier-1 row, not
+             # by design. This entry makes `core` select it, which is the same
+             # distinction the served_skills entry above draws ("the guards still
+             # ran there … this entry makes the owning surface select them by
+             # design"). (`integrity()` does NOT read CORE_ALSO — measured: `[]`
+             # either way — so it is not a pin; the manifest row above is what keeps
+             # the file classified.)
+             "tools/text_gate_13099.py",
              # #6388: `tools/seal_session_events.py` is the session-events seal
              # policy, guarded by tests/test_session_events_seal.py, which is
              # `core`-registered — but `tools/` is swallowed by
@@ -1864,6 +1887,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # around it. Pinned by
              # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
              "tools/dod_5090_probe.py",
+             # #12926: the pre-merge deployment-config check. `tools/` is in
+             # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and a
+             # tool-only diff answers with `surfaces: []` — measured before this entry:
+             # `--changed-files tools/embed_switch_gate.py` -> `surfaces=[]`,
+             # `full=False`, `test_embed_switch_gate_12926.py` ABSENT from `test_files`.
+             # That is the silent-drop class this entry exists for, and it bites the exact
+             # diff that could weaken the check (its discovery globs, its three verdict
+             # words, its `COULD NOT BE READ` refusal, its scrub of the ambient env) with
+             # every falsifier asleep. Same remedy and same class as the
+             # `tools/dod_5090_probe.py` entry directly above (#10465 review P1).
+             "tools/embed_switch_gate.py",
              # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
              # `core`-registered, but `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches

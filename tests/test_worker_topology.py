@@ -395,7 +395,7 @@ def test_a_cloud_uri_alone_is_an_embedded_boot_because_the_app_never_reads_it():
 def test_an_explicit_embedded_uri_masks_a_stale_cloud_uri():
     """⛔ The boot path is a PRECEDENCE chain, not a disjunction over both vars.
 
-    `entrypoint.sh:444-447` keeps an explicit `TORTOISE_DB_URI` WHATEVER its
+    `entrypoint.sh:457-460` keeps an explicit `TORTOISE_DB_URI` WHATEVER its
     shape, and promotes `FALKORDB_CLOUD_URI` only when that variable is empty —
     so an explicit `/data/tortoise.db` opens an EMBEDDED file even while a
     leftover `FALKORDB_CLOUD_URI` is still in the environment (a

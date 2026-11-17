@@ -60,7 +60,13 @@ def _registry_pairs() -> list[tuple[str, str]]:
         sdk_method = getattr(row, "sdk_method", None)
         if sdk_method:
             pairs.append((row.name, sdk_method))
-    assert len(pairs) > 50, f"registry scan found only {len(pairs)} rows — the scan is broken"
+    # 44 on the merged surface (56 live rows, 12 of which declare no
+    # `sdk_method`), after the READ/QUERY and WRITE/MUTATE container waves each
+    # retired rows that DID name one. The threshold keeps slack on purpose: it is
+    # a scan-sanity floor ("did the scan reach the registry at all?"), not a pin
+    # on the surface — a floor left at the pre-consolidation number would red on
+    # a CORRECT retirement.
+    assert len(pairs) > 40, f"registry scan found only {len(pairs)} rows — the scan is broken"
     return pairs
 
 
@@ -135,12 +141,24 @@ def _sdk_method_called_by(val) -> str | None:
     return None
 
 
+class UnreadableWrapper(AssertionError):
+    """The classifier could not READ a wrapper's source.
+
+    ⛔ It must never be reported as "reshaping": `None` from
+    `_passthrough_of` means "this wrapper's shape is its own business", and a
+    source that could not be read is NOT that fact — it is a hole in the scan,
+    and a hole that reports clean is the vacuity the guard below exists to
+    prevent.
+    """
+
+
 def _passthrough_of(fn) -> str | None:
     """The SDK method a wrapper RETURNS UNCHANGED, or None (see above)."""
     try:
         src = textwrap.dedent(inspect.getsource(fn))
-    except (OSError, TypeError):
-        return None
+    except (OSError, TypeError) as exc:
+        raise UnreadableWrapper(
+            f"cannot read the source of {getattr(fn, '__name__', fn)!r}: {exc}") from exc
     body = [n for n in ast.parse(src).body[0].body
             if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
     # shape A — one statement, returning the call itself:
@@ -171,11 +189,24 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     every call."""
     offenders = []
     checked = 0
-    for name, sdk_method in _registry_pairs():
+    reshaped = 0
+    unreadable: list[str] = []
+    unresolved: list[str] = []
+    pairs = _registry_pairs()
+    for name, sdk_method in pairs:
         if not hasattr(TortoiseSDK, sdk_method):
-            continue  # a row whose method is not on the SDK is another test's business
-        passed_through = _passthrough_method(name)
+            # A row naming a method the SDK does not have would be SKIPPED, and a
+            # skipped row is a hole in an exhaustive guard — so it is measured,
+            # not silently passed over.
+            unresolved.append(f"{name} -> TortoiseSDK.{sdk_method}")
+            continue
+        try:
+            passed_through = _passthrough_method(name)
+        except UnreadableWrapper as exc:
+            unreadable.append(str(exc))
+            continue
         if passed_through is None:
+            reshaped += 1
             continue  # a reshaping wrapper is entitled to its own annotation
         checked += 1
         wrapper_kind = _annotation_kind(
@@ -186,7 +217,62 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
             offenders.append(
                 f"{name}: wrapper declares {wrapper_kind!r} but "
                 f"TortoiseSDK.{passed_through} returns {sdk_kind!r}")
-    assert checked >= 20, (
+    # ── non-vacuity, DERIVED (never a literal floor) ─────────────────────
+    # A count literal is the wrong instrument here: it reds on a CORRECT
+    # retirement — the pre-#4282-Phase-2 population measured 22 pass-throughs;
+    # the WRITE/MUTATE wave alone took it to 19 (`tortoise_annotate_operator`,
+    # `tortoise_promote_point` and `tortoise_set_point_baseline` retired into
+    # reshaping containers), and the MERGED head measures 16, because the
+    # READ/QUERY wave also retired `tortoise_list_dedup_candidates` into
+    # `review_link_candidates`, which returns `Any` and so owes no list type —
+    # and nothing broke. (⛔ Not "20": that number is the old `>= 20` LITERAL
+    # re-read as a count — measured against origin/main with this file's own
+    # classifier: 61 rows, 22 pass-through, 39 reshaping.) Meanwhile a literal still
+    # goes quiet when the scan stops READING wrappers. What the
+    # guard actually needs is that the scan is EXHAUSTIVE: every row that names
+    # an SDK method is classified into exactly one of pass-through / reshaping,
+    # and no row is dropped for an unreadable source or a missing SDK method.
+    assert not unresolved, (
+        "these registry rows name an SDK method that is not on TortoiseSDK, so the "
+        "guard skipped them and cannot be exhaustive:\n  " + "\n  ".join(unresolved))
+    assert not unreadable, (
+        "these wrappers' source could not be read, so they were never classified — "
+        "an unreadable wrapper is a hole in the scan, not a reshaping one:\n  "
+        + "\n  ".join(unreadable))
+    # ⛔ AND a floor of ONE — read what it does and does not buy. Exhaustiveness
+    # alone is a TAUTOLOGY: every iteration increments exactly one counter (or lands
+    # in a list already proven empty), so an "unclassified row" is unrepresentable
+    # and that equality can never fail. The bucket that actually swallows holes is
+    # `reshaped`: `_passthrough_of` returns None for ANY shape it does not recognise,
+    # so a real pass-through rewritten in an idiom the classifier does not know (e.g.
+    # `return _safe(_quota_gated(_get_org_sdk().m, "points"), …)`, which the registry
+    # does use) is counted as "reshaping" and escapes — the same escape `_tail_name`'s
+    # note records a review round measuring. This floor therefore detects TOTAL
+    # collapse only (measured: `_passthrough_of` -> None answers checked=0,
+    # reshaped=44 and would otherwise satisfy every assert above); it is NOT a drift
+    # detector, and it cannot be one without a second, independent classifier.
+    # It is also a deliberate FALSE-RED risk in the other direction: a future batch
+    # that absorbs EVERY remaining pass-through door into reshaping containers takes
+    # checked to 0 and WILL red here, on a change that may be correct. Accepted on
+    # purpose — "no wrapper in the registry passes its SDK value through any more" is
+    # a class-level change a reviewer should see, not a silent one. (What the literal
+    # `>= 20` got wrong was different: it red at 19 while 19 was CORRECT.)
+    assert checked > 0, (
+        f"not one of {len(pairs)} registry rows was classified as a pass-through "
+        f"({reshaped} read as reshaping) — a classifier that matches no real "
+        "wrapper compares nothing, so a clean result here would be vacuous")
+    assert checked + reshaped == len(pairs), (
+        f"the scan classified {checked + reshaped} of {len(pairs)} registry rows "
+        f"({checked} pass-through, {reshaped} reshaping) — an unclassified row is a "
+        "wrapper this guard never looked at, so a clean result here would be vacuous")
+    # AND the pass-through POPULATION floor — the vacuity guard, not a target, and
+    # the measured merged number like every other pin in this file. 19 -> 16 with
+    # the surface: `tortoise_list_dedup_candidates` left the pass-through population
+    # when its SDK method retired into `review_link_candidates` (#11609 Phase 2,
+    # which returns `Any` and so owes no list type), and the three doors named above
+    # left it with the WRITE/MUTATE containers. The floor moves DOWN with the
+    # surface; it is not lowered to whatever a green run last produced.
+    assert checked >= 16, (
         f"only {checked} pass-through wrappers were found — the scan is not "
         f"reaching the registry, so a clean result here would be vacuous")
     assert not offenders, (
@@ -211,14 +297,30 @@ def test_the_two_named_tools_declare_a_shape_fastmcp_accepts():
     what the scan above measures. Do not delete those on the strength of this
     passing.
     """
-    for name, sdk_method in (("tortoise_belief_timeline", "belief_timeline"),
-                             ("tortoise_list_dedup_candidates", "list_dedup_candidates")):
+    for name, sdk_method, expected in (
+            ("tortoise_belief_timeline", "belief_timeline", "list"),
+            # #11609: the SDK method retired into `review_link_candidates`, which
+            # returns `Any` — so this door owes its OWN envelope (`-> dict`) rather
+            # than the SDK method's list type. The premise is re-derived, not dropped.
+            ("tortoise_list_dedup_candidates", "review_link_candidates", typing.Any)):
         assert callable(getattr(ms, name, None)), f"{name} is not on the MCP surface"
-        sdk_kind = _annotation_kind(
-            inspect.signature(getattr(TortoiseSDK, sdk_method)).return_annotation)
-        assert sdk_kind == "list", (
-            f"TortoiseSDK.{sdk_method} no longer returns a list — this test's "
-            f"premise changed; re-derive the guard instead of deleting it")
+        raw = inspect.signature(getattr(TortoiseSDK, sdk_method)).return_annotation
+        if expected is typing.Any:
+            # ⛔ `_annotation_kind` answers `None` for BOTH `-> Any` and "no annotation
+            # at all", so `assert sdk_kind == None` also passed once the container lost
+            # its annotation entirely (-> the door's own envelope would be derived from
+            # nothing). Pin the CONTAINER's shape on the raw annotation (#12951 fix-round
+            # review P3); `from __future__ import annotations` makes it the string "Any".
+            assert raw in (typing.Any, "Any"), (
+                f"TortoiseSDK.{sdk_method} no longer declares `-> Any` (raw annotation "
+                f"{raw!r}): the container's shape is what {name}'s own envelope is "
+                f"derived from — re-derive the guard instead of deleting it")
+        else:
+            sdk_kind = _annotation_kind(raw)
+            assert sdk_kind == expected, (
+                f"TortoiseSDK.{sdk_method} now returns {sdk_kind!r}, not {expected!r} "
+                f"— this test's premise changed; re-derive the guard instead of "
+                f"deleting it")
         wrapper_kind = _annotation_kind(
             inspect.signature(getattr(ms, name)).return_annotation)
         schema = _output_schema(getattr(ms, name))
@@ -246,7 +348,8 @@ class _StubSDK:
     def belief_timeline(self, topic, limit=50):
         return []
 
-    def list_dedup_candidates(self, candidate_type="content", limit=50):
+    def review_link_candidates(self, kind="connections", *,
+                               candidate_type="content", limit=50):
         return []
 
 
@@ -283,7 +386,8 @@ async def test_a_non_empty_list_result_keeps_its_rows(stubbed):
     """The fix must not just satisfy the empty case: the rows a caller wants
     have to survive the envelope."""
     class _Rows(_StubSDK):
-        def list_dedup_candidates(self, candidate_type="content", limit=50):
+        def review_link_candidates(self, kind="connections", *,
+                                  candidate_type="content", limit=50):
             return [{"id": "c1", "content": "a", "candidate_type": candidate_type}]
 
     ms._get_org_sdk = lambda *a, **k: _Rows()
@@ -300,7 +404,7 @@ async def test_a_non_empty_list_result_keeps_its_rows(stubbed):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name,args,raising", [
     ("tortoise_belief_timeline", {"topic": "Helios"}, "belief_timeline"),
-    ("tortoise_list_dedup_candidates", {}, "list_dedup_candidates"),
+    ("tortoise_list_dedup_candidates", {}, "review_link_candidates"),
 ])
 async def test_a_safe_failure_is_not_demoted_into_the_success_payload(
         name, args, raising, monkeypatch):

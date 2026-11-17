@@ -182,7 +182,7 @@ def test_a_SOURCE_targeted_edge_MOVES_and_both_routes_agree(edge_sdk, rel):
     """
     sdk, journal, tmp_path = edge_sdk
     ids = _world(sdk)
-    url = sdk.create_source("https://9836.test/doc",
+    url = sdk.register_source("https://9836.test/doc",
                             sourceKind="document").get("url")
     assert url, "the Source must carry the url the edge is keyed by"
     assert sdk.create_edge(rel, ids["old"], url)["created"] is True

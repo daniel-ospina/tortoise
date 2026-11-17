@@ -59,6 +59,35 @@ from .env_truthy import is_truthy
 #: ``counterfactual`` record instead of by the default.
 ENV_FLAG = "TORTOISE_VALUE_GATE"
 
+#: ⛔ **THE TWO SWITCHES READ OPPOSITE WAYS WHEN UNSET, AND THAT IS DELIBERATE**
+#: (`#11445`, restated by `#12926`) — the sibling in :mod:`tortoise.embed_gate` is
+#: **OFF** unless enabled, while this one is **ON** unless disabled. (⚠️ Its flag read is
+#: named nowhere in this file on purpose: `tests/test_embed_gate_5008.py` pins, within
+#: `tortoise/` only, gate module + seam (spelling) and `gate_visibility` (qualified name).) The two gate one
+#: rule set
+#: (`embed_gate.RULE_SET is RULES`) at two points answering two questions, and the
+#: asymmetry follows the COST of being wrong: a DISCARD that fires wrongly leaves
+#: a row that was never written — unrecoverable — so OFF is this half's safe
+#: residual, whereas the EMBED half's wrong answer costs rent on a row that IS
+#: written (recoverable, and armed only after its rate was measured — `#5008`).
+#: ⇒ **CHANGING EITHER DEFAULT IS A REOPEN OF `#11445`, NOT A FIX.** `#11445`
+#: decided the guarantee lives in the SHIPPED CONFIG rather than in these
+#: defaults; `#12926` enforces that pre-merge (`tools/embed_switch_gate.py`),
+#: states both effective values at boot (`tortoise/gate_visibility.py`), and
+#: deliberately leaves this default as declared.
+
+
+def resolve_enabled(raw: object | None) -> bool:
+    """The mechanical gate's resolution over a RAW value — the ONE default site.
+
+    Absent (``None``) ⇒ **ON**, which is the default `#10996` requires; blank,
+    garbage and the falsy spellings ⇒ OFF. ``value_gate_enabled()`` is this
+    function applied to the environment, so the order has exactly one copy, and
+    the startup diagnostic reports through it rather than re-deriving the
+    default.
+    """
+    return is_truthy("1" if raw is None else raw)
+
 
 def value_gate_enabled() -> bool:
     """Whether the mechanical gate runs. **On** unless the flag says otherwise.
@@ -77,8 +106,11 @@ def value_gate_enabled() -> bool:
     blank, garbage and the falsy spellings ⇒ off. For a *discard* predicate
     whose wrong answer is memory loss, OFF is the safe residual, so the tristate
     resolver (unset/blank/garbage → ``default``) is the wrong instrument here.
+
+    The default itself lives in :func:`resolve_enabled` — one site, shared with
+    the startup diagnostic (`tortoise/gate_visibility.py`).
     """
-    return is_truthy(os.environ.get(ENV_FLAG, "1"))
+    return resolve_enabled(os.environ.get(ENV_FLAG))
 
 
 # ── The rule vocabulary (each id is recorded on every discard —

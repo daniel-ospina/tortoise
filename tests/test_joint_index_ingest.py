@@ -82,7 +82,7 @@ def test_joint_one_graph_both_writers_share_source(tmp_path, sdk):
     the ORIGINAL sourceKind/contentHash/references SURVIVE, version
     UNCHANGED, the sweep re-run all-skipped (no churn)."""
     c = _corpus(tmp_path)
-    r1 = sdk.index_directory(str(c), extract_metadata=False)
+    r1 = sdk.index_sources_from_directory(str(c), extract_metadata=False)
     assert r1["indexed"] == 2
     url = f"corpus://{c.name}/s1.md"
     before = _query(sdk, "MATCH (s:Source {url:$u}) RETURN s.contentHash, "
@@ -130,7 +130,7 @@ def test_joint_one_graph_both_writers_share_source(tmp_path, sdk):
     assert _required_sweep(sdk._get_proj().g) == 0
 
     # sweep re-run → all-skipped (no churn — the joint convergence)
-    r2 = sdk.index_directory(str(c), extract_metadata=False)
+    r2 = sdk.index_sources_from_directory(str(c), extract_metadata=False)
     assert r2["skipped"] == 2 and r2["indexed"] == 0 and r2["updated"] == 0, r2
 
 
@@ -165,7 +165,7 @@ def test_joint_sweep_zero_point_mutation(tmp_path, sdk):
         "a plain Point↔Point IMPL is operator-mediated (#8499)"
 
     # the sweep over the corpus
-    sdk.index_directory(str(c), extract_metadata=False)
+    sdk.index_sources_from_directory(str(c), extract_metadata=False)
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == points_before, \
         "the sweep must not create/mutate Points"
     assert _count(sdk, "MATCH ()-[r:IMPL|NAND]->() RETURN count(r)") == edges_before, \
@@ -220,12 +220,12 @@ def test_joint_stub_source_exception_class(tmp_path, sdk):
     })
     # (the stub at the corpus url is created by a direct create_source call —
     # the ingest's source item for a corpus url with no hash stays a stub)
-    sdk.create_source(corpus_url, "agentSession")  # stub at the indexed url
+    sdk.register_source(corpus_url, "agentSession")  # stub at the indexed url
     assert _query(sdk, "MATCH (s:Source {url:$u}) RETURN s.contentHash",
                   {"u": corpus_url})[0][0] == ""
     # the sweep COMPLETES the stub (option 2 — the conditional merge writes
     # the real hash when the stored one differs/NULL)
-    r = sdk.index_directory(str(c), extract_metadata=False)  # noqa: F841
+    r = sdk.index_sources_from_directory(str(c), extract_metadata=False)  # noqa: F841
     completed = _query(sdk, "MATCH (s:Source {url:$u}) RETURN s.contentHash",
                        {"u": corpus_url})[0][0]
     assert completed and completed != "", \

@@ -28,6 +28,7 @@ from tortoise.entity_identity import (
     UnaddressableEntityName,
     resolve_entity_id_same_entity,
 )
+from tortoise.live import _terminal_excluded  # #13034: the ONE currency predicate
 from tortoise.search_engine import (
     annotate_ep_batch,
     get_relationships,
@@ -228,7 +229,12 @@ def _retrieve_topic_neighborhood(
                 point_rows = graph.query(
                     f"MATCH (p:Point)-[:{edge_type}]->(e:{entity_label} {{id: $eid}}) "
                     "WHERE p.is_operator = false "
-                    "  AND (p.status IS NULL OR p.status <> 'retracted') "
+                    # #13034: the shared predicate, never a hand-written
+                    # `status <> 'retracted'`. The hand-written form was a
+                    # SUBSET of the terminal vocabulary, so a superseded or
+                    # deprecated claim was folded into a live topic's
+                    # neighborhood and then summarised as current content.
+                    f"  AND {_terminal_excluded('p.status')} "
                     "RETURN p.id, p.content, p.pointKind "
                     "LIMIT $max_seeds",
                     params={"eid": entity_id, "max_seeds": max_seeds},
@@ -250,7 +256,9 @@ def _retrieve_topic_neighborhood(
         point_rows = graph.query(
             "MATCH (p:Point) "
             "WHERE p.is_operator = false "
-            "  AND (p.status IS NULL OR p.status <> 'retracted') "
+            # #13034: the shared predicate (see stage 1a) — a hand-written
+            # terminal subset seeds a topic neighborhood with dead claims.
+            f"  AND {_terminal_excluded('p.status')} "
             "  AND (toLower(coalesce(p.content, '')) CONTAINS toLower($topic) "
             "       OR toLower(coalesce(p.pointKind, '')) CONTAINS toLower($topic)) "
             "RETURN p.id, p.content, p.pointKind "
@@ -286,8 +294,12 @@ def _retrieve_topic_neighborhood(
                         "MATCH (n:Point)<-[r1:IMPL|NAND]-(op:Point {is_operator:true})"
                         "-[r2:IMPL|NAND]->(m:Point) "
                         "WHERE n.id IN $ids AND m.id <> n.id "
-                        "  AND (n.status IS NULL OR n.status <> 'retracted') "
-                        "  AND (m.status IS NULL OR m.status <> 'retracted') "
+                        # #13034: both hops ask the shared predicate — the
+                        # expansion must not walk THROUGH or INTO a dead claim,
+                        # which the hand-written tombstone subset allowed for
+                        # every terminal word but `retracted`.
+                        f"  AND {_terminal_excluded('n.status')} "
+                        f"  AND {_terminal_excluded('m.status')} "
                         "  AND m.is_operator = false "
                         "RETURN DISTINCT m.id, m.content, m.pointKind",
                         params={"ids": batch},

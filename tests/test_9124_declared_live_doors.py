@@ -250,7 +250,12 @@ _DECLARATION_DECORATORS = (*_LIVE_LANE_NAMES, *_APPLY_FIRST_LANE_NAMES)
 #: record and to be genuinely apply-first.
 _APPLY_FIRST_DOORS = {
     "approve_merge",         # SET reviewed flags, then PointRevised/… records
-    "assess_source",         # SET reliability, then the assessment record
+    # ⛔ #12948 renamed the public `assess_source` to `_assess_source` (the container
+    # `manage_source_trust` is the door now). The census keys on the FUNCTION name, so
+    # the entry moves with the rename — leaving `assess_source` here made the set name a
+    # function that no longer exists, which reds as a stale entry AND leaves the renamed
+    # body reaching the write handle with no lane (measured before this: reds 1 and 2).
+    "_assess_source",        # SET reliability, then the assessment record
     "compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
     "mitigate_operator",     # CREATE the mitigation, then its records
     "promote_point",         # CAS SET status='live', then PointPromoted
@@ -348,7 +353,10 @@ _NO_JOURNAL = {
     # `test_the_inventories_hold_no_stale_entry` reds on. A door that no longer
     # exists has no lane to name.
     "ingest",
-    "set_source_tier",
+    # ⛔ #12948 renamed the public `set_source_tier` to `_set_source_tier` (the container
+    # `manage_source_trust` is the door now), so the entry moves with the rename for the
+    # same measured reason as `_assess_source` above.
+    "_set_source_tier",
 }
 
 #: A statement the enumerator cannot PROVE read-only, in a function that appends
@@ -413,7 +421,7 @@ _UNRESOLVED = {
     # is a resolved read.
     "_raise_update_point_status_error",
     "_window_closure",
-    "expand_relationships",
+    "_expand_relationships",
     # f-string interpolates a computed fragment (`{_label}`, `{relationship_type}`,
     # `{_capture_passthrough_read_fields()}`, …) — the #9124 review's P1 shape,
     # which a placeholder substitution used to flatten into a false READ.
@@ -615,8 +623,8 @@ _UNRESOLVED = {
     "list_batch",
     "paginated_query",
     "query",
-    "search_sessions",
-    "suggest_entry_points",
+    "_search_sessions",
+    "_suggest_entry_points",
     "tortoise_fts_query",
     # ⛔ NO SECOND ROW FOR `calibrate_summary` / `_uncalibrated_ep_participants`.
     # They are declared ONCE, above (the #9063 entry). Both PRs that landed on
@@ -4849,6 +4857,30 @@ _PROVEN_READS: set[tuple[str, str]] = {
     # which the register's own note calls the wrong remedy.
     ("tortoise/sdk.py", "TortoiseSDK.calibrate_summary"),
     ("tortoise/sdk.py", "TortoiseSDK._uncalibrated_ep_participants"),
+    # #12592: both reaches are the SAME shape — an `f"MATCH (n:{label} {{id:$id}})
+    # … RETURN …"` whose statement interpolates the caller's loop variable, so the
+    # resolver cannot flatten it and the census's over-report polarity counts it as
+    # a write. By hand, both are reads: `RETURN count(n) AS rows, collect(n.status)
+    # …` (the fan-out probe) and `RETURN n.id AS id, n.status AS st,
+    # n.supersededBy AS succ` (the guard's per-row read) — no
+    # SET/CREATE/MERGE/DELETE/REMOVE, no write procedure, and neither appends a
+    # record. Declaring a lane would be a WRITE declaration on a read (the same
+    # reasoning this register's first entries give). The WRITES these two guard go
+    # through `_update_entity`, whose lane declaration is the door's own; the
+    # read-side verdict blesses no undeclared write.
+    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity._rows"),
+    # #12592: the OUTER door's own reach — the hybrid-id guard's sibling probe,
+    # `f"MATCH (n:{_sibling} {{id:$id}}) RETURN count(n) AS hits"`. The label is
+    # interpolated from the guard's own variable, so the resolver reports
+    # '<unresolved>' and the census's over-report polarity counts it as a write.
+    # By hand it is a READ: `RETURN count(n)`, no SET/CREATE/MERGE/DELETE/REMOVE,
+    # no write procedure, appending no record. The door's WRITE is not in this
+    # function at all — it is delegated to `update_knowledge`, which relays
+    # through `_update_entity_any` to the apply-first door `_update_entity`,
+    # whose lane declaration covers it. So this read-side verdict blesses no
+    # undeclared write (pinned statement extent below).
+    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity"),
+    ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"),
 }
 
 #: WHAT WAS PROVEN, not only whose statement was — keyed like `_PROVEN_READS`,
@@ -4869,6 +4901,18 @@ _PROVEN_READ_STATEMENTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("tortoise/sdk.py", "TortoiseSDK.calibrate_summary"): ("query",),
     # one `g.query`, resolving to `MATCH (n:{label}) WHERE … RETURN n.id [LIMIT n]`
     ("tortoise/sdk.py", "TortoiseSDK._uncalibrated_ep_participants"): ("query",),
+    # one `g.query`, resolving to `MATCH (n:{label} {id:$id}) RETURN count(n) …`
+    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity._rows"): ("query",),
+    # ONE, not two: the nested `_rows` probe takes its own key above; this
+    # function's only unresolved statement is the sibling probe's f-string label.
+    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity"): ("query",),
+    # ONE, not three: `_assert_supersession_names_a_successor` issues three
+    # `proj.g.query` calls and only the first is unresolved (the label loop's
+    # f-string). The other two are literal statements the resolver flattens into
+    # provable READS, so they never enter `writes` and pinning them here would
+    # make the extent lie. Measured with the module's own enumerator, not reasoned:
+    # `writes == [(48606, 'query', '<unresolved>')]`, `_is_unresolved_only` True.
+    ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"): ("query",),
 }
 
 

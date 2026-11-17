@@ -3444,9 +3444,18 @@ def apply_event_stream_folds(
         object_side = node.label == "Object"
 
         # The replay: `evs` is in `seq` order, and EVERY connector/pack write is
-        # guarded the way the live `SET` is — `AND (o.status IS NULL OR NOT
-        # (o.status IN $excluded))`. So a terminal word written by one event
-        # latches: the later events are refused instead of resurrecting it.
+        # guarded the way the live `SET` is — on the STATUS axis by
+        # `AND (o.status IS NULL OR NOT (o.status IN $excluded))`, and on the
+        # POSITION axis by `apply_stage_fold`'s own `isClosed` / terminal-slot
+        # guard. So a terminal word written by one event latches: the later
+        # events are refused instead of resurrecting it.
+        # ⛔ AND THE STATUS LATCH BINDS THE STAGE ARMS TOO (#13143 review,
+        # finding 2): the live fold refuses a stage move on a terminal stored
+        # `status` independently of the position guard, so the two stage arms
+        # below carry `if not _is_terminal_status(status)` as the exact mirror.
+        # Before that conjunct the sentence above was true of the status axis and
+        # FALSE of the position one — a stream that makes `status` terminal moved
+        # the stage on rebuild and not live.
         status: str | None = current
         #: ── #11824 S0: the POSITION axis, replayed alongside the lifecycle one ──
         #: The fold targets are STAGES for a migrated kind and for the built-in
@@ -3615,10 +3624,48 @@ def apply_event_stream_folds(
                         # own (`isClosed` / a terminal current slot), which is
                         # the same guard the live fold applies — one decision,
                         # two routes.
+                        #
+                        # ⛔ AND THE **STATUS** HALF OF THAT LATCH IS THIS
+                        # CONJUNCT (#13143 review, finding 2). `apply_stage_fold`
+                        # has no view of `status`, and the live arm refuses a
+                        # stage move on any row whose stored status is TERMINAL
+                        # (`projection/entities.py`, `if status is not None and
+                        # status in excluded: return False`) INDEPENDENTLY of
+                        # `isClosed` and of the current slot. Without it here,
+                        # a stream whose `status` BECOMES terminal (a `restatus`
+                        # — the documented order-blind window this module already
+                        # names) moved the stage on a rebuild and not live, which
+                        # is `live ≢ rebuilt` on the axis this PR introduces.
+                        if not _is_terminal_status(status):
+                            _reason, _props = apply_stage_fold(
+                                stage, fold_target.kind,
+                                index.pipeline_for(fold_target.kind),
+                                fold_target.target, reopen=False)
+                            if _props:
+                                stage = {
+                                    "stageId": _props.get("pipelineStageId"),
+                                    "pipelineKey": _props.get("pipelineStageKey"),
+                                    "isClosed": _props.get("isClosed"),
+                                }
+                                stage_props = _props
+                        continue
+                    if not _is_terminal_status(status):
+                        status = fold_target.target
+            if event.object_name == name:
+                builtin_stage = builtin_fold_stage(event.event_kind)
+                if builtin_stage is not None and not owns:
+                    # ── the same STATUS latch as the declared arm above ──
+                    # (#13143 review, finding 2). A terminal `status` refuses the
+                    # fold on BOTH routes, reopen included: `reopen` is the
+                    # POSITION axis's escape hatch, never a licence to move a row
+                    # whose LIFECYCLE word has ended (in the live fold the latch
+                    # runs before the stage decision, so `github.issue.reopened`
+                    # cannot revive a `deprecated` row either).
+                    if not _is_terminal_status(status):
                         _reason, _props = apply_stage_fold(
-                            stage, fold_target.kind,
-                            index.pipeline_for(fold_target.kind),
-                            fold_target.target, reopen=False)
+                            stage, BUILTIN_CONNECTOR_PIPELINE_KEY,
+                            BUILTIN_CONNECTOR_PIPELINE, builtin_stage,
+                            reopen=builtin_fold_reopens(event.event_kind))
                         if _props:
                             stage = {
                                 "stageId": _props.get("pipelineStageId"),
@@ -3626,23 +3673,6 @@ def apply_event_stream_folds(
                                 "isClosed": _props.get("isClosed"),
                             }
                             stage_props = _props
-                        continue
-                    if not _is_terminal_status(status):
-                        status = fold_target.target
-            if event.object_name == name:
-                builtin_stage = builtin_fold_stage(event.event_kind)
-                if builtin_stage is not None and not owns:
-                    _reason, _props = apply_stage_fold(
-                        stage, BUILTIN_CONNECTOR_PIPELINE_KEY,
-                        BUILTIN_CONNECTOR_PIPELINE, builtin_stage,
-                        reopen=builtin_fold_reopens(event.event_kind))
-                    if _props:
-                        stage = {
-                            "stageId": _props.get("pipelineStageId"),
-                            "pipelineKey": _props.get("pipelineStageKey"),
-                            "isClosed": _props.get("isClosed"),
-                        }
-                        stage_props = _props
         if (status is None or status == current) and not stage_props:
             out.append(node)
             continue

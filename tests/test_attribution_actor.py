@@ -157,7 +157,7 @@ class TestOauthResolverRawActor:
 
 
 class TestRegistryApikeyVerifyRawCreatedBy:
-    """sdk.apikey_verify returns the RAW created_by from the APIKey node —
+    """sdk._apikey_verify returns the RAW created_by from the APIKey node —
     the registry MCP lane was the actor-less gap (indicator 1)."""
 
     def test_apikey_verify_returns_raw_created_by(self, tmp_path, monkeypatch):
@@ -171,9 +171,9 @@ class TestRegistryApikeyVerifyRawCreatedBy:
         sdk = TortoiseSDK(db_path=db_path, namespace="registry")
         team = sdk.org_create("attribution-team")
         creator = str(_uuid.uuid4())
-        mint = sdk.apikey_create(team["id"], created_by=creator)
+        mint = sdk._apikey_create(team["id"], created_by=creator)
         key = mint["api_key"]
-        resolved = sdk.apikey_verify(key)
+        resolved = sdk._apikey_verify(key)
         assert resolved is not None
         assert resolved["created_by"] == creator
         # additive — pre-existing return keys untouched
@@ -193,8 +193,8 @@ class TestRegistryApikeyVerifyRawCreatedBy:
         team = sdk.org_create("attribution-team-legacy")
         # created_via="provisioned", no creator uuid rides the node when the
         # caller does not pass created_by (the "api" class).
-        key = sdk.apikey_create(team["id"], "api")["api_key"]
-        resolved = sdk.apikey_verify(key)
+        key = sdk._apikey_create(team["id"], "api")["api_key"]
+        resolved = sdk._apikey_verify(key)
         assert resolved is not None
         assert resolved.get("created_by") in (None, "api")
 

@@ -96,7 +96,7 @@ def test_the_update_door_refuses_it_too(sdk):
     obj = sdk.create_object("probe-update-door")
     object_id = obj.get("id") or obj.get("objectId")
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(object_id, story_arc=PROSE, sessionId=SESSION)
+        sdk.update_knowledge(object_id, story_arc=PROSE, sessionId=SESSION)
     assert "cannot be written through update_entity" in str(exc.value), (
         "the UPDATE door's own refusal must fire — a paired narrative is still "
         "unfileable through an update, which writes caller props onto the node")
@@ -210,7 +210,7 @@ def test_the_other_two_refusing_labels_accept_a_paired_narrative(sdk, door, labe
     §9.1(b)/R7 exists to remove.
     """
     if door == "source":
-        created = sdk.create_source(f"https://example.test/{SESSION}",
+        created = sdk.register_source(f"https://example.test/{SESSION}",
                                     "webpage", story_arc=PROSE, sessionId=SESSION)
     else:
         created = sdk.create_document(f"probe-{SESSION}", documentKind="transcript",

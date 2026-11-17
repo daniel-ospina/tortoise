@@ -167,7 +167,7 @@ def test_de2e_n5_empty_corpus():
     os.makedirs(os.path.join(tmp, "corpus"), exist_ok=True)
     sdk = TortoiseSDK(os.path.join(tmp, "n5.db"))
     try:
-        res = sdk.mine_corpus(os.path.join(tmp, "corpus"))
+        res = sdk.mine_knowledge_from_directory(os.path.join(tmp, "corpus"))
         assert res["sessions"] == 0
         assert res["ingested"] == 0 and res["skipped"] == 0 and res["failed"] == 0
         assert res["entities"] == 0 and res["objects"] == 0
@@ -193,7 +193,7 @@ def test_de2e_n1_malformed_session_skipped_batch_continues():
 
     sdk = TortoiseSDK(os.path.join(tmp, "n1.db"))
     try:
-        res = sdk.mine_corpus(corpus)
+        res = sdk.mine_knowledge_from_directory(corpus)
         assert res["sessions"] == 2
         assert res["failed"] >= 1, f"bad file not counted as failed: {res}"
         assert res["errors"], "bad file surfaced in errors"
@@ -217,11 +217,11 @@ def test_de2e_n8_duplicate_session_file_skipped_via_file_hash():
 
     sdk = TortoiseSDK(os.path.join(tmp, "n8.db"))
     try:
-        first = sdk.mine_corpus(corpus)
+        first = sdk.mine_knowledge_from_directory(corpus)
         assert first["ingested"] == 1
         assert first["entities"] >= 1 and first["objects"] >= 1
 
-        second = sdk.mine_corpus(corpus)
+        second = sdk.mine_knowledge_from_directory(corpus)
         assert second["skipped"] >= 1, f"second run should skip: {second}"
         assert second["entities"] == 0, "re-run added entities"
         assert second["objects"] == 0, "re-run added objects"
@@ -251,7 +251,7 @@ def test_de2e1_run_boundary_two_sessions_no_cross_wiring():
 
     sdk = TortoiseSDK(os.path.join(tmp, "rb.db"))
     try:
-        first = sdk.mine_corpus(corpus)
+        first = sdk.mine_knowledge_from_directory(corpus)
         assert first["sessions"] == 2
         g = sdk._get_proj().g
 
@@ -277,7 +277,7 @@ def test_de2e1_run_boundary_two_sessions_no_cross_wiring():
         def count_points():
             return g.query("MATCH (p:Point) RETURN count(p)").result_set[0][0]
         before = count_points()
-        second = sdk.mine_corpus(corpus)
+        second = sdk.mine_knowledge_from_directory(corpus)
         assert second["skipped"] >= 1, f"re-run should skip: {second}"
         assert count_points() == before, "re-mine stacked points"
     finally:
@@ -305,7 +305,7 @@ def test_de2e1_symlink_entry_skipped():
 
     sdk = TortoiseSDK(os.path.join(tmp, "sym.db"))
     try:
-        res = sdk.mine_corpus(corpus)
+        res = sdk.mine_knowledge_from_directory(corpus)
         sym_errors = [e for e in res["errors"] if str(e["file"]).endswith("evil.md")]
         assert sym_errors, f"symlink not surfaced in errors: {res['errors']}"
         assert sym_errors[0]["retryable"] is False
@@ -340,7 +340,7 @@ def test_de2e1_duplicate_session_primary_only():
 
     sdk = TortoiseSDK(os.path.join(tmp, "dup.db"))
     try:
-        res = sdk.mine_corpus(corpus)
+        res = sdk.mine_knowledge_from_directory(corpus)
         dup_errors = [e for e in res["errors"] if "duplicate sessionId" in e["error"]]
         assert dup_errors, f"non-primary copy not surfaced: {res['errors']}"
         assert dup_errors[0]["retryable"] is False
@@ -424,7 +424,7 @@ def test_de2e1_ingest_then_mine_mines_standalone_indexed_corpus():
         # mine into the existing team graph — the file must be MINED, not
         # skipped (no mined marker yet; the pre-scan's file_hash match is not
         # sufficient evidence the session was mined)
-        mine = sdk.mine_corpus(corpus)
+        mine = sdk.mine_knowledge_from_directory(corpus)
         assert mine["entities"] >= 1, f"ingest-only corpus not mined: {mine}"
         assert mine["objects"] >= 1, f"ingest-only corpus not mined: {mine}"
         rows = g.query("MATCH (p:Point) RETURN count(p)").result_set
@@ -432,7 +432,7 @@ def test_de2e1_ingest_then_mine_mines_standalone_indexed_corpus():
 
         # unchanged re-mine → skipped (mined marker now matches the hash)
         before = g.query("MATCH (p:Point) RETURN count(p)").result_set[0][0]
-        again = sdk.mine_corpus(corpus)
+        again = sdk.mine_knowledge_from_directory(corpus)
         assert again["entities"] == 0, f"re-run added entities: {again}"
         assert again["objects"] == 0, f"re-run added objects: {again}"
         after = g.query("MATCH (p:Point) RETURN count(p)").result_set[0][0]
@@ -472,13 +472,13 @@ def test_de2e1_symlink_primary_parity_no_point_growth():
         def count_points():
             return g.query("MATCH (p:Point) RETURN count(p)").result_set[0][0]
 
-        first = sdk.mine_corpus(corpus)
+        first = sdk.mine_knowledge_from_directory(corpus)
         assert first["entities"] >= 1 and first["objects"] >= 1, \
             f"first mine: {first}"
         points_run1 = count_points()
         assert points_run1 >= 1
 
-        second = sdk.mine_corpus(corpus)
+        second = sdk.mine_knowledge_from_directory(corpus)
         assert second["entities"] == 0, f"re-run added entities: {second}"
         assert second["objects"] == 0, f"re-run added objects: {second}"
         assert count_points() == points_run1, \

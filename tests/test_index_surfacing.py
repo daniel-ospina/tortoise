@@ -112,10 +112,10 @@ def test_e2e6_list_sources_flat_rows_and_by_kind(corpus):
     agentSession/meeting_summary/document, CYCLE-25 v3.6 #6 spelling)."""
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         assert r["indexed"] == 4 and r["failed"] == 0 and r["skipped"] == 0
 
-        rows = sdk.list_sources()
+        rows = sdk.list_knowledge("source")
         assert len(rows) == 4
         # Flat rows: every row carries url + sourceKind + points.
         assert all({"url", "sourceKind", "points"} <= set(row) for row in rows)
@@ -167,7 +167,7 @@ def test_e2e6_kind_scoped_structural_fts_leg(corpus):
     from tortoise.file_indexer import CLASSIFIER_TO_SOURCE_KIND
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         s1 = f"corpus://{corpus.name}/s1.md"
         s2 = f"corpus://{corpus.name}/s2.md"
@@ -278,7 +278,7 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
         if unsupported is not None:
             pytest.skip(f"Source FTS index creation unsupported: {unsupported}")
 
-        r = sdk.index_directory(str(c), extract_metadata=False)
+        r = sdk.index_sources_from_directory(str(c), extract_metadata=False)
         assert r["indexed"] == 4
         s1 = f"corpus://{c.name}/s1.md"
         s2 = f"corpus://{c.name}/s2.md"
@@ -292,7 +292,7 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
 
         # The registry sourceKind is what got indexed (vocabulary consistency
         # with E2E-6.1).
-        rows = sdk.list_sources()
+        rows = sdk.list_knowledge("source")
         assert dict(Counter(row["sourceKind"] for row in rows)) == {
             "agentSession": 2, "meeting_summary": 1, "document": 1}
         assert _required_sweep(g) == 0
@@ -317,7 +317,7 @@ def test_e2e6_recall_subgraph_seed_by_url(corpus):
     references present in edges); doc Source → its Document."""
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         meeting = f"corpus://{corpus.name}/meeting-2026-08-05.md"
         doc = f"corpus://{corpus.name}/strategy.md"
@@ -365,7 +365,7 @@ def test_e2e6_recall_subgraph_encoded_url_seed(tmp_path):
         "---\nsessionId: sp1\nagent: pi\ntitle: Notes\n---\nBody")
     sdk = _sdk()
     try:
-        sdk.index_directory(str(c), extract_metadata=False)
+        sdk.index_sources_from_directory(str(c), extract_metadata=False)
         g = sdk._get_proj().g
         seed = "corpus://my%20corpus%231/my%20notes.md"
         sub = sdk.recall_subgraph(seed=seed, completeness="full")
@@ -392,7 +392,7 @@ def test_e2e6_uc1_pool_negative_regression(corpus):
     falsifiable, not vacuous."""
     sdk = _sdk()
     try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
+        sdk.index_sources_from_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         # Seed a matching Point so the UC1 pool is non-empty (raw Cypher —
         # §7 harness convention; no write-path involvement).
@@ -410,7 +410,7 @@ def test_e2e6_uc1_pool_negative_regression(corpus):
         assert all(r.get("entity_type") not in {"source", "event"}
                    for r in rows)
         # Raw sweep: no Source/Event node is reachable via the pool.
-        assert all(r.get("id") not in {row["url"] for row in sdk.list_sources()}
+        assert all(r.get("id") not in {row["url"] for row in sdk.list_knowledge("source")}
                    for r in rows)
         assert _required_sweep(g) == 0
     finally:

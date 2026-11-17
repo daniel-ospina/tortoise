@@ -274,14 +274,23 @@ def test_a_bundle_naming_the_adopted_holder_is_not_a_born_terminal_mint(sdk):
     assert _name_ids(proj, "Object", "Other"), "the bundle wrote nothing"
 
 
-def test_a_bundle_naming_the_adopted_holder_may_declare_an_array_status(sdk):
-    """#9876 review F2, consumer A: the array-status arm over-rejected an ADOPT.
+def test_a_bundle_naming_the_adopted_holder_may_declare_a_LEGAL_status(sdk):
+    """#9876 review F2, consumer A — and ⛔ INVERTED for the ARRAY half by S0.
 
-    That arm exists because an ARRAY status the writer really stores makes
-    ``create_direct_edge``'s frozenset test raise ``TypeError`` after steps 2-3
-    committed. For the adopted shape the writer stores nothing — the ``MERGE``
-    matches the row the adopt just stamped — so there is no array to evaluate
-    and no mid-write raise to predict.
+    The original test asserted that the ``#7925`` "would store status" arm must
+    NOT fire for an ADOPT: for the adopted shape the writer stores nothing (the
+    ``MERGE`` matches the row the adopt just stamped), so there is no array to
+    evaluate and no mid-write raise to predict. That reading is still true of
+    the arm it was written for — and it is no longer the arm that decides.
+
+    #11824 S0 gives the ``:Object`` family a WRITE door, and ``_validate_bundle``
+    mirrors it at PHASE 1 (``_status_refusal_reason``): an ARRAY status is
+    refused as the door's SHAPE arm, for every Object item, adopted or not. So
+    the array declaration is now a REFUSAL that happens before any write — which
+    is the case this test checks first, and it is the discriminating row the
+    Phase-1 ``:Object`` arm did not have. The adopt half keeps its subject: a
+    LEGAL declared status still ingests, still adopts the id-less carrier, and
+    still stores no word (the writer matched the existing row).
     """
     client, _ = sdk
     proj = client._get_proj()
@@ -291,17 +300,34 @@ def test_a_bundle_naming_the_adopted_holder_may_declare_an_array_status(sdk):
     assert _name_ids(proj, "Object", "Legacy") == [None], (
         "fixture did not build the id-less live holder")
 
+    # ── the ARRAY status: refused at Phase 1, by the DOOR's own question ──
+    array_bundle = {"entities": [{"ref": "a", "type": "object",
+                                  "name": "Legacy",
+                                  "status": ["live", "superseded"]}]}
+    array_msgs = [v["message"] for v in client._validate_bundle(array_bundle)]
+    assert array_msgs, (
+        "an :Object item declaring an ARRAY status passed Phase-1 validation — "
+        "the writer refuses it (shape before vocabulary), so the bundle would "
+        "raise mid-ingest after the point items committed (#7925)")
+    joined = " ".join(array_msgs)
+    assert "must be a plain string" in joined, array_msgs
+    with pytest.raises(Exception):
+        client.ingest(array_bundle)
+    assert _name_ids(proj, "Object", "Legacy") == [None], (
+        "a REFUSED bundle adopted (wrote) the carrier")
+
+    # ── …and the LEGAL declaration still adopts, storing no word ──
     bundle = {"entities": [{"ref": "a", "type": "object", "name": "Legacy",
-                             "status": ["live", "superseded"]}]}
+                            "status": "live"}]}
     msgs = [v["message"] for v in client._validate_bundle(bundle)]
     assert not any("would store status" in m for m in msgs), msgs
-
     client.ingest(bundle)
     ids = _name_ids(proj, "Object", "Legacy")
     assert len(ids) == 1 and ids[0], (
         f"the bundle did not adopt the id-less carrier: {ids}")
     assert _statuses(proj, "Object", "Legacy") == [None], (
-        "the ingest stored the declared array status on the adopted carrier")
+        "the ingest stored a status on the adopted carrier — the ADOPT's writer "
+        "matches the existing row and writes nothing")
 
 
 def test_a_rename_journals_on_the_stable_id_and_survives_replay(sdk):
@@ -319,7 +345,7 @@ def test_a_rename_journals_on_the_stable_id_and_survives_replay(sdk):
                          is_episodic=False)
     (oid,) = _name_ids(proj, "Object", "Acme")
 
-    client.update_entity(oid, name="Acme Renamed")
+    client.update_knowledge(oid, name="Acme Renamed")
 
     assert _name_ids(proj, "Object", "Acme") == [], "the old name survived the rename"
     assert _name_ids(proj, "Object", "Acme Renamed") == [oid], (
@@ -669,8 +695,8 @@ def test_an_unresolvable_about_target_keeps_the_mention_exemption_and_replays(
 
 
 
-def test_a_declared_objecttype_object_still_folds_the_work_item_status(sdk):
-    """#3590 review P2: ``objectType='Object'`` must not drop the status fold.
+def test_a_declared_objecttype_object_still_folds_the_work_item_STAGE(sdk):
+    """#3590 review P2: ``objectType='Object'`` must not drop the fold.
 
     ``_event_plain_merge`` resolves the event's explicit ``object`` to an id and
     hands it to ``_fold_object_status``. Keying that hand-off on TRUTHINESS of
@@ -691,12 +717,14 @@ def test_a_declared_objecttype_object_still_folds_the_work_item_status(sdk):
                         object="Widget", objectType="Object",
                         is_episodic=False)
 
-    status = proj.g.query(
-        "MATCH (o:Object {id:$id}) RETURN o.status", params={"id": oid}
-    ).result_set
-    assert status and status[0][0] == "completed", (
-        "objectType='Object' suppressed the built-in lifecycle fold — status "
-        f"is {status[0][0] if status else None!r} (#1350)")
+    # #11824 S0: the fold's target is the core work-item TERMINAL STAGE
+    # (`done`), not the retired position word `completed` — and the status axis
+    # stays untouched.
+    assert _stage_of(proj, "Object", oid) == ("done", True), (
+        "objectType='Object' suppressed the built-in lifecycle fold — stage is "
+        f"{_stage_of(proj, 'Object', oid)!r} (#1350)")
+    assert _status_of(proj, "Object", oid) is None, (
+        "the fold wrote a LIFECYCLE word — position lives on the stage axis")
     # …and the produces edge still lands on the resolved id, not a stub.
     assert proj.g.query(
         "MATCH (e:Event)-[:produces]->(o:Object {id:$id}) "
@@ -927,7 +955,7 @@ def test_a_rename_onto_a_held_name_is_refused(sdk):
                                  is_episodic=False)["node"]["id"]
 
     with pytest.raises(NameAlreadyHeld):
-        client.update_entity(mover, name="Held")
+        client.update_knowledge(mover, name="Held")
 
     # The refusal wrote NOTHING: the mover keeps its own name.
     assert _name_ids(proj, "Object", "Mover") == [mover], (
@@ -935,7 +963,7 @@ def test_a_rename_onto_a_held_name_is_refused(sdk):
     assert _name_ids(proj, "Object", "Held") == ["id-held"]
 
     # …and the guard is not a blanket block: a rename onto a FREE name works.
-    client.update_entity(mover, name="Freed")
+    client.update_knowledge(mover, name="Freed")
     assert _name_ids(proj, "Object", "Freed") == [mover]
 
 
@@ -967,7 +995,7 @@ def test_a_rename_onto_an_id_less_live_holder_is_refused(sdk):
                                  is_episodic=False)["node"]["id"]
 
     with pytest.raises(NameAlreadyHeld) as refused:
-        client.update_entity(mover, name="Legacy")
+        client.update_knowledge(mover, name="Legacy")
     # The refusal COUNTS the holder it cannot address by id — a message that
     # silently dropped it would report the graph as less ambiguous than it is.
     assert "1 other live Object" in str(refused.value), str(refused.value)
@@ -1142,7 +1170,9 @@ def test_the_bundle_guard_reads_the_live_holder_not_a_terminal_one(sdk):
     obj = client.create_entity("object", "Ghost", objectKind="core:strategy",
                                _server_id="id-ghost",
                                is_episodic=False)["node"]["id"]
-    client.update_entity(obj, status="superseded")
+    # #12592: the word names its successor (ONTOLOGY §4.3); the row still
+    # ends terminal, which is what these arms measure.
+    client.update_knowledge(obj, status="superseded", supersededBy="Ghost II")
 
     _exists, hit, _op, _bad, _carriers, merges, target = \
         client._entity_name_holders("Object", "Ghost")
@@ -1193,6 +1223,23 @@ def _status_of(proj, label: str, entity_id: str):
     return rows[0][0] if rows else None
 
 
+def _stage_of(proj, label: str, entity_id: str):
+    """``(pipelineStageId, isClosed)`` — #11824 S0's POSITION axis.
+
+    The connector/pack fold no longer writes ``status`` (``in_progress`` /
+    ``completed`` are position words the four-word door refuses); it advances
+    the core work-item STAGE instead, so a fold assertion reads this pair and
+    asserts the status stayed untouched.
+    """
+    rows = proj.g.query(
+        f"MATCH (n:{label} {{id:$id}}) "
+        "RETURN n.pipelineStageId, n.isClosed",
+        params={"id": entity_id}).result_set
+    if not rows:
+        return None, False
+    return rows[0][0], bool(rows[0][1])
+
+
 def test_a_mention_of_a_superseded_name_does_not_mint_an_incarnation(sdk):
     """#3590 round-5 review F2: attribution may not CREATE an entity.
 
@@ -1222,7 +1269,8 @@ def test_a_mention_of_a_superseded_name_does_not_mint_an_incarnation(sdk):
                                   objectKind="core:strategy",
                                   _server_id="id-retired",
                                   is_episodic=False)["node"]["id"]
-    client.update_entity(buried, status="superseded")
+    client.update_knowledge(buried, status="superseded",
+                         supersededBy="Retired II")
     registrations_before = [r for r in _journal(events)
                             if r.get("type") in ("ObjectRegistered",
                                                  "SubjectAdded")]
@@ -1329,7 +1377,8 @@ def test_a_lifecycle_event_on_a_terminal_only_object_is_a_recorded_no_op(
                                   objectKind="core:strategy",
                                   _server_id="id-buried",
                                   is_episodic=False)["node"]["id"]
-    client.update_entity(buried, status="superseded")
+    client.update_knowledge(buried, status="superseded",
+                         supersededBy="Buried II")
 
     # The DOOR writes the event (no ghost minted, nothing registered) and the
     # miss it records is the bounded, reported one.
@@ -1465,7 +1514,10 @@ def test_an_about_target_that_folds_cannot_mask_the_explicit_targets_miss(sdk):
                               # the ATTRIBUTION target — registered, folds
                               "aboutEntities": ["Folded Tranche"]}})
 
-    assert _status_of(proj, "Object", tranche) == "released", (
+    # #11824 S0: the declared fold advances the kind's `released` STAGE (the
+    # attribution target must still FOLD for this fixture to exercise the
+    # mask — the axis it folds on changed, the premise did not).
+    assert _stage_of(proj, "Object", tranche) == ("released", True), (
         "the attribution target did not fold, so this fixture cannot exercise "
         "the mask — `matched_any` stayed False and the assertion below would "
         "pass on the pre-fix code for the wrong reason")
@@ -1592,7 +1644,7 @@ def test_the_event_api_registration_door_is_idempotent_on_a_live_name(
     ``entity_identity``, so a routine re-run of the v1 extractor left the name
     with TWO live carriers — after which every by-name read refuses
     (``AmbiguousEntityName``), ``create_entity`` raises, and
-    ``update_entity(name=…)`` raises ``NameAlreadyHeld``, for a name the
+    ``update_knowledge(name=…)`` raises ``NameAlreadyHeld``, for a name the
     producer registered legitimately.
 
     FAILS IF: the emitters go back to ``ulid()``. On that tree the two calls
@@ -1670,7 +1722,7 @@ def test_a_noop_name_rewrite_on_a_doubly_held_name_is_not_refused(sdk):
 
     ``_refuse_ambiguous_rename`` fires on *any* truthy string ``name`` in
     ``props``, and a read-modify-write caller that re-sends the entity's
-    CURRENT name (the ordinary ``update_entity(id, name=<unchanged>, …)``
+    CURRENT name (the ordinary ``update_knowledge(id, name=<unchanged>, …)``
     shape) gets a hard ``NameAlreadyHeld`` whenever ANOTHER live carrier also
     holds that name — even though no name moved. The two-carrier state is
     LEGAL (D2) and this PR's own fixtures build it, so the pre-fix guard made a
@@ -1693,7 +1745,7 @@ def test_a_noop_name_rewrite_on_a_doubly_held_name_is_not_refused(sdk):
                          is_episodic=False)
 
     # A read-modify-write re-sending the CURRENT name changes only the title.
-    node = client.update_entity("id-noop-a", name="Dup", title="Edited")
+    node = client.update_knowledge("id-noop-a", name="Dup", title="Edited")
     assert node.get("name") == "Dup", node
     assert node.get("title") == "Edited", (
         "the property half of the write was dropped: " + repr(node))
@@ -1705,7 +1757,7 @@ def test_a_noop_name_rewrite_on_a_doubly_held_name_is_not_refused(sdk):
     client.create_entity("object", "Mover", _server_id="id-noop-mover",
                          is_episodic=False)
     with pytest.raises(NameAlreadyHeld):
-        client.update_entity("id-noop-mover", name="Dup")
+        client.update_knowledge("id-noop-mover", name="Dup")
     assert _name_ids(proj, "Object", "Mover") == ["id-noop-mover"], (
         "a refused rename still moved the name")
 
@@ -1819,7 +1871,7 @@ def test_the_rename_door_locks_the_guard_and_the_write_together(sdk, monkeypatch
 
     monkeypatch.setattr(TortoiseSDK, "_journal_entity_mutation", journaling)
 
-    client.update_entity(oid, name="New Name")
+    client.update_knowledge(oid, name="New Name")
 
     assert ("Object", "New Name") in taken and ("Subject", "New Name") in taken, (
         "the rename door took no create lock — a create can mint and write a "

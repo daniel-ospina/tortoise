@@ -166,6 +166,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -174,12 +175,14 @@ from typing import Any
 __all__ = [
     "ANCHORED_READS",
     "MODES",
-    "MODE_OFF",    "MODE_PREFER",
+    "MODE_OFF",
+    "MODE_PREFER",
     "MODE_RECORD",
     "NODE_KEY_COLUMN",
     "NOT_SERVED",
     "READ_NODE_BY_KEY",
     "READ_POINT_BY_ID",
+    "RECORD_ANSWERED_REASONS",
     "RECORD_SERVE_ENV",
     "RECORD_STATEMENT_TIMEOUT_MS",
     "SERVED",
@@ -195,9 +198,11 @@ __all__ = [
     "not_served_reads",
     "open_record",
     "parity_difference",
+    "point_residency",
     "read_node",
     "read_point",
     "reset_fallback_counts",
+    "residency_armed",
     "serve_mode",
     "serve_point",
     "served_reads",
@@ -385,12 +390,23 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
         cypher="TortoiseSDK.get_point(id) — the SDK's internal accessor",
         reason="write paths call it MID-WRITE to build journal events, so a "
                "record-served answer would read a store the same write has not "
-               "finished projecting. The caller-facing reads of the same shape "
+               "finished projecting — so the ACCESSOR itself stays cache-only, "
+               "which is why `served_out` is OPT-IN (#12941) and no write path "
+               "passes it. The caller-facing reads of the same shape "
                "are the hosted endpoint served here AND the MCP route that reaches "
                "it (`tortoise_get_entity(id, type=\"point\")` — `tortoise_get_point` "
-               "is its RETIRED alias, `tool_registry.RETIRED_USE_INSTEAD`), which is "
-               "not wired because an MCP call carries no hosted org credential from "
-               "which to resolve a record tenant.",
+               "is its RETIRED alias, `tool_registry.RETIRED_USE_INSTEAD`). That "
+               "MCP route was excluded because an MCP call carried no hosted org "
+               "credential from which to resolve a record tenant; it does now "
+               "(#9192/#10025/#10046 install the tenant ambiently through "
+               "`mcp_auth._record_tenant_scope`), so since #12941 the route does "
+               "honour this seam — through the accessor's opt-in caller-facing "
+               "form, never through a mid-write caller. ⚠️ The OPERATOR route "
+               "(`tortoise_get_entity(id, type=\"operator\")` → "
+               "`tortoise_get_operator`, `tortoise_get_operator` itself) is the "
+               "same by-id read restricted to operator Points and goes through "
+               "that same form (#12941 review P1-1) — the operators are the "
+               "issue's own measured population.",
     ),
     "entity-accessor": AnchoredRead(
         name="entity-accessor",
@@ -403,8 +419,22 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "so a record-served answer "
                "would read a store the same write has not finished projecting. "
                "Its caller-facing surface is `tortoise_get_entity`, EXCLUDED for "
-               "the same reason as the point accessor: no hosted org credential "
-               "from which to resolve a record tenant. ⚠️ `tortoise_get` is NOT a "
+               "the same MID-WRITE reason as the point accessor. ⛔ NOT because it "
+               "lacks a coordinate (#12941 review P2-1): `sdk._get_entity` resolves "
+               "through `_resolve_entity(by_id=True, by_eventId=True, "
+               "by_url=True)` — an index-backed, per-label UNION and therefore a "
+               "real by-id coordinate, the SAME union `auto-detect-by-id` "
+               "describes below. What it is not is ONE label's coordinate, which "
+               "is exactly why serving it needs per-label parity measured "
+               "(#9721) before a `not-hot` verdict means here what it means for "
+               "Points. ⚠️ RESIDUAL "
+               "(#12941): the MCP tenant objection that used to sit beside this "
+               "reason no longer holds (the lane installs one ambiently), so this "
+               "door is now a real read-your-writes gap for an Object/Event written "
+               "and verified by id — `node-by-key` can answer it once parity is "
+               "measured for that label (see that entry's caveat), and that work is "
+               "tracked on #12941 rather than wired behind a parity claim this unit "
+               "cannot show. ⚠️ `tortoise_get` is NOT a "
                "separate escape from the exclusion — it is a by-id dispatcher, and "
                "`tortoise_get(id, type=\"point\")` lands on the SAME accessor this "
                "module excludes (`tortoise_get_point` → `TortoiseSDK.get_point`), so "
@@ -420,6 +450,76 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "the record tenant it would need is resolved from a hosted org "
                "credential, and the selfhost surface presents none — serving it "
                "would need its own tenant decision, not a copy of this one.",
+    ),
+    "auto-detect-by-id": AnchoredRead(
+        name="auto-detect-by-id",
+        status=NOT_SERVED,
+        # ⚠️ NOT a query — words, deliberately, for the reason
+        # `anchored-neighbours` gives: the real shape is a UNION of
+        # label-scoped, INDEX-BACKED branches (`projection._RESOLVE_BRANCHES`,
+        # reached through `_resolve_entity`), one per (label, key property) —
+        # Point/Subject/Object/Source by `id`, Event by `eventId`, Source also by
+        # `url` — and `_get_auto_detect` then takes the FIRST branch's hit.
+        # Writing an all-label `MATCH (n) WHERE n.id = … OR n.eventId = …` here
+        # would both misdescribe it and mint a governed all-type pattern that
+        # #7948's census would have to carry as an exclusion (#12941 review
+        # P2-3).
+        cypher="a UNION of label-scoped, indexed id lookups (Point/Subject/"
+               "Object/Source by id, Event by eventId, Source also by url), "
+               "first hit wins — not a single MATCH",
+        reason="the RETIRED bare-by-id door `tortoise_get(<id>)` with no `type` "
+               "(`mcp_server._get_auto_detect`), which resolves a node id across "
+               "FIVE labels with Point priority and then an AgentSession lookup, "
+               "all on the cache. ⛔ The LIVE bare form is NOT this door: "
+               "`tortoise_get_entity(<id>)` routes to `TortoiseSDK.get_entity` "
+               "(`entity-accessor` above), because the tool only dispatches when a "
+               "`type` is given — so a lane closing the residual must decide about "
+               "BOTH. It carries a "
+               "coordinate but not ONE label's, so a record answer would have to "
+               "re-decide the resolution ORDER across labels before it could "
+               "claim parity, and `node-by-key`'s parity is measured for `Point` "
+               "only (#9721). Enumerated here rather than left unlisted because "
+               "it is a LIVE caller-facing read-your-writes gap: an agent that "
+               "writes a Point and verifies with the bare form still reads `{}` "
+               "(#12941's residual, filed there rather than absorbed by a parity "
+               "claim this unit cannot show). The TYPED point form "
+               "(`type=\"point\"`) is served — it lands on "
+               "`tortoise_get_point`, see `internal-accessor`.",
+    ),
+    "session-accessor": AnchoredRead(
+        name="session-accessor",
+        status=NOT_SERVED,
+        # ⚠️ NOT a query — words, for the reason `anchored-neighbours` gives: a
+        # `MATCH (` literal in this field is a #7948 census candidate, and this
+        # entry was added with one (#12941 review P2-2).
+        cypher="an AgentSession `:Event` addressed by `session_id`; and the "
+               "durable `:Session` node read by "
+               "`TortoiseSDK._read_captured_session`, whose TURNS are already "
+               "record-backed (see `reason`)",
+        reason="the MCP tool `tortoise_get_entity(id, type=\"session\")` "
+               "reaches `TortoiseSDK.get_session` DIRECTLY (`mcp_server`'s "
+               "`get(..., type='session')` branch calls the SDK method, NOT the "
+               "`tortoise_get_session` tool — that is a live SIBLING door on the "
+               "same read, so wiring it would not move this one) and reads a "
+               "session down TWO lanes, and they "
+               "are NOT in the same state: (1) the indexed AgentSession `:Event` "
+               "by `session_id`, from the cache; (2) the durable `:Session` "
+               "projection (`_read_captured_session`), whose session ROW comes "
+               "from the cache but whose TURNS already come from BOTH stores — "
+               "`_record_turn_answer` → `record_read.session_turns`, "
+               "union-merged ahead of the graph copy (#3557/#10000). ⛔ So do NOT "
+               "read this exclusion as \"a record capability that is missing\" "
+               "and do not plan an `:Event` parity claim for lane 2 (it is a "
+               "`:Session` node): what is undecided is which reader OWNS the "
+               "session row, and a lane scoping it starts from the union merge "
+               "that already exists. A session's record rows ARE read "
+               "already — by the capture and detail doors, through "
+               "`record_read.session_turns` / `session_text` — so serving THIS "
+               "tool means deciding which reader owns a session, a placement "
+               "question rather than a missing capability. Enumerated rather than "
+               "left out because it is a caller-facing by-key read (#12941 "
+               "review P1-1), and an unlisted door reads as an absence the "
+               "registry never decided on.",
     ),
     "whole-graph": AnchoredRead(
         name="whole-graph",
@@ -461,6 +561,26 @@ class RecordUnavailable(RecordServeError):
     Raised only in :data:`MODE_RECORD`, where a fallback is not permitted. In
     :data:`MODE_PREFER` the same condition is a *named* fallback instead.
     """
+
+
+class RecordReadBoundMiss(RecordServeError):
+    """The record WAS ASKED and did not answer inside the caller's bound.
+
+    The synchronous twin of the lane-bound miss the hosted door already
+    discriminates on (#10602): ``refused`` is ``False`` because the submission
+    RAN — the record is neither down nor unasked, it was slower than the budget
+    the caller's lane allows. An abandoned worker may still answer; the caller
+    does not wait for it.
+
+    It is its OWN class, not a bare ``TimeoutError``, so a door cannot mistake
+    it for a structural fault: the repair is capacity, and the two armed modes
+    answer it differently (``prefer`` falls back to the cache and NAMES
+    :data:`FALLBACK_RECORD_BOUND_MISS`; ``record`` has no cache branch and must
+    RAISE, because turning "too slow" into an absence is the §17.2 inversion).
+    """
+
+    #: Mirrors the lane-miss shape `hosted_api` reads: `True` = never ran.
+    refused = False
 
 
 # ── the mode ────────────────────────────────────────────────────────────────
@@ -540,6 +660,20 @@ FALLBACK_REASONS: tuple[str, ...] = (
     FALLBACK_RECORD_UNAVAILABLE, FALLBACK_RECORD_MISS,
     FALLBACK_RECORD_TENANT_UNRESOLVED, FALLBACK_RECORD_LANE_REFUSED,
     FALLBACK_RECORD_BOUND_MISS)
+
+#: The ONE reason under an armed mode that means the record **was asked and
+#: answered "no row"**. Every OTHER reason means the record could not be asked
+#: (down, unasked, too slow to answer inside the bound, or no tenant to ask for)
+#: — and then an empty answer is **`not-hot`**, never a finding of absence.
+#:
+#: ⚠️ This is the whole distinction #7952 draws, applied to the seam that can
+#: finally see both stores: an empty CACHE answer means *"we cannot see it from
+#: here"*, an empty RECORD answer means *"it does not exist"* (§17.2/§17.3 and
+#: `STORAGE-ARCHITECTURE.md` §2.0 — record is truth, cache is derived). Reading
+#: it off `served_from` alone would be wrong, and the `record-miss` fallback is
+#: where that shows: the ANSWER came from the cache, but the record was
+#: successfully asked first, so the absence IS established.
+RECORD_ANSWERED_REASONS: tuple[str, ...] = (FALLBACK_RECORD_MISS,)
 
 _FALLBACKS: dict[str, int] = {}
 #: The counter is incremented from BOTH the event loop (the endpoint's
@@ -876,6 +1010,47 @@ class ServedAnswer:
     def found(self) -> bool:
         return self.props is not None
 
+    @property
+    def absence_established(self) -> bool:
+        """Did a store that could SEE the node produce this answer?
+
+        `True` in the three states below that settle what the store holds, and
+        `False` in the fourth — the one #12941 exists to separate:
+
+        * a **hit** (`props` is not `None`) → the store plainly saw it, so
+          there is no absence in this answer to mistake for one. ⚠️ `True` here
+          describes a FOUND node, which is why this predicate is not "is the
+          answer empty": a caller that needs "the store could not see it" wants
+          :attr:`not_hot`, not the negation of this one.
+        * the **record** answered empty → the truth store holds no such row, so
+          the absence IS established (§2.0: the record is authoritative);
+        * the **record was asked** (an armed `prefer` read that fell back on
+          `record-miss`) → also established, even though the cache is what
+          physically failed to find it;
+        * anything else — the record was down, unasked, out of time, or there
+          was no tenant to ask — means *nobody who could see it was consulted*,
+          and that is **not** an absence, so this returns `False`.
+
+        :attr:`not_hot` is the conjunction that matters: `props is None AND not
+        absence_established` — an empty answer from a store that could not see
+        the node, and nothing else.
+        """
+        if self.props is not None:
+            return True
+        if self.served_from == "record":
+            return True
+        return self.fallback_reason in RECORD_ANSWERED_REASONS
+
+    @property
+    def not_hot(self) -> bool:
+        """§17.2's verdict: the store this read consulted could not see it.
+
+        `not-hot` is a directive (*"ask the record"*), never a status term
+        (#7953) — so it rides the response beside the attribution and is never
+        allowed to BE the answer.
+        """
+        return self.props is None and not self.absence_established
+
     def as_wire(self) -> dict[str, Any]:
         """The attribution fields a caller puts on the response.
 
@@ -889,6 +1064,85 @@ class ServedAnswer:
         """
         return {"servedFrom": self.served_from,
                 "fallbackReason": self.fallback_reason}
+
+    def absent_wire(self) -> dict[str, Any]:
+        """The attribution an ABSENT answer carries — `not-hot` when it applies.
+
+        A separate method from :meth:`as_wire` for a load-bearing reason:
+        `as_wire`'s exact key set is pinned (`test_record_serve.py` asserts it
+        literally) and every FOUND read emits it, so widening it would change
+        the wire shape of every armed response. This one is used only on the
+        absent arms, and adds the marker ONLY where it is true — a
+        record-answered absence carries no `residency` key rather than a
+        `hot` one, because "the store could see it and it is not there" needs no
+        directive at all.
+        """
+        fields = self.as_wire()
+        if self.not_hot:
+            from .residency import RESIDENCY_FIELD, RESIDENCY_NOT_HOT
+
+            fields[RESIDENCY_FIELD] = RESIDENCY_NOT_HOT
+        return fields
+
+
+def residency_armed() -> bool:
+    """Is the completeness marker's own flag on? (default off — #4097 contract)
+
+    Read BEFORE the marker issues any query or reads any declaration
+    (``point_residency`` returns on this predicate before it reaches
+    ``read_declaration``), so a deployment that never armed the marker pays no
+    graph round trip FOR THE MARKER and answers byte-identically, which is the
+    whole reason this predicate exists rather than each door asking
+    ``residency.residency_enabled()`` late enough to have already paid for it.
+
+    ⛔ NOT a claim about the DOOR's handles: the `off` arm has already run its
+    pre-existing fallback cache read, and the SDK accessor opens
+    ``_cache_handle()`` itself to pass in as ``g`` — both before this predicate
+    is reached. What the ordering buys is that the MARKER adds no read of its
+    own to an unarmed deployment; it does not make the door free. (`record` and
+    `prefer` modes never reach this predicate at all: `point_residency` is
+    called only on the `off` arm, and `record` mode opens no cache handle —
+    that laziness is pinned by `test_12941_read_your_writes`.)
+    """
+    from .residency import residency_enabled
+
+    return residency_enabled()
+
+
+def point_residency(g: Any, *, found: bool, key: str) -> str | None:
+    """§17.2's marker for a point-by-id read the RECORD did not answer.
+
+    ONE implementation for both doors that ask (the SDK accessor behind the MCP
+    tool, and the hosted endpoint's `off` arm), so the two cannot mint different
+    verdicts from one declaration.
+
+    ``found``  a hit proves the store could see this read, so there is nothing to
+               mark and the declaration is not even read.
+    ``key``    the node the read named — the only case in which a declaration can
+               separate *"outside the hot set"* from *"inside it and genuinely
+               absent"* (``residency.mark_residency``).
+
+    Returns ``not-hot`` only when the marker's own flag is armed AND the cache
+    declares itself PARTIAL without covering ``key``. A missing/malformed
+    declaration reads as ``complete`` (the §2.0 default), so an operator who
+    never armed anything gets ``None`` and a byte-identical response.
+    """
+    from .residency import RESIDENCY_NOT_HOT, mark_residency, read_declaration
+
+    if found or not residency_armed():
+        return None
+    # ⛔ THE DECLARATION'S KEY IS A LABEL-SCOPED COORDINATE, not a bare id
+    # (#12941 review P2-2). `cache_projection.declared_key` is what the WRITER
+    # puts in a `partial` declaration and what `residency.mark_residency`'s
+    # ``key=`` expects, so passing a bare id here made the argument inert: a
+    # declaration that DID enumerate ``Point:<id>`` reported `not-hot` for a
+    # miss on that very node — a false impairment. The coordinate is minted HERE
+    # so neither call site can get the vocabulary wrong.
+    from .cache_projection import declared_key
+
+    marker = mark_residency(read_declaration(g), hits=0,
+                            key=declared_key("Point", key))
+    return RESIDENCY_NOT_HOT if marker == RESIDENCY_NOT_HOT else None
 
 
 class CacheAnswerRequired(Exception):
@@ -1079,6 +1333,67 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
         return _fell_back(FALLBACK_RECORD_MISS)
     return ServedAnswer(read=READ_POINT_BY_ID, coordinate=coordinate,
                         served_from="record", props=props)
+
+
+def serve_point_bounded(*, bound_s: float, **kwargs: Any) -> ServedAnswer:
+    """`:func:`serve_point`, bounded by WALL CLOCK — the SYNCHRONOUS doors' bound.
+
+    WHY THIS EXISTS (#12947 finding 1, P1). :func:`serve_point`'s callee is a
+    Postgres round trip whose ceilings are ``record_writer.CONNECT_TIMEOUT_SECONDS``
+    (10 s) plus ``RECORD_STATEMENT_TIMEOUT_MS`` (15 s) — both ABOVE
+    ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` (10 s). The hosted route submits the same
+    call to ``_read_offload(..., timeout=record_read_timeout_s())``, so it is
+    bounded there; the MCP door and the SDK call it on the caller's thread, where
+    nothing bounded it at all. Under a record slowdown an agent therefore got the
+    transport's ``-32009`` ("the work may still complete") instead of the cache
+    answer ``prefer`` promises, and :data:`FALLBACK_RECORD_BOUND_MISS` was
+    unreachable from those doors — the fallback was named in this module and
+    counted nowhere.
+
+    ONE bound governs all three doors: ``monitoring.record_read_timeout_s()``
+    (9.0 s today), which ``monitoring.py`` pins BELOW the transport's 10 s so the
+    lane's legible refusal — not a transport timeout describing queued work as
+    in-flight — is what a saturated caller sees.
+
+    ``bound_s``     the wall-clock budget for the WHOLE seam call. ``prefer``
+                    callers pass the DEFERRED shape (``cache_answer=None``) so
+                    the cache read stays on their own lane and a fallback they
+                    own; this wrapper never touches a graph handle.
+
+    A miss raises :class:`RecordReadBoundMiss`. ⛔ The WORKER IS NOT CANCELLED —
+    CPython cannot cancel a started thread — so the abandoned callable keeps its
+    slot until the driver's own ceiling. That is the same accepted saturation
+    policy `hosted_api` documents for its lane, stated here rather than implied:
+    the bound buys the CALLER a bounded answer, not the record a cheap abort.
+    """
+    if bound_s <= 0:
+        # A non-positive bound is not a bound (the driver reads 0 as "wait
+        # forever"); refuse rather than silently unbound the leg.
+        raise ValueError(f"bound_s must be positive, got {bound_s!r}")
+
+    box: dict[str, Any] = {}
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            box["answer"] = serve_point(**kwargs)
+        except BaseException as exc:      # re-raised on the caller's thread
+            box["error"] = exc
+            box["tb"] = sys.exc_info()[2]
+        finally:
+            done.set()
+
+    # A DAEMON thread on purpose: `ThreadPoolExecutor` registers an atexit hook
+    # that JOINS its workers, so a record that never answers could hold the
+    # interpreter open at shutdown. This worker must not be able to.
+    worker = threading.Thread(target=_run, name="record-read-bound", daemon=True)
+    worker.start()
+    if not done.wait(bound_s):
+        raise RecordReadBoundMiss(
+            f"the record was asked and did not answer inside {bound_s:.1f}s")
+    if "error" in box:
+        raise box["error"].with_traceback(box["tb"])
+    return box["answer"]
 
 
 # ── parity: the comparison rule ─────────────────────────────────────────────

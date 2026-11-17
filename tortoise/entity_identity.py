@@ -226,8 +226,18 @@ def live_name_holder_ids(g, label: str, name: str, *,
                          case_insensitive: bool = False,
                          name_props: tuple = ("name",),
                          also: tuple = (),
-                         alias_of: tuple = ()) -> list:
+                         alias_of: tuple = (),
+                         live_only: bool = True) -> list:
     """Every LIVE holder of ``name`` for ``label``, by ``n.id`` (raw).
+
+    ``live_only=False`` drops the currency predicate from the NAME arm, for a
+    caller that addresses a record **regardless of its state** — the position
+    axis's own read/write (:mod:`tortoise.pipeline`) must be able to name a
+    CLOSED object, or the terminal guard and the explicit reopen become
+    unreachable by name. That is design §6's by-name arm ("asking by name is
+    itself the request"), not a currency decision, and it is the ONLY shape
+    that needs it: `resolve_entity_id`'s exact-ID arm already returns a
+    terminal carrier's id.
 
     The list is **row-per-holder**, so an id-less legacy/hosted-stub holder
     (``MERGE (o:Object {name:$name})`` mints those) contributes an entry whose
@@ -245,7 +255,8 @@ def live_name_holder_ids(g, label: str, name: str, *,
     batch probe that must keep ``id``/``name`` matching apart).
     """
     return _name_holder_ids(g, label, name,
-                            case_insensitive=case_insensitive, live_only=True,
+                            case_insensitive=case_insensitive,
+                            live_only=live_only,
                             name_props=name_props, also=also,
                             alias_of=alias_of)
 
@@ -645,7 +656,8 @@ def resolve_or_mint(g, label: str, name: str, *,
 
 
 def resolve_fold_name(g, label: str, name: str, *,
-                      context: str = "", mention: bool = False) -> str | None:
+                      context: str = "", mention: bool = False,
+                      live_only: bool = True) -> str | None:
     """Resolve a NAME to one live id **for a fold** — never mints, never guesses.
 
     #3590 D9: the projection is not the minter. A fold-time mint cannot be
@@ -692,6 +704,22 @@ def resolve_fold_name(g, label: str, name: str, *,
     them. Without the exemption every such journal becomes UN-REBUILDABLE — the
     durable copy of the data can no longer be recovered from its journal (#3590
     review P1).
+
+    ``live_only=False`` drops the currency predicate from the NAME arm, for the
+    ONE caller that must address a row **regardless of its state**: the REOPEN
+    fold (``github.issue.reopened`` → ``in_progress``, #11824 S0). This is
+    design §6's by-name arm ("asking by name is itself the request") applied to
+    a fold, and it is the same shape ``pipeline.current_stage`` /
+    ``pipeline._resolve_object`` take (#13034): once the currency predicate reads
+    the POSITION axis, a CLOSED object is not live, so a live-only fold could
+    never resolve the row it exists to reopen — measured on the re-cut tree: the
+    reopen folded NOTHING and the row stayed ``done``/``isClosed=True`` for ever.
+    Two things keep that from becoming a resurrection hole: the caller must ask
+    for it explicitly (every other site keeps the default), and
+    ``_fold_object_stage``'s own ladder still refuses a row whose **status** is
+    terminal — a lifecycle ending is final, only a POSITION ending is
+    reopenable, which is the whole reason the S0 fold target is a terminal stage
+    rather than ``deprecated``.
 
     ⛔ **D1 is RULED (owner, 2026-10-26): a bare mention does not create an
     entity.** So the remedy is NOT "the producer registers what it references" —
@@ -753,9 +781,10 @@ def resolve_fold_name(g, label: str, name: str, *,
     # see the variant spelling a merge records in `aliases`, so it is NOT the
     # shape to copy).
     holders = _collapse_resolved_holders(
-        g, label, live_name_holder_ids(g, label, name))
+        g, label, live_name_holder_ids(g, label, name, live_only=live_only))
     if not holders:
-        holders, _key_props = _live_holders_same_entity(g, label, name)
+        holders, _key_props = _live_holders_same_entity(
+            g, label, name, any_status=not live_only)
     ids = [str(h) for h in holders if h]
     if len(holders) == 1 and ids:
         return ids[0]
@@ -1238,7 +1267,8 @@ def resolve_entity_id(g, label: str, value: str | None, *,
                       name_props: tuple = ("name",),
                       record_misses: bool = True,
                       also: tuple = (),
-                      alias_of: tuple = ()) -> str | None:
+                      alias_of: tuple = (),
+                      live_only: bool = True) -> str | None:
     """Route-then-refuse: the single live id for an id-or-name coordinate.
 
     Exact id match wins (returned regardless of status — an id is unambiguous
@@ -1277,6 +1307,13 @@ def resolve_entity_id(g, label: str, value: str | None, *,
     (recorded before raising), the terminal-only ``no-live-holder`` record — is
     taken over the widened key space, which is why a caller should use THIS
     instead of a bare holder read.
+
+    ``live_only=False`` (#13034) is the by-name arm of design §6: the NAME arm
+    stops applying the currency predicate, so a caller that must address a
+    record WHATEVER STATE IT IS IN — the position axis reading or moving a
+    closed object's stage — can reach it. It is not a currency decision for a
+    read surface: those apply the predicate to the ROWS they serve, never to the
+    coordinate they are asked about.
     """
     if value is None:
         return None
@@ -1308,7 +1345,7 @@ def resolve_entity_id(g, label: str, value: str | None, *,
         live_name_holder_ids(g, label, value,
                              case_insensitive=case_insensitive_name,
                              name_props=name_props, also=also,
-                             alias_of=alias_of))
+                             alias_of=alias_of, live_only=live_only))
     if len(by_name) > 1:
         # ⛔ `record_misses=False` suppresses the RECORD, never the refusal: an
         # ambiguous lookup is a real answer, and returning None would let a
@@ -1337,7 +1374,8 @@ def resolve_entity_id(g, label: str, value: str | None, *,
 def resolve_entity_id_same_entity(g, label: str, value: str | None, *,
                                   addressing: str | None = None,
                                   record_misses: bool = True,
-                                  case_insensitive_name: bool = False) -> str | None:
+                                  case_insensitive_name: bool = False,
+                                  live_only: bool = True) -> str | None:
     """``resolve_entity_id`` over the WRITER's folded union — one call, one key space.
 
     #12120: the write path (:func:`resolve_or_mint`) resolves ``name`` ·
@@ -1360,12 +1398,13 @@ def resolve_entity_id_same_entity(g, label: str, value: str | None, *,
     if not folded:
         return resolve_entity_id(g, label, value, addressing=addressing,
                                  record_misses=record_misses,
-                                 case_insensitive_name=case_insensitive_name)
+                                 case_insensitive_name=case_insensitive_name,
+                                 live_only=live_only)
     return resolve_entity_id(
         g, label, value, addressing=addressing, record_misses=record_misses,
         case_insensitive_name=case_insensitive_name,
         name_props=("name", "canonical_name"), also=(folded,),
-        alias_of=(folded,))
+        alias_of=(folded,), live_only=live_only)
 
 
 #: A document is a ``:Source`` carrying ``documentKind`` (D10, ONTOLOGY v3.15

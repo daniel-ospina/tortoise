@@ -688,12 +688,12 @@ class TestWriteBoundary:
         sdk, _events = journaled_sdk
         bare = sdk.create_object("Tranche bare", "venture:tranche")
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.update_entity(bare["id"], currency="BRL")
+            sdk.update_knowledge(bare["id"], currency="BRL")
         assert read_money_value(sdk.get_entity(bare["id"])) is None
 
     @pytest.mark.parametrize("label,update", ONE_SIDED_UPDATES,
                              ids=[s[0] for s in ONE_SIDED_UPDATES])
-    @pytest.mark.parametrize("door", ["update_entity", "update_point"])
+    @pytest.mark.parametrize("door", ["update_knowledge", "update_point"])
     def test_a_one_sided_update_cannot_strip_a_well_formed_value(
             self, journaled_sdk, door, label, update):
         """The gate grades the state the UPDATE LEAVES, never the bag.
@@ -709,7 +709,7 @@ class TestWriteBoundary:
         sdk, _events = journaled_sdk
         value = money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
                             verbatim="R$ 250.000,00")
-        if door == "update_entity":
+        if door == "update_knowledge":
             created = sdk.create_object("Tranche one-sided",
                                         "venture:tranche", **value)
         else:
@@ -733,12 +733,12 @@ class TestWriteBoundary:
         created = sdk.create_object(
             "Tranche partial", "venture:tranche",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))
-        sdk.update_entity(created["id"], amountMinor=RELEASED_MINOR)
+        sdk.update_knowledge(created["id"], amountMinor=RELEASED_MINOR)
         assert read_money_value(sdk.get_entity(created["id"])) == \
             ("BRL", RELEASED_MINOR, 2)
         # and a member restated at the value it already holds is not a half
         # value — the pre-#11836 bag-shaped gate refused exactly this
-        sdk.update_entity(created["id"], currency="BRL")
+        sdk.update_knowledge(created["id"], currency="BRL")
         assert read_money_value(sdk.get_entity(created["id"])) == \
             ("BRL", RELEASED_MINOR, 2)
         # RE-DENOMINATING at the value's own scale is admitted too, and that is
@@ -749,7 +749,7 @@ class TestWriteBoundary:
         # legal edit is a malformed value. What it will not admit is a scale
         # the table contradicts (`minorUnitExponent=3` on BRL, one of the
         # ONE_SIDED_UPDATES shapes).
-        sdk.update_entity(created["id"], currency="USD")
+        sdk.update_knowledge(created["id"], currency="USD")
         assert read_money_value(sdk.get_entity(created["id"])) == \
             ("USD", RELEASED_MINOR, 2)
 
@@ -761,7 +761,7 @@ class TestWriteBoundary:
         created = sdk.create_object(
             "Tranche cleared", "venture:tranche",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))
-        sdk.update_entity(created["id"], amountMinor=None, currency=None,
+        sdk.update_knowledge(created["id"], amountMinor=None, currency=None,
                           minorUnitExponent=None)
         assert read_money_value(sdk.get_entity(created["id"])) is None
 
@@ -780,7 +780,7 @@ class TestWriteBoundary:
         created = sdk.create_object("Tranche cited", "venture:tranche",
                                     **value)
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.update_entity(created["id"], verbatim="")
+            sdk.update_knowledge(created["id"], verbatim="")
         # no money in the bag: `verbatim` alone is an ordinary prop, untouched
         note = sdk.create_object("Note verbatim", "venture:note",
                                  verbatim="quoted text")
@@ -843,7 +843,10 @@ class TestWriteBoundary:
 #: The two doors whose write is a bare ``SET n += $props`` — the only doors
 #: where a key present with ``None`` DELETES the property (#2782 review
 #: Finding 1). Both are updates, so both carry the update-shaped gate.
-UPDATE_DOORS = ("update_entity", "update_point")
+#: ⛔ #11609 Phase 2 retired `update_entity` into `update_knowledge`; the entity
+#: arm below is that container's, so the ENTITY half of every pin here is
+#: unchanged and the door name is the live one.
+UPDATE_DOORS = ("update_knowledge", "update_point")
 
 
 def _create_money_carrier(sdk, door: str, name: str = "Tranche U") -> str:
@@ -989,7 +992,7 @@ class TestUpdateDoorCannotDeleteOrMisScale:
         assert _whole_sum(sdk) == {"BRL": RELEASED_MINOR}
 
     @pytest.mark.parametrize("door,prop", [
-        ("update_entity", {"title": "Tranche U (renamed)"}),
+        ("update_knowledge", {"title": "Tranche U (renamed)"}),
         ("update_point", {"namespace": "finance"}),
     ])
     def test_a_non_money_update_on_a_money_node_is_untouched(
@@ -1235,7 +1238,7 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
         monkeypatch.setattr(
             sdk_mod, "_entity_identity_probes",
             lambda: (*real(), (":Object", "aliasKey")))
-        sdk.update_entity("alias-11836", note="reached by the shared enumeration")
+        sdk.update_knowledge("alias-11836", note="reached by the shared enumeration")
         rows = g.query(
             "MATCH (o:Object {aliasKey:'alias-11836'}) RETURN o.note"
         ).result_set
@@ -1265,7 +1268,7 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
         monkeypatch.setattr(
             sdk_mod, "_entity_identity_probes",
             lambda: tuple(pair for pair in real() if pair[0] != ":Object"))
-        sdk.update_entity(object_id, note="written by the primary-key fallback")
+        sdk.update_knowledge(object_id, note="written by the primary-key fallback")
         rows = g.query(
             "MATCH (o:Object {id:$id}) RETURN o.note",
             params={"id": object_id}).result_set
@@ -1307,14 +1310,14 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
         # (1) the write's own value: it resolves the node by THIS key.
         # `summary` is declared on every canonical label, so the probe stays
         # uniform — no per-label table a new pair could fall outside of.
-        sdk.update_entity(value, summary="pair-reached")
+        sdk.update_knowledge(value, summary="pair-reached")
         assert _node_props(sdk, bare, key, value)["summary"] == "pair-reached", (
             f"update_entity does not resolve a :{bare} by {key!r} — a probe "
             "keyed on it would grade a node the write never touches, and one "
             "keyed differently would miss the node it does")
         # (2) the gate's own value: the SAME node is graded, before the write.
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.update_entity(value, currency=None)
+            sdk.update_knowledge(value, currency=None)
         assert _node_props(sdk, bare, key, value)[CURRENCY] == "BRL", (
             "the gate admitted a currency strip on the node the write touches")
 
@@ -1340,11 +1343,11 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
         self._indexer_shaped_event(
             sdk, event_id,
             node_id=None if not with_id else "some-other-id")
-        sdk.update_entity(event_id,
+        sdk.update_knowledge(event_id,
                           **money_props(COMMITTED_MINOR, "BRL",
                                         minor_unit_exponent=2))
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.update_entity(event_id, currency=None)
+            sdk.update_knowledge(event_id, currency=None)
         node = _money_node_by_event_id(sdk, event_id)
         assert node[AMOUNT_MINOR] == COMMITTED_MINOR
         assert node[CURRENCY] == "BRL"
@@ -1361,10 +1364,10 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
         self._indexer_shaped_event(
             sdk, event_id,
             node_id=None if not with_id else "other-id-for-partial")
-        sdk.update_entity(event_id,
+        sdk.update_knowledge(event_id,
                           **money_props(COMMITTED_MINOR, "BRL",
                                         minor_unit_exponent=2))
-        sdk.update_entity(event_id, amountMinor=COMMITTED_MINOR + 1)
+        sdk.update_knowledge(event_id, amountMinor=COMMITTED_MINOR + 1)
         node = _money_node_by_event_id(sdk, event_id)
         assert node[AMOUNT_MINOR] == COMMITTED_MINOR + 1
         assert node[CURRENCY] == "BRL"
@@ -1397,7 +1400,7 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
             g.query("CREATE (o:Object {id:'dup-11836'}) SET o += $p",
                     params={"p": money})
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.update_entity("dup-11836", currency=None)
+            sdk.update_knowledge("dup-11836", currency=None)
         rows = g.query(
             "MATCH (o:Object {id:'dup-11836'}) "
             "RETURN o.amountMinor, o.currency, o.minorUnitExponent"
@@ -1437,7 +1440,7 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
         ).result_set[0][0]
         assert count_before == 2, "the duplicate rows did not mint"
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.update_entity("duprow-11836", currency=None)
+            sdk.update_knowledge("duprow-11836", currency=None)
         rows = g.query(
             "MATCH (o:Object {id:'duprow-11836'}) "
             "RETURN o.amountMinor, o.currency, o.minorUnitExponent, "
@@ -1646,7 +1649,7 @@ class TestNonSanitizedSeams:
             self, journaled_sdk):
         sdk, events = journaled_sdk
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.create_source("https://ex.invalid/a", "web",
+            sdk.register_source("https://ex.invalid/a", "web",
                               amountMinor=COMMITTED_MINOR)
         log = events / "events.jsonl"
         assert not log.exists() or "SourceCreated" not in log.read_text(), \
@@ -1675,7 +1678,7 @@ class TestNonSanitizedSeams:
         reader from reading the node-only assertion as "nothing is stored".
         """
         sdk, events = journaled_sdk
-        sdk.create_source("https://ex.invalid/b", "web",
+        sdk.register_source("https://ex.invalid/b", "web",
                           **money_props(COMMITTED_MINOR, "BRL",
                                         minor_unit_exponent=2))
         rows = sdk._get_proj().g.query(

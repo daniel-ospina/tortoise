@@ -91,9 +91,12 @@ its ``refusal`` token is one of seven. NONE of the seven is exactly a term here:
   journal by design), counted on ``record_non_journal_skips`` rather than
   ``record_write_failures``, so nothing a replay could restore is missing;
 * ``journal_collision`` is the one CONFLICT-decided token (#9318): the record WAS
-  reached and refused to index this record under a journal position whose
-  content differs from what this write would produce (a different record, or
-  this record's payload re-derived since that row was written). Nothing was
+  reached and refused to index this record under a journal position that is
+  NOT this write's — a different record type, a different capture instant, or a
+  `ts`-less write whose content moved. ⚠️ A payload re-derived at the SAME type
+  and the SAME capture is NOT this token: it is read as the record's own drift
+  and is SILENT (#12904 P0-1), so an operator hunting this counter for that
+  shape finds none. Nothing was
   lost (the journal holds it) and nothing about the store is wrong, so it is an
   impairment — ``degraded`` — and
   its repair is a schema decision (journal identity in the key, #12894), not an

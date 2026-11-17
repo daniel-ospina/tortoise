@@ -35,7 +35,7 @@ class TestCheckpoint:
             {"wing": "proj", "room": "backend", "content": "backend note B"},
             {"wing": "other", "room": "meetings", "content": "meeting note C"},
         ]
-        result = sdk.checkpoint(items)
+        result = sdk.mine_knowledge_from_session(items=items)
         assert result["filed"] == 3
         assert result["duplicates"] == 0
 
@@ -48,7 +48,7 @@ class TestCheckpoint:
             {"wing": "p", "room": "r", "content": "same content"},
             {"wing": "p", "room": "r", "content": "same content"},
         ]
-        result = sdk.checkpoint(items)
+        result = sdk.mine_knowledge_from_session(items=items)
         assert result["filed"] == 1
         assert result["duplicates"] == 1
 
@@ -56,7 +56,7 @@ class TestCheckpoint:
         assert len(points) == 1
 
     def test_empty_items(self, sdk):
-        result = sdk.checkpoint([])
+        result = sdk.mine_knowledge_from_session(items=[])
         assert result == {"filed": 0, "duplicates": 0}
 
     def test_emits_provenance_events(self, sdk):
@@ -65,7 +65,7 @@ class TestCheckpoint:
             {"wing": "proj", "room": "decisions", "content": "decision A"},
             {"wing": "proj", "room": "backend", "content": "backend note B"},
         ]
-        result = sdk.checkpoint(items, agent_name="pi-agent")
+        result = sdk.mine_knowledge_from_session(items=items, agent_name="pi-agent")
         assert result["filed"] == 2
 
         proj = sdk._get_proj()
@@ -90,7 +90,7 @@ class TestCheckpoint:
             {"wing": "p", "room": "r", "content": "same content"},
             {"wing": "p", "room": "r", "content": "same content"},
         ]
-        result = sdk.checkpoint(items, agent_name="test-agent")
+        result = sdk.mine_knowledge_from_session(items=items, agent_name="test-agent")
         assert result["filed"] == 1
         assert result["duplicates"] == 1
 
@@ -118,7 +118,7 @@ class TestCheckpoint:
 
         for bad in (None, 123, 4.5, b"bytes", ["a"], {"x": 1}, True):
             with pytest.raises(BundleValidationError) as exc:
-                sdk.checkpoint([{"wing": "w", "room": "r", "content": bad}])
+                sdk.mine_knowledge_from_session(items=[{"wing": "w", "room": "r", "content": bad}])
             msg = str(exc.value)
             assert "checkpoint" in msg, f"must name the surface: {msg}"
             assert "items[0]" in msg, f"must name the item index: {msg}"
@@ -127,7 +127,7 @@ class TestCheckpoint:
         # An ABSENT content key is the same violation (not a bare KeyError) —
         # the same "absent == None" test ingest's Phase-1 gate uses.
         with pytest.raises(BundleValidationError, match="requires 'content'"):
-            sdk.checkpoint([{"wing": "w", "room": "r"}])
+            sdk.mine_knowledge_from_session(items=[{"wing": "w", "room": "r"}])
 
     def test_every_bad_item_is_reported_and_nothing_is_written(self, sdk):
         """The whole batch is refused in one pass, with zero partial writes.
@@ -145,7 +145,7 @@ class TestCheckpoint:
             {"content": 7},
         ]
         with pytest.raises(BundleValidationError) as exc:
-            sdk.checkpoint(items)
+            sdk.mine_knowledge_from_session(items=items)
         assert [v["index"] for v in exc.value.violations] == [1, 3]
         for v in exc.value.violations:
             assert {"section", "index", "message"} <= set(v)
@@ -159,23 +159,30 @@ class TestCheckpoint:
         from tortoise.exceptions import BundleValidationError
 
         for bad_items, needle in (
-            (None, "must be a list"),
             ("not-a-batch", "must be a list"),
             ({"content": "x"}, "must be a list"),
         ):
             with pytest.raises(BundleValidationError) as exc:
-                sdk.checkpoint(bad_items)
+                sdk.mine_knowledge_from_session(items=bad_items)
             assert needle in str(exc.value), str(exc.value)
             assert "checkpoint" in str(exc.value)
 
+        # `items=None` is NOT a malformed batch here: `None` is the container's
+        # "this arm was not chosen" value (#11609 batch 2), so it refuses by naming
+        # BOTH arms instead of handing `None` to the batch door. An explicitly empty
+        # batch is `items=[]`, and that still files zero (`test_empty_items`).
+        with pytest.raises(ValueError) as exc:
+            sdk.mine_knowledge_from_session(items=None)
+        assert "conversation=" in str(exc.value) and "items=" in str(exc.value)
+
         with pytest.raises(BundleValidationError, match=r"items\[0\] must be a dict"):
-            sdk.checkpoint([["a"]])
+            sdk.mine_knowledge_from_session(items=[["a"]])
 
     def test_a_tuple_batch_still_files(self, sdk):
         """No-regression pin: a tuple of items iterated fine before #8554, so
         the container check must not refuse it — the fix is about ``content``,
         not about an unrelated container-type detail."""
-        result = sdk.checkpoint(({"content": "tuple batch item A"},
+        result = sdk.mine_knowledge_from_session(items=({"content": "tuple batch item A"},
                                  {"content": "tuple batch item B"}))
         assert result == {"filed": 2, "duplicates": 0}
 
@@ -219,12 +226,9 @@ class TestCheckpoint:
             except ImportError:
                 pytest.skip("semantic dedup requires sklearn or sentence_transformers — neither available")
         original = "deploy the new feature to production servers tonight"
-        sdk.checkpoint([{"content": original}])
+        sdk.mine_knowledge_from_session(items=[{"content": original}])
         # Near-duplicate: one word changed, same structure
-        result = sdk.checkpoint(
-            [{"content": "deploy the new feature to production servers today"}],
-            threshold=0.7,
-        )
+        result = sdk.mine_knowledge_from_session(items=[{"content": "deploy the new feature to production servers today"}], threshold=0.7)
         assert result["duplicates"] == 1
         assert result["filed"] == 0
 
@@ -256,14 +260,11 @@ class TestCheckpoint:
                 # constants so the pin is deterministic on every machine (#880).
                 monkeypatch.setattr(hf_const, "HF_HUB_CACHE", empty_hf)
                 monkeypatch.setattr(hf_const, "HF_HUB_OFFLINE", True)
-                sdk.checkpoint([{"content":
+                sdk.mine_knowledge_from_session(items=[{"content":
                                  "deploy the new feature to production servers tonight"}])
                 with caplog.at_level(logging.WARNING, logger="tortoise.embeddings"):
-                    result = sdk.checkpoint(
-                        [{"content":
-                          "deploy the new feature to production servers today"}],
-                        threshold=0.7,
-                    )
+                    result = sdk.mine_knowledge_from_session(items=[{"content":
+                          "deploy the new feature to production servers today"}], threshold=0.7)
         finally:
             EmbeddingModel._reset()
 
@@ -275,19 +276,13 @@ class TestCheckpoint:
 
         """GAP-08: threshold=1.0 disables semantic dedup — hash-only fallback."""
         original = "original content about deployment strategy"
-        sdk.checkpoint([{"content": original}])
+        sdk.mine_knowledge_from_session(items=[{"content": original}])
         # Similar but not exact — should file since semantic dedup is off
-        result = sdk.checkpoint(
-            [{"content": "original content about deployment strategies"}],
-            threshold=1.0,
-        )
+        result = sdk.mine_knowledge_from_session(items=[{"content": "original content about deployment strategies"}], threshold=1.0)
         assert result["filed"] == 1
         assert result["duplicates"] == 0
         # Exact dup still caught by hash
-        result2 = sdk.checkpoint(
-            [{"content": "original content about deployment strategies"}],
-            threshold=1.0,
-        )
+        result2 = sdk.mine_knowledge_from_session(items=[{"content": "original content about deployment strategies"}], threshold=1.0)
         assert result2["duplicates"] == 1
 
 
@@ -301,12 +296,12 @@ class TestDiary:
         assert p["authoredBy"] == "pi-agent"
         assert p["wing"] == "test_wing"  # #49: wing replaces context
 
-        entries = sdk.diary_read("pi-agent", last_n=10, wing="test_wing")
+        entries = sdk.list_knowledge("diary", agent="pi-agent", limit=10, wing="test_wing")
         assert len(entries) == 1
         assert entries[0]["pointKind"] == "diary"
 
     def test_read_empty(self, sdk):
-        entries = sdk.diary_read("nobody", last_n=5)
+        entries = sdk.list_knowledge("diary", agent="nobody", limit=5)
         assert entries == []
 
     # flake: known redislite lifecycle issue (#176)
@@ -314,8 +309,8 @@ class TestDiary:
         sdk.diary_write("agent-a", "entry a1")
         sdk.diary_write("agent-b", "entry b1")
 
-        a_entries = sdk.diary_read("agent-a", last_n=10)
-        b_entries = sdk.diary_read("agent-b", last_n=10)
+        a_entries = sdk.list_knowledge("diary", agent="agent-a", limit=10)
+        b_entries = sdk.list_knowledge("diary", agent="agent-b", limit=10)
 
         assert len(a_entries) == 1
         assert len(b_entries) == 1
@@ -325,7 +320,7 @@ class TestDiary:
     def test_read_respects_last_n(self, sdk):
         for i in range(5):
             sdk.diary_write("agent-c", f"entry {i}")
-        entries = sdk.diary_read("agent-c", last_n=3)
+        entries = sdk.list_knowledge("diary", agent="agent-c", limit=3)
         assert len(entries) == 3
 
 
@@ -334,7 +329,7 @@ class TestDiary:
 class TestStatus:
     def test_connected_and_counts(self, sdk):
         sdk.create_point("statement", "hello")
-        result = sdk.status()
+        result = sdk.graph_overview("status")
         assert result["connected"] is True
         assert "Point" in result["counts"]
         assert result["counts"]["Point"] >= 1
@@ -557,9 +552,7 @@ class TestCheckpointDedupObservability:
         def boom(candidates, threshold):
             raise RuntimeError("simulated dedup backend failure")
         monkeypatch.setattr(sdk, "_semantic_dedup", boom)
-        result = sdk.checkpoint(
-            [{"wing": "p", "room": "r", "content": "unique content X"}]
-        )
+        result = sdk.mine_knowledge_from_session(items=[{"wing": "p", "room": "r", "content": "unique content X"}])
         assert result["filed"] == 1      # hash-only fallback worked
         assert result["duplicates"] == 0
 
@@ -570,9 +563,7 @@ class TestCheckpointDedupObservability:
             raise RuntimeError("simulated dedup backend failure")
         monkeypatch.setattr(sdk, "_semantic_dedup", boom)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-            sdk.checkpoint(
-                [{"wing": "p", "room": "r", "content": "unique content Y"}]
-            )
+            sdk.mine_knowledge_from_session(items=[{"wing": "p", "room": "r", "content": "unique content Y"}])
         assert any("dedup" in r.message for r in caplog.records), (
             "semantic-dedup failure was swallowed silently — no log record"
         )

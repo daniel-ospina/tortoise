@@ -2145,7 +2145,7 @@ class TestIntrospection:
         src = Path(ms.__file__).read_text()
         i_ingest = src.find("_get_org_sdk().ingest,")
         assert i_ingest != -1 and '.get("points")' in src[i_ingest:i_ingest + 400]
-        i_ckpt = src.find("_get_org_sdk().checkpoint,")
+        i_ckpt = src.find("_get_org_sdk()._checkpoint,")  # #11609: `checkpoint` retired; the door wraps the private seam
         assert i_ckpt != -1 and '.get("filed")' in src[i_ckpt:i_ckpt + 400]
         # capture_session weight lives in hosted_api (REST seam)
         import tortoise.hosted_api as ha

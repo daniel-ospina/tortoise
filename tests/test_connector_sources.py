@@ -541,8 +541,8 @@ class TestListSources:
             proj.apply(gh_issue_event())
             proj.apply(gh_pr_event())
             proj.apply(linear_cycle_event())
-            sdk.create_source("https://doc.example", "document")
-            sources = {s["url"]: s for s in sdk.list_sources()}
+            sdk.register_source("https://doc.example", "document")
+            sources = {s["url"]: s for s in sdk.list_knowledge("source")}
             assert sources[GH_URL]["sourceKind"] == "github_issue"
             assert sources[GH_URL]["points"] == 0
             assert sources["https://github.com/test/repo/pull/7"]["sourceKind"] == "github_pr"

@@ -217,7 +217,7 @@ def _get_org_sdk() -> TortoiseSDK:
         # not be served the workspace DEFAULT graph. Both producers document
         # this half-resolved state as fail-closed: `supabase_control.
         # _graph_namespace_for` returns None on a missing `graphs` row OR on any
-        # read exception, and `sdk.apikey_verify` returns None on a missing
+        # read exception, and `sdk._apikey_verify` returns None on a missing
         # `:Graph` node. The REST lane refuses the identical state (403
         # GRAPH_NOT_FOUND), so falling through to line below would open the
         # default graph with a graph-scoped key — silently, on the lane where
@@ -1521,7 +1521,7 @@ class OrgResolutionMiddleware(BaseHTTPMiddleware):
                         org = None
                     else:
                         sdk = await self._get_registry_sdk()
-                        org = sdk.apikey_verify(token)
+                        org = sdk._apikey_verify(token)
             except Exception:
                 # Registry/control plane down → 503, never 500/stack-trace.
                 # The 503 carries ``Retry-After`` (#3144/#3812): an auth-plane

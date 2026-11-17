@@ -122,6 +122,367 @@
     },
     {
       "kind": "sdk-method",
+      "symbol": "diary_read",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/diary_read.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:diary_read",
+          "sha256": "89cf225fc4b569c2b78f866a7fce2fb4b4f7505550288511e634ce24f0f4aed3"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "expand_relationships",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/expand_relationships.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:expand_relationships",
+          "sha256": "e7372e42b0e555872d8e225c17e41198394af556c85fb3f4e794f5a1c46ff804"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_dedup_candidates",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_dedup_candidates.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_dedup_candidates",
+          "sha256": "2b6abaee9a6b2e4e74945b68e49a1da66e451d7111806d375224dc55200d7a60"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_namespaces",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_namespaces.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_namespaces",
+          "sha256": "1fa134fac94d03526b3593f446a4477da82ce587208112b032751b088f815690"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_pointkinds",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_pointkinds.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_pointkinds",
+          "sha256": "430f0940327946b18715844063d0ab0eb71572edd03fef38a2092964abc3b380"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_sources",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_sources.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_sources",
+          "sha256": "285966af1b8b0d0b5de07037d363801b0c600c3661cffb4a63ca91612a8d0bef"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_tags",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_tags.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_tags",
+          "sha256": "29e577c7c75172eb53845f7ad04926bd34639f151450726bcfe4039e05c396f6"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "list_topics",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/list_topics.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:list_topics",
+          "sha256": "3229e8b1148964b856d83dfc6a718ab2cf7d7e8ca8761f9eca073bed7eba5f0b"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "provenance",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/provenance.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:provenance",
+          "sha256": "c7eeba4c3ed19f354a6225b25b6bf5d159fb507e18d169a9f32d828685e9495e"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "search_sessions",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/search_sessions.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:search_sessions",
+          "sha256": "f69df26b5825fafebcafdcecfd22e9f5a948e04d866204a061504786161c3bdb"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "status",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into graph_overview(section='status') (#11609 Phase 2, #4282 row 9): the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/status.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:status",
+          "sha256": "3318ebf7e5a81faf94e0e725c66df8b79055061359bfbe996edc0209581fb183"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "suggest_entry_points",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/suggest_entry_points.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:suggest_entry_points",
+          "sha256": "e4d25c482b9853d7b1fe7f57c4e9340c2910ef44e65e85a2c1a95deeae16464b"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "taxonomy",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/taxonomy.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:taxonomy",
+          "sha256": "e962de4bd674d5b634d320e365ef0dd9bc5654942dc042e18ae9eb6fdd2bf580"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "validate_domain",
+      "batch": "11609-a-read-containers",
+      "reason": "retired into the reader container that absorbs its question (#11609 Phase 2, #4282 rows 3-10); the public name fails and names the container",
+      "file": "archive/sdk-methods/11609-a-read-containers/validate_domain.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:validate_domain",
+          "sha256": "c41ac9817fb89846422ceaf218832cf8fd3e41374944958e71dbb5ac120b677a"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "checkpoint",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into mine_knowledge_from_session(items=...) (#4282 Phase 2, #11609): row 16 keeps this batch filer as its items arm, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/checkpoint.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:checkpoint",
+          "sha256": "eab69267989677c61a9c9bdadb1364e83a8201916c85b101f2430c3258a5b1b3"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "create_source",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into register_source (#4282 Phase 2, #11609): the approved row 14 keeps this body under its own name, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/create_source.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:create_source",
+          "sha256": "8b7dffdd5c78733f9f6515623e1138fe55526d422175b7ba55c03005949edb84"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "index_directory",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into index_sources_from_directory (#4282 Phase 2, #11609): row 15 keeps this walker under its own name, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/index_directory.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:index_directory",
+          "sha256": "b7c271211ccc065bab96e3c76af0714ffae8db04945f64cd8828e94e28926035"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "index_sessions",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into index_sources_from_directory(file_type='agent_session') (#4282 Phase 2, #11609); it was a single delegation, frozen as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/index_sessions.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:index_sessions",
+          "sha256": "73cf36a7a355e28c4137e276a5b43288b942ad296c3b526c5cfd2bcecaca075f"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "mine_corpus",
+      "batch": "11609-phase2-sources-containers",
+      "reason": "name retired into mine_knowledge_from_directory (#4282 Phase 2, #11609): row 17 keeps this miner under its own name, frozen here as the record of what the retired name did",
+      "file": "archive/sdk-methods/11609-phase2-sources-containers/mine_corpus.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "32011c4dad4b42364868cb0810ad8e7317a7dfb6",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:mine_corpus",
+          "sha256": "5e3af56db6e2f1cdb752c49376225b7c84eb0e1af4ba231eef2b7be6b6c9f106"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
       "symbol": "backfill_v25",
       "batch": "b2-sdk-retirement-wave-1",
       "reason": "One-shot ONTOLOGY v2.5 migration (status/pointKind backfill); zero callers. Beta w8_backfill region: dead code carrying a public promise. No recorded destination.",
@@ -212,6 +573,310 @@
           "path": "tortoise/sdk.py",
           "node": "FunctionDef:quarantine_batch",
           "sha256": "248ab05e8b7283a56ba65158ec7744d6500acbe8645678363744c6434eca7410"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "apikey_create",
+      "batch": "12901-wave-2",
+      "reason": "Mint a control-plane API key. Body survives PRIVATE as `_apikey_create`; recorded destination `create_key` (row 34).",
+      "file": "archive/sdk-methods/12901-wave-2/apikey_create.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:apikey_create",
+          "sha256": "5c4b9a3566987fdc7b5119df92216f24785755a18d250d2607a681f945d9e7e5"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "apikey_revoke",
+      "batch": "12901-wave-2",
+      "reason": "Revoke a key (soft delete). Body survives PRIVATE as `_apikey_revoke`; recorded destination `revoke_key` (row 36).",
+      "file": "archive/sdk-methods/12901-wave-2/apikey_revoke.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:apikey_revoke",
+          "sha256": "e727445890566f651c1a170ec516cb1d5c985f26794c8623ceb4d9bd1da2208d"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "apikey_verify",
+      "batch": "12901-wave-2",
+      "reason": "Verify a presented key against stored hashes. Body survives PRIVATE as `_apikey_verify`; beta files it under CONSOLE PLUMBING; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/apikey_verify.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:apikey_verify",
+          "sha256": "bd87867d5e20c40f330f9e56891bc7d133f6d70f3e89f97c1f92685038d962c7"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "graph_active_key_count",
+      "batch": "12901-wave-2",
+      "reason": "Non-revoked key count per graph. Body survives PRIVATE as `_graph_active_key_count`; recorded destination `list_keys`.",
+      "file": "archive/sdk-methods/12901-wave-2/graph_active_key_count.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:graph_active_key_count",
+          "sha256": "310a9b806efad356e07b2116d6ec59b39de8496ef0415c5f8bc14636bcd21e95"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "graph_delete",
+      "batch": "12901-wave-2",
+      "reason": "Soft-delete of a Graph node (tombstone). Body survives PRIVATE as `_graph_delete`; recorded destination `delete_memory_graph` (rows 30-33 range).",
+      "file": "archive/sdk-methods/12901-wave-2/graph_delete.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:graph_delete",
+          "sha256": "bc0242656e752281285f305b3e05547f25659f28d27d133551e1aceb97420973"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "graph_key_ids",
+      "batch": "12901-wave-2",
+      "reason": "APIKey ids bound to a graph (delete cascade). Body survives PRIVATE as `_graph_key_ids`; recorded destination `list_keys`.",
+      "file": "archive/sdk-methods/12901-wave-2/graph_key_ids.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:graph_key_ids",
+          "sha256": "4516ceb244c24002ed1906118811c95ac4b00f441b81f3b7545beea4df755efe"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "invitation_get_by_id",
+      "batch": "12901-wave-2",
+      "reason": "Read one invitation row. Body survives PRIVATE as `_invitation_get_by_id`; beta: the invite UX belongs to the console; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/invitation_get_by_id.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:invitation_get_by_id",
+          "sha256": "e2adc683a055f82309888ced103a861e122676bf6baf8418d9be6f24b422047b"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "invitation_list",
+      "batch": "12901-wave-2",
+      "reason": "List an org's pending invitations. Body survives PRIVATE as `_invitation_list`; beta: the invite UX belongs to the console; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/invitation_list.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:invitation_list",
+          "sha256": "2c720f517c25f564358418ddd844aa5d461e8f902c84e6258d129a516f7a1a4f"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "invitation_revoke",
+      "batch": "12901-wave-2",
+      "reason": "Revoke a pending invitation. Body survives PRIVATE as `_invitation_revoke`; beta: the invite UX belongs to the console; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/invitation_revoke.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:invitation_revoke",
+          "sha256": "ecf6bf6295e7b7cd5beae8e6354b2159c1c6cf0a9dcdbb88d42137fae99827f8"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "membership_create",
+      "batch": "12901-wave-2",
+      "reason": "Add a user to an org with a role. Body survives PRIVATE as `_membership_create`; recorded destination `add_member` (row 37).",
+      "file": "archive/sdk-methods/12901-wave-2/membership_create.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:membership_create",
+          "sha256": "0cf93f098471db88ac6fdb4e3213f8e1e9b5c522e3f81233e949118840d7c5f5"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "org_get",
+      "batch": "12901-wave-2",
+      "reason": "Control-plane org read. Body survives PRIVATE as `_org_get`; recorded destination `get_organisation_account` (beta row 27). No hint: beta never names org_get.",
+      "file": "archive/sdk-methods/12901-wave-2/org_get.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:org_get",
+          "sha256": "6b25b8d3f55f861296f803b175e2016a213e3a396a2d2d5e7e659010635b469b"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "signup_token_lookup",
+      "batch": "12901-wave-2",
+      "reason": "Resolve an agent self-signup token. Body survives PRIVATE as `_signup_token_lookup`; beta: operator-side provisioning, not product surface; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/signup_token_lookup.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:signup_token_lookup",
+          "sha256": "39981b33eec5cb5067a631a521534a4a1242ff8c74c1f442b44799b3d89eef13"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "signup_token_recover",
+      "batch": "12901-wave-2",
+      "reason": "Re-mint the bootstrap key for a signup token. Body survives PRIVATE as `_signup_token_recover`; beta: operator-side provisioning; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/signup_token_recover.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:signup_token_recover",
+          "sha256": "24d1e1bd1ce53cbe77655a30b9cecd2da3447a0ef853634dd17d99c59e52d7ac"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "signup_token_revoke",
+      "batch": "12901-wave-2",
+      "reason": "Revoke a signup token. Body survives PRIVATE as `_signup_token_revoke`; beta: operator-side provisioning; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/signup_token_revoke.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:signup_token_revoke",
+          "sha256": "04bde96885a7c828675e3ffa166c025ed12981b5725201af50ecc99158bac9a7"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "sweep_invite_ghost_memberships",
+      "batch": "12901-wave-2",
+      "reason": "Scheduled repair of membership rows whose invite never completed. Body survives PRIVATE as `_sweep_invite_ghost_memberships`; beta rules it OUR MAINTENANCE; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/sweep_invite_ghost_memberships.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:sweep_invite_ghost_memberships",
+          "sha256": "7f735dad21cb9a76e7d717a0aba68d6deaa4754c31ae8e7016d4a13fd68191cf"
+        }
+      ]
+    },
+    {
+      "kind": "sdk-method",
+      "symbol": "trash_graphs",
+      "batch": "12901-wave-2",
+      "reason": "Tombstoned custom graphs (the trash view). Body survives PRIVATE as `_trash_graphs`; beta rules it OUR MAINTENANCE, never product surface; no destination.",
+      "file": "archive/sdk-methods/12901-wave-2/trash_graphs.py",
+      "archived_from": "tortoise/sdk.py",
+      "archived_at": "d741bd4a5a8d45198ec9c8fd2324c93ca746af5e",
+      "sources": [
+        "tortoise/sdk.py"
+      ],
+      "blocks": [
+        {
+          "path": "tortoise/sdk.py",
+          "node": "FunctionDef:trash_graphs",
+          "sha256": "305fd299e7c3f24c9073678506762bf28637440ab7617a403b67e9fa0c157fa8"
         }
       ]
     }

@@ -14,11 +14,16 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
+import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from tortoise.hosted_backup import (
+    _LIST_MANIFEST_MAX_INFLIGHT,
+    _STORAGE_MAX_POOL_CONNECTIONS,
     DUMP_FORMAT,
     LockVerificationError,
     MemoryStorage,
@@ -1384,7 +1389,7 @@ def test_r2storage_env_construction(monkeypatch):
     monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk_env")
     monkeypatch.setenv("R2_BUCKET", "bkt_env")
     fake = _FakeS3()
-    monkeypatch.setitem(sys.modules, "boto3", _FakeBoto3(fake))
+    _install_fake_boto3(monkeypatch, _FakeBoto3(fake))
 
     store = R2Storage()  # no kwargs — the hosted API path
     store.upload("k", b"d")
@@ -1643,9 +1648,35 @@ class _FakeBoto3:
         return self._fake
 
 
+class _CapturingConfig:
+    """Stand-in for `botocore.config.Config` — records the kwargs `_s3()` passes."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.__dict__.update(kwargs)
+
+
+def _install_fake_boto3(monkeypatch, fake_boto3):
+    """Install a boto3 double TOGETHER with the botocore modules the real one ships.
+
+    ⛔ A boto3 double on its own fakes a shape that cannot exist: every real boto3
+    install carries `botocore`, and `R2Storage._s3()` builds its client with an
+    explicit `botocore.config.Config(max_pool_connections=...)` so the manifest
+    fan-out is coupled to a pool THIS code owns. Stubbing only `boto3` would test
+    a construction path production never takes.
+    """
+    stub_botocore = types.ModuleType("botocore")
+    stub_config = types.ModuleType("botocore.config")
+    stub_config.Config = _CapturingConfig
+    stub_botocore.config = stub_config
+    monkeypatch.setitem(sys.modules, "botocore", stub_botocore)
+    monkeypatch.setitem(sys.modules, "botocore.config", stub_config)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+
 def _r2_with_fake_boto3(monkeypatch) -> tuple[R2Storage, _FakeS3]:
     fake = _FakeS3()
-    monkeypatch.setitem(sys.modules, "boto3", _FakeBoto3(fake))
+    _install_fake_boto3(monkeypatch, _FakeBoto3(fake))
     store = R2Storage(
         endpoint_url="https://acct.r2.cloudflarestorage.com",
         access_key_id="ak",
@@ -1955,6 +1986,312 @@ def test_list_backups_sorted_newest_first():
     assert listed[0]["created_at"] > listed[1]["created_at"]
 
 
+# ── #13097: the listing is O(backups) round trips, so the GETs must overlap ────
+# The bug these pin: `list_backups` downloaded every manifest SERIALLY, which put
+# `GET /v1/backups` over the 60 s edge deadline for a real org (≈420 manifests
+# under the default retention) and answered 504 — indistinguishable from a
+# storage outage and, worse, from "no backups exist". Each test below pins one
+# half of the contract: they overlap (so the deadline is not met), the pool is
+# bounded (so a big org does not burst R2), and a real failure still raises
+# (so a partial list can never read as a smaller restore set).
+
+
+class _SlowCountingStorage(MemoryStorage):
+    """`MemoryStorage` whose downloads are slow enough to overlap.
+
+    Records the HIGH-WATER MARK of concurrent `download` calls — the property
+    under test — plus an optional single key to fail on.
+    """
+
+    def __init__(self, *, delay: float = 0.05, fail_on: str | None = None) -> None:
+        super().__init__()
+        self.delay = delay
+        self.fail_on = fail_on
+        self._lock = threading.Lock()
+        self._inflight = 0
+        self.max_inflight = 0
+        self.downloads: list[str] = []
+
+    def download(self, key: str) -> bytes:
+        with self._lock:
+            self._inflight += 1
+            self.max_inflight = max(self.max_inflight, self._inflight)
+            self.downloads.append(key)
+        try:
+            time.sleep(self.delay)
+            if self.fail_on is not None and self.fail_on in key:
+                raise PermissionError("AccessDenied")
+            return super().download(key)
+        finally:
+            with self._lock:
+                self._inflight -= 1
+
+
+def _seed_manifests(store: MemoryStorage, org_id: str, count: int) -> list[str]:
+    """Seed `count` per-graph manifests with distinct, increasing timestamps."""
+    base = datetime.now(timezone.utc)  # noqa: UP017
+    ids: list[str] = []
+    for i in range(count):
+        created = base - timedelta(minutes=i)
+        backup_id = f"{org_id}/g_test/{created.strftime('%Y%m%dT%H%M%SZ')}-{i:03d}"
+        store.upload(f"backups/{backup_id}/manifest.json", json.dumps({
+            "backup_id": backup_id,
+            "org_id": org_id,
+            "graph_name": "g_test",
+            "created_at": created.isoformat(),
+            "node_count": i,
+            "edge_count": 0,
+            "sha256": "0" * 64,
+            "format": DUMP_FORMAT,
+        }).encode())
+        ids.append(backup_id)
+    return ids
+
+
+def test_list_backups_fetches_manifests_concurrently():
+    """#13097: the per-manifest GETs overlap instead of costing one trip each.
+
+    ⛔ The overlap assertion IS the falsifier: on a serial implementation the
+    high-water mark is exactly 1. No wall-clock bound is asserted — an earlier
+    version of this test compared elapsed time against the serial cost and was
+    measured at 0.41 s against a 0.20 s bound on a loaded 10-core box (load avg
+    166), i.e. it reddened `main` whenever a lane saturated the host while proving
+    nothing `max_inflight` does not already prove.
+    """
+    store = _SlowCountingStorage(delay=0.01)
+    org_id = "team_conc"
+    _seed_manifests(store, org_id, 8)
+
+    listed = list_backups(store, org_id)
+
+    assert len(listed) == 8  # completeness is unchanged by the pool
+    assert store.max_inflight > 1  # ... and the GETs actually overlapped
+
+
+def test_list_backups_bounds_manifest_concurrency():
+    """#13097: the pool is BOUNDED — a big org must not open one GET per backup."""
+    store = _SlowCountingStorage(delay=0.005)
+    org_id = "team_big"
+    _seed_manifests(store, org_id, 40)
+
+    listed = list_backups(store, org_id)
+
+    assert len(listed) == 40
+    assert 1 < store.max_inflight <= _LIST_MANIFEST_MAX_INFLIGHT
+
+
+def test_the_manifest_concurrency_bound_stays_under_the_client_pool(monkeypatch):
+    """#13097: the bound is COUPLED to the pool the client is ACTUALLY BUILT WITH.
+
+    ⛔ This test reads the ceiling from the built client, not from a hand-written
+    copy of a library default. The earlier version compared
+    `_LIST_MANIFEST_MAX_INFLIGHT` to a module-level literal that mirrored
+    botocore's default — two constants in the same file, so it stayed green if
+    botocore changed its default OR if `_s3()` grew a `Config(...)` that lowered
+    the pool. That is a coupling test that cannot detect the failure it documents.
+
+    Here the client construction is exercised against stubs, so the assertion is
+    about the config THIS code passes: a `_s3()` that stops passing one, or that
+    passes a smaller pool than the manifest fan-out, fails here. No botocore in
+    the test environment is required (it is an optional extra) — which is also
+    why the check is not `importorskip`-ed into a permanent skip.
+    """
+    captured: dict[str, object] = {}
+
+    class _StubBoto3:
+        def client(self, *args, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    _install_fake_boto3(monkeypatch, _StubBoto3())
+
+    store = R2Storage(
+        endpoint_url="https://acct.r2.cloudflarestorage.com",
+        access_key_id="ak", secret_access_key="sk", bucket="tortoise-backups",
+    )
+    store._s3()
+
+    config = captured.get("config")
+    assert config is not None, "_s3() built the client WITHOUT a config — the pool is not ours to reason about"
+    pool = getattr(config, "max_pool_connections", None)
+    assert pool == _STORAGE_MAX_POOL_CONNECTIONS
+    assert pool >= _LIST_MANIFEST_MAX_INFLIGHT, (
+        "the manifest fan-out exceeds the client's connection pool: every wave "
+        "would drop its overflow connections and re-pay TCP+TLS")
+    # #13097: the pool must cover TWO listings, not one. `_backup_storage()` caches
+    # ONE `R2Storage` (one client), so the budget every concurrent `/v1/backups`
+    # request draws on is shared; the constant's own comment buys 32 so that two
+    # listings plus the sweep's writes fit. Without this assertion the guard is
+    # inert in exactly the direction it documents: raising the fan-out to 16 still
+    # satisfies `pool >= fanout` (32 >= 16) while two listings alone occupy the
+    # whole pool and every sweep upload drops its connection and re-pays TCP+TLS —
+    # the failure this constant exists to prevent. Measured: with the assertion
+    # removed, `_LIST_MANIFEST_MAX_INFLIGHT = 16` survives every test in this file.
+    assert pool > 2 * _LIST_MANIFEST_MAX_INFLIGHT, (
+        "the pool must cover TWO concurrent listings with headroom left for the "
+        "sweep's writes — they share this one cached client")
+
+
+def test_list_backups_surfaces_the_first_failure_in_INPUT_order():
+    """#13097: `pool.map`, not `as_completed` — the surfaced error is ORDER-fixed.
+
+    The comment above the pool calls this load-bearing: `map` yields in input
+    order, so which exception reaches the caller is identical to the serial loop
+    this replaced. `as_completed` would make it depend on network timing, i.e. the
+    error an operator sees would change between identical calls.
+
+    The two failing keys are deliberately ANTI-correlated with completion: the
+    EARLY one (input index 1) raises `RuntimeError` after 200 ms, the LATE one
+    (index 3) raises `PermissionError` after 1 ms. So `map` surfaces the earlier
+    key's `RuntimeError`; a `submit` + `as_completed` rewrite surfaces
+    `PermissionError` and reddens here. The assertion checks BOTH halves — the
+    type AND that the message names the earlier key — because either alone leaves
+    a hole: type-only passes a rewrite that still reports the wrong key, and
+    key-only passes one that reports the right key as the wrong class.
+
+    ⚠️ Green on the pre-fix serial code too — like the two paired guards above,
+    this pins a property the rewrite must PRESERVE, not the speed-up itself.
+    `RuntimeError` is chosen so it is outside the skip class; `ValueError`/
+    `KeyError`/the decode errors would be swallowed instead of surfacing.
+    """
+    store = _PerKeyFailureStorage()
+    org_id = "team_ordering"
+    _seed_manifests(store, org_id, 5)
+    keys = [k for k in store.list(f"backups/{org_id}/")
+            if k.endswith("/manifest.json")]
+    assert len(keys) == 5
+    store.plan = {
+        keys[1]: (0.20, RuntimeError(f"the earlier key wins: {keys[1]}")),
+        keys[3]: (0.001, PermissionError("AccessDenied")),
+    }
+
+    with pytest.raises(RuntimeError) as ei:
+        list_backups(store, org_id)
+
+    assert keys[1] in str(ei.value), (
+        f"expected the input-order failure naming {keys[1]!r}, got {ei.value}")
+    assert keys[3] not in str(ei.value), (
+        "an as-completed read surfaced the FASTEST failure instead")
+
+
+def test_list_backups_propagates_a_storage_failure_rather_than_a_partial_list():
+    """#13097: concurrency must not turn an outage into a SHORTER list.
+
+    A partial answer reads as "this org has fewer restore points" (or none) on
+    the one read a restore depends on, so the failure must escape the pool.
+    """
+    store = _SlowCountingStorage(delay=0.005)
+    org_id = "team_outage"
+    ids = _seed_manifests(store, org_id, 5)
+    store.fail_on = ids[2]
+
+    with pytest.raises(PermissionError):
+        list_backups(store, org_id)
+
+
+def test_list_backups_still_skips_an_unreadable_manifest_inside_the_pool():
+    """#13097: the SKIPPED class (corrupt / pruned) stays skipped under concurrency."""
+    store = _SlowCountingStorage(delay=0.005)
+    org_id = "team_corrupt"
+    _seed_manifests(store, org_id, 6)
+    bad_id = f"{org_id}/g_test/19990101T000000Z-bad"
+    store.upload(f"backups/{bad_id}/manifest.json", b"{this is not json")
+
+    listed = list_backups(store, org_id)
+
+    assert len(listed) == 6  # the corrupt one is skipped, the rest are complete
+    assert bad_id not in {m["backup_id"] for m in listed}
+
+
+class _PerKeyFailureStorage(MemoryStorage):
+    """Fails chosen keys with chosen delays/exception types.
+
+    Exists for the exception-IDENTITY test below: it needs one failing key EARLY
+    in input order that fails SLOWLY and a second, LATER key that fails FAST with
+    a different type, so "which error surfaces" distinguishes input order from
+    completion order.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.plan: dict[str, tuple[float, BaseException]] = {}
+        self._lock = threading.Lock()
+        self.downloads: list[str] = []
+
+    def download(self, key: str) -> bytes:
+        with self._lock:
+            self.downloads.append(key)
+        delay, exc = self.plan.get(key, (0.0, None))
+        if exc is not None:
+            time.sleep(delay)
+            raise exc
+        return super().download(key)
+
+
+def test_list_backups_skips_a_manifest_that_is_not_a_json_object():
+    """#13097 review: `None` is the skip sentinel, so a JSON `null` body must be
+    skipped explicitly — not silently swallowed by the sentinel while a non-dict
+    body like `[1,2]` instead reaches the sort and raises `AttributeError`.
+
+    One rule for every malformed manifest, whichever shape it arrives in.
+    """
+    store = _SlowCountingStorage(delay=0.005)
+    org_id = "team_shapes"
+    _seed_manifests(store, org_id, 3)
+    for suffix, body in (("null", b"null"), ("list", b"[1,2]"), ("str", b'"hi"')):
+        bad = f"{org_id}/g_test/19990101T000000Z-{suffix}"
+        store.upload(f"backups/{bad}/manifest.json", body)
+
+    listed = list_backups(store, org_id)
+
+    assert len(listed) == 3  # all three malformed shapes skipped, 3 good ones kept
+    assert all(isinstance(m, dict) for m in listed)
+
+
+def test_r2storage_builds_exactly_one_client_under_concurrent_first_callers(monkeypatch):
+    """#13097 review: `R2Storage._s3()`'s lazy init must be ATOMIC.
+
+    The manifest pool makes simultaneous first-callers routine. Without the lock,
+    each thread builds its own boto3 client (each with its own urllib3 pool) and
+    all but one are dropped unclosed — the connection budget splits and
+    construction is re-paid on the first request after a deploy. Deleting the
+    lock must fail THIS test.
+    """
+    constructed: list[object] = []
+    record = threading.Lock()
+
+    class _SlowCountingBoto3:
+        def client(self, *args, **kwargs):
+            time.sleep(0.05)  # widen the window: unserialised, all 8 threads get here
+            with record:
+                client = object()
+                constructed.append(client)
+                return client
+
+    _install_fake_boto3(monkeypatch, _SlowCountingBoto3())
+    store = R2Storage(
+        endpoint_url="https://acct.r2.cloudflarestorage.com",
+        access_key_id="ak", secret_access_key="sk", bucket="tortoise-backups",
+    )
+    got: list[object] = []
+    barrier = threading.Barrier(8)
+
+    def _call() -> None:
+        barrier.wait(timeout=10)
+        got.append(store._s3())
+
+    threads = [threading.Thread(target=_call) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(constructed) == 1  # exactly ONE client constructed
+    assert len(got) == 8  # every caller got a client ...
+    assert len({id(c) for c in got}) == 1  # ... and it was the SAME one
+    assert not any(t.is_alive() for t in threads)  # and nobody deadlocked
+
+
 def test_prune_keep_hourly_day_anchor_semantics(monkeypatch):
     """keep_hourly>0 REPLACES the daily keep-all rule with a bounded retention:
 
@@ -2056,7 +2393,7 @@ def test_r2_create_if_not_exists_412_race(monkeypatch):
             return {}
 
     fake = _ConditionalS3()
-    monkeypatch.setitem(sys.modules, "boto3", _FakeBoto3(fake))
+    _install_fake_boto3(monkeypatch, _FakeBoto3(fake))
     store = R2Storage(
         endpoint_url="https://acct.r2.cloudflarestorage.com",
         access_key_id="ak", secret_access_key="sk", bucket="tortoise-backups",
@@ -2086,7 +2423,7 @@ def test_r2_create_if_not_exists_fallback_head(monkeypatch):
             return {}
 
     fake = _NoConditionalS3()
-    monkeypatch.setitem(sys.modules, "boto3", _FakeBoto3(fake))
+    _install_fake_boto3(monkeypatch, _FakeBoto3(fake))
     store = R2Storage(
         endpoint_url="https://acct.r2.cloudflarestorage.com",
         access_key_id="ak", secret_access_key="sk", bucket="tortoise-backups",

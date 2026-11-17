@@ -41,7 +41,7 @@ THE THREE PROPERTIES THIS FILE ESTABLISHES.
    only when the applied map carries `name`, for every node label — so the
    refusal is a guard on an unproduced shape, never a block on a real write.
 3. **End to end, through the public SDK door, on a real Postgres** (`TEST_RECORD_DB_URI`,
-   the `test-record-postgres` job's shape, #9551): `sdk.update_entity(id,
+   the `test-record-postgres` job's shape, #9551): `sdk.update_knowledge(id,
    name=…)` journals `EntityMutated op=rename` on the stable id, the record row's
    `name` MOVES, its `node_key` does not, the old name is GONE from the tenant,
    the record→cache read returns the new name, and replaying the same journal
@@ -272,7 +272,7 @@ def test_the_public_rename_door_moves_the_records_name_live_and_on_replay(
         with use_record_tenant(*live):
             created = sdk.create_entity("object", name="Acme", objectKind="org")
             object_id = created["node"]["id"]
-            sdk.update_entity(object_id, name="AcmeRenamed")
+            sdk.update_knowledge(object_id, name="AcmeRenamed")
 
         # ── (a) the journal carries the producer's rename, on the STABLE id ──
         records = _journal_records(journal_path)

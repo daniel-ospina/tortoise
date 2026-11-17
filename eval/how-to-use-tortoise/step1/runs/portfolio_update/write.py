@@ -31,7 +31,7 @@ def edge(relation: str, from_id: str, to_id: str, fallback: str = "related") -> 
 
 
 # ---------------------------------------------------------------- source (memo)
-src = sdk.create_source(
+src = sdk.register_source(
     "memo://our-fund/portfolio/2026-08-quarterly-update",
     "portfolioUpdateMemo",
     title="Quarterly portfolio update, 2026-08",
