@@ -36,11 +36,12 @@ from tortoise.pack_registry import PackRegistry, default_packs_dir
 from tortoise.pack_manifest_store import validate_manifest
 from tortoise.status_folds import (
     BUILTIN_CONNECTOR_FOLDS,
+    BUILTIN_CONNECTOR_REOPENS,
     SHARED_CONNECTOR_STATUS_WORDS,
     StatusFoldIndex,
     bare_lifecycle_kind_collisions,
     build_status_fold_index,
-    builtin_fold_status,
+    builtin_fold_stage,
     validate_status_decl,
 )
 from tortoise.sdk import TortoiseSDK
@@ -57,8 +58,35 @@ def _object_status(sdk: TortoiseSDK, name: str):
     return rows[0][0] if rows else None
 
 
+def _object_stage(sdk: TortoiseSDK, name: str):
+    """The Object's POSITION (``pipelineStageId``) — the axis a fold moves.
+
+    #11824 S0 moved every pack's own word (and the built-in connector words,
+    which are position words too — design §3.2) off ``Object.status`` and onto
+    the kind's declared pipeline, so a fold assertion reads this, not
+    ``status``. ``status`` now carries only the four lifecycle words and no
+    fold writes it.
+    """
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.pipelineStageId",
+        params={"n": name}).result_set
+    return rows[0][0] if rows else None
+
+
 def _decl(event: str, status) -> dict:
     return {"event": event, "status": status}
+
+
+#: A minimal well-formed ``pipeline`` declaration — the MIGRATED shape (#11824
+#: S0), where a kind's own words are stage ids and there is no ``statuses``
+#: list. Used to prove the two-axis rules on a kind that declares only this.
+_PIPELINE = {
+    "stages": [
+        {"id": "pending", "label": "Pending", "order": 0, "slot": "entry"},
+        {"id": "released", "label": "Released", "order": 1,
+         "slot": "terminal", "outcome": "completed"},
+    ],
+}
 
 
 # ── 1. Declaration validation (DB-free) ──────────────────────────────────
@@ -97,6 +125,52 @@ class TestStatusDeclValidation:
         errors, _ = self._validate(
             {"folds": [_decl("trancheReleased", "released")]})
         assert any("'folds' requires 'statuses'" in e for e in errors)
+
+    def test_a_status_fold_on_a_pipeline_only_kind_is_rejected(self):
+        """#11824 S0 — the arm that keeps contract 1 true after the cut.
+
+        ``pipeline`` now satisfies the ``folds`` gate above, but a ``status:``
+        target has no declared ``statuses`` list to belong to on a migrated
+        kind. Pre-fix the membership check only errored on a NON-STRING target,
+        so ANY word validated clean — and ``_fold_target`` then handed it to the
+        fold routes as a ``FOLD_AXIS_STATUS`` target, which write
+        ``SET o.status = $status`` by raw Cypher and never ask the write door.
+        That is exactly the unvalidated status write S0 closes.
+
+        Non-vacuity: measured on the pre-fix module with the same call —
+        ``errors == []``.
+        """
+        errors, _ = self._validate(
+            {"pipeline": _PIPELINE,
+             "folds": [_decl("trancheReleased", "totally-made-up")]})
+        assert errors, "a `status:` fold on a pipeline-only kind validated clean"
+        assert any("targets 'status'" in e for e in errors), errors
+        assert any("totally-made-up" in e for e in errors), errors
+        # …and the repair is PERFORMABLE: it names the stage axis with the
+        # stages this kind actually declares (AX rule 2).
+        assert any("declare a 'statuses' list" in e for e in errors), errors
+        assert any("pending, released" in e for e in errors), errors
+
+    def test_a_stage_fold_on_a_pipeline_only_kind_is_still_accepted(self):
+        """The arm above must not over-block: ``stage:`` IS the migrated shape."""
+        errors, _ = self._validate(
+            {"pipeline": _PIPELINE,
+             "folds": [{"event": "trancheReleased", "stage": "released"}]})
+        assert errors == []
+
+    def test_a_declared_status_still_governs_a_status_fold_beside_a_pipeline(
+            self):
+        """A kind may declare BOTH axes; ``statuses`` then governs ``status:``
+        (so the new arm does not fire for a kind that can answer it)."""
+        errors, _ = self._validate(
+            {"statuses": ["pending", "released"], "pipeline": _PIPELINE,
+             "folds": [_decl("trancheReleased", "released")]})
+        assert errors == []
+        errors, _ = self._validate(
+            {"statuses": ["pending", "released"], "pipeline": _PIPELINE,
+             "folds": [_decl("trancheReleased", "shipped")]})
+        assert any("not in the kind's declared statuses" in e for e in errors), \
+            errors
 
     def test_statuses_must_be_non_empty_unique_list(self):
         errors, _ = self._validate({"statuses": []})
@@ -284,19 +358,31 @@ class TestRegistryWiring:
 
 class TestBuiltinParity:
     def test_builtin_map_is_the_historical_producer_to_status_map(self):
-        """The exact map the hand-typed ``if/elif`` carried (#1350/#1725)."""
+        """The exact map the hand-typed ``if/elif`` carried (#1350/#1725).
+
+        ⛔ #11824 S0: THE VALUES ARE STAGE IDS, not statuses. ``in_progress``
+        and ``completed`` are POSITION words (design §3.2) and the four-word
+        lifecycle axis can no longer hold them, so each target is a stage of
+        ``pipeline.CORE_WORK_ITEM_PIPELINE`` and the fold advances the stage
+        through ``pipeline.apply_stage_fold`` — the same function the
+        ``advance_stage`` verb calls. The two CLOSING folds land on ``done`` (a
+        terminal stage) rather than a lifecycle ending, because a terminal stage
+        is clearable with ``advance_stage(..., reopen=True)`` while a lifecycle
+        word is not — and ``github.issue.reopened`` is exactly that reopen.
+        """
         assert BUILTIN_CONNECTOR_FOLDS == {
             "pm:cardCreated": "in_progress",
             "github.issue.open": "in_progress",
             "github.issue.reopened": "in_progress",
-            "pm:cardCompleted": "completed",
-            "github.issue.closed": "completed",
+            "pm:cardCompleted": "done",
+            "github.issue.closed": "done",
         }
+        assert BUILTIN_CONNECTOR_REOPENS == frozenset({"github.issue.reopened"})
 
     def test_builtin_lookup_helper_agrees(self):
-        for event, status in BUILTIN_CONNECTOR_FOLDS.items():
-            assert builtin_fold_status(event) == status
-        assert builtin_fold_status("venture:disbursement") is None
+        for event, stage in BUILTIN_CONNECTOR_FOLDS.items():
+            assert builtin_fold_stage(event) == stage
+        assert builtin_fold_stage("venture:disbursement") is None
 
     def test_empty_index_declares_nothing(self):
         idx = StatusFoldIndex()
@@ -323,8 +409,10 @@ class TestIndexCompilation:
         }
         idx = build_status_fold_index(packs)
         assert idx.lifecycle_kinds == frozenset({"a:thing", "b:thing"})
-        assert idx.folds_for_event("a:thingDone") == [("a:thing", "a-done")]
-        assert idx.folds_for_event("b:thingDone") == [("b:thing", "b-done")]
+        assert [(t.kind, t.target) for t in idx.folds_for_event("a:thingDone")] \
+            == [("a:thing", "a-done")]
+        assert [(t.kind, t.target) for t in idx.folds_for_event("b:thingDone")] \
+            == [("b:thing", "b-done")]
 
     def test_a_kind_with_statuses_but_no_folds_still_owns_its_state(self):
         packs = {"a": self._Pack(["thing"], {"thing": {"statuses": ["x"]}})}
@@ -344,27 +432,54 @@ def venture_registry():
 
 
 class TestVentureDeclaration:
-    def test_all_seven_object_kinds_declare_statuses(self, venture_registry):
+    def test_every_object_kind_declares_a_state_surface(self, venture_registry):
+        """#11824 S0: a kind declares its own words on ONE of two axes.
+
+        Before S0 every object kind of this pack declared ``statuses``; the cut
+        moved each kind's own words onto ``pipeline`` (the POSITION axis) and
+        left ``status`` to the four-word lifecycle vocabulary. Either axis is a
+        complete state surface, so the invariant is "one of them, non-empty" —
+        NOT "statuses", which would now be false for all seven.
+        """
         venture = venture_registry.get_pack("venture")
         for kind in venture.object_kinds:
-            assert venture.kind_defs[kind].get("statuses"), kind
+            spec = venture.kind_defs[kind]
+            stages = (spec.get("pipeline") or {}).get("stages") or []
+            assert spec.get("statuses") or stages, (kind, spec)
 
     def test_the_three_lifecycle_events_carry_a_fold(self, venture_registry):
+        """…and each fold targets a STAGE of the kind it folds (S0)."""
         idx = venture_registry.status_fold_index
-        assert idx.folds_for_event("venture:disbursement") == [
+        assert [(t.kind, t.stage) for t in
+                idx.folds_for_event("venture:disbursement")] == [
             ("venture:tranche", "released")]
-        assert idx.folds_for_event("venture:conditionMet") == [
+        assert [(t.kind, t.stage) for t in
+                idx.folds_for_event("venture:conditionMet")] == [
             ("venture:condition", "met")]
-        assert idx.folds_for_event("venture:actionItemCompleted") == [
+        assert [(t.kind, t.stage) for t in
+                idx.folds_for_event("venture:actionItemCompleted")] == [
             ("venture:actionItem", "done")]
 
-    def test_every_fold_status_is_in_its_kinds_vocabulary(self, venture_registry):
+    def test_every_fold_target_is_declared_on_its_own_axis(self, venture_registry):
+        """The consistency rule, AXIS-AWARE (#11824 S0).
+
+        A ``status``-targeted fold must name one of the kind's declared
+        ``statuses``; a ``stage``-targeted fold must name one of its declared
+        ``pipeline`` stages. Reading only ``statuses`` (the pre-S0 shape) would
+        KeyError on every migrated kind — and reading only ``stage`` would stop
+        checking a pack that has not migrated.
+        """
         venture = venture_registry.get_pack("venture")
         for kind in venture.object_kinds:
             spec = venture.kind_defs[kind]
             statuses = set(spec.get("statuses", []))
+            stages = {s.get("id") for s in
+                      (spec.get("pipeline") or {}).get("stages") or []}
             for fold in spec.get("folds", []):
-                assert fold["status"] in statuses, (kind, fold)
+                if "stage" in fold:
+                    assert fold["stage"] in stages, (kind, fold)
+                else:
+                    assert fold["status"] in statuses, (kind, fold)
 
     def test_venture_loads_without_errors(self, venture_registry):
         assert not venture_registry.errors
@@ -406,13 +521,21 @@ class TestVentureDeclaration:
 
 class TestFoldBehaviour:
     def test_declared_fold_flips_status_end_to_end(self):
-        """Indicator (1): a declared rule flips Object.status."""
+        """Indicator (1): a declared rule moves the Object to its STAGE.
+
+        #11824 S0: the WINDOW is unchanged (a declared fold still fires
+        end-to-end through the projection) — the AXIS is what moved. The pack's
+        own words are pipeline stages now, so the fold advances
+        ``pipelineStageId`` and writes NO ``status`` at all.
+        """
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "AI-1", objectKind="venture:actionItem")
             sdk.create_event("AI-1 done", "venture:actionItemCompleted",
                              object="AI-1")
-            assert _object_status(sdk, "AI-1") == "done"
+            assert _object_stage(sdk, "AI-1") == "done"
+            assert _object_status(sdk, "AI-1") is None, \
+                "the fold wrote a lifecycle status — S0 moved it to the stage axis"
         finally:
             sdk.close()
 
@@ -422,7 +545,7 @@ class TestFoldBehaviour:
             sdk.create_entity("object", "T1", objectKind="venture:tranche")
             sdk.create_event("T1 released", "venture:disbursement",
                              object="T1")
-            assert _object_status(sdk, "T1") == "released"
+            assert _object_stage(sdk, "T1") == "released"
         finally:
             sdk.close()
 
@@ -446,9 +569,13 @@ class TestFoldBehaviour:
         try:
             sdk.create_entity("object", "the bug", objectKind="dev:issue")
             sdk.create_event("opened", "github.issue.open", object="the bug")
-            assert _object_status(sdk, "the bug") == "in_progress"
+            # #11824 S0: the connector words are POSITIONS (design §3.2), so the
+            # built-in fold advances the CORE work-item stage — it no longer
+            # writes `Object.status` at all.
+            assert _object_stage(sdk, "the bug") == "in_progress"
             sdk.create_event("closed", "github.issue.closed", object="the bug")
-            assert _object_status(sdk, "the bug") == "completed"
+            assert _object_stage(sdk, "the bug") == "done"
+            assert _object_status(sdk, "the bug") is None
         finally:
             sdk.close()
 
@@ -459,7 +586,7 @@ class TestFoldBehaviour:
         try:
             sdk.create_entity("object", "TASK-42", objectKind="dev:issue")
             sdk.create_event("done", "pm:cardCompleted", object="TASK-42")
-            assert _object_status(sdk, "TASK-42") == "completed"
+            assert _object_stage(sdk, "TASK-42") == "done"
         finally:
             sdk.close()
 
@@ -516,7 +643,7 @@ class TestFormWidenedDispatch:
         try:
             sdk.create_entity("object", "B1", objectKind="tranche")
             sdk.create_event("B1 released", "disbursement", object="B1")
-            assert _object_status(sdk, "B1") == "released"
+            assert _object_stage(sdk, "B1") == "released"
         finally:
             sdk.close()
 
@@ -525,7 +652,7 @@ class TestFormWidenedDispatch:
         try:
             sdk.create_entity("object", "B2", objectKind="tranche")
             sdk.create_event("B2 released", "venture:disbursement", object="B2")
-            assert _object_status(sdk, "B2") == "released"
+            assert _object_stage(sdk, "B2") == "released"
         finally:
             sdk.close()
 
@@ -534,7 +661,7 @@ class TestFormWidenedDispatch:
         try:
             sdk.create_entity("object", "B3", objectKind="venture:tranche")
             sdk.create_event("B3 released", "disbursement", object="B3")
-            assert _object_status(sdk, "B3") == "released"
+            assert _object_stage(sdk, "B3") == "released"
         finally:
             sdk.close()
 
@@ -548,6 +675,9 @@ class TestFormWidenedDispatch:
             sdk.create_entity("object", "B4", objectKind="tranche")
             sdk.create_event("closed", "github.issue.closed", object="B4")
             assert _object_status(sdk, "B4") is None  # #9974 R1: not written
+            # …on BOTH axes: S0's connector fold writes a stage, so "not
+            # relabelled" must assert the stage stayed unset too.
+            assert _object_stage(sdk, "B4") is None
         finally:
             sdk.close()
 
@@ -556,18 +686,21 @@ class TestFormWidenedDispatch:
         try:
             sdk.create_entity("object", "B5", objectKind="VENTURE:TRANCHE")
             sdk.create_event("B5 released", "Venture:Disbursement", object="B5")
-            assert _object_status(sdk, "B5") == "released"
+            assert _object_stage(sdk, "B5") == "released"
             sdk.create_entity("object", "B6", objectKind="Tranche")
             sdk.create_event("closed", "github.issue.closed", object="B6")
             assert _object_status(sdk, "B6") is None  # #9974 R1: not written
+            assert _object_stage(sdk, "B6") is None
         finally:
             sdk.close()
 
     def test_index_registers_both_spellings(self, venture_registry):
         idx = venture_registry.status_fold_index
-        assert idx.folds_for_event("disbursement") == [
+        assert [(t.kind, t.target) for t in
+                idx.folds_for_event("disbursement")] == [
             ("venture:tranche", "released")]
-        assert idx.folds_for_event("Venture:Disbursement") == [
+        assert [(t.kind, t.target) for t in
+                idx.folds_for_event("Venture:Disbursement")] == [
             ("venture:tranche", "released")]
         assert "venture:tranche" in idx.kind_forms
         assert "tranche" in idx.kind_forms
@@ -620,7 +753,7 @@ class TestExtractionPipelineFold:
             sdk._extract_session_v2(
                 [{"role": "user", "content": "T1 released"}], "s1",
                 "2026-01-01T00:00:00Z")
-            assert _object_status(sdk, "T1") == "released"
+            assert _object_stage(sdk, "T1") == "released"
         finally:
             sdk.close()
 
@@ -699,7 +832,7 @@ class TestFoldQueryTypeSafety:
         try:
             sdk.create_entity("object", "N1", objectKind=5)
             sdk.create_event("closed", "github.issue.closed", object="N1")
-            assert _object_status(sdk, "N1") == "completed"
+            assert _object_stage(sdk, "N1") == "done"
         finally:
             sdk.close()
 
@@ -708,7 +841,7 @@ class TestFoldQueryTypeSafety:
         try:
             sdk.create_entity("object", "N2", objectKind=["a", "b"])
             sdk.create_event("closed", "github.issue.closed", object="N2")
-            assert _object_status(sdk, "N2") == "completed"
+            assert _object_stage(sdk, "N2") == "done"
         finally:
             sdk.close()
 

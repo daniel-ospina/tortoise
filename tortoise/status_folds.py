@@ -281,6 +281,23 @@ def validate_status_decl(
         for _stage in pipeline_decl.get("stages") or ():
             if isinstance(_stage, dict) and isinstance(_stage.get("id"), str):
                 declared_stage_ids.append(_stage["id"])
+        # ── #11824 S0: the overlap warning FOLLOWS the words onto the stage ──
+        # Contract 3 below exists because a pack reusing a connector word
+        # (``open``/``closed``/``active``/``pending``) makes one spelling mean
+        # two lifecycles to a reader. The cut moved every pack's own words from
+        # `statuses` to `pipeline` stages, so checking only `statuses` would
+        # have DROPPED the detection for every migrated kind — silently, since
+        # the warning is advisory. Detected on whichever axis the kind uses.
+        stage_collisions = sorted(
+            set(declared_stage_ids) & SHARED_CONNECTOR_STATUS_WORDS)
+        if stage_collisions:
+            warnings.append(
+                f"kindDefs '{kind}': 'pipeline' stage id(s) "
+                f"{', '.join(stage_collisions)} reuse the shared connector "
+                f"vocabulary word(s) — this kind owns its own position (the "
+                f"built-in connector fold does not apply to it), but the "
+                f"spelling is ambiguous to a reader; rename or record the intent"
+            )
     if statuses_present:
         if not isinstance(statuses, list) or not statuses:
             errors.append(
@@ -440,21 +457,60 @@ def validate_status_decl(
                     f"kindDefs '{kind}': folds[{i}] must name 'stage' or "
                     f"'status'"
                 )
-            if isinstance(statuses, list) and all(
-                    isinstance(v, str) for v in statuses):
-                if status not in statuses:
+            # ── the `status` target, on the axis S0 reserves for four words ──
+            # A stage-targeted fold has no `status`, and that is legal — only a
+            # fold that NAMED `status` must have named a real, DECLARED one.
+            # (`stage`/`status`-both-absent is already reported above.)
+            if status is not None:
+                if not isinstance(status, str) or not status:
+                    errors.append(
+                        f"kindDefs '{kind}': folds[{i}] 'status' must be a "
+                        f"non-empty string"
+                    )
+                elif not (isinstance(statuses, list) and all(
+                        isinstance(v, str) for v in statuses)):
+                    # ── #11824 S0, and this arm is the whole reason it exists ──
+                    # Contract 1 is "a fold's `status` must be one of the kind's
+                    # declared `statuses`", and until S0 it held by ACCIDENT of
+                    # the `folds requires statuses` gate above: with no
+                    # `statuses` list there was nothing to test membership
+                    # against, and the old shape of this block only errored on a
+                    # NON-STRING target — so ANY word validated clean. That was
+                    # unreachable while the gate demanded `statuses`; now
+                    # `pipeline` satisfies the gate, and a migrated kind would
+                    # have accepted `folds: [{event: …, status:
+                    # 'totally-made-up'}]` and written it BY RAW CYPHER
+                    # (`_fold_target` returns it as a `FOLD_AXIS_STATUS`
+                    # target; the live fold's `SET o.status = $status` and the
+                    # replay fold never ask the write door). That is exactly the
+                    # unvalidated `status` write S0 closes, reached through the
+                    # one declaration surface S0 itself edits.
+                    #
+                    # The repair names a WRITABLE third part (AX rule 2): the
+                    # stage axis, which is where a migrated kind's own words
+                    # live, or an explicit `statuses` list to have meant.
+                    if pipeline_present:
+                        where = (
+                            f"declare a 'statuses' list on the kind, or fold "
+                            f"the kind's own words as STAGES — 'stage' "
+                            f"({', '.join(declared_stage_ids) or 'none declared'})"
+                        )
+                    else:
+                        where = "declare a 'statuses' list on the kind"
+                    errors.append(
+                        f"kindDefs '{kind}': folds[{i}] targets 'status' "
+                        f"{status!r}, but this kind declares no 'statuses' "
+                        f"list for that target to belong to — a fold target "
+                        f"must be declared where the kind declares it; {where}. "
+                        f"`status` itself carries only the four lifecycle "
+                        f"words (draft / live / deprecated / superseded), and "
+                        f"a fold does not write those: a fold moves POSITION."
+                    )
+                elif status not in statuses:
                     errors.append(
                         f"kindDefs '{kind}': folds[{i}] 'status' {status!r} is "
                         f"not in the kind's declared statuses "
                         f"({', '.join(statuses)})"
-                    )
-            elif not isinstance(status, str) or not status:
-                # A stage-targeted fold has no `status`, and that is legal —
-                # only a fold that NAMED `status` must have named a real one.
-                if status is not None or stage is None:
-                    errors.append(
-                        f"kindDefs '{kind}': folds[{i}] 'status' must be a "
-                        f"non-empty string"
                     )
     return errors, warnings
 
