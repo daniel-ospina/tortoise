@@ -334,9 +334,19 @@ def _transport_context():
 
 
 def test_mcp_tool_registered_readonly():
-    from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME  # noqa: I001
-    td = next(t for t in TOOL_REGISTRY
-              if t.name == "tortoise_find_cross_lens_candidates")
+    from tortoise.tool_registry import (  # noqa: I001
+        RETIRED_TOOL_REGISTRY, RETIRED_USE_INSTEAD, TOOL_REGISTRY, GROUP_BY_NAME,
+    )
+    # #11609 door-retirement wave retired this door FORWARD into
+    # `tortoise_review_link_candidates(kind="cross_lens")`. It is still SERVED through
+    # the #3883 shim, with the same SDK binding and the same read-only hints — the
+    # property this case exists for — so the entry is read from the served population
+    # and the pointer is pinned beside it.
+    served = {t.name: t for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)}
+    td = served["tortoise_find_cross_lens_candidates"]
+    pointer = RETIRED_USE_INSTEAD["tortoise_find_cross_lens_candidates"]
+    assert pointer.startswith("tortoise_review_link_candidates("), pointer
+    assert 'kind="cross_lens"' in pointer, pointer
     assert td.sdk_method == "get_cross_lens_candidates"
     assert td.annotations.readOnlyHint is True
     assert td.annotations.destructiveHint is False

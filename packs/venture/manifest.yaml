@@ -104,7 +104,19 @@ ontology:
         The fund's stake in — and ongoing relationship with — a company it backs.
         This is the portfolio position, not the company: the company itself is a
         core Subject. Lifecycle: prospective → invested → active → written-off.
-      statuses: [prospective, invested, active, written-off]
+      # #11824 S0 — these are PIPELINE STAGES, not `status` words. A knowledge
+      # kind's `status` is the four-word lifecycle vocabulary
+      # (`tortoise/lifecycle_vocabulary.py`); a kind's OWN words are positions,
+      # and position lives on the stage axis (design §3.2, §4). `written-off`
+      # reads TERMINAL BY SLOT, not by being a word any reader has to know.
+      pipeline:
+        defaultStage: prospective
+        stages:
+        - {id: prospective, label: Prospective, order: 0, slot: entry}
+        - {id: invested, label: Invested, order: 1, slot: active}
+        - {id: active, label: Active, order: 2, slot: active}
+        - {id: written-off, label: Written off, order: 3, slot: terminal,
+           outcome: lost}
       synonyms:
       - portfolio company
       - portfolio position
@@ -125,7 +137,16 @@ ontology:
         A multi-milestone initiative under an investment that produces
         deliverables — an R&D programme, product line, platform or brand.
         Lifecycle: proposed → prioritized → active → paused / deprioritized.
-      statuses: [proposed, prioritized, active, paused, deprioritized]
+      # `paused` / `deprioritized` are SUSPENDED, never terminal: a deprioritized
+      # programme is not ended, so it must not close the Object (#11824 S0).
+      pipeline:
+        defaultStage: proposed
+        stages:
+        - {id: proposed, label: Proposed, order: 0, slot: entry}
+        - {id: prioritized, label: Prioritized, order: 1, slot: entry}
+        - {id: active, label: Active, order: 2, slot: active}
+        - {id: paused, label: Paused, order: 3, slot: suspended}
+        - {id: deprioritized, label: Deprioritized, order: 4, slot: suspended}
       synonyms:
       - programme
       - platform
@@ -146,7 +167,19 @@ ontology:
         A produced or protected thing a programme owns — a product, technology,
         dataset, patent family or other intellectual property. Lifecycle:
         idea → developing → validated → protected → licensed.
-      statuses: [idea, developing, validated, protected, licensed]
+      # No stage here is TERMINAL, and that is deliberate rather than unfinished
+      # (#11824 S0): the pack declares no ending for an asset, and inventing one
+      # — `licensed` is a live business position, not an ending — would record a
+      # decision no one made. A kind needs no terminal stage; an Object with a
+      # real ending supersedes or deprecates it on the lifecycle axis.
+      pipeline:
+        defaultStage: idea
+        stages:
+        - {id: idea, label: Idea, order: 0, slot: entry}
+        - {id: developing, label: Developing, order: 1, slot: active}
+        - {id: validated, label: Validated, order: 2, slot: active}
+        - {id: protected, label: Protected, order: 3, slot: active}
+        - {id: licensed, label: Licensed, order: 4, slot: active}
       synonyms:
       - product
       - technology
@@ -170,7 +203,15 @@ ontology:
         programme or company: a grant, term of award, priced round, SAFE,
         convertible note or loan. Lifecycle: prospect → applied → awarded →
         active → closed.
-      statuses: [prospect, applied, awarded, active, closed]
+      pipeline:
+        defaultStage: prospect
+        stages:
+        - {id: prospect, label: Prospect, order: 0, slot: entry}
+        - {id: applied, label: Applied, order: 1, slot: entry}
+        - {id: awarded, label: Awarded, order: 2, slot: active}
+        - {id: active, label: Active, order: 3, slot: active}
+        - {id: closed, label: Closed, order: 4, slot: terminal,
+           outcome: completed}
       synonyms:
       - grant
       - term of award
@@ -198,10 +239,23 @@ ontology:
         conditions-met → released (a denial is recorded as a terminal
         non-release). The actual movement of money is the `disbursement` event,
         never a property of this Object.
-      statuses: [pending, conditions-met, released, denied]
+      # `denied` is TERMINAL BY SLOT, which is what the description already said
+      # in prose ("a denial is recorded as a terminal non-release") — the slot is
+      # that sentence, in the model (#11824 S0). Outcome `lost`: the money was
+      # not obtained. It is NOT `withdrawn`, which would record that WE walked
+      # away, a different event.
+      pipeline:
+        defaultStage: pending
+        stages:
+        - {id: pending, label: Pending, order: 0, slot: entry}
+        - {id: conditions-met, label: Conditions met, order: 1, slot: entry}
+        - {id: released, label: Released, order: 2, slot: terminal,
+           outcome: won}
+        - {id: denied, label: Denied, order: 3, slot: terminal,
+           outcome: lost}
       folds:
       - event: disbursement
-        status: released
+        stage: released
       synonyms:
       - parcel
       - installment
@@ -222,10 +276,16 @@ ontology:
         that unlocks the next parcel. Lifecycle: unmet → met. Satisfaction is
         recorded as the dated `conditionMet` event; this Object holds the
         current position.
-      statuses: [unmet, met]
+      # `met` is a live position, not an ending: a condition can be re-gated, so
+      # it is not a terminal stage (#11824 S0).
+      pipeline:
+        defaultStage: unmet
+        stages:
+        - {id: unmet, label: Unmet, order: 0, slot: entry}
+        - {id: met, label: Met, order: 1, slot: active}
       folds:
       - event: conditionMet
-        status: met
+        stage: met
       synonyms:
       - requirement
       - precondition
@@ -248,10 +308,16 @@ ontology:
         An owned, dated commitment produced by a meeting or a review — the
         "next steps" list. Lifecycle: open → in-progress → done. Completion is
         recorded as the dated `actionItemCompleted` event.
-      statuses: [open, in-progress, done]
+      pipeline:
+        defaultStage: open
+        stages:
+        - {id: open, label: Open, order: 0, slot: entry}
+        - {id: in-progress, label: In progress, order: 1, slot: active}
+        - {id: done, label: Done, order: 2, slot: terminal,
+           outcome: completed}
       folds:
       - event: actionItemCompleted
-        status: done
+        stage: done
       synonyms:
       - action item
       - next step

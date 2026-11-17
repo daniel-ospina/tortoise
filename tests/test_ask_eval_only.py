@@ -237,10 +237,15 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     #   registry's own `http_policy` population (55 live entries, 50 advertised). The
     #   exclusion set is still FIVE and unchanged by this wave, so the floor moves
     #   exactly with the live surface: 50 = 50 live `http_policy` entries - 5.
-    # Anything BELOW 50 is unexplained shrinkage and this arm reds on it; lowering the
+    #   #11609 DOOR RETIREMENT (this PR, lane E) — SEVEN advertised doors retire FORWARD and
+    #   NO container row arrives, so the listing moves by exactly -7: 50 - 7 = **43**,
+    #   re-measured from the registry's own `http_policy` population (48 live entries, 43
+    #   advertised). ALL SEVEN were `http_policy=True` and the exclusion set is still the
+    #   same FIVE, so the floor moves with the live surface and nothing else: 43 = 48 - 5.
+    # Anything BELOW 43 is unexplained shrinkage and this arm reds on it; lowering the
     # floor again needs the same kind of recorded reason, never a green run.
 
-    assert len(names) >= 50, f"default surface shrank to {len(names)}"
+    assert len(names) >= 43, f"default surface shrank to {len(names)}"
     # The floor is a proxy for the real invariant, and a proxy cannot tell a
     # recorded consolidation from a silent drop. Pin the invariant itself: the
     # default HTTP listing serves EXACTLY the registry's `http_policy` population

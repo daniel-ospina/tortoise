@@ -179,10 +179,14 @@ def test_update_entity_writes_and_records_under_the_armed_guard(
     obj = sdk.create_entity("object", "apply-first entity")["node"]["id"]
 
     before = _records_since(sdk).count("EntityMutated")
-    sdk.update_knowledge(obj, status="active")
+    # ⚠️ #11824 S0: the word is a lifecycle one. This test's subject is the SET-first
+    # + `EntityMutated` ordering, not the vocabulary — but `active` is now a
+    # POSITION word refused at the write door (it is a stage id, not a state), so
+    # the write must name a lifecycle word to exercise the path at all.
+    sdk.update_knowledge(obj, status="draft")
     assert _records_since(sdk).count("EntityMutated") == before + 1, (
         "the entity mutation's record did not land")
-    assert sdk.get_entity(obj)["status"] == "active"
+    assert sdk.get_entity(obj)["status"] == "draft"
 
 
 def test_create_operator_writes_and_records_under_the_armed_guard(

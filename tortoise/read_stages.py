@@ -101,7 +101,11 @@ STAGE_EMBED_ENCODE = "embed_encode"
 #: Per-leg attribution already exists on a different channel and for a different
 #: question (``leg_trace``'s entries), and is not duplicated here.
 STAGE_RETRIEVAL = "retrieval"
-#: ``rrf_fusion`` — pure CPU over the candidate pool.
+#: ``rrf_fusion`` — pure CPU over the candidate pool. ⛔ BRACKETS ONLY THE FUSION
+#: CALL. The graph-bracketing reads that follow it (recency weights, kind /
+#: status / claim filters, the echo fold, the rerank pool fetch) reopen
+#: ``retrieval``, because they are graph round trips and a breach inside one is
+#: retrieval work that ran late, never "the CPU fusion is stuck" (#10893 F1).
 STAGE_FUSION = "fusion"
 #: ``annotate_ep_batch`` — the EP breakdown decoration read.
 STAGE_EP_ANNOTATION = "ep_annotation"
