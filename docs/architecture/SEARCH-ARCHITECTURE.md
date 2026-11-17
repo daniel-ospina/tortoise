@@ -67,11 +67,9 @@ once"*:**
 | `Object` | **no** | **yes, and NOT expressible** — no status column, and the fold answers only `live`/`superseded` | the status fold first (paragraph above), then the column and the label — `object` has **no embedding column on `main` yet** (`#13265`'s migration, unmerged), which is the widest gap of any label here |
 | `Subject` | **no** | same as `Object` | same as `Object`, column included: **no embedding column on `main` yet** (`#13265`) |
 
-**⇒ The arming order follows from the table rather than from preference: `Point`/operator → `Source`/
-`Event` → `Object`/`Subject`, with the status fold as the last two labels' precondition.** Taking the labels
-in the order the ruling names them instead (`Object`/`Subject` first) would spend the longest stretch of the
-work on the two labels with the most still blocking them, and the shortest on the one that is already able
-to answer.
+**⇒ The arming order follows from the table: `Point`/operator → `Source`/`Event` → `Object`/`Subject`**, the
+last two gated on the status fold — not the order the ruling names the labels in, which would spend the
+longest stretch of the work on the two with the most still blocking them.
 
 **⇒ And *"armed and working"* is four conditions per label, in this order — it is not one switch:**
 **(1)** the vector is WRITTEN into the row (a writer that fills the payload column), **(2)** the index is
@@ -80,9 +78,8 @@ the label is in `_STATUS_FILTERED_LABELS`), and **(4)** the cutover SWITCH is on
 OFF — and off for a measured reason: the record has no backfill, so switching early drops pre-existing
 material out of the dense pool — and it is the one condition this document cannot schedule: arming is
 **downstream of `#11691`'s arming gate and `#13082` P0-b's RAM cap**, not parallel to them, so "the code is
-ready" is not "we may flip it"). **A label missing any one of the four is not armed, however the other three
-read** — which is the shape that produces a confident "done" from four green checks that never covered the
-same label.
+ready" is not "we may flip it"). **A label missing any one of the four is not armed, however the other three read** — four green checks can
+each be about a different label.
 
 **Sibling documents:** `STORAGE-ARCHITECTURE.md` owns authority per layer (§2.0/§3) and the cost model
 (§17.4); `CONSUMPTION-MODEL.md` owns metering; **this document owns where each search leg executes, and
