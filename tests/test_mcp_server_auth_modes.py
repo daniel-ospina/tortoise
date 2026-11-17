@@ -112,7 +112,7 @@ class TestTenantModeDefault:
         team = reg.org_create("tk-mcp-team")
         # Mint a tk_ key via the C2 prefix kwarg (the provisioning lane's
         # credential class).
-        key = reg.apikey_create(team["id"], "t", prefix="tk_")["api_key"]
+        key = reg._apikey_create(team["id"], "t", prefix="tk_")["api_key"]
         assert key.startswith("tk_")
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         tc = _mounted_test_client(app)
@@ -122,7 +122,7 @@ class TestTenantModeDefault:
             # Auth passes → the MCP server proceeds (200/202), not 401
             assert r.status_code in (200, 202), r.text
             # A tt_ key on the same registry also resolves (unchanged)
-            key2 = reg.apikey_create(team["id"], "t")["api_key"]
+            key2 = reg._apikey_create(team["id"], "t")["api_key"]
             r2 = _mcp_post(tc, _initialize_payload(),
                            auth_header=f"Bearer {key2}")
             assert r2.status_code in (200, 202), r2.text
@@ -144,7 +144,7 @@ class TestTenantModeDefault:
         team = reg.org_create("tk-mcp-deleg-team")
         # deleg=0 minted per-graph key (the provisioning lane's credential
         # class — C2 _mint_graph_key stamps delegation_depth 0).
-        key = reg.apikey_create(team["id"], "t", prefix="tk_",
+        key = reg._apikey_create(team["id"], "t", prefix="tk_",
                                 delegation_depth=0)["api_key"]
         assert key.startswith("tk_")
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)

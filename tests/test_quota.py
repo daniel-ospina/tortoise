@@ -278,7 +278,7 @@ class TestEnforceUsersLimit:
     def test_users_at_limit_raises(self, reg_sdk):
         tid = _find_org_id(reg_sdk)
         # Create a membership to hit the limit
-        reg_sdk.membership_create(tid, "user-1", "owner")
+        reg_sdk._membership_create(tid, "user-1", "owner")
         limits = resolve_org_limits(tid)
         # 1 membership, max_users=1 → at limit
         with pytest.raises(QuotaExceededError, match="users limit reached"):

@@ -4165,33 +4165,35 @@ class TestDoctorImportHygiene:
         assert "Component already exists" not in p.stderr
         assert "no handler" not in p.stderr
 
-    def test_session_capture_retirement_is_declared_not_silent(self):
-        """`tortoise_session_capture` retired (#12951) — and the #2204 defect this
-        test was written for WAS a silent absence, so the retirement must be the
-        DECLARED kind rather than the accidental one: the name is off the MCP
-        instance, it is in ``RETIRED_USE_INSTEAD``, and its pointer names the live
-        container that answers the same question. The container itself is still
-        registered — that is the #2204 arm, moved onto the name that resolves.
+    def test_every_served_registry_tool_reaches_the_mcp_instance(self):
+        """Every tool `tool_registry.TOOL_REGISTRY` SERVES is registered on the
+        MCP instance, and nothing else is (#2204).
 
-        FALSIFIABLE: drop the ``RETIRED_USE_INSTEAD`` entry and a caller's call
-        dead-ends with no migration; unregister the container and the registration
-        arm reds, which is the original #2204 regression exactly.
+        This is the original #2204 regression — `tortoise_session_capture` had a
+        handler but never reached the MCP server while `register_all` ran
+        mid-module — stated as the invariant rather than by naming one vehicle.
+        The vehicle had to change: `tortoise_session_capture` is one of the doors
+        #11609 lane C ABSORBED (`checkpoint`'s capture arm carries it), so a test
+        that names it now witnesses a retirement, not a registration bug (#12901).
+        Binding the assertion to the REGISTRY keeps the exact property #2204 was
+        about — a served tool that no client can see — and it cannot rot on the
+        next retirement, because the registry is where a door's liveness lives.
 
-        (Was `test_session_capture_registered_on_mcp_instance`: it asserted the
-        name reaches the instance, which the retirement deliberately reverses —
-        the invariant worth keeping is "never ABSENT, either served or declared
-        retired with a one-hop pointer", not "this one name is served".)
+        Both directions, because they fail differently: `missing` is the #2204
+        regression (served but invisible); `extra` is a component registered for
+        a name the registry no longer serves, which no surface/route check reads.
         """
         p = self._run_py(
-            "import tortoise.mcp_server as m; "
-            "from tortoise.tool_registry import RETIRED_USE_INSTEAD; "
-            "comps = m.mcp._local_provider._components; "
-            "names = [getattr(c, 'name', '') for c in comps.values()]; "
-            "assert 'tortoise_session_capture' not in names, names; "
-            "ptr = RETIRED_USE_INSTEAD.get('tortoise_session_capture'); "
-            "assert ptr and 'tortoise_mine_knowledge_from_session' in ptr, ptr; "
-            "assert 'tortoise_mine_knowledge_from_session' in names, names; "
-            "print('OK')"
+            "import tortoise.mcp_server as m\n"
+            "from tortoise.tool_registry import TOOL_REGISTRY\n"
+            "comps = m.mcp._local_provider._components\n"
+            "names = {getattr(c, 'name', '') for c in comps.values()}\n"
+            "served = {d.name for d in TOOL_REGISTRY}\n"
+            "missing = sorted(served - names)\n"
+            "extra = sorted(n for n in names - served if n)\n"
+            "assert not missing, f'served by the registry, invisible to MCP: {missing}'\n"
+            "assert not extra, f'registered on MCP, not served by the registry: {extra}'\n"
+            "print('OK', len(served))\n"
         )
         assert p.returncode == 0, p.stderr
         assert "OK" in p.stdout

@@ -7056,7 +7056,7 @@ def _entity_key_dense_query(
 # #1709: process-local serialization for the registry recovery mint (FalkorDB
 # has no transactions; parity with the Supabase lane's FOR UPDATE row lock —
 # concurrent same-token recoveries must not overshoot the non-bootstrap key
-# cap). See TortoiseSDK.signup_token_recover.
+# cap). See TortoiseSDK._signup_token_recover.
 _SIGNUP_TOKEN_RECOVER_LOCK = threading.Lock()
 
 
@@ -40547,7 +40547,7 @@ class TortoiseSDK:
         """Batch ingestion — walk directory, parse YAML frontmatter,
         create/update Event nodes. Returns {ingested, updated, skipped, failed, errors}.
 
-        DEPRECATED — use ``index_sources_from_directory`` (epic #900). During the W3
+        DEPRECATED — use ``index_directory`` (epic #900). During the W3
         deprecation window this FROZEN legacy branch keeps its behavior
         byte-identical (SC4). FLAG-SEMANTICS DIVERGENCE (W3, §6.1):
         ``extract_metadata=False`` STILL computes session embeddings on the
@@ -46478,6 +46478,28 @@ class TortoiseSDK:
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
     # ── Control Plane: Org CRUD ───────────────────────────────────
+    #
+    # ⛔ #12901 wave 2 (2026-11-16): every method that was a PUBLIC SDK door in the
+    # control-plane sections below (`Org CRUD`, `Membership CRUD`, `APIKey CRUD`,
+    # `Agent signup tokens`, `Invitation CRUD`) is now PRIVATE — the `_` prefix on
+    # `_graph_delete`/`_trash_graphs`/`_graph_key_ids`/`_graph_active_key_count`/
+    # `_org_get`/`_membership_create`/`_apikey_*`/`_signup_token_*`/`_invitation_*`/
+    # `_sweep_invite_ghost_memberships` is the marker. The
+    # canonical inventory's control-plane partition (N1–N6 in
+    # `docs/product/canonical-sdk-methods.md`) is console/hosted plumbing, not
+    # customer product surface, and the owner-approved beta surface allocates those
+    # capabilities to the tenancy block (`get_organisation_account`, `create_key`,
+    # `list_keys`, `revoke_key`, `add_member`, `delete_memory_graph`, …) — not to
+    # per-table CRUD. The BODIES all survive, privately, because `tortoise/hosted_api.py`,
+    # `tortoise/__main__.py` and `tortoise/mcp_auth.py` are their only callers: closing
+    # the door loses no capability, which is the `capture_session` -> `_capture_session`
+    # precedent recorded in `tortoise/sdk_retired.py`.
+    #
+    # Each departure is recorded in `sdk_retired.py::REMOVED_SDK_METHODS` (with its
+    # recorded destination in `WAVE2_DELETION_DESTINATIONS`) and pinned by
+    # `tests/test_sdk_retirement.py` + `tests/test_12901_wave2_control_plane.py`.
+    # Do NOT re-publicise one of these names without the owner's approval (AGENTS.md →
+    # "MCP/SDK Surface Approval").
 
     def org_create(self, name: str, *, idempotency_key: str | None = None,
                     mint_key: bool = True, owner_user_id: str | None = None) -> dict:
@@ -46672,7 +46694,7 @@ class TortoiseSDK:
             # membership upsert (role=owner, status=active, user_id=session
             # user) and membership_create (BELONGS_TO edge).
             if owner_user_id:
-                self.membership_create(tid, owner_user_id, "owner")
+                self._membership_create(tid, owner_user_id, "owner")
         except Exception:
             try:  # noqa: SIM105
                 reg.query("MATCH (t:Team {id:$id}) DETACH DELETE t",
@@ -46828,7 +46850,7 @@ class TortoiseSDK:
             params={"tid": org_id},
         ).result_set[0][0]
 
-    def graph_delete(self, org_id: str, graph_id: str) -> bool:
+    def _graph_delete(self, org_id: str, graph_id: str) -> bool:
         """Soft-delete a Graph node (status='deleted' tombstone — the v1
         lifecycle, C2 #2111). Returns True when a non-default node was
         tombstoned; False when unknown OR the default (callers map to
@@ -46884,7 +46906,7 @@ class TortoiseSDK:
         ).result_set
         return bool(res and int(res[0][0]) > 0)
 
-    def trash_graphs(self, org_id: str) -> list[dict]:
+    def _trash_graphs(self, org_id: str) -> list[dict]:
         """#2304: tombstoned custom nodes of an org (the trash list) — the
         owner restore surface. ``deleted_at`` absent = legacy tombstone
         (predates the prop; purge treats it as past-grace). Purged nodes
@@ -46998,7 +47020,7 @@ class TortoiseSDK:
             )
         return True
 
-    def graph_key_ids(self, org_id: str, graph_id: str) -> list[str]:
+    def _graph_key_ids(self, org_id: str, graph_id: str) -> list[str]:
         """APIKey node ids bound to a graph — the delete-cascade source
         (every key dies with the graph, E2E-8). Revoked or not — the
         cascade must revoke rows that are somehow still active AND clean
@@ -47010,7 +47032,7 @@ class TortoiseSDK:
         ).result_set
         return [r[0] for r in rows]
 
-    def graph_active_key_count(self, org_id: str, graph_id: str) -> int:
+    def _graph_active_key_count(self, org_id: str, graph_id: str) -> int:
         """ACTIVE (non-revoked) APIKey nodes bound to a graph — the
         key_count source for GET /v1/graphs (parity with the Supabase
         count_graph_keys seam; C2 P2: graph_key_ids is the cascade source
@@ -47033,7 +47055,7 @@ class TortoiseSDK:
         ).result_set
         return int(rows[0][0]) if rows else 0
 
-    def org_get(self, org_id: str) -> dict | None:
+    def _org_get(self, org_id: str) -> dict | None:
         """Get an org by ID. Returns None if not found."""
         reg = self._get_registry()
         rows = reg.query(
@@ -47174,7 +47196,7 @@ class TortoiseSDK:
             # present the disagreement diagnosis below still runs in full, in
             # every mode (a registry-written org is a real state even on a
             # Supabase deployment).
-            if self._get_registry(create=False) is not None and self.org_get(org_id) is not None:
+            if self._get_registry(create=False) is not None and self._org_get(org_id) is not None:
                 raise ControlPlaneError(
                     f"get_organisation_account cannot answer for {org_id!r}: the "
                     "account exists in this SDK's control plane but not in the one "
@@ -47201,7 +47223,7 @@ class TortoiseSDK:
         }
     # ── Control Plane: Membership CRUD ─────────────────────────────
 
-    def membership_create(self, org_id: str, user_id: str, role: str) -> dict:
+    def _membership_create(self, org_id: str, user_id: str, role: str) -> dict:
         """Add a user to an org with a given role.
 
         Validates role, org existence, and max_users constraint.
@@ -47215,7 +47237,7 @@ class TortoiseSDK:
                 f"Invalid role {role!r}. Must be 'owner', 'admin', or 'member'."
             )
 
-        org = self.org_get(org_id)
+        org = self._org_get(org_id)
         if org is None:
             raise ControlPlaneError(f"Team {org_id!r} not found")
 
@@ -47297,7 +47319,7 @@ class TortoiseSDK:
                 out.append(props)
         return out
 
-    def apikey_create(self, org_id: str, created_by: str,
+    def _apikey_create(self, org_id: str, created_by: str,
                       *, graph_id: str | None = None,
                       scopes: list | None = None,
                       created_by_key_id: str | None = None,
@@ -47351,7 +47373,7 @@ class TortoiseSDK:
                     _ESCALATION_SCOPES & set(scopes))) + ".",
             )
 
-        org = self.org_get(org_id)
+        org = self._org_get(org_id)
         if org is None:
             raise ControlPlaneError(f"Team {org_id!r} not found")
 
@@ -47400,7 +47422,7 @@ class TortoiseSDK:
                      resource_type="apikey", resource_id=kid)
         return {"id": kid, "key_prefix": key_prefix, "api_key": api_key,
                 "org_id": org_id, "created_at": now}
-    def apikey_revoke(self, key_id: str) -> dict:
+    def _apikey_revoke(self, key_id: str) -> dict:
         """Revoke an API key (soft delete — sets revoked_at). Idempotent."""
         from datetime import datetime, timezone
         reg = self._get_registry()
@@ -47421,7 +47443,7 @@ class TortoiseSDK:
                      resource_type="apikey", resource_id=key_id)
         return {"revoked": True, "key_id": key_id, "revoked_at": now}
 
-    def apikey_verify(self, key_plaintext: str) -> dict | None:
+    def _apikey_verify(self, key_plaintext: str) -> dict | None:
         """Verify an API key against stored hashes.
 
         Returns {org_id, key_id} if valid, None if not found or revoked.
@@ -47505,7 +47527,7 @@ class TortoiseSDK:
     # process-local lock (parity with the Supabase lane's FOR UPDATE row
     # lock — the non-bootstrap key cap cannot overshoot under concurrency).
 
-    def signup_token_lookup(self, token_plaintext: str) -> dict | None:
+    def _signup_token_lookup(self, token_plaintext: str) -> dict | None:
         """Resolve a signup token → its node props; None when unknown/revoked.
 
         Registry parity for resolve_signup_token (Supabase lane). The caller
@@ -47536,7 +47558,7 @@ class TortoiseSDK:
             ]
         return matches[0] if matches else None
 
-    def signup_token_recover(self, token_plaintext: str) -> dict:
+    def _signup_token_recover(self, token_plaintext: str) -> dict:
         """Keyless recovery: mint a NEW key on the token's org.
 
         Registry parity for recover_team_key (Supabase lane). Cap + revoke-
@@ -47550,11 +47572,11 @@ class TortoiseSDK:
         from datetime import datetime, timezone as _tz  # noqa: I001
         from .exceptions import ControlPlaneError
 
-        node = self.signup_token_lookup(token_plaintext)
+        node = self._signup_token_lookup(token_plaintext)
         if node is None:
             raise ControlPlaneError("signup token not found or revoked")
         org_id = node.get("org_id") or ""
-        org = self.org_get(org_id)
+        org = self._org_get(org_id)
         if org is None or org.get("deleted_at"):
             raise ControlPlaneError("signup token team deleted")
 
@@ -47567,7 +47589,7 @@ class TortoiseSDK:
         reg = self._get_registry()
         with _SIGNUP_TOKEN_RECOVER_LOCK:
             # re-verify under the lock (parity with the FOR UPDATE re-check)
-            node = self.signup_token_lookup(token_plaintext)
+            node = self._signup_token_lookup(token_plaintext)
             if node is None:
                 raise ControlPlaneError("signup token not found or revoked")
             if node.get("org_id") != org_id:
@@ -47637,7 +47659,7 @@ class TortoiseSDK:
                 "org_name": org.get("name"), "tier": org.get("tier") or "free",
                 "graph_name": org.get("graph_name") or f"org_{org_id}"}
 
-    def signup_token_revoke(self, token_plaintext: str, org_id: str) -> dict:
+    def _signup_token_revoke(self, token_plaintext: str, org_id: str) -> dict:
         """Revoke a signup token (set revoked_at) — registry parity (#1715).
 
         Org-scoped: the SignupToken node's org_id must match ``org_id`` or
@@ -47703,7 +47725,7 @@ class TortoiseSDK:
         return int(tier_limits("free").get("max_api_keys", 2))
 
     # ── Control Plane: Invitation CRUD ─────────────────────────────
-    def invitation_list(self, org_id: str) -> list[dict]:
+    def _invitation_list(self, org_id: str) -> list[dict]:
         """List invitations for an org (no token hashes)."""
         reg = self._get_registry()
         rows = reg.query(
@@ -47720,7 +47742,7 @@ class TortoiseSDK:
                 "expires_at": r[5], "accepted_at": r[6], "status": r[7],
             })
         return invs
-    def invitation_get_by_id(self, invitation_id: str) -> dict | None:
+    def _invitation_get_by_id(self, invitation_id: str) -> dict | None:
         """Get an invitation by its ULID."""
         reg = self._get_registry()
         rows = reg.query(
@@ -47729,9 +47751,9 @@ class TortoiseSDK:
         ).result_set
         return rows[0][0] if rows else None
 
-    def invitation_revoke(self, invitation_id: str) -> dict:
+    def _invitation_revoke(self, invitation_id: str) -> dict:
         """Revoke an invitation (soft delete). Idempotent."""
-        inv = self.invitation_get_by_id(invitation_id)
+        inv = self._invitation_get_by_id(invitation_id)
         if inv is None:
             return {"revoked": False, "reason": "not found"}
         if inv.get("status") == "revoked":
@@ -47745,7 +47767,7 @@ class TortoiseSDK:
         self._audit(inv["org_id"], None, "invitation_revoke",
                      resource_type="invitation", resource_id=invitation_id)
         return {"revoked": True, "invitation_id": invitation_id}
-    def sweep_invite_ghost_memberships(self, *, dry_run: bool = False) -> dict:
+    def _sweep_invite_ghost_memberships(self, *, dry_run: bool = False) -> dict:
         """#1908: one-time backfill sweep for pre-#1880 invite-{iid} ghosts.
 
         Deletes Membership rows whose user_id matches 'invite-*' when the
@@ -53844,7 +53866,7 @@ class TortoiseSDK:
                        progress_file: str | None = None) -> dict:
         """Index session files as AgentSession Events.
 
-        DEPRECATED — use ``index_sources_from_directory`` (epic #900). Thin wrapper
+        DEPRECATED — use ``index_directory`` (epic #900). Thin wrapper
         around the frozen legacy ``ingest_corpus`` (SC4 — behavior
         unchanged); see its docstring for the ``extract_metadata``
         flag-semantics divergence (W3, §6.1).

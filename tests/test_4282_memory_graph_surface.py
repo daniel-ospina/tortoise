@@ -123,7 +123,7 @@ class TestTheNewNamesWork:
 
     def test_restore_memory_graph_revives_a_tombstone(self, sdk, team):
         g = sdk._graph_create(team["id"], "prod", kind="custom")
-        assert sdk.graph_delete(team["id"], g["graph_id"]) is True
+        assert sdk._graph_delete(team["id"], g["graph_id"]) is True
         assert sdk.restore_memory_graph(team["id"], g["graph_id"]) is True
         row = next(r for r in sdk.list_memory_graphs(team["id"])
                    if r["graph_id"] == g["graph_id"])
@@ -132,7 +132,7 @@ class TestTheNewNamesWork:
     def test_restore_memory_graph_refuses_a_purged_graph(self, sdk, team):
         """Row 33: "Undo a recoverable delete. **Refuses on a purged graph**"."""
         g = sdk._graph_create(team["id"], "prod", kind="custom")
-        assert sdk.graph_delete(team["id"], g["graph_id"]) is True
+        assert sdk._graph_delete(team["id"], g["graph_id"]) is True
         sdk._get_registry().query(
             "MATCH (g:Graph {id:$gid, org_id:$tid}) "
             "SET g.purged_at = '2026-01-01T00:00:00+00:00'",
@@ -209,7 +209,7 @@ class TestTheMergeDidNotChangeBehaviour:
     def test_a_soft_deleted_graph_is_not_patchable(self, sdk, team):
         """Both old setters treated a tombstone as unknown — the merge must too."""
         g = sdk._graph_create(team["id"], "prod", kind="custom")
-        assert sdk.graph_delete(team["id"], g["graph_id"]) is True
+        assert sdk._graph_delete(team["id"], g["graph_id"]) is True
         assert sdk.update_memory_graph(
             team["id"], g["graph_id"], name="x") is False
         assert sdk.update_memory_graph(
