@@ -1,7 +1,7 @@
 # #9556 (#9189 follow-on) — S2 wiring census: production call sites of the two-store chain
 #   (reconciliation.reconcile / record_projection.replay /
 #   cache_projection.read_record_view / FalkorProjection.rebuild_from_record).
-# Measured at: feat/13220-vectors-postgres@6a30c8986750 on 2026-11-17, re-cut for #13220 (the code
+# Measured at: feat/13220-vectors-postgres@973d11ab3ee on 2026-11-17, re-cut for #13220 (the code
 #   measured is that commit's; this log is re-cut on top of it). TWO things
 #   moved since the last cut (fix/9556-record-restore@b5768749e, 2026-10-22, R8):
 #   #13210 added `tools/record_runner.py`, a SECOND production caller of
@@ -9,7 +9,8 @@
 #   (the ordinal is not pinned, see below — the FILE is). The ordinals were taken a
 #   THIRD time here: `origin/main` was merged in at `181bcca146`, which re-moved lines
 #   above both calls — and #13220's own later fix commits moved `record_writer.py` after
-#   the previous cut — so the previous paste no longer described a real run. The COUNTS
+#   the previous cut (2038 -> 2070 at `973d11ab3e`) — so the previous paste no longer
+#   described a real run. The COUNTS
 #   did not change. `FalkorProjection.
 #   rebuild_from_record` stays 0 -> 1 and `read_record_view` 1 -> 2 from the R8 cut,
 #   because `python -m tortoise record-restore` is a production caller of both.
@@ -35,7 +36,7 @@ production population: ['tortoise', 'tools', 'scripts']/**/*.py
 == reconciliation.reconcile: 0 production call site(s) ==
 
 == record_projection.replay: 2 production call site(s) ==
-  tortoise/record_writer.py:2038: report = record_projection.replay(
+  tortoise/record_writer.py:2070: report = record_projection.replay(
   tools/record_runner.py:738: from tortoise.record_projection import replay
 
 == cache_projection.read_record_view: 2 production call site(s) ==
