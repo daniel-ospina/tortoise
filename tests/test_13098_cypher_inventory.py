@@ -52,6 +52,77 @@ def test_the_doc_counts_match_the_census():
     assert proc.returncode == 0, f"census drift:\n{proc.stdout}\n{proc.stderr}"
 
 
+def test_the_doc_appendix_is_the_tools_own_output():
+    """Appendix A is DERIVED from the tree, so the doc must carry the tool's output.
+
+    ⛔ THIS ARM EXISTS BECAUSE THE PINS DO NOT REACH THE APPENDIX, and the gap is
+    not theoretical — it cost this document the same defect twice in ONE PR
+    (`#13223`). The 25 pins are SCALARS (`sites`, `shape_plain`, …): `--check`
+    prints "25 pinned counts match" while §Appendix A's ~1,309 `file:line` rows
+    name lines that no longer exist, because a later commit moved code inside a
+    file that already carried sites. The counts do not move (an insertion is not a
+    new statement) so EVERY gate in this suite stays green over a table whose
+    whole purpose is to be a resolvable index.
+
+    Measured twice on `#13223`: 644 of 1,309 rows wrong after `#13116`
+    (`hosted_api.py` +131, `sdk.py` net +72), and 6 more after `#13214` moved
+    `tortoise/metering.py` by +7 and `tortoise/postgres_bytes.py` by +4 — while
+    `--check` was RC=0 both times.
+
+    Why a byte comparison rather than sampling: the appendix is `--markdown`'s
+    output verbatim (`tools/cypher_inventory.py`, one row per site, sorted by
+    `(path, line)`), so any difference at all is a row the tree no longer
+    supports. Sampling cannot say that — a sample of 12 passed on the run that
+    still carried the 6 stale rows.
+    """
+    marker = "## Appendix A — every statement site, by shape\n"
+    doc = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(
+        encoding="utf-8")
+    assert marker in doc, (
+        "CYPHER-INVENTORY.md no longer carries Appendix A's heading — this arm\n"
+        "reads the table from that heading, so re-point it rather than deleting it")
+    appendix = doc[doc.index(marker) + len(marker) + 1:]
+    result = census.census(("tortoise/",))
+    expected = census.markdown_table(result["sites"]) + "\n"
+    if appendix == expected:
+        return
+    head_rows = appendix.splitlines()
+    tool_rows = expected.splitlines()
+    stale = [(i, a, b) for i, (a, b) in enumerate(zip(head_rows, tool_rows, strict=False))
+             if a != b]
+    shown = "\n".join(
+        f"  row {i}: doc  {a[:96]}\n          tool {b[:96]}" for i, a, b in stale[:5])
+    raise AssertionError(
+        "Appendix A is not the census tool's own output — it is DERIVED from the\n"
+        "tree, so regenerate it at THIS head rather than editing rows by hand:\n"
+        "    python tools/cypher_inventory.py --markdown\n"
+        "then replace everything after the `## Appendix A` heading with that\n"
+        "output. This failure is what a stale `file:line` index looks like — the\n"
+        "pins cannot see it, because counts do not move when code moves within a\n"
+        "file that already carries sites (measured on #13223, twice).\n"
+        f"rows: doc={len(head_rows)} tool={len(tool_rows)}; "
+        f"{len(stale)} row(s) differ.\n" + (shown or "  (same length, differs only in trailing bytes)"))
+
+
+def test_the_doc_appendix_row_count_is_the_census_site_count():
+    """The appendix's row count is §0's `sites` pin — one row per classified site.
+
+    A cheap second angle on the same artifact: a truncated or duplicated appendix
+    that happens to keep the surviving rows byte-identical still reds here, and
+    the message names the number the document itself publishes.
+    """
+    marker = "## Appendix A — every statement site, by shape\n"
+    doc = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(
+        encoding="utf-8")
+    appendix = doc[doc.index(marker) + len(marker) + 1:]
+    rows = [ln for ln in appendix.splitlines() if ln.startswith("| `")]
+    result = census.census(("tortoise/",))
+    assert len(rows) == len(result["sites"]), (
+        f"Appendix A carries {len(rows)} site rows, the census classifies "
+        f"{len(result['sites'])} — regenerate it with "
+        "`python tools/cypher_inventory.py --markdown` rather than hand-editing")
+
+
 def test_the_census_reconciles_arithmetically():
     """regex occurrences − non-call occurrences = AST door calls = classified + non-Cypher.
 
