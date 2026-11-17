@@ -1033,6 +1033,7 @@ refusal) — but a refusal with no drain behind it is deferred forever, which is
 condition #12992 measured: the cursor substrate EXISTED and a sweep had still shipped nothing,
 its only trigger dying `cli_missing` where the CLI is absent. Check the TRIGGER (`which tortoise`,
 plus `sweep-status.json`'s `reason`/`shipped`), never the directory: §3 of the research doc.
+
 ### 4.1.1c The OTHER half of the same breach — `wait_bound_starved`
 
 **A breach has two outcomes and only one of them was visible.** The
