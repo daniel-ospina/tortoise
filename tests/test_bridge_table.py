@@ -604,19 +604,30 @@ def test_vision_doc_buckets_match_generated_doc() -> None:
 
     # Labels carry a number that the owner's rulings can change. Match the shape,
     # then assert the number -- so the doc cannot silently keep a stale count.
-    for label_pat, value in [
-        (r"Registry tools", total),
-        (r"Absorbed into the \d+ MCP targets", mcp),
-        (r"Absorbed into a builder-only SDK method \(not on the MCP\)", sdk_only),
-        (r"Tenancy \(SDK/REST only\)", tenancy),
-        (r"Retired", retired),
+    # ⛔ A number INSIDE the label is a `\d+` WILDCARD in the pattern, so it is
+    # asserted as well (round-2 review of #13085): `Absorbed into the \d+ MCP
+    # targets` let the label's own target count rot green -- the exact hole this
+    # file already closed for the headline a few lines above.
+    for label_pat, value, label_number in [
+        (r"Registry tools", total, None),
+        (r"Absorbed into the (\d+) MCP targets", mcp, mcp_targets),
+        (r"Absorbed into a builder-only SDK method \(not on the MCP\)", sdk_only, None),
+        (r"Tenancy \(SDK/REST only\)", tenancy, None),
+        (r"Retired", retired, None),
     ]:
-        row = re.search(rf"^\| {label_pat} \| \*\*(\d+)\*\* \|$", vision, re.M)
+        row = re.search(
+            rf"^\| {label_pat} \| \*\*(?P<value>\d+)\*\* \|$", vision, re.M)
         assert row, f"vision doc has no reconciliation row matching {label_pat!r}"
-        assert int(row.group(1)) == value, (
-            f"vision doc row {label_pat!r} = {row.group(1)}, generated doc says {value}. "
+        assert int(row.group("value")) == value, (
+            f"vision doc row {label_pat!r} = {row.group('value')}, generated doc says {value}. "
             "The vision doc restates computed numbers; update it with the generator's output."
         )
+        if label_number is not None:
+            assert int(row.group(1)) == label_number, (
+                f"vision doc row {label_pat!r} names {row.group(1)} in the label, the "
+                f"generator says {label_number}. A number inside a LABEL is still a "
+                "restated count -- re-derive it; the pattern's wildcard must not hide it."
+            )
 
 
 def test_destination_map_matches_registry() -> None:
