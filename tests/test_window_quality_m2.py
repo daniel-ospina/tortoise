@@ -1571,7 +1571,14 @@ def test_s91_records_that_the_s10_reopen_trigger_fired():
         "§9.1 attributes its three shapes to §10; §10 lists triggers, not shapes")
     assert "§10's reopen trigger has FIRED" in section, (
         "§9.1 must record that §10's reopen trigger has fired on this evidence")
-    assert "reopened" in section
+    # ⛔ `assert "reopened" in section` was SUBSTRING-SATISFIED by its own negation:
+    # `§7 is therefore **not reopened**` contains "reopened", so the one pin written
+    # for this claim could not fail (#13126 round 10). The direction is bound.
+    assert _scope_bound(section, "§7 is therefore", "reopened", window=60), (
+        "§9.1 no longer states that §7 is therefore REOPENED")
+    assert "not reopened" not in _flat(section), (
+        "§9.1 states that §7 is NOT reopened — the opposite of what this evidence "
+        "does, and the 'silent adoption' the same paragraph forbids")
     tail = arch[arch.index("## 10. What would reopen this decision"):]
     assert "M2 showing a windowed graph loses retrieval quality" in tail, (
         "§10 no longer carries the trigger §9.1 cites")
@@ -1945,7 +1952,8 @@ def test_the_measured_findings_are_stated_and_cannot_be_inverted_green(artifact)
 
     inverted = ("other legs compensate", "legs compensate for it", "carries a signal",
                 "is LABELLED", "and it is labelled", "always told a store was partial",
-                "still handed back as a candidate", "Q2 is satisfied",
+                "still handed back as a candidate", "always handed back as a candidate",
+                "Q2 is satisfied",
                 "empty answer rather than a different claim",
                 "It is **a figure about the fused production read**",
                 "configuration's, a guarantee the shipped path")
@@ -1990,7 +1998,12 @@ def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
         (readme, "the measured answer is", "equal to the eviction on", "smaller than the eviction"),
         (readme, "the measured answer is", "the eviction plus the claim leg's",
          "no more than the claim leg"),
-        (readme, "passes neither", "`read_status_out`", "passes both"),
+        # ⛔ The first cut bound `passes neither` + `` `read_status_out` `` and left
+        # the PREDICATE free: "…It receives rows and the `_truncation_out` flag."
+        # stayed green inside the row's own window (#13126 round 10). The truncation
+        # half IS the finding, so the row binds it.
+        (readme, "passes neither", "nor `_truncation_out`",
+         ("passes both", "the `_truncation_out` flag")),
         (readme, "`TORTOISE_RESIDENCY` is", "**unarmed**", "`TORTOISE_RESIDENCY` is **armed**"),
         (readme, "appear in no module of the tree", "appear in no module", "appear in several modules"),
         (readme, "Q2 —", "is violated", "is satisfied"),
@@ -2008,6 +2021,19 @@ def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
         (readme, "It does not say the *vector* leg is bounded", "it is not",
          "does say the *vector* leg is bounded"),
         (arch, "armed only when M2 says it is safe", "in every arm", "in no arm"),
+        # ── round 10: the five claims the ledger did not reach ─────────────
+        # the arming decision's own "needs a further decision" clause, both sites
+        (arch, "Arming needs a decision this measurement", "cannot make on its own",
+         "no decision beyond this measurement"),
+        (arch, "so arming additionally needs", "no measurement can make",
+         "needs no further decision"),
+        # whether §7 is reopened — the sentence the adoption-vs-reopen reading turns on
+        (arch, "§7 is therefore", "reopened", "not reopened"),
+        # "no static order is a lever" — dissolving it re-opens tuning-then-arm
+        (arch, "No static eviction policy is a lever", "and recency is UNTESTED",
+         "A static eviction policy is a lever"),
+        # the §9.1 sibling of the README's "appear in no module" row
+        (arch, "and **no code path emits**", "no code path emits", "a code path emits"),
     ]
     bad = []
     for doc, anchor, required, forbidden in rows:
@@ -2016,8 +2042,15 @@ def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
         # the inverted spelling must not appear anywhere near the anchor either
         i = doc.find(anchor)
         window_text = doc[i:i + 400] if i >= 0 else ""
-        if forbidden in window_text:
-            bad.append(f"claim inverted at the site: {anchor!r} now reads {forbidden!r}")
+        # ⛔ a claim can be inverted by more than one phrasing, and pinning only the
+        # first leaves the others free (#13126 round 10: `passes both … and
+        # _truncation_out` and `… and the _truncation_out flag` were both green
+        # against a row that forbade one). A row may name a TUPLE of them.
+        spellings = (forbidden,) if isinstance(forbidden, str) else forbidden
+        for spelling in spellings:
+            if spelling in window_text:
+                bad.append(f"claim inverted at the site: {anchor!r} now reads "
+                           f"{spelling!r}")
     assert not bad, "\n  ".join(bad)
 
 
