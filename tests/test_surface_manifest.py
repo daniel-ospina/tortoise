@@ -411,20 +411,27 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     # 2c3c9acc, P3). Nothing read it: mutating all three numbers to 61 stayed green while every
     # other pin still agreed with itself, which is this wave's own defect class — a present-tense
     # claim with no machine behind it.
-    # ⛔ THE ANCHOR IS THE PHRASE, NOT ONE OF ITS SURFACE FORMS (#13052 review at ff2602f24, P3).
-    # Binding the tailed sentence ("… now <text> and it is still N of N verified") caught edits to
-    # THAT sentence and left a neighbouring statement of the same count unread — measured, a
-    # tail-less `The population is **61** now (after the door wave).` and a comma-form
-    # `The population is **61** now, and it is still 61 of 61 verified.` both stayed green while
-    # the doc asserted 60 and 61 at once. Every `The population is **N**` in the doc is therefore
-    # read for its NUMBER, whatever the sentence does afterwards; the tailed form additionally
-    # gets its `N of N verified` triple checked when it is present.
-    stated_now = [int(n) for n in re.findall(r"The population is\s+\*\*(\d+)\*\*", canonical)]
+    # ⛔ THE PIN MATCHES FORMS, AND SAYS SO (#13052 review at ff2602f24, then at 07ba02cd, both
+    # P3). Every round of this pin has been defeated by ONE SPELLING it did not read, and there is
+    # no end to that list: the count can be restated as `population is now **N**`, with a backticked
+    # fence, after an em dash, lower-cased mid-sentence, or paraphrased as "the retired-forward
+    # population numbers N shims". So the matcher below is deliberately FORM-TOLERANT (case-
+    # insensitive, either fence, an optional `now`, any of space/em-dash/hyphen between the parts)
+    # and the `N of N verified` triple is read from a WINDOW after the phrase rather than from one
+    # fixed continuation. ⛔ KNOWN AND DOCUMENTED RESIDUAL: a PARAPHRASE that names the population
+    # without the words `population is` is out of this pin's reach by construction — prose is not
+    # enumerable. A reworded or paraphrased statement of this count is therefore a change that must
+    # update this pin in the same change, exactly like the doc-form changes above.
+    stated_now = [
+        int(n) for n in re.findall(
+            r"population is[\s\u2014-]+(?:now[\s\u2014-]+)?(?:\*\*|`)(\d+)(?:\*\*|`)",
+            canonical, re.I)
+    ]
     assert stated_now, (
         "canonical-mcp-tools.md no longer states the retired population in present tense at "
-        "all (`The population is **N**`) — the amendment's SECOND statement of that count. Its "
-        "absence is a failure and not a vacuous pass: delete the sentence and the surviving "
-        "clause is the only statement left to check"
+        "all (any spelling of `population is <N>`) — the amendment's SECOND statement of that "
+        "count. Its absence is a failure and not a vacuous pass: delete the sentence and the "
+        "surviving clause is the only statement left to check"
     )
     assert stated_now == [retired] * len(stated_now), (
         f"canonical-mcp-tools.md states the retired population as {stated_now} across "
@@ -432,14 +439,16 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         f"{retired} — every statement of the count has to agree with the manifest, not just "
         "the one this pin was written against"
     )
-    population_now = re.findall(
-        r"The population is\s+\*\*(\d+)\*\* now .*?and it is still (\d+) of (\d+) verified",
-        canonical, re.S)
-    for stated, of_verified, verified in population_now:
-        assert (int(stated), int(of_verified), int(verified)) == (retired, retired, retired), (
-            f"canonical-mcp-tools.md says the retired population is {stated} now and "
-            f"{of_verified} of {verified} verified; the manifest's retired rows number "
-            f"{retired}")
+    for window in re.finditer(
+            r"population is[\s\u2014-]+(?:\*\*|`)(\d+)(?:\*\*|`)(.{0,200})", canonical,
+            re.I | re.S):
+        stated = int(window.group(1))
+        for of_verified, verified in re.findall(
+                r"(\d+) of (\d+) verified", window.group(2)):
+            assert (int(of_verified), int(verified)) == (stated, stated), (
+                f"canonical-mcp-tools.md says the retired population is {stated} and then "
+                f"{of_verified} of {verified} verified; the two halves of that sentence "
+                f"disagree, and the manifest's retired rows number {retired}")
     # 2. The live surface's MOVEMENTS — they COMPOSE, so the rule is the chain.
     # The doc records the whole history in one blockquote and states each movement with a
     # different verb: `moved the live surface 72 → 68`, then `took it 68 → 60`, `took it
