@@ -220,10 +220,12 @@ The **remainder** (`capture_redactions`, `machine_id`, `model`, `client_captured
   `client_captured_at` also read inside a `SET` (`sdk.py:4018-4021`); **`draft_count` and `commit_count`**
   are read inside the same commit-statement `SET` (`hosted_api.py:22237-22240`) — §1's reader rule, exactly
   as `provenance_spans` is counted in §2.2, and an earlier revision of this paragraph omitted them.
-- **No query NAMES it — but it IS read back as a WHOLE NODE:** `capture_redactions`. `sdk.py:2682` and
-  `:2705` only WRITE it (`SET s.capture_redactions=$redactions`) and no `RETURN`/`WHERE` names the
-  property — but two whole-node reads carry it, and a whole-node read is a reader by this document's own
-  vocabulary (row 14 counts `sdk.py:18841`'s `pt.get("mentions")` as one). `tools/backfill_copy_turns.py:188-192`
+- **No shipped query NAMES it — but it IS read back as a WHOLE NODE:** `capture_redactions`. `sdk.py:2682` and
+  `:2705` only WRITE it (`SET s.capture_redactions=$redactions`) and no product `RETURN`/`WHERE` names the
+  property — the one Cypher read that does name it is a TEST assertion
+  (`tests/test_capture_secret_redaction_4911.py:250-254`), which §6.1's own standard does not count — but two
+  whole-node reads carry it, and a whole-node read is a reader by this document's own vocabulary
+  (row 14 counts `sdk.py:27210`'s `get_point` — *"Returns dict of all properties"* — as one). `tools/backfill_copy_turns.py:188-192`
   is `RETURN id(s), s.id, properties(s)`, and its own comment at `:177-183` names this key explicitly as one
   the record must not lose (*"a null `capture_redactions` is a MEANINGFUL value … dropping the key would make
   the record unable to falsify that reading"*); `projection/__init__.py:14484` is `MATCH (s:Session) RETURN
