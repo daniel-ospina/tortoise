@@ -149,10 +149,21 @@
 -- BEFORE this file land carry no vector: the record is a journal fold, and the
 -- journal never carried one for these labels (`_upsert_object` derives it in the
 -- graph fold and writes it straight onto the node — #7845). The writer added
--- with this file fills every row written AFTER it ON THE LIVE PATH
--- (`record_writer.RecordWriter.write` is `derived_embedding_columns`' only
--- caller). ⛔ AND WHAT DOES **NOT** FILL IT — stated because a previous cut of
--- this paragraph claimed the opposite and was wrong:
+-- with this file fills every row written AFTER it ON THE LIVE PATH **whose
+-- encode answers within the write budget** (`record_writer.RecordWriter.write`
+-- is `derived_embedding_columns`' only caller). ⛔ AND WHAT DOES **NOT** FILL IT —
+-- stated because a previous cut of this paragraph claimed the opposite and was
+-- wrong:
+--
+--   * A LIVE row written while the embedder is COLD does not fill it either,
+--     and that is a designed decline rather than a bug: the writer passes
+--     `bounded=True` (#13224), so a model that has not become ready within
+--     `WRITE_EMBED_BUDGET_S` makes the encode DECLINE instead of stalling the
+--     caller's request (a cold load measured 13.5 s vs 25-43 ms per encode).
+--     The row lands with `embedding` NULL, `_note_cold_write` logs the cause
+--     once per process, and a later `replay(derived=…)` repairs it — which is
+--     why the bound is the parity-correct choice for a DERIVED column and
+--     would NOT be for a record-TRUTH one (#5004);
 --
 --   * `record_projection.replay()` does NOT, on its own. `derived=` is a
 --     KEYWORD DEFAULTING TO `None`, and `tools/record_runner.py::apply_batches`

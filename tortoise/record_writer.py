@@ -1839,9 +1839,17 @@ def derived_embedding_columns(
     Anything that cannot be derived returns NO columns: an uninstalled embedder
     (`compute_embeddings` answers `None`, #4280), an encode that raised, blank
     text (the graph skips it for the same reason — an empty string earned a junk
-    vector in the HNSW index, #331), and a non-string part in the composed text.
+    vector in the HNSW index, #331), a non-string part in the composed text, and
+    — ⛔ LIVE PATH ONLY — an embedder that did not become ready within the write
+    budget (`encode_for_row(..., bounded=True)`, #13224). That last one is not a
+    failure: the call DECLINES rather than stalling the user's request (a cold
+    load measured 13.5 s; the graph's own folds bound the same wait), so the row
+    lands with no vector and is repaired by a later `replay(derived=…)`.
+    `_note_cold_write` logs the distinct cause (`budget_expired` /
+    `fail_cooldown` / `attempt_spent`), which the `skipped` string below
+    deliberately does NOT try to reconstruct.
 
-    ⛔ ON THAT LAST ARM, corrected because an earlier cut of this docstring
+    ⛔ ON THE NON-STRING ARM, corrected because an earlier cut of this docstring
     asserted a parity that does not exist: the graph does NOT swallow a
     non-string part. Its `" ".join(...)` sits OUTSIDE the `try` that guards the
     encode (`projection/entities.py` — the document path's join, then
@@ -1914,7 +1922,16 @@ def derived_embedding_columns(
     except Exception:  # noqa: BLE001, RUF100 — every failure is "this row has no vector"
         return _DerivedEmbedding(skipped="the encode raised")
     if not vec:
-        return _DerivedEmbedding(skipped="the embedder produced no vector")
+        # ⛔ ONE STRING FOR THREE CAUSES, on purpose: a falsy answer is
+        # `compute_embeddings` saying `None` (not installed), `encode_for_row`
+        # DECLINING on a cold write (`bounded=True`, #13224) or an encode that
+        # raised — all of which this function answers the same way. The distinct
+        # cause is not reconstructed here: `_note_cold_write` already logged it
+        # per-process-per-cause, and inventing a second classification from a
+        # falsy return would be a guess dressed as a diagnosis.
+        return _DerivedEmbedding(
+            skipped="the embedder produced no vector (absent, declined on a "
+                    "cold write, or refused the text — see the cold-write log)")
     return _DerivedEmbedding(columns={"embedding": list(vec)})
 
 
