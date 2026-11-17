@@ -264,6 +264,26 @@ SELECT seq, mode FROM public.record_cursor WHERE org_id = %s AND graph_id = %s
 """
 
 
+def record_configured(dsn: str | None) -> bool:
+    """Is a record DSN configured — asked WITHOUT opening a connection.
+
+    `plan` must not open one (its "writes nothing" property is structural), but
+    it still has to tell "no record is armed" from "--from-checkpoint was not
+    passed": the first has no remedy in this tool and the second has a one-word
+    one, and reporting the first for the second sends an operator to their
+    credentials to fix a missing flag.
+
+    A MALFORMED value counts as configured: it is set, so the remedy is to fix
+    it, not to set one — and this predicate only chooses a sentence.
+    """
+    from tortoise.record_writer import record_dsn
+
+    try:
+        return bool(record_dsn(dsn))
+    except Exception:
+        return True
+
+
 def read_checkpoint(conn: Any, org_id: str, graph_id: str) -> Checkpoint:
     """The record's consumed positions — the ledger, read rather than kept."""
     from tortoise.record_projection import scope_connection
@@ -435,6 +455,8 @@ class PlanReport:
     events_to_consume: int
     batches: list[dict[str, Any]] = field(default_factory=list)
     totals: dict[str, Any] = field(default_factory=dict)
+    #: True when the run was GIVEN a record (a DSN), whether or not it read one.
+    record_armed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -632,8 +654,18 @@ def _render_plan(report: PlanReport) -> str:
                      f"{j['torn_tails']} torn tail fragment(s) — this is NOT a "
                      f"completeness claim")
     if report.checkpoint is None:
-        lines.append("checkpoint: UNREAD (no record armed) — planning from seq 1; "
-                     "the record may already hold some of this")
+        # ⛔ TWO DIFFERENT FACTS, and telling them apart is the point: "no record
+        # is armed" has no remedy in this tool, while "you did not ask" has a
+        # one-word one. Reporting the first for the second sends an operator to
+        # their DSN to fix a missing flag.
+        if report.record_armed:
+            lines.append("checkpoint: NOT READ (--from-checkpoint was not passed) "
+                         "— planning from seq 1; the record may already hold some "
+                         "of this, so `apply` will ask for a DIFFERENT number. "
+                         "Pass --from-checkpoint to plan what a run would do")
+        else:
+            lines.append("checkpoint: UNREAD (no record armed) — planning from "
+                         "seq 1; the record may already hold some of this")
     else:
         c = report.checkpoint
         lines.append(f"checkpoint: present {c['present']}, high {c['high_seq']}, "
@@ -782,6 +814,7 @@ def cmd_plan(args: argparse.Namespace, *, echo) -> int:
                         allocate=args.allocate)
     report.checkpoint = checkpoint
     report.cursor = None
+    report.record_armed = record_configured(args.dsn)
     emit(report.as_dict(), _render_plan(report), as_json=args.as_json)
     return EXIT_OK
 
@@ -880,10 +913,15 @@ def cmd_apply(args: argparse.Namespace, *, echo) -> int:
             raise RunnerError(
                 f"--acknowledge-plan {args.acknowledge_plan} does not match this "
                 f"run: {consumable} event(s) are unconsumed from seq "
-                f"{start_at + 1}. The plan you read does not describe this run "
-                f"(the journal grew, or the checkpoint moved). Re-run `plan` and "
-                f"acknowledge ITS number; `--limit` gives a bounded, stable run "
-                f"on a moving journal")
+                f"{start_at + 1} (the record already holds "
+                f"{start_at} position(s)). The plan you read does not describe "
+                f"this run: the journal grew, or the checkpoint moved. Ask for "
+                f"the number this run wants — "
+                f"`record_runner plan --from-checkpoint …` (a plain `plan` "
+                f"reports the WHOLE journal, which is a different number and "
+                f"will refuse again), or `status` for the remainder — then "
+                f"acknowledge that. `--limit` gives a bounded, stable run on a "
+                f"moving journal")
 
         report = apply_batches(
             journal=journal, org_id=args.org_id, graph_id=args.graph_id,
