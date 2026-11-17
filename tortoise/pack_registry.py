@@ -2587,7 +2587,8 @@ class PackRegistry:
                     # warning stashed in `_pending_lifecycle_warnings` and
                     # published by `load_all` into `lifecycle_warnings` (the
                     # PackManifest does not exist yet at this point).
-                    if "statuses" in spec or "folds" in spec:
+                    if "statuses" in spec or "folds" in spec \
+                            or "pipeline" in spec:
                         # Filter to the string entries the ontology loop above
                         # has already validated: an unhashable entry here
                         # (``eventKinds: [[1]]``) would make ``set()`` raise

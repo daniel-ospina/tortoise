@@ -404,24 +404,31 @@ def test_a_pre_speaker_turn_is_substrate_and_a_kindless_point_is_neither_hole(sd
     assert manifest["points_substrate"] + manifest["belief_eligible_total"] == total
 
 
-def test_an_outdated_endpoint_edge_still_counts_as_a_shape_factor(sdk):
+def test_a_dead_endpoint_edge_still_counts_as_a_shape_factor(sdk):
     """The `factor_edges` census deliberately counts SHAPE, not consumability.
 
     It does not carry `ep.py`'s direct-edge conjuncts `epistemic_disjunction()`
     and `_live_only(status)` (`ep.py:1939-1947`), so an `IMPL` whose endpoint is
-    `outdated` — an edge EP correctly refuses to consume — still counts. The
+    dead — an edge EP correctly refuses to consume — still counts. The
     consequence is pinned here because it is the SAFE direction, not an
     oversight: `no_operators` is a PERMANENT verdict ("nothing EP does can ever
-    help"), and reviving an outdated claim makes this edge a factor again, so
-    the graph must not be called structural. It reads `no_ep_factors` ("operators
+    help"), and reviving a dead claim makes this edge a factor again, so the
+    graph must not be called structural. It reads `no_ep_factors` ("operators
     exist, none reached the window") — true today, and non-structural.
+
+    ⚠️ #11824 S0: the endpoint is retired with `deprecated` — the door refuses
+    `outdated` (it names two different words without saying which, and it is the
+    pre-S0 spelling of this same condition). The census's question is about the
+    EDGE's shape, and it never reads which dead word produced it, so the
+    substitution changes nothing the test measures; the legacy `outdated`
+    population is covered by the rows that already hold it.
 
     If someone later adds the liveness conjuncts to the census, this test reds
     and forces the `stale_factor` decision (a new reason + its own cell) rather
     than silently re-routing the population at extraction.
     """
     conclusion = _claim(sdk, "conclusion A")
-    premise = _claim(sdk, "premise B", status="outdated")
+    premise = _claim(sdk, "premise B", status="deprecated")
     sdk._get_proj().g.query(
         "MATCH (p:Point {id:$premise}), (c:Point {id:$conclusion}) "
         "CREATE (p)-[:IMPL]->(c)",
@@ -432,7 +439,7 @@ def test_an_outdated_endpoint_edge_still_counts_as_a_shape_factor(sdk):
 
     assert manifest["operators"] == 0     # no operator node
     assert manifest["factor_edges"] == 1  # the edge EXISTS, even though EP
-                                          # cannot consume an outdated premise
+                                          # cannot consume a dead premise
 
     summary = mp.summarize_belief_activation(
         [{"question_id": "q1", "belief_activation": manifest}],

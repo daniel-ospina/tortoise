@@ -90,6 +90,46 @@ PENDING_KEY_PROP = "pipelineStagePendingKey"
 
 _TERMINAL_SLOT = "terminal"
 
+#: ── #11824 S0: THE CORE DEFAULT WORK-ITEM PIPELINE ─────────────────────────
+#: The connector folds (`status_folds.BUILTIN_CONNECTOR_FOLDS`) used to write
+#: ``in_progress`` / ``completed`` as **``Object.status``**. They cannot any
+#: more: ``status`` is the four-word LIFECYCLE axis (`lifecycle_vocabulary`),
+#: and a progress event is a POSITION (design §3.2, §4). So the folds target a
+#: stage of this declared default pipeline instead.
+#:
+#: WHY A CORE DEFAULT AND NOT A PACK'S. The built-in folds fire on an Object of
+#: ANY kind that declares no lifecycle of its own (``status_folds`` contract 2),
+#: so there is no single pack to declare the pipeline for them — design §4.2:
+#: *"a core kind has no pipeline until a default is declared for it"*. This is
+#: that declaration, in core, at the ONE home of the pipeline model (the shape
+#: is the shipped one — four slots, ordered stages, an ``outcome`` on a terminal
+#: stage; #2792).
+#:
+#: ``cancelled`` carries ``withdrawn`` and NOT a new outcome: ``PIPELINE_OUTCOMES``
+#: is a shipped CLOSED set (``won``/``lost``/``withdrawn``/``completed``,
+#: validated below and at every stage write), and a cancellation is precisely a
+#: withdrawal. No name here is load-bearing for a reader — the SLOT is (§4.1) —
+#: so a graph may rename or reorder these stages without breaking anything.
+CORE_WORK_ITEM_PIPELINE_KEY = "core:workitem"
+CORE_WORK_ITEM_PIPELINE: dict[str, Any] = {
+    "defaultStage": "todo",
+    "stages": [
+        {"id": "todo", "label": "To do", "order": 0, "slot": "entry"},
+        {"id": "in_progress", "label": "In progress", "order": 1,
+         "slot": "active"},
+        {"id": "done", "label": "Done", "order": 2, "slot": "terminal",
+         "outcome": "completed"},
+        {"id": "cancelled", "label": "Cancelled", "order": 3,
+         "slot": "terminal", "outcome": "withdrawn"},
+    ],
+}
+
+#: Props a stage write CLEARS — the review queue pair (#2792 indicator 4) and its
+#: clock, because a folded stage move settles what a parked raw label asked.
+_STAGE_CLEAR_PROPS: tuple[str, ...] = (
+    PENDING_PROP, PENDING_KEY_PROP, "pipelineStagePendingAt",
+)
+
 #: A stage id must not contain this character. ``stageKey`` is the composite
 #: ``f"{pipeline_key}|{stage_id}"`` — the durability registry's single-property
 #: node identity — so an unescaped ``|`` INSIDE a stage id makes the composite
@@ -319,6 +359,153 @@ class StageMove:
 
     def __bool__(self) -> bool:  # convenience: `if move:`
         return self.applied
+
+
+# ── #11824 S0: the stage-move decision, in ONE home ──────────────────────
+#
+# TWO producers move a stage: the ``advance_stage`` verb (a caller, or a pack's
+# own verb) and the connector/pack FOLD (an event, applied inside the
+# projection — ``projection/entities.py::_fold_object_status`` and, on a
+# rebuild, ``cache_projection.apply_event_stream_folds``). The fold cannot call
+# ``advance_stage``: that verb writes through ``sdk.update_entity``, which
+# journals — and a fold runs INSIDE the projection, on the live path and on
+# every replay, so journaling from it would append records while folding them
+# (live ≡ rebuilt is the invariant that forbids it).
+#
+# So the DECISION is extracted here as pure functions over a ``cur`` dict of the
+# object's stage props, and all three routes call it. That is the whole point:
+# a fold and a verb that each re-implemented "is this object closed?", "is this
+# move backwards?" would drift, and the drift would show up as a rebuild that
+# disagrees with the graph.
+
+def stage_move_refusal(cur_stage: PipelineStage | None, target: PipelineStage, *,
+                       is_closed: bool = False, reopen: bool = False,
+                       correction: bool = False) -> str | None:
+    """Why this move is refused, or ``None`` when it may be applied.
+
+    ``is_closed`` is the Object's DURABLE ``isClosed`` marker, and it is the half
+    that makes an ending stick: ``pipeline.py``'s own note is that the marker and
+    the resolved slot must AGREE — a pack release that reclassifies the stage an
+    Object sits in from ``terminal`` to an active slot takes effect immediately,
+    yet must not resurrect an object the graph records as closed, and an object
+    closed with NO resolvable stage stays closed (``isClosed`` is also written
+    through the generic entity surface).
+
+    This is the guard ORDER ``advance_stage`` has always applied, and it is kept
+    exactly: terminal first (a closed Object is not reopened by a passing
+    mention), then regression (a backward move is history, not state).
+    """
+    was_closed = bool(is_closed) or (
+        cur_stage is not None and cur_stage.is_terminal)
+    if was_closed and not (reopen and not target.is_terminal):
+        return "terminal-guard"
+    # ``reopen`` is the TERMINAL guard's escape hatch, not a general regression
+    # opt-out: on a live (non-terminal) Object it must not drop this guard too.
+    if (cur_stage is not None and target.order < cur_stage.order
+            and not correction and not (reopen and cur_stage.is_terminal)):
+        return "regression-guard"
+    return None
+
+
+def stage_move_props(pipeline_key: str, target: PipelineStage,
+                     at: str | None) -> dict[str, Any]:
+    """The props a stage move writes — the ONE spelling of ``STAGE_PROPS``.
+
+    ``isClosed`` is derived from the TARGET's slot (``stage.is_terminal``), so a
+    terminal stage closes durably and a non-terminal one re-opens the marker only
+    where the guard above admitted the move (a ``reopen=True`` from a terminal
+    stage).
+
+    ⛔ ``at=None`` CLEARS ``pipelineStageSince`` instead of minting a clock, and
+    that is what makes a FOLD replay-identical (#11824 S0). A verb has a caller
+    and a wall clock; a fold has neither — it runs inside the projection, on the
+    live path AND on every rebuild, so ``_now()`` there would record the REPLAY's
+    instant and the two routes would disagree on a prop that is in
+    ``STAGE_PROPS``. The event itself is the record of when, so the honest value
+    for a fold-driven move is "no since recorded" — clearing also stops a
+    previous move's clock from reading as this move's.
+    """
+    props: dict[str, Any] = {
+        "pipelineStageId": target.stage_id,
+        "pipelineSlot": target.slot,
+        "pipelineOutcome": target.outcome or "",
+        "pipelineStageSince": at,
+        "pipelineStageKey": pipeline_key,
+        "isClosed": target.is_terminal,
+    }
+    for prop in _STAGE_CLEAR_PROPS:
+        props[prop] = None
+    return props
+
+
+def apply_stage_fold(cur: dict, pipeline_key: str, decl: dict | None,
+                     stage_ref: str, *, reopen: bool = False,
+                     at: str | None = None,
+                     correction: bool = False) -> tuple[str | None, dict]:
+    """Fold ONE event-reported stage onto an Object's stage state.
+
+    Pure: ``cur`` is what the Object currently holds (``stageId`` / ``slot`` /
+    ``since`` / ``pipelineKey`` / ``isClosed`` — the ``current_stage`` read keys,
+    spelled the same so a caller passes its own read straight in), ``decl`` is
+    the declared pipeline (a pack's, or ``CORE_WORK_ITEM_PIPELINE``), and the
+    return is ``(refusal_reason, props_to_write)`` — ``props_to_write`` is empty
+    when refused, so a caller cannot write a refused move by accident.
+
+    Reasons are the verb's own vocabulary augmented by the fold's two:
+    ``no-pipeline`` (nothing declared — a configuration error, distinct from an
+    unrecognised stage) and ``unknown-stage`` (the target is not in the
+    declaration).
+
+    ⚠️ **BOUND (#13143 review, note 2) — the fold and the ``advance_stage`` verb
+    can resolve DIFFERENT declarations for the same row.** The verb resolves
+    through :func:`effective_pipeline`, which prefers a graph ``:Pipeline``
+    override; this function resolves ``decl``, and BOTH of its callers pass the
+    PACK declaration (``projection/entities.py``: ``index.pipeline_for(kind)``;
+    ``cache_projection``'s replay: the same index, or
+    ``BUILTIN_CONNECTOR_PIPELINE``). So on a graph that edited a pipeline
+    (copy-on-write override) a fold can write a stage the override RETIRED, and
+    the ``pipelineSlot`` / ``pipelineOutcome`` it stores carry the pack's opinion
+    rather than the graph's. The reopen path is NOT affected:
+    ``stage_move_refusal`` keys ``was_closed`` off the DURABLE ``isClosed``
+    marker, which the fold writes from the pack declaration, so
+    ``advance_stage(..., reopen=True)`` still admits the move.
+
+    ⛔ Do NOT fix this on the live side alone. The replay path
+    (``cache_projection``) reads the pack index and the record carries no
+    pipeline override, so a live-only override read would make the live fold and
+    the rebuilt fold disagree — the exact live ≢ rebuilt asymmetry this slice
+    exists to close (#10189). The fix needs the override on the REPLAY path (the
+    #2814 config registry), which is why it is recorded as a follow-up on #11824
+    rather than patched here.
+    """
+    if not decl or not decl.get("stages"):
+        return "no-pipeline", {}
+    pipe = _pipeline_from_decl(pipeline_key, decl)
+    target = pipe.resolve(stage_ref)
+    if target is None or target.status != STAGE_ACTIVE:
+        return "unknown-stage", {}
+    cur_stage = None
+    cur_id = cur.get("stageId")
+    cur_key = cur.get("pipelineKey")
+    if cur_id:
+        if cur_key and cur_key != pipeline_key:
+            # A stage id from ANOTHER pipeline must not be read as this one's
+            # current stage: silently skipping the guards is the resurrection
+            # vector `advance_stage` refuses as a cross-pipeline move.
+            return "cross-pipeline", {}
+        cur_stage = pipe.by_id(cur_id)
+        if cur_stage is None:
+            # FAIL CLOSED, exactly as the verb does on declaration drift: an
+            # unresolvable current stage must not fall through to the write,
+            # because that rewrites ``isClosed`` and resurrects a closed Object.
+            return "unresolvable-current-stage", {}
+    reason = stage_move_refusal(cur_stage, target,
+                                is_closed=bool(cur.get("isClosed")),
+                                reopen=reopen, correction=correction)
+    if reason is not None:
+        return reason, {}
+    return None, stage_move_props(pipeline_key, target, at)
+
 
 
 # ── Graph reads ───────────────────────────────────────────────────────────
@@ -812,7 +999,41 @@ def _resolve_object(graph, ref: str) -> tuple[str, dict] | None:
         "pipelineKey": r[5], "objectKind": r[6], "isClosed": r[7]}
 
 
+def _binds_core_work_item(cur: dict, pipeline_key: str) -> bool:
+    """True when the CORE default work-item pipeline may bind this Object.
+
+    The kind binding (``advance_stage``'s first guard) is that a pipeline key
+    equals the Object's namespaced ``objectKind`` (#2767). The CORE default is
+    the ONE legitimate exception, and it is an exception the built-in connector
+    fold CREATES: ``status_folds.BUILTIN_CONNECTOR_FOLDS`` fires on an Object of
+    ANY kind that declares no lifecycle of its own, so it stamps
+    ``pipelineStageKey='core:workitem'`` on e.g. a ``dev:issue`` (pinned by
+    ``tests/test_cache_projection.py::_assert_folded_stage``).
+
+    ⛔ WITHOUT THIS, THE DOCUMENTED REOPEN ROUTE DID NOT EXIST (#11824 S0
+    review, P2). ``advance_stage(<id>, 'core:workitem', …, reopen=True)`` is
+    what ``lifecycle_vocabulary``'s ``completed`` repair and
+    ``status_folds``' terminal-slot note both prescribe as the way back from a
+    terminal STAGE, and it raised twice: the kind binding refused (the kind is
+    ``dev:issue``, not ``core:workitem``) and, one line later,
+    ``effective_pipeline`` returned an EMPTY pipeline because no pack declares
+    ``core:workitem``. So the population the built-in folds retired had no
+    performable route back at all — for ``pm:cardCompleted``, which has no
+    reopening fold (only ``github.issue.reopened`` exists), a mistaken close was
+    permanent.
+
+    The exemption is deliberately NARROW — it grants nothing to a pipeline key
+    the row is not already ON. ``cur['pipelineKey']`` must ALREADY be the core
+    default, i.e. the row was placed there by a fold, so this cannot be used to
+    stamp an arbitrary kind onto the core pipeline (nor the core pipeline onto an
+    arbitrary Object), which is the vector the kind binding exists to stop.
+    """
+    return (pipeline_key == CORE_WORK_ITEM_PIPELINE_KEY
+            and cur.get("pipelineKey") == CORE_WORK_ITEM_PIPELINE_KEY)
+
+
 def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
+
                   at: str | None = None, source: str = "", reopen: bool = False,
                   correction: bool = False, reason: str = "",
                   declared: dict | None = None) -> StageMove:
@@ -827,7 +1048,14 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
     - **kind binding** — the pipeline key must equal the Object's namespaced
       ``objectKind`` (#2767), so no Object can be advanced through a pipeline
       that is not its own; an Object with no namespaced kind cannot be bound
-      to any pipeline and is refused.
+      to any pipeline and is refused. The ONE exception is the CORE default
+      work-item pipeline (``_binds_core_work_item``): a row a built-in
+      connector fold already stamped with ``pipelineStageKey='core:workitem'``
+      may be advanced through it, because no pack declares that key and the
+      fold fires on Objects of any kind — without it the terminal stage those
+      folds write could never be reopened, which is the recoverability the
+      design claims (§4.1: the SLOT carries the meaning, and a terminal stage
+      can be reopened).
     - **unresolvable current stage** — an Object whose stored stage does not
       resolve in the effective pipeline is refused, never advanced: skipping
       the guards is the resurrection vector. The refusal has no public
@@ -871,10 +1099,21 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
         raise ValueError(
             f"{object_ref!r} carries no namespaced objectKind, so no pipeline "
             f"can be bound to it (refusing {pipeline_key!r})")
-    if kind != pipeline_key:
+    if kind != pipeline_key and not _binds_core_work_item(cur, pipeline_key):
         raise ValueError(
             f"pipeline {pipeline_key!r} does not apply to {object_ref!r}: its "
             f"kind is {kind!r} (a pipeline keys on the namespaced kind)")
+
+    # The CORE default is declared HERE rather than in a pack (design §4.2: *"a
+    # core kind has no pipeline until a default is declared for it"*), so a
+    # caller could not have resolved it through ``declared_pipeline_for`` and
+    # the lookup below would have returned an empty pipeline — the second half
+    # of the "no route back" defect ``_binds_core_work_item`` documents. An
+    # explicit ``declared`` (and a graph override, read first inside
+    # ``effective_pipeline``) still wins, so a tenant that copied the pipeline
+    # on write, or renamed its stages, keeps that declaration.
+    if declared is None and pipeline_key == CORE_WORK_ITEM_PIPELINE_KEY:
+        declared = CORE_WORK_ITEM_PIPELINE
 
     pipe = effective_pipeline(graph, pipeline_key, declared=declared)
     if not pipe.stages:
@@ -958,21 +1197,19 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
     # guard too and applied a silent backward move. The regression guard's
     # documented opt-out is ``correction``; a reopen still has to travel
     # FROM a terminal stage to be a reopen at all.
-    if (cur_stage is not None and target.order < cur_stage.order
-            and not correction and not (reopen and cur_stage.is_terminal)):
-        return StageMove(applied=False, reason="regression-guard", stage=target)
+    #
+    # #11824 S0: BOTH guards above are now the shared pure decision
+    # (``stage_move_refusal``), which the connector/pack FOLD also calls
+    # (``apply_stage_fold``) — the fold cannot go through this verb (it runs
+    # inside the projection, which must not journal), so a second copy of
+    # "is it closed / is it backwards" here is exactly the drift that would
+    # let a rebuild disagree with the live graph.
+    _refusal = stage_move_refusal(cur_stage, target, is_closed=was_closed,
+                                  reopen=reopen, correction=correction)
+    if _refusal is not None:
+        return StageMove(applied=False, reason=_refusal, stage=target)
 
-    props: dict[str, Any] = {
-        "pipelineStageId": target.stage_id,
-        "pipelineSlot": target.slot,
-        "pipelineOutcome": target.outcome or "",
-        "pipelineStageSince": stage_ts,
-        "pipelineStageKey": pipeline_key,
-        "isClosed": target.is_terminal,
-        PENDING_PROP: None,
-        PENDING_KEY_PROP: None,
-        "pipelineStagePendingAt": None,
-    }
+    props: dict[str, Any] = stage_move_props(pipeline_key, target, stage_ts)
     if source:
         props["pipelineStageSource"] = source
     if reason:
