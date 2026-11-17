@@ -1020,6 +1020,24 @@ def test_the_docs_index_row_repeats_only_what_the_evidence_carries():
         "the harm side is not the short-query artifact's own seed cells — all "
         "three numbers, not just their sum")
 
+    # ⛔ the k=3 delta, its MDE sentence, the sample size and the window mode: all
+    # presence-only (or unread) at `d5be0e6840` — measured GREEN, each on its own:
+    # `+1.67 pp → +9.99 pp` at EITHER of the row's two sites, `n = 300 → n = 900`,
+    # `keyword_only 300/300 → 299/300`. Derived from the artifact, per site.
+    delta3 = (k3["on_hits"] - k3["off_hits"]) / n * 100
+    assert (f"at k=3 the +{delta3:.2f} pp is BELOW the "
+            f"{k3['mde_paired'] * 100:.2f} pp MDE" in row), (
+        "the row's k=3 winner sentence is not the artifact's delta and MDE")
+    assert f"the gain (+{delta3:.2f} pp, ns)" in row, (
+        "the row's short-arm gain is not the artifact's own k=3 delta")
+    assert f"exact McNemar at n = {n}" in row, (
+        "the row's sample size is not the artifact's drawn sample")
+    for arm, block in head["arms"]["point"]["window_modes"].items():
+        assert block["keyword_only"] == n, (
+            f"the {arm} arm is not keyword_only for all {n} items")
+    assert f"`keyword_only` {n}/{n}" in row, (
+        "the row's window-mode cell is not the artifact's measured mode")
+
 
 # ── 2e. the published RESULT figures, recomputed cell by cell ────────────────
 #
@@ -1367,6 +1385,24 @@ def test_the_briefs_result_tables_repeat_their_artifacts_cell_by_cell():
     assert (int(fired.group(1)), int(fired.group(2))) == (
         head["arms"]["point"]["expansion_fired_items"], n), (
             "the headline arm's firing count and sample size, not a re-staled pair")
+
+    # ── the §5 / §7 RESTATEMENTS, not only the tables ──────────────────────
+    # ⛔ measured GREEN at `d5be0e6840`, each on its own: the §5 MET row's MDE list
+    # (`3.84 → 3.99`), §7's `+5.67 pp @15`, and §7's seed count (`5 → 9 of 300`).
+    # A figure the tables pin can still be re-staled where the prose repeats it.
+    per_k = head["arms"]["point"]["per_k"]
+    mde_list = " / ".join(f"{per_k[f'k={k}']['mde_paired'] * 100:.2f}"
+                          for k in (3, 5, 10, 15))
+    assert f"**{mde_list} pp**" in brief, (
+        f"the §5 MDE restatement must be the artifact's own ({mde_list} pp)")
+    delta15 = (per_k["k=15"]["on_hits"] - per_k["k=15"]["off_hits"]) / n * 100
+    assert f"+{delta15:.2f} pp @15" in brief, (
+        "the §7 lift restatement must be the artifact's own k=15 delta")
+    short_seed = short["arms"]["point"]["per_k"]["k=15"]["seed_effect"]
+    moved_short = (short_seed["seed_lost_from_window"]
+                   + short_seed["seed_demoted_but_kept"])
+    assert f"{moved_short} of {short['population']['sample']} items whose seed moved" in brief, (
+        "the §7 cost restatement must be the short arm's own seed cells")
 
 
 def test_the_mde_direction_is_pinned_and_not_only_its_values():
@@ -1844,27 +1880,50 @@ def test_the_snapshot_digest_and_every_load_trace_are_pinned_where_quoted():
     assert brief.count(digest[:16]) >= 2, (
         "the digest is quoted at two sites (§3 as a prefix, §5 in full)")
     assert digest[:16] in index, "the index row must quote the same digest"
-    # ⛔ site-scoped, not presence: a whole-file `f"{n} files" in brief` let ONE of
-    # the three sites re-stale (measured GREEN at `3ae4980b1d` — `:92`'s
-    # `23 files / 14,225 lines` and `:138`'s `…, 23 files, 14,225 lines,
-    # 78,571,361 bytes` each replaced on its own, the other sites satisfying the
-    # presence check). The two SHAPES the brief actually prints are derived from
-    # the manifest here, so a re-stale at either site loses its own form.
+    # ⛔ EVERY site, not a list of shapes. A shape list kept in step with the prose
+    # is the same defect one layer out: `f"{n} files" in brief` let a single site
+    # re-stale (measured GREEN at `3ae4980b1d` at `:92` and `:138`), and the first
+    # fix — two derived shapes compared by presence — still MISSED the §5 MET row,
+    # where the bold sits inside the string (`**23 files**, 14,225 lines, …`), so
+    # neither shape matched (measured GREEN: `**23 files** → **14 files**` and
+    # `78,571,361 bytes → 99,999,999`). So: sweep every `<N> files … <M> lines`
+    # pair and every `<N> files, <M> lines, <B> bytes` triple in the bold/backtick-
+    # flattened text and require each to be the manifest's own numbers.
+    flat = brief.replace("**", "").replace("`", "")
+    want = (manifest["file_count"], manifest["total_lines"], manifest["total_bytes"])
     pair_form = f"{manifest['file_count']} files / {manifest['total_lines']:,} lines"
     trio_form = (f"{manifest['file_count']} files, {manifest['total_lines']:,} lines, "
                  f"{manifest['total_bytes']:,} bytes")
-    # ⛔ `form in brief` is a PRESENCE check, and §5's copy carries `**23 files**`
-    # markup while §3's does not — so §3 satisfied it and a re-stale of §5 ALONE
-    # stayed GREEN (measured by the reviewer: `78,571,361` → `…362`,
-    # `**23 files**` → `**24 files**`, `14,225` → `14,226`, each 49-passed).
-    # Compare on `_plain` (which drops `**` and `,`) and COUNT, so each site must
-    # carry its own form and neither can satisfy the other's assertion.
-    plain = _plain(brief)
-    assert plain.count(_plain(pair_form)) == 1, (
-        f"the file+line pair {pair_form!r} is printed at exactly one site (§1)")
-    assert plain.count(_plain(trio_form)) == 2, (
-        f"the digest/files/lines/bytes trio {trio_form!r} is printed at TWO sites "
-        "(§3 and the §5 falsifier); fewer means one has been re-staled or dropped")
+    # ⛔ PRESENCE and TRUTH are two questions, and the first fix answered only one.
+    # The site counts below keep a DROPPED site from reading as a shorter document
+    # (a `pairs`/`triples` sweep alone is satisfied by the other sites); the sweep
+    # below keeps a RE-STALED site from hiding behind a correct neighbour. Both.
+    assert flat.count(pair_form) == 1, (
+        f"the pair-only site {pair_form!r} is printed once (§1); found "
+        f"{flat.count(pair_form)}")
+    assert flat.count(trio_form) == 2, (
+        f"the trio {trio_form!r} is printed at TWO sites (§3 and the §5 falsifier); "
+        f"found {flat.count(trio_form)}")
+
+    def _num(text: str) -> int:
+        return int(text.replace(",", ""))
+
+    pairs = re.findall(r"(\d[\d,]*) files[^\n]{0,40}?(\d[\d,]*) lines", flat)
+    assert pairs, "the brief prints the corpus file/line pair"
+    for shown_files, shown_lines in pairs:
+        assert (_num(shown_files), _num(shown_lines)) == want[:2], (
+            f"a site prints {shown_files} files / {shown_lines} lines but the "
+            f"manifest holds {want[0]} files / {want[1]:,} lines")
+    triples = re.findall(
+        r"(\d[\d,]*) files, (\d[\d,]*) lines, (\d[\d,]*) bytes", flat)
+    assert len(triples) >= 2, (
+        "the digest/files/lines/bytes trio is printed at TWO sites at least (§3 "
+        f"and the §5 falsifier); found {len(triples)}")
+    for shown_files, shown_lines, shown_bytes in triples:
+        assert (_num(shown_files), _num(shown_lines), _num(shown_bytes)) == want, (
+            f"a site prints {shown_files} files, {shown_lines} lines, "
+            f"{shown_bytes} bytes but the manifest holds "
+            f"{want[0]} / {want[1]:,} / {want[2]:,}")
 
     # ⛔ EVERY load trace the brief prints must be one an artifact recorded: a
     # presence check let one of the two headline sites re-stale. The object
