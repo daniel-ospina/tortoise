@@ -256,37 +256,24 @@ def _row_is_frozen(status, outdated) -> bool:
     is deliberately not passed: this helper answers only the lifecycle question.
     Position is the axis a diff CAN converge on, so it is read separately.
     """
-    # ⛔ HASHING GUARD (#13289 review F6): `live.is_terminal_status` is a
-    # `frozenset` membership test, and membership HASHES the value — so a stored
-    # ARRAY `status` raises `TypeError: unhashable type`. ⚠️ NOT reachable through a
-    # current door: `update_knowledge(id, status=['live'])`, `create_object(...,
-    # status=['live'])` and `create_entity('Object', ..., status=['live'])` all
-    # REFUSE it — and the refusal is S0's, ONE HOP EARLIER than it looks: the update
-    # door refuses at `sdk.py:53763-53765` and the create door at `sdk.py:54657-54659`,
-    # both into `lifecycle_vocabulary.py:279-286`. ⛔ NOT at
-    # `_refuse_non_string_object_status` (`sdk.py:53803-53805` / `:54851-54855`): those
-    # calls are in the Object arm and are UNREACHABLE for a non-string, because S0's
-    # `_read_caller_status` has already raised (`tests/test_status_projection.py:2223-2236`
-    # says so outright — *"one lifecycle door refuses EVERY non-string as its FIRST arm
-    # … `_refuse_non_string_object_status` keeps its `lands`/`_value_ok` scoping for the
-    # shapes S0 does not answer first"*). Its own type arm is live only at a door with
-    # no S0 leg, `EventAPI.add_object` (`api.py:2927-2932`). ⛔ And `sdk.py:53785-53791`
-    # is the wrong place to check at all — prose about where the check must sit, asserting
-    # the OLD behaviour ("a LIVE never-statused Object accepted `status=['live']` and
-    # stored the list verbatim"). It is the
-    # LEGACY population — rows written before that door existed, which
-    # `lifecycle_vocabulary.py:263-264` records explicitly ("`status=['live']` *used
-    # to be* STORED on an `:Object`") and `sdk.py:53808-53811` enumerates from the
-    # other side ("written by a pre-fix SDK, a raw Cypher producer, or a JSONL replay
-    # of either") — and this repo deliberately keeps readers
-    # wider than the door (`live.py:100-108`). The FOLD tolerates it because its own
-    # `excluded` is a LIST (an `==` scan, no hash). A raise here is not a quiet skip
-    # of one row: `_project_issue` runs BEFORE the Object write and the exception
-    # lands in the per-issue handler, so that issue is dropped on EVERY poll while
-    # the run still reports success.
-    # Spelling the two terms out (rather than calling the shared helper) keeps the
-    # reader agreeing with the fold on that row instead of introducing a crash path
-    # it did not have. A non-string status is simply not a vocabulary word.
+    # ⛔ HASHING GUARD (#13289 review F6): `frozenset` membership HASHES the value,
+    # so a stored ARRAY `status` would raise `TypeError: unhashable type` and take the
+    # whole issue down on EVERY poll (`_project_issue` runs before the Object write and
+    # the exception lands in the per-issue handler, while the run still reports
+    # success). The FOLD tolerates such a row because its own `excluded` is a LIST — an
+    # `==` scan, no hash — so this reader must tolerate it too, and a non-string status
+    # is simply not a vocabulary word.
+    #
+    # ⚠️ A non-string `status` is a LEGACY shape, not a current one: the lifecycle doors
+    # refuse it at intake (`lifecycle_vocabulary.py:279-286`, reached from S0's
+    # `_read_caller_status` on both the update and create paths). It is kept readable
+    # because rows persist — `lifecycle_vocabulary.py:263-264` records the history
+    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:53808-53811`
+    # enumerates the routes from the other side (a pre-fix SDK, a raw Cypher producer, a
+    # JSONL replay of either) — and this repo deliberately keeps readers wider than its
+    # doors (`live.py:100-108`). ⛔ Deliberately NOT citing the individual `sdk.py` call
+    # sites here: two earlier cuts named the wrong hop, and a prose justification does
+    # not need them. `lifecycle_vocabulary.py:279-286` is the refusal.
     return bool(outdated) or (
         isinstance(status, str) and status in TERMINAL_EXCLUDED_STATUSES)
 
