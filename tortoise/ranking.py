@@ -726,9 +726,10 @@ def _parse_iso(value) -> datetime | None:
 #     and NARROW on the title-shaped ones: a query equal to a Source's own
 #     TITLE IS an identity hit, and that row then sorts ahead of every scored
 #     row. It is never INERT there. The FTS leg's ``_searchText`` is not the
-#     compared surface and has no bearing on this verdict — that field (the
-#     title when the writer had one, else the topic lexicon, else the summary)
-#     decides RECALL; this term decides identity.
+#     compared surface and has no bearing on this verdict — whatever that field
+#     holds per door (a source writer's title / topic lexicon / summary, the
+#     document fold's title+summary+topics) decides RECALL; this term decides
+#     identity.
 #   * ``created`` — the row's timestamp, for the existing recency term.
 #
 # ``operator`` routes to the POINT fetch on purpose and is not a fallback: an
