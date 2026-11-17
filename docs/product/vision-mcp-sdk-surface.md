@@ -112,12 +112,13 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 **The four bucket rows sum to 103.** (The last row is the target *surface*, not a bucket —
 27 targets received those 100 absorbed tools many-to-one, so it is not part of the sum.)
 
-> ⚠️ **This table predates #11609 family A (#12951) and its bucket rows have NOT been re-derived.**
-> The served population is **108** today (55 live + 53 retired shims, `tools/bridge_table.py
-> --check`), so the `103` above and the per-bucket split are one cut stale. The bucket counts have
+> ⚠️ **This table predates #11609 family A (#12951) and lane E's door retirement and its bucket
+> rows have NOT been re-derived.**
+> The served population is **108** today (48 live + 60 retired shims, `tools/bridge_table.py
+> --check`), so the `103` above and the per-bucket split are two cuts stale. The bucket counts have
 > no generator — `bridge_table.py` emits Part A/B/C but not this split — so re-deriving them means
 > re-bucketing by hand, which is why this is flagged rather than guessed at. The two numbers the
-> machine-checked claims read (`55 live` and `53 retired`) are correct everywhere else in this
+> machine-checked claims read (`48 live` and `60 retired`) are correct everywhere else in this
 > document.
 
 The **Retired** row fell **4 → 0** in #11609 **batch 1**: the last four
@@ -136,8 +137,10 @@ to 67 live + 30 retired shims (97 served at that wave): the SOURCES/MINE/SESSION
 approved names in and retired SEVEN advertised ones into them (#3883 keeps every retired
 name answering, which is why the served count RISES while the advertised count falls).
 Composed at this head with lane B (#4282's WRITE/MUTATE wave, which landed on `main` first), the
-same population reads **55 live + 53 retired shims = 108 served** — measured off the merged
-registry, not added by hand (`tools/bridge_table.py --check` reports 108 registry tools).
+same population reads **48 live + 60 retired shims = 108 served** — measured off the merged
+registry, not added by hand (`tools/bridge_table.py --check` reports 108 registry tools). The
+door-retirement wave moves the SPLIT only: seven advertised doors left the surface and each
+kept answering on its retired name, so the served population is unchanged at 108.
 
 The **Retired** row fell **9 → 4** in #4282 **Phase 3.2** (2026-11-04): five of the nine were
 DELETED from the served registry rather than retired into nothing, because the owner's

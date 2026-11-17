@@ -60,13 +60,16 @@ def _registry_pairs() -> list[tuple[str, str]]:
         sdk_method = getattr(row, "sdk_method", None)
         if sdk_method:
             pairs.append((row.name, sdk_method))
-    # 44 on the merged surface (56 live rows, 12 of which declare no
-    # `sdk_method`), after the READ/QUERY and WRITE/MUTATE container waves each
-    # retired rows that DID name one. The threshold keeps slack on purpose: it is
-    # a scan-sanity floor ("did the scan reach the registry at all?"), not a pin
-    # on the surface — a floor left at the pre-consolidation number would red on
-    # a CORRECT retirement.
-    assert len(pairs) > 40, f"registry scan found only {len(pairs)} rows — the scan is broken"
+    # 37 on the merged surface (48 live rows, 11 of which declare no `sdk_method`),
+    # after the READ/QUERY, WRITE/MUTATE and SOURCES/MINE/SESSION container waves each
+    # retired rows that DID name one, and then #11609's door-retirement wave retired
+    # seven more that each named one (44 − 7 = 37; `get_session`, `list_batch`,
+    # `find_cross_lens_candidates` and the four `create_*` aliases all wrapped an SDK
+    # method). The threshold keeps slack on purpose: it is a scan-sanity floor ("did the
+    # scan reach the registry at all?"), not a pin on the surface — a floor left at the
+    # pre-consolidation number would red on a CORRECT retirement, which is exactly what
+    # the previous `> 40` did when the seventh door left.
+    assert len(pairs) > 30, f"registry scan found only {len(pairs)} rows — the scan is broken"
     return pairs
 
 
@@ -270,9 +273,14 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # the surface: `tortoise_list_dedup_candidates` left the pass-through population
     # when its SDK method retired into `review_link_candidates` (#11609 Phase 2,
     # which returns `Any` and so owes no list type), and the three doors named above
-    # left it with the WRITE/MUTATE containers. The floor moves DOWN with the
-    # surface; it is not lowered to whatever a green run last produced.
-    assert checked >= 16, (
+    # left it with the WRITE/MUTATE containers. 16 -> 9 with #11609's door-retirement
+    # wave, which retired seven doors that were pass-throughs themselves
+    # (`get_session`, `list_batch`, `find_cross_lens_candidates` and the four
+    # `create_*` aliases): 16 − 7 = 9. The floor moves DOWN with the surface; it is
+    # not lowered to whatever a green run last produced, and the two guards ABOVE
+    # (`checked > 0`, and `checked + reshaped == len(pairs)`) are what still make a
+    # vacuous scan impossible — this one only keeps slack under them.
+    assert checked >= 9, (
         f"only {checked} pass-through wrappers were found — the scan is not "
         f"reaching the registry, so a clean result here would be vacuous")
     assert not offenders, (
