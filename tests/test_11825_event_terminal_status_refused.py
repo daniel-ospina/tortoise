@@ -3,7 +3,7 @@
 Measured at #11825's head, on three doors:
 
 ```
-update_entity(<event>, status='superseded')                     -> ACCEPTED
+update_knowledge(<event>, status='superseded')                     -> ACCEPTED
 create_entity('event', …, status='superseded')                  -> ACCEPTED
 create_event(…, status='superseded')                            -> ACCEPTED
 EventAPI.add_event(id, kind, status='superseded')               -> ACCEPTED
@@ -273,7 +273,7 @@ class TestTheUpdateDoor:
         """#12222: every refusal on this surface precedes every write.
 
         Measured before the fix, on a `:Point:Object` in `draft` whose target
-        name a live `:Object` already holds: `update_entity(<id>,
+        name a live `:Object` already holds: `update_knowledge(<id>,
         status="live", name=<held>)` raised `NameAlreadyHeld` and STILL left
         `status='live'` on the node with a journaled `restatus` — the fold
         would replay a status the caller was told had not been applied.
@@ -306,7 +306,7 @@ class TestTheUpdateDoor:
         assert len(_journal_lines(sdk._test_log)) == records_before
 
     def test_the_refusal_also_covers_update(self, sdk):
-        """`update()` is the documented alias of `update_entity()`."""
+        """`update()` is the documented alias of `update_knowledge()`."""
         eid = _event(sdk, name="Aliased")
         with pytest.raises(ValueError, match=":Event"):
             sdk.update(eid, status="superseded")
@@ -563,7 +563,7 @@ class TestTheEventApiDoor:
         ``_is_persistable_prop_value`` refuses these LEAVES while the engine
         really does STORE them (``projection._value_ok``, the predicate the
         ``#7369`` gate nulls on), so scoping on the fold alone let
-        ``update_entity(status=np.int64(7))`` write ``7`` onto the node — a
+        ``update_knowledge(status=np.int64(7))`` write ``7`` onto the node — a
         status no vocabulary can name, which is exactly what the type refusal is
         for. Refused now, and the stored status is untouched.
         """
@@ -690,7 +690,7 @@ class TestTheEventApiDoor:
         rendered-alias `outdated` key slipped past `_sanitize_props`' literal
         `"outdated" in props`, the guard was skipped, and the flag was STORED —
         the terminal half-state #11825 records, through a declared door. Measured
-        on the previous head: `update_entity(<event>, **{KOut("x"): True})` was
+        on the previous head: `update_knowledge(<event>, **{KOut("x"): True})` was
         ACCEPTED and the node read `status=None, outdated=True`, which `ep.py`
         reads as terminal while every retrieval leg serves it.
         """
@@ -1546,9 +1546,19 @@ class TestTheBundleValidationDoor:
 # ── T5: no over-block on the other labels ───────────────────────────────────
 
 class TestTheGuardDoesNotOverBlock:
+    """#11825's guard is about :Events; it must not narrow the other labels.
+
+    ⛔ #12592 narrowed ONE thing these cases touch: a bare
+    ``status='superseded'`` is now refused on every label (ONTOLOGY §4.3 — the
+    word names its successor), so the `superseded` control names its partner.
+    The #11825 question is unchanged: the label still takes a terminal status, it
+    is only the partnerless spelling that stopped landing.
+    """
+
     def test_a_point_still_takes_a_terminal_status(self, sdk):
         pid = sdk.create_point("statement", "a claim", status="live")["id"]
-        sdk.update_knowledge(pid, status="superseded")
+        sdk.update_knowledge(pid, status="superseded",
+                          supersededBy="the successor")
         row = sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": pid}
         ).result_set
@@ -1563,7 +1573,7 @@ class TestTheGuardDoesNotOverBlock:
     def test_a_subject_still_takes_a_terminal_status(self, sdk):
         """`#1423`'s `:Subject` vocabulary is its own arm and is untouched."""
         sid = sdk.create_entity("subject", "Acme Corp", subjectKind="organization")["node"]["id"]
-        sdk.update_knowledge(sid, status="superseded")
+        sdk.update_knowledge(sid, status="superseded", supersededBy="Acme Corp II")
         row = sdk._get_proj().g.query(
             "MATCH (n:Subject {id:$id}) RETURN n.status", params={"id": sid}
         ).result_set
@@ -1571,11 +1581,34 @@ class TestTheGuardDoesNotOverBlock:
 
     def test_an_object_still_takes_a_terminal_status(self, sdk):
         oid = sdk.create_entity("object", "PolicyV1", objectKind="policy")["node"]["id"]
-        sdk.update_knowledge(oid, status="superseded")
+        sdk.update_knowledge(oid, status="superseded", supersededBy="PolicyV2")
         row = sdk._get_proj().g.query(
             "MATCH (n:Object {id:$id}) RETURN n.status", params={"id": oid}
         ).result_set
         assert row[0][0] == "superseded"
+
+    @pytest.mark.parametrize("label", ["Point", "Object", "Subject"])
+    def test_a_bare_superseded_is_the_one_terminal_status_refused(self, sdk, label):
+        """#12592's delta, pinned HERE beside the case it narrows.
+
+        The non-vacuity control above must not be read as "every terminal word is
+        the same": `superseded` is the one the model defines by its partner, so
+        it is the one this door refuses without one.
+        """
+        if label == "Point":
+            node = sdk.create_point("statement", "bare", status="live")["id"]
+        elif label == "Object":
+            node = sdk.create_entity("object", "BarePolicy",
+                                     objectKind="policy")["node"]["id"]
+        else:
+            node = sdk.create_entity("subject", "Bare Team",
+                                     subjectKind="organization")["node"]["id"]
+        with pytest.raises(ValueError, match="no successor"):
+            sdk.update_knowledge(node, status="superseded")
+        row = sdk._get_proj().g.query(
+            "MATCH (n {id:$id}) RETURN n.status", params={"id": node}
+        ).result_set
+        assert row[0][0] != "superseded"
 
     def test_a_legacy_terminal_event_can_still_be_repaired(self, sdk):
         """The repair route a denylist (unlike an allowlist) preserves.

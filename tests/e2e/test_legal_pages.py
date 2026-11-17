@@ -152,6 +152,7 @@ if not APP_BASE_URL and BASE_URL.startswith("https://"):
 _RESOURCE_LOG_RE = re.compile(r"Failed to load resource")
 
 # ── Lazy playwright import — bare collection must never error. ─────────────
+from playwright.sync_api import Error as PlaywrightError  # noqa: E402
 from playwright.sync_api import Page, expect  # noqa: E402
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # noqa: E402
 
@@ -560,16 +561,38 @@ def _goto(page: Page, url: str, status: int = 200) -> str:
     saw the flake that reddened `test_company_root_links_to_the_blog` in #8384
     (the same SHA passed on the prior run); the helper's contract is "one retry
     on a transient failure", and a hang is one.
+
+    A transient navigation ERROR is retried the same way, and for the same
+    reason (#13096). `page.goto` raises `playwright.sync_api.Error` when the
+    navigation never produced a status at all — `net::ERR_NETWORK_CHANGED` means
+    the OS reported a network change while Chromium's request was in flight,
+    which a runner's ephemeral networking does routinely, and it reddened this
+    suite's REQUIRED `legal-e2e` context on #13096 while the same commit's
+    neighbours passed. That is the same class as the hang: no page was served,
+    so there is no status to assert and nothing here to call a defect. Catching
+    only `TimeoutError` made "one retry on a transient failure" true for one
+    transient shape and false for the other.
+
+    The retry is bounded at one and the error is RE-RAISED when the retry does
+    not clear it, so a genuine navigation failure still fails with its real
+    reason (`net::ERR_*`, Chromium's own message) instead of a bare "produced no
+    response" that hides what happened.
     """
-    try:
-        resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-    except PlaywrightTimeoutError:
-        resp = None
-    if resp is None or resp.status != status:
+    resp = None
+    last_exc: PlaywrightError | None = None
+    for attempt in range(2):  # one retry — the docstring above is the contract
+        last_exc = None
         try:
             resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        except PlaywrightTimeoutError:
+        except PlaywrightTimeoutError:  # a hang: retried, then "no response"
             resp = None
+        except PlaywrightError as exc:  # a failed navigation: retried, then re-raised
+            resp, last_exc = None, exc
+        if attempt == 0 and (resp is None or resp.status != status):
+            continue
+        break
+    if last_exc is not None:
+        raise last_exc
     assert resp is not None, f"{url} produced no response"
     assert resp.status == status, f"{url} returned {resp.status} (expected {status})"
     return page.content()
@@ -1594,6 +1617,104 @@ def test_mobile_render_no_horizontal_scroll(page: Page, origin: str, path: str) 
         "({sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth})"
     )
     assert dims["sw"] <= 375, f"{path} horizontal scroll: scrollWidth {dims['sw']} > 375"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The `_goto` retry contract (browser-free — no `page` fixture requested)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# `_goto` is the SINGLE navigation chokepoint for all 28 call sites in this
+# suite, so its contract is the suite's whole flake surface. It is exercised
+# here with a `page` double rather than a real browser: the property under test
+# is "how many times does the helper navigate, and what does it do with the
+# failure", which needs no rendering.
+
+
+class _NavResponse:
+    """Minimal `playwright.sync_api.Response` double: `_goto` only reads `.status`."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+
+class _NavPage:
+    """A `page` double that plays a scripted sequence of navigation outcomes.
+
+    ``outcomes`` is consumed one per ``goto`` call: an exception INSTANCE is
+    raised, an int becomes a response with that status. Every call is counted so
+    a test can pin how many navigations the helper actually spent.
+    """
+
+    def __init__(self, outcomes: list[object]) -> None:
+        self._outcomes = list(outcomes)
+        self.goto_calls = 0
+
+    def goto(self, url: str, **kwargs: object) -> _NavResponse:
+        self.goto_calls += 1
+        outcome = self._outcomes.pop(0) if self._outcomes else 200
+        if isinstance(outcome, BaseException):
+            raise outcome
+        assert isinstance(outcome, int), outcome
+        return _NavResponse(outcome)
+
+    def content(self) -> str:
+        return "<html>served</html>"
+
+
+def _network_changed(url: str = "http://127.0.0.1:8847/privacy") -> PlaywrightError:
+    """The exact failure #13096's required `legal-e2e` context died on."""
+    return PlaywrightError(
+        f'Page.goto: net::ERR_NETWORK_CHANGED at {url}\n'
+        f'Call log:\n- navigating to "{url}"'
+    )
+
+
+def test_goto_spends_its_one_retry_on_a_transient_navigation_error() -> None:
+    """`net::ERR_NETWORK_CHANGED` is transient — the helper must retry it once.
+
+    Fails on the pre-fix helper: it caught only `TimeoutError`, so this error
+    escaped on the FIRST navigation and the call raised instead of returning the
+    served page (#13096).
+    """
+    page = _NavPage([_network_changed()])  # first navigation fails, second serves
+    assert _goto(page, "http://127.0.0.1:8847/privacy") == "<html>served</html>"
+    assert page.goto_calls == 2, (
+        "a transient navigation error must be retried exactly once — got "
+        f"{page.goto_calls} navigation(s), so the helper either gave up on the first "
+        "attempt (the #13096 red) or retried more than its contract allows"
+    )
+
+
+def test_goto_still_retries_a_status_mismatch() -> None:
+    """The pre-existing retry — "one retry on a mismatch" — survives untouched.
+
+    This pins the OTHER half of the helper: rewriting `_goto` for #13096 moved
+    the status check inside a loop, so without this a refactor could silently
+    drop the retry that #3962 added and no test would notice. Green on both the
+    pre-fix and the fixed helper — it is a regression guard for this change's
+    rewrite, not a non-vacuity proof, and it is labelled as such rather than
+    claimed as one.
+    """
+    page = _NavPage([503, 200])  # a transient 5xx, then the real page
+    assert _goto(page, "http://127.0.0.1:8847/privacy") == "<html>served</html>"
+    assert page.goto_calls == 2, f"a status mismatch must still be retried once — got {page.goto_calls}"
+
+
+def test_goto_reraises_a_persistent_navigation_error() -> None:
+    """A failure the retry does not clear is re-raised with its real reason.
+
+    Two properties, both load-bearing: the retry is BOUNDED at one (not an
+    unbounded loop over a genuinely dead origin), and the error is not swallowed
+    into a vague "produced no response". Fails on the pre-fix helper, which
+    navigated once and re-raised immediately.
+    """
+    page = _NavPage([_network_changed(), _network_changed()])  # dead on both attempts
+    with pytest.raises(PlaywrightError, match=r"net::ERR_NETWORK_CHANGED"):
+        _goto(page, "http://127.0.0.1:8847/privacy")
+    assert page.goto_calls == 2, (
+        f"exactly one retry — got {page.goto_calls} navigation(s) for a persistently "
+        "failing origin, so the bound is not one"
+    )
 
 
 def test_legal_pages_minimum_content(page: Page) -> None:
