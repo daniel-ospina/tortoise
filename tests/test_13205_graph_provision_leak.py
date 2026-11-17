@@ -708,6 +708,19 @@ class TestTheSharedDoubleDerivesItsCertificate:
             "breaks on `a >= b`, so `_org_graph_names` would refuse the purge "
             "while this double called it green")
 
+    def test_a_walk_that_omits_the_cursor_column_from_select_is_REFUSED(self):
+        """The mirror of production's `select`-must-carry-the-cursor precondition.
+
+        ⛔ Unpinned until now, and measurably so: deleting the `raise` reddened
+        NOTHING (291 tests across `test_13205` + `test_billing` + `test_10025`).
+        The call site IS protected, but through the TEST-LOCAL `_CP`'s own
+        asserts — so the shared double could lose this mirror and every suite
+        would stay green while the fake quietly disagreed with the store.
+        """
+        cp = self._cp([{"id": "g1", "namespace": "org_1"}])
+        with pytest.raises(ValueError, match="cursor column"):
+            cp.query_all("graphs", select=["namespace"], cursor="id")
+
     def test_an_EMPTY_page_is_the_end_of_the_walk_and_CERTIFIES(self):
         cp = self._cp([])
         rows, complete = cp.query_all(
