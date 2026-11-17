@@ -1209,7 +1209,26 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  served_from: tortoise/mcp_server.py:5864fd98a914f746
+  # ⛔ #13075 moved this handler (`a09a0b3840`, "the currency rule reads the position
+  # axis") and left `served_from` at the value #12726 had hand-refreshed, so
+  # `surface_manifest.py check --provenance-strict` has been red on `main` ITSELF since
+  # then — the same FAIL row measured on a pristine `origin/main` worktree (`55ec2c71b1`)
+  # as on this head, so it is `main`'s third red and not this diff's. It is the SECOND
+  # half of `a09a0b3840`'s fallout: the same commit added
+  # `tests/test_13034_currency_rule_reads_position.py` unregistered, which reds
+  # `manifest-integrity`, and this PR repairs that half above. `served_from` is
+  # `_code_digest` of the handler's CODE OBJECT, so an edit INSIDE `tortoise_query`
+  # re-stamps it: refreshed here to the value the tree DERIVES, which is what `check`
+  # compares against.
+  # A full `cut` is deliberately NOT run: it is owner-gated (`tools/surface_manifest.py`),
+  # it re-emits only `MANIFEST_HEADER` (so every per-row rationale comment in this file is
+  # lost), and it re-derives the observed-usage columns from a machine-local call log. No
+  # tool or SDK method is added, removed or renamed here (55 MCP tools / 94 public SDK
+  # methods, unchanged), so this is a fingerprint refresh, not a surface change.
+  # IDENTICAL TO #13000's `c1e3ff8500` (#12992), which carries the same one-cell refresh on
+  # its own branch: whichever lands second applies to an unchanged line, so the duplicate
+  # resolves as identical rather than as a competing value.
+  served_from: tortoise/mcp_server.py:59f8f7e5957d81d8
   served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1
