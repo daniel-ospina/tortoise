@@ -570,6 +570,26 @@ def _family(value: Any) -> str:
     return type(value).__name__
 
 
+def _family_signature(value: Any) -> Any:
+    """`_family` applied RECURSIVELY, so a bool inside a list is still a bool.
+
+    ⛔ `_family` alone answers only for the top-level value, so a collection was
+    compared as `list` vs `list` and its ELEMENTS' families were never checked:
+    `[True]` and `[1]` reached the value pass as two `list`s, and Python's own
+    `[True] == [1]` then called them equal — the module header's rule ("a type
+    family change — int vs str, bool vs int — is a DIFFERENCE") was silently not
+    applied inside a collection (`#13098` review P3). A false PASS is the worst
+    class this file can produce, so the family check is recursive now rather than
+    left to a sort-order accident.
+    """
+    family = _family(value)
+    if family == "list":
+        return (family, tuple(_family_signature(v) for v in value))
+    if family == "dict":
+        return (family, tuple(sorted((str(k), _family_signature(v)) for k, v in value.items())))
+    return family
+
+
 def _norm(value: Any) -> Any:
     """Normalize for VALUE comparison only — never for the family check."""
     if isinstance(value, Decimal):
@@ -582,7 +602,13 @@ def _norm(value: Any) -> Any:
 
 
 def _canon(row: Sequence[Any]) -> str:
-    return json.dumps([_norm(v) for v in row], sort_keys=True, default=str)
+    """A canonical TEXT form — for the fingerprint and for display, never equality.
+
+    ⛔ Goes through `_render_canonical` (not a bare `_norm` dump) so a `Decimal`
+    dict KEY — which `json.dumps` refuses — cannot take `diff()` down with a
+    `TypeError` after every comparison has already succeeded (`#13098` review P3).
+    """
+    return json.dumps([_render_canonical(v) for v in row], sort_keys=True, default=str)
 
 
 def _norm_row(row: Sequence[Any]) -> tuple:
@@ -611,14 +637,25 @@ def _render_canonical(value: Any) -> Any:
     Recursive, because one level was the whole defect.
     """
     value = _norm(value)
-    if value is None or isinstance(value, (bool, str)):
+    if value is None or isinstance(value, str):
         return value
+    if isinstance(value, bool):
+        # ⛔ INSIDE a collection a bool must render as its number, because `_norm`
+        # says `[True] == [1]` — the top-level `part()` gives bools their own rank
+        # on purpose (a bool and a number are different FAMILIES, reported first),
+        # and nothing does that for a bool nested in a list or map, so rendering it
+        # verbatim left `[True]` and `[1]` with different keys (`#13098` review P3).
+        return int(value)
     if isinstance(value, float):
         return int(value) if value.is_integer() else value
     if isinstance(value, (list, tuple)):
         return [_render_canonical(v) for v in value]
     if isinstance(value, dict):
-        return {k: _render_canonical(v) for k, v in value.items()}
+        # `str(k)`: `json.dumps` accepts only str/int/float/bool/None keys, and a
+        # `Decimal` key raised a TypeError out of `diff()` — which the outer
+        # exit-code boundary turns into `2` ("could not run") rather than the
+        # traceback it deserves to be (`#13098` review P3).
+        return {str(k): _render_canonical(v) for k, v in value.items()}
     return value if isinstance(value, int) else str(value)
 
 
@@ -697,7 +734,7 @@ def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
         for col_index in range(width):
             c_val = c_row[col_index] if col_index < len(c_row) else "<absent>"
             s_val = s_row[col_index] if col_index < len(s_row) else "<absent>"
-            c_fam, s_fam = _family(c_val), _family(s_val)
+            c_fam, s_fam = _family_signature(c_val), _family_signature(s_val)
             # null handling is THREE-WAY: null != '' != 0 != False != 'None'
             if c_fam != s_fam:
                 value_diffs.append({"kind": "family", "row": row_index,

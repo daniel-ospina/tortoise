@@ -409,6 +409,47 @@ def test_the_multiset_sort_key_agrees_with_the_equality_for_collections_too():
     assert [d["kind"] for d in different["differences"]] == ["value"]
 
 
+def test_a_type_family_inside_a_collection_is_still_a_difference():
+    """`bool` vs `int` nested in a list/map must redden — it is a FAMILY change.
+
+    ⛔ `_family` answered only for the TOP-LEVEL value, so two lists compared as
+    `list` vs `list` and Python's own `[True] == [1]` then called them equal: the
+    header's rule ("a type family change — int vs str, bool vs int — is a
+    DIFFERENCE") was silently not applied inside a collection, which is a false
+    PASS — the worst class this file can produce (`#13098` review P3).
+    """
+    candidate = harness.Candidate(name="families", cypher="", sql="",
+                                 columns=("id", "v"), ordered=False)
+    cols = ["id", "v"]
+    for cypher_val, sql_val in (([True], [1]), ({"k": True}, {"k": 1}), ([1], ["1"])):
+        result = harness.diff(candidate, [("a", cypher_val)], cols,
+                             [("a", sql_val)], cols, ["a"])
+        assert result["equal"] is False, (cypher_val, sql_val, result["differences"])
+        assert [d["kind"] for d in result["differences"]] == ["family"], result["differences"]
+    # …and a numeric spelling change inside a collection is NOT a difference
+    numeric = harness.diff(candidate, [("a", [1])], cols, [("a", [1.0])], cols, ["a"])
+    assert numeric["equal"] is True, numeric["differences"]
+
+
+def test_a_non_string_dict_key_does_not_take_the_diff_down():
+    """A `Decimal` map KEY must not raise after every comparison has succeeded.
+
+    `json.dumps` accepts only str/int/float/bool/None keys; a bare `_norm` dump
+    raised there — a `TypeError` out of `diff()` instead of a verdict (`#13098`
+    review P3). Reachability is nil today (psycopg2's `jsonb` and FalkorDB's maps
+    both yield str keys), which is exactly why it needs a pin rather than a reader.
+    """
+    from decimal import Decimal
+
+    candidate = harness.Candidate(name="keys", cypher="", sql="",
+                                 columns=("id", "v"), ordered=False)
+    cols = ["id", "v"]
+    row = ("a", {Decimal("1"): "x"})
+    result = harness.diff(candidate, [row], cols, [row], cols, ["a"])
+    assert result["equal"] is True, result["differences"]
+    assert result["fingerprint"], "the fingerprint is computed after the sort — it must survive too"
+
+
 def test_a_projection_that_drifts_on_both_sides_still_reddens_against_the_declaration():
     """`Candidate.columns` is a CONTRACT, not a comment (`#13098` review P3).
 
