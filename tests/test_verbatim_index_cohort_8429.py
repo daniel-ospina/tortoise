@@ -109,20 +109,31 @@ class _Result:
 
 
 class _CohortGraph:
-    """A graph double that answers the INDEX query and the SCAN separately.
+    """A graph double that answers the INDEX query, the PROBE and the SCAN apart.
 
-    One double for both legs, because the defect IS the difference between them
-    (the index cannot hold the row the scan can read).
+    THREE populations, because the #8429 decision has three inputs and the defect
+    is their DIFFERENCE: the index query (filtered \u2014 the answer the leg returns),
+    the k=1 probe (``LIMIT 1`` \u2014 the engine's raw cohort, asked only on the
+    zero-row path) and the scan (which reads both stored shapes). ``probe_rows``
+    defaults to ``index_rows``, i.e. "the engine yielded exactly what the read's
+    own predicate let through"; a caller that sets it can express the state the
+    probe exists for \u2014 a POPULATED cohort whose rows the predicate excluded.
     """
 
-    def __init__(self, index_rows, scan_rows):
+    def __init__(self, index_rows, scan_rows, probe_rows=None):
         self.index_rows = list(index_rows)
         self.scan_rows = list(scan_rows)
+        self.probe_rows = (list(index_rows) if probe_rows is None
+                           else list(probe_rows))
         self.queries: list[str] = []
 
     def query(self, cypher, params=None, timeout=None):
         self.queries.append(cypher)
-        return _Result(self.index_rows if "queryNodes" in cypher else self.scan_rows)
+        if "queryNodes" not in cypher:
+            return _Result(self.scan_rows)
+        if "LIMIT 1" in cypher:  # the cohort probe, never the answer
+            return _Result(self.probe_rows)
+        return _Result(self.index_rows)
 
 
 def _vec(n: int = 8) -> list[float]:
@@ -151,6 +162,47 @@ def test_a_zero_row_index_answer_falls_back_to_the_scan():
         "An index was expected and did not answer.")
     assert entry["reason"] == "ok"
     assert entry["count"] == 1
+
+
+def test_a_post_filter_empty_answer_does_not_scan_or_claim_the_gap():
+    """#8429 review F2, PINNED: a populated cohort whose rows the read's OWN
+    predicate excluded is NOT the cohort gap.
+
+    The index query carries the status/`documentKind` predicate (`LIMIT` counts
+    POST-filter rows on purpose), so it can return zero rows while the engine
+    holds a full cohort. Without the probe this state was indistinguishable from
+    the verbatim-node gap: the leg would have paid a FULL LABEL SCAN on every
+    such read and reported `scan_fallback` \u2014 "the index did not answer" \u2014 for
+    an index that answered and was then filtered, which is the exact cost
+    `#13108` removed, on the regime where it was measured.
+
+    Deleting the probe leaves every other case in this file green, which is why
+    this one exists.
+    """
+    reset_circuit_breakers()
+    # index (filtered) -> nothing survived; probe (unfiltered, k=1) -> the cohort
+    # is there; the scan would return a row if it were allowed to run.
+    graph = _CohortGraph(index_rows=[],
+                         scan_rows=[("would-only-come-from-a-scan", 0.5)],
+                         probe_rows=[("excluded-by-the-predicate",)])
+    trace: list[dict] = []
+
+    hits = run_vector_query(graph, _vec(), limit=5, is_embedded=False,
+                            leg_trace=trace)
+
+    assert hits == [], (
+        "the leg returned a row its index answer did not contain \u2014 the scan ran "
+        "on a cohort the probe says is POPULATED (#8429 review F2)")
+    assert not any("vec.euclideanDistance" in q for q in graph.queries), (
+        "a full label scan was paid on a filtered-to-empty index answer \u2014 the "
+        "exact cost #13108 removed (#8429 review F2)")
+    assert any("LIMIT 1" in q for q in graph.queries), (
+        "premise: the zero-row path asks the engine about its raw cohort")
+    entry = next(e for e in trace if e["leg"] == "vector")
+    assert entry["mechanism"] == MECHANISM_INDEX, (
+        "the leg blamed the index for a filter it applied itself: "
+        f"mechanism={entry['mechanism']!r} (#8429 review F2)")
+    assert entry["reason"] == "ok" and entry["count"] == 0
 
 
 def test_a_non_empty_index_answer_does_not_scan():

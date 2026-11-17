@@ -4184,12 +4184,20 @@ def run_vector_query(
                           "'embedding', $limit, vecf32($query_vec)) YIELD node "
                           f"RETURN node.{id_field} LIMIT 1"),
                 }
+                # \u26d4 BOUNDED BY WHAT IS LEFT OF THE READ (#11691 / round-2 review):
+                # this probe runs AFTER the index attempt, so a full `timeout_ms`
+                # here lets a zero-row answer spend the leg's whole budget and
+                # then another one \u2014 and the collector discards rows past its
+                # own deadline, so the recovery this path exists for is lost
+                # exactly when the index is slow. Same idiom as the fall-through
+                # scan below.
                 for sig in (preferred, fallback):
                     try:
                         return bool(graph.query(
                             probes[sig],
                             params={"query_vec": query_vec, "limit": 1},
-                            timeout=timeout_ms,
+                            timeout=remaining_read_ms(_leg_started_at,
+                                                      timeout_ms),
                         ).result_set)
                     except Exception:  # noqa: BLE001, RUF100 — wrong signature, or no index
                         continue
