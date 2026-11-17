@@ -4,9 +4,9 @@
   "rows": [
     {
       "door": "sdk",
-      "org": "a129438cae6da453",
-      "graph_id": "g_12943a8cae6da453",
-      "cache_graph_canonical": "org_a129438cae6da453_g_12943a8cae6da453",
+      "org": "a12943b04b82bfc5",
+      "graph_id": "g_12943ab04b82bfc5",
+      "cache_graph_canonical": "org_a12943b04b82bfc5_g_12943ab04b82bfc5",
       "record": {
         "object": 1,
         "subject": 0,
@@ -26,13 +26,13 @@
         "__absent__": 1
       },
       "outcome": {
-        "cache_target": "org_a129438cae6da453_g_12943a8cae6da453"
+        "cache_target": "org_a12943b04b82bfc5_g_12943ab04b82bfc5"
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_a129438cae6da453_g_12943a8cae6da453": 1
+        "server://127.0.0.1:16403|org_a12943b04b82bfc5_g_12943ab04b82bfc5": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -42,13 +42,55 @@
         "uptime"
       ],
       "reached_canonical": true,
-      "reached_org_default": false
+      "reached_org_default": false,
+      "reconcile": {
+        "canonical_graph": "org_a12943b04b82bfc5_g_12943ab04b82bfc5",
+        "actual_graph": "org_a12943b04b82bfc5_g_12943ab04b82bfc5",
+        "canonical": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 0,
+          "divergent_keys": [],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {},
+          "graph_only_total": 0,
+          "missing_in_cache": 0,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "clean",
+          "exit": 0,
+          "stderr_tail": "2943b04b82bfc5_g_12943ab04b82bfc5 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+        },
+        "actual": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 0,
+          "divergent_keys": [],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {},
+          "graph_only_total": 0,
+          "missing_in_cache": 0,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "clean",
+          "exit": 0,
+          "stderr_tail": "2943b04b82bfc5_g_12943ab04b82bfc5 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+        }
+      }
     },
     {
       "door": "data_sdk",
-      "org": "b129438cae6da453",
-      "graph_id": "g_12943b8cae6da453",
-      "cache_graph_canonical": "org_b129438cae6da453_g_12943b8cae6da453",
+      "org": "b12943b04b82bfc5",
+      "graph_id": "g_12943bb04b82bfc5",
+      "cache_graph_canonical": "org_b12943b04b82bfc5_g_12943bb04b82bfc5",
       "record": {
         "object": 1,
         "subject": 0,
@@ -68,13 +110,13 @@
         "__absent__": 1
       },
       "outcome": {
-        "cache_target": "org_b129438cae6da453_g_12943b8cae6da453"
+        "cache_target": "org_b12943b04b82bfc5_g_12943bb04b82bfc5"
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_b129438cae6da453_g_12943b8cae6da453": 1
+        "server://127.0.0.1:16403|org_b12943b04b82bfc5_g_12943bb04b82bfc5": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -83,13 +125,55 @@
         "uptime"
       ],
       "reached_canonical": true,
-      "reached_org_default": false
+      "reached_org_default": false,
+      "reconcile": {
+        "canonical_graph": "org_b12943b04b82bfc5_g_12943bb04b82bfc5",
+        "actual_graph": "org_b12943b04b82bfc5_g_12943bb04b82bfc5",
+        "canonical": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 0,
+          "divergent_keys": [],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {},
+          "graph_only_total": 0,
+          "missing_in_cache": 0,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "clean",
+          "exit": 0,
+          "stderr_tail": "2943b04b82bfc5_g_12943bb04b82bfc5 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+        },
+        "actual": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 0,
+          "divergent_keys": [],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {},
+          "graph_only_total": 0,
+          "missing_in_cache": 0,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "clean",
+          "exit": 0,
+          "stderr_tail": "2943b04b82bfc5_g_12943bb04b82bfc5 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+        }
+      }
     },
     {
       "door": "data_sdk_orgwide",
-      "org": "c129438cae6da453",
-      "graph_id": "g_12943c8cae6da453",
-      "cache_graph_canonical": "org_c129438cae6da453_g_12943c8cae6da453",
+      "org": "c12943b04b82bfc5",
+      "graph_id": "g_12943cb04b82bfc5",
+      "cache_graph_canonical": "org_c12943b04b82bfc5_g_12943cb04b82bfc5",
       "record": {
         "object": 1,
         "subject": 0,
@@ -109,13 +193,13 @@
         "Source": 0
       },
       "outcome": {
-        "cache_target": "org_c129438cae6da453"
+        "cache_target": "org_c12943b04b82bfc5"
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_c129438cae6da453": 1
+        "server://127.0.0.1:16403|org_c12943b04b82bfc5": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -124,13 +208,57 @@
         "uptime"
       ],
       "reached_canonical": false,
-      "reached_org_default": true
+      "reached_org_default": true,
+      "reconcile": {
+        "canonical_graph": "org_c12943b04b82bfc5_g_12943cb04b82bfc5",
+        "actual_graph": "org_c12943b04b82bfc5",
+        "canonical": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 1,
+          "divergent_keys": [
+            "Object:1a1eb59681c-db69258ea9ab"
+          ],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {},
+          "graph_only_total": 0,
+          "missing_in_cache": 1,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "divergent",
+          "exit": 3,
+          "stderr_tail": "]) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\nrecord vs cache: 1 divergent of 1 checked (missing_in_cache=1, extra_in_cache=0, field_mismatches=0) verdict=divergent\n"
+        },
+        "actual": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 0,
+          "divergent_keys": [],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {},
+          "graph_only_total": 0,
+          "missing_in_cache": 0,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "clean",
+          "exit": 0,
+          "stderr_tail": "or search on org_c12943b04b82bfc5 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+        }
+      }
     },
     {
       "door": "rest",
-      "org": "d129438cae6da453",
-      "graph_id": "g_12943d8cae6da453",
-      "cache_graph_canonical": "org_d129438cae6da453_g_12943d8cae6da453",
+      "org": "d12943b04b82bfc5",
+      "graph_id": "g_12943db04b82bfc5",
+      "cache_graph_canonical": "org_d12943b04b82bfc5_g_12943db04b82bfc5",
       "record": {
         "object": 1,
         "subject": 0,
@@ -151,13 +279,13 @@
       },
       "outcome": {
         "status": 200,
-        "body": "{\"canonical_name\":\"door rest 8cae6da453\",\"createdAt\":\"2026-11-17T21:02:58.827088+00:00\",\"id\":\"1a1eb51f30a-3c41fcc81b5a\",\"name\":\"door-rest-8cae6da453\",\"objectKind\":\"goal\",\"title\":\"\"}"
+        "body": "{\"canonical_name\":\"door rest b04b82bfc5\",\"createdAt\":\"2026-11-17T21:11:09.920245+00:00\",\"embedding\":[-0.02795949950814247,-0.048445045948028564,0.041610002517700195,0.009605489671230316,-0.05277659371"
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_d129438cae6da453_g_12943d8cae6da453": 1
+        "server://127.0.0.1:16403|org_d12943b04b82bfc5_g_12943db04b82bfc5": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -167,13 +295,59 @@
         "uptime"
       ],
       "reached_canonical": true,
-      "reached_org_default": false
+      "reached_org_default": false,
+      "reconcile": {
+        "canonical_graph": "org_d12943b04b82bfc5_g_12943db04b82bfc5",
+        "actual_graph": "org_d12943b04b82bfc5_g_12943db04b82bfc5",
+        "canonical": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 0,
+          "divergent_keys": [],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {
+            "embedding": 1
+          },
+          "graph_only_total": 1,
+          "missing_in_cache": 0,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "clean",
+          "exit": 0,
+          "stderr_tail": "2943b04b82bfc5_g_12943db04b82bfc5 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+        },
+        "actual": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 0,
+          "divergent_keys": [],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {
+            "embedding": 1
+          },
+          "graph_only_total": 1,
+          "missing_in_cache": 0,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "clean",
+          "exit": 0,
+          "stderr_tail": "2943b04b82bfc5_g_12943db04b82bfc5 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+        }
+      }
     },
     {
       "door": "mcp",
-      "org": "e129438cae6da453",
-      "graph_id": "g_12943e8cae6da453",
-      "cache_graph_canonical": "org_e129438cae6da453_g_12943e8cae6da453",
+      "org": "e12943b04b82bfc5",
+      "graph_id": "g_12943eb04b82bfc5",
+      "cache_graph_canonical": "org_e12943b04b82bfc5_g_12943eb04b82bfc5",
       "record": {
         "object": 1,
         "subject": 0,
@@ -193,14 +367,13 @@
         "__absent__": 1
       },
       "outcome": {
-        "cache_target": "tortoise_test_matrix",
-        "tool_returned": "{'node': {'canonical_name': 'door mcp 8cae6da453', 'createdAt': '2026-11-17T21:03:00.253273+00:00', 'id': '1a1eb51f89d-14c583b8a8b7', 'name': 'door-mcp-8cae6da4"
+        "tool_returned": "{'node': {'canonical_name': 'door mcp b04b82bfc5', 'createdAt': '2026-11-17T21:11:11.745332+00:00', 'embedding': [-0.03779774159193039, -0.07126916944980621, 0."
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_e129438cae6da453_g_12943e8cae6da453": 1
+        "server://127.0.0.1:16403|org_e12943b04b82bfc5_g_12943eb04b82bfc5": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -209,13 +382,59 @@
         "uptime"
       ],
       "reached_canonical": true,
-      "reached_org_default": false
+      "reached_org_default": false,
+      "reconcile": {
+        "canonical_graph": "org_e12943b04b82bfc5_g_12943eb04b82bfc5",
+        "actual_graph": "org_e12943b04b82bfc5_g_12943eb04b82bfc5",
+        "canonical": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 0,
+          "divergent_keys": [],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {
+            "embedding": 1
+          },
+          "graph_only_total": 1,
+          "missing_in_cache": 0,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "clean",
+          "exit": 0,
+          "stderr_tail": "2943b04b82bfc5_g_12943eb04b82bfc5 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+        },
+        "actual": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 0,
+          "divergent_keys": [],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {
+            "embedding": 1
+          },
+          "graph_only_total": 1,
+          "missing_in_cache": 0,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "clean",
+          "exit": 0,
+          "stderr_tail": "2943b04b82bfc5_g_12943eb04b82bfc5 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+        }
+      }
     },
     {
       "door": "script_orglevel",
-      "org": "f129438cae6da453",
-      "graph_id": "g_12943f8cae6da453",
-      "cache_graph_canonical": "org_f129438cae6da453_g_12943f8cae6da453",
+      "org": "f12943b04b82bfc5",
+      "graph_id": "g_12943fb04b82bfc5",
+      "cache_graph_canonical": "org_f12943b04b82bfc5_g_12943fb04b82bfc5",
       "record": {
         "object": 1,
         "subject": 0,
@@ -235,13 +454,13 @@
         "Source": 0
       },
       "outcome": {
-        "cache_target": "org_f129438cae6da453"
+        "cache_target": "org_f12943b04b82bfc5"
       },
       "error": null,
       "cache_leg_failures": {},
       "cache_leg_failures_delta": {},
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_f129438cae6da453": 1
+        "server://127.0.0.1:16403|org_f12943b04b82bfc5": 1
       },
       "metrics_keys_moved": [
         "cache_write_targets",
@@ -250,13 +469,59 @@
         "uptime"
       ],
       "reached_canonical": false,
-      "reached_org_default": true
+      "reached_org_default": true,
+      "reconcile": {
+        "canonical_graph": "org_f12943b04b82bfc5_g_12943fb04b82bfc5",
+        "actual_graph": "org_f12943b04b82bfc5",
+        "canonical": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 1,
+          "divergent_keys": [
+            "Object:1a1eb597e91-38c990e30559"
+          ],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {},
+          "graph_only_total": 0,
+          "missing_in_cache": 1,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "divergent",
+          "exit": 3,
+          "stderr_tail": "]) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\nrecord vs cache: 1 divergent of 1 checked (missing_in_cache=1, extra_in_cache=0, field_mismatches=0) verdict=divergent\n"
+        },
+        "actual": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 0,
+          "divergent_keys": [],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {
+            "embedding": 1
+          },
+          "graph_only_total": 1,
+          "missing_in_cache": 0,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "clean",
+          "exit": 0,
+          "stderr_tail": "or search on org_f12943b04b82bfc5 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+        }
+      }
     },
     {
       "door": "misroute",
-      "org": "h129438cae6da453",
-      "graph_id": "g_12943h8cae6da453",
-      "cache_graph_canonical": "org_h129438cae6da453_g_12943h8cae6da453",
+      "org": "h12943b04b82bfc5",
+      "graph_id": "g_12943hb04b82bfc5",
+      "cache_graph_canonical": "org_h12943b04b82bfc5_g_12943hb04b82bfc5",
       "record": {
         "object": 1,
         "subject": 0,
@@ -272,8 +537,8 @@
         "__absent__": 1
       },
       "outcome": {
-        "cache_target": "org_h129438cae6da453_g_12943other6a56e93e",
-        "tenant_graph_id": "g_12943h8cae6da453"
+        "cache_target": "org_h12943b04b82bfc5_g_12943otherb2ff6981",
+        "tenant_graph_id": "g_12943hb04b82bfc5"
       },
       "error": null,
       "cache_leg_failures": {
@@ -283,7 +548,7 @@
         "tenant_graph_mismatch": 1
       },
       "cache_write_target_delta": {
-        "server://127.0.0.1:16403|org_h129438cae6da453_g_12943other6a56e93e": 1
+        "server://127.0.0.1:16403|org_h12943b04b82bfc5_g_12943otherb2ff6981": 1
       },
       "metrics_keys_moved": [
         "cache_leg_failures",
@@ -293,7 +558,53 @@
         "uptime"
       ],
       "reached_canonical": false,
-      "reached_org_default": false
+      "reached_org_default": false,
+      "reconcile": {
+        "canonical_graph": "org_h12943b04b82bfc5_g_12943hb04b82bfc5",
+        "actual_graph": "org_h12943b04b82bfc5_g_12943otherb2ff6981",
+        "canonical": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 1,
+          "divergent_keys": [
+            "Object:1a1eb5984c0-cb25b1140989"
+          ],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {},
+          "graph_only_total": 0,
+          "missing_in_cache": 1,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "divergent",
+          "exit": 3,
+          "stderr_tail": "]) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\nrecord vs cache: 1 divergent of 1 checked (missing_in_cache=1, extra_in_cache=0, field_mismatches=0) verdict=divergent\n"
+        },
+        "actual": {
+          "cache_side": "cache",
+          "checked": 1,
+          "declaration_coverage": "complete",
+          "declaration_source": null,
+          "divergent": 0,
+          "divergent_keys": [],
+          "extra_in_cache": 0,
+          "field_mismatches": 0,
+          "form_normalized": 0,
+          "graph_only": {
+            "embedding": 1
+          },
+          "graph_only_total": 1,
+          "missing_in_cache": 0,
+          "not_hot": 0,
+          "truth_side": "record",
+          "verdict": "clean",
+          "exit": 0,
+          "stderr_tail": "43b04b82bfc5_g_12943otherb2ff6981 is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) \u2014 those reads silently full-scan. Whether those labels get an index is \u00a714.3 V3 of STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index lives. Indexing them is NOT done here.\n"
+        }
+      }
     }
   ]
 }

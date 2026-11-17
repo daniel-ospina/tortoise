@@ -207,6 +207,50 @@ def _total(counts: dict[str, int]) -> int:
     return sum(counts.values())
 
 
+def _reconcile(org: str, graph_id: str, canonical: str,
+               actual: str | None) -> dict:
+    """The product's OWN instrument, on both candidate cache graphs.
+
+    Run once against the tenant's canonical name (what an operator derives from
+    the record) and once against the graph the write actually landed in. Both
+    verdicts are needed: the first is the confusion this issue is about, the
+    second is the convergence proof. `--cache-graph` has no derived default by
+    design (`tortoise/__main__.py`), so naming both is the operator's job — and
+    the point is that the SECOND one is the name nothing told them.
+    """
+    import subprocess
+
+    def _run(cache_graph: str) -> dict:
+        proc = subprocess.run(
+            [sys.executable, "-m", "tortoise", "record-reconcile",
+             "--db", os.environ["TORTOISE_DB_URI"],
+             "--record-dsn", os.environ["TORTOISE_RECORD_DSN"],
+             "--org", org, "--graph", graph_id,
+             "--cache-graph", cache_graph, "--json"],
+            capture_output=True, text=True, env=dict(os.environ), check=False)
+        try:
+            payload = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            payload = {"unparseable_stdout": (proc.stdout or "")[-400:]}
+        payload["exit"] = proc.returncode
+        payload["stderr_tail"] = (proc.stderr or "")[-300:]
+        return payload
+
+    return {"canonical_graph": canonical,
+            "actual_graph": actual,
+            "canonical": _run(canonical),
+            "actual": _run(actual) if actual else None}
+
+
+def _verdict(payload: dict | None) -> dict:
+    if not payload:
+        return {"verdict": "not-run"}
+    return {k: payload.get(k) for k in
+            ("verdict", "checked", "divergent", "missing_in_cache",
+             "extra_in_cache", "field_mismatches", "exit")
+            if k in payload}
+
+
 # ── the doors ────────────────────────────────────────────────────────────────
 
 
@@ -327,11 +371,6 @@ def _write_mcp(org: str, graph_id: str, ns: str, name: str) -> dict:
     from tortoise import mcp_auth, mcp_server
     from tortoise.record_writer import use_record_tenant
 
-    sdk = mcp_auth._get_base_sdk()
-    try:
-        target = sdk._get_proj().graph_name
-    finally:
-        sdk.close()
     previous = (mcp_server._sdk, getattr(mcp_server, "sdk", None))
     mcp_server._sdk = None
     mcp_server.sdk = None
@@ -350,7 +389,7 @@ def _write_mcp(org: str, graph_id: str, ns: str, name: str) -> dict:
                  mcp_auth._current_graph_namespace), tokens, strict=True))):
             var.reset(token)
         mcp_server._sdk, mcp_server.sdk = previous
-    return {"cache_target": target, "tool_returned": str(out)[:160]}
+    return {"tool_returned": str(out)[:160]}
 
 
 def _write_script_orglevel(org: str, graph_id: str, ns: str, name: str) -> dict:
@@ -487,6 +526,19 @@ def main(argv: list[str]) -> int:
               f"  writes_in_record={sum(record.values())}")
         if error:
             print(f"  WRITE RAISED      {error.splitlines()[-1]}")
+        if "--reconcile" in argv:
+            # The ACTUAL graph is read from the target registry, not from the
+            # door's own report: the registry is what the fold itself recorded,
+            # so it is the door-independent answer (REST holds no SDK handle at
+            # all, and the MCP door's pre-call handle is a different SDK).
+            actual = None
+            if len(target_delta) == 1:
+                actual = next(iter(target_delta)).split("|", 1)[1]
+            row["reconcile"] = _reconcile(org, graph_id, ns, actual)
+            print("  reconcile (tenant's canonical graph): "
+                  f"{json.dumps(_verdict(row['reconcile']['canonical']))}")
+            print("  reconcile (the graph the write used): "
+                  f"{json.dumps(_verdict(row['reconcile']['actual']))}")
     out = Path(os.environ.get(
         "SUMMARY_OUT",
         str(Path(__file__).with_name("last-run-door-matrix.json"))))
