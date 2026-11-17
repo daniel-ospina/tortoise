@@ -436,14 +436,17 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     # sentence just as `measurement.` does), and the SUBJECT is read and COMPARED, not merely
     # skipped — a skipped statement is an unchecked number, which is a false PASS on a figure this
     # same test derives two blocks above.
-    # OUT OF REACH, by construction and disclosed here (#13052 review at 71afedb3 and 8b7481e2):
-    # a paraphrase that never says `population is`; a figure stated only in a FOLLOWING sentence;
-    # a reworded sentence whose new wording drops the number from that clause; and a statement
-    # about a DIFFERENT population whose subject word is not one of `served`/`advertised`/`live`/
-    # `live surface`/`sdk`/`retired` — that one is read as the RETIRED count, so a correct figure
-    # for it reds and a wrong one can pass. The durable closure for any of those is to stop
-    # restating the count in free prose — not to widen this matcher again; a reworded statement
-    # must update this pin in the same change.
+    # OUT OF REACH, by construction and disclosed here (#13052 review at 71afedb3, 8b7481e2 and
+    # cc273bc3): a paraphrase that never says `population is`; a figure stated only in a FOLLOWING
+    # sentence; a reworded sentence whose new wording drops the number from that clause; a statement
+    # with TWO OR MORE words between `is` and the number (`The population is currently at 61.` —
+    # the quantifier below tolerates exactly one, so that sentence is skipped WHOLE, which is the
+    # unchecked-number class this block exists to name); and a statement about a DIFFERENT
+    # population whose subject word is not one of `served`/`advertised`/`live`/`live surface`/`sdk`/
+    # `retired` — that one is read as the RETIRED count, so a correct figure for it reds and a wrong
+    # one can pass. The durable closure for any of those is to stop restating the count in free
+    # prose — not to widen this matcher again; a reworded statement must update this pin in the same
+    # change.
     clause_break = re.compile(r"[.!?;:][\"')\]]*\s|\s\u2014\s")
     #: subject word -> the count the manifest derives for THAT population. ⛔ LONGEST FORM FIRST and
     #: both spellings listed: `"the live surface".endswith("live")` is FALSE (the window ends in
