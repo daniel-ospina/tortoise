@@ -1503,25 +1503,44 @@ def test_sc4_deprecation_markers_present():
         assert "index_sources_from_directory" in doc, \
             (f"{method_name} marker must name the LIVE replacement "
              "(index_directory is itself retired)")
-        # ⛔ The negative arm is scoped to the DEPRECATED PARAGRAPH(S) — not the whole
-        # docstring, and not a single physical line (rounds 1-4 of #13085's review).
-        # Banning the NAME outright reds on honest history: `tortoise/sdk.py`'s own
-        # `_index_process_unit` says "``index_file``/``index_directory`` (both DELETED
-        # by #4282 …)", and `index_sources_from_directory` says it "Absorbs
-        # `index_directory`". Reading only the line carrying DEPRECATED is too narrow
-        # both ways — the directives WRAP (`sdk.py:41302-41303`, `:55250-55251`), so an
-        # offer can sit BELOW the token, and the mirror shape puts it ABOVE it. The
-        # paragraph is therefore SPLIT FIRST and tested whole, so the arm has no
-        # direction and no line count to depend on.
-        # What must not survive is the DIRECTIVE that OFFERS the retired name; a
-        # paragraph may record what was absorbed. Residual: the arm keys on the word
-        # DEPRECATED, so a paragraph that merely MENTIONS it while recording history
-        # also reds — keep such history in a paragraph that avoids the word.
+        # ⛔ The negative arm runs TWICE, and the second run is what closes the
+        # cross-paragraph escape (round 5 of #13085's review).
+        #
+        # The paragraph-scoped arm below is the one with the PRECISE message: it reads
+        # the DEPRECATED paragraph WHOLE, so it is blind neither to a directive that
+        # WRAPS across physical lines (`sdk.py:41302-41303`, `:55250-55251`) nor to an
+        # offer placed above or below the token.
+        #
+        # But a paragraph-scoped arm FAILS OPEN when the offer arrives in a SEPARATE
+        # paragraph — measured: `DEPRECATED — see the note below (epic #900).` in one
+        # paragraph plus `Use ``index_directory`` if the container is unavailable.` in
+        # the next stays GREEN. That is the very defect this arm exists to catch, so
+        # the blanket ban below is not redundant belt-and-braces — it is the arm that
+        # catches it.
+        #
+        # The blanket ban is cheap HERE because it is measured, not assumed: at this
+        # head both in-scope docstrings carry ZERO occurrences of `index_directory`
+        # (`ingest_corpus` and `_index_sessions` are legacy surfaces that have nothing
+        # to record about what absorbed their old pointer — the live replacement is
+        # named in the same breath). If one later needs to RECORD the absorbed name,
+        # that red is intentional and instructive: this test's subject is a marker that
+        # OFFERS a live replacement, so such history belongs on the docstring of the
+        # method that absorbs it, not on these two.
+        #
+        # Residual, one-sided on purpose: the paragraph arm keys on the word DEPRECATED,
+        # so a paragraph that merely MENTIONS it while recording history also reds —
+        # keep such history out of these two docstrings (the blanket ban says so).
         offending = [p.strip() for p in re.split(r"\n\s*\n", doc)
                      if "DEPRECATED" in p and "index_directory" in p]
         assert not offending, (
             f"{method_name}'s DEPRECATED paragraph offers the retired index_directory: "
             f"{offending!r}")
+        # ...and the blanket ban catches the offer that arrives in a SEPARATE paragraph,
+        # which the scoped arm above provably misses (see the block comment).
+        assert "index_directory" not in doc, (
+            f"{method_name} names the retired ``index_directory`` anywhere in its "
+            "docstring — the live replacement is index_sources_from_directory, and "
+            "that is the only name this marker may offer")
 
     # the retired PUBLIC name is gone, and its frozen private path is still served
     assert not hasattr(TortoiseSDK, "index_sessions"), \
