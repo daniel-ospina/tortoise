@@ -511,6 +511,28 @@ def test_a_nested_lane_inside_a_replay_still_embeds(cold_embedder):
     )
 
 
+def test_a_projection_fault_reads_as_replay(monkeypatch):
+    """The fail-safe direction is REPLAY, so a fault can never DROP a vector.
+
+    `_in_replay_scope()` documents `except Exception: return True` as
+    load-bearing: an unreadable window is treated as replay, so the failure
+    direction is *embed anyway*, never *drop a vector*. Until this row existed
+    nothing exercised it — flipping the handler to `return False` reddened no
+    test (measured by a fresh-context reviewer), which left the documented
+    fail-safe free to be "tidied" into the direction it exists to forbid.
+    """
+    import tortoise.projection as projection
+
+    def _boom() -> bool:
+        raise RuntimeError("projection fault")
+
+    monkeypatch.setattr(projection, "replay_window_open", _boom)
+    assert embeddings._in_replay_scope() is True, (
+        "a raising replay-window read was treated as LIVE — the bound would then "
+        "engage inside an unreadable replay and drop a rebuild's vector"
+    )
+
+
 def test_the_cold_decline_is_logged_once_per_process_and_rearmed(cold_embedder, caplog):
     """The LOG half of the decline: ONE line, naming the budget and the repair.
 
@@ -635,16 +657,37 @@ def test_a_designed_absence_answers_immediately(monkeypatch):
     A plain `uv sync` has no `embeddings` extra, so the model can never load
     (`not_installed`). Waiting or retrying cannot help, so the answer must be
     immediate or the bound taxes every write on the documented default install.
+
+    ⛔ THE COOLDOWN IS DELIBERATELY EXPIRED (measured, twice, by a fresh-context
+    reviewer): with `_last_failed_at` set to *now*, the COOLDOWN branch answers
+    and this row stays green with the `not_installed` arm deleted — it would pin
+    `#399`'s negative cache, not the designed absence, and the arm could rot
+    un-noticed. Past the cooldown only the designed-absence arm can answer
+    without waiting, and `_warm_up_started` is asserted FALSE so the row also
+    proves the absence KICKS NO LOAD — the timestamp alone still passes on a
+    load that fails fast and is answered by the loop's cooldown re-check.
     """
     monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
     EmbeddingModel._reset()
     try:
         EmbeddingModel._last_failure_kind = "not_installed"
-        EmbeddingModel._last_failed_at = time.monotonic()
+        EmbeddingModel._last_failed_at = (
+            time.monotonic() - EmbeddingModel._FAIL_COOLDOWN_S - 1)
         t0 = time.perf_counter()
         assert EmbeddingModel.await_write_ready(5.0) is False
-        assert time.perf_counter() - t0 < 0.05
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 0.05, (
+            f"a designed absence waited {elapsed:.2f}s — the `not_installed` arm "
+            f"must answer BEFORE the budget and before any load is kicked"
+        )
+        assert EmbeddingModel._warm_up_started is False, (
+            "a designed absence KICKED a load attempt — waiting or retrying can "
+            "never help a keyword-only install, so it must not pay for one"
+        )
     finally:
+        t = EmbeddingModel._warm_up_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=60)
         EmbeddingModel._reset()
 
 
