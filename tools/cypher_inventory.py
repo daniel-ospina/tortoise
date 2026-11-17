@@ -168,10 +168,29 @@ WRITE_VERB = re.compile(
     r"^\s*(?:CREATE|MERGE|SET|DELETE|DETACH|REMOVE|DROP)\b",
     re.IGNORECASE | re.MULTILINE,
 )
-#: A SET that is part of `MATCH … SET` counts; the regex above is anchored to a
-#: line start, and statements are multi-line, so an inline `SET n.x = 1` needs
-#: this second arm.
-WRITE_INLINE = re.compile(r"\b(?:SET|REMOVE)\s+\w+\s*[.\[]|\bDETACH\s+DELETE\b|\bDELETE\s+\w", re.IGNORECASE)
+#: A write clause that is part of `MATCH … SET` counts; the regex above is
+#: anchored to a line start, and statements are multi-line, so an inline write
+#: needs this second arm.
+#:
+#: ⛔ EVERY Cypher write clause is listed, not only the dotted `SET n.x = 1` the
+#: first version handled. That version missed four shapes a real statement uses,
+#: and each miss turned a graph WRITE into a migration CANDIDATE — the one
+#: direction the verdict flips, so the headline number was inflated by exactly
+#: these (`#13098` review P2):
+#:   `SET n += $props` / `SET n = $props` / `SET n:Label`  → the target is
+#:       followed by an operator, not a `.`/`[`;
+#:   `SET {}` / `SET ???`                                → the SET target was
+#:       folded out of the literal, so nothing follows the keyword;
+#:   `MATCH … MERGE (a)-[:R]->(b)` / `MATCH … CREATE (…)` → the verb is inline,
+#:       never at a line start, so the `^`-anchored arm above cannot see it;
+#:   `MATCH … REMOVE {}`                                 → the same folded form.
+WRITE_INLINE = re.compile(
+    r"\bSET\s+(?:[\w`]+\s*(?:[.\[]|\+=|=|:)|[{\[]|\?\?\?)"
+    r"|\b(?:MERGE|CREATE)\s*\("
+    r"|\bDETACH\s+DELETE\b"
+    r"|\b(?:DELETE|REMOVE|DROP)\s+(?:\w|[{\[]|\?\?\?)",
+    re.IGNORECASE,
+)
 
 SHAPES = ("fulltext", "vector", "ddl", "traversal", "adjacency", "ep", "plain", "unresolved")
 

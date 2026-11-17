@@ -156,6 +156,56 @@ def test_a_postgres_statement_is_not_cypher():
     assert census.CYPHER_MARK.search("CREATE (n:Point {id:'x'})")
 
 
+@pytest.mark.parametrize(
+    "statement,shape",
+    [
+        # the write-clause shapes the first `WRITE_INLINE` arm could not see. Each
+        # left role=`read` on a statement that mutates the graph, so a `plain`
+        # one got verdict `candidate:SQL-shaped` — the one direction the verdict
+        # flips, and therefore an inflated headline candidate count
+        # (`#13098` review P2, measured on Appendix A's own output).
+        ("MATCH (n:Point {id:$id}) SET n += $props RETURN count(n)", "plain"),
+        ("MATCH (n:Point {id:$id}) SET n = $props RETURN count(n)", "plain"),
+        ("MATCH (n:Point {id:$id}) SET n:Object RETURN count(n)", "plain"),
+        ("MATCH (n:Point {id:$id}) SET n.version = 1 RETURN count(n)", "plain"),
+        # the SET target folded out of the literal: nothing follows the keyword
+        ("MATCH (n:Point {id:$id}) SET {} RETURN n.id", "plain"),
+        ("MATCH (n:Point {id:$id}) SET ??? RETURN count(n)", "plain"),
+        # the verb is inline, so the `^`-anchored `WRITE_VERB` arm cannot see it
+        ("MATCH (a:Point {id:$a}), (b:Point {id:$b}) MERGE (a)-[:CORR]->(b)", "adjacency"),
+        ("MATCH (s:Point {id:$sid}), (t) WHERE ID(t) = $tid CREATE (s)-[:CONTAINS]->(t)",
+         "adjacency"),
+        ("MATCH ({} {id:$id}) REMOVE {}.embedding", "plain"),
+    ],
+)
+def test_an_inline_write_clause_is_a_write_not_a_candidate(statement, shape):
+    """A statement carrying a write clause gets role `write`, never `candidate`.
+
+    Role is half the verdict (`VERDICTS[(shape, role)]`), so a write read as a
+    read is a migration candidate for a statement that mutates the graph — or, on
+    an adjacency shape, a `measure`. No test asserted `role` at all before this
+    one, which is why the defect was unguarded (`#13098` review P2).
+    """
+    got_shape, role = census.classify(statement)
+    assert got_shape == shape, f"premise: {statement!r} classifies by shape as {got_shape!r}"
+    assert role == "write", f"{statement!r} is a write clause, classified role={role!r}"
+    assert not census.VERDICTS[(shape, role)].startswith(("candidate", "measure"))
+
+
+def test_a_read_clause_is_still_a_read():
+    """The other direction: the fix must not make every statement a write.
+
+    A guard that fires on everything is as useless as one that fires on nothing,
+    and it would deflate the candidate count instead of inflating it.
+    """
+    for statement in (
+        "MATCH (n:Point {id:$id}) RETURN n.content",
+        "MATCH (n:Point) WHERE n.createdAt IS NULL RETURN count(n)",
+        "MATCH (m:Membership {user_id:$uid, role:'owner'}) RETURN m.role",
+    ):
+        assert census.classify(statement)[1] == "read", statement
+
+
 # --------------------------------------------------------------------------- #
 # the harness
 # --------------------------------------------------------------------------- #
