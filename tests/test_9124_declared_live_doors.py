@@ -4838,11 +4838,13 @@ def _modules_reaching_the_handle():
 #: out of the unproven bucket. MEASURED 2026-10-20 over 59 modules: 307 unresolved
 #: statements in the population — 226 in the unproven bucket, 40 in functions
 #: that already declare a lane (no bucket), 39 in a function that also holds a
-#: provable write, and the proven reads registered below — whose count lives in
-#: `_PROVEN_READS` itself and is deliberately NOT restated here. This sentence
-#: said "2 proven reads" while the set held five, then six: a count in prose next
-#: to the set it counts is the same staleness this comment warns about, so read
-#: the set. (The 307 / 226 / 40 / 39 figures are the 2026-10-20 reading above.)
+#: provable write, and the 2 proven reads that existed AT THAT READING. Those
+#: four terms sum to 307 and are that reading, not a live total. The live register
+#: is `_PROVEN_READS` below and its size is deliberately NOT restated here — read
+#: the set. This sentence once said "2 proven reads" while the set held five, then
+#: six: a count in prose next to the set it counts is the same staleness this
+#: comment warns about. (The 307 / 226 / 40 / 39 figures are the 2026-10-20
+#: reading above.)
 #:
 #: ⛔ THE KEY IS WHAT `enumerate_handle_surface` EMITS — scope-qualified, e.g.
 #: `("tortoise/sdk.py", "TortoiseSDK.delete_point")`, NOT `"delete_point"`. A
