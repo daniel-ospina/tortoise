@@ -89,9 +89,19 @@ def test_the_props_refusal_still_stands_after_the_column_arrives():
 
     This is the half of §17.5 that the ruling does NOT spend: the refusal is not
     relaxed, so a payload cannot smuggle an `embedding` into `props` now that a
-    column exists — `_split_properties` resolves the name to the COLUMN first
-    (`elif column in cols:` precedes `elif prop in refused_here`), which is what
-    lets the two rules coexist.
+    column exists.
+
+    ⛔ THE NAME IS RESOLVED TO NEITHER THE COLUMN NOR THE TAIL — it is DROPPED,
+    and by the arm this PR ADDS rather than by the refusal. The order at this
+    head is `GENERATED_COLUMNS` → `_BOOKKEEPING_COLUMNS` → **`DERIVED_COLUMNS`**
+    → `column in cols` → `refused_here` → tail, so the `DERIVED_COLUMNS` arm
+    fires first and `continue`s: a carried `embedding` never reaches the column,
+    which is what makes the column's only writer the record's own derivation
+    (the migration states the same rule, "a payload that NAMES `embedding` is
+    DROPPED"), and the sibling
+    `test_a_PAYLOAD_carried_object_embedding_is_refused` pins that half. The
+    `props` CHECK is the second lock on the same door — the first being this
+    projection — and the assertions below do not depend on which arm wins.
     """
     refused = rp.refused_props_names()
     assert "embedding" in refused["object"]

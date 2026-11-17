@@ -5880,9 +5880,17 @@ def mutations_for(
     is a stated gap rather than a property of this function.
 
     ``derived`` (#13220) — column values the RECORD computes that the JOURNAL
-    does not carry, merged over the node snapshot's payload before the ONE
-    split (:func:`_split_properties`) runs, so a derived column follows exactly
-    the same column/refusal/generated rules as a carried one. It is a PARAMETER
+    does not carry, bound into the column **after** the ONE split
+    (:func:`_split_properties`) has run — which is what lets it bypass the
+    `DERIVED_COLUMNS` refusal a CARRIED value meets (`_split_properties`
+    `continue`s on that arm, so a carried `object`/`subject` `embedding` is
+    DROPPED, not resolved to the column), and what keeps it out of the `props`
+    tail. Merging these values into the payload instead would send them through
+    that same refusal arm and the feature would write nothing at all. The two
+    arms the split DOES apply with identical semantics are re-checked on the
+    derived path below (`GENERATED_COLUMNS`, `_BOOKKEEPING_COLUMNS`), and the
+    merge is gated on `column in columns[node.table]` the same way. It is a
+    PARAMETER
     and not something this module computes, for two reasons that are both
     structural rather than stylistic:
 
@@ -7934,7 +7942,8 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
             plan.append(allocation_statement(
                 org_id=org_id, graph_id=graph_id, records=records))
         return plan
-    for index, record in enumerate(records):        # ⛔ THE CARRIED ORDINAL IS VALIDATED ONLY WHERE IT IS WRITTEN. It feeds
+    for index, record in enumerate(records):
+        # ⛔ THE CARRIED ORDINAL IS VALIDATED ONLY WHERE IT IS WRITTEN. It feeds
         # `_journal_row` and nothing else, so reading it on the `position=False`
         # arm refused a record-sourced batch over an ordinal the caller never
         # asked to write — a false refusal with nothing to repair, since no
