@@ -58,6 +58,7 @@ from typing import Any
 import httpx
 
 from tortoise import github_map
+from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
 from tortoise.live import (
     _terminal_excluded,  # #2901 canonical non-current predicate
     is_position_ended,
@@ -235,13 +236,9 @@ def _row_is_frozen(status, outdated) -> bool:
       directions (a reopen runs through the same fold), so the projection cannot
       move the row at all;
     * terminal on these terms but NOT latched by the fold (``status='outdated'``,
-      the legacy ``outdated=true`` flag) → the fold may still move the POSITION,
-      which cannot clear the word, so the answer stays "closed" for ever.
-
-    Either way a GitHub ``open`` can never be reconciled. The honest answer is
-    ``None`` — this module's "no opinion" — so `_project_issue` skips the
-    transition mint in both directions instead of minting `-reopened-N` without
-    bound against a row the projection refuses.
+      the legacy ``outdated=true`` flag) → the fold is dispatched ASYMMETRICALLY, and
+      that asymmetry is the reason this helper cannot answer for both terms at once:
+      see `_status_is_latched` and the reader below (``#13289`` round-4 finding 2).
 
     ⚠️ The SET is the shared ``live`` predicate's, whose vocabulary
     (``live.TERMINAL_EXCLUDED_STATUSES``) is deliberately WIDER than the fold's
@@ -251,8 +248,7 @@ def _row_is_frozen(status, outdated) -> bool:
     says so from the other
     side: the render-time probe *"adds `outdated` … which this fold does not"*).
     The wider set is correct HERE because the invariant this helper tests is "no
-    writer can clear it", not "the fold latches on it" — see the second bullet
-    above, which is exactly the case the narrower set would miss.
+    writer can clear it", not "the fold latches on it".
 
     ⚠️ It is the SHARED predicate, not a local re-spelling, and the POSITION axis
     is deliberately not passed: this helper answers only whether the LIFECYCLE
@@ -260,6 +256,33 @@ def _row_is_frozen(status, outdated) -> bool:
     read separately below.
     """
     return is_terminal_status(status, outdated)
+
+
+def _status_is_latched(status) -> bool:
+    """True when ``status`` is a word ``_fold_object_stage`` LATCHES on.
+
+    ``commit_ops.OBJECT_TERMINAL_STATUSES`` — the set the fold refuses on, read
+    BEFORE any position test (``entities.py:6219``) — is NARROWER than the
+    reader's vocabulary: it has no ``outdated`` member. That single missing word
+    is the whole difference, and it is not cosmetic, because the two folds that
+    consume these transitions are dispatched under DIFFERENT rules
+    (``#13289`` round-4 finding 2, measured):
+
+    * the CLOSE fold resolves its target through ``live_name_holder_ids``, which
+      applies the CURRENCY predicate — and ``outdated`` is in
+      ``live.TERMINAL_EXCLUDED_STATUSES``/the ``outdated`` flag conjunct, so such
+      a row has NO live holder and the fold is never dispatched. Nothing can
+      move it, so any state this read answers about it re-fires forever.
+    * the REOPEN fold takes ``_reopen_targets_closed`` (``entities.py:6149-6158``),
+      which bypasses the live-holder requirement when there is exactly one
+      registered incarnation — so for that direction the fold IS dispatched, and
+      it APPLIES, because the latch is this narrower set.
+
+    Answering ``None`` for both would therefore drop a reopen the projection
+    would have applied; answering ``"closed"`` for both loops the close. The
+    reader answers each term by what its own direction can actually reach.
+    """
+    return (status or "") in OBJECT_TERMINAL_STATUSES
 
 
 def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
@@ -1215,20 +1238,24 @@ class GitHubIndexer:
         # row as "closed" instead is NOT the fix: the word is permanent, so it
         # loops in the other direction (below).
         # ⛔ FIRST: a row whose answer can never move gets NO OPINION, never the
-        # other state (#13289 F1). The two LIFECYCLE terms are permanent — see
-        # `_row_is_frozen` — so a GitHub `open` could never be reconciled against
-        # them: `issue_to_event` mints `-reopened`, the projection refuses (or
-        # writes position props that cannot clear the word), the next poll reads
-        # "closed" again, and `_next_transition_id` mints `-reopened-2`,
-        # `-reopened-3`, … — one Event + one journal record per poll, without
-        # bound. Measured through the public door
-        # `update_knowledge(id, status="archived")` (stores `deprecated`) on an
+        # other state (#13289 F1). A LATCHED word is permanent — see
+        # `_status_is_latched` — and `_fold_object_stage` refuses on it BEFORE any
+        # position test, in BOTH directions, so a GitHub `open` could never be
+        # reconciled against it: `issue_to_event` mints `-reopened`, the projection
+        # refuses, the next poll reads the same word again, and
+        # `_next_transition_id` mints `-reopened-2`, `-reopened-3`, … — one Event +
+        # one journal record per poll, without bound. Measured through the public
+        # door `update_knowledge(id, status="archived")` (stores `deprecated`) on an
         # issue that stays OPEN on GitHub: `[1, 1, 1]` before this arm.
         # `None` is this module's "no opinion" value — `_project_issue` gates the
-        # transition mint on `prev_state is not None` — so a frozen row mints no
-        # transition in EITHER direction, which is the only stable answer while
-        # the projection refuses to move it.
-        if _row_is_frozen(status, outdated):
+        # transition mint on `prev_state is not None` — so a latched row mints no
+        # transition in EITHER direction, which is the only stable answer while the
+        # projection refuses to move it.
+        # ⛔ The two folds do NOT refuse alike, so the WIDER terms are handled below,
+        # after the position is known — see `_status_is_latched`'s docstring and the
+        # `wide` arm: answering `None` for `outdated` here (round 4, finding 2) was a
+        # SILENT FALSE NEGATIVE — it dropped a reopen the projection WOULD apply.
+        if _status_is_latched(status):
             return None
         # The POSITION half — the one axis the fold CAN move, so it is the one
         # axis this read may diff on. Resolved the way `apply_stage_fold`
@@ -1283,10 +1310,34 @@ class GitHubIndexer:
         # either"). `-created` is guarded separately by `_event_in_graph`.
         if stage_id is not None and declared_slot is None:
             return None
-        if is_position_ended(is_closed=is_closed,
-                             stage_slot=(slot if declared_slot is None
-                                         else declared_slot)):
+        position_ended = is_position_ended(
+            is_closed=is_closed,
+            stage_slot=(slot if declared_slot is None else declared_slot))
+        # ⛔ The WIDER lifecycle terms — `status='outdated'` / the legacy
+        # `outdated=true` flag — are NOT latched by the fold, and the two folds are
+        # dispatched under DIFFERENT rules (`_status_is_latched`): the CLOSE fold
+        # needs a LIVE holder, and an `outdated` row has none, so the close can never
+        # be applied and must get no opinion; the REOPEN fold takes
+        # `_reopen_targets_closed` and DOES apply. So this read answers the POSITION
+        # for these rows, which is what converges — measured on a row at
+        # `status='outdated'` + closed position, GitHub reopened:
+        #
+        #   `None` for both directions  -> [0, 0, 0], row stays `done`/`isClosed=true`
+        #                                 — a reopen the projection WOULD apply is dropped
+        #   position (this arm)         -> [1, 0, 0], row reaches `in_progress`/`active`
+        #
+        # and the not-ended shape (no live holder, so no close can ever fold) gets
+        # `None`, which is the only answer that cannot mint without bound. The one
+        # residual is recorded on the PR: after such a reopen the word is still
+        # `outdated`, so a SUBSEQUENT GitHub close mints nothing — unavoidable, since
+        # the fold that would apply it is never dispatched for a row with no live
+        # holder.
+        # ⚠️ Not folded into `_status_is_latched`: this term is reachable only after
+        # that arm declines, so the order below is load-bearing.
+        if position_ended:
             return "closed"
+        if _row_is_frozen(status, outdated):
+            return None
         if stage_id is not None or slot is not None:
             return "open"
         if status is None:

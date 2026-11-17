@@ -487,7 +487,16 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
                      "o.pipelineSlot='active'")
         t.issues_by_repo["acme/repo1"] = [gh_issue(
             1, state="open", updated_at="2026-07-24T08:00:00Z")]
-        _run(_indexer(t), sdk)  # back to open (mints -reopened)
+        # Back to open — and NOTHING is minted here, which is the control's premise
+        # rather than a side effect to gloss over: the reset above leaves the row at
+        # a LIVE position (`isClosed=false`, `in_progress`/`active`) and GitHub says
+        # `open`, so the two states AGREE and `github_map.issue_to_event` returns
+        # `None` (`github_map.py:311-318`). Round-4 review finding 4: the previous
+        # comment here claimed this line "mints -reopened", the opposite of what the
+        # fixture makes true. Pinned rather than described.
+        assert _run(_indexer(t), sdk)["events_minted"] == 0, (
+            f"{why}: the reset row and GitHub's `open` agree, so this poll must mint "
+            "nothing — if it minted, the control below is not measuring a close")
         t.issues_by_repo["acme/repo1"] = [gh_issue(
             1, state="closed", closed_at="2026-07-25T08:00:00Z",
             updated_at="2026-07-25T08:00:00Z")]
@@ -509,20 +518,20 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     plus one journal record, for an event the projection then refused
     (`entities.py:6204`).
 
-    A frozen row now answers `None` — this module's "no opinion" — so no
+    A LATCHED row now answers `None` — this module's "no opinion" — so no
     transition is minted in EITHER direction, the only stable answer while the
     projection refuses to move the row.
+
+    ⛔ Only the LATCHED word is covered here. The WIDER terms (`status='outdated'`,
+    the legacy `outdated=true` flag) are NOT frozen by the fold and answer the
+    POSITION axis instead — round-4 finding 2 found that answering `None` for them
+    silently dropped a reopen the projection WOULD apply. That asymmetry, both
+    directions of it, is `test_an_outdated_row_answers_the_position_axis` below.
     """
     oid = "github-issue-acme/repo1-1"
     frozen = {
         "a terminal LIFECYCLE word (what the `archived` door stores)": (
             "SET o.status='deprecated', o.pipelineStageId='in_progress', "
-            "o.pipelineSlot='active', o.isClosed=false"),
-        "a terminal STATUS word the fold does NOT latch on": (
-            "SET o.status='outdated', o.pipelineStageId='in_progress', "
-            "o.pipelineSlot='active', o.isClosed=false"),
-        "a legacy `outdated` flag": (
-            "SET o.outdated=true, o.pipelineStageId='in_progress', "
             "o.pipelineSlot='active', o.isClosed=false"),
     }
     for why, mutate in frozen.items():
@@ -563,6 +572,95 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)]
     assert mints == [1, 0], (
         f"the control did not mint exactly one close then stop ({mints})")
+
+
+def test_an_outdated_row_answers_the_position_axis(sdk):
+    """#13289 round-4 finding 2: the two folds refuse ASYMMETRICALLY on `outdated`.
+
+    `_fold_object_stage`'s latch is `commit_ops.OBJECT_TERMINAL_STATUSES`
+    (`projection/entities.py:6219`), which has no `outdated` member — but the two
+    folds that consume these transitions are dispatched under DIFFERENT rules, so
+    neither single answer serves both directions:
+
+    * the CLOSE fold resolves its target through `live_name_holder_ids`, which
+      applies the CURRENCY predicate — and `outdated` is in it
+      (`live.py` `TERMINAL_EXCLUDED_STATUSES` + the flag conjunct), so such a row has
+      NO live holder and the close fold is NEVER dispatched. Nothing can move it, so
+      any state this read answers about it re-fires once per poll, without bound;
+    * the REOPEN fold takes `_reopen_targets_closed` (`entities.py:6149-6158`), which
+      bypasses the live-holder requirement for a single registered incarnation — so it
+      IS dispatched, and it APPLIES, because the latch is that narrower set.
+
+    So the answer is the POSITION axis: `None` while the position is live (nothing
+    could ever close it), the position-derived state once it is ended (so the reopen
+    the projection WOULD apply is actually minted). Answering `None` for both — the
+    round-3 shape — made every assertion about the closed direction pass while
+    silently DROPPING that reopen: measured `[0, 0]` and the row left at
+    `done`/`terminal`/`isClosed=true`.
+    """
+    oid = "github-issue-acme/repo1-1"
+
+    def _fresh():
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (o:Object) DETACH DELETE o")
+        proj.g.query("MATCH (e:Event) DETACH DELETE e")
+        t = MockGitHubTransport(issues=[gh_issue(1)])
+        _run(_indexer(t), sdk)
+        return proj, t
+
+    # (a) + (b) A LIVE position on an `outdated` row can never be closed — the close
+    # fold is never dispatched — so BOTH GitHub directions must mint nothing. The
+    # CLOSED direction is the unbounded mint the wide term exists to stop; the OPEN
+    # direction is the "accidentally quiet" one that must stay quiet.
+    for why, mutate in {
+        "status='outdated' (terminal to the READER, not latched by the fold)":
+            "SET o.status='outdated'",
+        "the legacy `outdated=true` flag": "SET o.outdated=true",
+    }.items():
+        for gh_state in ("open", "closed"):
+            proj, t = _fresh()
+            proj.g.query(
+                f"MATCH (o:Object {{id:'{oid}'}}) {mutate}, "
+                "o.pipelineStageId='in_progress', o.pipelineSlot='active', "
+                "o.isClosed=false")
+            t.issues_by_repo["acme/repo1"] = [gh_issue(
+                1, state=gh_state,
+                closed_at=("2026-07-20T08:00:00Z" if gh_state == "closed"
+                           else None),
+                updated_at="2026-07-24T08:00:00Z")]
+            mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+            assert mints == [0, 0, 0], (
+                f"{why}, GitHub {gh_state}, live position: nothing can ever move "
+                f"this row (no live holder ⇒ the close fold is never dispatched), "
+                f"so a state here re-fires every poll ({mints})")
+
+    # (c) An ENDED position on the same row: the reopen fold IS dispatched and DOES
+    # apply, so the transition must be minted — exactly once, and the row must reach
+    # the live position. This is the direction the round-3 arm dropped.
+    for why, mutate in {
+        "status='outdated'": "SET o.status='outdated', ",
+        "the legacy `outdated=true` flag": "SET o.outdated=true, ",
+    }.items():
+        proj, t = _fresh()
+        proj.g.query(
+            f"MATCH (o:Object {{id:'{oid}'}}) {mutate}"
+            "o.pipelineStageId='done', o.pipelineSlot='terminal', o.isClosed=true")
+        assert GitHubIndexer._object_state_to_issue_state(proj, oid) == "closed", (
+            f"{why}: an ended position is the axis the fold can move, so the read "
+            "must answer it — answering 'no opinion' drops the reopen below")
+        t.issues_by_repo["acme/repo1"] = [gh_issue(
+            1, state="open", closed_at=None, updated_at="2026-07-24T08:00:00Z")]
+        mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)]
+        assert mints == [1, 0], (
+            f"{why}: GitHub reopened a row the projection WOULD move, so exactly "
+            f"one `-reopened` must be minted and then stop ({mints})")
+        stage, slot, closed = proj.g.query(
+            f"MATCH (o:Object {{id:'{oid}'}}) RETURN o.pipelineStageId, "
+            "o.pipelineSlot, o.isClosed").result_set[0]
+        assert (stage, slot, closed) == ("in_progress", "active", False), (
+            f"{why}: the reopen did not reach the row — measured "
+            f"{stage!r}/{slot!r}/{closed!r}, so the fold did NOT apply and the "
+            "mint above is itself a loop")
 
 
 def test_a_stale_pipelineSlot_prop_does_not_outvote_the_declaration(sdk):
