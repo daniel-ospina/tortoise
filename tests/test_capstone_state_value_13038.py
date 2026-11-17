@@ -146,9 +146,7 @@ def test_blocked_is_never_folded_into_wrong(narrative, verdict):
         narrative={"questions": [narrative["questions"][0]]},
         header={},
         answers=[blocked],
-        judged={"Q1": {"verdict": verdict, "because": "the judge guessed"}}
-        if verdict
-        else {},
+        judged={"Q1": {"verdict": verdict, "because": "the judge guessed"}} if verdict else {},
         ingest=[],
     )
     assert board["rows"][0]["verdict"] == "blocked"
@@ -249,15 +247,16 @@ def test_judge_refuses_a_document_that_is_not_a_judge_packet(tmp_path):
     ):
         p = tmp_path / name
         p.write_text(json.dumps(payload))
-        args = type("A", (), {"packet": str(p), "verdicts": None, "judge_cmd": None,
-                              "out": None})()
+        args = type("A", (), {"packet": str(p), "verdicts": None, "judge_cmd": None, "out": None})()
         assert cap.cmd_judge(args) == 2, name
         # It refused BEFORE writing: the run beside it is untouched.
         assert baseline.read_bytes() == before, name
         assert not (out / "scoreboard-local.md").exists(), name
 
     # A real judge packet is still accepted (the guard must not block the real path).
-    real = json.loads((ROOT / "docs" / "evidence" / "13038-capstone" / "judge-packet.json").read_text())
+    real = json.loads(
+        (ROOT / "docs" / "evidence" / "13038-capstone" / "judge-packet.json").read_text()
+    )
     assert real["schema"] == cap.PACKET_SCHEMA and real["questions"]
 
 
@@ -407,3 +406,189 @@ def test_the_top_table_is_short_and_the_detail_keeps_the_payload(narrative):
     summary = cap._calls_summary(board["rows"][0]["calls"])
     assert "A" * 400 not in summary, "the summary table must stay readable in a minute"
     assert len(summary) < 400
+
+
+# ── 5. the fail-open paths a fresh reviewer measured (PR #13303 review) ─────────
+
+
+def test_every_recipe_declares_the_refs_it_needs(narrative):
+    """`RECIPE_REFS` is what makes "a refused door blocks the question" true.
+
+    `must_appear`/`must_not_appear` cannot see a ref the recipe reads by id and never
+    names, so before this map a typo in `q3_pricing` or `uptime_target` reddened nothing:
+    the call was skipped and the positional payload lookup then handed the row a DIFFERENT
+    call's node (measured: the successor served as `the_replaced_node`, printing
+    `status='live', names-its-successor=False` — evidence inverted).
+    """
+    assert set(cap.RECIPE_REFS) == set(cap.RECIPES), (
+        "every recipe must declare its refs (empty list when it needs none), or the "
+        "drift this map exists to catch is invisible for that recipe"
+    )
+    produced = {op.get("ref") for op in narrative["ingest"]["ops"] if op.get("ref")}
+    for recipe, refs in cap.RECIPE_REFS.items():
+        unknown = set(refs) - produced
+        assert not unknown, (
+            f"{recipe} needs refs the narrative never produces: {sorted(unknown)} — it "
+            "would read as `blocked` on every run, including a healthy one"
+        )
+
+
+def test_an_unresolved_ref_is_reported_and_never_silently_ignored():
+    full = {"launch_plan": "p1"}
+    assert cap.refs_unresolved("plan_vs_occurrence", full) == []
+    assert cap.refs_unresolved("plan_vs_occurrence", {}) == ["launch_plan"]
+    assert cap.refs_unresolved("why_changed", {"q4_pricing": "p2"}) == ["q3_pricing"]
+    assert cap.refs_unresolved("current_commitments", {}) == []
+    assert cap.refs_unresolved("unknown_recipe", {}) == []
+
+
+def test_a_failed_or_absent_call_blocks_the_question_rather_than_scoring_it():
+    """`blocked` is "we could not ask" — it must win over an empty answer."""
+    ans = cap.Answer("Q2")
+    ans.calls.append(cap.Call("search", {"query": "launch event"}, True, rows=[]))
+    ans.calls.append(
+        cap.Call("read_entity", {"id": "p1"}, False, "StoreUnavailable", role="plan_node")
+    )
+    cap._require_call(ans, "search", "plan_node", "events")
+    assert ans.status == "blocked"
+    assert "plan_node" in ans.reason and "events" in ans.reason
+
+    ok = cap.Answer("Q2")
+    ok.calls.append(cap.Call("search", {"query": "launch event"}, True, rows=[], role="search"))
+    ok.calls.append(
+        cap.Call("read_entity", {"id": "p1"}, True, rows=[{"id": "p1"}], role="plan_node")
+    )
+    ok.calls.append(cap.Call("read_events", {"limit": 1}, True, rows=[], role="events"))
+    cap._require_call(ok, "search", "plan_node", "events")
+    assert ok.status == "answered", (
+        "a read that SUCCEEDED with zero rows is an answer ('the product served "
+        "nothing'), not a blocked question — folding it into blocked hides a real gap"
+    )
+
+
+def test_blocked_is_never_folded_into_wrong_or_overridden_by_a_right(narrative):
+    """A judge's `right` cannot turn an unasked question into a product success."""
+    blocked = cap.Answer(
+        "Q1", status="blocked", reason="the narrative's ingestion did not produce: q4_pricing"
+    )
+    board = cap.build_scoreboard(
+        narrative={"questions": [narrative["questions"][0]]},
+        header={},
+        answers=[blocked],
+        judged={"Q1": {"verdict": "right", "because": "looks fine to me"}},
+        ingest=[],
+    )
+    row = board["rows"][0]
+    assert row["verdict"] == "blocked", (
+        "the reader's `right` overrode a question the instrument could not ask"
+    )
+    assert board["tally"]["blocked"] == 1 and board["tally"]["right"] == 0
+    assert any("could not be asked" in n for n in blocked.notes), (
+        "the disagreement must stay visible rather than be silently discarded"
+    )
+
+
+def test_an_unknown_verdict_is_unjudged_and_never_vanishes_from_the_tally(narrative):
+    """`tally` is summed over the closed vocabulary; an unseen word must not escape it."""
+    questions = narrative["questions"]
+    answers = [cap.Answer(q["id"]) for q in questions]
+    judged = {q["id"]: {"verdict": "right", "because": "x"} for q in questions}
+    judged["Q1"] = {"verdict": "Excellent", "because": "a fourth word invented at the keyboard"}
+    board = cap.build_scoreboard(
+        narrative={"questions": questions}, header={}, answers=answers, judged=judged, ingest=[]
+    )
+    assert board["rows"][0]["verdict"] == "unjudged"
+    assert sum(board["tally"].values()) == len(questions), (
+        "a row outside the vocabulary left the tally, so the header could report fewer "
+        "verdicts than the scoreboard has rows"
+    )
+    assert set(board["tally"]) == set(cap.VERDICTS)
+
+
+def test_a_verdict_for_a_question_that_was_never_asked_is_blocked(narrative):
+    """A question never put to the product is `blocked`, not `unjudged` and not `right`.
+
+    The row already renders `answer_status: "blocked"` and `product_answer: "(not asked)"`,
+    so any other verdict makes the row contradict itself — and `right` would score the
+    product for a question the instrument never asked.
+    """
+    board = cap.build_scoreboard(
+        narrative={"questions": [narrative["questions"][0]]},
+        header={},
+        answers=[],  # the question was never asked
+        judged={"Q1": {"verdict": "right", "because": "the reader had no answer to read"}},
+        ingest=[],
+    )
+    assert board["rows"][0]["verdict"] == "blocked"
+    assert board["rows"][0]["answer_status"] == "blocked"
+    assert board["rows"][0]["product_answer"] == "(not asked)"
+
+
+def test_credentials_never_reach_a_recorded_line_through_the_store_uri():
+    """The header records the store URI and the scoreboard renders it."""
+    for uri in (
+        "docker://:hunter2@127.0.0.1:6379/db",
+        "bolt://falkordb:s3cr3t-pw@db.example.com:6379",
+        "redis://:Wq8-xT2pLm@10.0.0.5:6379/0",
+    ):
+        red = cap._redact(uri)
+        assert "hunter2" not in red and "s3cr3t-pw" not in red and "Wq8-xT2pLm" not in red
+        assert "<redacted>@" in red
+    assert cap._redact("docker://:@127.0.0.1:6379/db").count("@") == 1
+
+
+def test_a_by_id_read_never_fires_retired_as_current():
+    """Seeing a retired node BY ID is the legitimate way to ask what ended."""
+    ans = cap.Answer("Q5")
+    ans.calls.append(
+        cap.Call(
+            "read_entity",
+            {"id": "abc"},
+            True,
+            rows=[{"id": "abc", "name": "Thursday partner call"}],
+            role="cancelled_plan",
+        )
+    )
+    cap._signal_refs(ans, {"partner_call": "abc"}, {"must_not_appear": ["partner_call"]})
+    assert not any(s.startswith("RETIRED-AS-CURRENT") for s in ans.signals), (
+        "a by-id read was reported as 'served as current' — the false signal would be "
+        "attributed to the read path in the one field a reader uses for that"
+    )
+    ans.calls.append(
+        cap.Call("search", {"query": "partner call"}, True, rows=[{"id": "abc"}], role="by_name")
+    )
+    cap._signal_refs(ans, {"partner_call": "abc"}, {"must_not_appear": ["partner_call"]})
+    assert any(s.startswith("RETIRED-AS-CURRENT") for s in ans.signals), (
+        "a SEARCH still serving the retired id must fire — the fix must not disable the signal"
+    )
+
+
+def test_a_role_returns_only_that_calls_rows():
+    ans = cap.Answer("Q3")
+    ans.calls.append(
+        cap.Call("read_entity", {"id": "new"}, True, rows=[{"id": "new"}], role="successor_node")
+    )
+    assert ans.rows("replaced_node") == [], (
+        "a missing role must be EMPTY, never another call's rows — positional indexing "
+        "served the successor as the replaced node and inverted the evidence"
+    )
+    assert ans.first("successor_node")["id"] == "new"
+    assert ans.call("replaced_node") is None
+
+
+def test_the_verdicts_file_the_instrument_writes_is_the_one_it_reads(tmp_path):
+    judged = {
+        "Q1": {"verdict": "wrong", "because": "omits the launch plan", "cause": "reach"},
+        "Q2": {"verdict": "right", "because": "plan vs occurrence", "cause": None},
+    }
+    out = tmp_path / "verdicts.json"
+    cap._write_verdicts(
+        out, judged, packet_path=tmp_path / "packet.json", mode="fresh", meta={"elapsed_s": 150.2}
+    )
+    doc = json.loads(out.read_text())
+    assert doc["_provenance"]["reader"] == "fresh"
+    for qid, row in judged.items():
+        assert doc[qid] == row, "the round-trip lost a verdict"
+    # the consumer's own read path: `judged.get(id)` then a closed-vocabulary lookup
+    for qid in judged:
+        assert doc.get(qid, {}).get("verdict") in cap.VERDICTS

@@ -64,7 +64,9 @@ the target's retrieval posture — is in `scoreboard-local.md` (and machine-read
    (goal readings), the pipeline stage writer (`pipeline.seed_pipeline` / `advance_stage`), and
    the goal judgement writer (`goal_judgement.judge_and_record`). No fixture reaches into the
    graph directly; if a door refuses, the ingestion log says so and the dependent question becomes
-   `blocked`.
+   `blocked` — the refs each recipe needs are declared in `RECIPE_REFS` and checked BEFORE the
+   question is asked, because asking about a graph the scenario never created would hand a fresh
+   reader an empty answer and score it as a product defect.
 3. **The six customer questions asked through the product's own read surface** — `search`
    (`tortoise_fts_query`, the same call the hosted `/v1/search` route makes), `read_entity`
    (`get_entity`), `read_events` (`get_events`), and `judge` (`goal_judgement.judge`). Each recipe
@@ -115,6 +117,12 @@ by `tests/test_capstone_state_value_13038.py`:
 all `unjudged` → non-zero, with the clean-tally direction so it cannot pass on a constant) and
 `test_blocked_is_never_folded_into_wrong` (parametrized over every judge verdict, `right`
 included).
+
+`--verdicts-out <path>` writes what the reader returned in the shape `--verdicts` reads, so the
+re-score / re-render round-trip above is produced by the instrument rather than assembled by hand.
+The verdict vocabulary is closed: a verdict outside `right`/`wrong`/`blocked`/`unjudged` (a
+doctored `--verdicts` file, say) is recorded `unjudged` with the offending word named, never
+rendered as a verdict and never dropped from the tally.
 
 **Cost:** one throwaway FalkorDB container (a fresh graph, `header.store`) and **17 ingestion ops**
 (`run-local.json` → `ingest`); **20 product calls** (11 `search`, 6 `read_entity`, 2 `read_events`,

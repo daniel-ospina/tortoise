@@ -70,8 +70,11 @@ USAGE
     eval "$uri"
     uv run python tools/capstone_state_value.py run --target local
 
-    # judge the answers with a fresh reader (spawns one `pi -p`), then render
-    uv run python tools/capstone_state_value.py run --target local --judge fresh
+    # judge the answers with a fresh reader (spawns one `pi -p`), then render.
+    # `--verdicts-out` writes the reader's verdicts in the shape `--verdicts` reads, so the
+    # round-trip below is produced by the instrument rather than assembled by hand.
+    uv run python tools/capstone_state_value.py run --target local --judge fresh \
+        --verdicts-out /tmp/verdicts.json
 
     # or hand the packet to a human/agent and feed the verdicts back
     uv run python tools/capstone_state_value.py judge --packet docs/evidence/13038-capstone/judge-packet.json --verdicts verdicts.json
@@ -95,7 +98,8 @@ EXIT CODES
 1  the run completed but some question is `blocked` or `unjudged` — the scoreboard must
    be read, not trusted
 2  usage / unreadable narrative
-3  the target refused (no credentials, no disposable graph, unreachable store)
+3  the target refused (no credentials, no disposable graph, an unreachable or unreadable
+   store) — always a refusal with the reason and NO score, never a traceback
 """
 
 from __future__ import annotations
@@ -229,7 +233,16 @@ def _overlap(query: str, rows: list[dict]) -> dict:
 
 
 def _redact(text: str) -> str:
-    """Strip anything that could be a credential out of a recorded line."""
+    """Strip anything that could be a credential out of a recorded line.
+
+    The URI form is first because it is the one that reaches a COMMITTED artifact: the
+    store URI is recorded in the header of every run and rendered into the scoreboard, and
+    `docker://:hunter2@host:6379/db` / `bolt://user:s3cr3t@host` / `redis://:Wq8-xT2pLm@…`
+    all passed the token patterns below untouched. Today's committed baseline is clean only
+    because the private test lane's password is the empty string — which is a property of
+    the lane, not of this function.
+    """
+    text = re.sub(r"(?i)\b([a-z][a-z0-9+.\-]*://)([^\s/@]*:[^\s/@]*)@", r"\1<redacted>@", text)
     text = re.sub(r"(tt_[A-Za-z0-9]{6,})", "tt_<redacted>", text)
     text = re.sub(
         r"(?i)(api[_-]?key|token|password)([\"'=:\s]+)([^\s\"',}]{4,})", r"\1\2<redacted>", text
@@ -266,9 +279,18 @@ class Call:
     #: "are these rows even about the question?". A degraded read can serve the whole
     #: corpus ranked, and this is what makes that visible instead of plausible.
     overlap: dict = field(default_factory=dict)
+    #: WHAT THIS CALL IS FOR, in the recipe's own words ("the_plan_node", …). A recipe
+    #: looks its payload up by role, never by position: when a ref fails to resolve the
+    #: optional call is simply absent, and positional indexing then hands the
+    #: NEXT question's payload to this one — measured shape: with `q3_pricing`
+    #: unresolved, `calls[2]` was the *successor* node, so the signal printed
+    #: "replaced node status='live', names-its-successor=False", inverting the very
+    #: evidence the Q5/Q6 findings rest on. Roles make a missing call missing.
+    role: str = ""
 
     def to_dict(self) -> dict:
         return {
+            "role": self.role,
             "surface": self.surface,
             "request": self.request,
             "ok": self.ok,
@@ -299,6 +321,26 @@ class Answer:
             if term in DEGRADED_TERMS:
                 return True
         return False
+
+    def call(self, role: str) -> Call | None:
+        """The call a recipe made for *role*, or None when it was never made.
+
+        Every recipe reads its payload through this and marks the question `blocked`
+        when the role is absent, so an unresolved ref can never be answered with a
+        different call's rows.
+        """
+        for c in self.calls:
+            if c.role == role:
+                return c
+        return None
+
+    def rows(self, role: str) -> list:
+        c = self.call(role)
+        return list(c.rows) if c else []
+
+    def first(self, role: str) -> dict:
+        rows = self.rows(role)
+        return rows[0] if rows else {}
 
     def to_dict(self) -> dict:
         return {
@@ -337,8 +379,8 @@ class LocalTarget:
         if not uri:
             raise TargetRefused(
                 "no local instance: TORTOISE_DB_URI is unset. Get one from the private test "
-                "lane with `uri=\"$(uv run python tools/test_lane.py uri)\" || exit 1; "
-                "eval \"$uri\"` (or run the whole assessment with "
+                'lane with `uri="$(uv run python tools/test_lane.py uri)" || exit 1; '
+                'eval "$uri"` (or run the whole assessment with '
                 "`bash docs/evidence/13038-capstone/rerun.sh`). `test_lane.py run` is NOT "
                 "this route — it hands its argv to pytest."
             )
@@ -483,6 +525,7 @@ class LocalTarget:
         entity_type: str = "point",
         limit: int = 10,
         include_terminal: bool = False,
+        role: str = "",
     ) -> Call:
         """The product's search surface, with its OWN read verdict carried out.
 
@@ -520,7 +563,13 @@ class LocalTarget:
             )
         except Exception as exc:
             return Call(
-                "search", request, False, f"{type(exc).__name__}: {_cut(str(exc), 200)}", status, []
+                "search",
+                request,
+                False,
+                f"{type(exc).__name__}: {_cut(str(exc), 200)}",
+                status,
+                [],
+                role=role,
             )
         served = [
             {
@@ -552,9 +601,9 @@ class LocalTarget:
             f"zero-overlap rows={overlap['zero_overlap_rows']}/{overlap['rows']} · "
             f"legs={[(t.get('leg'), t.get('reason'), t.get('degraded')) for t in legs][:6]}"
         )
-        return Call("search", request, True, detail, status, served, legs, overlap)
+        return Call("search", request, True, detail, status, served, legs, overlap, role=role)
 
-    def read_entity(self, entity_id: str) -> Call:
+    def read_entity(self, entity_id: str, *, role: str = "") -> Call:
         try:
             node = self.sdk.get_entity(entity_id)
         except Exception as exc:
@@ -563,10 +612,11 @@ class LocalTarget:
                 {"id": entity_id},
                 False,
                 f"{type(exc).__name__}: {_cut(str(exc), 200)}",
+                role=role,
             )
-        return Call("read_entity", {"id": entity_id}, True, "one node", {}, [node])
+        return Call("read_entity", {"id": entity_id}, True, "one node", {}, [node], role=role)
 
-    def read_events(self, limit: int = 50) -> Call:
+    def read_events(self, limit: int = 50, *, role: str = "") -> Call:
         try:
             rows = self.sdk.get_events(limit=limit) or []
         except Exception as exc:
@@ -575,6 +625,7 @@ class LocalTarget:
                 {"limit": limit},
                 False,
                 f"{type(exc).__name__}: {_cut(str(exc), 200)}",
+                role=role,
             )
         served = [
             {
@@ -587,9 +638,13 @@ class LocalTarget:
             }
             for r in rows
         ]
-        return Call("read_events", {"limit": limit}, True, f"{len(served)} events", {}, served)
+        return Call(
+            "read_events", {"limit": limit}, True, f"{len(served)} events", {}, served, role=role
+        )
 
-    def judge_read(self, goal_id: str, indicator_id: str, target_id: str) -> Call:
+    def judge_read(
+        self, goal_id: str, indicator_id: str, target_id: str, *, role: str = ""
+    ) -> Call:
         """The product's own achievement surface: state + the reading it used."""
         request = {"goal": goal_id, "indicator": indicator_id, "target": target_id}
         try:
@@ -601,7 +656,9 @@ class LocalTarget:
                 self.sdk, indicator_id=indicator_id, target=target, goal_id=goal_id
             )
         except Exception as exc:
-            return Call("judge", request, False, f"{type(exc).__name__}: {_cut(str(exc), 200)}")
+            return Call(
+                "judge", request, False, f"{type(exc).__name__}: {_cut(str(exc), 200)}", role=role
+            )
         payload = {
             "state": judged.state,
             "reason": judged.reason,
@@ -620,6 +677,7 @@ class LocalTarget:
             f"{target.comparator} {target.threshold}",
             {},
             [payload],
+            role=role,
         )
 
 
@@ -832,12 +890,41 @@ class Ingestor:
 
 
 def _served_ids(answer: Answer) -> set[str]:
+    """Ids the product SERVED from a question-shaped SEARCH.
+
+    Search calls only, deliberately: a by-id `read_entity` is the legitimate way to see
+    a retired node (Q3 and Q6 both depend on it), so counting those rows here would fire
+    `RETIRED-AS-CURRENT` on a caller who already held the id — a false signal in the one
+    field a reader uses to attribute a failure to the read path.
+    """
     out: set[str] = set()
     for call in answer.calls:
+        if call.surface != "search":
+            continue
         for row in call.rows:
             if isinstance(row, dict) and row.get("id"):
                 out.add(row["id"])
     return out
+
+
+def _require_call(answer: Answer, *roles: str) -> None:
+    """`blocked` when a call the answer NEEDS did not succeed.
+
+    "We could not ask" is not "we answered badly" (honesty rule 2). A call that is
+    absent (its ref never resolved) or that failed is exactly that case — without this,
+    a refused read is scored as a product defect by a fresh reader who has no way to
+    tell the difference. A call that SUCCEEDED with zero rows is deliberately NOT
+    blocked: "the product answered with nothing" is a real answer and the reader scores
+    it.
+    """
+    missing = [r for r in roles if answer.call(r) is None or not answer.call(r).ok]
+    if not missing:
+        return
+    answer.status = "blocked"
+    detail = "; ".join(
+        f"{r}: {'never made' if answer.call(r) is None else answer.call(r).detail}" for r in missing
+    )
+    answer.reason = answer.reason or f"the read did not complete — {detail}"
 
 
 def _signal_refs(answer: Answer, refs: dict[str, str], spec: dict) -> None:
@@ -884,29 +971,37 @@ def recipe_current_commitments(target: LocalTarget, refs: dict[str, str], spec: 
             "what are we currently committed to — pricing, onboarding, launch and uptime",
             entity_type="point",
             limit=10,
+            role="committed_points",
         )
     )
-    ans.calls.append(target.search("current commitments", entity_type="object", limit=10))
-    ans.calls.append(target.search("onboarding flow", entity_type="object", limit=10))
+    ans.calls.append(
+        target.search(
+            "current commitments", entity_type="object", limit=10, role="committed_objects"
+        )
+    )
+    ans.calls.append(
+        target.search("onboarding flow", entity_type="object", limit=10, role="retired_flow")
+    )
     ans.payload = {
-        "served_points": ans.calls[0].rows,
-        "served_objects_for_current_commitments": ans.calls[1].rows,
-        "served_objects_for_retired_flow": ans.calls[2].rows,
+        "served_points": ans.rows("committed_points"),
+        "served_objects_for_current_commitments": ans.rows("committed_objects"),
+        "served_objects_for_retired_flow": ans.rows("retired_flow"),
     }
+    _require_call(ans, "committed_points", "committed_objects", "retired_flow")
     _signal_refs(ans, refs, spec)
     return ans
 
 
 def recipe_plan_vs_occurrence(target: LocalTarget, refs: dict[str, str], spec: dict) -> Answer:
     ans = Answer("Q2")
-    ans.calls.append(target.search("launch event", entity_type="object", limit=10))
+    ans.calls.append(target.search("launch event", entity_type="object", limit=10, role="search"))
     plan_id = refs.get("launch_plan")
     if plan_id:
-        ans.calls.append(target.read_entity(plan_id))
-    ans.calls.append(target.read_events(limit=50))
-    node = ans.calls[1].rows[0] if len(ans.calls) > 1 and ans.calls[1].rows else {}
+        ans.calls.append(target.read_entity(plan_id, role="plan_node"))
+    ans.calls.append(target.read_events(limit=50, role="events"))
+    node = ans.first("plan_node")
     ans.payload = {
-        "served_objects": ans.calls[0].rows,
+        "served_objects": ans.rows("search"),
         "the_plan_node": {
             k: node.get(k)
             for k in (
@@ -922,36 +1017,43 @@ def recipe_plan_vs_occurrence(target: LocalTarget, refs: dict[str, str], spec: d
         }
         if node
         else None,
-        "events_in_the_graph": ans.calls[-1].rows,
+        "events_in_the_graph": ans.rows("events"),
     }
     if node:
         ans.signals.append(
             f"stage={node.get('pipelineStageId')!r} slot={node.get('pipelineSlot')!r} "
             f"isClosed={node.get('isClosed')!r} status={node.get('status')!r}"
         )
+    _require_call(ans, "search", "plan_node", "events")
     _signal_refs(ans, refs, spec)
     return ans
 
 
 def recipe_why_changed(target: LocalTarget, refs: dict[str, str], spec: dict) -> Answer:
     ans = Answer("Q3")
-    ans.calls.append(target.search("pricing decision Q3 Q4", entity_type="point", limit=10))
+    ans.calls.append(
+        target.search("pricing decision Q3 Q4", entity_type="point", limit=10, role="default")
+    )
     ans.calls.append(
         target.search(
-            "pricing decision Q3 Q4", entity_type="point", limit=10, include_terminal=True
+            "pricing decision Q3 Q4",
+            entity_type="point",
+            limit=10,
+            include_terminal=True,
+            role="include_terminal",
         )
     )
     old = refs.get("q3_pricing")
     if old:
-        ans.calls.append(target.read_entity(old))
+        ans.calls.append(target.read_entity(old, role="replaced_node"))
     new = refs.get("q4_pricing")
     if new:
-        ans.calls.append(target.read_entity(new))
-    node_old = ans.calls[2].rows[0] if len(ans.calls) > 2 and ans.calls[2].rows else {}
-    node_new = ans.calls[3].rows[0] if len(ans.calls) > 3 and ans.calls[3].rows else {}
+        ans.calls.append(target.read_entity(new, role="successor_node"))
+    node_old = ans.first("replaced_node")
+    node_new = ans.first("successor_node")
     ans.payload = {
-        "served_default_scope": ans.calls[0].rows,
-        "served_include_terminal": ans.calls[1].rows,
+        "served_default_scope": ans.rows("default"),
+        "served_include_terminal": ans.rows("include_terminal"),
         "the_replaced_node": {
             k: node_old.get(k)
             for k in ("id", "content", "status", "validTo", "expiredAt", "supersededBy")
@@ -967,6 +1069,7 @@ def recipe_why_changed(target: LocalTarget, refs: dict[str, str], spec: dict) ->
             f"replaced node status={node_old.get('status')!r}, "
             f"names-its-successor={bool(node_old.get('supersededBy'))}"
         )
+    _require_call(ans, "default", "include_terminal", "replaced_node", "successor_node")
     _signal_refs(ans, refs, spec)
     return ans
 
@@ -975,18 +1078,18 @@ def recipe_goal_met(target: LocalTarget, refs: dict[str, str], spec: dict) -> An
     ans = Answer("Q4")
     goal, target_id = refs.get("uptime_goal"), refs.get("uptime_target")
     if goal:
-        ans.calls.append(target.read_entity(goal))
+        ans.calls.append(target.read_entity(goal, role="goal_node"))
     if goal and target_id:
-        ans.calls.append(target.judge_read(goal, goal, target_id))
-    ans.calls.append(target.read_events(limit=50))
-    node = ans.calls[0].rows[0] if ans.calls and ans.calls[0].rows else {}
-    judged = ans.calls[1].rows[0] if len(ans.calls) > 1 and ans.calls[1].rows else {}
+        ans.calls.append(target.judge_read(goal, goal, target_id, role="judgement"))
+    ans.calls.append(target.read_events(limit=50, role="readings"))
+    node = ans.first("goal_node")
+    judged = ans.first("judgement")
     ans.payload = {
         "the_goal_node": {k: node.get(k) for k in ("id", "name", "goalState", "status")}
         if node
         else None,
         "the_products_judgement": judged or None,
-        "readings_in_the_graph": ans.calls[-1].rows,
+        "readings_in_the_graph": ans.rows("readings"),
     }
     if node:
         ans.signals.append(f"goalState={node.get('goalState')!r} status={node.get('status')!r}")
@@ -999,6 +1102,7 @@ def recipe_goal_met(target: LocalTarget, refs: dict[str, str], spec: dict) -> An
     else:
         ans.status = "blocked"
         ans.reason = "the product's judgement surface returned no state"
+    _require_call(ans, "goal_node", "judgement", "readings")
     _signal_refs(ans, refs, spec)
     return ans
 
@@ -1006,17 +1110,21 @@ def recipe_goal_met(target: LocalTarget, refs: dict[str, str], spec: dict) -> An
 def recipe_planned_never_happened(target: LocalTarget, refs: dict[str, str], spec: dict) -> Answer:
     ans = Answer("Q5")
     ans.calls.append(
-        target.search("what was planned and never happened", entity_type="object", limit=10)
+        target.search(
+            "what was planned and never happened", entity_type="object", limit=10, role="question"
+        )
     )
-    ans.calls.append(target.search("thursday partner call", entity_type="object", limit=10))
+    ans.calls.append(
+        target.search("thursday partner call", entity_type="object", limit=10, role="by_name")
+    )
     call_id = refs.get("partner_call")
     if call_id:
-        ans.calls.append(target.read_entity(call_id))
-    node = ans.calls[2].rows[0] if len(ans.calls) > 2 and ans.calls[2].rows else {}
-    served = [r for r in ans.calls[1].rows if r.get("id") == call_id]
+        ans.calls.append(target.read_entity(call_id, role="cancelled_plan"))
+    node = ans.first("cancelled_plan")
+    served = [r for r in ans.rows("by_name") if r.get("id") == call_id]
     ans.payload = {
-        "served_for_the_question": ans.calls[0].rows,
-        "served_for_the_cancelled_call": ans.calls[1].rows,
+        "served_for_the_question": ans.rows("question"),
+        "served_for_the_cancelled_call": ans.rows("by_name"),
         "the_cancelled_plan": {
             k: node.get(k)
             for k in (
@@ -1044,6 +1152,7 @@ def recipe_planned_never_happened(target: LocalTarget, refs: dict[str, str], spe
             f"(status={served[0].get('status')!r}) — the S1 gap (#13034's predicate "
             "reads neither the terminal slot nor isClosed)"
         )
+    _require_call(ans, "question", "by_name", "cancelled_plan")
     _signal_refs(ans, refs, spec)
     return ans
 
@@ -1051,32 +1160,44 @@ def recipe_planned_never_happened(target: LocalTarget, refs: dict[str, str], spe
 def recipe_withdrawn(target: LocalTarget, refs: dict[str, str], spec: dict) -> Answer:
     ans = Answer("Q6")
     ans.calls.append(
-        target.search("has anything we relied on been withdrawn", entity_type="point", limit=10)
+        target.search(
+            "has anything we relied on been withdrawn",
+            entity_type="point",
+            limit=10,
+            role="question",
+        )
     )
-    ans.calls.append(target.search("beach club confirmed booking", entity_type="point", limit=10))
+    ans.calls.append(
+        target.search("beach club confirmed booking", entity_type="point", limit=10, role="by_name")
+    )
     ans.calls.append(
         target.search(
-            "beach club confirmed booking", entity_type="point", limit=10, include_terminal=True
+            "beach club confirmed booking",
+            entity_type="point",
+            limit=10,
+            include_terminal=True,
+            role="include_terminal",
         )
     )
     claim = refs.get("beach_club_claim")
     if claim:
-        ans.calls.append(target.read_entity(claim))
-    node = ans.calls[3].rows[0] if len(ans.calls) > 3 and ans.calls[3].rows else {}
+        ans.calls.append(target.read_entity(claim, role="claim_node"))
+    node = ans.first("claim_node")
     ans.payload = {
-        "served_default_scope": ans.calls[0].rows,
-        "served_for_the_claim_default_scope": ans.calls[1].rows,
-        "served_for_the_claim_include_terminal": ans.calls[2].rows,
+        "served_default_scope": ans.rows("question"),
+        "served_for_the_claim_default_scope": ans.rows("by_name"),
+        "served_for_the_claim_include_terminal": ans.rows("include_terminal"),
         "the_claim_node": {k: node.get(k) for k in ("id", "content", "status")} if node else None,
     }
     if node:
         ans.signals.append(f"claim status={node.get('status')!r} (a by-id read_entity)")
-    if not ans.calls[1].rows:
+    if not ans.rows("by_name"):
         ans.signals.append(
             "the withdrawn claim is absent from the default-scope search — correct for "
             "currency, but a customer asking 'has anything been withdrawn' is then told "
             "nothing, which is the wrong direction of absence"
         )
+    _require_call(ans, "question", "by_name", "include_terminal", "claim_node")
     _signal_refs(ans, refs, spec)
     return ans
 
@@ -1099,6 +1220,29 @@ RECIPE_NEEDS = {
     "planned_never_happened": ["search_objects", "read_entity"],
     "withdrawn": ["search_points", "read_entity"],
 }
+
+#: Which INGESTED identities a recipe needs before it can be asked at all.
+#:
+#: The narrative's write doors can refuse (a bad stage name, a superseded id, a terminal
+#: guard). When one does, the ref it would have produced is simply absent — and a recipe
+#: that ran anyway would ask the product about a graph the scenario never created and
+#: hand the empty result to a fresh reader as a product defect. That is the inversion
+#: `README.md` promises never happens: "if a door refuses … the dependent question becomes
+#: `blocked`". This map is what makes the promise true, and the pins assert it covers
+#: every ref the recipes name (`test_every_recipe_declares_the_refs_it_needs`).
+RECIPE_REFS = {
+    "current_commitments": [],
+    "plan_vs_occurrence": ["launch_plan"],
+    "why_changed": ["q3_pricing", "q4_pricing"],
+    "goal_met": ["uptime_goal", "uptime_target"],
+    "planned_never_happened": ["partner_call"],
+    "withdrawn": ["beach_club_claim"],
+}
+
+
+def refs_unresolved(recipe: str, refs: dict[str, str]) -> list[str]:
+    """The identities this recipe needs that the narrative's ingestion did not produce."""
+    return [r for r in RECIPE_REFS.get(recipe or "", []) if r not in refs]
 
 
 # ── the fresh-reader judge ───────────────────────────────────────────────────────
@@ -1443,18 +1587,35 @@ def build_scoreboard(
         ans = by_id.get(q["id"])
         j = judged.get(q["id"]) or {}
         verdict = j.get("verdict") or "unjudged"
+        # The judge's vocabulary is CLOSED. A verdicts file is a caller-supplied artifact,
+        # so a typo, a fourth word, or a value for a question that was never asked must not
+        # leave a row outside the tally — `tally` is summed over `VERDICTS`, so an
+        # unrecognised value would vanish from it while the row still rendered (measured:
+        # one doctored verdict produced "3 right · 2 wrong · 0 blocked · 0 unjudged" over
+        # SIX rows, Q1 rendered `Excellent`, and the run exited 0).
+        if verdict not in VERDICTS:
+            verdict = "unjudged"
+            j = {
+                "verdict": "unjudged",
+                "because": f"ignored a verdict outside the closed vocabulary: {j.get('verdict')!r}",
+                "cause": "unknown-verdict",
+            }
         # `blocked` wins over EVERY judge verdict, `right` included: a question the
         # instrument could not ask was not answered, so a reader that says `right`
         # is reading the packet's own framing rather than a product response. (HONESTY
         # RULE 2; #13303 review P1. Without the `right` arm the run exits 0 — "every
         # question was judged" — over a row that was never asked.)
         #
-        # `ans is None` is the SAME case and was missed by that first fix (#13303
-        # review cycle 2, P2): a question with no recorded Answer already renders
-        # `answer_status: "blocked"` and `product_answer: "(not asked)"`, so letting
-        # the judge's `right` stand made one row contradict itself and scored the
-        # product for a question never put to it.
+        # `ans is None` is the SAME case (`#13303` review cycle 2): a question with no
+        # recorded Answer already renders `answer_status: "blocked"` and
+        # `product_answer: "(not asked)"`, so letting the judge's `right` stand made one
+        # row contradict itself and scored the product for a question never put to it.
         if ans is None or ans.status == "blocked":
+            if ans is not None and verdict != "blocked":
+                ans.notes.append(
+                    f"the reader judged this {verdict!r}, but the question could not be "
+                    f"asked ({ans.reason or 'blocked'}) — `blocked` is not an answer"
+                )
             verdict = "blocked"
             j = {
                 "verdict": "blocked",
@@ -1688,7 +1849,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     # `terminal-guard` — so the run measures a graph the scenario did not create, and the
     # scoreboard looks identical while the evidence behind it is not. Refuse, name it, and
     # let the operator pass `--allow-existing-graph` only if that is what they meant.
-    existing = target.node_count()
+    # The store may be unreachable, and `node_count` deliberately raises rather than
+    # returning a plausible number. An unreachable target is a REFUSAL (exit 3, no score),
+    # not a crash — a caller keying on the documented exit table must not read it as one.
+    try:
+        existing = target.node_count()
+    except TargetRefused as exc:
+        print(f"capstone: target refused — {exc}", file=sys.stderr)
+        return 3
     if existing and not args.allow_existing_graph:
         reason = (
             f"graph {target.namespace!r} already holds {existing} nodes — the "
@@ -1720,6 +1888,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         recipe = RECIPES.get(q.get("recipe") or "")
         needs = RECIPE_NEEDS.get(q.get("recipe") or "", [])
         missing = [n for n in needs if n not in target.capabilities]
+        unresolved = refs_unresolved(q.get("recipe") or "", ingestor.refs)
         if recipe is None:
             answers.append(
                 Answer(q["id"], status="blocked", reason=f"unknown recipe {q.get('recipe')!r}")
@@ -1731,6 +1900,23 @@ def cmd_run(args: argparse.Namespace) -> int:
                     q["id"],
                     status="blocked",
                     reason="target lacks capability: " + ", ".join(missing),
+                )
+            )
+            continue
+        if unresolved:
+            # The narrative's own write doors refused, so the identities this question
+            # asks about do not exist. Asking anyway scores an empty graph as a product
+            # defect, which is the one way this instrument could lie in the product's
+            # disfavour — so it is `blocked`, never `wrong`.
+            answers.append(
+                Answer(
+                    q["id"],
+                    status="blocked",
+                    reason=(
+                        "the narrative's ingestion did not produce: "
+                        + ", ".join(unresolved)
+                        + " — the question was never asked (see the ingest log)"
+                    ),
                 )
             )
             continue
@@ -1786,11 +1972,21 @@ def cmd_run(args: argparse.Namespace) -> int:
         except (OSError, ValueError) as exc:
             notes.append(f"could not read verdicts {verdicts_path}: {exc}")
         judge_meta["file"] = str(verdicts_path)
+        judged.pop("_provenance", None)
     else:
         notes.append(
             "judging was disabled (--judge none): every row is `unjudged`. "
             "Feed judge-packet.json to a fresh reader and re-render with "
             "`judge --verdicts`."
+        )
+
+    if args.verdicts_out and judged:
+        _write_verdicts(
+            Path(args.verdicts_out).resolve(),
+            judged,
+            packet_path=packet_path,
+            mode=args.judge,
+            meta=judge_meta,
         )
 
     header["notes"] = notes
@@ -1823,6 +2019,30 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     tally = board["tally"]
     return exit_code(tally)
+
+
+def _write_verdicts(path: Path, judged: dict, *, packet_path: Path, mode: str, meta: dict) -> None:
+    """Write the reader's verdicts in the shape `--verdicts` CONSUMES.
+
+    Without this, the documented round-trip (`run --judge fresh` → re-score / re-render
+    from the stored verdicts) had no producer: `run` wrote the packet and the scoreboard
+    and nothing that `--verdicts` would accept, so the one file in the chain had to be
+    assembled by hand. Same dict, same ids, same vocabulary — the artifact this writes is
+    accepted by `judge --packet … --verdicts …` and by `run --judge file --verdicts …`.
+    """
+    doc = {
+        "_provenance": {
+            "packet": str(packet_path),
+            "reader": mode,
+            **{k: v for k, v in meta.items() if k in ("elapsed_s", "cmd", "file", "reason")},
+            "note": (
+                "Written by this instrument. `--verdicts <this file>` re-scores the same "
+                "packet without spawning a reader."
+            ),
+        },
+        **{k: v for k, v in judged.items() if not k.startswith("_")},
+    }
+    path.write_text(json.dumps(doc, indent=2, default=str))
 
 
 def cmd_judge(args: argparse.Namespace) -> int:
@@ -1863,6 +2083,7 @@ def cmd_judge(args: argparse.Namespace) -> int:
         except (OSError, ValueError) as exc:
             print(f"capstone: cannot read verdicts: {exc}", file=sys.stderr)
             return 2
+        judged.pop("_provenance", None)
         judge_meta = {"mode": "file", "file": str(args.verdicts)}
     else:
         out = judge_fresh(packet, cmd=args.judge_cmd)
@@ -1871,6 +2092,14 @@ def cmd_judge(args: argparse.Namespace) -> int:
         judge_meta["mode"] = "fresh"
         if not out.get("ok"):
             print(f"capstone: {out.get('reason')}", file=sys.stderr)
+    if getattr(args, "verdicts_out", None) and judged:
+        _write_verdicts(
+            Path(args.verdicts_out).resolve(),
+            judged,
+            packet_path=packet_path,
+            mode=judge_meta.get("mode", "judge"),
+            meta=judge_meta,
+        )
     narrative = {
         "issue": packet.get("issue"),
         "questions": packet.get("questions"),
@@ -1898,6 +2127,7 @@ def cmd_judge(args: argparse.Namespace) -> int:
                 c.get("rows") or [],
                 c.get("legs") or [],
                 c.get("overlap") or {},
+                role=c.get("role") or "",
             )
             for c in row.get("calls") or []
         ]
@@ -1989,6 +2219,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.add_argument("--verdicts", default=None, help="verdicts JSON for --judge file")
     run.add_argument(
+        "--verdicts-out",
+        default=None,
+        help=(
+            "write the reader's verdicts here, in the shape --verdicts consumes "
+            "(the re-score / re-render round-trip had no producer before this flag)"
+        ),
+    )
+    run.add_argument(
         "--judge-cmd", default=None, help="judge command, default `pi -p --no-session --no-tools`"
     )
     run.add_argument(
@@ -2008,6 +2246,11 @@ def main(argv: list[str] | None = None) -> int:
     judge = sub.add_parser("judge", help="score an existing judge packet and re-render")
     judge.add_argument("--packet", required=True)
     judge.add_argument("--verdicts", default=None)
+    judge.add_argument(
+        "--verdicts-out",
+        default=None,
+        help="write the reader's verdicts here, in the shape --verdicts consumes",
+    )
     judge.add_argument("--judge-cmd", default=None)
     judge.add_argument(
         "--out",
