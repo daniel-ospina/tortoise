@@ -263,14 +263,14 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 
 | shape | readers (`file:line`) | capability |
 |---|---|---|
-| `:GraphEventMeta` | `event_store.py:557`, `:657`, `:1103`; `hosted_backup.py:842`; `sdk.py:13761` (reads); `:491`/`:738` are the `MERGE` **RMW** that advances/restores the watermark | **none** |
+| `:GraphEventMeta` | `event_store.py:557`, `:657`; `hosted_backup.py:842`; `sdk.py:13761` (reads); `:491`/`:738` are the `MERGE` and `:1103` a `SET` **RMW** that advance or restore the watermark | **none** |
 | `:EpMeta` | `sdk.py:36069`; `ep.py:473` | **none** |
-| `:Meta` | `residency.py:244`, `:292`, `:298`; `sdk.py:55647` | **none** |
-| `:WhySnapshot` | `why_snapshot.py:237`, `:303`, `:350` | **none** |
-| `:CommitRecord` | `commit_idempotency.py:57`, `:65`, `:194` | **none** |
-| `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`), `:502` (page) — `:487` is the CREATE, not a reader | **none** |
+| `:Meta` | `residency.py:244`, `:292`; `sdk.py:55647` (reads); `:298` is a `DETACH DELETE`, not a read | **none** |
+| `:WhySnapshot` | `why_snapshot.py:237` (read); `:303`/`:350` are the retention `DELETE` prunes, not reads | **none** |
+| `:CommitRecord` | `commit_idempotency.py:57`, `:65` (reads); `:194` is the idempotency `DELETE`, not a read | **none** |
+| `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`); `:502` is the `MAX_RECEIPTS` `DETACH DELETE`, `:487` the CREATE — neither is a reader | **none** |
 | `:Batch` | `mining.py:94`, `:178`; `projection/__init__.py:14295` | **none** |
-| `:PipelineStage` | `pipeline.py:349`, `:685`, `:731` | **none** |
+| `:PipelineStage` | `pipeline.py:349` (read); `:685`/`:731` are `SET` **RMW**, not reads | **none** |
 | `:PackInstall` / `:PackSelection` | `export.py:126` (`:PackInstall`); `pack_state.py:878-881` (`MATCH (s:PackSelection) RETURN s.revision, s.configured_at, s.updated_by`) | **none** |
 | `:ContextSubscription` | `webhook_delivery.py:425`, `:435`, `:444`, `:452`, `:461`, `:1113`; `why_snapshot.py:557` (reads; `:406` is the `CREATE` named in §1) | **none** |
 | `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:759-763` (`MATCH (n:OnboardingState {org_id:$org_id})-[:COMPLETED_STEP]->(s:OnboardingStep) RETURN s.step_id`) | **adjacency** → **`graph`** (§3 row 11c) — listed here only so the label is not missing from the table |
