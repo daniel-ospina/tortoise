@@ -422,6 +422,9 @@ def test_retiring_with_the_ordinary_verb_ends_both_fields_and_the_surfaces_agree
     assert found[0].invalidation.reason == "goal-retired"
     report = invalidate_stale(sdk, goal_id=goal["id"])
     assert report["counts"]["retired"] == 1
+    # ⚠️ THIS row is written by the INVALIDATION FOLD, not by the write door, so
+    # S0's `retracted`→`deprecated` synonym does NOT apply to it — measured at this
+    # head, the stored word is still `retracted`.
     assert sdk.get_entity(made["point_id"])["status"] == "retracted"
 
 
@@ -899,6 +902,19 @@ def test_an_UNHASHABLE_stored_status_reaches_the_documented_ValueError(sdk):
     stored value — storable through the public door — raised ``TypeError:
     unhashable type: 'list'`` from inside ``_sanitize_props`` on any write that
     needed the stored half, where the doors promise the documented ``ValueError``.
+
+    ⛔ THE FIXTURE WRITES THE ROW WITH RAW CYPHER (#12869 merge reconciliation).
+    The sentence above ("storable through the public door") stopped being true
+    when `#12869` landed: every SDK door now REFUSES a non-string `status`
+    before it can store one, so `update_knowledge(goal, status=["live"])` raises
+    at the fixture line instead of building the row this test is about. What the
+    test asserts is unchanged and still matters — such a row remains reachable
+    from a raw Cypher producer, a JSONL replay or a pre-fix SDK, which is the
+    route `#12869`'s own suite documents
+    (`test_a_row_that_ALREADY_holds_a_non_scalar_is_REFUSED_not_crashed`).
+    ⚠️ Non-vacuity is unaffected: the assertion still reds as
+    `TypeError: unhashable type: 'list'` if the stored-side hardening is
+    reverted, because the fixture no longer depends on the door it is bypassing.
     """
     goal = _goal(sdk, tag="unhashable")
     # ⛔ #11824 S0 CLOSED THE PUBLIC ROUTE for this shape (`a status must be a
