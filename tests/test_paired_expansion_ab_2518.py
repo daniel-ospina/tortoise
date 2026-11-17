@@ -1351,6 +1351,29 @@ def test_the_brief_does_not_claim_an_unmeasured_seed_absence():
         "committed evidence supports")
 
 
+def test_no_artifact_names_a_symbol_that_does_not_resolve():
+    """⛔ `#13267` review 4: the control's structural claim cited `sdk.SDK.search_graph`.
+
+    That symbol resolves to nothing — the class is `TortoiseSDK` and there is no
+    `SDK` on it. It sat in the ONE committed field that grounds the control's
+    "one code path" claim, and it survived four review rounds because every pin
+    read the brief and none read the artifacts' prose. A citation that does not
+    resolve is the same defect the brief's own predicate citation exists to avoid.
+    """
+    sdk = (Path(__file__).resolve().parent.parent / "tortoise" / "sdk.py").read_text()
+    assert "class TortoiseSDK" in sdk
+    assert "class SDK" not in sdk, (
+        "an `SDK` class now exists — re-derive which symbol the gate sits in")
+    for name in _ARTIFACTS:
+        raw = (_DOCS / name).read_text()
+        assert "sdk.SDK" not in raw, (
+            f"{name} cites `sdk.SDK…`, which does not resolve — the class is "
+            "`TortoiseSDK` (`#13267` review 4)")
+    control = _artifact("paired-object-60-control.json")["arms"]["object"]
+    assert "TortoiseSDK.tortoise_fts_query" in control["identity_note"], (
+        "the control's structural claim must cite the symbol that resolves")
+
+
 def test_the_index_row_calls_displacement_churn_not_harm():
     """⛔ `#13267` F7: the docs index presented the churn figure as the harm side.
 

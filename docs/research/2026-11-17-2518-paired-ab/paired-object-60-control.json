@@ -8,7 +8,7 @@
         "on": 0
       },
       "identity_measured": false,
-      "identity_note": "UNMEASURED, and it was reported as measured (#13267 F1): `read_arm` recorded each item's ranked list for the `point` arm only, so on this arm both sides were `None` and `(ids or [])` made that `[] == []` for every item \u2014 'the identical ranked list for all N items' from a constant no retrieval behaviour can move. The conclusion still holds and rests on the CALL SITE: `sdk.SDK.search_graph` arms the expansion only behind `entity_key_expansion and entity_type == \"point\"`, so this arm's two switch states are one code path. The tool now records ids for every arm and derives this count from the comparison, so a re-run measures it.",
+      "identity_note": "UNMEASURED, and it was reported as measured (#13267 F1): `read_arm` recorded each item's ranked list for the `point` arm only, so on this arm both sides were `None` and `(ids or [])` made that `[] == []` for every item \u2014 'the identical ranked list for all N items' from a constant no retrieval behaviour can move. The conclusion still holds and rests on the CALL SITE: `TortoiseSDK.tortoise_fts_query` arms the expansion only behind `entity_key_expansion and entity_type == \"point\"`, so this arm's two switch states are one code path. The tool now records ids for every arm and derives this count from the comparison, so a re-run measures it.",
       "items_whose_read_grew": null,
       "per_item": {
         "item-000000": {
@@ -578,7 +578,7 @@
   "population_file": "/tmp/snap-2518/population-60.json",
   "provenance": {
     "git_head": "9b537d875a3ee27e6abdb7ccac07b28ef71a78cd",
-    "git_head_note": "`git_head` is the repo commit the run sat on, and it does NOT identify the producing code: these artifacts carry `mde_note` and a null/`nan` `mde_paired`, which the tool emits only from 5898385f2e onward \u2014 that fix was UNCOMMITTED when the run happened. `tool_sha256` is null because this run predates the field; a run from this tool version records the digest of its own bytes and whether they were committed (#13267 F4).",
+    "git_head_note": "`git_head` is the repo commit the run sat on, and it does NOT identify the producing code: ALL THREE artifacts carry the `mde_note` key, and the object control's is populated and sits beside a `nan` `mde_paired` (the two point artifacts' `mde_note` is `\"\"` and their `mde_paired` is finite) \u2014 the tool emits that key only from 5898385f2e onward, and that fix was UNCOMMITTED when the run happened. `tool_sha256` is null because this run predates the field; a run from this tool version records the digest of its own bytes and whether they were committed (#13267 F4).",
     "tool_path": "tools/paired_expansion_ab_2518.py",
     "tool_sha256": null,
     "tool_uncommitted": true

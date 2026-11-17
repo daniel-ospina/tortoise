@@ -208,7 +208,6 @@ so a re-run measures the read, not the target's presence.
   was designed for on the class it targets, and says nothing about the product's recall on real questions.
   `#11901` declared the same residual for its generated variant arm.
 - **The k = 3 delta is BELOW this n's MDE.** Observed +1.67 pp against a 2.08 pp minimum detectable effect
-- **The k = 3 delta is BELOW this n's MDE.** Observed +1.67 pp against a 2.08 pp minimum detectable effect
   ⇒ **no winner at k = 3 is claimable**. ⚠️ The TOOL does not decide that — `_print_summary` prints the
   point estimate (`delta=`) beside both recalls, the CI and both MDEs, and emits no winner verdict at all;
   the MDE rule is this brief's.
@@ -233,7 +232,7 @@ it was unmeasured before).
 
 | measure (n = 300) | k = 3 | k = 15 |
 |---|---|---|
-| OFF top-k ids **displaced** from the ON window | **727 / 900 (80.8 %)** | **3,350 / 4,500 (74.4 %)** |
+| OFF top-k ids **displaced from the ON top-k** (`off_ids[:k]` absent from `on_ids[:k]`) | **727 / 900 (80.8 %)** | **3,350 / 4,500 (74.4 %)** |
 | items whose OFF top-1 survived in the ON window | 68 / 300 | 126 / 300 |
 | **seed** (the query's own point — the one labelled id) lost from the window | 0 | 0 |
 | seed demoted but kept | 0 | 0 |
@@ -263,7 +262,9 @@ same snapshot, n = 300):
 
 **Why this is the result worth keeping.** With a short query the gain is smaller (**+1.67 pp**, not
 significant) and the harm becomes visible: **5 of 300 items (1.7 %) had their own best match moved — 3 out
-of the window entirely** — which is the **same order** as the 1.67 pp gained. On this arm **the lever's cost
+of the k-window, 2 demoted but kept** — which is the **same order** as the 1.67 pp gained. ⚠️ "out of the
+k-window" is `seed_lost_from_window`'s own definition (`off_rank < k` and `on_rank` null or `>= k`), not
+"gone from the read": a seed that fell to rank 20 of the 60-wide read is counted. On this arm **the lever's cost
 and its benefit are indistinguishable in size**, and **neither side can be separated from noise at
 n = 300** — the gain's exact McNemar p is 0.0625, and the 3 seeds lost are a bare count (1 % of items)
 with no interval and no test attached. ⚠️ The 5 is `seed_lost_from_window` 3 **plus**
@@ -315,7 +316,8 @@ with no interval and no test attached. ⚠️ The 5 is `seed_lost_from_window` 3
 2. **On the leg the lever arms, it helps on its own class** (+5.67 pp @15, p = 2 × 10⁻⁵) and **its cost is
    a re-rank of the same size** (+1.67 pp gain against 5 of 300 items whose seed moved in the short-query
    arm — 3 out of the k-window, 2 demoted but kept). **In the headline arm** the k = 15 benefit is
-   resolvable while the cost is not; **in the short-query arm neither is** (1.67 pp against a 2.08 pp MDE).
+   resolvable while the cost is **unrecorded** there (§4.1); **in the short-query arm neither is**
+   (1.67 pp against a 2.08 pp MDE).
 3. **Do not arm it on this evidence.** `entity_key_expansion` stays caller-gated `False`; the honest
    summary is *"the mechanism works on its class and its displacement cost is unquantified at production
    scale"*, not *"it helps"*. A decision to arm it needs the harm side measured on items whose relevance
@@ -359,23 +361,27 @@ drawn `population-300.json` was never committed — so `items.name_digest` can b
 (it equals `population.names_sha256`) but the names behind it cannot be re-derived here. The artifacts say
 so rather than implying otherwise.
 
-⛔ **And three fields in these three files are ANNOTATIONS, not run output.** The control's
+⛔ **And FOUR field groups in these three files are ANNOTATIONS, not run output.** The control's
 `identity_measured: false` + its `identity_note`; all three files'
 `construction_unrecorded: {fields: [query_chars, key_tokens, min_query_tokens]}` (their runs predate those
-fields); and all three files' `repeat_identical: null` + `repeat_check` block — those were added by hand
-beside the run. They mean "this run did not record/measure it", which is a fact about THESE FILES — no
-version of the tool emitted them (`#13267` review 5, F5). The `repeat_check` case is the sharpest: their
-`repeat` arm compared the target's **rank**, which is null on both sides for every point-arm item, so the
-`true` those files used to carry was `None == None` — a constant. The annotation records the basis
-(`target_rank`), the zero items actually compared, and that it is not a determinism check (`#13267` review 4
-F2). The tool emits `identity_measured` and `repeat_check` itself now, compares ranked-list **digests**, and
-the suite's artifact-shape helper holds for a tool-produced artifact as well as these three, so a correct
+fields); all three files' `repeat_identical: null` + `repeat_check` block; and all three files'
+`provenance` block — whose `tool_sha256: null` cannot be emitted by any version (`_tool_provenance`
+returns `None` only on `OSError`) and whose `tool_uncommitted: true` is a claim about a run-time working
+tree that nothing in these files measures — were added by hand beside the run. They mean "this run did not
+record/measure it", which is a fact about THESE FILES — no version of the tool emitted them (`#13267`
+review 5, F5). The `repeat_check` case is the sharpest: their `repeat` arm compared the target's **rank**,
+which is null on both sides for every point-arm item, so the `true` those files used to carry was
+`None == None` — a constant. The annotation records the basis (`target_rank`), the zero items actually
+compared, and that it is not a determinism check (`#13267` review 4 F2). The tool emits
+`identity_measured` and `repeat_check` itself now, compares ranked-list **digests**, and the suite's
+artifact-shape helper holds for a tool-produced artifact as well as these three, so a correct
 re-generation is not punished by the pins that document the older shape.
 
 The tool records, in the artifact's own `provenance` block, the sha256 of its own bytes and whether those
 bytes were committed (`tool_sha256` / `tool_uncommitted`) — because `git_head` alone does **not** identify
-the producing code (`#13267` F4): these three artifacts record `9b537d875a` while carrying `mde_note` and a
-`nan` `mde_paired`, which only `5898385f2e`'s code emits (that fix was uncommitted when the run happened),
+the producing code (`#13267` F4): these three artifacts record `9b537d875a` while carrying the `mde_note`
+key (the control's populated, beside a `nan` `mde_paired`; the two point artifacts' `""` with a finite
+`mde_paired`), which only `5898385f2e`'s code emits (that fix was uncommitted when the run happened),
 and the earlier generation recorded `44a1b82` while carrying fields first committed in `9b537d8`.
 
 `tests/test_paired_expansion_ab_2518.py` pins the statistics to hand-computed tails and to the brief's own

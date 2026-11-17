@@ -2073,7 +2073,7 @@
   "population_file": "/tmp/snap-2518/population-300.json",
   "provenance": {
     "git_head": "9b537d875a3ee27e6abdb7ccac07b28ef71a78cd",
-    "git_head_note": "`git_head` is the repo commit the run sat on, and it does NOT identify the producing code: these artifacts carry `mde_note` and a null/`nan` `mde_paired`, which the tool emits only from 5898385f2e onward \u2014 that fix was UNCOMMITTED when the run happened. `tool_sha256` is null because this run predates the field; a run from this tool version records the digest of its own bytes and whether they were committed (#13267 F4).",
+    "git_head_note": "`git_head` is the repo commit the run sat on, and it does NOT identify the producing code: ALL THREE artifacts carry the `mde_note` key, and the object control's is populated and sits beside a `nan` `mde_paired` (the two point artifacts' `mde_note` is `\"\"` and their `mde_paired` is finite) \u2014 the tool emits that key only from 5898385f2e onward, and that fix was UNCOMMITTED when the run happened. `tool_sha256` is null because this run predates the field; a run from this tool version records the digest of its own bytes and whether they were committed (#13267 F4).",
     "tool_path": "tools/paired_expansion_ab_2518.py",
     "tool_sha256": null,
     "tool_uncommitted": true

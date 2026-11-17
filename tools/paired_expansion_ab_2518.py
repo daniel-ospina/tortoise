@@ -54,7 +54,9 @@ WHAT IS MEASURED, IN ONE TOOL
    → hit, c = hit → miss), a seeded paired bootstrap CI on the recall delta, the
    measured outcome correlation and the implied variance reduction, and — stated
    BEFORE any verdict — the **minimum detectable effect** for the n actually used.
-   `#13118`'s two-arms-need-755 framing is recomputed for contrast.
+   `#13118`'s two-arms-need-755 framing is recomputed for contrast — ⛔ that
+   estimate is quoted, not derived, and is published nowhere this repo can point
+   to (`#13267` review 3); what this tool computes is the DERIVATION.
 5. **The harm side, measured too.** "Help or hurt" needs both directions: the tool
    records how much of each arm's top-k the expansion's merged, re-ranked pass
    DISPLACES (`_entity_key_dense_pass`'s docstring names this as real behaviour,
@@ -1167,7 +1169,7 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
         prov_off = off["provenance_counts"].get(EXPANSION_PROVENANCE, 0)
         prov_on = on["provenance_counts"].get(EXPANSION_PROVENANCE, 0)
         # ⛔ "Did the lever fire?" must NOT be read off ``provenance``: ONLY the
-        # DENSE half tags its trace entries (`sdk.SDK._entity_key_dense_pass`
+        # DENSE half tags its trace entries (`TortoiseSDK._entity_key_dense_pass`
         # passes ``provenance=PROVENANCE_ENTITY_KEY_EXPANSION``); the SPARSE half
         # (`_entity_key_expansion_pass`) forwards `run_fts_query`'s own entries,
         # which carry `leg/ran/degraded/reason/count` and no provenance at all.
