@@ -24,7 +24,7 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **301** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **297** files scanned |
 | files carrying at least one statement site | **99** |
 | **statement sites (this census)** | **1311** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **859** (578 read, 281 write) |
@@ -37,14 +37,6 @@ this document classifies **statements**.
 | `unresolved` (statement not statically resolvable) | 106 |
 | non-Cypher door calls (excluded from every shape total) | 260 |
 | **AST door calls** = census + non-Cypher | **1571** |
-
-> ⛔ **`files_scanned` is 301 at THIS (merged) head, and it was 297 on EACH parent alone** — the
-> two sides each added new `tortoise/` modules and the merge carries the union, so neither parent's
-> pin could have shown this. The pins and Appendix A below are re-derived from the merged tree
-> (`python tools/cypher_inventory.py --markdown`, `--check` → "25 pinned counts match"); the
-> narrative figures below that still say "297" are the measurements they were taken over — §1's
-> two `rg` reconciliation counts are per-297-file runs and are left at that population rather than
-> re-scaled by hand.
 
 > **The finding, with its count: 578 of 1311 product statements (44.1 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
@@ -472,7 +464,7 @@ the order was fixed (`#13098` review F8).
 
 <!-- cypher-inventory:sites = 1311 -->
 <!-- cypher-inventory:files = 99 -->
-<!-- cypher-inventory:files_scanned = 301 -->
+<!-- cypher-inventory:files_scanned = 297 -->
 <!-- cypher-inventory:unresolved = 106 -->
 <!-- cypher-inventory:candidates = 578 -->
 <!-- cypher-inventory:shape_adjacency = 292 -->
