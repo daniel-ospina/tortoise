@@ -5271,12 +5271,23 @@ _JOURNAL_ENVELOPE_KEYS = (
 #   built, overwriting it (measured on ``update_point``: a caller ``ts``,
 #   ``event_id`` and ``projection_version`` all reached the record).
 #
-# The set is spelled out rather than derived so an auditor sees it whole; it
-# must stay equal to `_JOURNAL_ENVELOPE_KEYS` minus ``id``.
+# The set is spelled out rather than derived so an auditor sees it whole; it is
+# `_JOURNAL_ENVELOPE_KEYS` minus ``id`` **plus ``seq``** — and `seq` is not in the
+# envelope tuple because it is not an envelope name: it is the record's POSITION,
+# reserved for the reason below. (An earlier sentence said the set "must stay
+# equal to `_JOURNAL_ENVELOPE_KEYS` minus `id`", which stopped being true when
+# `seq` was added here — corrected rather than left as a claim a reader would
+# check and find false.)
 #
 # ⛔ ``seq`` IS LOAD-BEARING HERE, not tidiness (#12894). `#9190` makes the
-# record CARRY its ordinal, so `record_projection._carried_position` READS a
-# record's `seq` and REFUSES the write when it disagrees with the enumeration.
+# record CARRY its ordinal, so `record_projection.replay` READS a record's `seq`
+# — **only when the caller declares the batch RECORD-sourced**
+# (``carried_positions=True``), and then REFUSES the write when the carried number
+# disagrees with the enumeration (#13043 review P1-3). On a journal-sourced batch
+# the enumeration IS the position and the prop is ignored, which is what keeps a
+# legacy line on disk from refusing its own write. `EventLog.append` and
+# `_emit_event`'s `**extra` strip the name at the chokepoints as well, so no NEW
+# line can carry one.
 # A caller prop named ``seq`` rode `event.update(extra)` onto the journal line
 # top level (neither this set nor `_JOURNAL_ENVELOPE_KEYS` named it), so
 # ``update_point(pid, seq=42)`` produced a line whose ``seq`` disagreed with
