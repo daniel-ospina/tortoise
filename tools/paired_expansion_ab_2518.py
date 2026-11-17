@@ -52,8 +52,11 @@ WHAT IS MEASURED, IN ONE TOOL
    cannot reach it) whose E3 ``search_keys`` are its only join surface.
 4. **Paired statistics.** McNemar's exact test on the discordant pairs (b = miss
    → hit, c = hit → miss), a seeded paired bootstrap CI on the recall delta, the
-   measured outcome correlation and the implied variance reduction, and — stated
-   BEFORE any verdict — the **minimum detectable effect** for the n actually used.
+   measured outcome correlation and the implied variance reduction, and the
+   **minimum detectable effect** for the n actually used — ⛔ REPORTED BESIDE the
+   exact test, and **not** pre-stated: π is this run's own discordant share, so
+   the figure cannot exist until both arms have been read (`#13267` review 4 F3;
+   an earlier revision of this line claimed it was fixed in advance).
    `#13118`'s two-arms-need-755 framing is recomputed for contrast — ⛔ that
    estimate is quoted, not derived, and is published nowhere this repo can point
    to (`#13267` review 3); what this tool computes is the DERIVATION.
@@ -1211,6 +1214,15 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
                 "`expansion_identical_items` is null — the identity is a "
                 "call-site fact here, not something this run measured"),
         }
+        # ⛔ What this run's `per_item` rows make RE-DERIVABLE from the artifact
+        # alone. `--no-include-per-item` omits the rows entirely, so nothing is.
+        has_per_item = bool(args.include_per_item) and bool(item_ids)
+        _has_ids_digests = has_per_item and all(
+            off["per_item"][i]["ids"] is not None
+            and on["per_item"][i]["ids"] is not None for i in item_ids)
+        _has_seed_ranks = has_per_item and all(
+            "seed_rank" in off["per_item"][i]
+            and "seed_rank" in on["per_item"][i] for i in item_ids)
         out_arms[arm].update({
             "expansion_provenance_entries": {"off": prov_off, "on": prov_on},
             "window_modes": modes,
@@ -1226,11 +1238,35 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
                     "list — the target's rank alone cannot show a re-ordered "
                     "window, so no determinism is claimed"),
             },
+            # ⛔ WHICH derived figures this artifact makes RE-DERIVABLE, and which
+            # it merely reports. A figure in neither list is a free parameter; a
+            # figure in `derived_unpinned` cannot be recomputed from `per_item` and
+            # is therefore not protected by recomputation (`#13267` review 5 F1).
+            "derived_recomputable": [
+                name for name, datum in (
+                    ("expansion_fired_items", _has_ids_digests),
+                    ("ranked_lists_compared", _has_ids_digests),
+                    ("seed_effect", _has_seed_ranks),
+                ) if datum],
+            "derived_unpinned": ["off_topk_displacement"] if _has_ids_digests
+            else ["off_topk_displacement", "seed_effect",
+                  "expansion_fired_items", "ranked_lists_compared"],
+            "derived_note": (
+                "`off_topk_displacement` is NOT RE-DERIVABLE: it needs "
+                "the ranked-list IDS and `per_item` records only their digests. "
+                "Everything in `derived_recomputable` IS recomputed from "
+                "`per_item` by the suite."),
             "per_k": per_k,
             "reads": {"off": off["reads"], "on": on["reads"]},
             "per_item": {iid: {
                 "off_rank": off["per_item"][iid]["rank"],
                 "on_rank": on["per_item"][iid]["rank"],
+                # ⛔ The SEED's rank per side, so `seed_effect` is re-derivable
+                # from the artifact instead of being a free parameter that only
+                # the brief/artifact comparison can catch (`#13267` review 5 F1:
+                # `seed_lost_from_window: 3 -> 0` in both files SURVIVED).
+                "off_seed_rank": off["per_item"][iid]["seed_rank"],
+                "on_seed_rank": on["per_item"][iid]["seed_rank"],
                 # ⛔ A DIGEST of each side's ranked list, so the ON==OFF claim is
                 # checkable FROM THE ARTIFACT rather than only from the tool's
                 # own summary counts (`#13267` F1).

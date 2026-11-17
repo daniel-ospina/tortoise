@@ -375,10 +375,26 @@ record/measure it", which is a fact about THESE FILES — no version of the tool
 review 5, F5). The `repeat_check` case is the sharpest: their `repeat` arm compared the target's **rank**,
 which is null on both sides for every point-arm item, so the `true` those files used to carry was
 `None == None` — a constant. The annotation records the basis (`target_rank`), the zero items actually
-compared, and that it is not a determinism check (`#13267` review 4 F2). The tool emits
+compared, and that it is not a determinism check (`#13267` review 4 F2). ⛔ The CONTROL is a
+different case and its own block says so: its rank is present on all 60 items in both reads, so it
+records `compared: 60` and a real 60-of-60 equality of target PRESENCE — still not a determinism
+check of the read, but **not** zero items compared (`#13267` review 5 F5). The tool emits
 `identity_measured` and `repeat_check` itself now, compares ranked-list **digests**, and the suite's
 artifact-shape helper holds for a tool-produced artifact as well as these three, so a correct
 re-generation is not punished by the pins that document the older shape.
+
+⛔ **A fourth annotation class, and the residual it names.** All three files also carry
+`derived_recomputable: []` / `derived_unpinned: [...]` / `derived_note`. These runs recorded no per-item
+seed rank and no per-item ranked-list id digests, so **`seed_effect`, `expansion_fired_items` and
+`ranked_lists_compared` are the run's own output but CANNOT be recomputed from the artifact**: the suite
+holds them to "the brief repeats the artifact" only, so a *consistent* re-staling of the figure in BOTH
+files is invisible to it (`#13267` review 5 F1 — measured: `seed_lost_from_window: 3 → 0` in the artifact
+and the brief together SURVIVED, as did `expansion_fired_items: 293 → 1` together). ⚠️ **`off_topk_displacement`
+is not re-derivable even for a new run**: it needs the ranked-list IDS and the artifact records only their
+digests, so its only protection is the range invariants plus the CHURN framing. The tool now records
+`per_item.off_seed_rank` / `on_seed_rank` and declares per arm which figures it makes re-derivable, and the
+suite RE-DERIVES every declared one; the committed files declare none, and say so, rather than implying a
+protection they do not have.
 
 The tool records, in the artifact's own `provenance` block, the sha256 of its own bytes and whether those
 bytes were committed (`tool_sha256` / `tool_uncommitted`) — because `git_head` alone does **not** identify

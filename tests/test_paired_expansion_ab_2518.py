@@ -547,7 +547,7 @@ def _fake_arm(ids_by_item, *, seed_ranks=None, mode="keyword_only"):
 
 
 def _build_fake_artifact(*, point_off, point_on, object_off, object_on,
-                         args=None, repeat_ids=None):
+                         args=None, repeat_ids=None, arms=None):
     item_ids = sorted(point_off)
     names = [f"the name {i}" for i in range(len(item_ids))]
     items = [{"item_id": iid, "name": name, "target_overlap_with_query": 0}
@@ -557,15 +557,16 @@ def _build_fake_artifact(*, point_off, point_on, object_off, object_on,
     pop_body = {"schema": P.POPULATION_SCHEMA, "snapshot_digest": "0" * 64,
                 "population": 40, "sample": len(item_ids), "seed": 7,
                 "names_sha256": P._sha256_bytes("\n".join(names).encode())}
-    arms = {
-        "point": {"off": _fake_arm(point_off, seed_ranks={i: 0 for i in item_ids}),
-                  "on": _fake_arm(point_on, seed_ranks={i: 0 for i in item_ids})},
-        "object": {"off": _fake_arm(object_off), "on": _fake_arm(object_on)},
-    }
-    if repeat_ids is not None:
-        # the repeat arm, so the determinism check has something to compare
-        arms["point"]["repeat"] = _fake_arm(
-            repeat_ids, seed_ranks={i: 0 for i in item_ids})
+    if arms is None:
+        arms = {
+            "point": {"off": _fake_arm(point_off, seed_ranks={i: 0 for i in item_ids}),
+                      "on": _fake_arm(point_on, seed_ranks={i: 0 for i in item_ids})},
+            "object": {"off": _fake_arm(object_off), "on": _fake_arm(object_on)},
+        }
+        if repeat_ids is not None:
+            # the repeat arm, so the determinism check has something to compare
+            arms["point"]["repeat"] = _fake_arm(
+                repeat_ids, seed_ranks={i: 0 for i in item_ids})
     art = P._build_artifact(
         args or _fake_args(), manifest, pop_body, items, {}, {"anchors": 1},
         arms, item_ids, load_start={"load_1m": 1.0, "load_5m": 1.0,
@@ -1982,3 +1983,225 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
         f"{sorted(missing)}")
     assert dirs and "docs/research/2026-11-17-2518-paired-ab/" in dirs, (
         "the cell must name the directory it summarises")
+
+
+# ── 2h. the pins review round 5 measured GREEN (`#13267` F1–F6) ──────────────
+#
+# Same shape as 2g: each test names the mutant the reviewer PROVED survived at
+# the head it reviewed, and the fix that now reds it.
+
+_DERIVED = {"off_topk_displacement", "seed_effect", "expansion_fired_items",
+            "ranked_lists_compared"}
+
+
+def _assert_derived_figures_recompute(art: dict, where: str) -> None:
+    """Every derived figure the artifact DECLARES re-derivable must recompute.
+
+    ⛔ `#13267` review 5 F1: `seed_effect`, `expansion_fired_items` and
+    `ranked_lists_compared` were free parameters — held only to "the brief
+    repeats the artifact", so a CONSISTENT re-staling of both stayed green
+    (measured: `seed_lost_from_window: 3 → 0` and `expansion_fired_items: 293 → 1`
+    each in the artifact AND the brief, 46 passed). A figure that cannot be
+    recomputed must be DECLARED uncomputable, never left looking pinned.
+    """
+    for arm, block in art["arms"].items():
+        declared = set(block["derived_recomputable"])
+        unpinned = set(block["derived_unpinned"])
+        assert declared <= _DERIVED and unpinned <= _DERIVED, (
+            f"{where}/{arm}: unknown derived field name")
+        assert not (declared & unpinned), (
+            f"{where}/{arm}: {sorted(declared & unpinned)} is declared both "
+            "recomputable and unpinned")
+        assert declared | unpinned == _DERIVED, (
+            f"{where}/{arm}: every derived figure must be classified; missing "
+            f"{sorted(_DERIVED - declared - unpinned)}")
+        if unpinned:
+            assert "NOT RE-DERIVABLE" in (block.get("derived_note") or ""), (
+                f"{where}/{arm}: an unpinned derived figure with no note saying so")
+
+        per_item = block.get("per_item") or {}
+        item_ids = sorted(per_item)
+        if "seed_effect" in declared:
+            assert item_ids, f"{where}/{arm}: declared seed_effect with no rows"
+            off = {i: {"seed_rank": r["off_seed_rank"]} for i, r in per_item.items()}
+            on = {i: {"seed_rank": r["on_seed_rank"]} for i, r in per_item.items()}
+            for key, cell in block["per_k"].items():
+                k = int(key.split("=")[1])
+                if cell.get("seed_effect") is None:
+                    continue
+                assert P._seed_effect(off, on, item_ids, k=k) == cell["seed_effect"], (
+                    f"{where}/{arm}/{key}: the recorded seed_effect does not "
+                    "recompute from the artifact's own per-item seed ranks")
+        if "expansion_fired_items" in declared:
+            assert item_ids, f"{where}/{arm}: declared firing with no rows"
+            fired = sum(1 for r in per_item.values()
+                        if r["off_ids_digest"] != r["on_ids_digest"])
+            both = sum(1 for r in per_item.values()
+                       if r["off_ids_digest"] and r["on_ids_digest"])
+            assert fired == block["expansion_fired_items"], (
+                f"{where}/{arm}: recorded {block['expansion_fired_items']} fired "
+                f"items but the per-item ranked-list digests differ on {fired}")
+            assert both == block["ranked_lists_compared"], (
+                f"{where}/{arm}: recorded ranked_lists_compared="
+                f"{block['ranked_lists_compared']} but {both} rows carry both "
+                "sides' digests")
+
+
+def test_the_committed_artifacts_declare_which_derived_figures_they_pin():
+    """The three published runs record their own unpinned set, and say so."""
+    for name in _ARTIFACTS:
+        art = _artifact(name)
+        _assert_derived_figures_recompute(art, name)
+        for arm, block in art["arms"].items():
+            assert block["derived_recomputable"] == [], (
+                f"{name}/{arm}: these runs recorded no per-item seed rank or id "
+                "digest, so NOTHING may be declared recomputable")
+            assert "seed_effect" in block["derived_unpinned"]
+            assert "off_topk_displacement" in block["derived_unpinned"]
+
+
+def test_a_tool_produced_artifact_recomputes_its_derived_figures(
+        _no_embedder_probe):
+    """The other half: where the datum EXISTS, the pin must actually bite.
+
+    A new run records `per_item.off_seed_rank` / `on_seed_rank`, so the tool
+    declares `seed_effect` recomputable — and a re-staled count now reds instead
+    of surviving. Mutating the built artifact stands in for that re-stale.
+    """
+    off = {"item-000000": ["a", "b"], "item-000001": ["c", "d"]}
+    on = {"item-000000": ["b", "a", "z"], "item-000001": ["c", "d"]}
+    art, _ = _build_fake_artifact(
+        point_off=off, point_on=on, object_off=off, object_on=off)
+    block = art["arms"]["point"]
+    assert set(block["derived_recomputable"]) == _DERIVED - {"off_topk_displacement"}
+    assert block["derived_unpinned"] == ["off_topk_displacement"]
+    _assert_derived_figures_recompute(art, "tool-produced")
+
+    # ⛔ the mutant the reviewer measured GREEN at the reviewed head
+    for key, cell in block["per_k"].items():
+        cell["seed_effect"]["seed_lost_from_window"] += 1
+        cell["seed_effect"]["seed_at_top1_off"] += 1
+    block["expansion_fired_items"] = 1
+    with pytest.raises(AssertionError):
+        _assert_derived_figures_recompute(art, "mutant")
+
+
+def test_the_refusal_producers_fire_not_only_the_exit_code(
+        _no_embedder_probe):
+    """F2 — the refusal CLASSES were pinned only over a hand-built list.
+
+    `_exit_code`'s scoping is pinned at `test_..._class_scoping` over a list the
+    test itself constructs, and the committed control's `refusal_kinds` pins the
+    RECORD. Neither pins the producer, so deleting the `refusals.append(...)` for
+    structural blindness — or for a mixed window mode — left the suite green
+    (measured: both mutants SURVIVED, 46 passed). With either gone, a run the tool
+    promises will exit 3 publishes exit 0.
+    """
+    same = {"item-000000": ["a"], "item-000001": ["b"]}
+    diff = {"item-000000": ["a", "z"], "item-000001": ["b"]}
+
+    # ── structural blindness: an object-only run reads no lever-armed leg
+    # (both sides identical, which is what the gated-out leg LOOKS like — the
+    # tool infers the structural claim from that identity, so a diverging object
+    # arm is by definition NOT structurally blind and this fixture must match)
+    blind, _ = _build_fake_artifact(
+        point_off=same, point_on=same, object_off=same, object_on=same,
+        arms={"object": {"off": _fake_arm(same), "on": _fake_arm(same)}})
+    assert blind["arms"]["object"]["structurally_blind"] is True
+    assert P.STRUCTURAL_REFUSAL in blind["refusal_kinds"], (
+        "an object-only run must REFUSE to publish a verdict — every arm is "
+        "blind to the lever")
+    assert P._exit_code(list(zip(blind["refusal_kinds"], blind["refusals"])),
+                        allow_mixed_modes=True) == 3, (
+        "`--allow-mixed-modes` must NOT excuse structural blindness")
+
+    # ── a contaminated window: two legs in one arm
+    mixed_arm = {"off": _fake_arm(same), "on": _fake_arm(diff)}
+    mixed_arm["off"]["window_modes"] = {"keyword_only": 1, "hybrid": 1}
+    mixed, _ = _build_fake_artifact(
+        point_off=same, point_on=diff, object_off=same, object_on=same,
+        arms={"point": mixed_arm,
+              "object": {"off": _fake_arm(same), "on": _fake_arm(same)}})
+    assert P.MODE_REFUSAL in mixed["refusal_kinds"], (
+        "an arm whose two sides ran different legs is contaminated by the LEG, "
+        "not the lever, and must refuse")
+    assert P._exit_code(list(zip(mixed["refusal_kinds"], mixed["refusals"])),
+                        allow_mixed_modes=False) == 3
+    assert P._exit_code(list(zip(mixed["refusal_kinds"], mixed["refusals"])),
+                        allow_mixed_modes=True) == 0, (
+        "the mode refusal is the ONE class the opt-out is scoped to")
+
+
+def test_the_instruments_own_front_page_does_not_restate_a_retracted_claim():
+    """F3 — the module docstring kept the retracted pre-statement.
+
+    `#13267` review 4 F3 killed "MDE stated BEFORE any verdict" in the function
+    docstring and the brief; the MODULE docstring (the instrument's front page)
+    still carried it, and no test reads it.
+    """
+    doc = P.__doc__ or ""
+    flat = doc.replace("**", "").replace("``", "")
+    assert "BEFORE any verdict" not in doc, (
+        "the module docstring restates the retracted pre-statement")
+    assert "not pre-stated" in flat, (
+        "the front page must say the MDE is reported, not pre-stated")
+    assert "minimum detectable effect" in doc
+
+
+def test_the_control_cites_a_call_site_symbol_that_resolves():
+    """F4 — the control's `identity_note` cited `sdk.SDK.search_graph`.
+
+    Measured: `hasattr(tortoise.sdk, "SDK")` is False and `TortoiseSDK` has no
+    `search_graph`; the method is `tortoise_fts_query`. The brief's own citation
+    WAS pinned to the resolving symbol — the artifact carrying the same claim was
+    not.
+    """
+    from tortoise import sdk as _sdk
+    note = _artifact("paired-object-60-control.json")["arms"]["object"]["identity_note"]
+    assert "TortoiseSDK.tortoise_fts_query" in note
+    assert "sdk.SDK.search_graph" not in note, (
+        "that symbol does not exist — the conclusion must cite the call site it "
+        "actually leans on")
+    assert hasattr(_sdk.TortoiseSDK, "tortoise_fts_query")
+    assert not hasattr(_sdk, "SDK")
+
+
+def test_the_brief_carries_no_duplicated_or_dangling_bullet():
+    """F6 — a leftover from the MDE rewrite: the same bullet twice, one dangling."""
+    brief = (_DOCS / "research-brief.md").read_text()
+    lines = brief.splitlines()
+    for i, (a, b) in enumerate(zip(lines, lines[1:]), start=1):
+        assert a != b or not a.strip(), (
+            f"line {i} is duplicated verbatim (and one copy dangles): {a[:120]!r}")
+
+
+def test_the_seed_effect_producer_matches_a_hand_computed_case():
+    """F1, second half — re-deriving with the tool's OWN function is circular.
+
+    `_assert_derived_figures_recompute` pins the artifact against the code: if the
+    producer itself changes, the recompute changes with it and stays green
+    (measured: `lost += 1` → `if False:` SURVIVED it). So the PRODUCER is pinned
+    here against a hand-computed case, the way the statistics are, and the two
+    together close both directions.
+    """
+    off = {"a": {"seed_rank": 0}, "b": {"seed_rank": 5}, "c": {"seed_rank": None},
+           "d": {"seed_rank": 0}, "e": {"seed_rank": 3}}
+    on = {"a": {"seed_rank": 2}, "b": {"seed_rank": None}, "c": {"seed_rank": None},
+          "d": {"seed_rank": 0}, "e": {"seed_rank": 3}}
+    # by hand, k = 15:
+    #   top1 off: a(0), d(0)                        -> 2
+    #   top1 on : d(0)                              -> 1   (a moved to rank 2)
+    #   lost    : b (5 < 15, on None)               -> 1
+    #   demoted : a (2 > 0, not lost)               -> 1
+    #   shift   : a +2, d 0, e 0, b absent          -> 2
+    assert P._seed_effect(off, on, sorted(off), k=15) == {
+        "seed_at_top1_off": 2, "seed_at_top1_on": 1,
+        "seed_lost_from_window": 1, "seed_demoted_but_kept": 1,
+        "seed_rank_shift_sum": 2}
+    # ⛔ a NARROWER window loses nothing here: at k = 3 `a` sits at rank 2 in both
+    # arms (kept), and `b`'s OFF rank 5 was already outside the window, so it was
+    # never IN it to be lost — the metric counts displacement, not absence
+    assert P._seed_effect(off, on, sorted(off), k=3)["seed_lost_from_window"] == 0
+    narrow = {"a": {"seed_rank": 0}, "b": {"seed_rank": 2}}
+    assert P._seed_effect(narrow, {"a": {"seed_rank": 9}, "b": {"seed_rank": 2}},
+                          ["a", "b"], k=3)["seed_lost_from_window"] == 1
