@@ -1696,6 +1696,22 @@ def test_search_projects_through_the_served_row_helper():
         f"`served` is projected without `_served_row` (a duplicate that can drift): {missing}"
     )
 
+    # A correct BINDING is not enough: bind through the helper for `overlap`/`detail`, then
+    # project the rows the `Call` RETURNS inline, and the loop above never looks at it
+    # (#13303 cycle 15, measured: 75 green while the served rows came from a duplicate that
+    # can drift). Any dict-literal comprehension in this method must go through the helper.
+    projections = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.ListComp, ast.GeneratorExp))
+        and isinstance(n.elt, ast.Dict)
+        and any(
+            isinstance(k, ast.Constant) and k.value in ("supersedes", "what") for k in n.elt.keys
+        )
+    ]
+    inline = [ast.unparse(n)[:90] for n in projections if not _refs(n, "_served_row")]
+    assert not inline, f"rows are projected inline instead of through `_served_row`: {inline}"
+
 
 def test_every_post_ingestion_refusal_drops_the_graph(monkeypatch, tmp_path):
     """All four refusal gates route through ONE path, so `--drop-graph` cannot be skipped."""
