@@ -1491,6 +1491,29 @@ class _EqualityLie(str):
     __hash__ = str.__hash__
 
 
+class _AlwaysEqualLie(str):
+    """A `str` that answers "equal" to everything — the OTHER lie direction.
+
+    #13065 review ROUND 18. The `False` direction of this lie is mostly harmless
+    for a value whose content already spells the same ending; the `True` direction
+    is what lets a content-distinct value pass a comparison it does not satisfy.
+    MEASURED on this head with the verdict-map normalisation removed (i.e. the
+    pre-fix path): ``_refuse_inconsistent_goal_ending({"status": "superseded",
+    "supersededBy": "succ-1", "goalState": <content 'abandoned', __eq__ -> True>})``
+    **LANDED** while the plain-`str` control was REFUSED with the identical bag —
+    so a goal ended on ``status`` and running on ``goalState`` got through. With
+    the normalisation in place both are REFUSED.
+    """
+
+    def __eq__(self, other):
+        return True
+
+    def __ne__(self, other):
+        return False
+
+    __hash__ = str.__hash__
+
+
 def test_a_goalState_whose_RENDERING_lies_cannot_split_the_pair(sdk):
     """#13065 review ROUND 15, finding 1 (P1) — grade what the WRITE SENDS.
 
@@ -1552,17 +1575,16 @@ def test_a_goalState_whose_RENDERING_lies_cannot_split_the_pair(sdk):
 def test_an_EQUALITY_lie_cannot_forge_a_superseded_ending(sdk):
     """#13065 review ROUND 16, finding 1 (P2) — the verdicts are equality tests.
 
-    ⚠️ CORRECTED in round 17. This docstring first carried TWO rows as measured
-    holes, copied from the round-16 reviewer's table without re-deriving them. The
-    first row does not reproduce: a lie whose CONTENT is an abandoned word is
-    caught by the guard's FIRST arm whichever way ``__eq__`` answers, because the
-    ending-kind dispatch reads the content, so it never reaches an equality test.
-    MEASURED on this head with the helper neutralised: both the subclass and the
-    plain control are REFUSED, byte-identical ("goalState='abandoned' ends the
-    goal, but status='superseded' leaves it running"). It is kept below as a
-    control that the lie cannot smuggle a disagreement in that direction either —
-    not as the hole. A `⚠️ CORRECTED` marker records that the text changed, never
-    that it was right; this one is right because it was re-measured.
+    ⚠️ CORRECTED in round 17, and corrected AGAIN in round 18 — the first version
+    of this note said row 1 was "caught by the guard's FIRST arm whichever way
+    `__eq__` answers … so it never reaches an equality test". Both halves are
+    false: the row-1 lie's `__eq__` IS consulted (`sdk.py:6363` → `5995`, and
+    `sdk.py:6384`), and a `__eq__`->True lie on the SAME bag **LANDED** pre-fix
+    (MEASURED above). What is true of row 1 is narrower: the `__eq__`->False
+    answer happens to coincide with what the content says, so that direction
+    cannot flip the outcome. Row 1-as-written is therefore a control, the
+    `__eq__`->True direction is a second hole (pinned below), and row 2 is the
+    third.
 
     The row that IS the hole — re-measured here, subclass LANDED vs plain control
     REFUSED:
@@ -1580,12 +1602,22 @@ def test_an_EQUALITY_lie_cannot_forge_a_superseded_ending(sdk):
     goal = _goal(sdk, tag="equality-lie", goalState="active")
 
     # (1) CONTROL — a `superseded` status against a goalState whose content is an
-    # ABANDONED word. Refused with and without the fix (the first arm reads the
-    # content), so this pins "the lie cannot hide a disagreement", not the fix.
+    # ABANDONED word, with the lie answering "not equal". Refused with and without
+    # the fix, because that answer coincides with the content; it pins "this
+    # direction cannot hide a disagreement", not the fix.
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(goal["id"], status="superseded",
                              supersededBy="succ-1",
                              goalState=_EqualityLie("abandoned"))
+    assert "not interchangeable" in str(exc.value), str(exc.value)
+
+    # (1b) the SAME bag with the lie in the OTHER direction DID land pre-fix
+    # (MEASURED: LANDED vs the plain control's REFUSED), so this is a second hole
+    # of the same family, not a restatement of row 2.
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], status="superseded",
+                             supersededBy="succ-1",
+                             goalState=_AlwaysEqualLie("abandoned"))
     assert "not interchangeable" in str(exc.value), str(exc.value)
 
     # ...the plain-str control, so the assertion above is not just "this door
