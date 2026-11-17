@@ -84,8 +84,8 @@ def test_terminal_vocabulary_is_the_shared_set():
         assert is_terminal_status(s), s
     # ⚠️ #11824 S0 REVERSED this pin, deliberately and on the record. It used to
     # read `"deprecated" not in POINT_STATUS_VALUES` — the pin for a deliberate
-    # OMISSION recorded at `live.py:90-98`, where `deprecated` was a read-side/
-    # legacy word a Point could not be given. S0 closes every knowledge kind at
+    # OMISSION recorded at `live.py:100-107` on `main@a218f8867b`, retired by this
+    # change (the word is writable now). S0 closes every knowledge kind at
     # ONE four-word vocabulary (`draft` / `live` / `deprecated` / `superseded`)
     # because the rule that separates the two endings is one rule: `superseded`
     # NAMES ITS SUCCESSOR, and if nothing replaced it the word is `deprecated`.

@@ -12,12 +12,23 @@ vocabulary.
 
 This file pins four things:
 
-1. **The partition** (``TERMINAL_STATUS_VALUES == POINT_STATUS_VALUES -
-   CURRENT_POINT_STATUS_VALUES``). A status added to the canonical vocabulary
-   cannot be silently omitted from the terminal set — the parity test below is
-   the trap, and it is a *derivation from* ``POINT_STATUS_VALUES``, not a
-   second hand-written expectation. Consumers that call the canonical
-   *predicate* inherit the derivation by construction.
+1. **The partition** (every WRITE word is CURRENT or NOT-CURRENT; every READ
+   word is NOT-CURRENT). A status added to the canonical vocabulary cannot be
+   silently omitted from the terminal set — the parity test below is the trap,
+   and it is a *derivation from* ``POINT_STATUS_VALUES``, not a second
+   hand-written expectation. Consumers that call the canonical *predicate*
+   inherit the derivation by construction. ⛔ Since `#11824` S0 the WRITE set
+   and the READ set are deliberately NOT the same set, so the pre-S0 identity
+   ``TERMINAL_STATUS_VALUES == POINT_STATUS_VALUES - CURRENT_POINT_STATUS_VALUES``
+   no longer holds **while ``tortoise/live.py`` keeps its pre-S2 split** — that
+   is a partitioning artefact in one module, NOT something a decision retired.
+   `docs/plans/2026-11-16-state-lifecycle-implementation.md` §S2 names this very
+   identity as *"what FORCES the ``live.py`` edit"*, and §S4 repeats it, both
+   restoring the equality by moving the legacy words into
+   ``LEGACY_NON_CURRENT_STATUS_VALUES`` with ``TERMINAL_EXCLUDED_STATUSES`` held
+   constant. The equality's absence here licenses no one to leave the split; do
+   not read this file as its retirement (design §8: "what a reader hides is
+   wider than what a writer may create").
 2. **No reader re-declares a status literal** — an AST scan over the fixed
    consumers' executable string constants, so an inline ``IN [...]`` subset
    cannot reappear in a query body (the exact shape of the defect).
@@ -78,16 +89,65 @@ DEDUP_OBSERVATION = _load_script(
 # ── 1. the canonical partition ────────────────────────────────────────────
 
 def test_terminal_set_is_the_vocabularys_terminal_half() -> None:
-    """#2901 derivation: terminal == vocabulary minus current.
+    """#2901 derivation, restated for the post-S0 WRITE/READ split (#13217).
 
     ``live.py`` and ``sdk.py`` cannot import each other (sdk imports live), so
-    the equality is *asserted here* rather than enforced by import-time
-    coercion. This is the derivation — the expected value is computed from
-    ``POINT_STATUS_VALUES``, never restated.
+    the relation is *asserted here* rather than enforced by import-time
+    coercion. The expected values are computed from the two vocabularies, never
+    restated.
+
+    ⛔ The pre-S0 form of this test pinned ``TERMINAL_STATUS_VALUES ==
+    POINT_STATUS_VALUES - CURRENT_POINT_STATUS_VALUES`` — i.e. the READ set was
+    exactly the NON-CURRENT half of the WRITE set, so no word a writer could set
+    went unclassified. It never pinned ``READ == WRITE``; with a non-empty
+    CURRENT that could not hold. `#11824` S0 deliberately split them: the
+    WRITE vocabulary narrowed to four words (``draft``/``live``/``deprecated``/
+    ``superseded``) while the READ set keeps every legacy word a reader must
+    still hide (``retracted``/``outdated``/``archived``), because stored rows
+    keep whatever they hold and nothing is backfilled (`#11824` §1, design §8).
+    ⛔ That equality is NOT retired by the decision — it is **unsatisfiable while
+    ``live.py`` holds its pre-S2 split**, and the plan of record names this very
+    assertion as the thing that forces the re-partition:
+    ``docs/plans/2026-11-16-state-lifecycle-implementation.md`` §S2 — *"it is
+    what FORCES the ``live.py`` edit … true only if ``retracted``/``outdated``
+    leave the terminal set and ``deprecated`` joins it — with
+    ``TERMINAL_EXCLUDED_STATUSES`` held constant"* — and §S4 repeats it for
+    ``archived``. Until S2 and S4 land, what holds instead is the pair of
+    properties the split implies.
+
+    ⚠️ A narrowing of the READ set is mostly NOT caught here: the READ-side sets
+    are derived from each other, so dropping a word the write set does not itself
+    carry (``archived`` / ``outdated`` / ``retracted``) moves both and stays
+    green. The exception is ``superseded`` — it is also a word a writer may set,
+    so it sits inside ``writable_terminal`` and removing it DOES redline the
+    ``<=`` below. Either way the ABSOLUTE width is pinned only by
+    ``tests/test_lifecycle_guards.py:80-82``, which spells the five words out as
+    a literal expectation. This arm is the derivation and the classification
+    trap; that one is the value pin.
     """
-    assert TERMINAL_STATUS_VALUES == POINT_STATUS_VALUES - CURRENT_POINT_STATUS_VALUES
-    assert TERMINAL_STATUS_VALUES | CURRENT_POINT_STATUS_VALUES == POINT_STATUS_VALUES
-    assert not (TERMINAL_STATUS_VALUES & CURRENT_POINT_STATUS_VALUES)
+    writable = POINT_STATUS_VALUES
+    writable_terminal = writable - CURRENT_POINT_STATUS_VALUES
+    # every word a reader will SERVE as current is one a writer may set — that is
+    # the falsifiable half. The identity below is set algebra for ANY CURRENT ⊆
+    # POINT, so it reds only when CURRENT names a word the write set lacks
+    # (measured: injecting an unclassified write word leaves it green and reds
+    # the `<=` and the classification arm instead); the classification trap lives
+    # there, not here.
+    assert writable == CURRENT_POINT_STATUS_VALUES | writable_terminal
+    # a word a writer may set as an ending is never served as current (design §8:
+    # "what a reader hides is wider than what a writer may create"). Its ABSOLUTE
+    # width cannot be checked by derivation in this file: EXCLUDED is BUILT from
+    # TERMINAL_STATUS_VALUES, so dropping a READ word that the write set does not
+    # carry moves both and this `<=` stays green — that literal pin is
+    # `tests/test_lifecycle_guards.py:80-82`. `superseded` is the one READ word
+    # this line DOES catch, because a writer may set it too.
+    assert writable_terminal <= TERMINAL_EXCLUDED_STATUSES, (
+        "a status a writer may set is served as current: "
+        f"{sorted(writable_terminal - TERMINAL_EXCLUDED_STATUSES)}"
+    )
+    # …and the opposite end holds too: no word a writer may create as CURRENT is
+    # also in the hide-set, so the split cannot serve a live row as already ended.
+    assert not (CURRENT_POINT_STATUS_VALUES & TERMINAL_EXCLUDED_STATUSES)
 
 
 def test_every_vocabulary_member_is_classified() -> None:
@@ -95,11 +155,17 @@ def test_every_vocabulary_member_is_classified() -> None:
 
     This is the answer to "what prevents the NEXT status from being added to
     the vocabulary and forgotten": the partition must stay total, so a new
-    member lands in exactly one of current/terminal — it can never be
+    member lands in exactly one of current/not-current — it can never be
     unclassified and silently treated as current. Consumers that call the
     canonical predicate then inherit the new member automatically.
+
+    ⛔ Read membership from ``TERMINAL_EXCLUDED_STATUSES``, not from
+    ``TERMINAL_STATUS_VALUES``: that is the set a READER hides (#2901's subject),
+    and after `#11824` S0 it is the wider one — ``deprecated`` is a WRITE word
+    that arrives in it through ``LEGACY_NON_CURRENT_STATUS_VALUES``.
     """
-    classified = CURRENT_POINT_STATUS_VALUES | TERMINAL_STATUS_VALUES
+    classified = (CURRENT_POINT_STATUS_VALUES
+                  | (POINT_STATUS_VALUES & TERMINAL_EXCLUDED_STATUSES))
     assert classified == POINT_STATUS_VALUES, (
         "vocabulary members not classified as current-or-terminal: "
         f"{sorted(POINT_STATUS_VALUES - classified)}"
@@ -113,17 +179,27 @@ def test_outdated_is_terminal() -> None:
 
 
 def test_exclusion_set_adds_only_the_legacy_deprecated_status() -> None:
-    """#2901 inverse-shape ruling (see live.py).
+    """#2901 inverse-shape ruling (see live.py), as `#11824` S0 left it.
 
-    ``deprecated`` is NOT a legal create-time status: no SDK/API write path
-    emits it (asserted in tests/test_lifecycle_guards.py), so the vocabulary is
-    right to omit it. It IS present in legacy graphs and must never be served
-    as current, so it joins the EXCLUSION set only.
+    ``LEGACY_NON_CURRENT_STATUS_VALUES`` is the set of words a READER must hide
+    that the canonical terminal vocabulary does not itself name; it is exactly
+    ``{"deprecated"}``.
+
+    ⛔ `#11824` S0 REVERSED the pre-S0 pin ``"deprecated" not in
+    POINT_STATUS_VALUES``, deliberately and on the record: S0 closed every
+    knowledge kind at ONE four-word vocabulary
+    (``draft``/``live``/``deprecated``/``superseded``), so ``deprecated`` is now
+    a WRITE word as well as a legacy read word. The omission was the defect — a
+    Point that could not be ``deprecated`` had no way to say "this ended and
+    nothing replaced it" (``superseded`` NAMES ITS SUCCESSOR). The reversal is
+    already recorded at `tests/test_lifecycle_guards.py:85-97`, which asserts
+    the opposite of the old pin; this arm follows it rather than re-litigating
+    it (#13217).
     """
     assert TERMINAL_EXCLUDED_STATUSES == (
         TERMINAL_STATUS_VALUES | LEGACY_NON_CURRENT_STATUS_VALUES)
     assert {"deprecated"} == LEGACY_NON_CURRENT_STATUS_VALUES
-    assert "deprecated" not in POINT_STATUS_VALUES
+    assert "deprecated" in POINT_STATUS_VALUES
     assert is_terminal_status("deprecated") is True
 
 

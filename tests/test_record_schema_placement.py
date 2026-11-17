@@ -40,6 +40,7 @@ NO DATABASE IS NEEDED. The pgTAP half (RLS, PK/FK, the CHECKs firing) is
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -1879,24 +1880,173 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
 #: so a `DROP CONSTRAINT IF EXISTS chk_…` and the prose that names the
 #: constraint (migration headers do) both miss — only a real declaration is
 #: captured.
-_PROPS_BAN_PIN_RE = re.compile(
-    r"(ADD\s+)?CONSTRAINT\s+chk_(\w+)_props_no_derived\s+CHECK\b(.{0,400})",
-    re.S | re.I,
+#: The constraint HEADER, deliberately with NO body in the pattern.
+#: ⛔ WHY THE BODY IS NOT CAPTURED IN THE PATTERN (measured false pass, review of
+#: #13265 P2). The first form captured it inline — `CHECK\b(.{0,400})` with
+#: `re.S` — and `finditer` resumes only after a WHOLE match, i.e. past those 400
+#: characters, so a re-declaration starting inside the previous one's window was
+#: never matched at all and the pin read the body it had already captured.
+#:
+#: ⛔ AND WHY THE BODY IS NOT A WINDOW EITHER (round 3 of the same review). Taking
+#: "the text up to the next header, capped at 400" looked right and was not: the
+#: closest pair of declarations in this tree is **2,038** characters apart
+#: (measured at this head over 87 files / 9 declarations: 2,200 · 2,048 · 3,123 ·
+#: 2,038 · 6,536 · 3,895 · 44,747 · 109,441 · 148,124), so the CAP bound on EVERY
+#: declaration in the tree and the "body" was a 400-character slice of whatever
+#: followed the constraint. Substring-testing
+#: that slice for `'embedding'` let MIGRATION PROSE satisfy the pin: a new
+#: migration shrinking the ban to `ARRAY['status']` and then saying, in a comment
+#: within the window, "the 'embedding' column is written by the projection" left
+#: the pin GREEN — the same false pass, one layer in.
+#:
+#: ⇒ THE PIN READS THE REFUSED NAMES, NOT A TEXT WINDOW. The question these
+#: assertions actually ask is "which property names does the in-force ban
+#: refuse?", so the `ARRAY[…]` literal is parsed and its members are compared as
+#: names. Prose cannot answer that question, and neither can truncation: a body
+#: that refuses by some expression this pattern does not understand yields NO
+#: names and fails the pin loudly instead of passing on a stray quote.
+#:
+#: ⛔ AND THE NAMES SEARCH IS ANCHORED TO THE CHECK'S OWN EXPRESSION (round 3 P1 of
+#: the same review, still open at round 4 as N4). A bare `ARRAY[…]` search over
+#: the span took the FIRST such literal ANYWHERE in it — and the LAST
+#: declaration's span runs to EOF (109,441 characters at this head), so a comment
+#: citing the literals to explain the history (this repo's own header style, and a
+#: comment is a WORSE answerer than prose because its `ARRAY['embedding']` is
+#: well-formed) was read as the ban. Measured counter-example: an in-force ban
+#: rewritten to `'{status}'::text[]` followed by `-- Was ARRAY['embedding'], now
+#: ARRAY['status']` reported `{embedding}` over a ban that refuses only `status` —
+#: a FALSE PASS, which is the direction this whole block exists to close. So the
+#: search starts at the declaration's own `NOT (props ?|` and stops at that
+#: statement's `;`: text outside the CHECK can no longer answer, and a CHECK
+#: spelled in a form this pattern does not understand still yields NO names.
+#: (Canonical read is `pg_get_constraintdef()` over `pg_constraint` — the live
+#: `chk_*_props_no_derived` pgTAP arm, which this DB-free parse cannot replace;
+#: PostgreSQL explicitly does not guarantee a CHECK reduces to a value list, which
+#: is why an unreadable CHECK must fail LOUD here rather than guess.)
+_PROPS_BAN_PIN_HEADER_RE = re.compile(
+    r"(ADD\s+)?CONSTRAINT\s+chk_(\w+)_props_no_derived\s+CHECK\b",
+    re.I,
 )
+#: The CHECK's OWN expression — the anchor the names search may not leave.
+_PROPS_BAN_EXPR_RE = re.compile(r"\(\s*NOT\s*\(\s*props\s*\?\|", re.I)
+#: The refused-name list: `NOT (props ?| ARRAY['embedding', 'status'])`.
+_PROPS_BAN_NAMES_RE = re.compile(r"ARRAY\s*\[([^\]]*)\]", re.I)
+#: A `DROP CONSTRAINT` is an EVENT: a drop with no later re-declaration leaves NO
+#: ban in force, and a reader that only collects declarations cannot see that
+#: (round 4 N3, measured: a dropped ban left every Python pin green).
+_PROPS_BAN_DROP_RE = re.compile(
+    r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?chk_(\w+)_props_no_derived",
+    re.I,
+)
+#: Only for the diagnostic snippet attached to a finding; NOT read by any pin.
+_PROPS_BAN_SNIPPET_CHARS = 400
+_PROPERTY_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+#: SQL comments are NOT code, and two measured false passes came from reading
+#: them (round 3): a comment's `ARRAY['embedding', …]` was taken as an
+#: expression, and a comment BETWEEN the constraint NAME and `CHECK` stopped the
+#: header matching at all — silently demoting the in-force read to an older
+#: declaration. Stripping them before any matching closes both, and it also means
+#: a CHECK whose expression carries a comment still parses (instead of failing
+#: closed on a legal spelling). Replaced by a space so token adjacency cannot
+#: change.
+_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
 
 
-def props_ban_pins(text: str) -> dict[str, list[tuple[bool, str]]]:
-    """Every `props_no_derived` CHECK body, per table, in declaration order.
+def _strip_sql_comments(text: str) -> str:
+    """The text with SQL comments removed — what every parse below reads."""
+    return _SQL_COMMENT_RE.sub(" ", text)
 
-    Each entry is `(is_redeclaration, body)`: `is_redeclaration` is True when the
-    DDL form was `ADD CONSTRAINT …` (a FORWARD re-declaration, which under
-    append-only history SUPERSEDES the in-`CREATE TABLE` one) and False for a
-    bare `CONSTRAINT … CHECK` inside a `CREATE TABLE` body.
+
+@dataclass(frozen=True)
+class PropsBanEvent:
+    """One event in a table's props-ban history, at `position` in the source."""
+
+    position: int
+    kind: str                 # "declare" | "drop"
+    table: str
+    is_redeclaration: bool
+    names: frozenset[str]
+    snippet: str
+
+
+def props_ban_events(text: str) -> list[PropsBanEvent]:
+    """Every props-ban event (declaration OR drop), in source order.
+
+    Comments are stripped first, so a declaration is found even when a comment
+    sits between its NAME and `CHECK`, and a comment's `ARRAY[…]` is never read as
+    the constraint's expression.
     """
-    pins: dict[str, list[tuple[bool, str]]] = {}
-    for m in _PROPS_BAN_PIN_RE.finditer(text):
-        pins.setdefault(m.group(2), []).append((bool(m.group(1)), m.group(3)))
+    clean = _strip_sql_comments(text)
+    headers = list(_PROPS_BAN_PIN_HEADER_RE.finditer(clean))
+    drops = list(_PROPS_BAN_DROP_RE.finditer(clean))
+    events: list[PropsBanEvent] = []
+    for index, match in enumerate(headers):
+        # A declaration's span ends at the NEXT event of any kind, so its names
+        # can never come from a later constraint or a later DROP.
+        stop = len(clean)
+        later = [m.start() for m in headers[index + 1:] if m.start() > match.start()]
+        later += [m.start() for m in drops if m.start() > match.start()]
+        if later:
+            stop = min(later)
+        span = clean[match.end():stop]
+        names: frozenset[str] = frozenset()
+        anchor = _PROPS_BAN_EXPR_RE.search(span)
+        if anchor is not None:
+            semicolon = span.find(";", anchor.end())
+            array = _PROPS_BAN_NAMES_RE.search(
+                span, anchor.end(), len(span) if semicolon < 0 else semicolon)
+            if array is not None:
+                names = frozenset(_PROPERTY_NAME_RE.findall(array.group(1)))
+        events.append(PropsBanEvent(
+            match.start(), "declare", match.group(2), bool(match.group(1)), names,
+            span[:_PROPS_BAN_SNIPPET_CHARS]))
+    for drop in drops:
+        events.append(PropsBanEvent(
+            drop.start(), "drop", drop.group(1), False, frozenset(),
+            clean[drop.start():drop.end()]))
+    events.sort(key=lambda event: event.position)
+    return events
+
+
+def props_ban_pins(text: str) -> dict[str, list[tuple[bool, frozenset[str], str]]]:
+    """Every `props_no_derived` DECLARATION, per table, in declaration order.
+
+    Each entry is `(is_redeclaration, refused_names, snippet)`:
+
+    * `is_redeclaration` — True when the DDL form was `ADD CONSTRAINT …` (a
+      FORWARD re-declaration, which under append-only history SUPERSEDES the
+      in-`CREATE TABLE` one), False for a bare `CONSTRAINT … CHECK` inside a
+      `CREATE TABLE` body;
+    * `refused_names` — the property names the CHECK's `ARRAY[…]` literal names.
+      THIS is what the pins assert on; a text window is not, because prose and
+      truncation both pollute one (see the block comment above). Read ONLY from
+      the CHECK's own `NOT (props ?| …)` expression up to that statement's `;`,
+      so text outside the CHECK cannot answer and a CHECK this pattern cannot
+      parse yields the EMPTY set (a loud failure, never a passing guess);
+    * `snippet` — the following text, capped, for failure messages only.
+
+    ⛔ THIS VIEW OMITS DROPS, which is why `props_ban_in_force` exists: a reader
+    that asks "what is in force?" must see a DROP, not just the last declaration.
+    """
+    pins: dict[str, list[tuple[bool, frozenset[str], str]]] = {}
+    for event in props_ban_events(text):
+        if event.kind == "declare":
+            pins.setdefault(event.table, []).append(
+                (event.is_redeclaration, event.names, event.snippet))
     return pins
+
+
+def props_ban_in_force(text: str, table: str) -> tuple[str, frozenset[str]]:
+    """What the database enforces on `table` today: `(kind, refused_names)`.
+
+    `kind` is `"declare"` (a ban exists — `refused_names` is what it refuses),
+    `"drop"` (the last event removed the ban: NOTHING is refused) or `"none"`
+    (no declaration and no drop anywhere).
+    """
+    events = [event for event in props_ban_events(text) if event.table == table]
+    if not events:
+        return ("none", frozenset())
+    return (events[-1].kind, events[-1].names)
 
 
 def all_migration_text() -> str:
@@ -1932,6 +2082,14 @@ def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col
     # (this PR's own header does), so the name's last textual occurrence is not a
     # definition. Match the DDL form only — `ADD CONSTRAINT <name> CHECK` or a
     # bare `CONSTRAINT <name> CHECK` — and read the LAST one.
+    # ⛔ AND COMPARE ITS REFUSED NAMES, NEVER A TEXT WINDOW. A window is satisfied
+    # by migration PROSE: this pin passed over a ban shrunk to `ARRAY['status']`
+    # once a comment mentioning 'embedding' sat within 400 characters of it
+    # (review of #13265, round 3 — measured: with the text window in force the
+    # shrunk ban read as GREEN; the name-based read reds it). `props_ban_pins`
+    # parses the `ARRAY[…]` literal
+    # for exactly this reason, and a body it cannot read yields NO names, so the
+    # assertion fails loudly instead of passing on a stray quote.
     # ⛔ AND READ IT FROM THE WHOLE MIGRATIONS DIRECTORY, not this file's
     # `MIGRATIONS` tuple. That tuple is the read set `parse_sql_columns()` uses for
     # its COLUMN census, and it is hand-maintained — it does NOT list
@@ -1948,15 +2106,143 @@ def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col
     # `test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table_one`
     # below, so the regex that defines "a declaration" has a single home rather
     # than a second copy that can drift from this one.
-    definitions = [body for _is_redecl, body in
-                   props_ban_pins(all_migration_text()).get(table, [])]
-    assert definitions, (
+    kind, refused = props_ban_in_force(all_migration_text(), table)
+    assert kind != "none", (
         f"chk_{table}_props_no_derived has no DDL definition anywhere under "
         f"{_MIGRATIONS_DIR.relative_to(REPO_ROOT)} — the props ban has no home")
-    assert f"'{col}'" in definitions[-1], (
+    assert kind == "declare", (
+        f"the IN-FORCE state of chk_{table}_props_no_derived is {kind!r}: the last "
+        f"event is a DROP, so NOTHING is refused on {table} and {col!r} is open to "
+        "a payload. A reader that only collects declarations cannot see this")
+    assert col in refused, (
         f"the LAST re-declaration of chk_{table}_props_no_derived no longer names "
-        f"'{col}' — a later migration re-opened the name even though the column now "
-        f"exists. Definition read: {definitions[-1]!r}")
+        f"{col!r} — a later migration re-opened the name even though the column "
+        f"now exists. Names read: {sorted(refused)}")
+
+
+def test_a_redeclaration_that_FOLLOWS_another_closely_is_STILL_READ():
+    """A body capture that swallows the NEXT declaration is a false pass.
+
+    ⛔ MEASURED (review of #13265 P2). With the body captured inside the pattern
+    (`CHECK\b(.{0,400})`, `re.S`, greedy) `finditer` resumes past the whole
+    match, so a declaration starting inside the previous one's 400-character
+    window was never matched: on the text below the old pattern saw **0**
+    `subject` declarations (both sat inside the `object` one's window) and the
+    pin read whatever body it had already captured. With the third declaration
+    SHRINKING the ban to `ARRAY['status']`, that made the pin certify a
+    constraint the database no longer had — F8's failure one level down, where
+    the READ SET is right and the PARSER drops it.
+
+    TWO discriminators, because either alone is defeatable: the COUNT reds a
+    regression that re-narrows the read to some fixed width (a declaration then
+    hides inside its predecessor's slice, as it did under `CHECK\b(.{0,400})`),
+    and the LAST NAME SET reds a read of the wrong declaration.
+    """
+    text = (
+        "ALTER TABLE public.object ADD CONSTRAINT chk_object_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding']));\n"
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding']));\n"
+        "ALTER TABLE public.subject DROP CONSTRAINT IF EXISTS chk_subject_props_no_derived;\n"
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['status']));\n")
+    pins = props_ban_pins(text)
+    assert set(pins) == {"object", "subject"}, (
+        f"a declaration was swallowed by the one before it: {sorted(pins)}")
+    assert len(pins["subject"]) == 2, (
+        "only one chk_subject_props_no_derived was read although two are "
+        f"declared — the parser is consuming the next header: {pins['subject']!r}")
+    assert "embedding" in pins["subject"][0][1]
+    assert "embedding" not in pins["subject"][-1][1], (
+        "the LAST (in-force) declaration no longer refuses 'embedding' and this "
+        f"read did not notice: {sorted(pins['subject'][-1][1])}")
+
+    # ⛔ AND PROSE MUST NOT RESCUE IT (round 3 of the same review). A text-window
+    # read passed this case: the shrunk CHECK followed by a comment that mentions
+    # the name — which is what a real migration would plausibly say.
+    prose = (
+        text
+        + "-- Only 'status' is refused from here on; the 'embedding' column is\n"
+        + "-- written by the projection and never by a payload.\n")
+    rescued = props_ban_pins(prose)["subject"][-1][1]
+    assert "embedding" not in rescued, (
+        "a comment mentioning 'embedding' after the shrunk CHECK satisfied the "
+        f"pin — the read is still a text window: {sorted(rescued)}")
+
+
+def test_the_props_ban_pin_reads_the_CHECKS_own_expression_not_the_tail():
+    """An UNANCHORED `ARRAY[…]` search is answerable by text outside the CHECK.
+
+    ⛔ MEASURED (review of #13265, round 3 P1, still open at round 4 as N4).
+    `_PROPS_BAN_NAMES_RE.search(span)` took the FIRST `ARRAY[…]` anywhere in the
+    span, and the LAST declaration's span runs to EOF (109,441 characters at this
+    head), so the documented promise — "a body that refuses by some expression
+    this pattern does not understand yields NO names and fails the pin loudly
+    instead of passing on a stray quote" — held only while nothing downstream of
+    it contained an `ARRAY[…]`. That is exactly what a migration header does, and
+    in a COMMENT it is worse than prose: `ARRAY['embedding']` is well-formed, so
+    the names regex reads it as the ban.
+
+    The text below is an in-force ban narrowed to a NON-`ARRAY` spelling and then
+    explained in a comment. The ban refuses `status` ONLY; the comment names
+    `embedding`. An unanchored read reports `{embedding}` — certifying a ban the
+    database does not have, which is the false PASS this whole block exists to
+    close. The anchored read sees no `ARRAY[…]` inside the CHECK's own expression
+    and reports NO names, so the pin fails loudly.
+
+    The second half is the over-narrowing guard: a literal that IS inside the
+    expression must still be read, so "no names" cannot become the answer to
+    every question.
+    """
+    text = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| '{status}'::text[]));\n"
+        "-- Was ARRAY['embedding'], now ARRAY['status']: the column is written by\n"
+        "-- the projection and never by a payload.\n")
+    names = props_ban_pins(text)["subject"][-1][1]
+    assert "embedding" not in names, (
+        "the ARRAY[…] search ran PAST the CHECK's own expression and read a "
+        f"trailing comment as the ban: {sorted(names)}")
+
+    shrunk = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['status']::text[]));\n"
+        "-- was ARRAY['embedding'] before this migration\n")
+    assert props_ban_pins(shrunk)["subject"][-1][1] == frozenset({"status"}), (
+        "the anchor over-narrowed: the literal INSIDE the CHECK's own expression "
+        "must still be read")
+
+
+    # ROUND 3 vehicle A — a comment carrying the OLD `ARRAY[…]`, INSIDE the CHECK.
+    comment_array = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived CHECK (\n"
+        "  -- was: NOT (props ?| ARRAY['embedding', 'status']::text[])\n"
+        "  NOT (props ?| ARRAY['status']::text[]));\n")
+    kind, names = props_ban_in_force(comment_array, "subject")
+    assert (kind, names) == ("declare", frozenset({"status"})), (
+        f"a comment's ARRAY[...] was read as the refused names: {sorted(names)}")
+
+    # ROUND 3 vehicle B — a comment between the constraint NAME and `CHECK`. Legal
+    # SQL, and how a migration narrating a narrowing reads; it used to hide the
+    # declaration entirely, so the in-force read fell back to an OLDER one.
+    name_comment = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  -- narrowed: only status from here on\n"
+        "  CHECK (NOT (props ?| ARRAY['status']::text[]));\n")
+    kind, names = props_ban_in_force(name_comment, "subject")
+    assert (kind, names) == ("declare", frozenset({"status"})), (
+        "a comment between the constraint name and CHECK hid the declaration, so "
+        f"the read fell back to nothing or to an older one: {(kind, sorted(names))}")
+
+    # ROUND 3 vehicle C — a DROP with no later re-declaration leaves NO ban.
+    dropped = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['embedding', 'status']::text[]));\n"
+        "ALTER TABLE public.subject DROP CONSTRAINT chk_subject_props_no_derived;\n")
+    kind, names = props_ban_in_force(dropped, "subject")
+    assert (kind, names) == ("drop", frozenset()), (
+        "a DROP after the last declaration was not seen, so the read keeps "
+        f"certifying a ban the database no longer has: {(kind, sorted(names))}")
 
 
 def test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table_one():
@@ -1978,16 +2264,17 @@ def test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table
     would pass a status-only check.
     """
     pins = props_ban_pins(all_migration_text())
-    is_redecl, body = pins["subject"][-1]
+    is_redecl, names, snippet = pins["subject"][-1]
     assert is_redecl, (
         "the LAST chk_subject_props_no_derived is an in-`CREATE TABLE` declaration "
         "— the Oct-14 FORWARD re-declaration is the one in force, so the pin is "
-        f"reading the wrong definition again: {body!r}")
-    assert "'embedding'" in body and "'status'" in body, (
+        f"reading the wrong definition again: {snippet!r}")
+    assert {"embedding", "status"} <= names, (
         "the LAST chk_subject_props_no_derived does not refuse BOTH names — the "
         "in-force Oct-14 re-declaration refuses `embedding` and `status`, and the "
         "Oct-12 one it superseded refused only `embedding`. Either the pin is "
-        f"reading the superseded definition again or the ban was shrunk: {body!r}")
+        "reading the superseded definition again or the ban was shrunk: "
+        f"names read {sorted(names)}, declaration starts {snippet!r}")
     # …and the subject ban has TWO declarations to choose between, which is why
     # `[-1]` had to stop meaning "the Oct-12 one". Object stays single-declared.
     assert len(pins["subject"]) >= 2 and len(pins["object"]) >= 1
