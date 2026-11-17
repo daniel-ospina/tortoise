@@ -29,13 +29,20 @@ sized from the graph's byte total alone. This tool reports, per tenant:
    when it does not, the key fraction is the reading and the byte fraction is
    omitted rather than computed over a pretend zero.
 4. **Cold-restore cost** for the graph. Instrument: `--restore-probe`, a timed
-   `DUMP` → `DEL` → `RESTORE` on the named graph (indexes KEPT, so this is the
+   `DUMP` → `RESTORE … REPLACE` on the named graph (indexes KEPT, so this is the
    conservative figure; dropping the vector index before the dump is what the
    measured ~0.03 s figure in #13082 does, and that path is NOT timed here).
-   LIMITS: per GRAPH, not per region — FalkorDB has no per-region eviction. The
-   probe is DESTRUCTIVE for the interval between DEL and RESTORE, so it refuses
-   unless `--confirm-graph` names exactly the graph measured, and it refuses a
-   graph that is not already on the instance (reading a typo CREATES it).
+   LIMITS: per GRAPH, not per region — FalkorDB has no per-region eviction.
+   ⛔ THERE IS NO `DEL` AND THEREFORE NO INTERVAL IN WHICH THE GRAPH DOES NOT
+   EXIST (#13102 F2). `RESTORE` validates the payload's RDB version and checksum
+   BEFORE it creates the key, so a rejected payload leaves the live graph
+   untouched — whereas `DEL`-then-`RESTORE` leaves the payload as the only copy
+   if the restore fails, which is how a measurement loses a tenant's graph.
+   There is no separate delete step to time, so `del_s` is reported absent
+   rather than as a fabricated 0.0. The probe still REWRITES the key, so it
+   refuses unless `--confirm-graph` names exactly the graph measured, and it
+   refuses a graph that is not already on the instance (reading a typo CREATES
+   it).
 
 Nothing here refuses a write, deletes stored history, or bounds anything: it is
 the measurement half. The cap half is `tortoise/allowance_gate.py`.
@@ -119,11 +126,27 @@ def _connection(endpoint):
 
 
 def _restore_probe(uri: str, graph: str, confirm: str | None) -> dict:
-    """Time a DUMP → DEL → RESTORE for ONE graph. Dry run unless confirmed."""
+    """Time a DUMP → RESTORE-REPLACE for ONE graph. Dry run unless confirmed.
+
+    ⛔ NO `DEL` (#13102 F2). The rebuild is `RESTORE … REPLACE` against the LIVE
+    key: Redis validates the payload's RDB version and checksum BEFORE it creates
+    the key, so a payload the engine rejects leaves the graph untouched, and
+    there is no window in which the only copy of a tenant's graph is a local
+    variable. The previous shape (`DUMP` → `DEL` → `RESTORE`, no `except`)
+    deleted first and handed the operator a traceback on failure — with the
+    payload discarded with the stack frame, i.e. an unrecoverable loss on a
+    measurement. `tortoise/graph_key_restore.py` documents the same hazard for
+    the same sequence ("the payload is the only copy left").
+
+    A failure here is reported as a MEASUREMENT that could not be taken (the
+    section's ``error`` → ``EXIT_UNMEASURABLE``), never as a traceback, and the
+    graph is never deleted.
+    """
     if confirm != graph:
         return {
-            "error": ("--restore-probe is DESTRUCTIVE for the interval between "
-                      "DEL and RESTORE; it runs only with "
+            "error": ("--restore-probe REBUILDS the named graph's key from its "
+                      "own DUMP payload (RESTORE … REPLACE, in place); it runs "
+                      "only with "
                       f"--confirm-graph {graph!r} (matching --graph)"),
             "dry_run": True,
             "recorded_reference": RECORDED_COLD_RESTORE_S,
@@ -145,18 +168,38 @@ def _restore_probe(uri: str, graph: str, confirm: str | None) -> dict:
         t0 = perf_counter()
         payload = client.dump(graph)
         t1 = perf_counter()
-        client.delete(graph)
+        # A payload that is not raw bytes is not a payload `RESTORE` can verify
+        # (the client is built with `decode_responses=True`); refuse it HERE,
+        # while the graph is still the live key, rather than sending it on.
+        if not isinstance(payload, (bytes, bytearray)):
+            return {"error": (
+                f"DUMP returned {type(payload).__name__}, not bytes — a decoded "
+                "payload cannot be restored (RESTORE checks a binary RDB "
+                "checksum); nothing was written to the graph")}
+        try:
+            # REPLACE, no DEL: the checksum is verified BEFORE the key is
+            # touched, so a rejected payload leaves the graph intact.
+            client.restore(graph, 0, payload, replace=True)
+        except Exception as exc:  # the engine's error is REPORTED, never raised
+            # NOT a traceback: the reading is unmeasurable, the graph is intact,
+            # and the payload is still in this scope if an operator wants it.
+            return {"error": (
+                f"RESTORE was refused by the engine ({type(exc).__name__}: "
+                f"{exc}); the graph was NOT deleted and its key is unchanged "
+                f"(the {len(payload)}-byte payload failed validation before any "
+                "write)"), "graph": graph, "bytes": len(payload)}
         t2 = perf_counter()
-        client.restore(graph, 0, payload)
-        t3 = perf_counter()
         return {
             "graph": graph,
             "indexes": "kept",
+            # No DEL step exists, so there is no delete time to report. `None`,
+            # not 0.0 — an absent step is not a zero-second step (#13102 F2).
+            "rebuild": "restore-replace",
+            "del_s": None,
             "dump_s": round(t1 - t0, 4),
-            "del_s": round(t2 - t1, 4),
-            "restore_s": round(t3 - t2, 4),
-            "total_s": round(t3 - t0, 4),
-            "bytes": len(payload) if isinstance(payload, (bytes, bytearray)) else None,
+            "restore_s": round(t2 - t1, 4),
+            "total_s": round(t2 - t0, 4),
+            "bytes": len(payload),
         }
     finally:
         # Best-effort close: a failed close must not mask the probe's reading
@@ -246,8 +289,10 @@ def main(argv: list[str] | None = None) -> int:
             if cold.get("error"):
                 print(f"cold restore    : {cold['error']}")
             else:
+                del_s = cold.get("del_s")
                 print(f"cold restore    : {cold['total_s']}s "
-                      f"(dump {cold['dump_s']} · del {cold['del_s']} · "
+                      f"(dump {cold['dump_s']} · "
+                      f"del {'n/a (RESTORE REPLACE, in place)' if del_s is None else del_s} · "
                       f"restore {cold['restore_s']}, indexes kept)")
     # EVERY section that can fail is checked, not just the cold-restore probe
     # (#13102 F5: the ledger section's error was merged into `report` and
