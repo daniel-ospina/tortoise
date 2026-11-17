@@ -4501,11 +4501,27 @@ def run_vector_query(
         # readable at this width. One row is enough for ``empty_results`` to be
         # honest; NONE means the leg answered nothing and must say so.
         #
-        # Population: the WHOLE LABEL, deliberately — the same population the
-        # ``embedded`` count above uses. When ``_scope_embedded`` measured a
-        # narrower scope, "no readable row on the label" still proves the claim
-        # (it is the stronger statement), so the verdict is never recorded on a
-        # weaker measurement than it asserts. An UNMEASURABLE probe (raise, or
+        # Population: the WHOLE LABEL, deliberately — and the residual that
+        # deliberate choice leaves is NAMED here rather than argued away
+        # (#13290 attestation finding; recorded on #8430, not filed as a peer).
+        # ⛔ THE ARGUMENT HOLDS IN ONE DIRECTION ONLY. "No readable row on the
+        # LABEL" does prove "no readable CANDIDATE" — the stronger statement, so
+        # the verdict is never recorded on a weaker measurement than it asserts.
+        # The converse does NOT hold when `_scope_embedded` measured a scope
+        # NARROWER than the label: `embedded` is then the SCOPED count
+        # (:4482-4483) while this probe is label-wide, so a readable row OUTSIDE
+        # the scope leaves `empty_results`/degraded=False standing over a
+        # candidate set the width test emptied — a candidate-set false
+        # `empty_results`, reachable in the state this very reason names (a
+        # partial re-embed / encoder-width change leaves old-width rows inside
+        # the scope and new-width rows outside it).
+        # Scoping the probe HERE would close it and REVERSE a pinned decision:
+        # `tests/test_embedding_boundary_8419_8430.py:`
+        # `test_a_readable_row_keeps_an_empty_result_a_healthy_verdict` records
+        # that the excluded-but-readable row IS proof the store is readable, so
+        # `empty_results` is its honest verdict. The residual therefore stands,
+        # is recorded with the reviewer's two-direction reproduction on #8430,
+        # and must not disappear by consensus. An UNMEASURABLE probe (raise, or
         # an engine that cannot answer `RETURN 1 LIMIT 1`) leaves the existing
         # reason in place: a redundant `empty_results` is the cheap failure.
         unreadable = False

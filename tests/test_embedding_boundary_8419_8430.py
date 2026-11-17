@@ -408,7 +408,7 @@ def test_a_document_with_only_retired_content_earns_no_vector(tmp_path):
     """
     seen: list[str] = []
 
-    def _encoder(text, _dim=None):
+    def _encoder(text, _dim=None, **_kw):
         seen.append(text)
         return _vector(0.0)
 
@@ -438,7 +438,7 @@ def test_the_index_path_still_suppresses_the_embedding(tmp_path):
     """
     seen: list[str] = []
 
-    def _encoder(text, _dim=None):
+    def _encoder(text, _dim=None, **_kw):
         seen.append(text)
         return _vector(0.0)
 
