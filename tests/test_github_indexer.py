@@ -632,6 +632,80 @@ def test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration(sdk):
     mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
     assert mints == [0, 0, 0], (
         f"a pack-keyed row was read against CORE's declaration and looped ({mints})")
+    # ⛔ …and the direction that actually FIRES (#13289 F4). The assertion above
+    # cannot see the loop: with the issue OPEN, a reader answering `open` agrees
+    # with GitHub and mints nothing by accident. Fetch it CLOSED — a frozen row the
+    # fold refuses (`cross-pipeline`) never moves, so a reader answering `open`
+    # mints a `-closed` on EVERY poll, for ever:
+    #   pre-fix measured: mints=[1, 1, 1], events=['github-issue-acme/repo1-1-closed']
+    # The position is UNRESOLVABLE (`declared_slot is None` — unrecognised key) and
+    # the prop never resolved (`pipelineSlot=null`), so no fold has moved this row
+    # and none will: the answer is `None` ("no opinion"), exactly as
+    # `_row_is_frozen` answers for the lifecycle half. Answering "closed" instead
+    # is NOT the repair — it loops in the other direction (the mirror of F1).
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-25T08:00:00Z",
+        updated_at="2026-07-25T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+    assert mints == [0, 0, 0], (
+        f"a frozen pack-keyed row was read as OPEN, so every poll minted another "
+        f"close while the fold refused to move it ({mints})")
+    minted = proj.g.query(
+        "MATCH (e:Event) WHERE e.eventId ENDS WITH '-closed' "
+        "OR e.eventId ENDS WITH '-reopened' RETURN e.eventId").result_set
+    assert [tuple(r) for r in minted] == [], (
+        f"a transition was minted for a row the fold cannot move "
+        f"({[tuple(r) for r in minted]})")
+    # The second refusal, `unresolvable-current-stage`: a stage id absent from the
+    # declaration it resolves against (no key → CORE). One supported public write
+    # (`update_knowledge(id, pipelineStageId='nope')`), same frozen shape, same
+    # loop — measured `[1, 1, 1]` before the arm.
+    proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) SET o.pipelineStageKey=null, "
+        "o.pipelineStageId='nope', o.pipelineSlot=null, o.isClosed=false")
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", updated_at="2026-07-26T08:00:00Z")]
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-27T08:00:00Z",
+        updated_at="2026-07-27T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+    assert mints == [0, 0, 0], (
+        f"an unresolvable stage id was read as OPEN and looped ({mints})")
+    # …and the CONTROL that keeps the arm from swallowing resolvable rows. A
+    # RESOLVABLE position is untouched by the arm: a keyless row at a live stage
+    # still mints exactly one close and then stops.
+    proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) SET o.pipelineStageKey=null, "
+        "o.pipelineStageId='in_progress', o.pipelineSlot='active', "
+        "o.isClosed=false")
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", updated_at="2026-07-28T08:00:00Z")]
+    _run(_indexer(t), sdk)  # back to open
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-29T08:00:00Z",
+        updated_at="2026-07-29T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)]
+    assert mints == [1, 0], (
+        f"the control did not mint exactly one close then stop ({mints}) — the "
+        f"`None` arm must not swallow a row whose position DOES resolve")
+    # ⛔ And the STALE-PROP mirror (#13289 F4): F2's prop fallback is right for a row
+    # a PACK fold owns, but no pack fold can address an indexed issue Object
+    # (`github_map` writes no `objectKind`), so the connector fold is the only fold
+    # this row will ever see — and it refuses the foreign key. Nothing clears that
+    # prop, so answering from it freezes the row in the OTHER direction: below, the
+    # prop says `terminal` while GitHub says OPEN, and the reader answering "closed"
+    # mints a `-reopened` on EVERY poll (measured pre-fix: `[1, 1, 1]`). The arm must
+    # therefore precede the fallback.
+    proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) SET o.pipelineStageKey='venture:deal', "
+        "o.pipelineStageId='released', o.pipelineSlot='terminal', o.isClosed=false")
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", updated_at="2026-07-30T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+    assert mints == [0, 0, 0], (
+        f"a frozen row with a stale `terminal` prop was read as CLOSED, so every "
+        f"poll minted another reopen while the connector fold refused the foreign "
+        f"key ({mints})")
 
 
 def test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):

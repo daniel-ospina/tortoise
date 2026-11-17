@@ -1245,6 +1245,44 @@ class GitHubIndexer:
         # Reading `o.pipelineKey` returns NULL on every row, which silently
         # reduces the declaration arm below to its connector fallback.
         declared_slot = _declared_stage_slot(stage_key, stage_id)
+        # ⛔ A POSITION THE FOLD REFUSES gets NO OPINION — the position half of the
+        # same rule `_row_is_frozen` applies to the lifecycle half (#13289 F4).
+        # `apply_stage_fold` writes NOTHING for a row it cannot resolve, so neither
+        # "open" nor "closed" can be reconciled against it: whichever one the reader
+        # picks, the transition arm mints the OTHER state once per poll and
+        # `_next_transition_id` keeps the ids distinct, so the journal grows without
+        # bound — the `-closed`/`-reopened` loop this PR exists to close, one guard
+        # over. Measured on `1e95e315a7` (reader answered `open`):
+        #
+        #   SET o.pipelineStageKey='venture:deal', o.pipelineStageId='done'
+        #   issue open   -> mints=[0, 0, 0]   (accidentally quiet: the states agree)
+        #   issue CLOSED -> mints=[1, 1, 1]   events=['…-closed']   ← the loop
+        #
+        # ⛔ THIS ARM MUST PRECEDE THE `slot` FALLBACK, and that is the correction
+        # F4 made to F2. F2's rule ("the caller falls back to the stored
+        # `pipelineSlot` prop, which the pack's OWN fold writes") is right for a row a
+        # PACK fold owns — but this read is only ever asked about an INDEXED ISSUE
+        # Object, `github_map` writes no `objectKind`, and so no pack fold can address
+        # one: the connector fold is the only fold that will ever see this row, and it
+        # refuses a foreign key with `cross-pipeline`. Nothing clears that prop, so the
+        # fallback answers the same state for ever while GitHub moves — measured with
+        # `pipelineSlot='terminal'`: the row froze at "closed" and minted a `-reopened`
+        # on every poll (the mirror direction). `declared_slot is None` is exactly
+        # "the id resolves to no slot by declaration", i.e. one of the two refusals:
+        #   * `cross-pipeline` — `pipelineStageKey` names another pipeline (reached by
+        #     a supported public write: `update_knowledge(id, *, **props)`);
+        #   * `unresolvable-current-stage` — the id is absent from the declaration it
+        #     resolves against (`update_knowledge(id, pipelineStageId='nope')`).
+        # A RESOLVABLE position is untouched, so F2 keeps its pack-prop protection
+        # where a declaration actually exists (`_declared_stage_slot` still returns
+        # `None` for an unrecognised key; this arm decides what the READER answers).
+        # `None` is `_project_issue`'s "no opinion" (the mint is gated on
+        # `prev_state is not None`) and the repo's own answer for this shape:
+        # `planned_occurrence.plan_position` refuses to call an unresolvable row
+        # open/upcoming for the same reason ("a pre-check must not attempt one
+        # either"). `-created` is guarded separately by `_event_in_graph`.
+        if stage_id is not None and declared_slot is None:
+            return None
         if is_position_ended(is_closed=is_closed,
                              stage_slot=(slot if declared_slot is None
                                          else declared_slot)):
