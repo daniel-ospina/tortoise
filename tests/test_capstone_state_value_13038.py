@@ -509,13 +509,26 @@ def test_an_unresolved_ref_is_reported_and_never_silently_ignored():
     assert cap.refs_unresolved("why_changed", {"q4_pricing": "p2"}) == ["q3_pricing"]
     # Q1's answer key names four commitments and two identities that must not appear, so
     # it waits for all of them — `[]` here was the hole the second review found.
+    # `uptime_TARGET`, not `uptime_GOAL` (#13303 cycle 6, P2): the key names the 99.9 %
+    # target as the commitment, so declaring the goal object let a refused `judge_goal`
+    # write — a Q4 concern — block Q1 and drop its measured `wrong`.
     assert cap.refs_unresolved("current_commitments", {}) == [
         "q3_pricing",
         "q4_pricing",
         "old_onboarding",
         "launch_plan",
-        "uptime_goal",
+        "uptime_target",
     ]
+    # …and a refused JUDGEMENT write blocks Q4 (whose key is the judged state) without
+    # blocking Q1 (whose key is the commitment).
+    all_refs = {r: r for r in cap.RECIPE_REFS["current_commitments"]}
+    all_refs.update({r: r for r in cap.RECIPE_REFS["goal_met"]})
+    assert cap.refs_unresolved("current_commitments", all_refs, {"uptime_goal"}) == []
+    assert cap.refs_unresolved("goal_met", all_refs, {"uptime_goal"}) == ["uptime_goal"]
+    # Q4's key is the LATEST reading (November's 99.72): with that write refused, October's
+    # 99.95 would be judged newest and the product would report `met` — the instrument's own
+    # failed write scored as a product defect (#13303 cycle 6, P1).
+    assert cap.refs_unresolved("goal_met", all_refs, {"uptime_nov"}) == ["uptime_nov"]
     assert cap.refs_unresolved("unknown_recipe", {}) == []
 
 
@@ -598,6 +611,97 @@ def test_a_credential_in_the_deployed_api_url_never_reaches_the_recorded_header(
     prov = target.provenance()
     assert "hunter2" not in prov["api"] and "<redacted>" in prov["api"]
     assert "hunter2" not in str(prov) and "tt_abcdefghijkl" not in str(prov)
+
+
+def test_the_deployed_probe_records_a_userinfo_url_without_echoing_the_secret_or_raising():
+    """A probe records; it must not raise, and it must not echo the credential.
+
+    #13303 cycle 6, P1: `http.client.InvalidURL` is an `HTTPException`, NOT a `ValueError`,
+    so a userinfo URL with no explicit port made `_get_hostport` read the password as a
+    port — the traceback AND the recorded `error` string carried it, and the run exited 2
+    where EXIT CODES promises a refusal with exit 3. The prior pin used `…:9`, an explicit
+    port, so it never reached the crashing shape.
+    """
+    target = cap.DeployedTarget(
+        api_url="https://alice:s3cr3t-pw@api.example.com", api_key="tt_SECRETKEY123"
+    )
+    prov = target.provenance()
+    blob = json.dumps(prov)
+    assert "s3cr3t-pw" not in blob, "the password reached a recorded line"
+    assert "tt_SECRETKEY123" not in blob
+    reach = prov["reachability"]
+    assert reach["error"], "the failure must be RECORDED, not swallowed silently"
+    assert "s3cr3t" not in str(reach["error"])
+
+
+def test_judge_refuses_to_write_into_the_evidence_bundle(tmp_path):
+    """`judge` must not replace the real run's board with a lower-fidelity copy.
+
+    #13303 cycle 6, P2: `--out` defaults to the packet's directory, so re-scoring the
+    committed packet in place rewrote `run-local.json` / `scoreboard-local.md` with a
+    header frozen BEFORE the reader ran (`mode: file`, 62.8 s) and exited 0. Measured: both
+    bundle files changed md5.
+    """
+    args = type(
+        "A",
+        (),
+        {
+            "packet": str(ROOT / "docs" / "evidence" / "13038-capstone" / "judge-packet.json"),
+            "verdicts": str(
+                ROOT / "docs" / "evidence" / "13038-capstone" / "verdicts-baseline.json"
+            ),
+            "judge_cmd": None,
+            "out": str(cap.DEFAULT_OUT),
+        },
+    )()
+    before = {
+        p.name: p.read_bytes()
+        for p in (cap.DEFAULT_OUT / "run-local.json", cap.DEFAULT_OUT / "scoreboard-local.md")
+    }
+    assert cap.cmd_judge(args) == 2
+    after = {
+        p.name: p.read_bytes()
+        for p in (cap.DEFAULT_OUT / "run-local.json", cap.DEFAULT_OUT / "scoreboard-local.md")
+    }
+    assert before == after, "the bundle's board was replaced"
+
+
+def test_render_obeys_the_same_exit_rule_as_run_and_judge():
+    """The third producer of a scoreboard must not report success over an unjudged board.
+
+    #13303 cycle 6, P2: `render` returned 0 unconditionally, while EXIT CODES says a board
+    with `unjudged` rows is a 1.
+    """
+    board = {
+        "schema": "capstone-state-value-scoreboard/v1",
+        "header": {},
+        "ingest": [],
+        "rows": [],
+        "tally": {"right": 0, "wrong": 0, "blocked": 0, "unjudged": 6},
+    }
+    assert cap.exit_code(board["tally"]) == 1
+    assert cap.exit_code({"right": 3, "wrong": 3, "blocked": 0, "unjudged": 0}) == 0
+
+
+def test_judge_refuses_a_packet_holding_a_subset_of_the_frozen_scenario(tmp_path):
+    """A packet with fewer questions than the narrative renders a complete-looking board.
+
+    #13303 cycle 6, P2: three of six questions produced "2 right · 1 wrong · 0 blocked ·
+    0 unjudged" and exited 0 — a different denominator, presented as the assessment.
+    """
+    real = json.loads(
+        (ROOT / "docs" / "evidence" / "13038-capstone" / "judge-packet.json").read_text()
+    )
+    assert cap._same_questions_as_narrative(real) is True
+    truncated = dict(real)
+    truncated["questions"] = real["questions"][:3]
+    truncated["product_answers"] = real["product_answers"][:3]
+    assert cap._same_questions_as_narrative(truncated) is False
+    p = tmp_path / "truncated.json"
+    p.write_text(json.dumps(truncated))
+    args = type("A", (), {"packet": str(p), "verdicts": None, "judge_cmd": None,
+                          "out": str(tmp_path / "o")})()
+    assert cap.cmd_judge(args) == 2
 
 
 def test_run_judge_file_refuses_a_verdicts_document_before_measuring(tmp_path, narrative):

@@ -114,6 +114,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import traceback
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -249,6 +250,27 @@ def _redact(text: str) -> str:
         r"(?i)(api[_-]?key|token|password)([\"'=:\s]+)([^\s\"',}]{4,})", r"\1\2<redacted>", text
     )
     return text
+
+
+def _strip_userinfo(text: str, url: str) -> str:
+    """`_redact`, plus the URL's OWN credentials in whatever fragment leaks them.
+
+    A scheme-less fragment defeats the `scheme://user:pass@` regex: `urlopen` on
+    `https://alice:s3cr3t-pw@api.example.com` raises `InvalidURL` whose message is
+    `nonnumeric port: 's3cr3t-pw@api.example.com'` — the password with NO scheme and NO
+    colon in front of it, so `_redact` passed it through (measured: the pin caught the
+    password in `provenance()`, #13303 cycle 6). Scrub the URL's own username and password
+    literally, then apply the general rules.
+    """
+    out = _redact(text)
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return out
+    for secret in (parts.password, parts.username):
+        if secret and len(secret) >= 3:
+            out = out.replace(secret, "<redacted>")
+    return out
 
 
 def _git(*args: str) -> str:
@@ -725,6 +747,16 @@ class DeployedTarget:
         self.reach = self._probe()
 
     def _probe(self) -> dict:
+        """Reachability + version, recorded as data — NEVER raised, NEVER echoing a secret.
+
+        Any exception is recorded, not propagated: a probe is the one thing that must not
+        take the run down, and `http.client.InvalidURL` (an `HTTPException`, NOT a
+        `ValueError`) proved that a narrowed tuple is a hole — a deployed URL carrying
+        userinfo with no explicit port made `_get_hostport` read the password as a port,
+        and BOTH the escaped traceback and the recorded `error` string then carried the
+        credential while the run exited 2 where the table promises a refusal with exit 3
+        (#13303 cycle 6, P1).
+        """
         import urllib.error
         import urllib.request
 
@@ -738,8 +770,10 @@ class DeployedTarget:
                     out[path.strip("/").replace("/", "_")] = json.loads(
                         resp.read().decode("utf-8", "replace")
                     )
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-                out["error"] = f"{path}: {type(exc).__name__}: {_cut(str(exc), 160)}"
+            except Exception as exc:  # noqa: BLE001 — a probe records, it never raises
+                out["error"] = _strip_userinfo(
+                    f"{path}: {type(exc).__name__}: {_cut(str(exc), 160)}", self.api_url
+                )
         return out
 
     def provenance(self) -> dict:
@@ -792,6 +826,10 @@ class Ingestor:
         #: reader attributes the instrument's own refused write to a product issue (#13034).
         #: This is the exact case `--allow-existing-graph` documents (a second terminal
         #: advance is refused) and the exact inversion README:66 promises cannot happen.
+        #: A READ the question's key depends on belongs here too: Q4's key is the LATEST
+        #: reading (99.72, November), so a refused reading write leaves October's 99.95 as
+        #: the newest and the product's own judge reports `met` — a `wrong` row manufactured
+        #: by the instrument's failed write (#13303 cycle 6, P1).
         self.failed_refs: set[str] = set()
 
     def _need(self, requires: list[str]) -> str | None:
@@ -1255,11 +1293,16 @@ RECIPE_REFS = {
         # the question, so a missing or refused write makes the question unanswerable rather
         # than merely harder — declaring `[]` here (as this map first did) asked Q1 against a
         # graph the scenario had not created and let a reader score it.
+        #
+        # `uptime_TARGET`, not `uptime_GOAL` (#13303 cycle 6, P2): Q1's key names the 99.9 %
+        # TARGET as the commitment. Declaring the goal object made a refused `judge_goal`
+        # write — a Q4 concern — block Q1 and drop its measured `wrong` for a write Q1 does
+        # not depend on. `uptime_goal` stays on `goal_met`, which is where the judgement is.
         "q3_pricing",
         "q4_pricing",
         "old_onboarding",
         "launch_plan",
-        "uptime_goal",
+        "uptime_target",
     ],
     "plan_vs_occurrence": ["launch_plan"],
     "why_changed": ["q3_pricing", "q4_pricing"],
@@ -1272,6 +1315,11 @@ RECIPE_REFS = {
         # scores it `wrong`, and it names a PRODUCT defect for the instrument's refused write.
         # They were the only two ingest refs in the whole narrative that no question waited
         # for; a pin now asserts no ingest ref can be unwatched again.
+        #
+        # October's reading IS declared even though Q4's key does not turn on it: the class
+        # invariant (every produced ref is watched by some recipe) is what keeps a future
+        # narrative from adding an unwatched ref, and blocking Q4 on a refused October write
+        # is the fail-closed direction — the scenario is not the scenario.
         "uptime_oct",
         "uptime_nov",
     ],
@@ -2172,6 +2220,37 @@ def cmd_judge(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # The packet's questions ARE the frozen scenario's questions (`_judge_packet` copies
+    # them from the narrative, which is frozen before the run). A packet holding a SUBSET
+    # rendered a complete-looking board over a different denominator and exited 0 —
+    # "2 right · 1 wrong · 0 blocked · 0 unjudged" over three of six questions (#13303
+    # cycle 6, P2). Verified only when the packet records a narrative we can read; a
+    # packet from another checkout is judged with a note rather than refused.
+    same_scenario = _same_questions_as_narrative(packet)
+    if same_scenario is False:
+        print(
+            f"capstone: refusing {packet_path} — its questions are not the frozen "
+            f"scenario's ({len(packet.get('questions') or [])} in the packet); re-run the "
+            "assessment instead of judging a truncated packet",
+            file=sys.stderr,
+        )
+        return 2
+
+    # The bundle's own board comes from a REAL run (`run --judge fresh`), whose header says
+    # `mode: fresh` and carries the run's own durations. `judge` rebuilds the header from
+    # the packet, which was frozen BEFORE the reader ran, so writing here replaces the
+    # baseline with a lower-fidelity copy (`mode: file`, 62.8 s) and exits 0 while doing
+    # it — measured, with the bundle's two files changing md5 (#13303 cycle 6, P2).
+    out_dir = Path(args.out).resolve() if args.out else packet_path.parent
+    if out_dir == DEFAULT_OUT.resolve():
+        print(
+            f"capstone: refusing to write into the evidence bundle {DEFAULT_OUT} — "
+            "`judge` rebuilds the header from the packet, which predates the reader, so "
+            "it would replace the real run's board with a lower-fidelity copy. Point "
+            "--out at a scratch directory (e.g. /tmp/capstone-rerender).",
+            file=sys.stderr,
+        )
+        return 2
     if args.verdicts:
         try:
             judged = _load_verdicts_map(args.verdicts)
@@ -2254,7 +2333,6 @@ def cmd_judge(args: argparse.Namespace) -> int:
     # Persist beside the packet so the committed run JSON and the committed
     # scoreboard are the SAME run — a re-render that only printed would let the
     # two drift, and the drift would be invisible.
-    out_dir = Path(args.out).resolve() if args.out else packet_path.parent
     target = str(header.get("target") or "local")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"run-{target}.json").write_text(json.dumps(board, indent=2, default=str))
@@ -2268,6 +2346,33 @@ def cmd_judge(args: argparse.Namespace) -> int:
     return exit_code(tally)
 
 
+def _same_questions_as_narrative(packet: dict) -> bool | None:
+    """Does this packet carry the FROZEN scenario's question ids?
+
+    `True`/`False` when the packet records a narrative this checkout can read; `None`
+    when it records none, or the path does not resolve here (a packet from another
+    checkout) — the caller then judges with no claim about the denominator.
+
+    Why it exists: the packet's `questions` ARE `narrative['questions']` (`_judge_packet`
+    copies them), so a packet holding a SUBSET is not the scenario the narrative froze —
+    and it rendered a complete-looking board over a smaller denominator and exited 0
+    (#13303 cycle 6, P2).
+    """
+    recorded = (packet.get("header") or {}).get("narrative")
+    if not recorded:
+        return None
+    path = Path(recorded)
+    if not path.is_absolute():
+        path = ROOT / path
+    try:
+        narrative = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    want = [q.get("id") for q in narrative.get("questions") or []]
+    got = [q.get("id") for q in packet.get("questions") or []]
+    return bool(want) and want == got
+
+
 def cmd_render(args: argparse.Namespace) -> int:
     try:
         board = json.loads(Path(args.run).resolve().read_text())
@@ -2279,7 +2384,10 @@ def cmd_render(args: argparse.Namespace) -> int:
         Path(args.write).resolve().write_text(md)
         print(f"capstone: wrote {args.write}", file=sys.stderr)
     print(md)
-    return 0
+    # The third producer of a scoreboard, and the only one that used to ignore the rule:
+    # `render` returned 0 over a board with six `unjudged` rows while EXIT CODES says that
+    # is a 1 (#13303 cycle 6, P2). One definition, `exit_code`, for all three.
+    return exit_code(board.get("tally") or {})
 
 
 def main(argv: list[str] | None = None) -> int:
