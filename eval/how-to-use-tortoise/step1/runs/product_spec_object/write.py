@@ -172,13 +172,26 @@ if PLAN_ID:
     step("source -> plan v2 (references)", sdk.link_source_to_entity, SPEC_URL, PLAN_ID, "Object", "spec")
 
 # v1 is replaced entirely: it is no longer a live, actively pursued plan.
+# ⛔ #13065 review ROUND 14, finding 7 (P3) — this call used to be
+# `status='superseded', goalState='abandoned'`, which the write boundary now
+# REFUSES: the two axes' endings are the SAME endings spelled twice (`abandoned`
+# pairs with `deprecated`/`archived`/`retracted`; a row that was REPLACED is
+# `superseded` on both), and `goalState='superseded'` in turn demands the
+# successor be NAMED (`supersededBy`) — the same fact this run already records as
+# `replacedByPlanId`. Keeping `goalState` out is not an alternative here: v1 was
+# created with `goalState='active'`, so a `status`-only write would END it on one
+# axis and leave it running on the other, which is the divergence the guard
+# exists to stop. This is the reference run the AX write eval documents, so a
+# [FAIL] line here was the repo's own worked example demonstrating a refused call.
+v1_ending = {"status": "superseded", "goalState": "superseded"}
+if PLAN_ID:
+    v1_ending["supersededBy"] = PLAN_ID
 step(
-    "update: plan v1 -> status superseded / goalState abandoned",
+    "update: plan v1 -> superseded on BOTH axes (successor named)",
     sdk.update,
     V1_OBJ,
-    status="superseded",
-    goalState="abandoned",
     replacedByPlanId=PLAN_ID,
+    **v1_ending,
 )
 
 # --------------------------------------------------------------- the corrections
