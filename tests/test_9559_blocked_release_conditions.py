@@ -2308,15 +2308,23 @@ def test_a_string_literal_is_not_a_comment_and_cannot_hide_a_migration(tmp_path)
     """REVIEW FINDING (P2, fail-open): stripping without modelling `'…'` deletes DATA.
 
     PostgreSQL ends a `'…'` literal only at an unescaped `'` (`''` escapes one), so
-    a `/*` inside a literal is text the server executes. `_strip_sql_comments`
+    a `/*` or `--` inside a literal is text the server executes. `_strip_sql_comments`
     feeds the CANDIDATE scan as well as the body scan, so a correction migration
-    whose literal contained `/*` had its tail deleted, stopped matching
-    `_RESIDENCY_DEFS_RX`, and dropped out of `candidates` — the gate then asserted
-    over the SUPERSEDED file and went GREEN over a live, unguarded function.
+    whose literal contained an UNCLOSED `/*` had its tail deleted — including its own
+    `CREATE … FUNCTION` — stopped matching `_RESIDENCY_DEFS_RX`, and dropped out of
+    `candidates`; the gate then asserted over the SUPERSEDED file and went GREEN
+    over a live, unguarded function.
 
-    ⛔ Both halves are pinned here because they fail in opposite directions:
-    removing text can HIDE A FILE (this row), and failing to remove comment text
-    can FAKE A BODY (the row above).
+    ⛔ The literal with the `/*` sits ABOVE the declaration on purpose. A `/*` placed
+    after it leaves the declaration intact, so a literal-blind strip still selects
+    the file and the candidate assertions stay green — the row would then pin only
+    the body half and its own message would name a state the fixture cannot reach.
+    Measured: with the `/*` moved below the declaration, restoring the pre-fix strip
+    keeps BOTH candidate assertions green.
+
+    Both halves are pinned here because they fail in opposite directions: removing
+    text can HIDE A FILE (this row), and failing to remove comment text can FAKE A
+    BODY (the row above).
     """
     migrations = tmp_path / "migrations"
     migrations.mkdir()
@@ -2333,7 +2341,8 @@ def test_a_string_literal_is_not_a_comment_and_cannot_hide_a_migration(tmp_path)
         "$$ LANGUAGE plpgsql;\n",
         encoding="utf-8")
     (migrations / live_name).write_text(
-        "-- correction: the guard is gone, and the log line quotes a path\n"
+        "-- correction: the guard is gone, and the run's log line quotes a glob\n"
+        "DO $$ BEGIN RAISE NOTICE 'scanning /*'; END $$;\n"
         "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()\n"
         "RETURNS void AS $$\n"
         "BEGIN\n"
@@ -2349,6 +2358,18 @@ def test_a_string_literal_is_not_a_comment_and_cannot_hide_a_migration(tmp_path)
         "string literal was read as a comment and its tail deleted — the gate "
         f"would assert over the superseded file. candidates={got}")
     assert got[-1] == live_name, f"newest-first is broken: {got}"
+
+    # Non-vacuity: the LITERAL-BLIND cut is what hides the file, and this asserts
+    # the fixture can actually show it. The pre-fix strip removed `--` tails and
+    # `/* … */` spans but knew nothing about literals, so at the literal's `/*` it
+    # entered block-comment mode and deleted to EOF (nothing closes that `/*`) —
+    # including the declaration below it. Reconstructed here as "text before the
+    # first `/*`", which is exactly what that strip leaves for this file.
+    raw = (migrations / live_name).read_text(encoding="utf-8")
+    blind = raw[:raw.index("/*")]
+    assert _RESIDENCY_DEFS_RX.search(blind) is None, (
+        "the fixture's literal-blind cut still contains the declaration — the "
+        "candidate half has lost its subject, so it cannot attribute the fix")
     code = _function_body(
         (migrations / live_name).read_text(encoding="utf-8"), _RESIDENCY_DEFS_RX)
     assert code is not None
