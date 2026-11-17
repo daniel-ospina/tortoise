@@ -857,6 +857,46 @@ def test_only_a_complete_run_may_publish_into_the_bundle(tmp_path):
     )
 
 
+def test_the_packet_is_written_only_after_the_publish_guard(tmp_path):
+    """A REFUSED run must not replace the committed `judge-packet.json` (#13303 cycle 9, P1).
+
+    The packet used to be written BEFORE `may_publish`, so a run that refused to publish its
+    board still replaced the one committed file that says which run the numbers came from —
+    while the refusal message said "Nothing was written".
+    """
+    import inspect
+
+    src = inspect.getsource(cap.cmd_run)
+    guard = src.index("may_publish(board, out_dir)")
+    packet = src.index("packet_path.write_text")
+    assert guard < packet, "judge-packet.json is written before the publish guard"
+    for name in ('f"run-{target.kind}.json"', 'f"scoreboard-{target.kind}.md"'):
+        assert guard < src.index(name), f"{name} is written before the publish guard"
+
+
+def test_verdicts_out_cannot_cross_runs_into_the_bundle(tmp_path):
+    """`--verdicts-out` refuses the bundle by IDENTITY, not by completeness (#13303 c9, P2).
+
+    A COMPLETE board from a scratch run still must not land its verdicts beside the committed
+    board: `verdicts-baseline.json` would then describe a different run than
+    `run-local.json`, and nothing would say so.
+    """
+    args = type(
+        "A",
+        (),
+        {
+            "packet": str(ROOT / "docs" / "evidence" / "13038-capstone" / "judge-packet.json"),
+            "verdicts": str(ROOT / "docs" / "evidence" / "13038-capstone" / "verdicts-baseline.json"),
+            "judge_cmd": None,
+            "out": str(tmp_path),
+            "verdicts_out": str(cap.DEFAULT_OUT / "verdicts-baseline.json"),
+        },
+    )()
+    before = (cap.DEFAULT_OUT / "verdicts-baseline.json").read_bytes()
+    assert cap.cmd_judge(args) == 2
+    assert (cap.DEFAULT_OUT / "verdicts-baseline.json").read_bytes() == before
+
+
 def test_judge_records_that_the_scenario_could_not_be_verified(tmp_path):
     """The `scenario_check` note must exist in the artifact, not only in prose (#13303 c8)."""
     real = json.loads(

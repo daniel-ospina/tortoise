@@ -116,8 +116,11 @@ shape check were bypassed. For the same reason `run` refuses to publish a board 
 fully judged** into the bundle — whatever the cause (`--judge none`, a reader that failed, an empty
 verdicts map): the rule is keyed on the produced tally (`may_publish`), not on a flag, so a
 partly-`unjudged` board cannot become the baseline. Point `--out` at a scratch directory to inspect
-it. `judge` and `render --write` refuse the bundle for the same reason: the baseline comes from one
-complete `run`.
+it. `judge` and `render --write` refuse the bundle outright, and `--verdicts-out` is refused there
+unless the same invocation is also publishing its board: the baseline comes from ONE complete `run`,
+and every file in this bundle — `run-local.json`, `scoreboard-local.md`, `judge-packet.json`,
+`verdicts-baseline.json` — is written by it or not at all. (A refusal is decided BEFORE the packet is
+written, so a refused run leaves all four untouched.)
 
 `--judge fresh` spawns the fresh reader itself as `pi -p --no-session --no-tools`, in an EMPTY
 sandbox directory rather than the repo root, and writes its verdicts. Both halves of that are
