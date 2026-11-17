@@ -2441,7 +2441,7 @@ already carried the reopen. What the net change corrects is the result, and one 
 - **§14.3's lead** attributed the *"the record must hold a label's vectors before anything else about that label's
   storage is decided"* constraint to the index answer. It is in the **second** ruling, not a corollary of the first,
   and the attribution is corrected.
-- **Six templated sites** (§12.1b ×2, §12.1c ×2, §12.2c, §13 — `:216`, `:980`, `:1118`, `:1126`, `:1541`, `:1592`)
+- **Six templated sites** (§2, §12.1, §12.1b, §12.1c, §13 and §14.3's V1 row — `:216`, `:980`, `:1118`, `:1126`, `:1541`, `:1592`)
   each opened *"THE 2026-11-10 KEEP RULING IS IN FORCE TODAY"*. The ruling is not: its **prohibition** binds today
   because the later ruling's condition is unmet. Each site now says that, and says the ruling itself is superseded
   for the GRAPH COPY only. Left alone they contradicted §12.1c and the V3 row in the same file — six statements
@@ -2454,10 +2454,21 @@ already carried the reopen. What the net change corrects is the result, and one 
   `origin/main` read *"`:Event`/`:Source` were never named by the KEEP ruling, so their graph copies were already
   retirable once the record serves them"*, at §14.3's lead and in `SEARCH-ARCHITECTURE.md`'s decision block. No ruling
   makes them retirable: `#11395` comment `6956793300` authorises retirement for `:Object`/`:Subject` and no other label.
-  Both sites now say the pair is neither protected by the KEEP ruling **nor retired by this one**, and state the
-  record-first condition as what it is — **SEQUENCING**, addressed to every label and scoping none — separate from the
-  label-scoped authorisation to retire. Left as a "wording" correction, the record would have kept a permission no
-  owner ruling grants and the changelog would have called it unchanged.
+  Both sites now say the pair is neither protected by the KEEP ruling **nor retired by this one**. Left as a
+  "wording" correction, the record would have kept a permission no owner ruling grants and the changelog would have
+  called it unchanged.
+- **The removal rule is now stated as its two parts, at every site.** The precondition was being written three
+  different ways and each site quoted the same comment while disagreeing with the others: §14.3's lead extended the
+  precondition to `:Event`/`:Source`, which `#11395` comment `6956793300` does not name; the V3 row's *"never
+  widened"* is true of the **prohibition** and read as if it also bounded the precondition; and
+  `SEARCH-ARCHITECTURE.md`'s decision block stated the pair with no condition at all. Both are now explicit
+  wherever either appears: the **record-first condition** is SEQUENCING — addressed to every label, scoping none —
+  and the **authorisation to RETIRE** a graph copy is scoped, and that comment gives it for `:Object`/`:Subject`
+  and no other label. A label-scoped authorisation never narrowed the sequencing rule, and the general rule never
+  widened the prohibition.
+- **§14.3's heading** now says the KEEP half's *prohibition* binds today rather than that the ruling is "in force
+  today", so the heading agrees with the six sites, the V3 row and this entry instead of contradicting them from
+  the line above the table.
 
 ⛔ **Why this entry exists.** The entry above states that a ⛔ marker sits **immediately after** the KEEP quotation
 saying *"that it is the 2026-11-10 ruling and not the current one"*. An intermediate revision of the wording removed
