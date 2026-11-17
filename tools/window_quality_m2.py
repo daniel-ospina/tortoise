@@ -99,9 +99,13 @@ FOUR INVARIANTS, ASSERTED — because they falsify the INSTRUMENT
  3. No demoted node is returned at ANY rank — ``found_deep_of_demoted == 0``.
     This is the STRONG form of (1) and the one the record's verdict rests on.
     It is not redundant: ``found_deep`` is a rate over ALL queries, so on a
-    population whose complete-graph ceiling is below 1.0 (``:Point`` on this
-    corpus: 0.410 against a resident share of 0.5267) a leak of demoted queries
-    sits UNDER (1)'s bound and passes it. (3) has no ceiling to hide behind.
+    population whose COMPLETE-graph ceiling is below 1.0 (``:Point`` on this
+    corpus: 0.7133 — 28.7 % of claim canonicals are unreachable with the whole
+    graph resident) a leak of demoted queries sits UNDER (1)'s bound and passes
+    it. (3) has no ceiling to hide behind. NOTE: the windowed ``tail@0.5`` arm's
+    own 0.410 against a 0.5267 resident share is a DIFFERENT quantity (11.7 pp of
+    headroom within that arm); quoting it as the complete-graph ceiling was the
+    error this note replaces.
  4. The query-sample seed and the ``random`` eviction seed must not collide
     (``EVICT_SEED_OFFSET``). They are permutations of the SAME list, so one shared
     seed makes the retained suffix and the sampled prefix DISJOINT by
@@ -903,9 +907,11 @@ def run(args: argparse.Namespace) -> int:
                 # ⚠️ This aggregate bound is NOT the verdict's load-bearing claim,
                 # and on its own it cannot enforce it (#12186 review P1-2).
                 # `found_deep` is a rate over ALL queries, so on a population
-                # whose complete-graph ceiling is below 1.0 (`:Point` on this
-                # corpus: 0.410 vs resident 0.5267) a leak of demoted queries
-                # sits UNDER the bound and passes. The comment here used to claim
+                # whose COMPLETE-graph ceiling is below 1.0 (`:Point` on this
+                # corpus: 0.7133 — resident share 1.0) a leak of demoted queries
+                # sits UNDER the bound and passes. (0.410 vs 0.5267 is the
+                # windowed `tail@0.5` arm, not the complete graph — corrected.)
+                # The comment here used to claim
                 # the opposite — that it "fails for any demoted node surfaced at
                 # any rank" — which was only true on `:Object`, where the
                 # ceiling is 1.0. INVARIANT 3 below is the per-demoted detector

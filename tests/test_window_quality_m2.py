@@ -746,6 +746,7 @@ def _arms_as_table_rows(arms):
             "found@deep": f"{d['found_deep'] * 100:.1f}",
             "recall@3": f"{d['recall@3'] * 100:.1f}",
             "recall@5": f"{d['recall@5'] * 100:.1f}",
+            "recall@10": f"{d['recall@10'] * 100:.1f}",
             "recall@15": f"{d['recall@15'] * 100:.1f}",
             "misbind@1": f"{d['misbind_at_1'] * 100:.1f}",
             "wrong-not-miss¹": f"{d['wrong_not_miss'] * 100:.1f}",
@@ -774,9 +775,9 @@ def _parse_table(md, header_prefix):
         ("object", "| arm | resident | found@deep | recall@3 | recall@5",
          ["resident", "found@deep", "recall@3", "recall@5", "recall@15",
           "misbind@1", "wrong-not-miss¹", "silent-zero¹"]),
-        ("point", "| arm | resident | found@deep | recall@3 | recall@15",
-         ["resident", "found@deep", "recall@3", "recall@15", "misbind@1",
-          "wrong-not-miss¹", "silent-zero¹"]),
+        ("point", "| arm | resident | found@deep | recall@3 | recall@5 | recall@10 | recall@15",
+         ["resident", "found@deep", "recall@3", "recall@5", "recall@10", "recall@15",
+          "misbind@1", "wrong-not-miss¹", "silent-zero¹"]),
     ],
 )
 def test_every_result_table_cell_is_recomputed_from_the_artifact(

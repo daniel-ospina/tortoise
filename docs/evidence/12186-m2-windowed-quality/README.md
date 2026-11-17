@@ -105,8 +105,9 @@ a constant in the instrument, and it is not counted among the invariants.)
 2. **The graph holds exactly the intended resident set** after eviction.
 3. **`found_deep_of_demoted == 0`** — no demoted node is returned at **any** rank. This is the strong
    form of (1) and the one the verdict rests on: `found@deep` is a rate over ALL queries, so on a
-   population whose complete-graph ceiling is below 1.0 (`:Point`: 0.410 against a resident share of
-   0.5267) a leak of demoted queries sits *under* the aggregate bound and passes (1).
+   population whose complete-graph ceiling is below 1.0 (`:Point`: **71.3 %** — 28.7 % of claim
+   canonicals are unreachable even with the whole graph resident) a leak of demoted queries sits *under*
+   the aggregate bound and passes (1).
 4. The query-sample seed and the `random` eviction seed are **independent** (`EVICT_SEED_OFFSET`).
    They are permutations of the same list; one shared seed made the retained suffix and the sampled
    prefix disjoint by construction, and the first run reported `resident_share` 0.667 / 0.167 / 0.000
@@ -151,19 +152,19 @@ deleting the `invalidate_degraded_snapshot()` call, which is the reproduction, n
 
 ### `:Point` — the population the window demotes
 
-| arm | resident | found@deep | recall@3 | recall@15 | misbind@1 | wrong-not-miss¹ | silent-zero¹ |
-|---|---|---|---|---|---|---|---|
-| complete | **100.0** | **71.3** | **15.7** | **40.7** | **93.0** | **0.0** | **0.0** |
-| tail@0.90 | 90.0 | 64.7 | 12.7 | 39.3 | 94.3 | 100.0 | 0.0 |
-| tail@0.75 | 74.3 | 55.3 | 11.3 | 32.7 | 94.3 | 100.0 | 0.0 |
-| tail@0.5 | 52.7 | 41.0 | 8.3 | 25.7 | 95.7 | 100.0 | 0.0 |
-| tail@0.25 | 24.7 | 22.0 | 5.0 | 13.3 | 98.7 | 100.0 | 0.0 |
-| tail@0.10 | 10.0 | 9.7 | 6.7 | 8.3 | 97.3 | 100.0 | 0.0 |
-| random@0.90 | 85.3 | 63.7 | 14.7 | 37.0 | 92.7 | 100.0 | 0.0 |
-| random@0.75 | 72.7 | 55.0 | 12.3 | 31.7 | 93.0 | 100.0 | 0.0 |
-| random@0.5 | 49.3 | 40.0 | 10.0 | 24.0 | 94.3 | 100.0 | 0.0 |
-| random@0.25 | 25.0 | 23.7 | 8.7 | 17.3 | 95.7 | 100.0 | 0.0 |
-| random@0.10 | 11.0 | 11.0 | 5.3 | 10.0 | 97.3 | 100.0 | 0.0 |
+| arm | resident | found@deep | recall@3 | recall@5 | recall@10 | recall@15 | misbind@1 | wrong-not-miss¹ | silent-zero¹ |
+|---|---|---|---|---|---|---|---|---|---|
+| complete | **100.0** | **71.3** | **15.7** | **22.0** | **33.0** | **40.7** | **93.0** | **0.0** | **0.0** |
+| tail@0.90 | 90.0 | 64.7 | 12.7 | 18.0 | 31.0 | 39.3 | 94.3 | 100.0 | 0.0 |
+| tail@0.75 | 74.3 | 55.3 | 11.3 | 16.0 | 25.3 | 32.7 | 94.3 | 100.0 | 0.0 |
+| tail@0.5 | 52.7 | 41.0 | 8.3 | 13.3 | 21.7 | 25.7 | 95.7 | 100.0 | 0.0 |
+| tail@0.25 | 24.7 | 22.0 | 5.0 | 8.0 | 11.0 | 13.3 | 98.7 | 100.0 | 0.0 |
+| tail@0.10 | 10.0 | 9.7 | 6.7 | 7.7 | 8.3 | 8.3 | 97.3 | 100.0 | 0.0 |
+| random@0.90 | 85.3 | 63.7 | 14.7 | 21.3 | 28.7 | 37.0 | 92.7 | 100.0 | 0.0 |
+| random@0.75 | 72.7 | 55.0 | 12.3 | 17.7 | 25.7 | 31.7 | 93.0 | 100.0 | 0.0 |
+| random@0.5 | 49.3 | 40.0 | 10.0 | 14.0 | 19.3 | 24.0 | 94.3 | 100.0 | 0.0 |
+| random@0.25 | 25.0 | 23.7 | 8.7 | 11.0 | 15.0 | 17.3 | 95.7 | 100.0 | 0.0 |
+| random@0.10 | 11.0 | 11.0 | 5.3 | 6.3 | 10.0 | 10.0 | 97.3 | 100.0 | 0.0 |
 
 ---
 
