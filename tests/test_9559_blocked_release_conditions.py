@@ -48,6 +48,7 @@ is the defect it exists to prevent). It is:
 """
 from __future__ import annotations
 
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -400,7 +401,7 @@ def test_no_other_surface_still_asserts_a_released_ground_as_current():
         "no per-org split",
     )
     offenders = []
-    scanned = 0
+    nonempty = 0
     for name, text in surfaces.items():
         # ⛔ NORMALISE FIRST. These are wrapped docstrings, so on the pre-fix tree
         # the phrase "no per-org figure at all" appeared with a line break inside
@@ -417,20 +418,23 @@ def test_no_other_surface_still_asserts_a_released_ground_as_current():
         # asserts it without one is the defect.
         for para in text.split("\n\n"):
             flat = " ".join(para.split())
-            scanned += 1
+            if not flat:
+                continue
+            # ⛔ COUNT ONLY NON-EMPTY PARAGRAPHS. `str.split` returns at least
+            # one element for ANY string (`"".split("\n\n") == [""]`), so the
+            # earlier `scanned >= len(surfaces)` could NEVER fire — a vacuity
+            # guard that was itself vacuous. A surface that silently became ""
+            # (renamed, docstring removed) is exactly what it must catch.
+            nonempty += 1
             if "OVERRIDES" in flat:
                 continue
             for phrase in released_assertions:
                 if " ".join(phrase.split()) in flat:
                     offenders.append(f"{name}: {phrase!r} in: {flat[:90]}")
-    assert scanned >= len(surfaces), (
-        f"only {scanned} paragraph(s) scanned across {len(surfaces)} surface(s) "
-        f"— the scan has become vacuous")
-    assert not offenders, (
-        "a surface an arming lane reads still asserts the FALSIFIED premise "
-        "(the per-org byte attribution exists — #12762, "
-        "postgres_bytes.PerOrgPostgresBytes.for_org):\n  "
-        + "\n  ".join(offenders))
+    assert nonempty >= len(surfaces), (
+        f"only {nonempty} non-empty paragraph(s) across {len(surfaces)} "
+        f"surface(s) — at least one surface is empty, so the scan has become "
+        f"vacuous (a renamed or removed docstring is not a passing surface)")
     assert not offenders, (
         "a surface an arming lane reads still asserts the FALSIFIED premise "
         "(the per-org byte attribution exists — #12762, "
@@ -561,21 +565,31 @@ def test_the_record_restore_door_never_consults_an_allowance():
         + "\n  ".join(offenders))
 
 
+#: Token kinds that are NOT code: comments, string literals, and the whitespace
+#: bookkeeping. ⛔ ``FSTRING_MIDDLE`` is in the set because of PEP 701 (Py3.12):
+#: an f-string's LITERAL TEXT is ``FSTRING_MIDDLE``, not ``STRING``, so without it
+#: a comment-shaped f-string (``log(f"we never call enforce_allowances {x}")``)
+#: still offends — the same false RED one syntax form over, on a lane #9559
+#: explicitly asks to NAME the constraint. The ``{…}`` EXPRESSION tokens stay
+#: NAME/OP, so a real call inside an f-string is still caught: skipping the literal
+#: opens no hole. ``getattr`` keeps this importable on a Python without it.
+_SKIP_TOKENS = frozenset({
+    tokenize.COMMENT, tokenize.STRING, tokenize.NL, tokenize.NEWLINE,
+    tokenize.INDENT, tokenize.DEDENT, tokenize.ENCODING, tokenize.ENDMARKER,
+    getattr(tokenize, "FSTRING_MIDDLE", -1),
+})
+
+
 def _code_only(path: Path) -> str:
     """The file's source with comments AND string literals blanked out.
 
     Line numbers are preserved (blanked tokens become empty, comments become
     empty) so a reported line number still points at the offending code.
     """
-    import tokenize
-
     keep: dict[int, list[str]] = {}
     with path.open("rb") as fh:
         for tok in tokenize.tokenize(fh.readline):
-            if tok.type in (tokenize.COMMENT, tokenize.STRING,
-                            tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
-                            tokenize.DEDENT, tokenize.ENCODING,
-                            tokenize.ENDMARKER):
+            if tok.type in _SKIP_TOKENS:
                 continue
             keep.setdefault(tok.start[0], []).append(tok.string)
     lines = path.read_text(encoding="utf-8").splitlines()
