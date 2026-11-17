@@ -824,27 +824,83 @@ def test_a_long_secret_is_redacted_before_truncation(tmp_path):
     assert secret[:100] not in blob and "alice" not in blob.replace("https://", "")
 
 
-def test_run_refuses_to_publish_an_unjudged_board_into_the_bundle(tmp_path, narrative):
-    """`run --judge none` must not replace the baseline with a non-result (#13303 c7, P3)."""
-    nar = tmp_path / "n.json"
-    nar.write_text(json.dumps(narrative))
-    args = type(
-        "A",
-        (),
-        {
-            "narrative": str(nar),
-            "out": str(cap.DEFAULT_OUT),
-            "judge": "none",
-            "verdicts": None,
-            "target": "local",
-            "graph": None,
-            "db_uri": None,
-            "search_timeout_ms": 0,
-        },
-    )()
-    before = (cap.DEFAULT_OUT / "run-local.json").read_bytes()
-    assert cap.cmd_run(args) == 2
-    assert (cap.DEFAULT_OUT / "run-local.json").read_bytes() == before
+def test_only_a_complete_run_may_publish_into_the_bundle(tmp_path):
+    """The publish rule is keyed on the BOARD, not on a flag (#13303 cycle 8, P1).
+
+    Three different invocations produce an all-`unjudged` board — `--judge none`, a
+    `--judge fresh` run whose reader failed, `--judge file` with an empty map — and the
+    flag-keyed guard let the last two replace the committed baseline while the README said
+    that could not happen. Measured: `--judge fresh --judge-cmd true` changed all three
+    committed files and exited 1 over `0 right · 0 wrong · 0 blocked · 6 unjudged`.
+    """
+    unjudged = {"tally": {"right": 0, "wrong": 0, "blocked": 0, "unjudged": 6}}
+    blocked = {"tally": {"right": 3, "wrong": 2, "blocked": 1, "unjudged": 0}}
+    clean = {"tally": {"right": 3, "wrong": 3, "blocked": 0, "unjudged": 0}}
+    assert cap.may_publish(unjudged, cap.DEFAULT_OUT) is False
+    assert cap.may_publish(blocked, cap.DEFAULT_OUT) is False
+    assert cap.may_publish(clean, cap.DEFAULT_OUT) is True
+    # …anywhere else is the caller's business, including an unjudged board.
+    assert cap.may_publish(unjudged, tmp_path) is True
+    # …and every write door consults the bundle rule (none may hash its own copy): `run`
+    # asks `may_publish`, and `render` refuses the bundle outright because it is not a
+    # producer at all.
+    import inspect
+
+    assert "may_publish(" in inspect.getsource(cap.cmd_run), (
+        "cmd_run writes the board into the bundle without consulting may_publish"
+    )
+    assert "DEFAULT_OUT" in inspect.getsource(cap.cmd_render), (
+        "cmd_render --write does not consult the bundle at all"
+    )
+    assert "DEFAULT_OUT" in inspect.getsource(cap.cmd_judge), (
+        "cmd_judge does not consult the bundle at all"
+    )
+
+
+def test_judge_records_that_the_scenario_could_not_be_verified(tmp_path):
+    """The `scenario_check` note must exist in the artifact, not only in prose (#13303 c8)."""
+    real = json.loads(
+        (ROOT / "docs" / "evidence" / "13038-capstone" / "judge-packet.json").read_text()
+    )
+    bad = dict(real)
+    bad["header"] = dict(real["header"], narrative="/nonexistent/elsewhere/narrative.json")
+    p = tmp_path / "p.json"
+    p.write_text(json.dumps(bad))
+    out = tmp_path / "o"
+    args = type("A", (), {"packet": str(p), "verdicts": str(
+        ROOT / "docs" / "evidence" / "13038-capstone" / "verdicts-baseline.json"
+    ), "judge_cmd": None, "out": str(out)})()
+    assert cap.cmd_judge(args) == 0
+    board = json.loads((out / "run-local.json").read_text())
+    assert board["header"]["judge"]["scenario_check"] == "unverified"
+    assert any("scenario not verified" in n for n in board["header"]["notes"])
+    # …and the committed packet records the checked case.
+    assert cap._same_questions_as_narrative(real) is True
+
+
+def test_render_refuses_a_document_that_is_not_a_scoreboard(tmp_path):
+    """A verdicts map / run file / packet is not a board (#13303 cycle 8, P7)."""
+    for name, payload in (
+        ("verdicts.json", {"Q1": {"verdict": "right"}}),
+        ("packet.json", {"schema": "capstone-state-value-judge-packet/v1", "questions": []}),
+    ):
+        p = tmp_path / name
+        p.write_text(json.dumps(payload))
+        assert cap.cmd_render(type("A", (), {"run": str(p), "write": None})()) == 2
+    # …and rendering the committed board INTO the bundle is refused too: a re-render is not
+    # a producer, so it must not touch the baseline even when its content is identical.
+    assert cap.cmd_render(
+        type("A", (), {"run": str(ROOT / "docs" / "evidence" / "13038-capstone"
+                                / "run-local.json"),
+                       "write": str(cap.DEFAULT_OUT / "scoreboard-local.md")})()
+    ) == 2
+    # The committed board still renders (and to a scratch path, not the bundle).
+    out = tmp_path / "r.md"
+    assert cap.cmd_render(
+        type("A", (), {"run": str(ROOT / "docs" / "evidence" / "13038-capstone"
+                                / "run-local.json"), "write": str(out)})()
+    ) == 0
+    assert out.read_text().startswith("#")
 
 
 def test_run_judge_file_refuses_a_verdicts_document_before_measuring(tmp_path, narrative):

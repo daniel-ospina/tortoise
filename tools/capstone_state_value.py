@@ -68,7 +68,10 @@ USAGE
     # the same, spelled out, when the exports are needed for another command
     uri="$(uv run python tools/test_lane.py uri)" || exit 1
     eval "$uri"
-    uv run python tools/capstone_state_value.py run --target local
+    # --out is mandatory here: the default destination is the committed evidence bundle,
+    # and a run that is not fully judged (this one has no --judge, so every row would be
+    # `unjudged`) is REFUSED there. Point it at a scratch directory.
+    uv run python tools/capstone_state_value.py run --target local --out /tmp/capstone-run
 
     # judge the answers with a fresh reader (spawns one `pi -p`), then render.
     # `--verdicts-out` writes the reader's verdicts in the shape `--verdicts` reads, so the
@@ -422,7 +425,10 @@ class LocalTarget:
                 f"{_cut(_strip_userinfo(uri, uri), 40)}"
             )
         os.environ["TORTOISE_DB_URI"] = uri
-        self.uri = _redact(uri)
+        # `_strip_userinfo`, not `_redact`: a bare username (`docker://alice@host`) is not
+        # matched by the `user:pass@` regex, and this reaches the committed header + scoreboard
+        # (#13303 cycle 8, P5).
+        self.uri = _strip_userinfo(uri, uri)
         self.namespace = namespace or f"capstone13038_{_stamp()}"
         self.capabilities = set(CAPABILITIES)
         #: 0 = the PRODUCT's own read budget (500 ms, `search_engine`'s collective
@@ -1293,8 +1299,8 @@ RECIPE_NEEDS = {
 }
 
 #: Identities the SCENARIO creates that no question is scored against, and why each is
-#: allowed to go unwatched. Anything here can be refused without blocking a question — so an
-#: entry is a deliberate statement, not an oversight, and the pins assert every key still
+#: allowed to go unwatched. An entry says the refusal cannot make a question WRONG, which is
+#: not the same as "blocks nothing" — a cascade counts too — so each entry carries the reason, and the pins assert every key still
 #: exists in the narrative (a stale allowlist would silently license a future gap).
 SCENARIO_ONLY_REFS = {
     "core:plan": (
@@ -1716,6 +1722,22 @@ def exit_code(tally: dict) -> int:
     return 0 if tally.get("blocked", 0) == 0 and tally.get("unjudged", 0) == 0 else 1
 
 
+def may_publish(board: dict, out_dir: str | Path) -> bool:
+    """May this board be written into the COMMITTED evidence bundle?
+
+    Only a COMPLETE run may (#13303 cycle 8, P1). Keyed on the PRODUCED tally, never on a
+    flag: `--judge none`, a `--judge fresh` run whose reader failed, and `--judge file` with
+    an empty map ALL produce an all-`unjudged` board, and a flag-keyed guard let the
+    documented reproduction command replace the baseline with a non-result — measured:
+    `--judge fresh --judge-cmd true` changed all three committed files and exited 1 over a
+    board reading `0 right · 0 wrong · 0 blocked · 6 unjudged`. Any other destination is the
+    caller's business.
+    """
+    if Path(out_dir).resolve() != DEFAULT_OUT.resolve():
+        return True
+    return exit_code(board.get("tally") or {}) == 0
+
+
 def build_scoreboard(
     *, narrative: dict, header: dict, answers: list[Answer], judged: dict, ingest: list[dict]
 ) -> dict:
@@ -1953,19 +1975,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
             return 2
 
-    # `run --judge none` produces an all-`unjudged` board — not a baseline. Writing it into
-    # the bundle replaced the committed `run-local.json` / `scoreboard-local.md` with a
-    # non-result, and the only other signal was `git status` (#13303 cycle 7, P3). The
-    # producer MAY publish here (`--judge fresh` / `--judge file`); the unjudged form may not.
-    if args.judge == "none" and out_dir.resolve() == DEFAULT_OUT.resolve():
-        print(
-            f"capstone: refusing to write an UNJUDGED board into the evidence bundle "
-            f"{DEFAULT_OUT} — every row would be `unjudged`, which is not a baseline. "
-            "Point --out at a scratch directory, or score it (--judge fresh|file).",
-            file=sys.stderr,
-        )
-        return 2
-
     try:
         target = build_target(
             args.target,
@@ -2184,6 +2193,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     board["header"] = header
     board["judge"] = judge_meta
 
+    # THE BUNDLE IS WRITTEN ONLY BY A COMPLETE RUN (#13303 cycle 8, P1). Keyed on the
+    # PRODUCED tally, not on `--judge`: a `--judge fresh` run whose reader fails, and a
+    # `--judge file` run handed an empty map, BOTH produce an all-`unjudged` board — a
+    # flag-keyed guard let the documented reproduction command replace the committed
+    # baseline with a non-result while the README said that could not happen. Measured:
+    # `--judge fresh` with `--judge-cmd true` changed all three committed files.
+    if not may_publish(board, out_dir):
+        if not args.json:
+            print(render_markdown(board))
+        print(
+            f"\ncapstone: REFUSING to publish this board into the evidence bundle "
+            f"{DEFAULT_OUT} — the tally is {board['tally']}, so it is not a usable "
+            "baseline. Nothing was written; point --out at a scratch directory to "
+            "inspect it.",
+            file=sys.stderr,
+        )
+        return 1
+
     run_json = out_dir / f"run-{target.kind}.json"
     run_json.write_text(json.dumps(board, indent=2, default=str))
     md = render_markdown(board)
@@ -2194,8 +2221,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     # verdicts AND the scoreboard. The primary artifact lands first; a verdicts-out failure
     # is then loud but costs nothing that cannot be re-derived from the packet.
     if args.verdicts_out and judged:
+        verdicts_out = Path(args.verdicts_out).resolve()
+        # Same rule as the board: the bundle's verdicts come from a COMPLETE run, so a
+        # partial run cannot leave `verdicts-baseline.json` describing a different run than
+        # the `run-local.json` beside it (#13303 cycle 8, P2).
+        if not may_publish(board, verdicts_out.parent):
+            print(
+                f"capstone: refusing to write verdicts into the bundle {DEFAULT_OUT} — "
+                "the board is not fully judged, so it would not describe the committed run",
+                file=sys.stderr,
+            )
+            return 1
         _write_verdicts(
-            Path(args.verdicts_out).resolve(),
+            verdicts_out,
             judged,
             packet_path=packet_path,
             mode=args.judge,
@@ -2447,6 +2485,31 @@ def cmd_render(args: argparse.Namespace) -> int:
         board = json.loads(Path(args.run).resolve().read_text())
     except (OSError, ValueError) as exc:
         print(f"capstone: cannot read run {args.run}: {exc}", file=sys.stderr)
+        return 2
+    # A non-board (a verdicts map, a run file, a packet) used to reach `render_markdown` as a
+    # `KeyError: 'header'` traceback. Refused with the documented shape instead (#13303 c8).
+    missing = {"header", "rows", "tally"} - set(board) if isinstance(board, dict) else None
+    if missing is None or missing:
+        print(
+            f"capstone: refusing {args.run} — not a scoreboard "
+            f"({'missing ' + ', '.join(sorted(missing)) if missing else 'not an object'})",
+            file=sys.stderr,
+        )
+        return 2
+    # …and `render` is not a producer of the baseline: a board reaches the bundle from a
+    # COMPLETE run, so a mistyped `--write` cannot replace it with a re-render of something
+    # else (#13303 cycle 8, P2).
+    # `render` is not a PRODUCER, so "complete board" is not enough here: a complete board
+    # from ANOTHER run would leave `scoreboard-local.md` describing a different run than
+    # `run-local.json` beside it, and nothing would say so (#13303 cycle 8, P2). Refused
+    # outright; write elsewhere and compare.
+    if args.write and Path(args.write).resolve().parent == DEFAULT_OUT.resolve():
+        print(
+            f"capstone: refusing to write a rendered board into the evidence bundle "
+            f"{DEFAULT_OUT} — that board comes from `run`; write elsewhere and copy if it "
+            "is genuinely the same run",
+            file=sys.stderr,
+        )
         return 2
     md = render_markdown(board)
     if args.write:
