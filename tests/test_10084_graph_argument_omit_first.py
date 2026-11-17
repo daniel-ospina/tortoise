@@ -243,9 +243,10 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #   this view is the HTTP-filtered one (`_reset_ip_rate_limits` imports
     #   `tortoise.hosted_api`, which registers the HTTP tool transform on the shared
     #   `mcp` singleton): measured at origin/main (d741bd4) 59 unfiltered -> 54 filtered,
-    #   and at THIS head 55 unfiltered -> 50 filtered (both populations move by the same
-    #   −9 + 5 = −4, since all nine retired doors and all five arriving containers are
-    #   `http_policy=True`). Of the six `GRAPH_ARGUMENT_EXCLUDED` names only three are in
+    #   and at the head lane E branched from 55 unfiltered -> 50 filtered (both
+    #   populations move by the same −9 + 5 = −4, since all nine retired doors and all
+    #   five arriving containers are `http_policy=True`). Of the six
+    #   `GRAPH_ARGUMENT_EXCLUDED` names only three are in
     #   the filtered view (`tortoise_graph_set_recording`, `tortoise_list_graphs`,
     #   `tortoise_manage_sources`), so 50 − 3 = 47 advertising tools.
     #
@@ -267,7 +268,8 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #   55 - 9 + 5 = 51 after #11609 batch A, then 59 - 7 + 6 = 58 and -9 + 5 again on
     #   the re-cut; it converges on the SAME 50 measured here. ⛔ The UNFILTERED total is a
     #   DIFFERENT sum and must not reuse those terms: 68 - 14 + 6 = 60, - 7 + 6 = 59 at
-    #   origin/main, - 9 + 5 = 55 at this head. Stating either one's net as if both
+    #   origin/main, - 9 + 5 = 55 at the head lane E branched from (48 at this head).
+    #   Stating either one's net as if both
     #   populations were the same hides a real `http_policy=False` row behind a
     #   coincidence.
     assert len(advertising) >= 40, (

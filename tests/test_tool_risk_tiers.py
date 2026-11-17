@@ -159,8 +159,10 @@ class TestTheRiskAxis:
         #   reading-tier (`tortoise_search_knowledge`, `tortoise_list_knowledge`,
         #   `tortoise_check_confidence`, `tortoise_explore_connections`,
         #   `tortoise_review_link_candidates`; `tortoise_graph_overview` was already live),
-        #   so 49 + 5 = 54 here, and the served census is 55 live + 53 retired = 108 (the
-        #   retired doors stay SERVED as shims and keep their tier).
+        #   so 49 + 5 = 54 here, and the served census is 48 live + 60 retired = 108 (the
+        #   retired doors stay SERVED as shims and keep their tier, so a retirement MOVES a
+        #   row between these two halves and leaves the TOTAL unchanged — which is why the
+        #   total cannot notice a stale split, and this line has to state both halves).
         assert len(reading) == 54, sorted(reading)
         assert len(served()) == 108, sorted(e.name for e in served())
 
