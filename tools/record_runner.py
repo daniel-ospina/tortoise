@@ -1018,7 +1018,7 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
         remaining = None
     elif cp.next_seq - 1 > len(journal.records):
         remaining = None
-        mismatch = (f"the record holds positions up to {cp.next_seq - 1} but "
+        mismatch = (f"the record holds positions up to {cp.high_seq} but "
                     f"the journal has only {len(journal.records)} records — "
                     f"they are not the same journal")
     else:

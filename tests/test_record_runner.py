@@ -671,6 +671,49 @@ def test_status_does_not_report_a_completion_over_a_DIFFERENT_journal(
     assert payload["fully_consumed"] is None
 
 
+def test_status_at_the_COMPLETION_BOUNDARY_still_reports_done(monkeypatch, capsys):
+    """⛔ The mirror of the test above: the mismatch guard must not OVER-FIRE.
+
+    At `next_seq - 1 == len(journal.records)` the record holds exactly this
+    journal and the honest answer is `0` / `true`. A guard written `>=` instead
+    of `>` would report `unknown` for a correctly completed record — a false
+    refusal on the one input where the tool is supposed to say "done". Both
+    sides of the boundary are pinned, so neither direction can go green.
+    """
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=39, present=39,
+                                                first_gap=None, min_seq=1))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "events remaining: 0" in out
+    assert "not the same journal" not in out
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
+               "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["events_remaining"] == 0
+    assert payload["fully_consumed"] is True
+
+
+def test_the_mismatch_sentence_names_the_HIGH_water_mark_not_the_resume_point(
+        monkeypatch, capsys):
+    """⛔ The sentence must equal `plan`'s for the same record (review P2).
+
+    `Checkpoint.next_seq` is `first_gap` whenever a gap exists, so
+    `next_seq - 1` is NOT what the record holds — with a gap at 50 it printed
+    "positions up to 49" while `plan` said "up to 100". A refusal diagnostic
+    that under-states the record is its own defect on a refusal path.
+    """
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=100, present=99,
+                                                first_gap=50, min_seq=1))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "positions up to 100" in out
+    assert "positions up to 49" not in out
+
+
 def test_apply_REFUSES_allocate_because_it_would_mint_fresh_ordinals(
         monkeypatch, capsys):
     """The allocation arm cannot carry a historic fold: it issues NEW positions."""
