@@ -422,11 +422,25 @@ def test_a_non_numeric_reading_is_refused_not_a_bare_typeerror(bad):
 
 
 def test_the_absent_is_zero_semantics_are_declared_on_the_dimension():
-    """A FLOW's absence is a zero; a GAUGE's is not. It is a DECLARATION, so a
-    future flow dimension gets it without a meter-specific branch."""
+    """Absence-is-zero is a DECLARATION, and each one states its case.
+
+    ``capture_extraction`` is a FLOW: a window that has just begun has captured
+    nothing, so an absent row is a real zero.
+
+    ``graph_storage`` is a GAUGE and declares it for ONE state only — the
+    reader's CERTAIN "no row in this window" (#13102 F1). Its row is written by
+    a separate, default-OFF sweep (``BACKUP_SWEEP_ENABLED=False``), so refusing
+    there refuses every tenant's every write, including the very write that
+    would let the row exist. The fail-closed direction is NOT relaxed: an
+    unageable row (``unreported``), a stale row, and every failed read still
+    refuse — pinned in ``test_13084_ram_cap.py``.
+
+    ``postgres_storage`` declares nothing, so it keeps the strict reading.
+    """
     by_dim = {d.dimension: d for d in DIMENSIONS}
     assert by_dim["capture_extraction"].absent_is_zero is True
-    assert by_dim["graph_storage"].absent_is_zero is False
+    assert by_dim["graph_storage"].absent_is_zero is True  # ABSENT only
+    assert by_dim["postgres_storage"].absent_is_zero is False
 
 
 @pytest.mark.parametrize("reason", ["degraded", "schema_error", None])

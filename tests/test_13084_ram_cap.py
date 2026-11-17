@@ -374,10 +374,11 @@ def test_every_OTHER_unmeasured_reason_STILL_refuses(monkeypatch, reason):
 
 
 def test_a_missing_measured_at_is_no_reading_not_zero(monkeypatch):
-    """The ledger's zero view and a degraded read both carry no timestamp.
+    """A reading with no timestamp and NO named reason is still refused.
 
-    Reading either as 0 MB would compare as "under the cap" and pass silently —
-    the fail-open the dimension's ``absent_is_zero=False`` exists to stop.
+    The zero view and a degraded read both carry no timestamp, so the reason is
+    what decides: an omission (a stub, an older seam, a reason this gate never
+    saw) must not be read as ``absent``, or every fault would disarm the cap.
     """
     from tortoise import metering
 
@@ -456,9 +457,27 @@ def test_the_cap_deletes_nothing():
 
 
 def test_the_cap_is_per_account_in_MB_with_no_node_or_graph_count():
+    """#11758's declared shape: ONE account-scoped MB allowance, no per-graph rule.
+
+    The live pin is the ARTIFACT's declaration (#13102 F6). The deleted
+    assertion here was ``"graph" not in entry.unit.lower()``, which could not
+    fail while ``entry.unit == "MB"`` stood two lines above — any unit
+    containing "graph" reddens the equality first — so it read as coverage of
+    "no per-graph rule" without being able to detect one. What actually
+    falsifies a per-graph rule is the artifact: a dimension whose ``scope`` is
+    not ``account``, or a ``*_per_graph`` key, would appear here.
+    """
     entry = {d.dimension: d for d in DIMENSIONS}["graph_storage"]
+    declared = pricing.storage_dimensions()
     assert entry.unit == "MB"
     assert "node" not in entry.limit_key.lower()
-    assert "graph" not in entry.unit.lower()
     # one dimension, one key, one account: the allowance is a scalar, not a map
     assert isinstance(entry.limit_key, str)
+    # the key the gate enforces IS the artifact's declared key...
+    assert entry.limit_key == declared["graph_storage"]["allowance_key"]
+    # ...the artifact declares the allowance ACCOUNT-scoped (no per-graph unit)
+    assert declared["graph_storage"]["scope"] == "account"
+    assert all(d["scope"] == "account" for d in declared.values())
+    # ...and no declared dimension counts nodes or graphs
+    assert not any("node" in k.lower() or "graph_count" in k.lower()
+                   for k in declared)

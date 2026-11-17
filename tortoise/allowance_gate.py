@@ -557,18 +557,29 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
         # read through ``pricing.storage_limits``) and reach this gate through
         # ``quota.resolve_org_limits``, so the price and the cap cannot drift.
         #
-        # THE DERIVATION (recorded here because this is the line that arms it):
-        # the owner's rule is that a tier's hot window may cost at most 30 % of
-        # its monthly price, and a resident GB costs ~$74/GB-month (the
-        # artifact's $85 sale rate sits 1.46x above a $58.33 hot-data cost
-        # basis; 30 % of solo's $19 is $5.70, and $5.70 / $74 = 0.077 GB).
-        # Decimal MB, because the meter publishes decimal MB:
-        #     solo  $19 x 30 % = $5.70  -> 77 MB   (artifact: 77)
-        #     pro   $25 x 30 % = $7.50  -> 102 MB  (artifact: 102)
-        #     team  $149 x 30 % = $44.70 -> 615 MB (artifact: 615)
-        # (the issue quotes "solo ≈ 78 MB", which is the same figure at
-        # $73/GB-month; the artifact carries 77 and the artifact wins, because
-        # two numbers for one allowance is how a cap and a price drift apart).
+        # THE DERIVATION (recorded here because this is the line that arms it).
+        # ⚠️ IT IS NOT A DIVISION OF THE 30 % BUDGET BY $74/GB-MONTH — that
+        # shortcut reproduces only solo and is what a reader re-running it
+        # disputes (#13102 F4: $7.50/74 = 101.4, $44.70/74 = 604.1, against the
+        # 102/615 this gate enforces). The cap comes from
+        # ``docs/architecture/SEARCH-ARCHITECTURE.md`` §8, which solves the
+        # window TOGETHER WITH DENSITY because the shared project line
+        # ($85 ÷ tenants) is part of the same budget, and then applies the 75 %
+        # occupancy of provisioned RAM:
+        #
+        #     provisioned MB  p = (0.30·P − $0.125) ÷ ($43.75/1000 + $85/8000)
+        #     hot window        = 0.75 · p
+        #
+        #     solo  $19  → p 102.5 MB → 0.75p = 76.9 → **77 MB**
+        #     pro   $25  → p 135.6 MB → 0.75p = 101.7 → **102 MB**
+        #     team  $149 → p 819.8 MB → 0.75p = 614.8 → **615 MB**
+        #
+        # ($0.125 is the 1 GB record allowance at $0.125/GB-month; $43.75/1000
+        # is RAM per provisioned MB; $85/8000 is the shared project line per
+        # provisioned MB.) The artifact carries 77/102/615 and the ARTIFACT
+        # WINS, because two numbers for one allowance is how a cap and a price
+        # drift apart. (The issue quotes "solo ≈ 78 MB", the same figure at
+        # $73/GB-month.)
         meter=_graph_storage_mb,
         stale_after_seconds=STALE_AFTER_SECONDS,
         # ⚠️ THE ESTIMATE RULE — the reason this dimension is armable at all, and

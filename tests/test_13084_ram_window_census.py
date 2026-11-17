@@ -3,7 +3,9 @@
 The measurement halves are covered by `test_13084_demand_census.py` (the ledger
 fold) and by the run recorded on the PR (the restore probe against a lane
 container). What must not drift here is the set of things the tool REFUSES to do:
-a union of tenants, and a destructive restore probe that was not confirmed.
+a union of tenants, a destructive restore probe that was not confirmed, and a
+census whose ledger does not exist (an unmeasurable census must never exit 0 —
+#13102 F5).
 """
 from __future__ import annotations
 
@@ -45,6 +47,31 @@ def test_the_restore_probe_refuses_without_an_exact_confirm(tmp_path, capsys):
 def test_a_restore_probe_without_a_graph_uri_is_a_usage_error(capsys):
     assert census.main(["--restore-probe", "--graph", "g"]) == census.EXIT_USAGE
     assert "requires --graph-uri" in capsys.readouterr().err
+
+
+def test_a_missing_ledger_is_unmeasurable_not_a_silent_success(tmp_path, capsys):
+    """#13102 F5: a census that measured NOTHING must not exit 0 and print nothing.
+
+    ``_ledger_section`` returns ``{"error": ...}`` for a path that does not
+    exist; it was merged into the report and then only ``cold_restore`` was
+    inspected, so ``--ledger /nope.jsonl`` exited ``EXIT_OK`` with ZERO stdout
+    lines in human mode — the same "a missing file is not a zero reading" rule
+    the fold asserts, broken one layer up.
+
+    Mutation this REDs: restore the cold-restore-only check (or drop the error
+    print) — the exit code becomes 0 and/or the render is empty.
+    """
+    missing = tmp_path / "nope.jsonl"
+    assert census.main(["--ledger", str(missing), "--tenant", "t1"]) == \
+        census.EXIT_UNMEASURABLE
+    out = capsys.readouterr().out
+    assert "no ledger at" in out, out
+
+    # the same error is reported (and the exit code unchanged) under --json
+    assert census.main(["--ledger", str(missing), "--tenant", "t1",
+                        "--json"]) == census.EXIT_UNMEASURABLE
+    payload = json.loads(capsys.readouterr().out)
+    assert "no ledger at" in payload["error"]
 
 
 def test_the_human_render_prints_the_seed_holes_beside_n_a(tmp_path, capsys):

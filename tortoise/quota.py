@@ -664,16 +664,20 @@ def _arm_graph_storage(limits: dict, tier: str) -> dict:
     ``ALLOWANCE_KEYS``) without a second edit — the seam #9567 D12 built.
 
     ⛔ THE NUMBER COMES FROM THE ARTIFACT, never from this file. The derivation
-    (recorded in ``product/pricing.json`` ->
-    ``billing.storage._included_amounts_status`` and restated at the declaration
-    in ``allowance_gate.DIMENSIONS['graph_storage']``): a tier's hot window may
-    cost at most 30 % of its monthly price, and a resident GB costs
-    ~$74/GB-month — so solo $19 x 30 % = $5.70 -> **77 MB**, pro $25 x 30 % ->
-    **102 MB**, team $149 x 30 % -> **615 MB**. Decimal MB, the meter's own
-    unit, so no MiB/MB factor is applied (that mix is the measured 3.77x error
-    class). The key NAME is read from the artifact's declared dimension too,
-    for the same reason: two spellings of one allowance is how an arming edit
-    silently lands on a key the gate never reads.
+    is ``docs/architecture/SEARCH-ARCHITECTURE.md`` §8, and ⚠️ it is NOT
+    "30 % of the price ÷ $74/GB-month" — that shortcut reproduces solo and
+    nothing else (#13102 F4: $7.50/74 = 101.4, $44.70/74 = 604.1), because the
+    shared project line is part of the same budget:
+
+        provisioned MB  p = (0.30·P − $0.125) ÷ ($43.75/1000 + $85/8000)
+        hot window        = 0.75 · p
+        solo $19 → 77 MB · pro $25 → 102 MB · team $149 → 615 MB
+
+    Decimal MB, the meter's own unit, so no MiB/MB factor is applied (that mix
+    is the measured 3.77x error class). The key NAME is read from the
+    artifact's declared dimension too, for the same reason: two spellings of
+    one allowance is how an arming edit silently lands on a key the gate never
+    reads.
 
     ⛔ ``free``/``anon`` ARE LEFT UNARMED, and that is a correctness fix, not an
     omission. The artifact carries ``0`` for their hot window because the owner

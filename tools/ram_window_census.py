@@ -210,6 +210,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(report, indent=2))
     else:
+        if report.get("error"):
+            # ⛔ A MISSING/UNREADABLE LEDGER IS NOT A ZERO READING (#13102 F5).
+            # This used to be json-only: the human render printed NOTHING and
+            # the script still exited 0, so a census that measured nothing read
+            # as a census that found nothing — the same rule the fold itself
+            # asserts, broken one layer up.
+            print(f"ledger          : {report['error']}")
         if "query_mix" in report:
             mix = report["query_mix"]
             print(f"tenant          : {report['tenant']}")
@@ -242,8 +249,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"cold restore    : {cold['total_s']}s "
                       f"(dump {cold['dump_s']} · del {cold['del_s']} · "
                       f"restore {cold['restore_s']}, indexes kept)")
-    if any(("error" in s) for s in
-           [report.get("cold_restore")] if isinstance(report.get("cold_restore"), dict)):
+    # EVERY section that can fail is checked, not just the cold-restore probe
+    # (#13102 F5: the ledger section's error was merged into `report` and
+    # inspected by nothing, so `--ledger /nope.jsonl` exited OK and printed
+    # nothing). Any error in any section is UNMEASURABLE, which is exactly what
+    # ``EXIT_UNMEASURABLE`` exists for.
+    cold = report.get("cold_restore")
+    if report.get("error") or (isinstance(cold, dict) and cold.get("error")):
         return EXIT_UNMEASURABLE
     return EXIT_OK
 
