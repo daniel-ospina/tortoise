@@ -55,7 +55,10 @@ from typing import Any
 import httpx
 
 from tortoise import github_map
-from tortoise.live import _terminal_excluded  # #2901 canonical non-current predicate
+from tortoise.live import (
+    _terminal_excluded,  # #2901 canonical non-current predicate
+    is_position_ended,
+)
 from tortoise.quota import QuotaCheckError, QuotaExceededError
 from tortoise.sdk import UnapprovedKindNamespace  # #5475: a refused kind fails the RUN
 
@@ -1044,7 +1047,10 @@ class GitHubIndexer:
 
         The two arms are read in the order the axes were introduced: POSITION
         first (what every current write sets), then the legacy `status` word (a
-        row folded by a pre-S0 binary, or one replayed from a pre-S0 journal).
+        row a pre-S0 BINARY wrote and that has never been rebuilt — a rebuild
+        runs TODAY's fold, so a replayed journal produces the position axis and
+        `status` NULL, never `status='completed'`; measured live vs
+        `rebuild_all`: both give `[NULL, 'done', 'terminal', True]`).
         """
         rows = proj.g.query(
             "MATCH (o:Object {id:$id}) "
@@ -1054,12 +1060,22 @@ class GitHubIndexer:
         if not rows:
             return None
         status, is_closed, slot, stage_id = rows[0]
-        # The position axis: a terminal SLOT (or the durable `isClosed` latch
-        # `apply_stage_fold` maintains beside it) is the S0 spelling of "ended".
+        # The position axis, through the ONE shared predicate (`live.py`) — never
+        # a local re-spelling of it. ⛔ A local `is_closed is True` was measured
+        # to DISAGREE with the fold that acts on the answer: `isClosed` is stored
+        # verbatim by the public doors (`create_object(..., isClosed=1)` stores
+        # `1`), and `advance_stage` reads it with `bool()`. With identity, a row
+        # at `isClosed=1, slot='active'` read as OPEN while the fold refused as
+        # terminal (`terminal-guard`), so every poll minted another `-closed`
+        # into the journal and the graph said open FOR EVER (measured:
+        # poll1/2/3 each `events_minted=1`, row never moves).
+        # `is_position_ended` reads `isClosed` by `bool()` and strips the slot,
+        # matching `apply_stage_fold` and every other position read.
+        #
         # `cancelled` is terminal too, so a cancelled item reads as closed —
         # which is right for THIS question: both mean "not open", and a later
         # `state=open` in GitHub is a transition worth minting either way.
-        if is_closed is True or (slot is not None and str(slot) == "terminal"):
+        if is_position_ended(is_closed=is_closed, stage_slot=slot):
             return "closed"
         if stage_id is not None or slot is not None:
             return "open"

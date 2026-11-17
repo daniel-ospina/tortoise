@@ -433,6 +433,45 @@ def test_repeated_transitions_mint_monotonic_ids(sdk):
         "a connector close folded a LIFECYCLE word onto the four-word axis")
 
 
+def test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
+    """#13143 review F1: the state diff must read `isClosed` the way the FOLD does.
+
+    `isClosed` is stored VERBATIM by the public doors — `create_object(...,
+    isClosed=1)` stores `1` — and `advance_stage` reads it with `bool()`. A diff
+    that read it with `is True` therefore disagreed with the fold acting on the
+    same row: truthy-but-not-True read as OPEN here while the fold refused with
+    `terminal-guard`, so EVERY poll minted another `-closed` into the journal
+    (measured pre-fix: poll1/2/3 each `events_minted=1`) and the graph said the
+    issue was open for ever. The read now goes through `live.is_position_ended`,
+    the same predicate the fold and every other position read use.
+    """
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    # A row the fold has already ended, with the marker written by a door that
+    # stores it uncoerced (`1`, not `True`) and the stage left non-terminal.
+    proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) "
+        "SET o.isClosed = 1, o.pipelineStageId = 'in_progress', "
+        "    o.pipelineSlot = 'active'")
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="closed", closed_at="2026-07-20T08:00:00Z",
+        updated_at="2026-07-20T08:00:00Z")]
+    stats = _run(_indexer(t), sdk)
+    assert stats["events_minted"] == 0, (
+        "a row whose `isClosed` is a truthy NON-boolean was read as OPEN, so "
+        "the diff minted a close for a close the graph already records")
+    # …and the same answer on the next poll: one mint per RUN would still grow
+    # the journal without bound, so the count must stay 0 (not "one, once").
+    _run(_indexer(t), sdk)
+    rows = proj.g.query(
+        "MATCH (e:Event) WHERE e.eventId STARTS WITH 'github-issue-acme/repo1-1' "
+        "RETURN e.eventKind"
+    ).result_set
+    assert sorted(r[0] for r in rows) == ["github.issue.open"], (
+        f"a repeated false close was minted: {sorted(r[0] for r in rows)}")
+
+
 # ── P1-5 (PR #1792): indexer is a routing pass-through ───────────────
 
 def test_indexer_preserves_connector_routing_props(sdk):

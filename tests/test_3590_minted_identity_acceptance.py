@@ -1453,8 +1453,12 @@ def test_a_lifecycle_event_on_a_doubly_held_name_is_not_a_green_run(sdk):
         "a state-moving fold miss over an ambiguous target FAILED to fail "
         f"the run: {[str(e) for e in entries]}")
     # Nothing was moved: the ambiguity is not silently resolved by picking one.
+    # ⛔ #13143 (S0): read the POSITION axis — no fold writes a lifecycle word
+    # any more, so `_status_of(...) != "in_progress"` was satisfied by NULL on
+    # every graph and could no longer see the mutation it guards. This asserts
+    # on the axis the fold actually moves.
     for oid in ("id-dup-live-a", "id-dup-live-b"):
-        assert _status_of(proj, "Object", oid) != "in_progress", (
+        assert _stage_of(proj, "Object", oid) is None, (
             "the fold MOVED one carrier's state out of an ambiguous target: "
             f"{oid}")
 
