@@ -596,10 +596,14 @@ On `:Point` it does **not** hold: keeping 52.7 % of claims finds only 41.0 %, be
 own ceiling (below) — so on claims the loss is the eviction **plus** a ranking weakness the window did not
 cause, and the two must not be added into one number. At §8's own solo target (≈77 MB against an ≈150 MB
 complete graph, i.e. about half) **recall@3 falls 88.3 % → 46.0 %** and the top-1-is-a-different-node
-rate **rises 27.7 % → 41.0 %**. On the claim population (`:Point`) `found@deep` falls **71.3 % → 41.0 %**
-and the wrong-answer rate per demoted query is **100 %**: a demoted claim query returns another claim,
-never an empty answer. A miss costs a new node; a wrong top-1 is how the duplicate the epic exists to
-prevent is minted.
+rate **rises 27.7 % → 41.0 %** (a tie-counting rate: read its direction, not its decimal — the band
+is 9.85 pp, stated in the record). On the claim population (`:Point`) `found@deep` falls **71.3 % →
+41.0 %**, and a demoted claim query never comes back empty: it returns **some other claim** at rank 1.
+⛔ Read that as a property of the LEG, not as a window effect — `:Point` `empty` is 0.0 in every arm
+including `complete`, so the wrong-answer rate is 100 % for any demoted subset by arithmetic, and the
+complete graph already reads 93.0 % `misbind@1` (the record states the same caveat in bold). It is
+still the consequence that matters — a miss costs a new node, a wrong top-1 is how the duplicate the
+epic exists to prevent is minted — but it is not a difference the window makes.
 
 ⚠️ **"Never returned at any rank" is a statement about this configuration, not a law.** Demotion here is
 `DETACH DELETE`, and the only tier that could still serve a deleted node — `fallback_snapshot`'s 60 s
@@ -607,14 +611,20 @@ in-memory corpus — is invalidated explicitly by the instrument. So the zero is
 invalidation hook (Finding 6, `#13123`), not proof that no compensating leg could ever exist. The
 stronger reading would need a run in which a demotion is performed WITHOUT that invalidation.
 
-**No eviction policy protects the quality.** The cold-tail (recency/frequency) policy is **not separated
-from a seeded random control** by this measurement — recall@3 46.0 vs 46.3 at 0.50 and 81.0 vs 81.7 at
-0.90 — because a demoted node is unretrievable whatever reason selected it. ⚠️ The two are not identical
-at the low coverages (20.3 vs 25.3 at 0.25, 8.7 vs 12.0 at 0.10), where the realized resident share
-differs too, so "agree at every coverage" overstates it; the verdict does not rest on that agreement but
-on `recall@k <= resident_share` and `found_deep_of_demoted == 0`, which hold in every arm of both
-policies. The policy table's *"recency beats static degree ranking"* is a **hit-rate** result and does
-not carry to retrieval quality.
+**No static eviction policy protects the quality — and recency is UNTESTED here.** The cold-tail policy is
+**not separated from a seeded random control** by this measurement — recall@3 46.0 vs 46.3 at 0.50 and
+81.0 vs 81.7 at 0.90 — because a demoted node is unretrievable whatever reason selected it. ⚠️ The two
+are not identical at the low coverages (20.3 vs 25.3 at 0.25, 8.7 vs 12.0 at 0.10), where the realized
+resident share differs too, so "agree at every coverage" overstates it; the verdict does not rest on
+that agreement but on `recall@k <= resident_share` and `found_deep_of_demoted == 0`, which hold in every
+arm of both policies.
+
+⛔ **The order tested is not recency.** On this corpus the cold-tail policy is a **static popularity
+count** — there is no read ledger to build a recency policy from — so §7's actual claim, that *recency*
+beats static degree ranking, was **NOT re-tested by M2** and this section does not overturn it on the
+retrieval axis. What the measurement bounds is the **static** axis: no smarter static ranking buys back
+quality. (The policy table's hit-rate result is a separate matter; recency's own effect on retrieval
+quality remains open, and is M3/M5's.)
 
 **The loss carries no signal.** `extractor_v2._fts_rows` — the capture path — requests neither
 `read_status_out` nor `_truncation_out`; `TORTOISE_RESIDENCY` is off; and **no code path emits** this

@@ -222,10 +222,12 @@ nodes the graph holds, and the record does not serve set-shaped reads — `recor
 work on for a demoted candidate. The vector leg escapes this once it moves to Postgres (§3); the text leg
 does not, because §6.2's decision item 2 keeps it in the graph.
 
-**Two things the measurement changed that are not numbers.** The eviction policy does not matter — the
-cold-tail/recency policy and a random control are not separated at any coverage — so the policy table's hit-rate
-result does not carry to retrieval quality (the two policies read 46.0 vs 46.3 at the target size, though
-they diverge at the lowest coverages where the realized resident share differs too). And a
+**Two things the measurement changed that are not numbers.** A smarter *static* eviction policy buys back
+no retrieval quality — the cold-tail order and a random control are not separated at any coverage
+(46.0 vs 46.3 at the target size, though they diverge at the lowest coverages where the realized
+resident share differs too) — because a demoted node is unretrievable whatever selected it. ⛔ That
+order is a **static popularity** count, not recency (this corpus has no read ledger), so §7's *recency*
+claim was **not** re-tested and is not overturned here. And a
 demotion must invalidate `fallback_snapshot`, whose 60 s
 corpus is cleared by `SDK._mark_dirty` but not by a bare Cypher `DELETE`: without it the degraded path keeps
 serving the demoted corpus, which this instrument caught as recall above the arm's own resident share.
