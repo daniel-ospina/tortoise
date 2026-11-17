@@ -674,32 +674,46 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
 
 
 def test_a_POSITIONLESS_wide_term_row_answers_one_direction_only(sdk):
-    """#13289 review round 6 (P2): the position-less legacy row is the SAME asymmetry.
+    """#13289 review rounds 6-7: the position-less row is the SAME asymmetry.
 
-    Gating the wide arm on "has a position" fixed the `status='completed'` case and
-    put the loop back for `status='in_progress'`: with no pipeline props the read
-    fell through to `_STATUS_TO_STATE`, answered `"open"` for a row whose close fold
-    can never be dispatched (no live holder — `resolve_fold_name` →
-    `live._terminal_excluded`, which carries the `outdated` conjunct), and minted
-    `-closed` on every poll.
+    Gating the wide arm on "the row has a position" fixed `status='completed'` and
+    put the per-poll loop back for `status='in_progress'`: with no pipeline props
+    the read fell through to `_STATUS_TO_STATE` and answered `"open"`, so a GitHub
+    close minted `-closed` on every poll against a row whose close fold can never be
+    dispatched (no live holder — `resolve_fold_name` → `live._terminal_excluded`,
+    which carries the `outdated` conjunct; `entities.py:6157-6160`).
 
-    The rule is per-direction here too: the word is answered where it says
-    `closed` (the reopen direction can still fold and converges), and `None` where
-    it says `open` (a close could never be applied).
+    The rule is per-direction. Withhold ONLY where the word says `open`; any other
+    word — including one OUTSIDE `_STATUS_TO_STATE` (`outdated`, or a NULL status
+    carrying the flag) — can only mint a REOPEN, which the fold applies, so it is
+    answered `"closed"`. ⚠️ `!= "closed"` conflated "says open" with "says nothing"
+    and dropped those reopens for ever.
+
+    ⛔ The `mints` assertions drive the GITHUB state each shape can actually get
+    wrong: the open-word row against a CLOSED issue (the only direction in which
+    its loop is observable — against an open issue it mints nothing under either
+    reader, so a shared "open" fixture could not discriminate).
     """
     oid = "github-issue-acme/repo1-1"
+    closed_issue = dict(state="closed", closed_at="2026-07-26T08:00:00Z",
+                        updated_at="2026-07-26T08:00:00Z")
+    open_issue = dict(state="open", updated_at="2026-07-26T08:00:00Z")
     shapes = {
-        # (mutate, expected read, expected mints against a GitHub OPEN issue)
-        # ── the P2 win: the word says closed, so a reopen is still recordable ──
+        # (mutate, expected read, github state, expected mints)
+        # ── the word says closed: a GitHub reopen is recordable and folds ──
         "a legacy pre-S0 CLOSED row + the legacy flag": (
             "SET o.status='completed', o.outdated=true, o.pipelineStageId=null, "
-            "o.pipelineSlot=null, o.isClosed=null", "closed", [1, 0, 0]),
-        # ── the arm that must NOT answer: a close could never be dispatched ──
+            "o.pipelineSlot=null, o.isClosed=null", "closed", open_issue, [1, 0, 0]),
+        # ── a word OUTSIDE the map: still only a reopen can fold ──
+        "a row whose word is not in _STATUS_TO_STATE + the legacy flag": (
+            "SET o.status='outdated', o.outdated=true, o.pipelineStageId=null, "
+            "o.pipelineSlot=null, o.isClosed=null", "closed", open_issue, [1, 0, 0]),
+        # ── the word says OPEN: a close could never be dispatched, so withhold ──
         "a legacy OPEN row + the legacy flag": (
             "SET o.status='in_progress', o.outdated=true, o.pipelineStageId=null, "
-            "o.pipelineSlot=null, o.isClosed=null", None, [0, 0, 0]),
+            "o.pipelineSlot=null, o.isClosed=null", None, closed_issue, [0, 0, 0]),
     }
-    for why, (mutate, expected, expected_mints) in shapes.items():
+    for why, (mutate, expected, gh_state, expected_mints) in shapes.items():
         proj = sdk._get_proj()
         proj.g.query("MATCH (o:Object) DETACH DELETE o")
         proj.g.query("MATCH (e:Event) DETACH DELETE e")
@@ -710,12 +724,11 @@ def test_a_POSITIONLESS_wide_term_row_answers_one_direction_only(sdk):
         assert got == expected, (
             f"{why}: expected {expected!r} from a position-less row carrying a wide "
             f"lifecycle term, got {got!r}")
-        t.issues_by_repo["acme/repo1"] = [gh_issue(
-            1, state="open", updated_at="2026-07-26T08:00:00Z")]
+        t.issues_by_repo["acme/repo1"] = [gh_issue(1, **gh_state)]
         mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
         assert mints == expected_mints, (
-            f"{why}: expected {expected_mints} against a GitHub-open issue, got "
-            f"{mints} — a close minted here can never be folded, so it re-fires")
+            f"{why}: expected {expected_mints} against a GitHub "
+            f"{gh_state['state']!r} issue, got {mints}")
 
 
 def test_a_stale_pipelineSlot_prop_does_not_outvote_the_declaration(sdk):

@@ -302,10 +302,12 @@ def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
     answers `None`.
 
     ⚠️ A FALSY id (`''`) is a third case and not a refusal at all:
-    `apply_stage_fold`'s `if cur_id:` (`pipeline.py:490`) SKIPS the guard block
-    and admits the move, so the stored `pipelineSlot` PROP is the only position
-    answer such a row has, and the caller uses it. That is why the caller's test
-    is truthiness and not `is not None`.
+    `apply_stage_fold`'s `if cur_id:` (`pipeline.py:490`) SKIPS the IDENTITY
+    guards (`cross-pipeline` / `unresolvable-current-stage`) — `stage_move_refusal`
+    (`pipeline.py:504`) still runs, so a close event against an already-closed row
+    is still refused as `terminal-guard` — and the stored `pipelineSlot` PROP is
+    therefore the only position answer such a row has. That is why the caller's
+    test is truthiness and not `is not None`.
     """
     if stage_id is None:
         return None
@@ -1387,8 +1389,15 @@ class GitHubIndexer:
             # ⚠️ Falling through unconditionally here instead put the loop back:
             # `status='in_progress'` + `outdated=true`, GitHub closed, minted
             # `-closed` on every poll.
-            if _STATUS_TO_STATE.get(str(status)) != "closed":
+            # ⛔ Withhold ONLY where the word says "open". `!= "closed"` conflated
+            # that with "the word says NOTHING" — `status='outdated'` and a NULL
+            # status carrying the flag are outside `_STATUS_TO_STATE`, so they took
+            # the same branch and DROPPED the reopen the fold applies (the same
+            # silent-false-negative class as round 4). Any answer that is not
+            # "open" can only mint a reopen, which folds, so it is safe.
+            if _STATUS_TO_STATE.get(str(status)) == "open":
                 return None
+            return "closed"
         if stage_id is not None or slot is not None:
             return "open"
         if status is None:
