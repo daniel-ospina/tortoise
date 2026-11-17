@@ -373,6 +373,35 @@ class TestDeprovisionOnDelete:
         assert "ACL-user enumeration failed" in text and "o1" in text, text
         assert "query_all" in text, text   # names the seam that cannot walk
 
+    def test_a_FAILED_acl_enumeration_is_ANNOUNCED_and_not_silent(self, monkeypatch, caplog):
+        """⛔ The `except` arm is a fail-open that #13287 owns, and it is the
+        WORSE of the two: `query_all` RAISES on an outage by contract, so this arm
+        returns with `ids == []` and the caller still drops EVERY graph and
+        cascades the naming rows. It cannot refuse (C4/#2113, best-effort), so the
+        least it must do is SAY so — and it never reaches the `LOWER BOUND`
+        warning below, so without a sentence of its own the total loss of every
+        `tenant_<gid>` credential is completely silent.
+
+        Mutant: restore the bare `"team ACL-user enumeration failed … : %s"`
+        message — this reds on the missing clause.
+        """
+        from tortoise import hosted_api as ha
+
+        class _Broken:
+            def query_all(self, *a, **k):
+                raise RuntimeError("postgrest 503 on the graphs walk")
+
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: _Broken())
+        caplog.set_level(logging.WARNING, logger="tortoise.hosted_api")
+        assert ha._drop_org_acl_users("o1") is None   # must not raise (#2113)
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "NOT blocked" in text, text
+        assert "tenant_*" in text and "13287" in text, text
+
+
     def test_an_unreadable_enumeration_REFUSES_rather_than_erasing_a_subset(self, monkeypatch):
         """⛔ A failure to ask is not an answer (review round 4, P1).
 

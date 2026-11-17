@@ -34736,6 +34736,21 @@ def _drop_org_acl_users(org_id: str) -> None:
     retry — the residual #13287 owns. This warning therefore does not claim the
     tail is safe; it announces the bound so the credential can be found and
     dropped by hand, which is the one thing silence would prevent.
+
+    ⛔ THE SAME DIVERGENCE EXISTS WITHOUT `complete=False` AT ALL, and it is the
+    WORSE arm — do not read the paragraph above as the whole residual.
+    `query_all` RAISES on an outage by contract (`supabase_control.query_all`:
+    "Failures RAISE … an outage is not an incomplete result"), so an ordinary
+    5xx or timeout on this ONE request takes the `except` below, which logs
+    "enumeration failed (best-effort)" and RETURNS — with `ids == []`, before the
+    `LOWER BOUND` warning can fire. The sibling walk one statement later can
+    still certify on its own retry, and then `_drop_org_graphs_strict` deletes
+    EVERY graph and `purge_org_control_plane` cascades the rows away: every
+    `tenant_<gid>` credential of the org is orphaned, and nothing announced it.
+    Same #13287, ten times the blast radius of the partial case, and strictly
+    more likely. One enumeration (deriving the gids from the certified namespace
+    list) closes both arms; until then the `except` arm is a fail-open and is
+    recorded as such.
     """
     from tortoise.supabase_control import (
         get_control_plane,
@@ -34761,8 +34776,14 @@ def _drop_org_acl_users(org_id: str) -> None:
             ).result_set
             ids = [r[0] for r in rows]
     except Exception as e:
+        # ⛔ A fail-open arm, recorded above and owned by #13287: this RETURN
+        # does not stop the caller, which drops every graph and cascades the rows
+        # naming them while NO `tenant_<gid>` user was dropped. Nag loudly enough
+        # that the operator can act, since this arm emits no `LOWER BOUND` above.
         _logger.warning(
-            "team ACL-user enumeration failed for %s (best-effort): %s",
+            "team ACL-user enumeration failed for %s (best-effort): %s — the "
+            "graph drops that follow are NOT blocked, so this org's `tenant_*` "
+            "ACL users may be orphaned; check them by hand (#13287)",
             org_id, e)
         return
     if not complete:
