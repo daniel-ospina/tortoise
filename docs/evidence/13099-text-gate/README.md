@@ -143,7 +143,9 @@ direction. Anyone reading this record should treat the evidence base as **two** 
 
 ⚠️ **The entity-name class is a proxy, and the record says so.** The corpus has no real entity names;
 its nearest stored "name" is a document's own text. What it tests is the exact-lookup surface — and
-that is where the one real deficit appears (§5.2, mechanism in §5.4).
+that is where the in-graph leg trails most sharply **at the head** (§5.2, mechanism in §5.4). It is
+**not the only** place it trails: the anchor class trails at depth too (§5.1, and §5.4 says so), which
+is why no sentence here says "the one deficit".
 
 ---
 

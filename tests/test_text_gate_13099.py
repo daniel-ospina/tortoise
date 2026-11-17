@@ -32,12 +32,14 @@ from tools.text_gate_13099 import (
     N_POINTS,
     QUERY_CLASSES,
     SEED,
+    TOKENIZER_FALLBACKS,
     build_corpus,
     build_query_classes,
     committed_queries_digest,
     labels_for,
     load_committed_queries,
     oov_evidence,
+    or_tokens,
     verdict,
 )
 
@@ -650,3 +652,41 @@ def test_the_fusion_control_is_not_offered_as_a_postgres_option():
     art = _artifact()
     assert art["verdict"]["control_arms_not_candidates"] == ["hybrid_baseline"]
     assert "hybrid_baseline" not in art["verdict"]["qualifying_candidates"]
+
+
+def test_a_tokenizer_fallback_is_recorded_once_per_query_text(monkeypatch):
+    """A silent tokenizer swap would falsify the record's own claim.
+
+    `or_tokens` promises the SHARED product tokenizer ("it keeps the comparison
+    about the scorer"), and it is invoked once per lexical arm — four times per
+    query. A raw append therefore published one entry per CALL, so the artifact's
+    count read 4× the affected queries. This pins one entry per text, the reason
+    being recorded, and NO entry on the normal path.
+    """
+    import tortoise.sparse as sparse
+
+    # the normal path records nothing
+    TOKENIZER_FALLBACKS.clear()
+    assert or_tokens("operator point flag")
+    assert TOKENIZER_FALLBACKS == []
+
+    # one text, four invocations — exactly one entry, and it says why
+    monkeypatch.setattr(sparse, "tokenize_sparse_query", lambda *a, **k: [])
+    TOKENIZER_FALLBACKS.clear()
+    for _ in range(4):
+        assert or_tokens("operator point flag") == ["operator", "point", "flag"]
+    assert len(TOKENIZER_FALLBACKS) == 1, TOKENIZER_FALLBACKS
+    assert TOKENIZER_FALLBACKS[0]["text"] == "operator point flag"
+    assert "no tokens" in TOKENIZER_FALLBACKS[0]["reason"]
+
+    # a raising tokenizer is recorded with the exception, and still falls back
+    def _boom(*a, **k):
+        raise RuntimeError("tokenizer exploded")
+
+    monkeypatch.setattr(sparse, "tokenize_sparse_query", _boom)
+    TOKENIZER_FALLBACKS.clear()
+    for _ in range(4):
+        assert or_tokens("operator point flag") == ["operator", "point", "flag"]
+    assert len(TOKENIZER_FALLBACKS) == 1
+    assert "RuntimeError: tokenizer exploded" in TOKENIZER_FALLBACKS[0]["reason"]
+    TOKENIZER_FALLBACKS.clear()

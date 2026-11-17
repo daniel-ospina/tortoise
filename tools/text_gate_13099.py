@@ -440,7 +440,9 @@ def or_tokens(text: str) -> list[str]:
         reason = f"{type(exc).__name__}: {exc}"
     if not toks:
         if not any(e["text"] == text for e in TOKENIZER_FALLBACKS):
-            # `or_tokens` runs once per QUERY (three call sites), so a raw append
+            # `or_tokens` is invoked once per LEXICAL ARM — four times per query
+            # through three syntactic sites (`pg_ts_rank` runs for both `en` and
+            # `simple`), so a raw append
             # would record one entry per call and make the published count a
             # multiple of the texts. Keyed by text: one entry per affected query.
             TOKENIZER_FALLBACKS.append(
