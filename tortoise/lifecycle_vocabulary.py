@@ -174,6 +174,36 @@ _ACCEPTED_FORMS = (
 STATUS_WRITE_OUTCOMES: dict[str, int] = {"normalised": 0, "refused": 0}
 
 
+def refusal_type_name(value: object) -> str:
+    """``type(value).__name__`` that CANNOT escape as its own exception.
+
+    The sibling of :func:`_render`, on the OTHER caller-controlled axis a
+    refusal interpolates (#12910 review round 8). A metaclass may define
+    ``__name__`` as a raising property:
+
+        class _RaisingNameMeta(type):
+            @property
+            def __name__(cls):
+                raise RuntimeError("name-boom")
+
+    and then ``f"{type(value).__name__}"`` raises out of a door that promised a
+    ``ValueError`` — measured at ``#12910``'s merge of ``#11824 S0``:
+    ``create_object(status=_BoomInt(123))`` raised ``RuntimeError: name-boom``
+    from this module, where the type's NAME was the only hostile operand. The
+    contract is the exception CLASS, so every operand is rendered through a
+    contained helper — this is that helper for the class name.
+    """
+    try:
+        name = type(value).__name__
+    except Exception:  # noqa: BLE001, RUF100 — a hostile metaclass is the point
+        return "unreadable (its metaclass raises)"
+    # The READ surviving is not enough: the property may ANSWER with something
+    # that is not a `str`, and an f-string then renders it with the caller's own
+    # `__format__` (measured: `RuntimeError: fmt-boom`). Exact-`str` also keeps
+    # the value safe to hash and sort in a refusal that groups names.
+    return name if type(name) is str else "unreadable (its name is not a str)"
+
+
 def _render(value: object) -> str:
     """``repr(value)`` that CANNOT escape as its own exception (#12906 P3).
 
@@ -186,7 +216,7 @@ def _render(value: object) -> str:
     try:
         return repr(value)
     except Exception:
-        return f"<{type(value).__name__} whose repr() raised>"
+        return f"<{refusal_type_name(value)} whose repr() raised>"
 
 
 def _refusal(value: object, fault: str, repair: str, *,
@@ -253,7 +283,7 @@ def read_caller_status(value: object, *, kind: str = "",
     if not issubclass(type(value), str):
         raise _refusal(
             value,
-            f"a status must be a plain string, and {type(value).__name__} is "
+            f"a status must be a plain string, and {refusal_type_name(value)} is "
             f"not one",
             "Pass the word itself, as a string.",
             count=count,

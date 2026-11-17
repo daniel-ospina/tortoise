@@ -614,7 +614,11 @@ def test_an_unhashable_status_is_refused_not_a_crash_in_the_routing_guard(sdk):
     ).result_set == [[0]], "a refused write must land nothing"
 
     # ── 2. #12869: the unhashable shape is a REFUSAL, never a crash ─────
-    with pytest.raises(ValueError, match="refused a non-string status"):
+    # ⛔ RE-DERIVED at #12910's merge of #11824 S0: the shared lifecycle door
+    # refuses the shape as its FIRST arm, so the message is that door's
+    # ("was refused") — `main`'s arm immediately above states the same contract
+    # for the same fixture, and both now name the same authority.
+    with pytest.raises(ValueError, match=r"was refused"):
         sdk.create_object("Q3b", objectKind="core:team", status=["active"])
     assert sdk._get_proj().g.query(
         "MATCH (n:Object {name:'Q3b'}) RETURN count(n)").result_set[0][0] == 0, (

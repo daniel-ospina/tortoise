@@ -71,7 +71,7 @@ from .lifecycle_vocabulary import (
     LIFECYCLE_STATUS_SYNONYMS as _LIFECYCLE_STATUS_SYNONYMS,
     LIFECYCLE_STATUS_VALUES as _LIFECYCLE_STATUS_VALUES,
     read_caller_status as _read_caller_status,
-    status_refusal_reason as _status_refusal_reason,
+    refusal_type_name, status_refusal_reason as _status_refusal_reason,
 )
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 # #12297: the fused-candidate rerank, imported at module scope because the read
@@ -13576,15 +13576,15 @@ def _refusal_type_name(value) -> str:
     #12914 review P3). Defensive for the same reason as ``_refusal_repr``
     below, and shared so the two cannot drift.
     """
-    try:
-        name = type(value).__name__
-    except Exception:  # noqa: BLE001, RUF100 — a hostile metaclass is the point
-        return "unreadable (its metaclass raises)"
-    # The READ surviving is not enough: the property may ANSWER with something
-    # that is not a `str`, and an f-string then renders it with the caller's own
-    # `__format__` (measured: `RuntimeError: fmt-boom`). Exact-`str` also keeps
-    # the value safe to hash and sort in a refusal that groups names.
-    return name if type(name) is str else "unreadable (its name is not a str)"
+    # ⛔ ONE HOME (#12910's merge of #11824 S0): the shared lifecycle door needs
+    # the same reader for its own refusal, so the implementation lives there and
+    # this delegates. Two copies of a containment rule drift, and the drift is
+    # exactly the bug each copy was written to stop.
+    #
+    # It keeps BOTH axes: the NAME may raise (a metaclass property), and the
+    # READ surviving may ANSWER with a non-`str`, which an f-string renders with
+    # the caller's own `__format__` (measured: `RuntimeError: fmt-boom`).
+    return refusal_type_name(value)
 
 
 def _refusal_repr(value) -> str:
@@ -32219,8 +32219,17 @@ class TortoiseSDK:
                 continue
             violations.append({
                 "section": "entities", "index": i,
+                # ⛔ `_refusal_repr`, NEVER the raw `!r` (#12910 review P2-1, and
+                # this is the regression its pin caught). The message is built
+                # into a violations LIST that `ingest` raises on, so a caller
+                # whose `__repr__` raises replaced that exception with its own
+                # — measured after #11824 S0 rewrote this arm: `_validate_bundle`
+                # raised `RuntimeError: repr-boom` for a `status=123` whose
+                # class defines a raising `__repr__`, instead of RETURNING the
+                # violation. The refusal's contract is the exception CLASS, so
+                # every operand is rendered through the contained helper.
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{own_status!r} for a :{_item_label} — the writer "
+                           f"{_refusal_repr(own_status)} for a :{_item_label} — the writer "
                            f"validates against the declared lifecycle and "
                            f"refuses it mid-write, so the bundle is "
                            f"rejected at validation. {_status_refusal}",
