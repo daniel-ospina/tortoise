@@ -523,6 +523,8 @@ def rg_totals(prefixes: tuple[str, ...], *, drop_test_modules: bool = True) -> d
         "lines_door_calls": 0,
         "files_door_calls": 0,
         "door_occurrences_without_a_call": 0,
+        "door_occurrences_on_call_lines": 0,
+        "lines_where_regex_and_ast_disagree": 0,
     }
     for rel in files:
         try:
@@ -541,14 +543,19 @@ def rg_totals(prefixes: tuple[str, ...], *, drop_test_modules: bool = True) -> d
             tree = ast.parse(text)
         except SyntaxError:
             continue
-        call_lines = {
+        ast_by_line = Counter(
             node.lineno for node in ast.walk(tree)
             if isinstance(node, ast.Call) and _is_door(node)
-        }
+        )
+        call_lines = set(ast_by_line)
         for lineno, line in enumerate(text.splitlines(), start=1):
+            occurrences_here = len(door_line.findall(line))
             if lineno in call_lines:
-                continue
-            totals["door_occurrences_without_a_call"] += len(door_line.findall(line))
+                totals["door_occurrences_on_call_lines"] += occurrences_here
+                if occurrences_here != ast_by_line[lineno]:
+                    totals["lines_where_regex_and_ast_disagree"] += 1
+            else:
+                totals["door_occurrences_without_a_call"] += occurrences_here
     return totals
 
 

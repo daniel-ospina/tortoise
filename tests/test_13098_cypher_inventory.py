@@ -64,16 +64,26 @@ def test_the_census_reconciles_arithmetically():
     totals = census.rg_totals(("tortoise",))
     ast_door_calls = len(result["sites"]) + result["non_cypher_door_calls"]
     assert totals["lines_door_calls"] - totals["door_occurrences_without_a_call"] == ast_door_calls
-    # ⛔ The THIRD reconciliation line the report prints and the doc claims —
-    # `occurrences sharing a line with a CALL` = regex occurrences on call lines
-    # MINUS the AST's own node count. Both sides are measured independently (a
-    # line regex vs an AST walk), so this can fail: a comment mentioning a door
-    # beside a real call reddens it. The assertion this replaced was
-    # `result["ast_door_calls"] == ast_door_calls`, which compared a dict field
-    # with the exact expression that produced it — dead by construction
-    # (`#13098` review P2-4).
-    assert (totals["lines_door_calls"] - totals["door_occurrences_without_a_call"]
-            - ast_door_calls) == 0
+    # ⛔ This second assertion was an IDENTITY and could never fail: both buckets
+    # come from the SAME regex, so `regex − non-call` equals the regex's own
+    # partition total by construction, and subtracting the AST count from it is
+    # the assertion above rearranged. Its comment claimed a line regex and an AST
+    # walk were "measured independently", which the arithmetic denies
+    # (`#13098` review P2). What is asserted now is a PER-LINE cross-check of the
+    # line regex against the AST's own door nodes — strictly stronger than the
+    # sum, because a balanced pair of opposite errors (one line where the regex
+    # sees two occurrences and the AST holds one node, another off in the other
+    # direction) leaves the totals closing perfectly and is caught only here.
+    # Non-vacuity measured: putting a docstring `.query(` on a line that already
+    # carries a real door call takes this counter 0 -> 1, and the partition above
+    # still balances. The counter is deliberately NOT printed in the report: the
+    # doc frames the printed third row as the DERIVED residual, and that framing
+    # is correct as written.
+    assert totals["lines_where_regex_and_ast_disagree"] == 0, (
+        "the door regex and the AST disagree on how many door calls ONE LINE carries — the "
+        "totals can still close over that, which is exactly why this arm exists: "
+        f"{totals}"
+    )
 
 
 def test_the_census_pin_can_report_drift(tmp_path):

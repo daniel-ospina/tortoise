@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1301** | **97** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **8,791** | **799** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/` |
+| every tracked surface (`--all-surface`) | **8,793** | **799** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement, NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it read 8,791 here, which is no tree this tool can print) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it

@@ -6370,14 +6370,20 @@ surfaces:
   # subjects are `tools/` paths (`cypher_inventory.py`, `cypher_diff_harness.py`)
   # that match no SOURCE_PATTERNS entry, and the doc they pin is a `docs/` file.
   # Registered at all because an unlisted file is a `manifest-integrity` red
-  # (#1262) AND is selected by no shard (#1349/#2938) — so the 22 pins here
+  # (#1262) AND is selected by no shard (#1349/#2938) — so the pins here
   # (census arithmetic, shape precedence, the diff's row/order/null/shape rules,
   # the refusal arms) would be green-by-absence, which for a "harness that can
-  # fail" is the one thing it cannot afford. Hermetic: the census is `subprocess`
-  # + `ast` over the git index, and the harness cases drive `diff()` /
-  # `_mutated()` / `bootstrap_record()` in process with the store and `subprocess`
-  # seams patched — no DB, no graph, no docker, no network, no model call. The
-  # DB-backed legs are their own job (`.github/workflows/cypher-diff.yml`).
+  # fail" is the one thing it cannot afford.
+  # ⛔ No CASE COUNT is quoted above, for the reason the `durations` row for this
+  # file states in its own words: a count moves whenever a review round adds a
+  # pin, and the authority is `tools/ci_selection.py --integrity`, not a number
+  # beside it (`#13098` review P3 — an earlier revision of this comment said "22
+  # pins", which was never right at any commit on this branch).
+  # Hermetic: the census is `subprocess` + `ast` over the git index, and the
+  # harness cases drive `diff()` / `_mutated()` / `bootstrap_record()` in process
+  # with the store and `subprocess` seams patched — no DB, no graph, no docker, no
+  # network, no model call. The DB-backed legs are their own job
+  # (`.github/workflows/cypher-diff.yml`).
   - test_13098_cypher_inventory.py
   # #5140: the pending-extraction default (`tortoise/ingest.py`'s
   # `_document_is_pending` / `_discover_pending_documents`) and its
