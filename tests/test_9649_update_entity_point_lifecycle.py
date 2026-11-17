@@ -992,6 +992,12 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
     provenance = sdk.create_point(
         "statement", "carries provenance", dedup=False,
         status="retracted", eventId="ev-9649-prov")["id"]
+    # The status this Point is BORN with, read back rather than hard-coded: since
+    # `#11824` S0 the door normalises the synonyms (`retracted`/`archived` are
+    # STORED as `deprecated`), so asserting the input spelling would pin the
+    # writer's vocabulary rather than this arm's claim — "the provenance Point is
+    # untouched".
+    born_status = sdk.get_entity(provenance)["status"]
     sdk._get_proj().g.query(
         "CREATE (e:Event {eventId:'ev-9649-prov', name:'session'})")
 
@@ -1021,18 +1027,9 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
         "MATCH (e:Event {eventId:'ev-9649-prov'}) RETURN e.validTo",
     ).result_set == [["2031-01-01T00:00:00Z"]], (
         "the Event the caller addressed must take the write")
-    # ⛔ THE CANONICAL WORD, not the caller's spelling: `create_point` above
-    # passes `status="retracted"`, and since S0 (#11824) that value is a DECLARED
-    # SYNONYM — `lifecycle_vocabulary` outcome 2 stores `retracted`/`archived` as
-    # `deprecated`, silently. The claim this row exists for is that the write to
-    # `ev-9649-prov` reached the EVENT and left the provenance POINT alone; the
-    # spelling of a terminal word is incidental to that, so asserting the caller's
-    # word would pin the pre-S0 create door instead. Measured RED on `main` at
-    # `97fd713ffb` before this line was fixed (`assert 'deprecated' ==
-    # 'retracted'`): #13133 landed this file's #13100 rewrite without running it,
-    # and the row it left asserted a stored word the door had already moved.
-    assert sdk.get_entity(provenance)["status"] == "deprecated", (
-        "the provenance Point must be untouched")
+    assert sdk.get_entity(provenance)["status"] == born_status, (
+        "the provenance Point must be untouched — an unqualified address hands "
+        "the guard a claim the caller never addressed")
 
 
 def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
@@ -1070,7 +1067,11 @@ def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
 
     with pytest.raises(ValueError, match="transition"):
         sdk.update_knowledge("src://hybrid-9649", status="draft")
-    with pytest.raises(ValueError, match=r"was refused"):
+    # `#11824` S0 re-worded the vocabulary refusal from `Invalid status` to
+    # `status 'garbage' was refused: it is not a lifecycle word for :Point`; the
+    # claim under test is that the WORD is validated on the resolved address, not
+    # the sentence.
+    with pytest.raises(ValueError, match=r"status 'garbage' was refused"):
         sdk.update_knowledge("src://hybrid-9649", status="garbage")
     assert _row(sdk, pid)["status"] == "live", (
         "a refused hybrid status write must not touch the row")
