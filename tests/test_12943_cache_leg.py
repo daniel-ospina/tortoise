@@ -1086,6 +1086,21 @@ def test_apply_keeps_the_signature_the_replay_engines_introspect(
     {"type": "PointsMerged"},                            # no merge_ids
     {"type": "ObjectSuperseded", "id": "no-such-object"},  # matched nothing
     {"type": "PointPromoted", "point": {"id": "\x00bad"}},  # unwritable id
+    # ── review cycle 4, P2: the DELEGATED folds that report their own
+    # 0-row count straight through `_apply_event`, none of which called
+    # `_skip()`. Measured on the head before this cycle: every one of these
+    # left `{'embedded:…|tortoise': 1}` in the registry while its fold logged
+    # (or silently counted) zero rows.
+    {"type": "OperatorAnnotated", "id": "no-such-operator", "bias": 0.4},
+    {"type": "PointRetracted", "id": "no-such-retract"},
+    {"type": "ConfidenceChanged", "id": "no-such-cc", "confidence": 0.5},
+    {"type": "EdgeMessageChanged", "op": "set", "src": "a", "tgt": "b",
+     "rel": "IMPL", "msg_alpha": 0.5},
+    {"type": "EdgeMessageChanged", "op": "clear", "scope": "all"},
+    {"type": "EntityLinked", "source_id": "s-missing",
+     "source_label": "Session", "target_id": "o-missing",
+     "target_label": "Object", "edge_type": "aboutObject"},
+    {"type": "SessionRecorded"},                        # malformed: no id
 ])
 def test_the_OTHER_writing_nothing_exits_are_not_counted(
         monkeypatch, tmp_path, event):
@@ -1096,6 +1111,11 @@ def test_the_OTHER_writing_nothing_exits_are_not_counted(
     dropped, and counted `ObjectSuperseded` on the LIVE path because its `_skip()`
     was nested inside the journal-context gate — the one path this instrument
     exists to serve.
+
+    Review cycle 4 found the same defect one layer down: the folds that RETURN
+    their matched-row count (annotator, retract, belief, edge-message) and the
+    two delegated arms (`EntityLinked`, `SessionRecorded`) hand `_apply_event` a
+    0 that nothing translated into `_skip()`. Six more rows came from that.
     """
     _drop_uri(monkeypatch)
     from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
@@ -1107,6 +1127,39 @@ def test_the_OTHER_writing_nothing_exits_are_not_counted(
         assert cache_write_targets() == {}, (
             f"{event['type']} wrote nothing but was counted as a landed cache "
             f"write — got {cache_write_targets()!r}")
+    finally:
+        sdk.close()
+
+
+def test_the_0_row_capable_arms_STILL_count_a_fold_that_LANDED(
+        monkeypatch, tmp_path):
+    """The `_skip()` on those arms must not swallow a fold that DID write.
+
+    A blanket "never count these event types" mutant would pass the sibling
+    test above while inverting the instrument's polarity (under-reporting
+    instead of over-reporting), so each arm is driven twice: once against a
+    target that does not exist, once against one that does.
+    """
+    _drop_uri(monkeypatch)
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        point = sdk.create_point("fact", "a landed fold")
+        # Every arm below MATCHes an existing target, so each must count 1.
+        for event in (
+            {"type": "OperatorAnnotated", "id": point["id"], "bias": 0.4},
+            {"type": "ConfidenceChanged", "id": point["id"],
+             "confidence": 0.6},
+            {"type": "PointRetracted", "id": point["id"]},
+            {"type": "SessionRecorded", "id": "sess-landed-1"},
+        ):
+            reset_cache_write_targets()
+            proj.apply(dict(event, event_id=f"ev-landed-{event['type']}"))
+            assert sum(cache_write_targets().values()) == 1, (
+                f"{event['type']} folded a real target and must count exactly "
+                f"one landed write — got {cache_write_targets()!r}")
     finally:
         sdk.close()
 

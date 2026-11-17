@@ -12755,12 +12755,19 @@ class FalkorProjection(
             and this fold has many exits that write nothing (a malformed
             envelope, an unwritable or absent id on the point/operator/promote
             arms, an empty `merge_ids`, a re-stamp that folded no Point, a
-            supersede that matched no Object, and the three
+            supersede that matched no Object, a 0-row annotator / retract /
+            belief / edge-message fold, an `EntityLinked` or `SessionRecorded`
+            whose statement matched nothing, and the three
             recognized-not-folded arms at the tail). Counting them
             would answer "how many folds were STARTED"; the one direction that
             matters is the opposite — a record-written / cache-not-written split
             must never read as a write that landed (#12943 review cycle 2,
             finding 1, where the hook sat ABOVE the malformed-type guard).
+
+            ⛔ THE LIST ABOVE IS THE SET OF MARKED EXITS, not a claim that it is
+            every no-write exit in the file (review cycle 3, P3). A new arm
+            that can fold 0 rows must mark itself here; when one does not, the
+            registry over-reports, never under-reports.
             """
             if _wrote is not None:
                 _wrote[0] = False
@@ -12991,6 +12998,12 @@ class FalkorProjection(
             # materializes only LATER is a forward reference — the live write
             # no-op'd it, so it is neither folded nor recorded.
             if self._apply_annotator(ev) == 0:
+                # #12943 (review cycle 4, P2): the fold MATCHed no Point, so
+                # no statement landed — not a write target. `_skip()` sits
+                # OUTSIDE the record below on purpose: that record is gated on
+                # the journal context and on whether the miss is a legitimate
+                # forward reference, and neither changes WHAT was written.
+                _skip()
                 _ann_id = ev.get("id")
                 if (_writable_id(_ann_id)
                         and _annotator_dims(ev, aliases=True)
@@ -13020,9 +13033,18 @@ class FalkorProjection(
             # reproduces exactly. The gate is the ORDER of first
             # materialization, so a create → hard-delete → retract journal
             # (first <= seq) still refuses.
-            if (isinstance(rid, str)
-                    and self._retract(rid, now=ev.get("ts"),
-                                      valid_to=ev.get("valid_to")) == 0
+            _retract_matched = (
+                self._retract(rid, now=ev.get("ts"),
+                              valid_to=ev.get("valid_to"))
+                if isinstance(rid, str) else 0)
+            # #12943 (review cycle 4, P2): the retract's own count decides
+            # whether a write landed — 0 rows (or no statement at all, for a
+            # non-str id) means nothing did. Same split as the annotator arm:
+            # the journal-context record below answers a DIFFERENT question
+            # (is the miss a forward reference this engine must not refuse).
+            if not _retract_matched:
+                _skip()
+            if (isinstance(rid, str) and _retract_matched == 0
                     and not _journal_forward_reference(
                         journal_first_materialized, journal_seq,
                         "Point", rid)):
@@ -13206,12 +13228,26 @@ class FalkorProjection(
             # engines (``rebuild``/``recover_from_log``) buffer the type and
             # call ``fold_deferred_entity_links`` after the pass, matching
             # ``rebuild_all``'s trailing sweep on a forward-reference journal.
-            return self._fold_entity_linked(ev)
+            _linked = self._fold_entity_linked(ev)
+            # #12943 (review cycle 4, P2): 0 = the record was malformed or an
+            # endpoint is absent, i.e. the MERGE matched nothing and created
+            # nothing. An idempotent re-MERGE of an edge that already exists
+            # still counts (a write was issued and landed) — the same bound
+            # `edges._record_structural_edges` states for its own `created`.
+            if not _linked:
+                return _skip()
+            return _linked
         elif t == "SessionRecorded":
             # #3664: the :Session node's journal carrier — the capture MERGE
             # is a raw write, so without this a rebuild lost the node (and
             # made any EntityLinked edge from it unreplayable).
-            return self._fold_session_recorded(ev)
+            _session = self._fold_session_recorded(ev)
+            # #12943 (review cycle 4, P2): 0 = a malformed record (an
+            # unwritable/blank id, or a value the writer would have dropped),
+            # so the MERGE never ran. Nothing landed.
+            if not _session:
+                return _skip()
+            return _session
         elif t == "SessionDeleted":
             # #7951: the :Session hard-delete carrier (JSONL-only). The
             # session delete is a raw DETACH DELETE and no EntityMutated
@@ -13352,6 +13388,9 @@ class FalkorProjection(
             # on BOTH sides), and its id must be writable. A forward-referenced
             # write is neither folded nor recorded.
             if self._fold_confidence_changed(ev) == 0:
+                # #12943 (review cycle 4, P2): 0 matched rows = no belief
+                # column written, on the live one-record path included.
+                _skip()
                 _cc_rid = ev.get("id")
                 _cc_has_prop = any(
                     k in ev for k in (*BELIEF_PROPS, *BELIEF_BOOL_PROPS))
@@ -13379,8 +13418,14 @@ class FalkorProjection(
             # ``nonfolded.EXEMPT_SHAPES`` with its degraded guarantee written
             # down; ``rebuild_all``'s deferred sweep carries the same
             # disposition.
-            if (self._fold_edge_message_changed(ev) == 0
-                    and ev.get("op") == "set"):
+            _em_folded = self._fold_edge_message_changed(ev)
+            # #12943 (review cycle 4, P2): 0 = the statement matched no edge,
+            # on BOTH legs (`set` miss, or a `clear` whose scope or ids dropped
+            # nothing), so nothing was written. The record+warning below is the
+            # `set`-only half — a separate question from what landed.
+            if _em_folded == 0:
+                _skip()
+            if _em_folded == 0 and ev.get("op") == "set":
                 record_non_folded(
                     SHAPE_EDGE_MESSAGE_MISS,
                     event_id=ev.get("event_id"),
