@@ -7715,10 +7715,14 @@ def _drop_block_entries(text: str, section: str) -> str:
 #: and carries no such cite. The arm table below needs that split, because
 #: `pytest.raises(AssertionError)` cannot tell them apart.
 #:
-#: ⛔ `_pin_row_failures` EMITS FOUR LINE-FINDING SHAPES, and the pattern must match
-#: all four (#13033 review P1, P2 — the fourth is the unregistered-source-key finding,
+#: ⛔ `_pin_row_failures` EMITS FIVE LINE-FINDING SHAPES, and the pattern must match
+#: all five (#13033 review P1, P2 — the fourth is the unregistered-source-key finding,
 #: which a fix in round 6 ADDED without teaching this pattern about it, reproducing the
-#: very misclassification it was fixing). It used to match the literal `(cited by <doc>)`
+#: very misclassification it was fixing; the FIFTH is the ungradeable-kind finding,
+#: added in round 8 right beside the guard whose comment says such a row "is reported
+#: as the row's own defect" — and left unclassified, so `_block_findings` called it a
+#: BLOCK finding and the arm table below could be satisfied by that unrelated row red.
+#: MEASURED at round 12 by driving the producer, not by reading the pattern). It used to match the literal `(cited by <doc>)`
 #: tail; when that tail moved to `_cite_failure` (`<doc> cites <source>:<n> …`), to the
 #: bare-continuation arm (`<doc>: the sentence containing … does not cite :<n>`), and
 #: to the scoping-phrase arm (`<doc>: the scoping phrase … occurs <n> time(s)`), the
@@ -7738,6 +7742,10 @@ def _drop_block_entries(text: str, section: str) -> str:
 #:     block finding matched here, `_block_findings` DROPPED it, and the baseline below
 #:     passed while the arm table was satisfied by it — the split failing in the
 #:     direction that hides a red instead of inventing one (#13033 review round 6);
+#:   * the ungradeable-kind arm (`<doc>: the row for '<sentence>' names anchor kind
+#:     '<kind>', which this pin cannot grade`) is a `_pin_row_failures` finding for the
+#:     same reason: classified as a block finding it false-REDs the baseline (naming
+#:     the block arms for a row defect) and can satisfy an arm-table case.
 #:   * `_bundle_sweep`'s `- <cite> (<label>): <source>:<n> reads …` shape is
 #:     deliberately NOT matched — it was a BLOCK finding before this split existed and
 #:     stays one.
@@ -7749,6 +7757,7 @@ _ROW_FINDING = re.compile(
     r"|- \S+: the sentence containing .* does not cite :\d+"
     r"|- \S+: the scoping phrase .* occurs \d+ time\(s\) — this pin needs"
     r"|- \S+: this row's SOURCE key .* is not in the source map"
+    r"|- \S+: the row for .* names anchor kind .* which this pin cannot grade"
 )
 
 
@@ -7794,9 +7803,11 @@ def test_the_line_and_block_findings_are_told_apart(tmp_path):
     lifted out of the source, so a re-wording inside a producer left the test GREEN
     while `_ROW_FINDING` went dead again — the same silent rot, one level up. Each case
     below calls `_pin_row_failures` / `_bundle_missing` / `_bundle_sweep` and classifies
-    what comes back: three row SHAPES (the fourth fixture is `_cite_failure` again with a
-    hyphenated label, which pins the label class rather than a fourth producer) and one
-    block finding driven through the real sweep.
+    what comes back: five row SHAPES — the `_cite_failure` miss, the bare continuation,
+    the unregistered source key, the ungradeable anchor kind (all four emitted by
+    `_pin_row_failures`) and the scoping phrase — plus a hyphenated label, which pins the
+    label class rather than a further producer, and one block finding driven through the
+    real sweep.
     """
     src = tmp_path / "seam.py"
     src.write_text("# a comment\ntarget = 1\nother = 2\n", encoding="utf-8")
@@ -7849,8 +7860,22 @@ def test_the_line_and_block_findings_are_told_apart(tmp_path):
         f"a row keyed outside the source map must be a FINDING, not a KeyError; "
         f"got {unregistered!r}")
 
+    # 6. the UNGRADEABLE KIND on the graded path (round-8 P3, classified in round 12).
+    #    `_pin_row_failures` REPORTS a row whose kind it cannot grade instead of letting
+    #    `ANCHOR_KINDS` raise, and that finding is a ROW finding like the other four —
+    #    MEASURED: with the pattern keyed on four shapes only, `_block_findings`
+    #    returned this one as a BLOCK finding, so the baseline false-REDded naming the
+    #    block arms for a row defect and `test_each_block_arm_reds_on_the_mutation_it_
+    #    guards` could be satisfied by it.
+    ungradeable = _pin("`src.py:2` is where the seam sits.\n",
+                       [("is where the seam sits", (("2", ("span", "x = 1")),))])
+    assert ungradeable and "cannot grade" in ungradeable[0], (
+        f"a row whose kind the pin cannot grade must be a FINDING, not a ValueError; "
+        f"got {ungradeable!r}")
+
     rows = {"cite_failure/miss": missed, "bare continuation": bare,
             "unregistered source key": unregistered,
+            "ungradeable anchor kind": ungradeable,
             "scoping phrase": ambiguous, "hyphenated label": hyphenated}
     for name, findings in rows.items():
         assert findings, f"the {name} arm produced NO finding — the fixture is inert"
@@ -7919,7 +7944,12 @@ def test_the_line_and_block_findings_are_told_apart(tmp_path):
     # arm's words for the document arm's flips the class of a finding the driven
     # `ambiguous` fixture really produces.
     flipped = "- " + ambiguous[0].replace("this pin needs", "this claim needs")
-    assert "- " + ambiguous[0] and _ROW_FINDING.match("- " + ambiguous[0])
+    # ⛔ ONE CONJUNCT, because that is what this assertion actually checks (#13033
+    # round-12 review, P3): `"- " + ambiguous[0]` is a non-empty string, so it is
+    # ALWAYS truthy and the two-part form above read as a check of both. The prefix is
+    # built by the same expression either way — an assertion on it would be an
+    # assertion on string concatenation.
+    assert _ROW_FINDING.match("- " + ambiguous[0]), ambiguous[0]
     assert not _ROW_FINDING.match(flipped), (
         f"the row/document arms are not discriminated by `this pin needs`: {flipped!r}")
 
@@ -8046,6 +8076,10 @@ def test_a_stale_cite_names_the_line_the_anchor_really_lives_on(tmp_path):
     docstring's own vet-flag illustration could be reverted with CI green. Each arm below
     drives a REAL producer and requires the resolved line in its output. Deleting the
     resolution reds every one of them.
+
+    ⛔ Round 12 finished the job: the first version of this test pinned two of the seven
+    sites in this file and said "every" (measured — see arm 6). ALL SEVEN now have their
+    own arm, one per branch of `_bundle_missing` plus the row/bare-continuation pair.
     """
     lines = ["# a comment", "target = 1", "other = 2"]
     # 1. the block arm (`_bundle_missing`), which `_bundle_sweep` composes
@@ -8090,6 +8124,50 @@ def test_a_stale_cite_names_the_line_the_anchor_really_lives_on(tmp_path):
             {"doc.md": doc}, {"src": lines}, default_source="src")
         assert reported and "cannot grade" in reported[0] and unsupported in reported[0], (
             f"an ungradeable row kind must be REPORTED, not raised: {reported}")
+    # 6. ⛔ ONE ARM PER `_locate_hint` SITE IN THIS FILE (#13033 round-12 review, P2 —
+    #    MEASURED, and the measurement is the point). Round 11's claim on the row of
+    #    `config/ci-surfaces.yml` was that the sites are pinned; mutating EACH of the
+    #    seven in turn, line-count preserving, with `(lambda *a, **k: "ZZZ")(` left
+    #    FIVE of them green (417 passed): the `def` anchor, the `span` anchor, the
+    #    `span` end spec, the `method-span` def anchor and the `method-span` end spec.
+    #    Those are `_BUNDLE_RULES`' own live kinds (`the entry point` is `def`,
+    #    `the references writer` is `method-span` with `("exact", ")")`), so the
+    #    resolution this PR exists to deliver could be replaced by a constant on five
+    #    of seven paths with CI green. Each arm below DRIVES `_bundle_missing` through
+    #    one branch and requires the resolved number in ITS OWN fragment — so a
+    #    constant at that branch reds exactly one arm, not the whole test.
+    #    ⚠️ Mutate by SUBSTITUTING WITHIN the line, never by deleting it: deleting
+    #    shifts this file's own line numbers, and the self-cite pin further down reds
+    #    for a reason that has nothing to do with hint coverage (round 12 tripped on
+    #    this and mis-read site 6 as pinned).
+    moved = [
+        "# a comment",           # 1
+        "target = 1",            # 2  <- where `target = 1` really is
+        "def target_seam(",     # 3  <- where the def anchor really is
+        "    return target",     # 4
+        "}",                     # 5  <- where the `exact` end spec really is
+    ]
+    # 6a. the `def` anchor branch
+    def_miss = _bundle_missing("def", ("def target_seam(",), moved, 1, None)
+    assert def_miss and "is at line 3" in def_miss[0], (
+        f"the `def` anchor branch must name the line the def really lives on: {def_miss}")
+    # 6b. the `span` anchor branch (the anchor is in the file, but outside the span)
+    span_miss = _bundle_missing("span", ("target = 1",), moved, 3, 4)
+    assert span_miss and "is at line 2" in span_miss[0], (
+        f"the `span` anchor branch must name the line the anchor really lives on: {span_miss}")
+    # 6c. the `span` END-SPEC branch (the range closes one line early)
+    span_end = _bundle_missing("span", ("def target_seam",), moved, 3, 4, ("exact", "}"))
+    assert span_end and "is at line 5" in span_end[0], (
+        f"the `span` end-spec branch must name the line the end token really lives on: {span_end}")
+    # 6d. the `method-span` DEF-ANCHOR branch
+    method_def = _bundle_missing("method-span", ("def target_seam(",), moved, 1, None)
+    assert method_def and "is at line 3" in method_def[0], (
+        f"the `method-span` def branch must name the def's real line: {method_def}")
+    # 6e. the `method-span` END-SPEC branch
+    method_end = _bundle_missing("method-span", ("def target_seam",), moved, 3, 4,
+                                ("exact", "}"))
+    assert method_end and "is at line 5" in method_end[0], (
+        f"the `method-span` end-spec branch must name the end token's real line: {method_end}")
 
 
 def test_the_arm_table_is_not_satisfied_by_an_unrelated_red():
