@@ -344,8 +344,29 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     # stated as arithmetic is a claim with no machine behind it, and the earlier pin only read the
     # "… → …" form, so an error here stayed green. Every equation is evaluated against its own
     # stated result, and the two results that ARE claims about this head are bound to the manifest.
-    paren_start = canonical.index("(68 − 9 + 5")
-    arithmetic = canonical[paren_start : canonical.index("SERVED population", paren_start)]
+    # ⛔ BOTH SLICE BOUNDS ARE NAMED ASSERTIONS, NOT `str.index` (#13052 review at
+    # `71afedb`, P2). The start used to be a hard-coded `"(68 − 9 + 5"`, so a purely
+    # editorial `−`→`-` reformat — a spelling the evaluator below already tolerates
+    # (`lhs.replace("−", "-")`) — died as `ValueError: substring not found`, with no
+    # message and no pointer to the em-dash. Each bound now accepts the forms the rest of
+    # the block accepts and, when neither is present, fails with a sentence naming the
+    # clause that went missing rather than a traceback.
+    composed = re.search(r"\(\s*68\s*[−-]\s*9\s*\+\s*5", canonical)
+    assert composed, (
+        "canonical-mcp-tools.md no longer opens its composed-surface parenthetical with "
+        "`(68 − 9 + 5 …`. That parenthetical is the ONE place the advertised and retired "
+        "movements are recorded as arithmetic, and every binding below is written against "
+        "it — so a reworded sentence must update this pin in the same change"
+    )
+    paren_start = composed.start()
+    served_caption = re.search(r"SERVED population", canonical[paren_start:])
+    assert served_caption, (
+        "canonical-mcp-tools.md's composed-surface parenthetical is no longer followed by "
+        "the `SERVED population` clause that CLOSES it; without that bound the slice below "
+        "would read to the end of the document and its equations would no longer be this "
+        "parenthetical's"
+    )
+    arithmetic = canonical[paren_start : paren_start + served_caption.start()]
     equations = re.findall(r"(\d+(?:\s*[−+-]\s*\d+)+)\s*=\s*(\d+)", arithmetic)
     assert len(equations) >= 2, (
         f"canonical-mcp-tools.md's composed-surface parenthetical states {len(equations)} "

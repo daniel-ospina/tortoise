@@ -89,9 +89,54 @@ RETIRED_THIS_WAVE: dict[str, tuple[str, str]] = {
     "tortoise_create_document": ("create_entity", 'type="document"'),
 }
 
-#: The entity kinds `TortoiseSDK.create_entity` routes. Read from the module's own
-#: label map rather than restated, so a new arm cannot pass this file by hand.
-_CREATE_ENTITY_TYPES = ("subject", "object", "event", "document")
+def _require_non_empty(what: str, kinds: tuple[str, ...]) -> tuple[str, ...]:
+    """A derivation that produced NOTHING reds here rather than passing vacuously.
+
+    Every assertion in this file is parametrized over one of these tuples, and an empty
+    tuple makes a parametrization collect zero cases — a green file with nothing behind
+    it. So a restructured pointer table or a restructured `create_entity` dispatch is a
+    named failure at import, not a silent no-op.
+    """
+    if not kinds:
+        raise RuntimeError(
+            f"test_11609_door_retirement: {what} yielded no kinds, so every assertion "
+            "built on it would pass vacuously instead of reding — re-derive this pin "
+            "against whatever replaced the shape it reads")
+    return kinds
+
+
+#: The kinds the `create_*` doors this wave retires forward `type=` to, read out of the
+#: pointer table itself rather than restated, so a door added to `RETIRED_THIS_WAVE` is
+#: covered here without a second edit to a hand-kept list. Scoped by CONTAINER, not by the
+#: pointer's shape: `tortoise_get_session` also forwards a `type=` (`"session"`), and that
+#: one selects a READ arm rather than a write.
+RETIRED_CREATE_TYPES: tuple[str, ...] = _require_non_empty(
+    "the `create_*` doors' `type=` pointers",
+    tuple(match.group(1)
+          for container, pointer in RETIRED_THIS_WAVE.values()
+          if container == "create_entity"
+          and (match := re.fullmatch(r'type="([a-z_]+)"', pointer))),
+)
+
+
+def _create_entity_dispatch_arms() -> tuple[str, ...]:
+    """The kinds `TortoiseSDK.create_entity` DISPATCHES on, read from its own arms.
+
+    ⛔ READ FROM THE DISPATCH, NEVER FROM `_ENTITY_ITEM_LABELS` (#13052 review at
+    `2c3c9acc` — the second site of the class the round before it closed 100 lines above).
+    That map is interpolated into the `unknown type` message and decides NOTHING, which
+    was measured both ways: adding a real `elif t == "point":` arm to the dispatch leaves
+    it untouched (a false GREEN on exactly the drift these rows exist to catch), and
+    adding `"point"` to it alone changes no behaviour (a false RED). The arms are the
+    `if t == "<kind>":` / `elif t == "<kind>":` branches at the method's own body indent.
+    """
+    source = inspect.getsource(TortoiseSDK.create_entity)
+    return tuple(
+        re.findall(r'^        (?:el)?if t == "([a-z_]+)":$', source, re.MULTILINE))
+
+
+_CREATE_ENTITY_TYPES: tuple[str, ...] = _require_non_empty(
+    "`TortoiseSDK.create_entity`'s dispatch arms", _create_entity_dispatch_arms())
 
 #: Doors this wave deliberately does NOT retire, each with the artefact that says why.
 PROTECTED = {
@@ -402,23 +447,39 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
             "pointer's discriminator is dropped (subject/object fold it to 'other'; "
             "event/document refuse) and a migrating caller loses the kind silently")
 
-    @pytest.mark.parametrize("entity_type", _CREATE_ENTITY_TYPES)
+    def test_the_derived_kinds_are_the_ones_the_doors_forward(self):
+        """Both derivations agree, so neither is a hand-kept list that can rot alone.
+
+        `RETIRED_CREATE_TYPES` comes from the pointer table and `_CREATE_ENTITY_TYPES`
+        from `create_entity`'s dispatch arms; an arm added for a kind no door forwards,
+        or a door forwarding a kind the container no longer routes, is the difference.
+        """
+        assert set(_CREATE_ENTITY_TYPES) == set(RETIRED_CREATE_TYPES), (
+            f"`create_entity` dispatches {sorted(_CREATE_ENTITY_TYPES)} while the doors "
+            f"this wave retires forward {sorted(RETIRED_CREATE_TYPES)} — one of the two "
+            "moved, and the retirement is only safe while they are the same set")
+
+    @pytest.mark.parametrize("entity_type", RETIRED_CREATE_TYPES)
     def test_create_entity_routes_every_retired_create_type(self, entity_type):
         """The arm exists for every `create_*` door this wave retires.
 
-        Read from the module's own label map (`_ENTITY_ITEM_LABELS`, the constant
-        `create_entity` validates against) so a hand-copied tuple here cannot drift from
-        the dispatch. ⛔ `point` is asserted ABSENT on purpose: when an arm for it lands,
-        `tortoise_create_point` becomes retirable and this assertion is the tripwire
-        that says so.
-        """
-        from tortoise.sdk import _ENTITY_ITEM_LABELS
+        Both halves are read from `create_entity`'s OWN DISPATCH ARMS — the branch that
+        actually decides the write — so a hand-copied tuple here cannot drift from it and
+        a new arm cannot pass this file by hand. ⛔ `point` is asserted ABSENT on purpose:
+        when an arm for it lands, `tortoise_create_point` becomes retirable and this
+        assertion is the tripwire that says so.
 
-        assert entity_type in _ENTITY_ITEM_LABELS, (
-            f"create_entity no longer routes type={entity_type!r} "
-            f"(routes {sorted(_ENTITY_ITEM_LABELS)}), so the door it absorbs had no "
-            "container to answer through")
-        assert "point" not in _ENTITY_ITEM_LABELS, (
+        ⛔ `_ENTITY_ITEM_LABELS` is deliberately NOT read here (#13052 review at
+        `2c3c9acc`, corrected at `32c041df`): it decides nothing, so an assertion against
+        it is blind to a real dispatch arm AND reds on a map-only edit that changes no
+        behaviour. The door itself is driven for `point` by its sibling below.
+        """
+        arms = _create_entity_dispatch_arms()
+        assert entity_type in arms, (
+            f"create_entity no longer dispatches type={entity_type!r} "
+            f"(arms {sorted(arms)}), so the door it absorbs had no container to answer "
+            "through")
+        assert "point" not in arms, (
             "create_entity now has a `point` arm — `tortoise_create_point` can retire in "
             "that batch (see RETIRED_USE_INSTEAD's lane-E note)")
 
