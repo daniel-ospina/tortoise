@@ -95,9 +95,10 @@ EXIT CODES
 ----------
 0  the run completed and every question was JUDGED (whatever the verdicts were — this
    tool measures the product, it does not pass or fail on the product's behalf)
-1  the run completed but some question is `blocked` or `unjudged` — the scoreboard must
-   be read, not trusted
-2  usage / unreadable narrative
+1  the run did NOT produce a usable score: some question is `blocked` or `unjudged`, OR
+   the board scored NOTHING (no rows — an empty population is not a completed run). The
+   scoreboard must be read, not trusted
+2  usage / unreadable narrative / a document that is not a judge packet or a verdicts map
 3  the target refused (no credentials, no disposable graph, an unreachable or unreadable
    store) — always a refusal with the reason and NO score, never a traceback
 """
@@ -2084,6 +2085,24 @@ def cmd_judge(args: argparse.Namespace) -> int:
             print(f"capstone: cannot read verdicts: {exc}", file=sys.stderr)
             return 2
         judged.pop("_provenance", None)
+        # REFUSE a file that is not a verdicts MAP, for the same reason the packet is
+        # checked (#13303 review cycle 3, P3): this command writes into the packet's
+        # directory, and `verdicts-baseline.json` is documented as "copied from
+        # `run-local.json`'s rows", so pointing `--verdicts` at a RUN file is a
+        # plausible typo. Measured: it scored nothing, wrote an all-`unjudged` board
+        # over the committed run. A verdict map is `{QID: {"verdict": …}}`; a run file
+        # maps `schema`/`rows`/`tally` to non-maps. NOTE this is the DOCUMENT-shape
+        # gate only — a recognised map carrying a word outside the closed vocabulary is
+        # `build_scoreboard`'s job (recorded `unjudged`, never refused).
+        if not isinstance(judged, dict) or not all(
+            isinstance(v, dict) for v in judged.values()
+        ):
+            print(
+                f"capstone: refusing {args.verdicts} — not a verdicts map "
+                f"(expected {{question_id: {{'verdict': one of {', '.join(VERDICTS)}}}}})",
+                file=sys.stderr,
+            )
+            return 2
         judge_meta = {"mode": "file", "file": str(args.verdicts)}
     else:
         out = judge_fresh(packet, cmd=args.judge_cmd)

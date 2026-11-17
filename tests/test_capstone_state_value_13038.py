@@ -233,31 +233,89 @@ def test_judge_refuses_a_document_that_is_not_a_judge_packet(tmp_path):
     it, while `judge` writes `run-{target}.json` / `scoreboard-{target}.md` into the
     packet's OWN directory by default — so a mistyped `--packet` silently replaced the
     committed baseline with a 0-row board and exited 0.
+
+    The canary sits in the SAME directory as the packets and is named `run-local.json`,
+    because that is exactly what a write-through would clobber (`--out` omitted →
+    `packet_path.parent`); a canary anywhere else passes over a guard that writes first
+    and refuses after (#13303 review cycle 3, P1).
     """
-    out = tmp_path / "evidence"
-    out.mkdir()
-    baseline = out / "run-local.json"
+    d = tmp_path / "canary"
+    d.mkdir()
+    baseline = d / "run-local.json"
     baseline.write_text(json.dumps({"schema": "capstone-state-value-scoreboard/v1"}))
     before = baseline.read_bytes()
 
-    for name, payload in (
-        ("run-local.json", {"schema": "capstone-state-value-scoreboard/v1"}),
-        ("verdicts.json", {"Q1": {"verdict": "right"}}),
-        ("packet.json", {"schema": cap.PACKET_SCHEMA, "questions": []}),
+    for i, (name, payload) in enumerate(
+        (
+            # a RUN file: scoreboard schema, no questions
+            ("a-run.json", {"schema": "capstone-state-value-scoreboard/v1"}),
+            # a verdicts map that is not a packet
+            ("b-verdicts.json", {"Q1": {"verdict": "right"}}),
+            # right schema, NO questions — the second guard
+            ("c-noquestions.json", {"schema": cap.PACKET_SCHEMA, "questions": []}),
+            # WRONG schema WITH questions — only the schema guard can refuse this one,
+            # which is what keeps that guard from being dead code
+            (
+                "d-wrongschema.json",
+                {
+                    "schema": "capstone-state-value-scoreboard/v1",
+                    "questions": [
+                        {"id": "Q1", "question": "q", "key": "k",
+                         "what_a_wrong_answer_means": "m"}
+                    ],
+                },
+            ),
+        )
     ):
-        p = tmp_path / name
+        p = d / f"{i}-{name}"
         p.write_text(json.dumps(payload))
         args = type("A", (), {"packet": str(p), "verdicts": None, "judge_cmd": None, "out": None})()
         assert cap.cmd_judge(args) == 2, name
         # It refused BEFORE writing: the run beside it is untouched.
         assert baseline.read_bytes() == before, name
-        assert not (out / "scoreboard-local.md").exists(), name
+        assert not (d / "scoreboard-local.md").exists(), name
 
     # A real judge packet is still accepted (the guard must not block the real path).
     real = json.loads(
         (ROOT / "docs" / "evidence" / "13038-capstone" / "judge-packet.json").read_text()
     )
     assert real["schema"] == cap.PACKET_SCHEMA and real["questions"]
+
+
+def test_judge_refuses_a_verdicts_file_that_is_not_a_verdicts_map(tmp_path):
+    """The sibling input to the same destructive write (#13303 review cycle 3, P3).
+
+    `verdicts-baseline.json` is documented as "copied from `run-local.json`'s rows", so
+    `--verdicts run-local.json` is a plausible typo — and it used to score nothing and
+    write an all-`unjudged` board into the packet's directory.
+    """
+    d = tmp_path / "v"
+    d.mkdir()
+    packet = d / "packet.json"
+    packet.write_text(
+        (ROOT / "docs" / "evidence" / "13038-capstone" / "judge-packet.json").read_text()
+    )
+    baseline = d / "run-local.json"
+    baseline.write_text("{\"keep\": true}")
+    before = baseline.read_bytes()
+
+    bad = d / "run-as-verdicts.json"
+    bad.write_text(json.dumps({"schema": "capstone-state-value-scoreboard/v1"}))
+    args = type("A", (), {"packet": str(packet), "verdicts": str(bad), "judge_cmd": None,
+                          "out": None})()
+    assert cap.cmd_judge(args) == 2
+    assert baseline.read_bytes() == before
+    assert not (d / "scoreboard-local.md").exists()
+
+    # …and a REAL verdicts map is still accepted.
+    real = json.loads(
+        (ROOT / "docs" / "evidence" / "13038-capstone" / "verdicts-baseline.json").read_text()
+    )
+    assert isinstance(real, dict) and all(
+        isinstance(v, dict) and v.get("verdict") in cap.VERDICTS
+        for k, v in real.items()
+        if not k.startswith("_")
+    )
 
 
 # ── 3. the mechanical signals, and the fresh-reader parse ───────────────────────

@@ -122,7 +122,14 @@ included).
 re-score / re-render round-trip above is produced by the instrument rather than assembled by hand.
 The verdict vocabulary is closed: a verdict outside `right`/`wrong`/`blocked`/`unjudged` (a
 doctored `--verdicts` file, say) is recorded `unjudged` with the offending word named, never
-rendered as a verdict and never dropped from the tally.
+rendered as a verdict and never dropped from the tally — whereas a document that is not a verdicts
+map at all (a `run-local.json` passed as `--verdicts`) is REFUSED before anything is written.
+
+⚠️ **The committed baseline below predates the reader-sandbox hardening, and its own header says
+so.** `run-local.json` → `header.judge.judge_cmd` is `pi -p --no-session`: that run's reader had
+tools and sat in the repo root. The verdicts are NOT re-derived here — the change is to what a
+reader *can* do, not to what it concluded — and no number moved. A re-run now records
+`pi -p --no-session --no-tools` in that field and spawns the reader in a throwaway directory.
 
 **Cost:** one throwaway FalkorDB container (a fresh graph, `header.store`) and **17 ingestion ops**
 (`run-local.json` → `ingest`); **20 product calls** (11 `search`, 6 `read_entity`, 2 `read_events`,
@@ -140,7 +147,9 @@ produced is asserted beyond that:
 
 * `run-local.json` → `header` is the run this bundle records (graph
   `capstone13038_20261117t184234z`, `2026-11-17T18:42:34Z → 18:46:07Z`, 213.0 s) and
-  `judge` says how its verdicts were produced (`mode: fresh`, `elapsed_s: 150.2`);
+  `judge` says how its verdicts were produced (`mode: fresh`, `elapsed_s: 150.2`, and
+  `judge_cmd` — the invocation that produced them, `pi -p --no-session` for this baseline; a
+  committed run made after the sandbox change carries `--no-tools`);
   `scoreboard-local.md` renders that header and those rows; `judge-packet.json` carries the same
   identity fields (`started`, `graph`, `product`, `store`, `narrative`, `retrieval_posture`) and the
   verdict-free payloads — its own `finished`/`duration_s` are the **ingest + ask** portion (62.8 s,
