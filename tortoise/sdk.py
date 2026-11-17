@@ -10468,10 +10468,10 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     raise ValueError(
         f"{door} refused a non-string status for {_refusal_repr(target)}: "
         f"{_refusal_repr(word)} is {_refusal_type_name(word)}, not a `str`. ONTOLOGY §4.3 declares "
-        f"`status` as a STRING, and the Object family's word set is "
-        f"deliberately OPEN — a pack kind validates against its own declared "
-        f"words (#10371), so arbitrary STRINGS stay accepted and are not "
-        f"narrowed here. A non-string is not a declared word under ANY kind, "
+        f"`status` as a STRING, and `#11824` S0 CLOSED the word set — one "
+        f"four-word set for every knowledge kind, with a pack's own words on "
+        f"the STAGE axis — so an arbitrary STRING is refused by name, not "
+        f"accepted. A non-string is undeclared under ANY kind, "
         f"and it cannot be stored: `:Object.status` is what the lifecycle "
         f"guard hashes to decide whether a row is terminal, so a non-scalar "
         f"stored here makes every later lifecycle write on this row fail "
@@ -54850,7 +54850,7 @@ class TortoiseSDK:
             # the string; `_refusal_type_name(x)` is shadow-free AND hostile-safe.
             # ⚠️ AND THE HELPER'S OWN AMBIGUITY RAISE IS UNREACHABLE FROM ALL THREE
             # CALLERS — by three different arms, not one: `create_entity`'s own,
-            # `_refuse_non_str_keys` (add_object), `_sanitize_props` (update, `:6464`).
+            # `_refuse_non_str_keys` (add_object), `_sanitize_props` (update, `:6463`).
             # ⛔ WHERE THIS GUARD SITS, MEASURED — do not restate the ladder from
             # memory. `#11824` S0's TYPE check runs INLINE in `create_entity` (its
             # `_read_caller_status` call), NOT in `_validate_bundle` (which returns
@@ -54866,12 +54866,12 @@ class TortoiseSDK:
             # door: it is LIVE for the one shape S0 does not answer first, a plain
             # `str` word, pinned at `tests/test_status_projection.py:2262`
             # (`test_the_CREATE_guard_is_a_LANDING_test_not_a_presence_test`: the MERGE
-            # arm leaves the row byte-identical, and the id-less ADOPT arm leaves it
-            # unchanged EXCEPT the id stamp the adopt itself writes). The helper's
+            # arm leaves the row byte-identical; the id-less ADOPT arm gains the id
+            # stamp AND the `canonical_name` the create's own props set. The helper's
             # `lands` scoping still governs `EventAPI.add_object` (`api.py:2927`).
-            # Its two-key AMBIGUITY raise is answered first too, by a DIFFERENT arm:
-            # `create_entity`'s own `_status_write_is_ambiguous` (`sdk.py:54695`)
-            # raises `refused a CONFLICTING status write` (measured), not this helper.
+            # Its two-key AMBIGUITY raise never fires either: at `add_object` that
+            # answer comes from `_refuse_non_str_keys` (`api.py:381`), and the
+            # helper's own raise is unreachable from all three callers (above).
             #
             # ⛔ ONLY THE NON-PERSISTABLE ARM WAS INVERTED — not the landing one.
             # `…_NON_PERSISTABLE_status_is_still_DROPPED_not_refused` is now
