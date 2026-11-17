@@ -6112,9 +6112,39 @@ class _EntityHandlers:
                 self.g, "Object", name, any_status=True)
             _live_holders = _live_holders_same_entity(
                 self.g, "Object", name)[0]
-            object_id = resolve_fold_name(
-                self.g, "Object", name, context="status fold object",
-                mention=bool(_held) and not _live_holders)
+            # ⛔ #11824 S0: A **REOPENING** FOLD MUST BE REACHABLE BY NAME.
+            # S0 moved the closing connector fold onto a TERMINAL STAGE, so a
+            # closed work item now has `isClosed=True` and a terminal current
+            # slot — and the currency read below correctly says it has no LIVE
+            # holder. That made `github.issue.reopened` INERT: the name resolved
+            # to nothing, the fold never ran, and the durable close was never
+            # cleared (measured: after open/close/reopened the row stays
+            # `done`, `isClosed=True`; the rebuilt path DOES reopen, because the
+            # replay arm folds by `object_name` — so live and rebuild
+            # disagreed).
+            #
+            # The narrow exception is the position axis's own by-name arm
+            # (`live_name_holder_ids(..., live_only=False)`): *"the position
+            # axis's own read/write must be able to name a CLOSED object, or the
+            # terminal guard and the explicit reopen become unreachable by
+            # name"* (entity_identity, design §6). It is taken ONLY for the
+            # declared reopening fold, and ONLY for a single registered
+            # incarnation — the decision to move is still `apply_stage_fold`'s,
+            # which refuses unless `reopen` is requested AND the target is
+            # non-terminal, and `_fold_object_stage` still refuses a row whose
+            # `status` is terminal (a superseded/deprecated Object is not
+            # resurrected by a passing mention).
+            _reopen_targets_closed = (
+                bool(builtin_fold_reopens(event_kind))
+                and not _live_holders
+                and len(_held) == 1
+                and isinstance(_held[0], str))
+            if _reopen_targets_closed:
+                object_id = _held[0]
+            else:
+                object_id = resolve_fold_name(
+                    self.g, "Object", name, context="status fold object",
+                    mention=bool(_held) and not _live_holders)
         if builtin_stage is not None and object_id:
             # ── #11824 S0: the compatibility fold is a STAGE move now ──
             # It used to write `in_progress` / `completed` as `Object.status`,
