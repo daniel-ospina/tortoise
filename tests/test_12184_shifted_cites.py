@@ -64,6 +64,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "search_engine.py:6300", _SE, 6300, "(op)-[r2:IMPL|hasPart]-(other:Point)"),
     (_AUDIT, "search_engine.py:6659", _SE, 6659, "(n:Point)-[r:aboutSubject]->(:Subject)"),
     (_AUDIT, "search_engine.py:6661", _SE, 6661, "(m:Event)-[r2:aboutSubject]->(:Subject)"),
+    # Row 149's TWO BARE range cites carry no `search_engine.py` prefix, so the token-level pins for
+    # `6659`/`6661` above do not reach them — they are the only shifted mentions in this document the
+    # first pin set missed. Both were already correct at the pre-fix head, so these two are
+    # COMPLETENESS pins: they catch the re-point/double-shift that DID happen in this class (`:4549`
+    # re-pointed to `:4552`), which is the failure the whole file exists for.
+    (_AUDIT, "`:6658-6661`", _SE, 6658, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
+    (_AUDIT, "`:6664-6677`", _SE, 6664, "def subject_binding_available"),
     (_AUDIT, "search_engine.py:3042", _SE, 3042, "CALL db.idx.fulltext.queryNodes"),
     (_AUDIT, "search_engine.py:4353-4355", _SE, 4353, "MATCH (n:{label_str})"),
     (_AUDIT, "search_engine.py:3941", _SE, 3941, "CALL db.idx.vector.queryNodes"),
@@ -71,6 +78,10 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:3014`", _SE, 3014, "the fulltext index is on Source._searchText"),
     (_AUDIT, "cache_projection.py:2650-2657", _CP, 2650, "it is the ONLY field the Source FTS index"),
     (_AUDIT, "cache_projection.py:2660-2662", _CP, 2660, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
+    # Row 387's bare range, quoting "un-indexes a restored session". Its sibling pins (`2660-2662`,
+    # `2650-2657`) are different ranges and do not reach this one. NON-VACUOUS: the pre-fix document
+    # carried `:2648-2649` here, so the cite-token arm fires on that tree (measured).
+    (_AUDIT, "`:2650-2651`", _CP, 2651, "un-indexes a restored session"),
     (_AUDIT, "cache_projection.py:2712", _CP, 2712, "tail_denied = forbidden | {"),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3393", _SE, 3393, "``:Source``/``:Document`` row must not contribute"),
@@ -150,4 +161,4 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS}
-    assert len(_PINS) == 20
+    assert len(_PINS) == 23
