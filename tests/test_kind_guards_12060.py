@@ -1131,6 +1131,14 @@ class TestReviewFindingsClosed:
         write, and the caller gets ONE refusal naming a performable repair rather
         than a guard-invented status error. The `roleHolder` half of the same arm
         is unaffected and still load-bearing — it is pinned separately.
+
+        ⚠️ NON-VACUITY ATTRIBUTION (review rule 3). The TALLY assertion at the end
+        is what reddens when the abstention arm is deleted — with the arm gone the
+        redirect fires and the DOOR produces the identical `status 'active' was
+        refused` message, so the two message assertions above hold either way and
+        carry no discriminating power of their own. They are here as the CALLER's
+        contract (one refusal, performable repair), not as proof the arm fired;
+        do not read them as that proof, and do not delete the tally line.
         """
         guard = Confusion(
             rule="acme:org", when="nameMatches", pattern=r"^acme-org-[0-9]+$",

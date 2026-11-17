@@ -464,13 +464,14 @@ def _admitted_kind_forms(namespaced_kind: str) -> list[str]:
     return forms
 
 
-def _portfolio_declared_statuses() -> dict[str, frozenset[str]]:
-    """``{case-folded kind spelling: declared statuses}`` for the pack.
+def _portfolio_declared_states() -> "tuple[dict[str, frozenset[str]], frozenset[str]]":
+    """``({case-folded kind spelling: declared states}, migrated spellings)``.
 
     Read from the registry at call time (never a hardcoded copy — that is the
-    map `#2729` exists to remove). ``{}`` when the pack machinery is unavailable:
-    the same degradation ``_expand`` accepts, since a validator that raised here
-    would be swallowed by ``run_domain_graph_validators`` and read as CLEAN.
+    map `#2729` exists to remove). ``({}, frozenset())`` when the pack machinery
+    is unavailable: the same degradation ``_expand`` accepts, since a validator
+    that raised here would be swallowed by ``run_domain_graph_validators`` and
+    read as CLEAN.
 
     Keyed on EVERY spelling the write gate admits for the kind — the namespaced
     ``portfolio:mandate`` AND the bare ``mandate`` — because the gate admits both
@@ -481,36 +482,58 @@ def _portfolio_declared_statuses() -> dict[str, frozenset[str]]:
     spellings come from the canonical seam
     (``StatusFoldIndex.kind_forms_for`` — the same map the declared fold uses,
     #2729) instead of being re-derived here.
+
+    ⛔ ``#11824 S0`` — THE SECOND RETURN VALUE IS THE POINT OF THE REPAIR.
+    The migrated kinds' own words (``adopted``/``proposed``/``breached``/
+    ``retired`` …) moved from ``statuses`` to ``pipeline`` STAGES. The first
+    version of this function replaced them with the four-word lifecycle set,
+    which NARROWED a validator's accepted set in the same slice whose acceptance
+    says *"nothing is dropped from any filter"*: with no backfill (#11824 §1)
+    every pre-S0 row still holding a stage word was reported as a violation, and
+    the refusal's ``fix`` pointed at a ``statuses`` key the migration deleted.
+    The accepted set is now the union — the lifecycle vocabulary the write door
+    accepts for the kind **OR** the stages it declares — so a legacy row is
+    legal and a genuinely undeclared word is still reported.
     """
     try:
         from .domain_loader import _get_registry
         reg = _get_registry()
         pack = reg.get_pack(_PORTFOLIO_DOMAIN) if reg is not None else None
     except Exception:  # noqa: BLE001, RUF100 — advisory surface, see docstring
-        return {}
+        return {}, frozenset()
     if pack is None:
-        return {}
+        return {}, frozenset()
     try:
         fold_index = reg.status_fold_index
     except Exception:  # advisory surface, see docstring — never raise into the swallow
         fold_index = None
     out: dict[str, frozenset[str]] = {}
+    migrated: set[str] = set()
     for kind, spec in (pack.kind_defs or {}).items():
         if not isinstance(spec, dict):
             continue
         statuses = spec.get("statuses")
+        pipeline = spec.get("pipeline")
         if isinstance(statuses, list) and statuses:
             allowed = frozenset(s for s in statuses if isinstance(s, str))
-        elif isinstance(spec.get("pipeline"), dict):
-            # ── #11824 S0: a MIGRATED kind's status vocabulary ──
-            # The kind's own words moved to the pipeline STAGE axis, so its
-            # `status` vocabulary is the four-word lifecycle base — exactly what
-            # the write door accepts for it (`lifecycle_vocabulary`). Returning
-            # nothing here would make this rule grade ZERO rules and report
-            # `portfolio_rules_unavailable`, i.e. turn a real clean verdict into
-            # "not evidence" for the pack's own acceptance.
+            on_stage_axis = False
+        elif isinstance(pipeline, dict):
+            # ── #11824 S0: a MIGRATED kind's accepted states ──
+            # The kind's own words are pipeline STAGES, and the two axes are
+            # both READABLE state: `status` carries the four lifecycle words
+            # the write door accepts (`lifecycle_vocabulary`), `pipelineStageId`
+            # carries the kind's position. A row may hold EITHER, because S0
+            # does not backfill: dropping the stage words from this set would
+            # report every pre-S0 row as undeclared on its own pack. Returning
+            # nothing here instead would make this rule grade ZERO rules and
+            # report `portfolio_rules_unavailable`, i.e. turn a real clean
+            # verdict into "not evidence" for the pack's own acceptance.
             from .lifecycle_vocabulary import LIFECYCLE_STATUS_SET
-            allowed = LIFECYCLE_STATUS_SET
+            stages = frozenset(
+                s["id"] for s in (pipeline.get("stages") or ())
+                if isinstance(s, dict) and isinstance(s.get("id"), str))
+            allowed = LIFECYCLE_STATUS_SET | stages
+            on_stage_axis = True
         else:
             continue
         namespaced = f"{_PORTFOLIO_DOMAIN}:{kind}"
@@ -520,7 +543,14 @@ def _portfolio_declared_statuses() -> dict[str, frozenset[str]]:
             forms = [namespaced.lower(), str(kind).lower()]
         for form in forms:
             out[str(form).lower()] = allowed
-    return out
+            if on_stage_axis:
+                migrated.add(str(form).lower())
+    return out, frozenset(migrated)
+
+
+def _portfolio_declared_statuses() -> dict[str, frozenset[str]]:
+    """The first half of :func:`_portfolio_declared_states` (see it for why)."""
+    return _portfolio_declared_states()[0]
 
 
 @domain_validator(_PORTFOLIO_DOMAIN, surface=SURFACE_GRAPH)
@@ -569,7 +599,7 @@ def validate_portfolio_shape(graph) -> list[dict]:
     # one definition (never a second literal).
     from .commit_ops import OBJECT_TERMINAL_STATUSES
 
-    declared = _portfolio_declared_statuses()
+    declared, migrated_forms = _portfolio_declared_states()
     if not declared:
         # Fail-open but NAMED — on the channel the CALLER reads, not only here.
         # With no readable `portfolio` pack there is nothing for the
@@ -611,9 +641,17 @@ def validate_portfolio_shape(graph) -> list[dict]:
                     f"{', '.join(sorted(valid))})"
                 ),
                 "fix": (
-                    "write the state the kind declares, or amend the kind's "
-                    "`statuses` in packs/investment-portfolio-manager/"
-                    "manifest.yaml — a declared-statuses kind OWNS its state"
+                    "write the state the kind declares, or amend its "
+                    "declaration in packs/investment-portfolio-manager/"
+                    "manifest.yaml — "
+                    + (
+                        "this kind's own states are `pipeline:` STAGES, so "
+                        "either advance the stage (`advance_stage`) or write "
+                        "one of the four lifecycle words as its `status`"
+                        if (object_kind or "").lower() in migrated_forms else
+                        "a declared-statuses kind OWNS its state, so add the "
+                        "word to the kind's `statuses`"
+                    )
                 ),
             })
 
