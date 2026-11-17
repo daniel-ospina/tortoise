@@ -373,6 +373,7 @@ DenseSearcher = Callable[
 def searcher(
     record_dsn: str | None = None,
     carried: tuple[str, str] | None = None,
+    timeout_ms: int | None = None,
 ) -> DenseSearcher | None:
     """A dense searcher bound to this request's tenant, or ``None`` when unarmed.
 
@@ -402,6 +403,41 @@ def searcher(
     either door, no driver. The caller takes the graph branch in all of them — it
     is the branch that has always answered, and the payload has not moved out of
     the graph.
+
+    ⛔ ``timeout_ms`` IS THE READ'S OWN BUDGET, BOUND HERE AT CONSTRUCTION (#11691)
+    — deliberately NOT a fifth argument on the returned callable. The four-argument
+    shape above is load-bearing (one ordering pass consumes both legs, so the
+    ranking cannot drift by construction), and a per-call budget argument would be
+    the same drift re-opened in a new position: a caller that omitted it would
+    silently get the door's 15 s bound again.
+
+    Why it has to be bound at all: ``run_vector_query`` gives the GRAPH branches
+    500 ms (``graph.query(..., timeout=timeout_ms)``) while this leg inherited
+    ``record_serve.RECORD_STATEMENT_TIMEOUT_MS`` = **15 s** plus a 10 s connect
+    bound — a 30x mismatch. The fused read then JOINS its workers
+    (``ThreadPoolExecutor.__exit__``, ``search_engine.degradation_chain``), so the
+    cap does not save the caller: one slow record query turned a 500 ms search
+    into a multi-second one and the leg was recorded as ``timeout``, discarding a
+    result it may have had. With the budget bound here the statement timeout is
+    ``min(RECORD_STATEMENT_TIMEOUT_MS, timeout_ms)``, so the query is cancelled
+    inside the read's budget, the graph branch answers, and the trace records the
+    NAMED fallback (``scan_fallback``) instead.
+
+    ``None`` (the default) leaves the door's own bound in place, unchanged — the
+    reconstruction reads (health, replay, backup, restore) legitimately need
+    seconds, which is why the ceiling is a per-door constant and this is a
+    tightening only. Pinned by
+    ``tests/test_11691_vector_leg_budget.py::test_the_record_leg_is_bound_by_the_reads_own_budget``.
+
+    ⚠️ THE ONE WINDOW THIS DOES NOT BOUND, stated rather than implied: the
+    CONNECT. ``record_writer._default_connect`` applies
+    ``CONNECT_TIMEOUT_SECONDS`` (10 s) — or a ``connect_timeout`` the operator put
+    in the DSN — and neither is reachable from here, because the handle is pooled
+    (#9558) and its connect parameters are the pool's, not this read's. So the
+    statement is bounded by the read's budget and the connect is not. It is named
+    rather than fixed because bounding it means changing what the POOL hands
+    every other borrower; the measured failure this issue prices (a 15 s
+    STATEMENT on a 500 ms read) is the one that was observed.
     """
     try:
         from .record_writer import record_dsn as _resolve_record_dsn
@@ -435,7 +471,11 @@ def searcher(
     ) -> list[tuple[str, float, Any]] | None:
         return vector_search(scope, entity_type, query_vec, limit,
                              record_dsn=record_dsn,
-                             excluded_statuses=excluded_statuses)
+                             excluded_statuses=excluded_statuses,
+                             # The read's budget, captured HERE (on the request's
+                             # thread, at construction) rather than passed per
+                             # call — see this function's docstring (#11691).
+                             timeout_ms=timeout_ms)
 
     return _search
 
@@ -448,6 +488,7 @@ def vector_search(
     *,
     record_dsn: str | None = None,
     excluded_statuses: tuple | None = None,
+    timeout_ms: int | None = None,
 ) -> list[tuple[str, float, Any]] | None:
     """The kNN read — ONE statement, tenant-scoped, shortfall asserted.
 
@@ -464,6 +505,15 @@ def vector_search(
     caller can take the graph branch and NAME the fallback), and
     :class:`VectorShortfall` when it answered with fewer rows than the filter
     selects (so the caller reports an incomplete answer rather than a small one).
+
+    ``timeout_ms`` is the READ's budget (#11691). It is forwarded to
+    :func:`tortoise.record_serve.open_record`, which applies
+    ``min(RECORD_STATEMENT_TIMEOUT_MS, timeout_ms)`` — the door's ceiling
+    tightened, never widened. ``None`` keeps the door bound. A query cancelled by
+    it raises (``QueryCanceled``) and surfaces as :class:`RecordVectorError`, i.e.
+    the caller's NAMED graph fallback rather than a silent multi-second stall:
+    without the bound a slow record read ran to 15 s while the read's own cap was
+    500 ms, and the leg was then recorded as ``timeout`` with its rows discarded.
     """
     mapping = LABEL_SERVED.get(entity_type)
     if mapping is None:
@@ -498,7 +548,12 @@ def vector_search(
     params = (literal, scope.org_id, scope.graph_id, literal, int(limit))
 
     try:
-        conn = open_record(record_dsn)
+        # ⚠️ TWO CALL SHAPES ON PURPOSE: with no budget the door is asked exactly
+        # as it was before #11691 — no kwarg, the door's own bound — so the
+        # unbudgeted path is byte-identical (and the pins that stub `open_record`
+        # with a one-argument double stay honest about what the leg asks for).
+        conn = (open_record(record_dsn) if timeout_ms is None
+                else open_record(record_dsn, statement_timeout_ms=timeout_ms))
     except Exception as e:  # noqa: BLE001, RUF100 — every failure is "the record did not answer"
         raise RecordVectorError(
             f"the record could not be opened ({type(e).__name__}) — the dense "

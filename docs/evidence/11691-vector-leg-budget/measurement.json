@@ -1,0 +1,228 @@
+{
+ "shapes": [
+  {
+   "table": "point_plain",
+   "timed_writes": 1000,
+   "rows_after": 1200,
+   "population": 1200,
+   "p50_ms": 0.293,
+   "p95_ms": 3.226,
+   "mean_ms": 1.9607,
+   "min_ms": 0.167,
+   "max_ms": 202.919,
+   "bytes_per_1000_writes": 2942293.3,
+   "index_bytes": 0,
+   "index_bytes_growth": 0,
+   "total_bytes": 3538944,
+   "indexes": {}
+  },
+  {
+   "table": "point_gen_only",
+   "timed_writes": 1000,
+   "rows_after": 1200,
+   "population": 1200,
+   "p50_ms": 0.667,
+   "p95_ms": 15.05,
+   "mean_ms": 4.1219,
+   "min_ms": 0.352,
+   "max_ms": 219.86,
+   "bytes_per_1000_writes": 4887893.3,
+   "index_bytes": 0,
+   "index_bytes_growth": 0,
+   "total_bytes": 5873664,
+   "indexes": {}
+  },
+  {
+   "table": "point",
+   "timed_writes": 1000,
+   "rows_after": 1200,
+   "population": 1200,
+   "p50_ms": 3.006,
+   "p95_ms": 83.017,
+   "mean_ms": 14.4669,
+   "min_ms": 1.394,
+   "max_ms": 441.61,
+   "bytes_per_1000_writes": 6990506.7,
+   "index_bytes": 2555904,
+   "index_bytes_growth": 2531328,
+   "total_bytes": 8421376,
+   "indexes": {
+    "point_pkey": 90112,
+    "idx_point_embedding_vec_hnsw": 2465792
+   }
+  }
+ ],
+ "shapes_at_scale": [
+  {
+   "table": "point_plain",
+   "timed_writes": 200,
+   "rows_after": 20220,
+   "population": 20220,
+   "p50_ms": 0.272,
+   "p95_ms": 3.069,
+   "mean_ms": 1.4685,
+   "min_ms": 0.183,
+   "max_ms": 73.332,
+   "bytes_per_1000_writes": 3112960.0,
+   "index_bytes": 0,
+   "index_bytes_growth": 0,
+   "total_bytes": 58105856,
+   "indexes": {}
+  },
+  {
+   "table": "point_gen_only",
+   "timed_writes": 200,
+   "rows_after": 20220,
+   "population": 20220,
+   "p50_ms": 0.611,
+   "p95_ms": 2.592,
+   "mean_ms": 2.9156,
+   "min_ms": 0.379,
+   "max_ms": 118.145,
+   "bytes_per_1000_writes": 5283840.0,
+   "index_bytes": 0,
+   "index_bytes_growth": 0,
+   "total_bytes": 97632256,
+   "indexes": {}
+  },
+  {
+   "table": "point",
+   "timed_writes": 200,
+   "rows_after": 20220,
+   "population": 20220,
+   "p50_ms": 6.09,
+   "p95_ms": 128.502,
+   "mean_ms": 27.2193,
+   "min_ms": 2.081,
+   "max_ms": 392.667,
+   "bytes_per_1000_writes": 7577600.0,
+   "index_bytes": 42532864,
+   "index_bytes_growth": 458752,
+   "total_bytes": 140165120,
+   "indexes": {
+    "point_pkey": 1114112,
+    "idx_point_embedding_vec_hnsw": 41418752
+   }
+  }
+ ],
+ "scale": {
+  "total": 138649600,
+  "indexes": {
+   "point_pkey": 1105920,
+   "idx_point_embedding_vec_hnsw": 40968192
+  },
+  "toast": 54616064,
+  "index_bytes": 42074112,
+  "rows_with_vector": 20000,
+  "rows": 20000
+ },
+ "server": {
+  "postgres": "16.16 (Debian 16.16-1.pgdg12+1)",
+  "pgvector": "0.8.7"
+ },
+ "issue": 11691,
+ "measured": "2026-11-17T03:19:15Z",
+ "host": {
+  "platform": "macOS-27.0-arm64-arm-64bit",
+  "loadavg_before": [
+   45.70263671875,
+   45.30615234375,
+   50.35986328125
+  ],
+  "loadavg_after": [
+   48.11962890625,
+   46.3203125,
+   49.91796875
+  ],
+  "timed_phase_seconds": 157.7
+ },
+ "pricing": {
+  "cost_basis_usd_per_gb_month": 0.125,
+  "overage_usd_per_gb_month": 0.3,
+  "write_ops_usd_per_10k": 5.0,
+  "included_write_ops_per_month": {
+   "free": 10000,
+   "solo": 10000,
+   "pro": 50000,
+   "team": 200000,
+   "anon": 1000
+  },
+  "bytes_per_gb": 1000000000
+ },
+ "deltas": {
+  "small_population": {
+   "rows": 1200,
+   "paired_generated_column_ms_p50": 0.375,
+   "paired_hnsw_ms_p50": 2.367,
+   "paired_total_ms_p50": 2.758,
+   "paired_total_ms_p95": 6.168
+  },
+  "scale_population": {
+   "rows": 20220,
+   "paired_generated_column_ms_p50": 0.303,
+   "paired_hnsw_ms_p50": 3.721,
+   "paired_hnsw_ms_p95": 23.052,
+   "paired_total_ms_p50": 3.987,
+   "paired_total_ms_p95": 23.483
+  },
+  "unpaired_p50_delta_ms": {
+   "generated_column": 0.374,
+   "hnsw": 2.339,
+   "total": 2.713
+  },
+  "unpaired_p95_delta_ms": {
+   "generated_column": 11.824,
+   "hnsw": 67.967,
+   "total": 79.791,
+   "host_noise_floor": 2.933
+  },
+  "hnsw_bytes_per_1000_writes": 2129920.0,
+  "payload_bytes_per_1000_writes": 1945600.0
+ },
+ "production_volume": {
+  "measured_at_rows": 20000,
+  "measured_at_rows_with_vector": 20000,
+  "measured_total_bytes": 138649600,
+  "measured_toast_bytes": 54616064,
+  "measured_index_bytes": 42074112,
+  "measured_indexes": {
+   "point_pkey": 1105920,
+   "idx_point_embedding_vec_hnsw": 40968192
+  },
+  "bytes_per_row": 6932.5,
+  "index_bytes_per_row": 2103.7,
+  "derivation": "linear in rows at fixed M; the measured bytes/row above times the production row count",
+  "production_rows": 33671,
+  "production_total_bytes": 233424208,
+  "production_index_bytes": 70833683,
+  "usd_per_month": {
+   "principal_cost_basis": 0.0292,
+   "principal_overage": 0.07,
+   "principal_index_only_cost_basis": 0.0089
+  },
+  "flow_usd_per_month": {
+   "anon_cost_basis": 0.0005,
+   "anon_overage": 0.0012,
+   "free_cost_basis": 0.0051,
+   "free_overage": 0.0122,
+   "pro_cost_basis": 0.0255,
+   "pro_overage": 0.0611,
+   "solo_cost_basis": 0.0051,
+   "solo_overage": 0.0122,
+   "team_cost_basis": 0.1019,
+   "team_overage": 0.2445
+  },
+  "added_write_time": {
+   "rows": 20220,
+   "ms_per_write_p50": 3.987,
+   "ms_per_write_p95": 23.483,
+   "seconds_per_month_at_tier_volume": {
+    "anon": 4.0,
+    "free": 39.9,
+    "pro": 199.3,
+    "solo": 39.9,
+    "team": 797.4
+   }
+  }
+ }
+}

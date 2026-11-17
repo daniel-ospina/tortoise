@@ -2366,6 +2366,17 @@ MECHANISM_SCAN_FALLBACK = "scan_fallback"
 #: in-graph index is dropped, is a store that has not been migrated.
 MECHANISM_PGVECTOR = "pgvector"
 
+#: The dense leg's DEFAULT budget, in ms — ONE home for the number, because two
+#: callers now have to agree on it (#11691). :func:`run_vector_query`'s
+#: ``timeout_ms`` is this by default, :func:`degradation_chain` falls back to it,
+#: and the RECORD leg's statement timeout is bound by it at construction
+#: (``sdk._record_vector_searcher(timeout_ms=…)`` → ``record_vector.searcher``).
+#: They are not independent: the record leg used to inherit
+#: ``record_serve.RECORD_STATEMENT_TIMEOUT_MS`` (15 s) while the graph branches
+#: got this, and the fused read JOINS its workers, so a leg on a different budget
+#: is a leg the cap cannot bound.
+VECTOR_LEG_BUDGET_MS = 500
+
 # ── #2518: which PASS produced a leg entry ─────────────────────────────────
 # A leg can now be asked MORE THAN ONCE in one read: the entity/fact-augmented
 # key expansion's dense half runs the vector leg a second time with a composed
@@ -3523,7 +3534,8 @@ def run_bm25_query(
 
 
 def run_vector_query(
-    graph, query_vec: list[float], limit: int = 20, timeout_ms: int = 500,
+    graph, query_vec: list[float], limit: int = 20,
+    timeout_ms: int = VECTOR_LEG_BUDGET_MS,
     is_embedded: bool = True, entity_type: str = "point",
     vector_index_api: str | None = None, excluded_statuses: tuple | None = None,
     leg_trace: list[dict] | None = None,
@@ -3642,6 +3654,17 @@ def run_vector_query(
     took the INDEX, not the property. Default ``None`` = the graph branches
     only, byte-identical to the pre-#11642 behaviour, so a box with no record
     armed is unchanged and every existing caller is unchanged.
+
+    ⛔ THE RECORD LEG'S DEADLINE IS BOUND WHEN IT IS CONSTRUCTED, NOT HERE
+    (#11691) — ``searcher(..., timeout_ms=…)`` captures ``timeout_ms`` at
+    construction and the returned callable stays FOUR-argument, deliberately:
+    one shape for both legs is what makes the single ordering pass
+    ranking-identical between them. So the budget reaches the record's
+    ``statement_timeout`` as ``min(RECORD_STATEMENT_TIMEOUT_MS, timeout_ms)``,
+    and a record query slower than the read is cancelled INSIDE the read rather
+    than running to the door's 15 s and turning a 500 ms search into a
+    multi-second one. Callers that construct the searcher must therefore pass the
+    SAME budget they pass here (``sdk._record_vector_searcher`` does).
 
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side.
@@ -4768,7 +4791,7 @@ def degradation_chain(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         # Submit all enabled strategies in parallel
-        runner_timeout = int(elevated_timeout_ms or 500)
+        runner_timeout = int(elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
         # R3 (#1542) D4: the per-strategy private list is passed ONLY when
         # tracing is active — a default (leg_trace=None) caller sees
         # byte-identical submit kwargs (the bench fakes in
@@ -4836,7 +4859,7 @@ def degradation_chain(
         # hasn't completed within 500ms from the start of iteration.
         # #316: elevated_timeout_ms threads the benchmark cap into the
         # deadline too (default-off — production callers keep 0.5s).
-        deadline = (elevated_timeout_ms or 500) / 1000.0
+        deadline = (elevated_timeout_ms or VECTOR_LEG_BUDGET_MS) / 1000.0
         timed_out: set[str] = set()
         try:
             for future in concurrent.futures.as_completed(futures, timeout=deadline):

@@ -690,7 +690,8 @@ def reset_fallback_counts() -> None:
 # ── the record door ─────────────────────────────────────────────────────────
 
 
-def open_record(record_dsn: str | None = None) -> Any:
+def open_record(record_dsn: str | None = None,
+                statement_timeout_ms: int | None = None) -> Any:
     """Open a BOUNDED record connection on the ONE declared arming surface.
 
     The DSN is resolved by :func:`tortoise.record_writer.record_dsn` — the module
@@ -713,6 +714,22 @@ def open_record(record_dsn: str | None = None) -> Any:
     the bound dies with the transaction even though the handle outlives it. Pinned by
     ``tests/test_9558_record_write_cost.py::test_the_read_door_bounds_its_read_transaction_locally``:
     reverting this line reds it.
+
+    ⛔ ``statement_timeout_ms`` LETS A CALLER **TIGHTEN** THE BOUND AND NEVER LOOSEN
+    IT (#11691). :data:`RECORD_STATEMENT_TIMEOUT_MS` is the DOOR'S ceiling — what a
+    read that legitimately takes seconds (health, replay, backup, restore, a
+    reconstruction) is allowed to spend — and the applied value is
+    ``min(ceiling, statement_timeout_ms)``. A caller that passed a LARGER number
+    still gets the ceiling, so this parameter cannot become a second, silently
+    wider door. It exists for exactly one caller: the SEARCH dense leg
+    (:func:`tortoise.record_vector.searcher`), whose read's own budget is 500 ms
+    and which therefore cannot afford — but used to pay, up to 15 s — a bound
+    chosen for the reconstruction reads.
+
+    ⚠️ A NON-POSITIVE BOUND IS CLAMPED TO 1 ms RATHER THAN PASSED THROUGH, and that
+    is a trap rather than tidiness: Postgres reads ``statement_timeout = 0`` as
+    **NO TIMEOUT AT ALL**, so a caller whose budget rounded or defaulted to 0
+    would silently acquire the UNBOUNDED read the constant exists to prevent.
     """
     # ⚠️ The resolver is imported under a DISTINCT name: the parameter above is
     # also called `record_dsn`, and a same-named import rebinds the name so the
@@ -761,6 +778,11 @@ def open_record(record_dsn: str | None = None) -> Any:
         raise RecordUnavailable(
             f"the record could not be opened ({type(e).__name__}) — an absence "
             f"is NOT established") from e
+    # The applied bound: the door's ceiling, tightened by the caller and never
+    # widened by it — see the docstring (#11691).
+    bound_ms = int(RECORD_STATEMENT_TIMEOUT_MS)
+    if statement_timeout_ms is not None:
+        bound_ms = max(1, min(bound_ms, int(statement_timeout_ms)))
     try:
         cur = conn.cursor()
         # ⛔ TRANSACTION-LOCAL, because the handle is now POOLED (#9558).
@@ -776,7 +798,7 @@ def open_record(record_dsn: str | None = None) -> Any:
         # the same; `set_config` is used because it takes a bind parameter, which
         # `SET` does not.
         cur.execute("SELECT set_config('statement_timeout', %s, true)",
-                    (str(int(RECORD_STATEMENT_TIMEOUT_MS)),))
+                    (str(bound_ms),))
         cur.close()
         return conn
     except Exception as e:

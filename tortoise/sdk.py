@@ -959,7 +959,7 @@ def _capture_redaction_warning(count: int) -> str:
     )
 
 
-def _record_vector_searcher(sdk=None):
+def _record_vector_searcher(sdk=None, timeout_ms=None):
     """The dense leg's POSTGRES searcher for THIS request — or ``None``.
 
     #11642 / #4051 V1. Two properties are the whole reason this is a function
@@ -990,13 +990,37 @@ def _record_vector_searcher(sdk=None):
 
     A broken install (an unimportable module) is ``None`` for the same reason:
     a search must not become a 500 because a retrieval accelerator is missing.
+
+    ⛔ ``timeout_ms`` IS THE READ'S OWN BUDGET, AND IT IS BOUND HERE (#11691).
+    ``record_vector.searcher`` threads it into the returned closure, so the
+    record's ``statement_timeout`` becomes ``min(RECORD_STATEMENT_TIMEOUT_MS,
+    timeout_ms)``. The reason it is bound at CONSTRUCTION rather than passed per
+    call: the callable's FOUR-argument shape is what keeps both legs' rows going
+    through ONE ordering pass (``#6214``/``#10121``), and a fifth, per-call budget
+    argument would re-open exactly the drift the shape prevents.
+
+    Why it is needed at all: ``run_vector_query`` bounds the GRAPH branches at
+    500 ms while this leg inherited ``record_serve``'s 15 s statement bound and a
+    10 s connect bound — and the fused read JOINS its workers
+    (``degradation_chain``'s ``ThreadPoolExecutor.__exit__``), so the read's own
+    cap could not bound it. One slow record read turned a 500 ms search into a
+    multi-second one AND recorded ``timeout``, discarding rows it may have had.
+
+    ⚠️ CALLERS MUST PASS THE BUDGET THEY GIVE ``run_vector_query`` /
+    ``degradation_chain``, or the leg is back on the door's 15 s: ``None`` (the
+    default, kept for the places that do not go through a bounded read) leaves
+    the door bound untouched. The three construction sites pass
+    ``VECTOR_LEG_BUDGET_MS``, ``degradation_chain``'s own fallback
+    (``_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS``) and the expansion pass's
+    ``timeout_ms`` respectively.
     """
     try:
         from .record_vector import searcher
     except Exception:  # noqa: BLE001, RUF100 — an unimportable accelerator is "unarmed"
         return None
     try:
-        return searcher(carried=getattr(sdk, "_record_tenant", None))
+        return searcher(carried=getattr(sdk, "_record_tenant", None),
+                        timeout_ms=timeout_ms)
     except Exception:  # noqa: BLE001, RUF100 — never let the accelerator break a read
         _logger.debug("record dense searcher unavailable — using the graph",
                       exc_info=True)
@@ -34702,7 +34726,7 @@ class TortoiseSDK:
         pool cap — the documented degradation. ``top_k`` is hard-clamped at
         CROSS_LENS_ANN_TOP_K_MAX by the caller.
         """
-        from .search_engine import run_vector_query  # noqa: I001
+        from .search_engine import VECTOR_LEG_BUDGET_MS, run_vector_query  # noqa: I001
         import numpy as np
 
         proj = self._get_proj()
@@ -34719,12 +34743,18 @@ class TortoiseSDK:
                 embeddings[pid] = np.asarray(emb, dtype=np.float64)
 
         best: dict[tuple[str, str], float] = {}
+        # #11691: ONE budget for this read — the graph branches' `timeout_ms` and
+        # the RECORD leg's statement bound. The record leg is constructed HERE,
+        # per call, with that budget, so it can no longer run to the record
+        # door's 15 s inside a 500 ms read (the fused read JOINS its workers).
+        _budget_ms = VECTOR_LEG_BUDGET_MS
         for pid, meta in pool.items():
             vec = embeddings.get(pid)
             if vec is None:
                 continue
             hits = run_vector_query(proj.g, vec.tolist(), limit=top_k + 1,
                                     is_embedded=is_embedded,
+                                    timeout_ms=_budget_ms,
                                     # #1359: recorded index API → skip the
                                     # failing signature attempt on Cypher engines.
                                     vector_index_api=getattr(
@@ -34732,7 +34762,9 @@ class TortoiseSDK:
                                     # #11642: the Postgres ANN leg when a record
                                     # tenant is armed on this request; `None`
                                     # keeps the graph branch unchanged.
-                                    pg_vector=_record_vector_searcher(self))
+                                    # #11691: bound to this read's budget.
+                                    pg_vector=_record_vector_searcher(
+                                        self, timeout_ms=_budget_ms))
             for nid, _score in hits:
                 if nid == pid or nid not in pool:
                     continue
@@ -42332,6 +42364,7 @@ class TortoiseSDK:
             expand_structural_hops,
             _recency_factors,
             _trace_entry,
+            VECTOR_LEG_BUDGET_MS,
         )
         # W4 (#2101): the additive why-layer enrichment (shared assembly —
         # DM-1; lazy import — why.py pulls search_engine helpers only).
@@ -42847,6 +42880,12 @@ class TortoiseSDK:
             tuple(expanded_kinds)
             if leg_trace is not None and query_vec is not None
             and expanded_kinds else None)
+        # #11691: the SAME budget `degradation_chain` gives every leg's
+        # `timeout_ms` below, so the RECORD dense leg's statement bound is
+        # `min(record door, this)` instead of the door's 15 s. Derived with the
+        # identical expression degradation_chain uses (`int(elevated or
+        # VECTOR_LEG_BUDGET_MS)`) rather than a second guess at it.
+        _leg_budget_ms = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
         raw_results = degradation_chain(
             graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
@@ -42883,7 +42922,7 @@ class TortoiseSDK:
             # would find no tenant and take the graph branch on EVERY request
             # while reporting nothing. `None` (no record DSN, or no tenant
             # installed) keeps the graph branches byte-identically.
-            pg_vector=_record_vector_searcher(self),
+            pg_vector=_record_vector_searcher(self, timeout_ms=_leg_budget_ms),
         )
 
         if _bm25_lexical and "vector" not in _floored_legs:
@@ -45211,7 +45250,10 @@ class TortoiseSDK:
                 # the tenant ContextVar is readable here — unlike the shipped
                 # leg, which runs on a pool worker and is handed the callable
                 # by `_record_vector_searcher()` at the `degradation_chain` call.
-                pg_vector=_record_vector_searcher(self),
+                # #11691: bound to THIS pass's budget, the same `timeout_ms` the
+                # graph branches just above get — otherwise the record leg would
+                # still be on the door's 15 s inside a 500 ms read.
+                pg_vector=_record_vector_searcher(self, timeout_ms=timeout_ms),
                 # ONE dense slot, ONE tally: the shipped leg already counted it
                 # (the #8488 arm's ``meter=False`` precedent — the trace still
                 # records the second pass, so a measurement can see it ran).
