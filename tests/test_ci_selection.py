@@ -22980,16 +22980,21 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
 
     `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match, and a named
     match REPLACES the `core` fallback in `select()` (`core` is added only when
-    nothing named matched). MEASURED with the shipped selector and this manifest
-    **as it stood before this PR — a `core`-ONLY row**: `select(['tortoise/
-    hosted_api.py'], 'pull_request', manifest)` -> `surfaces=['api',
-    'onboarding']`, `full: False`, and this file ABSENT from `test_files`.
-    (⛔ The qualifier is load-bearing: on the manifest WITH the `api` row the
-    same call returns the pin PRESENT, so a reader who re-measures against the
-    committed file and drops the qualifier gets the opposite answer — the
-    review's F4.) So BOTH census arms slept on the diff class they exist for: a
-    re-spelled `status != 'superseded'` filter, or a deleted `_terminal_excluded`
-    usage in the hosted door, merged green.
+    nothing named matched). MEASURED with the shipped selector against a manifest
+    carrying a **`core`-ONLY row** — the state THIS BRANCH itself created in
+    `3c380b667fe8`, before the `api` arm was added. ⛔ NOT "main's state":
+    `origin/main` carried **zero** rows for the file (`grep -c` over
+    `git show origin/main:config/ci-surfaces.yml` -> 0), which is what the
+    docstring above means by "UNLISTED on `main`" and what commit `a36581fd`
+    retired by name — so do not re-read this clause as "main had a `core` row".
+    On that `core`-only row: `select(['tortoise/hosted_api.py'], 'pull_request',
+    manifest)` -> `surfaces=['api', 'onboarding']`, `full: False`, and this file
+    ABSENT from `test_files`. (⛔ On the manifest WITH the `api` row the same call
+    returns the pin PRESENT, so a reader who re-measures against the committed
+    file gets the opposite answer — which is why the qualifier is load-bearing.)
+    So BOTH census arms slept on the diff class they exist for: a re-spelled
+    `status != 'superseded'` filter, or a deleted `_terminal_excluded` usage in the
+    hosted door, merged green.
 
     That is the #1349/#2938/#3154 silent-drop class in its harmful direction, and
     it is the defect the two rows above record for themselves
