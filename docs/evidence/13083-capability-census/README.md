@@ -84,6 +84,15 @@ lane is the population a `record_only` move would remove from.
    document has no measurement of them — which is a gap in the evidence, not a claim that they are free.
    (`:Tag` is `graph`-verdicted in the audit; it is unexercised **here**, which is a coverage gap, not a
    `record_only` verdict.)
+5. **The instrument wipes its graph before seeding — `MATCH (n) DETACH DELETE n` at
+   `probe_shape_bytes.py:195` — and what stops that reaching a tenant graph is the repo's L2 rule, not this
+   document.** The wipe goes through `proj.g`, which is a `_GuardedGraph` (`tortoise/projection/__init__.py:11727`),
+   and `_is_bulk_wipe` runs in its `query` and classifies that statement as a whole-graph wipe, refused on any
+   graph name that is not a disposable test graph. `--namespace` is not a way in either: `TortoiseSDK` maps
+   `test_*` / `tortoise_test*` / `test-*` namespaces to the test-shaped `<ns>_tortoise`, and maps **every other**
+   namespace to `org_<ns>` (`tortoise/sdk.py:10619-10637`) — the production-looking class L2 refuses. Stated
+   because an earlier review raised this wipe as an unguarded hazard: it is guarded, by the mechanism's own owner
+   (`#2944`), not by a copy of that predicate kept here.
 
 ## The two arms
 
@@ -109,7 +118,7 @@ residency marginal here would be the instrument's noise dressed as a measurement
 and deterministic; the residency figure is **unmeasured**.
 
 **This arm measures the SIZE OF THE PRIZE, not a shipped change.** The move was withdrawn: two policy pins
-in `tests/test_cache_projection.py` (`:185-190`, `:243-246`) refuse the declaration until it is widened
+in `tests/test_cache_projection.py` (`:186-195`, `:243-246`) refuse the declaration until it is widened
 with a tail-only category — a decision belonging to `#10429`, which owns this route. The MECHANISM does
 honour the entry (`_props_from_row`'s `tail_denied` is the plain forbidden set plus its spellings,
 `cache_projection.py:2710`). See the audit's §5.1.

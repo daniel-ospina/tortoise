@@ -152,9 +152,11 @@ marked **none**.
 | `tortoise/domain_validators.py:105` (and the same property-join shape at `:174-182`, `:197-205`) | `MATCH (req) WHERE (req:Point OR req:Object) AND req.pointKind IN $req_kinds`, then `OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow})` — **property-equality joins only**; no relationship appears in any pattern | **none** |
 | `tortoise/domain_validators.py:153-158` (`orphan_use_case`) | `OPTIONAL MATCH (uc)<-[:hasPart]-(op:Point {is_operator:true, op_type:'composedOf'})-[:hasPart]->(jtbd:Point)` — a **2-hop `hasPart` walk**, i.e. every parented use-case is found THROUGH the tree | **adjacency** |
 | `tortoise/domain_validators.py:241-243` | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT (n)--()` — the `orphaned_draft` rule (#131) tests **existence of any edge**, which is adjacency | **adjacency** |
+| **the whole-node accessor family** — `tortoise/sdk.py:24633`, `:25506`, `:27101`, `:27197`, `:27296` (`get_point`'s `_cache_answer`), `:40513`; `tortoise/record_serve.py:306` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
 
-**Verdict: `graph`.** Sixteen readers, **fourteen of them capability-carrying** (two are deliberately
-`none`: `search_engine.py:4350-4352`, a plain label scan, and `domain_validators.py:105`), across six files (`projection/propagation.py`,
+**Verdict: `graph`.** Seventeen reader rows, **fourteen of them capability-carrying** (three are deliberately
+`none`: `search_engine.py:4350-4352`, a plain label scan; `domain_validators.py:105`, a property-equality join;
+and the whole-node accessor family above), across six files (`projection/propagation.py`,
 `sdk.py`, `mcp_server.py`, `projection/edges.py`, `search_engine.py`, `domain_validators.py`); a
 record-backed copy could not answer any of them without re-implementing belief
 propagation, the **variable-length hop walk**, the fulltext index or HNSW in SQL (which is `#13082` Phase 2 and its stop condition).
@@ -204,7 +206,11 @@ mechanism, not a citation nicety.
 | `tortoise/assembly.py:2629` | `MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event)` | **adjacency** |
 | `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:2944` derives the label from `entity_type`; `sdk.py:52011` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6825` | **fulltext index** |
 
-**Verdict: `graph`.**
+**Verdict: `graph`.** ⚠️ Two whole-node reads are absent from the table above and belong to it by §2's own rule:
+`tortoise/session_indexer.py:746` (`MATCH (e:Event {eventId: $eid}) RETURN properties(e)`) and the
+label-generic `tortoise/record_reconcile.py:533` (`MATCH (n:{label}) RETURN properties(n)`). Both are
+capability **`none`**, so they add no capability and change no verdict — they are named so that the census's
+"each row is a reader" claim is true rather than merely convenient.
 
 ### 2.4 `:Session`
 
@@ -344,7 +350,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 
 | # | shape | readers (summary) | needs graph? | verdict | one-line reason |
 |---|---|---|---|---|---|
-| 1 | `:Point` core (`id`, content, `pointKind`, `status`) | §2.1, 16 readers | **yes** — EP walk, `IMPL`/`NAND`/`TAGGED`/`extractedFrom` adjacency, FTS, HNSW | **graph** | the belief walk *is* the product; four of the five capabilities read it |
+| 1 | `:Point` core (`id`, content, `pointKind`, `status`) | §2.1, 17 reader rows (14 capability-carrying + 3 `none`) | **yes** — EP walk, `IMPL`/`NAND`/`TAGGED`/`extractedFrom` adjacency, FTS, HNSW | **graph** | the belief walk *is* the product; four of the five capabilities read it |
 | 2 | `:Point.ep_*`, `baseline_set`, `confidence` | `propagation.py:81,86`; `sdk.py:38073` | **yes** — EP state | **graph** | there is no EP in SQL without building one |
 | 3 | `:Point.embedding` | vector leg (HNSW) | **yes** — vector index | **graph** | the index lives in the engine (§12.1) |
 | 4 | `:Source` identity + `_searchText` | §2.2 | **yes** — `references`/`extractedFrom`, FTS | **graph** | §9.4 ① makes the link load-bearing |
@@ -467,7 +473,7 @@ is dropped.
 
 **What actually refuses it is a TEST POLICY, and both pins are deliberate:**
 
-- `tests/test_cache_projection.py:185-190` pins the dict **exactly** (`{source, event}`) so that adding an
+- `tests/test_cache_projection.py:186-195` pins the dict **exactly** (`{source, event}`) so that adding an
   entry cannot slip in as "a one-line dict edit" — its own comment says the decision *"belongs in this test
   and in §9.1's placement rows"*.
 - `tests/test_cache_projection.py:243-246` asserts every declared not-projectable name is a **real, exercised
@@ -479,10 +485,32 @@ is dropped.
 (a declared name with no column, exercised through the `props` tail), or this route stays open. This document
 records the finding and the number; it does not widen another issue's pin.
 
-⛔ **And the fix must be a projection-only deny, not a fold deny.** A `_POINT_DENY` entry (`projection/`)
-would make a `rebuild_all` **DELETE** `story_arc` from every legacy `:Point` — a graph-side `REMOVE` that no
-instrument ships, on a population where for pre-`#9555` rows the graph copy may be the **only** copy (§9.1
-residual (a)). The projection deny stops the WRITE and deletes nothing.
+⛔ **And the fix must be a projection-only deny, not a fold deny — but for a narrower reason than an earlier
+draft gave, and that draft's mechanism was wrong.** ⚠️ **An earlier draft said a `_POINT_DENY` entry would make a
+`rebuild_all` DELETE the property from every legacy `:Point`. That is false.** `_POINT_DENY`
+(`projection/entities.py:2472`) has one operational consumer: it is passed as a skip set into
+`_persist_extra_props(…, self._POINT_HANDLED | self._POINT_DENY, …)` at `:3183-3192`, which **drops the key from
+the `SET n += $extra` map** — nothing is REMOVEd — plus a warning check at `:3201`. No code path derives a
+`REMOVE`/`DELETE` from that set (`rg -n '_POINT_DENY' tortoise/` returns the definition, that call site, and
+comments).
+
+**The real reason the fold deny is the wrong instrument is a different one, and the code names it.** The
+destruction the tree actually documents is a **whole-graph restore wipe** — `MATCH (n) DETACH DELETE n`, which
+*"cannot be row-scoped … so a graph holding ANY row whose PROSE the record does not carry must NOT be restored at
+all: copy that prose out first, because the wipe destroys the only copy"* (`projection/entities.py:2327-2333`,
+§17.2, `#11325`). That hazard is **independent of which deny carries the entry**, which is why a fold deny does not
+mitigate it. What does separate the two denies is **which payload the key arrives in**: the journal fold handles a
+payload key (`_POINT_DENY` is *"for payload keys the replay must not re-apply"*, `:1826`), while this route's key
+arrives in a **record row's `props` tail** and is denied by `_props_from_row`'s `tail_denied` (`cache_projection.py:2710`).
+
+⚠️ **And a graph-side clear DOES ship — scoped, and not to this population.** `update_point(<id>, story_arc=None)`
+is an in-place clear (`projection/entities.py:2337-2338`, `#11325`) that applies **only where
+`public.session_narrative.narrative` still holds the text**, and the comment warns it must **never** be aimed at the
+row's own `props` tail: the clear's own record write consumes that tail, so the patch merges right-hand and
+**overwrites the prose**. For the legacy tail-only rows this census is about, that clear is therefore not
+applicable — which is the accurate form of "deleting nothing", and it is a stronger argument for the projection
+deny than the wrong one: the projection deny stops the WRITE on exactly the population where no graph-side clear
+can safely reach.
 
 **What it would be worth, measured.** Same corpus both arms (`--legacy-prose` on BOTH), and the ONLY thing
 varied is the declaration: `before` pops the entry, `after` sets it. No prose-less arm is compared against a
