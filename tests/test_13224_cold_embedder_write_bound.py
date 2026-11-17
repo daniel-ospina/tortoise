@@ -56,6 +56,16 @@ from tortoise.embeddings import (  # noqa: E402
     EmbeddingModel,
     encode_for_row,
 )
+from tortoise.projection import (  # noqa: E402
+    _PREWIPE_SYNTHETIC_REASON,
+    _graph_metadata_write_scope,
+    _prewipe_restore_write_scope,
+    _prewipe_synthetic_write_scope,
+    _replay_write_scope,
+)
+from tortoise.projection.edges import (  # noqa: E402
+    _structural_edge_write_scope,
+)
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 #: How long the simulated cold load takes. Long enough that "blocked on the
@@ -102,17 +112,22 @@ def cold_embedder(monkeypatch):
     """
     monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
     EmbeddingModel._reset()
+    started = None
     with mock.patch.object(EmbeddingModel, "__init__", _fake_slow_init(_LOAD_S)):
-        EmbeddingModel.start_warm_up()  # what hosted_api._lifespan does
+        # what hosted_api._lifespan does
+        started = EmbeddingModel.start_warm_up()
         try:
             yield
         finally:
             pass
-    # The daemon load thread outlives the patch — join it before resetting, or it
-    # would stamp a fake model onto the NEXT test's singleton.
-    t = EmbeddingModel._warm_up_thread
-    if t is not None and t.is_alive():
-        t.join(timeout=_LOAD_S + 5)
+    # The daemon load thread outlives the patch — join the one this fixture
+    # STARTED before resetting, or it would stamp a fake model onto the NEXT
+    # test's singleton. ⛔ Join the object captured at start, never a re-read of
+    # `EmbeddingModel._warm_up_thread`: a body that calls `_reset()` (the
+    # end-to-end row did) clears that class attribute, so re-reading it here
+    # silently skipped the join and leaked the load into the following test.
+    if started is not None and started.is_alive():
+        started.join(timeout=_LOAD_S + 10)
     EmbeddingModel._reset()
 
 
@@ -289,12 +304,14 @@ def test_await_write_ready_reports_the_cold_answer_within_the_budget(cold_embedd
 
 
 def test_encode_for_row_is_the_seam_that_carries_the_bound(cold_embedder):
-    """Reaching the encoder through a different door is bounded too.
+    """Called directly with ``bounded=True`` the seam declines instead of waiting.
 
-    ``_upsert_object`` / ``_upsert_point`` embed through this same function, so a
-    ``Subject``-only fix would leave the stall reachable from the other doors
-    (which is how it looked in production: the fast doors were only fast because
-    the model was already warm).
+    ⛔ SCOPE, stated because the previous version of this docstring claimed more
+    than it tests: this row calls the SEAM, so it proves the seam honours the
+    opt-in — it proves nothing about which folds PASS it. That is
+    ``test_every_derived_entity_fold_opt_into_the_bound`` below, which drives
+    each door through the SDK (dropping `bounded=True` from the Object,
+    Document and Event folds left the rest of this file green — the review's M2).
 
     ⛔ `bounded=True` is the OPT-IN the derived-entity folds pass; the default is
     deliberately unbounded (see the record-truth test below).
@@ -304,6 +321,75 @@ def test_encode_for_row_is_the_seam_that_carries_the_bound(cold_embedder):
     elapsed = time.perf_counter() - t0
     assert elapsed < _LOAD_S, (
         f"encode_for_row blocked {elapsed:.2f}s on a cold embedder"
+    )
+
+
+#: The three OTHER DERIVED-entity doors — the ones whose `bounded=True` opt-in
+#: was unpinned, so a regression that dropped it shipped green (the review's M2:
+#: removing `bounded=True` from `_upsert_object`, `_upsert_document` and the Event
+#: fold, keeping Subject, left the file 16/16 GREEN). Each entry drives the public
+#: SDK door and names the label/key that door's row lands under, so the assertion
+#: is about the ROW the fold wrote and not about a folded event dictionary.
+_DOOR_CASES: tuple[tuple[str, object, str, str], ...] = (
+    ("object",
+     lambda sdk: sdk.create_object(f"cold-door-object-{time.time_ns()}",
+                                   objectKind="other"),
+     "Object", "id"),
+    ("document",
+     lambda sdk: sdk.create_document(f"cold-door-doc-{time.time_ns()}",
+                                     documentKind="report"),
+     "Source", "url"),
+    ("event",
+     lambda sdk: sdk.create_event(f"cold-door-event-{time.time_ns()}",
+                                  eventKind="occurrence"),
+     "Event", "id"),
+)
+
+
+@pytest.mark.parametrize("door,create,label,key", _DOOR_CASES,
+                         ids=[c[0] for c in _DOOR_CASES])
+def test_every_derived_entity_fold_opt_into_the_bound(
+        door, create, label, key, cold_embedder, sdk):
+    """⚠ EVERY derived-entity door must OPT IN, not just ``Subject``.
+
+    The invariant is the first row's, per door: **the write returns while the
+    load is still in flight and the row is still written**. The mutant this row
+    exists for is dropping `bounded=True` from that fold — the fold then falls
+    back to the synchronous `compute_embedding` → `get()`, which blocks on the
+    class lock for the WHOLE load, so `elapsed` reaches `_LOAD_S` and the load has
+    landed by the time the create returns. Both halves are asserted for that
+    reason: on the mutant the wall-clock bound AND the still-cold precondition
+    fail together.
+
+    ``Subject`` has its own end-to-end rows above; this row covers the other
+    three, and ``_upsert_event``'s default sub-payload is why its kind is not
+    ``meeting`` (the fold skips that one by construction).
+    """
+    assert not EmbeddingModel.loaded(), (
+        "precondition: the embedder must be COLD when the write arrives")
+
+    t0 = time.perf_counter()
+    node = create(sdk)
+    elapsed = time.perf_counter() - t0
+
+    assert node.get("id"), f"the {door} row must still be written, got {node!r}"
+    assert not EmbeddingModel.loaded(), (
+        f"the {_LOAD_S:.1f}s load must still be IN FLIGHT after the {door} create — "
+        f"if it finished, that write waited it out (or the run measured a warm path)"
+    )
+    assert elapsed < _LOAD_S, (
+        f"create_{door} took {elapsed:.2f}s against a {_LOAD_S:.1f}s cold load — the "
+        f"fold is not passing `bounded=True` to encode_for_row, so the cold stall "
+        f"#13224 removed from Subject is still reachable from this door"
+    )
+
+    stored = sdk._get_proj().g.query(
+        f"MATCH (n:{label} {{{key}:$id}}) RETURN n.embedding IS NOT NULL",
+        params={"id": node["id"]})
+    assert stored.result_set, f"the {door} row must EXIST under {label}.{key}"
+    assert stored.result_set[0][0] is False, (
+        f"a {door} row written inside the cold window must carry no vector (the "
+        f"traded consistency), or this run measured the warm path"
     )
 
 
@@ -342,8 +428,6 @@ def test_a_replay_scope_keeps_the_synchronous_contract(cold_embedder):
     encode decision. A timing-dependent replay would give two rebuilds of one
     journal different graphs.
     """
-    from tortoise.projection import _replay_write_scope
-
     with _replay_write_scope():
         t0 = time.perf_counter()
         vec = encode_for_row(f"replay seam {time.time_ns()}", _DIM, bounded=True)
@@ -355,6 +439,75 @@ def test_a_replay_scope_keeps_the_synchronous_contract(cold_embedder):
     assert elapsed >= _LOAD_S * 0.5, (
         f"the replay did not wait for the load ({elapsed:.2f}s) — the bound leaked "
         f"into the replay path"
+    )
+
+
+#: The INNER lanes a replay engine opens inside its own window — the set
+#: `projection.replay_window_open()`'s docstring names (`#9391`/`#9553`). Each one
+#: SHADOWS the reason in `_CACHE_WRITE_AUTHORIZED`, which is why the window has to
+#: be read from the depth and not from the innermost lane.
+_INNER_LANES: tuple[tuple[str, object], ...] = (
+    ("graph_metadata",
+     lambda: _graph_metadata_write_scope("schema-ddl")),
+    ("prewipe_restore",
+     lambda: _prewipe_restore_write_scope(":Batch markers (#990)")),
+    ("prewipe_synthetic",
+     lambda: _prewipe_synthetic_write_scope(_PREWIPE_SYNTHETIC_REASON)),
+    ("structural_edge",
+     lambda: _structural_edge_write_scope()),
+)
+
+
+@pytest.mark.parametrize("inner", [c[1] for c in _INNER_LANES],
+                         ids=[c[0] for c in _INNER_LANES])
+def test_a_nested_lane_inside_a_replay_is_still_replay(inner):
+    """⚠ The replay test must read the WINDOW (a depth), never the inner LANE.
+
+    `rebuild_all` opens `_replay_write_scope()` around its whole body and then
+    opens inner lanes per restore leg, per synthetic pass, and for schema DDL —
+    each of which SHADOWS the reason in `_CACHE_WRITE_AUTHORIZED`. MEASURED on
+    the shape this row was written against (a direct `== _REPLAY_WRITE_LANE`
+    comparison): all four inner lanes read `False` while the replay window was
+    still open, so the bound re-engaged and a cold rebuild wrote derived rows
+    without vectors — the live/replay divergence `encode_for_row` forbids.
+
+    ``projection.replay_window_open()`` is the primitive that already documents
+    this trap: `_RAW_QUERY_CLOSED_DEPTH` is inherited by nested scopes and cannot
+    be cleared by one.
+    """
+    # Not in a replay: the bound is allowed (this is the LIVE door shape).
+    assert embeddings._in_replay_scope() is False
+    with _replay_write_scope():
+        assert embeddings._in_replay_scope() is True
+        with inner():
+            assert embeddings._in_replay_scope() is True, (
+                "a lane nested inside a replay window shadowed the reason, so "
+                "_in_replay_scope() read False while the replay was still "
+                "running — read `replay_window_open()` (the depth), not the "
+                "innermost lane"
+            )
+
+
+def test_a_nested_lane_inside_a_replay_still_embeds(cold_embedder):
+    """The behavioural half: the dispatch above really suppresses the bound.
+
+    `test_a_nested_lane_inside_a_replay_is_still_replay` proves the predicate;
+    this row proves what the predicate is FOR — a nested fold inside a cold
+    rebuild waits for the load and produces its vector, so two rebuilds of one
+    journal cannot disagree on timing.
+    """
+    with _replay_write_scope(), _graph_metadata_write_scope("schema-ddl"):
+        t0 = time.perf_counter()
+        vec = encode_for_row(
+            f"nested replay seam {time.time_ns()}", _DIM, bounded=True)
+        elapsed = time.perf_counter() - t0
+    assert vec is not None, (
+        "a fold nested inside a replay window dropped its vector — a cold rebuild "
+        "is not reproducible then"
+    )
+    assert elapsed >= _LOAD_S * 0.5, (
+        f"the nested fold did not wait for the load ({elapsed:.2f}s) — the bound "
+        f"leaked into the replay window"
     )
 
 
@@ -514,27 +667,38 @@ from tests.test_hosted_api import client as client  # noqa: E402
 
 
 def test_post_subjects_stays_under_the_wait_bound_while_the_embedder_is_cold(
-        cold_embedder, client):
+        client, cold_embedder):
     """The customer-visible door, measured from outside the handler.
 
     Production returned **504** here because the request outlived the transport
     wait bound (``mcp_auth._TRANSPORT_WAIT_BOUND_S`` = 10 s) waiting for a model
     load it did not trigger.
+
+    ⛔ ``client`` is requested BEFORE ``cold_embedder``: the hosted client builds
+    its app (and its lifespan) first, and the cold window is then established on
+    top of it — the reverse order lets the client's own start-up decide the
+    embedder state the request meets.
+
+    ⛔ The coldness PRECONDITION is asserted, not assumed. Without it a warm or
+    leaked ``_instance`` satisfies both ``status_code == 200`` and
+    ``elapsed < _LOAD_S`` while measuring the warm path entirely — the exact
+    vacuity ``test_create_does_not_block_on_a_cold_embedder`` guards against on
+    the SDK door.
     """
-    EmbeddingModel._reset()
-    with mock.patch.object(EmbeddingModel, "__init__", _fake_slow_init(_LOAD_S)):
-        EmbeddingModel.start_warm_up()
-        t0 = time.perf_counter()
-        resp = client.post("/v1/subjects",
-                           json={"name": f"cold-api-{time.time_ns()}",
-                                 "subjectKind": "naturalPerson"})
-        elapsed = time.perf_counter() - t0
+    assert not EmbeddingModel.loaded(), (
+        "precondition: the embedder must be COLD when the request arrives")
+
+    t0 = time.perf_counter()
+    resp = client.post("/v1/subjects",
+                       json={"name": f"cold-api-{time.time_ns()}",
+                             "subjectKind": "naturalPerson"})
+    elapsed = time.perf_counter() - t0
 
     assert resp.status_code == 200, (
         f"POST /v1/subjects answered {resp.status_code} while the embedder was "
         f"cold ({elapsed:.1f}s) — production saw 504 at 18.4s (#13224)"
     )
-    # The load is 3 s here and 13.5-57 s in production; the transport wait bound
+    # The load is 6 s here and 13.5-57 s in production; the transport wait bound
     # that produced the 504 is 10 s. A door that waits for the load cannot answer
     # inside it, so "below the load" is the discriminating comparison.
     assert elapsed < _LOAD_S, (

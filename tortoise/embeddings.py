@@ -1681,16 +1681,6 @@ WRITE_EMBED_BUDGET_S = 0.25
 #: becomes ready mid-budget is used, coarse enough not to spin (<= 25 wakeups).
 _WRITE_READY_POLL_S = 0.01
 
-#: The ONE lane a fold must treat as REPLAY (`projection._replay_write_scope()`'s
-#: declared reason, imported from its home in `projection` rather than re-lettered
-#: here). Every OTHER lane — `"live-door"`, `"create_entity"`, `"commit"`, a bare
-#: SDK write with no scope at all — is a LIVE door, where the bound may apply. An
-#: allow-list is not possible: live lanes are named by their feature and there are
-#: many, while the replay scope is a single declared literal. (`"create_entity"`
-#: is the lane a hosted `POST /v1/subjects` actually runs under — measured — which
-#: is why an allow-list on `"live-door"` silently disabled this bound.)
-
-
 def _in_replay_scope() -> bool:
     """True when this fold is a journal REPLAY, not a live door (#13224).
 
@@ -1704,16 +1694,28 @@ def _in_replay_scope() -> bool:
     exist to rule out. Live may decline (its row is the one a request is waiting
     on, and its vector is repairable from the graph); replay may not.
 
+    ⛔ READ THE WINDOW, NOT THE INNERMOST LANE. `projection.replay_window_open()`
+    is depth-based (`_RAW_QUERY_CLOSED_DEPTH`, set by `_handle_only_write_scope`,
+    which is what `_replay_write_scope()` returns) because the lane reasons live
+    in ONE ContextVar and an INNER scope SHADOWS the outer one — the same trap
+    that function's own docstring documents for `#9553`. MEASURED on the previous
+    shape of this function, which compared `_CACHE_WRITE_AUTHORIZED` against
+    `_REPLAY_WRITE_LANE` directly: inside an open replay window, nesting
+    `_graph_metadata_write_scope("schema-ddl")`,
+    `_prewipe_restore_write_scope(...)`, `_prewipe_synthetic_write_scope(...)` or
+    `edges._structural_edge_write_scope()` each read `False` — so the bound
+    re-engaged and a rebuild's first seconds wrote derived rows without vectors,
+    which is exactly the live/replay divergence the paragraph above forbids. The
+    depth is inherited by every nested lane and cannot be cleared by one, so it
+    answers the question this function actually asks.
+
     Fail-safe: a read that raises, or a projection import that fails, is treated
     as REPLAY — the bound stays off, so the failure direction is "embed anyway",
     never "drop a vector".
     """
     try:
-        from tortoise.projection import (
-            _CACHE_WRITE_AUTHORIZED,
-            _REPLAY_WRITE_LANE,
-        )
-        return _CACHE_WRITE_AUTHORIZED.get() == _REPLAY_WRITE_LANE
+        from tortoise.projection import replay_window_open
+        return replay_window_open()
     except Exception:  # noqa: BLE001 — a projection import fault must not decide
         return True
 
@@ -1761,9 +1763,12 @@ def encode_for_row(
     — the Point journal stamp under `PRESENCE IS OWNERSHIP`, `#5004` — must
     never take an `None` for a slow embedder, because a cold `None` there is
     recorded as an explicit CLEAR that a rebuild reproduces and no graph-side
-    backfill can reach it), and a `bounded=True` call is suppressed inside
-    `projection._replay_write_scope()` (`_in_replay_scope()`), so a fold's
-    decision is timing-free on both sides. The DERIVED-entity folds are the only
+    backfill can reach it), and a `bounded=True` call is suppressed inside a
+    replay WINDOW — `_in_replay_scope()`, which asks
+    `projection.replay_window_open()` (depth-based, inherited by every nested
+    lane) rather than comparing the innermost lane, because an inner lane SHADOWS
+    the replay's reason while the replay is still running. So a fold's decision is
+    timing-free on both sides. The DERIVED-entity folds are the only
     opt-in: `_upsert_subject` / `_upsert_object` / the document and Event arms
     recompute their vector from the payload text, so a live decline is
     repairable from the graph and `derived = replay(journal)` still holds.
