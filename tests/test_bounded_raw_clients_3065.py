@@ -759,6 +759,7 @@ _EXPECTED_TOOL_SITES = {
     "tools/longmem_eval/server_posture.py": 1,   # pre-existing, already resolver-bound
     "tools/ram_window_census.py": 2,            # #13084's INFO/DUMP handle + the RESTORE probe's client (both `**_bounded_server_socket_kwargs()`)
     "tools/text_gate_13099.py": 2,              # #13107's seed client + the arms' measurement client (both `**_bounded_server_socket_kwargs()`)
+    "tools/cypher_diff_harness.py": 3,         # #13098's seed / verdict / bench clients, bounded by #13211 (the issue that governs this fix; #13140 is the defect's origin — ⛔ NOT #13163, which is `tools/text_gate_13099.py`'s pair and never mentions this harness)
 }
 
 

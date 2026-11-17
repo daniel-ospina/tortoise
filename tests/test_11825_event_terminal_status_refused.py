@@ -66,19 +66,7 @@ from tortoise.sdk import POINT_STATUS_VALUES, TortoiseSDK
 #: to the question these tests ask, and neither may be weakened: the assertion is
 #: the STATE (nothing stored, nothing journalled), so the pattern accepts either
 #: and the ordering is main's to decide.
-#:
-#: ⛔ A THIRD answer joined at the #13065 merge: `_sanitize_props` refuses a call
-#: in which two keys render as the SAME name and ask for DIFFERENT words
-#: ("more than one key in this call renders as `status` and they ask for
-#: different words"). That is also a correct answer to these questions — and it
-#: fires BEFORE the `:Event` arm for exactly the two-key inputs the masking arms
-#: below construct (`status` + an alias). It does not weaken the claim those arms
-#: pin: masking needed the guard to read only the LAST declaration, and a pair of
-#: DIFFERENT words is now refused regardless of which one is last. Repeated here
-#: rather than re-spelled per arm, so the day a door reorders again the pattern is
-#: the one place that changes.
-_EITHER_REFUSAL = (r"(not writable on an :Event|not an exact `str`"
-                   r"|CONFLICTING status write)")
+_EITHER_REFUSAL = r"(not writable on an :Event|not an exact `str`)"
 
 #: The terminal half, as a sorted tuple so a parametrized id list is stable.
 _TERMINAL = tuple(sorted(TERMINAL_EXCLUDED_STATUSES))
@@ -688,7 +676,19 @@ class TestTheEventApiDoor:
                 return isinstance(other, _AliasOutdated) and str.__eq__(self, other)
 
         eid = _event(sdk, name="Masked")
-        with pytest.raises(ValueError, match=_EITHER_REFUSAL):
+        # ⛔ RE-DERIVED at #12910's merge of #11824 S0: the MASKING guard this
+        # arm exists for is now the GENERAL one. `#12910`'s `_sanitize_props`
+        # refuses a CONFLICTING status write — "more than one key in this call
+        # renders as `status` and they ask for different words … which word
+        # lands cannot be known here, and guessing it is a bypass" — and it
+        # answers BEFORE the Event terminal door, because the ambiguity is the
+        # bypass (#13065 review finding 3). The property this arm pins is
+        # unchanged and is asserted below: the masked write is REFUSED and
+        # nothing lands. Named as a third accepted refusal rather than relaxed
+        # to `ValueError`, so an arm that stops refusing still reds.
+        with pytest.raises(ValueError,
+                           match=r"(not writable on an :Event"
+                                 r"|CONFLICTING status write)"):
             sdk.update_knowledge(eid, **{"status": "superseded",
                                       _AliasHarmless("status"): "live"})
         assert "status" not in _props(sdk, eid)

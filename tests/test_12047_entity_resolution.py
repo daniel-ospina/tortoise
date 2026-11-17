@@ -1687,6 +1687,13 @@ class TestThe12120RemainingReaders:
         On `main` the variant minted its own node, so the exposure was CREATED by
         widening the writer — legitimate public writes produced an un-rebuildable
         journal.
+
+        ⛔ #13143 (S0 ran after this pin): the fold it counts is a POSITION move
+        now, so the read is `pipelineStageId`. The subject is unchanged — the
+        variant name must resolve to the node the create landed on, live AND on
+        replay — and the assertion is not weakened by the axis move: an identity
+        miss still folds nothing (stage NULL) and still makes `rebuild_all`
+        raise, which the walk below depends on.
         """
         from tortoise.sdk import TortoiseSDK
 
@@ -1706,19 +1713,19 @@ class TestThe12120RemainingReaders:
                              object="The Acme Corp", objectType="Object")
 
             g = sdk._get_proj().g
-            live = g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+            live = g.query("MATCH (o:Object {id:$id}) RETURN o.pipelineStageId",
                            params={"id": first}).result_set
             assert live and live[0][0] == "in_progress", (
-                "the variant spelling did not fold a status onto the node the "
+                "the variant spelling did not fold a stage onto the node the "
                 "create resolved onto — the fold recorded an identity miss")
 
             # A non-folded, non-exempt record makes the run boundary raise.
             sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
-            replayed = g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+            replayed = g.query("MATCH (o:Object {id:$id}) RETURN o.pipelineStageId",
                                params={"id": first}).result_set
             assert replayed and replayed[0][0] == "in_progress", (
-                "derived != replay: the status folded live but not on replay")
+                "derived != replay: the stage folded live but not on replay")
         finally:
             sdk.close()
 

@@ -92,12 +92,33 @@ USAGE
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.11+-only import raises ImportError before a later guard could run.
+#
+# #4053/#11342: the refusal must not wear a VERDICT's status. This tool's
+# answers are 0 (census produced) and 1 (`--check` reports doc drift), and
+# `raise SystemExit(<message>)` exits 1 — so an old interpreter would report
+# DRIFT against a doc nobody touched. 2 is this tool's own "could not run"
+# (`check()` already returns it when the doc is absent), which is exactly what an
+# old interpreter is, so the refusal is reused on purpose rather than invented.
+# `SystemExit(<int>)` carries no message, so the refusal is printed explicitly.
+# Pinned by `tests/test_entry_point_python_guard.py::REFUSAL_CODES`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/cypher_inventory.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/cypher_inventory.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import ast
 import json
 import re
 import subprocess
-import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path

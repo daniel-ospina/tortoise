@@ -112,10 +112,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import-path bootstrap
     sys.path.insert(0, str(REPO_ROOT))
 
-#: The production budget this issue is about. ⛔ `search_engine.py:3551` is the VECTOR leg's own
-#: `timeout_ms` default and `:4894` is `degradation_chain`'s `runner_timeout`; `:2857` is
-#: `run_fts_query`'s (the LEXICAL leg's) and `:4728` is a comment line — an earlier revision cited
-#: both, sending a reader to the wrong leg (`#13121` round 8 F4).
+#: The production budget this issue is about. ⛔ `search_engine.py:3563` is the VECTOR leg's own
+#: `timeout_ms` default (`VECTOR_LEG_BUDGET_MS` = 500) and `:4936` is `degradation_chain`'s
+#: `runner_timeout`; `:2868` is `run_fts_query`'s (the LEXICAL leg's) and `:4770` is a comment line
+#: about `#4210`/`#3019` — an earlier revision cited both (`#13121` round 8 F4).
 #: The collector's own `as_completed(timeout=0.5)` is the second budget (`#8450`).
 DEFAULT_TIMEOUT_MS = 500
 
