@@ -173,11 +173,19 @@ class _Result:
 
 @pytest.fixture()
 def armed(monkeypatch):
-    """The cutover plus a tenant — the two gates `searcher()` refuses without."""
+    """The cutover plus a tenant — the two gates `searcher()` refuses without.
+
+    ⚠️ The SINGLE-TENANT declaration is part of the arming now (#13331 review
+    F4): `TORTOISE_RECORD_JOURNAL` names ONE journal path, process-globally, so
+    `journal_ready` refuses to apply it where the deployment did not declare that
+    it serves one graph (#9192). A test that stands in for an armed single-tenant
+    box must say so, exactly as the deployment does.
+    """
     import tortoise.record_writer as rw
 
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
     monkeypatch.setenv(record_vector.ARMING_ENV, "1")
+    monkeypatch.setenv(rw.RECORD_SINGLE_TENANT_ENV, "1")
     monkeypatch.setattr(rw, "record_tenant", lambda: None, raising=False)
     return ("org_11691", "graph_11691")
 

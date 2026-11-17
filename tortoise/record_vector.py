@@ -462,6 +462,20 @@ def cutover_armed() -> bool:
 #: Unset is NOT an error and NOT a silent skip: the gate CANNOT answer without
 #: it, so `journal_ready` returns "not enforced" and a WARNING is emitted once per
 #: process naming exactly what is unchecked (see :func:`journal_ready`).
+#:
+#: ⛔ THE DECLARATION IS SUBJECT TO `#9192`'s RULE, and this module ENFORCES it
+#: rather than repeating its name: a journal path is process-global, so it can
+#: only describe ONE tenant. `journal_ready` therefore refuses to apply it unless
+#: the deployment declared single tenancy
+#: (`single_tenant_declared()`, `TORTOISE_RECORD_SINGLE_TENANT=1`) — on a process
+#: serving several tenants the comparison would be tenant A's journal against
+#: tenant B's rows, which `record_writer`'s own docstring calls "not a weaker
+#: answer than the scope — it is a WRONG one, and it fails silently". The
+#: direction is `#9192`'s: NOT READY (and one warning naming the declaration),
+#: because a check that cannot be applied to this tenant must never report that
+#: tenant as complete. The consequence is stated where it bites: an armed
+#: MULTI-TENANT deployment keeps the graph branch until the journal can be
+#: resolved PER SCOPE rather than from the environment (#13353).
 RECORD_JOURNAL_ENV = "TORTOISE_RECORD_JOURNAL"
 
 #: How long one tenant's readiness verdict is trusted. A coverage read is one
@@ -543,10 +557,32 @@ def journal_ready(scope: _Scope, *, record_dsn: str | None = None,
     it runs on the REQUEST's thread *before* :func:`searcher` returns; an
     unbounded read here is the `#11691` defect re-opened one function above the
     fix for it. See :func:`_measure_readiness`.
+
+    ⛔ AND THE DECLARATION MUST BE APPLICABLE TO THIS TENANT, or it is not
+    applied (the `#9192` rule, ENFORCED here rather than cited): a
+    process-global journal path describes ONE tenant, so on a process that did
+    not declare single tenancy
+    (:func:`tortoise.record_writer.single_tenant_declared`) the comparison would
+    be one tenant's journal against another tenant's rows. That is not a weaker
+    answer than the scope, it is a WRONG one, and it fails silently — so this
+    returns ``False`` with ONE warning naming `TORTOISE_RECORD_SINGLE_TENANT`.
+    The graph branch answers instead, which is `#11642` P1's correct answer,
+    until the journal can be resolved per scope (#13353).
+
+    ⛔ THE COUNT COMES FROM `EventLog.position_readonly()`, never from
+    `EventLog.position()` (#13331 review F2): the latter takes the append lock
+    and opens the journal for WRITING, so a read-shaped call on the request
+    thread could suppress the `seq` of a concurrent live write for 30 s (the
+    `_FLOCK_UNHEALTHY` amplification) and would need write permission on a
+    journal a reader is legitimately mounting read-only. A journal path that
+    does not EXIST is "not measured" (``None``), never "0 records, so nothing is
+    missing" — the false PASS of review F3/B.
     """
     if not os.environ.get(RECORD_JOURNAL_ENV):
         _warn_readiness_undeclared()
         return True
+    if not _journal_declaration_applies():
+        return False
     clock = time.monotonic() if now is None else now
     key = _readiness_key(scope, record_dsn)
     with _READINESS_LOCK:
@@ -581,6 +617,59 @@ def _warn_readiness_undeclared() -> None:
         ARMING_ENV, RECORD_JOURNAL_ENV)
 
 
+def _journal_declaration_applies() -> bool:
+    """May this process's journal declaration be applied to a tenant at all?
+
+    ⛔ ONE PATH, PROCESS-GLOBAL, THEREFORE ONE TENANT (#9192). The env pair
+    `TORTOISE_RECORD_ORG`/`TORTOISE_RECORD_GRAPH` is gated exactly this way by
+    :func:`tortoise.record_writer.single_tenant_declared`, whose docstring states
+    the reason verbatim: *"it can only be correct where the process serves one
+    graph … on a process serving several tenants it is not a weaker answer than
+    the scope — it is a WRONG one, and it fails silently."* `journal_ready`
+    measures THIS tenant's rows against the journal the declaration names, so a
+    declaration that does not apply to this tenant must not produce a verdict
+    about it: ``False`` keeps the graph branch (a correct answer, `#11642` P1),
+    while ``True`` would be a false PASS over a tenant nobody measured.
+
+    Unset AND unimportable are the same answer (not applicable): this runs on
+    the SEARCH path, where a missing arming module is not worth a raise.
+    """
+    try:
+        from .record_writer import single_tenant_declared
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable arming module is "unarmed"
+        return False
+    try:
+        applies = bool(single_tenant_declared())
+    except Exception:  # noqa: BLE001, RUF100 — a raising declaration is not a declaration
+        return False
+    if not applies:
+        _warn_readiness_multitenant()
+    return applies
+
+
+#: One warning per process for the multi-tenant refusal, like the undeclared one.
+_WARNED_MULTITENANT = False
+
+
+def _warn_readiness_multitenant() -> None:
+    global _WARNED_MULTITENANT
+    with _WARN_LOCK:
+        if _WARNED_MULTITENANT:
+            return
+        _WARNED_MULTITENANT = True
+    from .record_writer import RECORD_SINGLE_TENANT_ENV
+
+    logging.getLogger(LOG_NAME).warning(
+        "record dense leg: %s names ONE journal, but this process did not "
+        "declare single tenancy (%s is unset), so the per-tenant backfill "
+        "coverage of EACH tenant cannot be measured — comparing one tenant's "
+        "journal against another tenant's rows is a wrong answer, not a weak "
+        "one (#9192). Every tenant on this process keeps the graph branch, "
+        "which is a correct answer, until the journal is declared per tenant "
+        "(#13353); set %s=1 ONLY in a process that serves one graph",
+        RECORD_JOURNAL_ENV, RECORD_SINGLE_TENANT_ENV, RECORD_SINGLE_TENANT_ENV)
+
+
 def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
                        timeout_ms: int | None = None) -> bool:
     """The coverage read behind :func:`journal_ready`. Never raises.
@@ -606,16 +695,35 @@ def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
       statement (``_FIRST_GAP_SQL``) whose answer this function never reads —
       readiness asks only ``unprojected`` and ``present``. Issuing it would
       spend the read's budget on a fact nobody consumes.
+
+    ⛔ AND THE JOURNAL IS COUNTED READ-ONLY (#13331 review F2).
+    `EventLog.position_readonly()` is `position()` without its side effects: no
+    append lock (so a wedged peer cannot park this call, and a timeout here can
+    never stamp the path `_FLOCK_UNHEALTHY` and suppress a concurrent writer's
+    `seq` for 30 s), no ``a+b`` open (so a journal mounted READ-ONLY is
+    countable instead of an endless `OSError`), and ``None`` for a path it could
+    not count — which is this function's ``False``, not the ``0`` that would read
+    as "the journal is empty, so the record holds all of it" (review F3/B).
     """
     path = os.environ.get(RECORD_JOURNAL_ENV)
     try:
         from .log import EventLog
 
-        enumerated = EventLog(path).position()
+        enumerated = EventLog(path).position_readonly()
     except Exception as exc:
         logging.getLogger(LOG_NAME).debug(
             "record dense leg: the declared journal %r could not be counted "
             "(%s) — keeping the graph branch", path, type(exc).__name__)
+        return False
+    if enumerated is None:
+        # ⛔ NOT ZERO (#13331 review F3/B). A declared path that does not exist
+        # is the shape a mistyped value or an unmounted volume takes, and a `0`
+        # here makes `unprojected` 0 for any tenant whose record holds a row —
+        # i.e. the gate reports a journal it never counted as fully projected.
+        logging.getLogger(LOG_NAME).debug(
+            "record dense leg: the declared journal %r does not exist (or is "
+            "not a readable regular file), so this tenant's coverage is "
+            "UNMEASURED — keeping the graph branch", path)
         return False
     conn = None
     try:

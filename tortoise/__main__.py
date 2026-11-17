@@ -843,17 +843,36 @@ def _cmd_record_reconcile(args):
         # holds? A journal position the record never consumed is invisible to the
         # record↔cache comparison (both sides can agree perfectly while a whole
         # write is missing), so it is named here rather than reasoned about. The
-        # journal's own enumeration is `EventLog.position()` — the SAME reader a
-        # replay numbers against — and the record side is
+        # journal's own enumeration is `EventLog.position_readonly()` — the SAME
+        # reader a replay numbers against, minus `position()`'s side effects (the
+        # append lock and the write fd, which a measurement verb must not impose
+        # on the writer's journal: #13331 review F2) — and the record side is
         # `record_projection.journal_coverage`, the reader the live chokepoint and
         # the dense-leg gate share.
+        #
+        # ⛔ A JOURNAL THAT CANNOT BE COUNTED IS NOT A CLEAN JOURNAL (#13331
+        # review F3/B). `position()` answers `0` for a missing path, and a `0`
+        # here makes `unprojected` 0 for any tenant whose record holds a row — so
+        # `record-reconcile --journal /typo/events.jsonl` printed the unqualified
+        # `✓ record == cache` and exited 0, on a tenant that might be far behind.
+        # The verb also promises `1` is never returned, and an unreadable path
+        # used to escape as a traceback; both shapes are the "no verdict was
+        # produced" answer this verb already has.
         journal_leg = None
         if args.journal:
             from tortoise.log import EventLog
             from tortoise.record_projection import journal_coverage as _coverage
 
             log = EventLog(args.journal)
-            enumerated = log.position()
+            enumerated = log.position_readonly()
+            if enumerated is None:
+                raise ReconciliationUnavailable(
+                    f"the journal at {args.journal!r} could not be COUNTED (it "
+                    f"does not exist, is not a regular file, or could not be "
+                    f"read) — so the journal leg is UNKNOWN, not clean. A record "
+                    f"short of its journal reads as complete when the journal "
+                    f"that would show the lag cannot be counted (#13331). Check "
+                    f"the --journal path and the file's permissions")
             journal_leg = _coverage(
                 conn, org_id=args.org, graph_id=args.graph,
                 enumerated=enumerated)

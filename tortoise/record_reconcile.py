@@ -675,6 +675,11 @@ class RecordReconcileResult:
         (:meth:`verdict`); it must never reach the WIRE as a measured number,
         which is why :meth:`as_dict` — not this property — is where the two
         states are separated (#13331 review F2).
+
+        ⚠️ A leg that was SUPPLIED and could not be measured
+        (``journal.unprojected is None``) also answers ``0`` here, for the same
+        totality reason — but it is not clean: :meth:`verdict` returns
+        ``unanswerable`` for it, so the zero never becomes a pass.
         """
         if self.journal is None:
             return 0
@@ -700,11 +705,22 @@ class RecordReconcileResult:
         a cache divergence: the cache divergence is the more specific finding
         (a second writer, a failed fold), and an operator chasing a missing
         journal position must not be told the cache is fine when it is not.
+
+        ⛔ A JOURNAL LEG THAT WAS ASKED FOR AND COULD NOT BE MEASURED is
+        ``unanswerable``, never ``clean`` (`#5090` Q2). `JournalCoverage`
+        reports ``unprojected=None`` when the caller supplied no enumeration
+        (an unreadable journal, a path that is not there — #13331 review
+        F3/B), and a ``clean`` verdict over a leg nobody could measure is the
+        vacuous green this module refuses everywhere else: the operator is told
+        the record holds every journal position when the count that would have
+        shown a lag never ran.
         """
         if self.divergent > 0:
             return VERDICT_DIVERGENT
         if self.unprojected_journal > 0:
             return VERDICT_UNPROJECTED
+        if self.journal is not None and self.journal.unprojected is None:
+            return VERDICT_UNANSWERABLE
         if self.checked == 0:
             return VERDICT_UNANSWERABLE
         return VERDICT_CLEAN
@@ -719,14 +735,18 @@ class RecordReconcileResult:
             "declaration_coverage": self.declaration.coverage,
             "declaration_source": self.declaration.source,
             "journal": None if self.journal is None else self.journal.as_dict(),
-            # ⛔ NOT `self.unprojected_journal`: that property answers ``0`` for a
-            # leg that never ran (so `verdict()` stays total), and a ``0`` on the
-            # wire is a MEASURED zero — `python -m tortoise record-reconcile
-            # --json` without `--journal` would then tell a scheduler the record
-            # holds the whole journal. "not measured" and "measured none" are
-            # reported differently, which is the `#5090` Q2 rule this module
-            # applies everywhere else (`#13331` review F2).
+            # ⛔ NOT `self.unprojected_journal` alone: that property answers ``0``
+            # for a leg that never ran (so `verdict()` stays total), and a ``0``
+            # on the wire is a MEASURED zero — `python -m tortoise
+            # record-reconcile --json` without `--journal` would then tell a
+            # scheduler the record holds the whole journal. The same holds for a
+            # leg that RAN but could not count the journal (`journal.unprojected`
+            # is ``None``, #13331 review F3/B): its count is unknown too, not 0.
+            # "not measured" and "measured none" are reported differently, which
+            # is the `#5090` Q2 rule this module applies everywhere else
+            # (`#13331` review F2).
             "unprojected_journal": (None if self.journal is None
+                                    or self.journal.unprojected is None
                                     else self.unprojected_journal),
         })
         return payload
@@ -1019,7 +1039,16 @@ def log_result(result: RecordReconcileResult,
                  f"property occurrence(s) not compared ({names}{more})]")
     verdict = result.verdict()
     line = f"{line} verdict={verdict}"
-    if result.journal is not None and result.unprojected_journal:
+    if result.journal is not None and result.journal.unprojected is None:
+        # #13331 review F3/B — the leg RAN and the journal could not be
+        # counted. Saying nothing here is the failure the whole leg exists to
+        # prevent: the default line would be the unqualified `record == cache`
+        # with `verdict=unanswerable` trailing it, and `record-reconcile
+        # --journal <typo>` would read as a clean pass.
+        line += (" [journal: the declared journal could NOT be counted, so the "
+                 "leg is UNKNOWN — not clean; check the path exists and holds "
+                 "the records a replay reads, then re-run]")
+    elif result.journal is not None and result.unprojected_journal:
         # #13331 — the THIRD leg, rendered beside the cache comparison so a reader
         # cannot mistake a coherent cache for a coherent pair. The repair is named
         # because it is a single idempotent command, not an investigation.
