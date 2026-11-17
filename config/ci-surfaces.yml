@@ -7429,6 +7429,19 @@ surfaces:
   # not `carve_out` either: it builds its own engine (`TortoiseSDK(str(tmp_path
   # / "t12586.db"))`), so it tolerates the URI redirect rather than needing it.
   - test_12586_update_point_promote_flag.py
+  # #13034: "is this still served as current?" — the two-axis terminal predicate
+  # (`isClosed` + the `terminal` pipeline slot, alongside the lifecycle word) and
+  # the five readers that must ask it. `core` is the sufficient surface and it is
+  # the one its own diff resolves to: every subject of the file falls through the
+  # `SOURCE_PATTERNS` — `tortoise/live.py`, `tortoise/pipeline.py` and
+  # `tortoise/derived_invalidation.py` match no entry (verified by resolving each
+  # through `ci_selection.SOURCE_PATTERNS`), and `tortoise/sdk.py`, which the file
+  # also imports, is in `SHARED_MODULES` and forces the FULL matrix on its own.
+  # ⛔ THE ROW IS THE WHOLE FIX: the file exists in main and was never classified,
+  # so `ci_selection.py --integrity` failed closed on EVERY PR until it was added
+  # (the #1349/#3332 silent-drop class, in its blocking form — an unclassified
+  # file is also a file `select()` never runs).
+  - test_13034_currency_rule_reads_position.py
   - test_uri_env_mutations_declared.py
   # #8066: the served-skill relay ratchet. Its SUBJECT is every
   # `tests/**/*.py`, so it must be registered on every surface such a file can
