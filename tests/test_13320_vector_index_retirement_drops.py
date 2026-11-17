@@ -302,6 +302,10 @@ class _EngineLikeGraph:
     * ``"pre-reshaped"`` — the FIRST (gate) read already answers with rows whose
       ``types`` cell is not a mapping: a catalogue that is present but
       unparseable (#13330 review P2 — this used to read as "no index here").
+    * ``"foreign-prop"`` — the catalogue holds TWO ``Point`` VECTOR indexes, on
+      ``embedding`` and on ``other_prop``, and the DROP removes only the property
+      the statement names. This is the lane where a LABEL-grained verdict reports
+      a successful removal as a survivor (#13330 review P3).
 
     ⛔ The generic forms are REJECTED with the engine's own message rather than
     accepted. A fake that accepts any statement mentioning ``embedding`` is how
@@ -317,6 +321,8 @@ class _EngineLikeGraph:
                            "NODE", "OPERATIONAL", "")]
         else:
             self._rows = [_catalogue_row("Point", "embedding", "VECTOR")]
+            if drop_accepts == "foreign-prop":
+                self._rows.append(_catalogue_row("Point", "other_prop", "VECTOR"))
 
     def _drop_row(self):
         self._rows = [
@@ -343,6 +349,16 @@ class _EngineLikeGraph:
                 # `types` cell, i.e. "returned but not interpretable".
                 self._rows = [("Point", ["embedding"], "not-a-dict", 0, 0, 0,
                                "NODE", "OPERATIONAL", "")]
+                return _Result([])
+            if self.drop_accepts == "foreign-prop":
+                # The engine drops the ONE property the statement names — a
+                # VECTOR index on another property is none of its business.
+                _named = re.search(r"ON \(\w+\.(\w+)\)", cypher, re.I)
+                _prop = _named.group(1) if _named else "embedding"
+                self._rows = [
+                    r for r in self._rows
+                    if not (str(r[0]) == "Point" and _prop in r[2])
+                ]
                 return _Result([])
             self._drop_row()
             return _Result([])
@@ -712,6 +728,56 @@ def test_a_DROP_that_RAISES_after_applying_is_MEASURED_not_assumed(
     assert not _retirement_warnings(caplog), (
         "the index WAS removed, but the sweep reported a survivor on stale "
         f"rows: {_retirement_warnings(caplog)}")
+    # ⛔ #13330 review P3: `_wrote_index` is an ATTEMPT here, so this arm is
+    # reachable with NO statement having RETURNED. The line's whole purpose is
+    # that an operator need not reconstruct what happened, so it must not print
+    # `with None` — and it must name the state it is actually in.
+    dropped = [r.getMessage() for r in caplog.records
+               if r.levelno == logging.INFO
+               and "dropped the in-graph" in r.getMessage()]
+    assert dropped, (
+        "the removal this lane measured was not reported — the operator has no "
+        "artifact for what the sweep did")
+    assert "with None" not in dropped[0], (
+        f"the removal line credits the drop to `None`: {dropped[0]!r}")
+    assert "raised after the DDL had run" in dropped[0], (
+        "the line must say the statement never RETURNED while the DDL applied — "
+        f"that is exactly what this lane measures: {dropped[0]!r}")
+
+
+def test_a_successful_removal_beside_a_FOREIGN_vector_index_is_not_a_survivor(
+        monkeypatch, caplog):
+    """The verdict is a claim about `Point.embedding`, not about `Point`.
+
+    #13330 review P3: only the GATE half of the property grain was pinned. A
+    verdict that treats ANY `Point` VECTOR index as the embedding one passes
+    every other pin — and then a store whose `Point.embedding` index was
+    successfully removed, while a second `Point` VECTOR index sits on another
+    property, is reported as a SURVIVOR: the operator is told arming did not take
+    effect about the sweep that did exactly its job.
+    """
+    _arm(monkeypatch)
+    graph = _EngineLikeGraph(drop_accepts="foreign-prop")
+    proj = _bare(graph)
+
+    with caplog.at_level(logging.DEBUG):
+        proj._ensure_indexes()
+
+    # The premise, asserted rather than assumed: only `embedding` went.
+    remaining = [str(r[2]) for r in graph._rows if str(r[0]) == "Point"]
+    assert remaining and all("embedding" not in cell for cell in remaining), (
+        "this pin needs the sweep to have removed `Point.embedding` and left the "
+        f"foreign VECTOR index alone; catalogue now: {remaining!r}")
+    assert any("other_prop" in cell for cell in remaining), (
+        "the foreign index vanished from the fake, so nothing is left that a "
+        f"label-grained verdict could mistake for the embedding one: {remaining!r}")
+
+    assert not _retirement_warnings(caplog), (
+        "a successful removal beside a FOREIGN `Point` VECTOR index was reported "
+        f"as a survivor: {_retirement_warnings(caplog)}")
+    assert "confirmed absent from the post-drop catalogue" in caplog.text, (
+        "the removal was not reported as MEASURED — the verdict read the label "
+        "instead of the property")
 
 
 def test_a_row_that_did_not_parse_withholds_the_confirmed_absence(
@@ -737,6 +803,14 @@ def test_a_row_that_did_not_parse_withholds_the_confirmed_absence(
     assert _retirement_warnings(caplog), (
         "the unconfirmable removal was silent — a reshape this store cannot read "
         "must be reported, not assumed absent")
+    # ⛔ #13330 review P3: the sweep may well have DROPPED the index here, so the
+    # line must not assert an arming outcome nothing measured.
+    joined = " ".join(_retirement_warnings(caplog))
+    assert "did NOT take effect" not in joined, (
+        "this sweep may have removed the index; whether arming took effect is NOT "
+        f"measured here and must not be asserted: {joined!r}")
+    assert "NOT measured by this sweep" in joined, (
+        f"the line must say what it does not know: {joined!r}")
 
 
 def test_an_ANSWERED_but_unparseable_catalogue_is_not_a_measurement_of_absence(

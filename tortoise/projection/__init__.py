@@ -708,8 +708,17 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 #: The sweep runs on the hosted PER-REQUEST path, and a survivor is a PERMANENT
 #: state (an engine that refuses the drop keeps refusing it), so an unlatched
 #: line would put a WARNING on the stream at request rate for the life of the
-#: deployment — how a real alarm stops being read. Latched on `(endpoint, graph)`
-#: with the same fallback rule, so a different store still gets its own warning.
+#: deployment — how a real alarm stops being read. Latched on
+#: `(endpoint, graph, KIND)` with the same fallback rule, so a different store
+#: still gets its own warning.
+#: ⛔ `KIND` is not decoration (#13330 review P1). The three unable-to-retire
+#: arms — `catalogue-unreadable`, `removal-unconfirmed` and `index-survived` —
+#: share this REGISTER but not one BUCKET: each kind reports at most once per
+#: store per process. With one bucket per store, a TRANSIENT unreadable catalogue
+#: spent the budget, and the sweep that LATER measured the index really present
+#: (the permanent state, and the one line this work exists to guarantee) reported
+#: nothing for the life of the process. The outcome is shared; the diagnosis is
+#: not, and the stronger claim must never be silenced by the weaker one.
 #: ⚠️ Only the LINE is latched: the sweep re-measures the catalogue every setup,
 #: so a store that becomes clean stops warning.
 _VECTOR_INDEX_DROP_FAILED_WARNED: set[tuple] = set()
@@ -21846,7 +21855,15 @@ class FalkorProjection(
                     "measured (436.5 s at 20k nodes, 191.8 s tuned, instance "
                     "blocked) — for dumps taken AFTER this sweep; a dump taken "
                     "before it still carries the index",
-                    self._graph_name, _dropped_with)
+                    self._graph_name,
+                    # ⛔ NOT `%r` of `None` (#13330 review P3): `_wrote_index` is
+                    # an ATTEMPT, so this arm is reachable with no statement
+                    # having RETURNED — every candidate raised, and one of them
+                    # had already applied the DDL. Printing `with None` in the
+                    # line whose whole job is "the operator must not have to
+                    # reconstruct what happened" defeats it.
+                    _dropped_with or (
+                        "(a candidate DROP that raised after the DDL had run)"))
             else:
                 # ⛔ THE SURVIVOR, OR THE UNCONFIRMED ONE. Both leave the store in
                 # the state #13320 was filed on (paying for the index AND the
@@ -21890,14 +21907,27 @@ class FalkorProjection(
                 _refusals = "; ".join(
                     f"{stmt!r}: {err}" for stmt, err in _drop_refusals
                 ) or "none refused"
+                # ⛔ THE COST/ARMING SENTENCE IS ALSO A CLAIM (#13330 review P3).
+                # "The store keeps paying … so arming did NOT take effect" is
+                # MEASURED only on the survivor arm. On an UNCONFIRMED arm nothing
+                # measured it — and on the unparseable-row lane the sweep may well
+                # have dropped the index — so the line must say what it does not
+                # know instead of asserting the outcome. It sits here, beside
+                # `_verdict`, because it is the second half of the same diagnosis.
+                _cost_clause = (
+                    "The store keeps paying for the in-graph index AND the "
+                    "pgvector copy, so arming did NOT take effect here"
+                    if _still_indexed is not None
+                    else "Whether it is still paying for the in-graph index "
+                    "AND the pgvector copy is NOT measured by this sweep, so "
+                    "this line cannot say whether arming took effect here")
                 if self._retirement_failure_is_news(
                         "removal-unconfirmed" if _still_indexed is None
                         else "index-survived"):
                     _log.warning(
                         "#13320: the in-graph Point.embedding vector index on %s "
-                        "%s — %s. Statements refused: %s. The store keeps paying "
-                        "for the in-graph index AND the pgvector copy, so arming "
-                        "did NOT take effect here. Do not hand-run DROP INDEX on "
+                        "%s — %s. Statements refused: %s. %s. Do not hand-run "
+                        "DROP INDEX on "
                         "production to \"finish\" it: the statement that removes "
                         "a VECTOR index is `DROP VECTOR INDEX FOR (p:Point) ON "
                         "(p.embedding)` (index_catalogue."
@@ -21906,7 +21936,7 @@ class FalkorProjection(
                         "this engine implements for a VECTOR index — report it "
                         "rather than masking it",
                         self._graph_name, _verdict,
-                        _what_the_engine_did, _refusals)
+                        _what_the_engine_did, _refusals, _cost_clause)
 
     def _retirement_failure_is_news(self, kind: str) -> bool:
         """Is this store's FIRST report of THIS kind of failure? (#13320)
