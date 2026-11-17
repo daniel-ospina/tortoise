@@ -112,6 +112,35 @@ BUILTIN_CONNECTOR_FOLDS: dict[str, str] = {
 #: issue has no successor, so its fold target would have been `deprecated` and
 #: an old issue closed at import would have been retired with no way back.
 #: The reopen path is exactly ``github.issue.reopened`` below.
+#:
+#: ⛔ #13143 review finding 5 (P3) — THE READER-SIDE CONSEQUENCE, STATED AND
+#: MEASURED (it was previously silent). ``live._terminal_excluded`` composes the
+#: position axis unconditionally (#13034), so a row these folds move to ``done`` /
+#: ``cancelled`` now reads as **ENDED** on every recall/search leg, where
+#: pre-S0's ``status='completed'`` was NOT a terminal word
+#: (``commit_ops.OBJECT_TERMINAL_STATUSES`` never contained it) and the row
+#: stayed current. So a ``pm:cardCompleted`` / ``github.issue.closed`` folded
+#: after S0 disappears from ``recall_state`` and the search legs that read the
+#: same predicate — a behaviour change this slice did not previously announce.
+#:
+#: That is the RECORDED DECISION, not an accident: plan §6
+#: (``docs/plans/2026-11-15-state-lifecycle-and-pipelines.md``) rules *"the
+#: state is the determinant; the call is the option"* — whether a record ENDED
+#: is answered by its lifecycle word **or the position axis**, and a read may
+#: choose *whether* it wants ended records, never which words mean ended. The
+#: plan's own terminal-stage row (§10) is what puts these folds on that axis.
+#: ⛔ Do NOT "fix" this by exempting the fold population in a reader: the
+#: position axis is deliberately NOT part of the reader's family seam, and
+#: ``live._terminal_excluded`` says so — *"it may not opt out of the position
+#: axis, which is why there is no ``include_position_axis`` switch to wire by
+#: mistake"* (#13034, design §6). Making these rows stay current would make a
+#: filter disagree with the state, which is the one thing §6 forbids; the route
+#: to a different answer is a reopen of #13034, not a reader carve-out.
+#:
+#: Pinned so the disclosure cannot drift back to silence:
+#: ``tests/test_status_folds_2729.py::test_a_folded_terminal_stage_reads_as_ended
+#: _on_the_currency_leg`` asserts BOTH halves — the fold lands terminal, and the
+#: shared currency predicate then excludes the row.
 BUILTIN_CONNECTOR_REOPENS: frozenset[str] = frozenset({"github.issue.reopened"})
 
 #: The declared pipeline the built-in folds advance — the CORE default (a

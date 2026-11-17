@@ -623,6 +623,65 @@ class TestFoldBehaviour:
         finally:
             sdk.close()
 
+    def test_a_folded_terminal_stage_reads_as_ended_on_the_currency_leg(self):
+        """⛔ #13143 review finding 5 (P3) — the reader-side effect, PINNED.
+
+        This was silent, and it is a real behaviour change: pre-S0 the closing
+        folds wrote ``status='completed'``, which is **not** in
+        ``commit_ops.OBJECT_TERMINAL_STATUSES``, so the row stayed CURRENT and
+        kept appearing in recall/search. S0 moves them to a terminal STAGE, and
+        ``live._terminal_excluded`` composes the position axis unconditionally
+        (#13034), so a closed card/issue now reads as ENDED on every leg that
+        reads that predicate.
+
+        That is the RECORDED DECISION, not a regression to "fix" in a reader:
+        plan §6 rules *"the state is the determinant; the call is the option"* —
+        whether a record ENDED is answered by its lifecycle word **or the
+        position axis**, and a read may choose *whether* it wants ended records,
+        never which words mean ended. ``live._terminal_excluded`` states the
+        other half: the position axis "may not opt out", which is why there is
+        no ``include_position_axis`` switch to wire by mistake (#13034, design
+        §6). Exempting this population would make a filter disagree with the
+        state — the route to a different answer is a reopen of #13034, not a
+        reader carve-out.
+
+        The test exists so the disclosure cannot drift back to silence: if a
+        later change stops the fold landing terminal, or stops the currency
+        predicate reading the slot, this reds and the claim is re-examined
+        instead of quietly becoming false.
+        """
+        from tortoise.live import _terminal_excluded
+
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "CARD-END", objectKind="dev:issue")
+            g = sdk._get_proj().g
+            live_pred = _terminal_excluded("o.status",
+                                           include_outdated_flag=False)
+            before = g.query(
+                f"MATCH (o:Object {{name:'CARD-END'}}) WHERE {live_pred} "
+                f"RETURN count(o)").result_set[0][0]
+            assert before == 1, "the fresh card must read as CURRENT"
+
+            sdk.create_event("done", "pm:cardCompleted", object="CARD-END")
+            assert _object_stage(sdk, "CARD-END") == "done"
+            assert _object_status(sdk, "CARD-END") is None
+
+            # The disclosed consequence, measured: the currency leg no longer
+            # sees the row, on the POSITION axis alone (the status is untouched).
+            after = g.query(
+                f"MATCH (o:Object {{name:'CARD-END'}}) WHERE {live_pred} "
+                f"RETURN count(o)").result_set[0][0]
+            assert after == 0, (
+                "a terminal stage no longer reads as ENDED — the disclosure "
+                "and plan §6 are now false; re-examine, do not silently accept")
+            slot = g.query(
+                "MATCH (o:Object {name:'CARD-END'}) RETURN o.pipelineSlot"
+            ).result_set[0][0]
+            assert slot == "terminal", slot
+        finally:
+            sdk.close()
+
     def test_declared_fold_never_resurrects_a_terminal_object(self):
         """#2164/#3309 guard carried through the declared path too."""
         from _node_ids import node_id
