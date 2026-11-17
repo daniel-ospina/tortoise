@@ -644,6 +644,33 @@ def test_status_text_says_UNKNOWN_rather_than_a_false_zero(monkeypatch, capsys):
     assert "CUT OVER" in out
 
 
+def test_status_does_not_report_a_completion_over_a_DIFFERENT_journal(
+        monkeypatch, capsys):
+    """⛔ ENUMERATED arm, positions past the journal's length — the P2 residual.
+
+    `plan --from-checkpoint` REFUSES this input by name ("they are not the same
+    journal"). `status` clamped `39 - 100` to 0 and printed
+    `fully_consumed: true` — asserting completion about two stores that hold
+    different histories. Two coordinate systems must not be reconciled into
+    "done" by arithmetic on either arm.
+    """
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=100, present=100,
+                                                first_gap=None, min_seq=1))
+    rc = main(["status", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "not the same journal" in out
+    assert "events remaining: 0" not in out
+    assert "fully_consumed: true" not in out
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
+               "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["events_remaining"] is None
+    assert payload["fully_consumed"] is None
+
+
 def test_apply_REFUSES_allocate_because_it_would_mint_fresh_ordinals(
         monkeypatch, capsys):
     """The allocation arm cannot carry a historic fold: it issues NEW positions."""

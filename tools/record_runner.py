@@ -1007,7 +1007,22 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
     # record holding 3 ordinals and NONE of this journal's records. The
     # remainder is only a number on the enumerated arm; on the allocated arm the
     # honest answer is that the fold does not apply, which `plan` already says.
-    remaining = None if allocated else len(journal.records) - (cp.next_seq - 1)
+    #
+    # ⛔ AND THE ENUMERATED ARM HAS THE SAME HOLE ONE STEP WIDER (review P2): a
+    # record whose positions run PAST this journal's length is a DIFFERENT
+    # journal — `plan` refuses that input by name — and clamping the subtraction
+    # with `max(0, …)` turned it into a completion claim. Two stores holding
+    # different histories must not be reconciled into "done" by arithmetic.
+    mismatch = None
+    if allocated:
+        remaining = None
+    elif cp.next_seq - 1 > len(journal.records):
+        remaining = None
+        mismatch = (f"the record holds positions up to {cp.next_seq - 1} but "
+                    f"the journal has only {len(journal.records)} records — "
+                    f"they are not the same journal")
+    else:
+        remaining = len(journal.records) - (cp.next_seq - 1)
     payload = {
         "verb": "status",
         "org_id": args.org_id,
@@ -1018,8 +1033,9 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
                        "first_gap": cp.first_gap, "next_seq": cp.next_seq,
                        "min_seq": cp.min_seq, "contiguous": cp.contiguous},
         "cursor": None if cursor is None else {"seq": cursor[0], "mode": cursor[1]},
-        "events_remaining": None if allocated else max(0, remaining),
-        "fully_consumed": None if allocated else (remaining <= 0 and cp.contiguous),
+        "events_remaining": None if remaining is None else max(0, remaining),
+        "fully_consumed": (None if remaining is None
+                           else (remaining <= 0 and cp.contiguous)),
     }
     text = "\n".join([
         f"journal: {journal.path} — {len(journal.records)} records",
@@ -1028,6 +1044,7 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
         ("events remaining: unknown — this graph is CUT OVER, so its record's "
          "positions are the allocator's and not this journal's; the fold does "
          "not apply" if allocated
+         else f"events remaining: unknown — {mismatch}" if mismatch is not None
          else f"events remaining: {max(0, remaining)}"),
         "cutover: " + ("none (positions are the journal's)" if cursor is None
                        else f"cursor present (seq {cursor[0]}, mode {cursor[1]})"),
