@@ -194,7 +194,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    the capture path at `tortoise/sdk.py:21786`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
    insertion then moved both, and `#11835`'s seam stamp moved them once more; both now read
-   `:21506`.)  <!-- Re-derived again at the merge of `#13143` with this branch: `#13143`'s tree
+   `:21786`.)  <!-- Re-derived again at the merge of `#13143` with this branch: `#13143`'s tree
    had this writer at `21336`, and merging this branch kept ITS `sdk.py` numbering (+29 lines above
    this writer), so the prose cite, the bare parenthetical below and the `sed` below were all
    re-derived together off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. The bare
@@ -782,7 +782,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:15123`) that derives the doc's cite, two are the
+                                                          # (`:15112`) that derives the doc's cite, two are the
                                                           # finder's own conditions (#12569), and the fourth is
                                                           # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
@@ -841,7 +841,7 @@ grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml
 # *the writer landed, the corpus was not re-measured* (and no rollup query exists, §1).
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
-sed -n '21506p' tortoise/sdk.py                             # the call (`references`'s writer)
+sed -n '21786p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching, and now no longer empty: exclude this record, and the hits are the
 # BUNDLE's OWN registration of the A1 row (#10982 landed it AFTER this record was written),
