@@ -2068,6 +2068,15 @@ def _ledger_violations(rows) -> list[str]:
     for doc, anchor, required, forbidden in rows:
         spellings = ((forbidden,) if isinstance(forbidden, (str, re.Pattern))
                      else tuple(forbidden))
+        # ⛔ ALWAYS, and independently of `required`: a row whose `required` is `None`
+        # still binds the claim, so DELETING the claim (or replacing it with its own
+        # inversion) must red. Without this, the five anchor-only rows would have
+        # been loosened to "nothing is checked unless the inverted spelling appears"
+        # — the same regressing-pin class round 5 caught (measured: removing this
+        # line turned three inversion mutants GREEN).
+        if anchor not in doc:
+            bad.append(f"claim no longer stated: {anchor!r} is absent from the record")
+            continue
         # ⛔ A `required` that is a substring of its own anchor satisfies itself: the
         # direction half of five rows was vacuous, so only the anchor check was
         # load-bearing (#13126 round 12, F4). Such a row states `None` — the anchor
@@ -2252,6 +2261,15 @@ def test_the_claim_ledger_refuses_inversions_and_spares_correct_english():
          "and a `fallback` entry **ran**",
          "and a `fallback` entry **reached**",
          True),
+        ("the OTHER rejected leg wording", "readme",
+         "and a `fallback` entry **ran**",
+         "and a `fallback` entry **serving**",
+         True),
+        # the anti-vacuity half still bites: the claim's predicate cannot be deleted
+        ("the claim itself deleted", "readme",
+         "equal to the eviction on `:Object`, and on `:Point`",
+         "the same bound, and on `:Point`",
+         True),
         ("CAPS NEGATION is not dismissed", "arch",
          "§7 is therefore **reopened**",
          "§7 is therefore **NOT reopened**",
@@ -2279,6 +2297,16 @@ def test_the_claim_ledger_refuses_inversions_and_spares_correct_english():
          "and a `fallback` entry **ran**",
          "and a `fallback` entry **executed**",
          False),
+        # ── anchor-only rows still bind their claim (the loosening this repair
+        # nearly shipped: `required=None` must not mean "nothing is checked") ──
+        ("anchor-only claim deleted", "readme",
+         "appear in no module of the tree",
+         "appear in several modules of the tree",
+         True),
+        ("anchor-only claim inverted in place", "arch",
+         "the record does not serve set-shaped reads",
+         "the record does serve set-shaped reads",
+         True),
         # ── spares: a negation in the PREVIOUS sentence must not launder this one ──
         ("cue does not cross the sentence boundary", "readme",
          "the loss is **equal to the eviction on `:Object`",
