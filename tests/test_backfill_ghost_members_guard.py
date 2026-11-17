@@ -45,6 +45,11 @@ def _install_fake_sdk(monkeypatch, resolved_name: str) -> dict:
         def _get_registry(self):
             return SimpleNamespace(name=resolved_name)
 
+        # #12901 wave 2 PRIVATISED the door this script reaches:
+        # `graph-scripts/backfill_invite_ghost_members.py` now calls
+        # `sdk._sweep_invite_ghost_memberships(dry_run=...)`, so the fake must answer to
+        # that name — else the call raises AttributeError (:105) and the dry-run arm that
+        # reads `sweep_dry_run` REDs; it does not pass vacuously.
         def _sweep_invite_ghost_memberships(self, *, dry_run=False):
             # #12901 wave 2 PRIVATISED the public `sweep_invite_ghost_memberships`
             # (sdk_retired.py); the script under test calls `_sweep_…`, so modelling
