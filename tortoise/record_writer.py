@@ -1802,6 +1802,23 @@ def derived_embedding_columns(
     `required_embedding_dim` threaded through the write seam; that is a follow-up,
     not something this docstring may claim.
 
+    ⛔ COST, DISCLOSED: this derivation encodes the SAME text the graph fold then
+    encodes again (`projection/entities.py::_upsert_object`/`_upsert_subject`
+    call `encode_for_row(name)` for the same row, and `_upsert_document` /
+    `_upsert_event` do the same for theirs), and `encode_for_row` memoises
+    nothing (`tortoise/embeddings.py` — gate check, then `encode_for_store`). So
+    on an ARMED record every live `ObjectRegistered`/`SubjectAdded`/
+    `EventRecorded`/`DocumentCreated` write pays TWO model calls for one text.
+    Sharing one encode across the record writer and the graph fold is a
+    follow-up; nothing here measures or mitigates it, and no cost figure is
+    quoted — the record write path's own per-record cost lives in
+    `docs/evidence/9558-record-write-cost/` and an encode dominates it.
+
+    ⛔ AND WHAT THIS DOES **NOT** REACH: a `record_projection.replay()` that is
+    passed no ``derived`` — `tools/record_runner.py`'s fold is the live example —
+    derives nothing, so it lands `embedding` NULL on every row it folds. The gap
+    is stated in this PR's migration header, not repaired here.
+
     Anything that cannot be derived returns NO columns: an uninstalled embedder
     (`compute_embeddings` answers `None`, #4280), an encode that raised, blank
     text (the graph skips it for the same reason — an empty string earned a junk

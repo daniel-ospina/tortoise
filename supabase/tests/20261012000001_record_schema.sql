@@ -278,8 +278,11 @@ END $$;
 
 -- 4a(ii). The forward migration REPLACES the constraint wholesale, so the OTHER
 -- name it refuses must be pinned on the LIVE constraint (not just via the Python
--- union parse, which cannot see a shrinking re-declaration). `embedding` is not
--- a column on `subject`, so this is a props-tail refusal and nothing else.
+-- union parse, which cannot see a shrinking re-declaration). ⚠️ `embedding` IS a
+-- column on `subject` since `#13220` (`20261117000001`), so this asserts the
+-- props-TAIL refusal specifically: the column exists AND a payload naming the
+-- name in the open `props` bag is still refused (`chk_subject_props_no_derived`'s
+-- `?|` test), which is what keeps the projection the only writer.
 DO $$
 BEGIN
   BEGIN

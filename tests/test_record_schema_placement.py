@@ -1878,10 +1878,26 @@ def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col
     columns = parse_sql_columns()
     assert col in columns.get(table, set()), (
         f"{table}.{col} is the #13220 fingerprint column and must be a record column")
+    # ⛔ The assertion below is scoped to the LAST DDL re-declaration of the
+    # constraint, not to the whole migration union. A union-wide `'embedding' in
+    # text` was satisfied by HISTORY — `20261012000002_record_semantic.sql` and
+    # `20261014000001_record_subject_props_no_derived.sql` both carry the string —
+    # so it stayed green even if a later migration dropped and re-added
+    # `chk_<table>_props_no_derived` WITHOUT the name. And a bare `rfind` on the
+    # constraint NAME is equally wrong: migration headers cite it in PROSE
+    # (this PR's own header does), so the name's last textual occurrence is not a
+    # definition. Match the DDL form only — `ADD CONSTRAINT <name> CHECK` or a
+    # bare `CONSTRAINT <name> CHECK` — and read the LAST one.
     text = "\n".join(p.read_text(encoding="utf-8") for p in MIGRATIONS)
-    assert f"chk_{table}_props_no_derived" in text
-    assert f"'{col}'" in text, (
-        f"the props CHECK must still name '{col}' — the ban is not relaxed by the column")
+    definitions = re.findall(
+        rf"(?:ADD\s+)?CONSTRAINT\s+chk_{table}_props_no_derived\s+CHECK\b(.{{0,400}})",
+        text, re.S | re.I)
+    assert definitions, (
+        f"chk_{table}_props_no_derived has no DDL definition — the props ban has no home")
+    assert f"'{col}'" in definitions[-1], (
+        f"the LAST re-declaration of chk_{table}_props_no_derived no longer names "
+        f"'{col}' — a later migration re-opened the name even though the column now "
+        f"exists. Definition read: {definitions[-1]!r}")
 
 
 def test_props_checks_refuse_the_derived_names():

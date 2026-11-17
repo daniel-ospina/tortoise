@@ -35,28 +35,34 @@
 -- into the open property tail), and `object.status` — the other member of that
 -- refusal — keeps its ban untouched.
 --
--- ⛔ AND WHAT IT DOES **NOT** OVERRIDE (2): `20261109000001_record_embedding_vector.sql`
--- carries a recorded decision — its block "WHY `public.object` AND
--- `public.subject` GET NO VECTOR COLUMN" rejects its own candidate (a), a column
--- on either label, and is marked "stated so the next lane does not re-derive it".
--- Migrations are append-only, so that block stays exactly as it is; this file is
--- the later declaration, and this line is what makes the reversal findable
--- instead of looking like an accident of history:
+-- ── THE SECOND REVERSAL, AND THE ONE RULING THIS FILE DOES **NOT** TOUCH ──
+--
+-- `20261109000001_record_embedding_vector.sql` carries a recorded decision —
+-- its block "WHY `public.object` AND `public.subject` GET NO VECTOR COLUMN"
+-- rejects its own candidate (a), a column on either label, and is marked "stated
+-- so the next lane does not re-derive it". Migrations are append-only, so that
+-- block stays exactly as it is; this file is the later declaration, and this
+-- line is what makes the reversal findable instead of looking like an accident
+-- of history:
 --
 -- **OVERRIDES:** `20261109000001_record_embedding_vector.sql`'s decision that
 -- `object`/`subject` get NO vector column (its candidate (a)) — the owner's
 -- 2026-11-17 ruling spends V3's remaining half and requires both vectors to be
 -- INDEXED in Postgres, and candidate (a)'s stated objection ("nothing would fill
 -- it, so it would be an empty column") is refuted by a WRITER rather than by the
--- objection being wrong: `record_writer.derived_embedding_columns` fills it from
--- the record's own replay, through the same `embeddings.encode_for_row` seam the
--- graph writes call.
--- comment `6781921075`) forbids any pass from removing `:Object`/`:Subject`
--- embeddings **from the graph** or from stopping their write there. This file
--- touches Postgres only. `projection/entities.py::_upsert_object` /
--- `_upsert_subject` still call `encode_for_row(name)` and still write
--- `o.embedding`/`s.embedding`; a change that stopped that would be a REOPEN of
--- #11395, not a consequence of this migration.
+-- objection being wrong: `record_writer.derived_embedding_columns` fills it on
+-- the LIVE write path, through the same `embeddings.encode_for_row` seam the
+-- graph writes call. ⚠️ NOT on a `record_runner` replay — see "THE COLUMN
+-- ARRIVES EMPTY" below, which states exactly which routes fill it and which do
+-- not.
+--
+-- ⛔ AND WHAT THIS FILE DOES **NOT** OVERRIDE: the **2026-11-10 KEEP ruling**
+-- (#11395, comment `6781921075`) forbids any pass from removing
+-- `:Object`/`:Subject` embeddings **from the graph** or from stopping their
+-- write there. This file touches Postgres only. `projection/entities.py::
+-- _upsert_object` / `_upsert_subject` still call `encode_for_row(name)` and
+-- still write `o.embedding`/`s.embedding`; a change that stopped that would be a
+-- REOPEN of #11395, not a consequence of this migration.
 --
 -- ── WHY THIS IS NOT AUTHORITY (the objection §17.5 exists to raise) ─────────
 --
@@ -113,8 +119,36 @@
 -- BEFORE this file land carry no vector: the record is a journal fold, and the
 -- journal never carried one for these labels (`_upsert_object` derives it in the
 -- graph fold and writes it straight onto the node — #7845). The writer added
--- with this file fills every row written AFTER it; a historic backfill is
--- #13210's record runner, not a silent absence. Nothing here claims otherwise.
+-- with this file fills every row written AFTER it ON THE LIVE PATH
+-- (`record_writer.RecordWriter.write` is `derived_embedding_columns`' only
+-- caller). ⛔ AND WHAT DOES **NOT** FILL IT — stated because a previous cut of
+-- this paragraph claimed the opposite and was wrong:
+--
+--   * `record_projection.replay()` does NOT, on its own. `derived=` is a
+--     KEYWORD DEFAULTING TO `None`, and `tools/record_runner.py:761` (the
+--     `record_runner` bulk/backfill fold, #13210) calls `replay(batch, conn,
+--     org_id=…, graph_id=…, start_seq=…, allocate=…)` without it. So a
+--     `record_runner` re-fold of a historic journal lands `object.embedding` /
+--     `subject.embedding` / `event.embedding` NULL and the two HNSW indexes
+--     below stay empty for that population. Threading `derived=` through the
+--     runner (which needs an embedder in a tool that is deliberately
+--     embedder-free) is a FOLLOW-UP, not something this file delivers.
+--   * the same `replay()` divergence is why `mutations_for`'s long-standing
+--     "a replay in journal order builds the same row the live path built"
+--     invariant now holds only WHEN the caller passes `derived=` — that
+--     docstring says so explicitly at HEAD.
+--
+-- ⚠️ AND THE PRICE OF DERIVING IT TWICE, disclosed rather than buried: the
+-- record derives its vector from the same text the graph fold then encodes
+-- (`projection/entities.py::_upsert_object`/`_upsert_subject`/
+-- `_upsert_document`/`_upsert_event`), and `embeddings.encode_for_row` memoises
+-- nothing — so on an ARMED record a live `ObjectRegistered`/`SubjectAdded`/
+-- `EventRecorded`/`DocumentCreated` write now issues TWO model calls for one
+-- text. That is a real cost increase on the capture path (the record write
+-- path's own per-record cost was measured to the millisecond in
+-- `docs/evidence/9558-record-write-cost/`, and an encode is orders of magnitude
+-- above it). It is NOT measured here and NOT mitigated here; sharing one encode
+-- across both writers is a follow-up. This file claims no cost figure.
 -- ============================================================================
 
 -- ── object ──────────────────────────────────────────────────────────────────

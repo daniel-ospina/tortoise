@@ -5871,7 +5871,13 @@ def mutations_for(
     (:func:`_narrative_statements`, #9555) is appended when THIS record
     carries the narrative or the capture counts that home is keyed on. The
     append is per-record and idempotent, so a replay in journal order builds
-    the same row the live path built.
+    the same row the live path built — **CONDITIONAL since #13220, and the
+    condition is ``derived``**: a column this module can only receive from the
+    caller (`object`/`subject` `embedding` today) is `NULL` on a replay that
+    passes no ``derived``, so "the same row" holds only when the replayer
+    supplies what the live writer supplied. `tools/record_runner.py`'s fold does
+    NOT today (see #13220's migration header, "THE COLUMN ARRIVES EMPTY"), which
+    is a stated gap rather than a property of this function.
 
     ``derived`` (#13220) — column values the RECORD computes that the JOURNAL
     does not carry, merged over the node snapshot's payload before the ONE
