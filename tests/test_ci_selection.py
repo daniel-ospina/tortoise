@@ -10232,6 +10232,15 @@ ROWED_BY_THIS_FOLD = (
     "test_closes_landing.py",
     "test_metering_capture_usage_reader.py",
     "test_rail_detach.py",
+    # #13110 (PR #13116) — the fold that registered `goalState` on both public doors.
+    # `test_13110_goalstate_doors.py` is a file this fold ADDED; the second is `main`'s
+    # own UNREGISTERED file, which this fold's `sdk` row is the first to put in a
+    # `fast_pool()` surface. Either way the ENTRY RULE applies, and neither row existed
+    # until the round-5 review reported them (the pin above could not see them, because
+    # nothing listed them here — which is the reason both halves of this fix ship
+    # together).
+    "test_13110_goalstate_doors.py",
+    "test_13034_currency_rule_reads_position.py",
 )
 
 
@@ -10246,6 +10255,37 @@ def test_every_fast_file_this_fold_rows_carries_a_durations_row():
         "ENTRY RULE requires the row to EXIST (#3400/#4348) — add it with the "
         "`new in …` note; `tools/ci_timing.py --refresh-durations` fills the value "
         "from a push-to-main junit sweep later.")
+
+
+def test_the_entry_rule_bites_on_the_two_rows_this_fold_registered():
+    """Non-vacuity for #13110's two added rows — the state the round-5 review found.
+
+    Reconstructed from the LIVE map by dropping the two rows this fix adds, the same
+    way the #2148 pin above reconstructs its own pre-fix state: the assertion is then
+    about the map this PR shipped, and a later reader can re-derive it without an
+    invented fixture. `--integrity` cannot stand in for this: the coverage check is a
+    0.90 RATIO with ~70 files of headroom, so it was green over both missing rows.
+
+    ⛔ Both files must be IN the guarded set for the pin above to see them at all — that
+    is the half of this defect the rows alone do not fix (measured: with the rows added
+    and the set untouched, the entry-rule pin stayed green over any future file nobody
+    listed).
+    """
+    from tools.ci_selection import load_manifest
+    real = load_manifest()["durations"]
+    added = {
+        "test_13110_goalstate_doors.py",
+        "test_13034_currency_rule_reads_position.py",
+    }
+    assert added <= set(ROWED_BY_THIS_FOLD), (
+        "the two rows this fold added must be in the guarded set, otherwise the "
+        "ENTRY RULE pin cannot see them: "
+        f"{sorted(added - set(ROWED_BY_THIS_FOLD))}")
+    pre_fix = {k: v for k, v in real.items() if k not in added}
+    assert sorted(f for f in ROWED_BY_THIS_FOLD if f not in pre_fix) == sorted(added), (
+        "the pre-fix reconstruction must name exactly the two rowless files the "
+        "#13116 round-5 review reported — otherwise this pin is not testing that "
+        "defect")
 
 
 def test_the_added_file_row_guard_bites_at_the_pre_fix_head():
