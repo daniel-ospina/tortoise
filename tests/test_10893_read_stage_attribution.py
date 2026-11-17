@@ -126,6 +126,15 @@ def _mentions_store(node) -> bool:
     return False
 
 
+def _calls_name(node, name: str) -> bool:
+    """Does ``node`` call the bare function ``name`` (``name(...)``)?"""
+    return any(
+        isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name) and n.func.id == name
+        for n in ast.walk(node)
+    )
+
+
 def _mark_args_name(stmt) -> str | None:
     """The stage NAME of a ``_mark_read_stage(STAGE_X)`` statement, else None."""
     if (
@@ -166,6 +175,44 @@ def _enclosing_path(root, target):
     return path
 
 
+def _window_and_closer(fn, start):
+    """``(span, closer)`` — the statements that run after a mark, and the mark
+    that closes the window (``None`` when no later mark runs).
+
+    ``start`` is either the stage NAME of the mark to open the window at (exactly
+    one such mark must exist) or a mark statement already inside ``fn``. The
+    statement form exists for #13294: ``ep_annotation``'s CLOSER is the evidence
+    for which stage the content fetch is charged to, and asking a second,
+    hand-rolled walk what runs after it would let the two disagree about program
+    order — the same defect class the shared ``_mentions_store`` detector closed
+    (#13174), one level up.
+    """
+    if isinstance(start, str):
+        sites = [n for n in ast.walk(fn) if _mark_args_name(n) == start]
+        assert len(sites) == 1, (
+            f"expected exactly one `_mark_read_stage({start})` in "
+            f"tortoise_fts_query, found {len(sites)} — this pin cannot say which "
+            "window is the stage"
+        )
+        mark = sites[0]
+    else:
+        mark = start
+    path = _enclosing_path(fn, mark)
+    assert path, "the mark site must be reachable from the function node"
+
+    after: list = list(path[-1][0][path[-1][1] + 1:])
+    for depth in range(len(path) - 2, -1, -1):
+        block, index, _container = path[depth]
+        after.extend(block[index + 1:])
+
+    span: list = []
+    for stmt in after:
+        if _mark_args_name(stmt) is not None:
+            return span, stmt
+        span.append(stmt)
+    return span, None
+
+
 def _span_until_next_mark(fn, mark_name: str) -> list:
     """Statements that run AFTER ``_mark_read_stage(<mark_name>)``, up to but not
     including the next ``_mark_read_stage(...)`` in PROGRAM ORDER.
@@ -182,26 +229,10 @@ def _span_until_next_mark(fn, mark_name: str) -> list:
     does not terminate the span (the span keeps going, so the failure mode is
     MORE store calls in the window, never fewer), and statements reachable only
     through a branch are not descended into.
+
+    The walk itself lives in :func:`_window_and_closer`; this is the named form.
     """
-    sites = [n for n in ast.walk(fn) if _mark_args_name(n) == mark_name]
-    assert len(sites) == 1, (
-        f"expected exactly one `_mark_read_stage({mark_name})` in tortoise_fts_query, "
-        f"found {len(sites)} — this pin cannot say which window is the stage"
-    )
-    path = _enclosing_path(fn, sites[0])
-    assert path, "the mark site must be reachable from the function node"
-
-    after: list = list(path[-1][0][path[-1][1] + 1:])
-    for depth in range(len(path) - 2, -1, -1):
-        block, index, _container = path[depth]
-        after.extend(block[index + 1:])
-
-    span: list = []
-    for stmt in after:
-        if _mark_args_name(stmt) is not None:
-            return span
-        span.append(stmt)
-    return span
+    return _window_and_closer(fn, mark_name)[0]
 
 
 # ── 1. the shared-mutable-object property (the load-bearing one) ────────────
@@ -421,6 +452,109 @@ def test_fusion_brackets_only_the_rrf_call_and_no_graph_round_trip():
         f"a store round trip runs with `fusion` already open at line(s) {offenders} "
         "— a breach there would be published as 'the CPU fusion is stuck' while "
         "`retrieval` reads closed and healthy"
+    )
+
+
+def test_ep_annotation_closes_when_its_own_read_returns():
+    """#13294: ``ep_annotation`` is the ANNOTATION READ, not the annotation plus
+    the content assembly that follows it.
+
+    ``STAGE_EP_ANNOTATION`` is documented as "``annotate_ep_batch`` — the EP
+    breakdown decoration read", and ``STAGE_ORDERING``'s own docstring states the
+    rule both stages must obey, verbatim: graph work that runs after a stage's
+    read returned is "retrieval work that happened to run late, never 'the
+    annotation took ¬'". The mark used to stay open from ``annotate_ep_batch``
+    all the way to the ordering pass, so the LARGEST graph read of a search —
+    step 7's batch content fetch plus ``fetch_point_epistemic_state`` — was
+    published as ``stage=ep_annotation`` with ``retrieval`` closed and healthy.
+
+    The window is the SAME AST shape the fusion sibling uses (``_window_and_closer``
+    + the shared ``_mentions_store`` detector), and the annotation read itself is
+    the one store reference it is ALLOWED to contain — the stage is named for
+    that read. Reddens on both mutations, measured rather than asserted (see the
+    PR body): deleting the mark that closes the window (the span then grows over
+    the step-7 ``graph.query`` sites) and inserting any store round trip between
+    the annotation read and that mark.
+    """
+    fn = _fts_query_fn()
+    span, closer = _window_and_closer(fn, "STAGE_EP_ANNOTATION")
+
+    own = [stmt for stmt in span if _calls_name(stmt, "annotate_ep_batch")]
+    assert own, (
+        "the ``ep_annotation`` window does not contain ``annotate_ep_batch`` — "
+        "the stage is named for that read, so the mark that opens it must "
+        "precede the call and the mark that closes it must follow"
+    )
+    assert _mark_args_name(closer) == "STAGE_RETRIEVAL", (
+        "the mark that closes ``ep_annotation`` is "
+        f"{_mark_args_name(closer)!r}, not 'STAGE_RETRIEVAL' — every graph round "
+        "trip after the annotation read (step 7's content fetch, the "
+        "epistemic-state read) belongs to ``retrieval``"
+    )
+    offenders = [stmt.lineno for stmt in span if _mentions_store(stmt)]
+    assert offenders == [own[0].lineno], (
+        "the ``ep_annotation`` window reaches the store at line(s) "
+        f"{offenders}, and only the annotation read itself ({own[0].lineno}) "
+        "may — a breach inside any other graph round trip there would be "
+        "published as 'the annotation took ¬' while ``retrieval`` reads "
+        "closed and healthy"
+    )
+
+
+def test_the_content_fetch_and_epistemic_read_are_charged_to_retrieval():
+    """#13294's positive half: what OPENS where ``ep_annotation`` closes.
+
+    The pin above says ``ep_annotation`` closes at its own read; it does not say
+    which stage takes over, and a mark of the wrong stage would satisfy it while
+    the dominant graph read of a search is still attributed to something that had
+    returned. So the window is walked from the closing mark and BOTH of step 7's
+    graph round trips must be inside it — the batch content fetch (any store
+    reference OTHER than the epistemic read) and ``fetch_point_epistemic_state``
+    — with ``ordering``, the next stage's mark, as its closer.
+
+    ⛔ THE STORE SCAN EXCLUDES THE EPISTEMIC READ, and that exclusion is the whole
+    difference between a pin and a tautology (#13297 review IS-1).
+    ``fetch_point_epistemic_state(graph, ...)`` PASSES ``graph``, so it satisfies
+    ``_mentions_store`` on its own — a bare ``any(_mentions_store(...))`` is
+    therefore ENTAILED by the assertion above it and can never be the row that
+    reddens. Measured at the fixed head: blanking step 7's content fetch, the 7.5
+    relationships read and the subject probe (every store statement in the window
+    but the epistemic read) left the unexcluded form GREEN. Excluding the read the
+    sibling assertion already pins is what makes THIS one observe the content
+    fetch it names.
+
+    Read together with the sibling above, this is the whole claim: the content
+    fetch and the epistemic-state read are attributed to ``retrieval``, never to
+    ``ep_annotation``, and ``retrieval`` stays open until the ordering pass
+    begins.
+    """
+    fn = _fts_query_fn()
+    _ep_span, closer = _window_and_closer(fn, "STAGE_EP_ANNOTATION")
+    assert _mark_args_name(closer) == "STAGE_RETRIEVAL", (
+        "``ep_annotation`` is not closed by a ``retrieval`` mark, so there is no "
+        "window to charge the content fetch to"
+    )
+    span, after = _window_and_closer(fn, closer)
+    assert _mark_args_name(after) == "STAGE_ORDERING", (
+        "the window opened after ``ep_annotation`` is closed by "
+        f"{_mark_args_name(after)!r}, not 'STAGE_ORDERING' — ``retrieval`` must "
+        "stay open across the whole post-annotation assembly, and the ordering "
+        "pass is what ends it"
+    )
+    assert any(
+        _calls_name(stmt, "fetch_point_epistemic_state") for stmt in span
+    ), (
+        "``fetch_point_epistemic_state`` is no longer inside the ``retrieval`` "
+        "window — a breach blocked in that read would be blamed on a stage that "
+        "had already returned"
+    )
+    assert any(
+        _mentions_store(stmt) for stmt in span
+        if not _calls_name(stmt, "fetch_point_epistemic_state")
+    ), (
+        "no store round trip sits inside the ``retrieval`` window after "
+        "``ep_annotation`` — step 7's batch content fetch is the dominant graph "
+        "read of a search, and this pin is only meaningful while it exists here"
     )
 
 
