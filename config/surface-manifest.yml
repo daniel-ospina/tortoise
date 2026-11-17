@@ -1289,6 +1289,18 @@ rows:
   # predicted. `config/ci-surfaces.yml` went the same way earlier under #13144 (#13139), which is
   # why this PR no longer touches that file either.
   #
+  # ⛔ A LATER `main` LANE RESTATED THIS AND GOT IT WRONG, so its block is folded into this one
+  # instead of being kept twice. `#13000`'s `980f271acc` added eleven lines here saying this row
+  # was "refreshed here to the value the tree derives" and quoting `at 55` tools as "unchanged" —
+  # but that commit changes no `served_from` line at all (the refresh was `#13052`'s `cut`, landed
+  # earlier the same morning), and `#13052` had ALREADY retired seven doors, so 55 was a door count
+  # behind on the day it was written and 48 is what `rows` carries now. Keeping both blocks would
+  # leave this file asserting a count its own `rows` does not have — which is exactly what
+  # `test_no_per_row_comment_quotes_a_stale_surface_count` reds on. The measurement it quoted is
+  # preserved rather than erased: a pristine `main` at `2390101f68` read the same recorded/derived
+  # pair this block already names two paragraphs up, so what is dropped here is the stale COUNT and
+  # the wrong verb, not the fact.
+  #
   # A full `cut` is deliberately NOT run from a docs branch. It is NOT owner-only — `p_cut.add_
   # argument("--commit", …)` carries no `required=True` and `build_doc` falls back to
   # `git rev-parse HEAD`, and `cmd_cut` carries no identity check — but it is gated on the owner's
@@ -1304,17 +1316,6 @@ rows:
   # regenerate it" would cost the WHY to re-buy a value the tree already agrees with. The VALUE is
   # still never hand-derived — it is the digest `check --provenance-strict` compares. A reader
   # holding the "always regenerate" page should put it down here, not "fix" this row by cutting.
-  # ⛔ #13075 moved this handler ("the currency rule reads the position axis",
-  # `a09a0b3840`) and left `served_from` at the value #12726 had hand-refreshed, so
-  # `surface_manifest.py check` has been red on `main` itself since then — measured on a
-  # pristine `origin/main` worktree (`2390101f68`) as the SAME recorded/derived pair this
-  # row now carries. `served_from` is `_code_digest` of the handler's CODE OBJECT, so an
-  # edit inside `tortoise_query` re-stamps it: refreshed here to the value the tree
-  # derives, because `cut` is owner-gated (`tools/surface_manifest.py`) and this change
-  # adds/removes/renames NO tool or method (55 MCP tools / 94 SDK methods, unchanged).
-  # A full `cut` is deliberately NOT committed: it re-emits only `MANIFEST_HEADER`, so
-  # the per-row rationale comments in this file are lost, and it re-derives the
-  # observed-usage columns from a machine-local call log.
   served_from: tortoise/mcp_server.py:59f8f7e5957d81d8
   served_attributes: 7a717e4e60ce3bfa
   family: memory
