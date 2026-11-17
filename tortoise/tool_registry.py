@@ -831,7 +831,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "NAME) + supersededAt, with no edge transfer. transfer_edges=None "
                     "(default, not supplied) takes that label-driven arm; True/False are "
                     "POINT-ONLY and are REFUSED on an Object/Subject rather than silently "
-                    "dropped. dry_run=True previews exactly what would change.",
+                    "dropped. dry_run=True previews with the same arm and the same "
+                    "FAMILY-ARM checks, writing nothing — not refusal parity on the hybrid "
+                    ":Object:Event / :Subject:Event / :Object:Source / :Subject:Source "
+                    "shapes (fail-closed; tortoise#13114).",
         risk="destructive",
         http_policy=True,
         sdk_method="supersede_knowledge",  # #11609 lane B: retired into the container
@@ -1706,7 +1709,12 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "successor's NAME) + supersededAt, no edge transfer. transfer_edges=None "
                     "(default, not supplied) takes that label-driven arm; True/False are "
                     "POINT-ONLY and are REFUSED on an Object/Subject rather than silently "
-                    "dropped. dry_run=True previews what would change and changes nothing.",
+                    "dropped. dry_run=True previews with the same arm and the same "
+                    "FAMILY-ARM checks, writes nothing, and reports the node count the "
+                    "write would touch; it is NOT refusal parity on the hybrid shapes "
+                    ":Object:Event / :Subject:Event / :Object:Source / :Subject:Source, "
+                    "where the preview says would-supersede and the write refuses "
+                    "(fail-closed; tortoise#13114).",
         risk="destructive",
         http_policy=True,
         sdk_method="supersede_knowledge",

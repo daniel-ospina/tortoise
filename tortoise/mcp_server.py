@@ -8190,9 +8190,15 @@ def tortoise_supersede_knowledge(old_id: str, new_id: str,
     only public route for a family supersede. The value is passed through
     UNCHANGED; the SDK owns the one dispatch rule.
 
-    dry_run=True previews the transition — which edges would move — and changes
-    nothing; it runs the same guards, so a rejected input is rejected in the
-    preview too.
+    dry_run=True previews what would change — the same arm and the same FAMILY-ARM
+    checks, nothing written — and reports the node count the write would touch (and
+    the rows it would bind on the family arm, which transfers no edges).
+    ⛔ It is NOT refusal parity with the write on every shape: the write continues
+    into `update_knowledge` -> `_update_entity`, whose label-surface guards an
+    `:Event` row and a `:Source` row fail, and the preview does not run those. On
+    the hybrid shapes `:Object:Event` / `:Subject:Event` / `:Object:Source` /
+    `:Subject:Source` the preview says "would supersede" and the write refuses
+    (fail-closed, nothing written; tortoise#13114).
     """
     return tortoise_supersede(old_id, new_id, transfer_edges=transfer_edges,
                               dry_run=dry_run)
