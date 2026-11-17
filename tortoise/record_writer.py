@@ -1259,17 +1259,16 @@ def _verify_pending_input(conn: Any) -> bool:
     driver words it — returns ``False`` and the caller DISCARDS the handle: the
     next record gets a fresh connect instead of inheriting a corpse.
 
-    ⚠️ THE PAIR COSTS **TWO** ROUND TRIPS, and the honest price is stated rather than
-    hidden: the probe's own statement, then the `rollback()` that clears the
-    transaction it opened (measured on the shipped driver: **0.43–1.3 ms** for the
-    pair on two hosts, against single-digit µs for a `rollback()` on an
-    already-IDLE handle). It is
-    paid ONCE PER EVENT — a death or a notification — never per record, which is
-    what makes certainty affordable here; the common borrow (quiet socket) pays
-    no round trip at all. ⛔ The rollback is NOT dropped to make this read as one
-    round trip: `_reset_parked_transaction` would clear the same transaction a
-    line later in today's only caller, and depending on the caller's next line is
-    how a helper becomes a landmine for the next one.
+    ⚠️ THE PAIR COSTS **TWO** ROUND TRIPS, and the honest price is stated rather
+    than hidden: the probe's own statement, then the `rollback()` that clears the
+    transaction it opened (measured on two hosts, shipped driver: **0.43–1.3 ms**
+    for the pair, against single-digit µs for a `rollback()` on an already-IDLE
+    handle). It is paid ONCE PER EVENT — a death or a notification — never per
+    record, which is what makes certainty affordable here; the common borrow
+    (quiet socket) pays no round trip at all. ⛔ The rollback is NOT dropped to
+    make this read as one round trip: `_reset_parked_transaction` would clear the
+    same transaction a line later in today's only caller, and depending on the
+    caller's next line is how a helper becomes a landmine for the next one.
     """
     try:
         cursor = conn.cursor()
@@ -1353,13 +1352,13 @@ def _take_idle_connection(dsn: str) -> Any | None:
     ⛔ THE IDLE CASE IS THE ONE THAT LOST RECORDS (#12822). `closed` and
     `transaction_status` cannot see a peer that hung up while the handle was
     parked, so the borrow also reads the SOCKET (:func:`_socket_has_pending_input`,
-    1.7 µs, no I/O) and, only when something is pending, asks the SERVER
-    (:func:`_verify_pending_input`: one `SELECT 1` and its rollback, i.e. two
-    round trips, measured 0.43–1.3 ms). Quiet socket ⇒ NO round trip; pending
-    input ⇒ that verification, which is either a death found or a notification
-    delivered to a handle that then stays in service. Paying it on EVERY borrow
-    instead would be the "health query per acquire" this module rejected, and
-    skipping it is what let a corpse through.
+    ~1-2 µs, one `poll(0)` syscall, no round trip) and, only when something is
+    pending, asks the SERVER (:func:`_verify_pending_input`: one `SELECT 1` and
+    its rollback, i.e. two round trips, measured 0.43–1.3 ms). Quiet socket ⇒ NO
+    round trip; pending input ⇒ that verification, which is either a death found
+    or a notification delivered to a handle that then stays in service. Paying
+    it on EVERY borrow instead would be the "health query per acquire" this
+    module rejected, and skipping it is what let a corpse through.
 
     Every blocking step (the verification, the reset, and the discard's Terminate
     packet) happens OUTSIDE the lock, one candidate at a time: `close()` is a

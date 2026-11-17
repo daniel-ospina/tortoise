@@ -399,8 +399,7 @@ substrate preamble on first use, seeds a tenant, and asserts every write is
 ## Falsifiers — what must make each claim red
 
 The mechanism half is pinned in `tests/test_9558_record_write_cost.py` (32
-tests: 7 for the schema cache, 21 for the pool, and 4 for the wrapper/park/
-read-door contracts the review cycles added). 28 of the 32 carry a recorded
+tests, counted at this tree: `rg -c '^def test_'`). 28 of the 32 carry a recorded
 mutation: **27** under a literal `FALSIFIER:` block and one
 (`test_a_parked_transaction_is_reset_at_reuse_not_at_release`) stated as
 `FALSIFIER, both halves:`. The four with no block at all

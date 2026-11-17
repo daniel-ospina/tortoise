@@ -35,7 +35,7 @@ fetched and therefore before the answer is returned (#9558 review cycle 3, P1).
 NO DATABASE. Every connection here is a fake DB-API object (the same shape
 `tests/test_record_writer_seam.py` uses, imported rather than re-invented), and
 the transaction-status constants are patched so this file runs on a lane with no
-`[postgres]` extra (⚠️ THIRTEEN of its twenty-eight tests then SKIP — the pool pins need the
+`[postgres]` extra (⚠️ FOURTEEN of its thirty-two tests then SKIP — the pool pins need the
 driver — which is why it is also armed into `test-record-postgres`) — `test_record_writer_seam.py`'s own
 `test_importing_the_seam_pulls_in_no_database_driver` is what keeps the seam
 importable there, and this file must not undo it by importing the driver itself.
@@ -896,9 +896,14 @@ def test_a_readable_handle_is_verified_by_the_server_and_kept():
     occurrence: one fresh connect per record, which is the failure the previous
     pin's docstring calls worse than the bug being fixed.
 
-    FALSIFIER: return the candidate as soon as the socket reads readable (drop
-    `_verify_pending_input`, or make it always return True without asking) and
-    the FIRST assertion reds — the handle is closed, not lent.
+    FALSIFIER: one per mutant, and they red DIFFERENT assertions — which matters,
+    because the two halves are the two ways this pin can be defeated:
+
+    * drop `_verify_pending_input` (or return True from it without asking) and the
+      handle IS lent, so the first assertion stays green and the `commands` one
+      reds: `assert [] == ['cursor()']`.
+    * discard a readable handle instead — the shape the paragraph above describes
+      — and the FIRST assertion reds (the healthy handle is closed, not lent).
     """
     live = SocketFakeStatusConnection(IDLE)
     live.pending_input(b"NOTIFY record, 'a peer spoke'")
