@@ -570,27 +570,93 @@ def _family(value: Any) -> str:
     return type(value).__name__
 
 
-def _leaf_families(value: Any) -> frozenset:
-    """The DISTINCT families of `value`'s leaves, blind to arity and key names.
+class _NaN:
+    """A singleton standing in for NaN, so a NaN compares EQUAL to itself.
 
-    ⛔ Structure is not a family. `[1]` vs `[1, 2]` and `{'a': 1}` vs `{'b': 1}` are
-    VALUE differences, and a signature that carries arity or key names relabels
-    them `family` — which is a diagnostic regression, not a fix (`#13098` review
-    P3). What must still redden as `family` is a LEAF whose type family changed one
-    level down, so that is all this returns.
+    ⛔ Python says `nan != nan`, so the same NaN on both sides reddened forever on a
+    column that can legitimately hold one (`public.point.confidence` is `double
+    precision`, per `_norm_row`'s docstring) — and NESTED the verdict depended on
+    whether the driver handed back one object or two, i.e. on allocation rather
+    than on data (`#13098` review P3).
+
+    ⛔ It must NOT be a `str`: canonicalising to the token `"NaN"` put an ordinary
+    string into the number's slot, so `_norm(nan) == _norm("NaN")` and a row with a
+    real `"NaN"` cancelled a NaN in another position (`#13098` review P2). Identity
+    equality against a private single instance cannot collide with any value the
+    engines can return.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NAN"
+
+    def __str__(self) -> str:
+        return "NAN"
+
+
+NAN = _NaN()
+
+
+def _family_shape(value: Any) -> Any:
+    """`_family` applied recursively, PRESERVING position, arity and key identity.
+
+    ⛔ Two things are not the same, and conflating them produced a finding in each
+    direction (`#13098` review P2/P3):
+
+    * **structure** — arity, which key, which position. `[1]` vs `[1, 2]` and
+      `{'a': 1}` vs `{'b': 1}` are VALUE differences; carrying arity or key names in
+      the compared signature relabelled them `family`.
+    * **a leaf's type family** — `[True]` vs `[1]`, `{'k': True}` vs `{'k': 1}`. That
+      IS a family difference, and Python's own `[True] == [1]` erases it.
+
+    So the shape keeps the structure and the leaves keep their family; `_skeleton`
+    then erases the leaves, which lets the value pass tell "same structure, a family
+    changed" (→ `family`) from "the structure itself changed" (→ `value`).
+
+    ⛔ Every node is TAGGED (`leaf`, `list`, `set`, `dict`, `entry`) so `_skeleton`
+    can walk it without guessing whether a tuple is a node or a value. Walking a
+    key/leaf PAIR as if it were a node iterated the leaf family's characters and
+    produced a skeleton that depended on the family's SPELLING — `null` gave four
+    underscores and `str` three, so a nested null-vs-string difference was reported
+    as `value` (`#13098` review P2).
     """
     family = _family(value)
-    if family in ("list", "set", "frozenset"):
-        leaves: set = set()
-        for item in value:
-            leaves |= _leaf_families(item)
-        return frozenset(leaves)
+    if family == "list":
+        # ORDER IS STRUCTURE: sorting the members made `[[True],[1]]` and
+        # `[[1],[True]]` the same shape, so a swapped family pair was reported EQUAL
+        # (`#13098` review P2). A `list` keeps its positions.
+        return ("list", tuple(_family_shape(v) for v in value))
+    if family in ("set", "frozenset"):
+        # a set has no order, so its members are ordered by their own rendered shape.
+        # A swap of two members that Python already calls EQUAL (`('a',True)` vs
+        # `('a',1)` hash and compare the same) is therefore invisible — accepted:
+        # neither engine returns a `set`, so the branch is unreachable.
+        return (family, tuple(sorted((_family_shape(v) for v in value), key=repr)))
     if family == "dict":
-        leaves = set()
-        for item in value.values():
-            leaves |= _leaf_families(item)
-        return frozenset(leaves)
-    return frozenset((family,))
+        return ("dict", tuple(sorted((("entry", (_key_identity(k), _family_shape(v)))
+                                      for k, v in value.items()),
+                                     key=lambda entry: entry[1][0])))
+    return ("leaf", family)
+
+
+def _skeleton(shape: Any) -> Any:
+    """`_family_shape` with every LEAF FAMILY erased — the structure alone, keys kept."""
+    kind = shape[0]
+    if kind == "leaf":
+        return ("leaf",)
+    if kind == "entry":
+        return ("entry", shape[1][0])          # the key is structure — keep it
+    return (kind, tuple(_skeleton(child) for child in shape[1]))
+
+
+def _key_identity(key: Any) -> str:
+    """A key's identity that keeps two keys rendering alike APART.
+
+    ⛔ `str(k)` made `1` and `"1"` one entry, so the map silently lost a key. The
+    NUL separator cannot appear in a real key: `jsonb` forbids `\u0000` in strings.
+    """
+    return f"{type(key).__name__}\x00{key}"
 
 
 def _norm(value: Any) -> Any:
@@ -603,7 +669,7 @@ def _norm(value: Any) -> Any:
     if isinstance(value, Decimal):
         value = float(value)
     if isinstance(value, float) and value != value:
-        return "NaN"
+        return NAN
     if isinstance(value, (list, tuple)):
         return [_norm(v) for v in value]
     if isinstance(value, dict):
@@ -656,6 +722,10 @@ def _render_canonical(value: Any) -> Any:
     Recursive, because one level was the whole defect.
     """
     value = _norm(value)
+    if value is NAN:
+        # its own rendering: `1` is not a legitimate value for a NaN slot, and the
+        # string "NaN" is an ordinary row value, so neither may collide with it
+        return ["\x00nan"]
     if value is None or isinstance(value, str):
         return value
     if isinstance(value, bool):
@@ -670,11 +740,13 @@ def _render_canonical(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_render_canonical(v) for v in value]
     if isinstance(value, dict):
-        # `str(k)`: `json.dumps` accepts only str/int/float/bool/None keys, and a
-        # `Decimal` key raised a TypeError out of `diff()` — which the outer
-        # exit-code boundary turns into `2` ("could not run") rather than the
-        # traceback it deserves to be (`#13098` review P3).
-        return {str(k): _render_canonical(v) for k, v in value.items()}
+        # `_key_identity(k)`: `json.dumps` accepts only str/int/float/bool/None
+        # keys, and a `Decimal` key raised a TypeError out of `diff()` — which the
+        # outer exit-code boundary turned into `2` ("could not run") rather than the
+        # traceback it deserves to be. It is TYPE-TAGGED because a bare `str(k)`
+        # collapsed `1` and `"1"` into one entry, losing a key from the fingerprint
+        # (`#13098` review P2/P3).
+        return {_key_identity(k): _render_canonical(v) for k, v in value.items()}
     return value if isinstance(value, int) else str(value)
 
 
@@ -754,14 +826,24 @@ def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
             c_val = c_row[col_index] if col_index < len(c_row) else "<absent>"
             s_val = s_row[col_index] if col_index < len(s_row) else "<absent>"
             c_fam, s_fam = _family(c_val), _family(s_val)
-            # a LEAF family that changed one level down is still a family difference
-            # — but only when both sides carry leaves, so `{}` vs `{'a': 1}` stays a
-            # value difference instead of being relabelled (`#13098` review P3)
+            # ⛔ A leaf family that changed one level down is still a family
+            # difference, and a STRUCTURE change is a value difference — the two
+            # must not be conflated (`#13098` review P2/P3). `_skeleton` erases the
+            # leaves, so "same structure, a leaf changed" is exactly `family`;
+            # everything else falls through to the value comparison — except when
+            # normalisation cannot see the difference at all (`True` key vs `1` key,
+            # list vs tuple), where calling it `value` would report NOTHING and that
+            # would be a false PASS.
             if c_fam == s_fam and c_fam in ("list", "dict", "set", "frozenset"):
-                c_leaves, s_leaves = _leaf_families(c_val), _leaf_families(s_val)
-                if c_leaves and s_leaves and c_leaves != s_leaves:
-                    c_fam = f"{c_fam}{sorted(c_leaves)}"
-                    s_fam = f"{s_fam}{sorted(s_leaves)}"
+                c_shape, s_shape = _family_shape(c_val), _family_shape(s_val)
+                if c_shape != s_shape:
+                    if _skeleton(c_shape) != _skeleton(s_shape) and _norm(c_val) != _norm(s_val):
+                        value_diffs.append({"kind": "value", "row": row_index,
+                                            "column": cypher_cols[col_index],
+                                            "cypher": c_val, "sql": s_val})
+                        continue
+                    c_fam = f"{c_fam}{c_shape}"
+                    s_fam = f"{s_fam}{s_shape}"
             # null handling is THREE-WAY: null != '' != 0 != False != 'None'
             if c_fam != s_fam:
                 value_diffs.append({"kind": "family", "row": row_index,

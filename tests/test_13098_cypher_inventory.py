@@ -421,7 +421,14 @@ def test_a_type_family_inside_a_collection_is_still_a_difference():
     candidate = harness.Candidate(name="families", cypher="", sql="",
                                  columns=("id", "v"), ordered=False)
     cols = ["id", "v"]
-    pairs = (([True], [1]), ({"k": True}, {"k": 1}), ([1], ["1"]), ({True}, {1}))
+    pairs = (([True], [1]), ({"k": True}, {"k": 1}), ([1], ["1"]), ({True}, {1}),
+             # ⛔ a SWAP between two positions: the SET of leaf families is identical
+             # on both sides, so a set-based check skipped the gate and Python's own
+             # `True == 1` then certified the row — a false PASS (`#13098` review P2)
+             ([[True], [1]], [[1], [True]]),
+             ({"flag": True, "count": 1}, {"flag": 1, "count": True}),
+             # …and a null nested under a key is still three-way
+             ({"k": None}, {"k": ""}))
     for cypher_val, sql_val in pairs:
         result = harness.diff(candidate, [("a", cypher_val)], cols,
                              [("a", sql_val)], cols, ["a"])
@@ -471,10 +478,21 @@ def test_the_same_nan_on_both_sides_is_not_a_difference():
         result = harness.diff(candidate, [("a", cypher_val)], cols,
                              [("a", sql_val)], cols, ["a"])
         assert result["equal"] is True, (cypher_val, sql_val, result["differences"])
-    # …but a NaN is NOT equal to a number, to null, or to the string "nan"
-    for other in (0, 1, None, "nan"):
+    # …but a NaN is NOT equal to a number, to null, or to a STRING that spells it.
+    # ⛔ `"NaN"` is the case that matters: canonicalising a NaN to that token put an
+    # ordinary string into the number's slot, so a row holding a real `"NaN"`
+    # cancelled a NaN in another position (`#13098` review P2).
+    for other in (0, 1, None, "nan", "NaN", "NAN"):
         result = harness.diff(candidate, [("a", nan)], cols, [("a", other)], cols, ["a"])
         assert result["equal"] is False, other
+    swapped = harness.diff(candidate, [("a", [nan, "NaN"])], cols,
+                          [("a", ["NaN", nan])], cols, ["a"])
+    assert swapped["equal"] is False, swapped["differences"]
+    # ⛔ and the FINGERPRINT must still tell them apart: a str token put the string
+    # into the number's slot, so two different rows fingerprinted identically
+    nan_fp = harness.diff(candidate, [("a", nan)], cols, [("a", nan)], cols, ["a"])
+    str_fp = harness.diff(candidate, [("a", "NaN")], cols, [("a", "NaN")], cols, ["a"])
+    assert nan_fp["fingerprint"] != str_fp["fingerprint"], "a NaN and the string 'NaN' render alike"
 
 
 def test_a_non_string_dict_key_does_not_take_the_diff_down():
@@ -498,6 +516,14 @@ def test_a_non_string_dict_key_does_not_take_the_diff_down():
         result = harness.diff(candidate, [row], cols, [row], cols, ["a"])
         assert result["equal"] is True, (row, result["differences"])
         assert result["fingerprint"], "the fingerprint is computed after the sort — it must survive"
+    # ⛔ and the fingerprint must still tell two such maps APART: a bare `str(k)`
+    # collapsed `1` and `"1"` into one entry and dropped the other's value, so two
+    # different rows fingerprinted identically (`#13098` review P3).
+    left = harness.diff(candidate, [("a", {1: "x", "1": "y"})], cols,
+                       [("a", {1: "x", "1": "y"})], cols, ["a"])
+    right = harness.diff(candidate, [("a", {1: "x", "1": "z"})], cols,
+                        [("a", {1: "x", "1": "z"})], cols, ["a"])
+    assert left["fingerprint"] != right["fingerprint"], "a map key was dropped from the rendering"
 
 def test_a_projection_that_drifts_on_both_sides_still_reddens_against_the_declaration():
     """`Candidate.columns` is a CONTRACT, not a comment (`#13098` review P3).
