@@ -1893,14 +1893,16 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
 #: of the next, which is the distance a window has to clear — is MEASURED by
 #: `test_the_snippet_cap_clears_every_declaration_gap`, and that test is the ONLY
 #: place a number may live. ⛔ NOT HERE: this comment carried a hand-copied census
-#: ("87 files / 9 declarations: …, 2,038 …") that was already stale two migrations
-#: later — the tree had gained a migration and the tightest gap had moved — which is
-#: the same defect as the one this block documents: a
-#: figure with no reader rots into a false statement. The CONVENTION is stated so
-#: the next reader does not "correct" one ruler with the other (round 4 did):
-#: end→start, not start→start — the two differ by the declaration's own width.
-#: So the CAP bound on EVERY
-#: declaration in the tree and the "body" was a 400-character slice of whatever
+#: and it was WRONG WHEN IT WAS WRITTEN — not merely stale later, which is the
+#: explanation it used to give. Measured at this PR's own base: the tree already
+#: held 88 migrations, the tightest gap was 1,304 and there were 9 declarations,
+#: while the comment said 87 and 2,038. A hand-copied census is a claim nothing
+#: checks; that is the same defect as the one this block documents. The CONVENTION
+#: is stated so the next reader does not "correct" one ruler with the other
+#: (round 4 did): end→start, not start→start — they differ by the declaration's own
+#: width — and the numbers live only in the test's own failure message.
+#: A cap of
+#: 400 characters bounded the "body" — a slice of whatever
 #: followed the constraint. Substring-testing
 #: that slice for `'embedding'` let MIGRATION PROSE satisfy the pin: a new
 #: migration shrinking the ban to `ARRAY['status']` and then saying, in a comment
@@ -2063,9 +2065,18 @@ def props_ban_events(text: str) -> list[PropsBanEvent]:
         m for m in _PROPS_BAN_PIN_HEADER_RE.finditer(clean)
         if is_code(m.start()) and declared_on(m.start()) is not None
     ]
+    # ⛔ ONE FILTERED LIST, and the EVENTS are built from it. These used to be
+    # built from a fresh `finditer` over `clean`, so the filter applied to the
+    # span-bounding copy and NOT to the events: a `DROP CONSTRAINT` mentioned in a
+    # dollar-quoted history note registered as a real drop (measured: a migration
+    # that only documents "a DROP was tried and reverted" red the pin). Fail-closed
+    # then, but the prose above said otherwise — and once the boundary read is
+    # literal-aware this would be a false pass.
     others = [
-        m for m in list(_PROPS_BAN_DROP_RE.finditer(clean))
-        + list(_PROPS_BAN_RENAME_RE.finditer(clean))
+        (m, "drop") for m in _PROPS_BAN_DROP_RE.finditer(clean)
+        if is_code(m.start()) and declared_on(m.start()) is not None
+    ] + [
+        (m, "rename") for m in _PROPS_BAN_RENAME_RE.finditer(clean)
         if is_code(m.start()) and declared_on(m.start()) is not None
     ]
     events: list[PropsBanEvent] = []
@@ -2074,7 +2085,7 @@ def props_ban_events(text: str) -> list[PropsBanEvent]:
         # expression at the first `;` — so neither a later constraint nor a later
         # DROP can supply this one's names.
         later = [m.start() for m in headers[index + 1:] if m.start() > match.start()]
-        later += [m.start() for m in others if m.start() > match.start()]
+        later += [m.start() for m, _kind in others if m.start() > match.start()]
         stop = min(later) if later else len(clean)
         span = clean[match.end():stop]
         statement = span.split(";", 1)[0]
@@ -2087,13 +2098,9 @@ def props_ban_events(text: str) -> list[PropsBanEvent]:
         events.append(PropsBanEvent(
             match.start(), "declare", match.group(2), bool(match.group(1)), names,
             span[:_PROPS_BAN_SNIPPET_CHARS], declared_on(match.start())))
-    for match in _PROPS_BAN_DROP_RE.finditer(clean):
+    for match, kind in others:
         events.append(PropsBanEvent(
-            match.start(), "drop", match.group(1), False, frozenset(),
-            match.group(0), declared_on(match.start())))
-    for match in _PROPS_BAN_RENAME_RE.finditer(clean):
-        events.append(PropsBanEvent(
-            match.start(), "rename", match.group(1), False, frozenset(),
+            match.start(), kind, match.group(1), False, frozenset(),
             match.group(0), declared_on(match.start())))
     events.sort(key=lambda event: event.position)
     return events
@@ -2343,30 +2350,62 @@ def test_the_props_ban_pin_reads_the_CHECKS_own_expression_not_the_tail():
 
 
 def test_no_migration_executes_dynamic_DDL_for_a_props_ban():
-    """The blind spot of the target check, made LOUD instead of silent.
+    """The blind spot of the target check, made LOUD — in the shapes it can see.
 
     An event must sit in a `CREATE|ALTER TABLE` statement, so DDL executed
-    DYNAMICALLY (inside `DO $$ … EXECUTE '…' $$`, i.e. inside a literal) is not
-    read. That is safe only while no migration does it for these constraints:
-    measured at this head, the corpus's only `EXECUTE 'ALTER TABLE` statements
-    touch triggers. If that changes, this test reds and the reader decides —
-    rather than the pin silently losing an event.
+    DYNAMICALLY is not read. This test is the compensating control, and ⛔ IT WAS
+    FALSE AS FIRST WRITTEN: it matched `EXECUTE '…'` only and measured SILENT on
+    three spellings this repo already writes — `EXECUTE format('… %I …')`,
+    `EXECUTE $q$…$q$`, and `EXECUTE 'a' || 'b'` — while its own prose claimed the
+    blind spot "cannot be entered silently". (Round 7 of review, measured:
+    `supabase/migrations/20260915000001_tenancy_team_to_org.sql:184` is exactly
+    `EXECUTE format('ALTER TABLE %I RENAME CONSTRAINT %I TO %I', …)`.)
+
+    Two controls, because a widened keyword match alone is either silent or
+    over-broad (that tenancy statement names OTHER constraints, which is legal):
+
+    1. no dynamic statement may mention a props-ban constraint at all — the
+       spelling-independent rule, since the name is what makes it ours;
+    2. every occurrence of `props_no_derived` in CODE text must be accounted for
+       by a parsed event, so a declaration the statement filter drops (for any
+       reason, not just this one) cannot disappear silently.
+
+    ⚠️ STATED RESIDUAL: a name ASSEMBLED from parameters (`format('… ADD
+    CONSTRAINT %I …', 'chk_' || t || '_props_no_derived')`) appears literally
+    nowhere, and no text control can see it. Measured: no migration does this.
     """
+    text = all_migration_text()
     for path in sorted((REPO_ROOT / "supabase" / "migrations").glob("*.sql")):
-        text = path.read_text(encoding="utf-8")
-        for match in re.finditer(r"EXECUTE\s+'([^']*)'", text, re.I):
-            executed = match.group(1)
-            assert not re.search(r"(?:ADD|DROP|RENAME)\s+CONSTRAINT", executed, re.I), (
-                f"{path.name} executes dynamic constraint DDL ({executed[:80]!r}) — "
-                "the props-ban parse cannot see it; teach the parse or record the gap")
+        clean = record_projection._strip_sql_comments(path.read_text(encoding="utf-8"))
+        for match in re.finditer(r"\bEXECUTE\b", clean, re.I):
+            statement = clean[match.start():]
+            end = statement.find(";")
+            statement = statement if end == -1 else statement[:end]
+            assert "props_no_derived" not in statement, (
+                f"{path.name} executes a dynamic statement that names a props-ban "
+                f"constraint ({statement[:120]!r}) — the props-ban parse cannot "
+                "see it; teach the parse or record the gap")
+    # Control 2: every code-level occurrence of the NAME has a parsed event.
+    stripped = record_projection._strip_sql_comments(text)
+    code = "".join(
+        stripped[start:end]
+        for start, end, kind in record_projection._scan_sql(stripped)
+        if kind == "code"
+    )
+    named = len(re.findall(r"props_no_derived", code))
+    parsed = len(props_ban_events(text))
+    assert named == parsed, (
+        f"{named} code-level mention(s) of `props_no_derived` but {parsed} parsed "
+        f"event(s) — a declaration was dropped by the statement filter "
+        f"({sorted(f'{e.table}:{e.kind}' for e in props_ban_events(text))})")
 
 
 def test_the_snippet_cap_clears_every_declaration_gap():
     """The 400-char snippet cap is only diagnostic if it cannot reach the next ban.
 
     ⛔ THIS TEST OWNS THE CENSUS. The block above used to state it as prose
-    ("87 files / 9 declarations: 2,200 · … · 2,038 · …"), and by the time anyone
-    read it again the tree had gained migrations and the tightest gap had moved —
+    (a file count and a tightest gap), and both were WRONG WHEN WRITTEN (88 files
+    and 1,304 at this PR's base) —
     a stale figure BESIDE a pinned one, which is the failure class this file
     documents at length. So the figures are derived here, at run time, and the
     failure message prints them; nothing in the file asserts a hand-copied number.
