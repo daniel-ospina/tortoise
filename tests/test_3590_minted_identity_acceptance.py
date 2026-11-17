@@ -39,6 +39,7 @@ from pathlib import Path
 
 import pytest
 
+from tortoise.exceptions import BundleValidationError
 from tortoise.sdk import TortoiseSDK
 
 pytestmark = pytest.mark.timeout(300)
@@ -274,14 +275,24 @@ def test_a_bundle_naming_the_adopted_holder_is_not_a_born_terminal_mint(sdk):
     assert _name_ids(proj, "Object", "Other"), "the bundle wrote nothing"
 
 
-def test_a_bundle_naming_the_adopted_holder_may_declare_an_array_status(sdk):
-    """#9876 review F2, consumer A: the array-status arm over-rejected an ADOPT.
+def test_a_bundle_declaring_an_array_status_is_refused_at_validation(sdk):
+    """#9876 review F2, consumer A — re-aimed by #11824 S0.
 
     That arm exists because an ARRAY status the writer really stores makes
     ``create_direct_edge``'s frozenset test raise ``TypeError`` after steps 2-3
     committed. For the adopted shape the writer stores nothing — the ``MERGE``
     matches the row the adopt just stamped — so there is no array to evaluate
     and no mid-write raise to predict.
+
+    ⛔ **S0 changed WHERE that is answered, and answers it earlier.** The
+    four-word lifecycle vocabulary makes `status` a plain word, so an array is
+    refused by the bundle validator before any write, naming the string rule
+    (``… was refused: a status must be a plain string, and list is not one``).
+    Measured: the refusal is a ``BundleValidationError`` out of
+    ``ingest``/``_validate_bundle``, NOT the old "would store status" arm and
+    NOT a TypeError after partially committing. Both halves are pinned here:
+    the array is refused loudly up front, and the ADOPT path itself still works
+    with a legal word — the subject this test was written for.
     """
     client, _ = sdk
     proj = client._get_proj()
@@ -295,13 +306,22 @@ def test_a_bundle_naming_the_adopted_holder_may_declare_an_array_status(sdk):
                              "status": ["live", "superseded"]}]}
     msgs = [v["message"] for v in client._validate_bundle(bundle)]
     assert not any("would store status" in m for m in msgs), msgs
+    assert any("must be a plain string" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        client.ingest(bundle)
+    assert _name_ids(proj, "Object", "Legacy") == [None], (
+        "the refused bundle partially committed — the id-less carrier was "
+        "stamped before the array status was rejected")
 
-    client.ingest(bundle)
+    # …and the ADOPT itself is unaffected when the declared status is a WORD.
+    client.ingest({"entities": [{"ref": "a", "type": "object",
+                                 "name": "Legacy", "status": "live"}]})
     ids = _name_ids(proj, "Object", "Legacy")
     assert len(ids) == 1 and ids[0], (
         f"the bundle did not adopt the id-less carrier: {ids}")
     assert _statuses(proj, "Object", "Legacy") == [None], (
-        "the ingest stored the declared array status on the adopted carrier")
+        "the adopt wrote the declared status; it stores nothing — the MERGE "
+        "matches the row the adopt just stamped")
 
 
 def test_a_rename_journals_on_the_stable_id_and_survives_replay(sdk):
@@ -670,17 +690,23 @@ def test_an_unresolvable_about_target_keeps_the_mention_exemption_and_replays(
 
 
 def test_a_declared_objecttype_object_still_folds_the_work_item_status(sdk):
-    """#3590 review P2: ``objectType='Object'`` must not drop the status fold.
+    """#3590 review P2: ``objectType='Object'`` must not drop the fold.
 
     ``_event_plain_merge`` resolves the event's explicit ``object`` to an id and
     hands it to ``_fold_object_status``. Keying that hand-off on TRUTHINESS of
     ``objectType`` discarded the id for a DECLARED ``'Object'`` (only
     ``'Document'`` has no entity id to give — its object is a :Source url), so
-    both halves of the fold went inert: the ``#1350`` work-item status was
+    both halves of the fold went inert: the ``#1350`` work-item fold was
     silently NOT applied and nothing was reported. Fail-open, in the opposite
     direction to every other fold in the change.
 
     Reachable from a public door: ``EventAPI.add_event(object_type=…)``.
+
+    ⛔ #13143 (S0 ran after this pin): the fold it guards is a POSITION move now
+    — the connector close advances the Object to the terminal stage of
+    ``core:workitem`` (``done``/terminal/``isClosed``) and leaves the four-word
+    lifecycle ``status`` NULL. The pin's subject is unchanged (the id must not
+    be discarded for a declared ``'Object'``); only the axis it reads moved.
     """
     client, _ = sdk
     proj = client._get_proj()
@@ -691,12 +717,17 @@ def test_a_declared_objecttype_object_still_folds_the_work_item_status(sdk):
                         object="Widget", objectType="Object",
                         is_episodic=False)
 
-    status = proj.g.query(
-        "MATCH (o:Object {id:$id}) RETURN o.status", params={"id": oid}
-    ).result_set
-    assert status and status[0][0] == "completed", (
-        "objectType='Object' suppressed the built-in lifecycle fold — status "
-        f"is {status[0][0] if status else None!r} (#1350)")
+    status, stage, slot, closed = proj.g.query(
+        "MATCH (o:Object {id:$id}) "
+        "RETURN o.status, o.pipelineStageId, o.pipelineSlot, o.isClosed",
+        params={"id": oid}
+    ).result_set[0]
+    assert (stage, slot, closed) == ("done", "terminal", True), (
+        "objectType='Object' suppressed the built-in fold — the position is "
+        f"({stage!r}, {slot!r}, {closed!r}) (#1350)")
+    assert status is None, (
+        "the connector fold wrote a LIFECYCLE word — S0 moved it to the "
+        "position axis")
     # …and the produces edge still lands on the resolved id, not a stub.
     assert proj.g.query(
         "MATCH (e:Event)-[:produces]->(o:Object {id:$id}) "
@@ -1195,6 +1226,14 @@ def _status_of(proj, label: str, entity_id: str):
     return rows[0][0] if rows else None
 
 
+def _stage_of(proj, label: str, entity_id: str):
+    """The POSITION axis (S0): a declared pack fold is a stage move now."""
+    rows = proj.g.query(
+        f"MATCH (n:{label} {{id:$id}}) RETURN n.pipelineStageId",
+        params={"id": entity_id}).result_set
+    return rows[0][0] if rows else None
+
+
 def test_a_mention_of_a_superseded_name_does_not_mint_an_incarnation(sdk):
     """#3590 round-5 review F2: attribution may not CREATE an entity.
 
@@ -1414,8 +1453,12 @@ def test_a_lifecycle_event_on_a_doubly_held_name_is_not_a_green_run(sdk):
         "a state-moving fold miss over an ambiguous target FAILED to fail "
         f"the run: {[str(e) for e in entries]}")
     # Nothing was moved: the ambiguity is not silently resolved by picking one.
+    # ⛔ #13143 (S0): read the POSITION axis — no fold writes a lifecycle word
+    # any more, so `_status_of(...) != "in_progress"` was satisfied by NULL on
+    # every graph and could no longer see the mutation it guards. This asserts
+    # on the axis the fold actually moves.
     for oid in ("id-dup-live-a", "id-dup-live-b"):
-        assert _status_of(proj, "Object", oid) != "in_progress", (
+        assert _stage_of(proj, "Object", oid) is None, (
             "the fold MOVED one carrier's state out of an ambiguous target: "
             f"{oid}")
 
@@ -1469,7 +1512,7 @@ def test_an_about_target_that_folds_cannot_mask_the_explicit_targets_miss(sdk):
                               # the ATTRIBUTION target — registered, folds
                               "aboutEntities": ["Folded Tranche"]}})
 
-    assert _status_of(proj, "Object", tranche) == "released", (
+    assert _stage_of(proj, "Object", tranche) == "released", (
         "the attribution target did not fold, so this fixture cannot exercise "
         "the mask — `matched_any` stayed False and the assertion below would "
         "pass on the pre-fix code for the wrong reason")
