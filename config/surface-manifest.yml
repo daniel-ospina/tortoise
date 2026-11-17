@@ -85,6 +85,23 @@
 # with it is checked by tools/surface-target-check.py, which reads those docs rather than
 # a constant here.
 #
+# ROWS RE-STAMPED FOR A DECLARATION CHANGE (#13110) — recorded HERE because a re-cut
+# erases body comments (see the ⚠️ above). `tortoise_create_object`,
+# `tortoise_create_entity` and `tortoise_create_point` each gained a `goalState`
+# PARAMETER, which moved both of their cells: `served_from` is the `_code_digest` of the
+# handler's code object (bytecode, names, constants — a docstring counts, it is a
+# `co_const`; `co_firstlineno` is excluded on purpose, so a pure code move moves
+# nothing, and only the edited tool's row moves), and `served_attributes` hashes
+# `__defaults__`/`__annotations__`, which a new parameter changes (#4192). The values were
+# re-stamped to what the code DERIVES — `tools/surface_manifest.py check` re-derives and
+# compares, so the code is authoritative, not these digits. Precedent: #12547 re-stamped
+# `served_from` for `tortoise_query` in the same way, and its own row comment was then
+# erased by the next cut (2c67c0cf99) — which is why this note lives in the header.
+# ⛔ A re-stamp is NOT an approval. The approval gate is the “add or remove a tool or a
+# public SDK method” rule (AGENTS.md §MCP/SDK Surface Approval); a parameter on an
+# existing door is neither, `counts:`/`high_water_counts:` are unchanged, and the tool
+# and SDK name sets are unchanged. A green `surface-guard` run is a consistency result.
+#
 # `cut_at_commit` IS a DEFAULT-BRANCH COMMIT, never a lane one (#11057 review F1). It names
 # the `main` commit this baseline was cut AGAINST, so `cut --commit <sha-in-main>` — not the
 # worktree HEAD it happened to run in. This repo squash-merges and deletes the source
@@ -1388,8 +1405,8 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_create_point
-  served_from: tortoise/mcp_server.py:9860ad2503ad1b45
-  served_attributes: edb6c4d045fc0522
+  served_from: tortoise/mcp_server.py:a8ac1e8d58e702a6
+  served_attributes: 0bdf08286d48f29c
   family: memory
   family_rank: 1
   served: http
@@ -1769,8 +1786,8 @@ rows:
   cluster_note: group `fetch-by-id` is split across ['graph', 'sessions']; proposed family `graph` — waits for your
     approval
 - name: tortoise_create_entity
-  served_from: tortoise/mcp_server.py:b489e9cdb82dbd6d
-  served_attributes: 764058954f66db36
+  served_from: tortoise/mcp_server.py:2ad91f43163a0f76
+  served_attributes: 93b456ed38374aa3
   family: graph
   family_rank: 2
   served: http
@@ -1826,19 +1843,8 @@ rows:
   cluster_canonical: tortoise_create_entity
   cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
 - name: tortoise_create_object
-  # #13110: `goalState` was added as a DECLARED parameter (a closed-vocabulary
-  # field on the existing tool — no tool or public SDK method was added or
-  # removed, and `counts:`/`high_water_counts:` are unchanged). Both cells below
-  # are re-stamped BY HAND to the values the code derives, the same way #12547
-  # re-stamped `served_from` for `tortoise_query`: `served_from` is the
-  # `_code_digest` of the handler's CODE OBJECT (any edit inside the body moves
-  # it) and `served_attributes` hashes the handler's `__defaults__` and
-  # `__annotations__` — which a new parameter changes (#4192). Neither cell is
-  # an approval: the manifest's own header says a green run is a consistency
-  # result, never consent, and the approval gate for the tool surface is the
-  # "add/remove a tool or public SDK method" rule (AGENTS.md), which this is not.
-  served_from: tortoise/mcp_server.py:969907ca4c036542
-  served_attributes: 440e7a55b08e94ff
+  served_from: tortoise/mcp_server.py:f6f1291a10c7cba8
+  served_attributes: 02dd12308466f524
   family: graph
   family_rank: 2
   served: http

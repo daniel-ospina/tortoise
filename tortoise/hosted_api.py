@@ -11410,6 +11410,27 @@ class CreatePointRequest(BaseModel):
     # the baseline it already has otherwise (with a logged warning) — never a
     # silent drop either way (#7980).
     credibility: str | int | float | None = None
+    # #13110: the SAME class #4032 fixed above, for the other ontology field a
+    # customer must be able to set. `goalState` is declared on the §4.1 Point
+    # table too (a legacy goal POINT — the objective map's goals are Points,
+    # #7856), the SDK persists it through the props passthrough, and this
+    # model dropped it the same way `confidence`/`authoredBy` were dropped. So
+    # the Field description above is the class: **a value the store can hold
+    # must never be a 200 with the value missing.**
+    goalState: str | None = None
+
+    @field_validator("goalState")
+    @classmethod
+    def valid_goal_state(cls, v: str | None) -> str | None:
+        """Same rule and same sentence as the objects door (`CreateObjectRequest`)
+        — and the same SDK function, so there is still ONE vocabulary.
+
+        Refused at the door rather than left to the SDK because this route's
+        blanket ``except Exception`` would turn the SDK's ValueError into a bare
+        500 that names nothing.
+        """
+        validate_goal_state(v)  # raises ValueError → 422 naming the set
+        return v
 
     @field_validator("kind")
     @classmethod
@@ -13670,6 +13691,12 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
                 _author_props["authoredBy"] = body.authoredBy
             if body.credibility is not None:
                 _author_props["credibility"] = body.credibility
+            # #13110: `goalState` on the same rule as the objects door — only
+            # when the caller NAMED it, so a dedup hit that does not name the
+            # field cannot wipe a stored achievement state (the #9572 clobber
+            # class).
+            if "goalState" in body.model_fields_set:
+                _author_props["goalState"] = body.goalState
             out = sdk.create_point(
                 content=body.content,
                 kind=body.kind,

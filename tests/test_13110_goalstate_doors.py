@@ -38,7 +38,7 @@ import pytest
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-from tortoise.sdk import GOAL_STATE_VALUES  # noqa: E402
+from tortoise.sdk import GOAL_STATE_VALUES
 
 _ORG = "team-13110"
 
@@ -81,8 +81,8 @@ def _graph(db_path):
 
 @contextlib.contextmanager
 def _rest_client():
-    from tortoise.hosted_api import app, get_current_org
     from tests._verdict import verdict_client
+    from tortoise.hosted_api import app, get_current_org
 
     app.dependency_overrides[get_current_org] = _team
     try:
@@ -136,8 +136,13 @@ def _objects_named(ha, name: str) -> int:
 
 def _vocabulary_in(text: str) -> bool:
     """Every member of the closed set is named by the refusal (#13110 asks for
-    the vocabulary, not just a rejection)."""
-    return all(word in text for word in sorted(GOAL_STATE_VALUES))
+    the vocabulary, not just a rejection).
+
+    QUOTED, not bare-substring: `"met" in text` is satisfied by `"unmet"`, so a
+    paraphrased refusal that dropped `met` would pass the loose form. The guard
+    renders `sorted(GOAL_STATE_VALUES)`, i.e. every member single-quoted.
+    """
+    return all(f"'{word}'" in text for word in sorted(GOAL_STATE_VALUES))
 
 
 # ── Door 1 — REST `POST /v1/objects` ────────────────────────────────────────
@@ -217,6 +222,44 @@ def test_rest_explicit_null_is_accepted_and_clearing_stays_the_update_door(tmp_p
         assert _stored(ha, node_id) is None
 
 
+# ── Door 1b — REST `POST /v1/points` (a goal POINT, §4.1) ─────────────────────
+
+def test_rest_points_door_persists_and_refuses_goal_state(tmp_path):
+    """The SAME field on the sibling REST door — and the reason it is in scope:
+    a goal is a legacy POINT as well as an Object (ONTOLOGY §4.1, #7856), and
+    this model carried the identical silent drop. Left alone, the class #4032
+    found here would keep producing 200-with-the-value-missing on the very door
+    the objective map's goals are written through."""
+    with _graph(str(tmp_path / "rest-points.db")) as ha, _rest_client() as client:
+        r = client.post("/v1/points", json={
+            "content": "goal point with an achievement state",
+            "kind": "goal", "goalState": "blocked"})
+        assert r.status_code == 200, (r.status_code, r.text)
+        node_id = r.json()["id"]
+        assert _stored(ha, node_id) == "blocked"
+
+        bad = client.post("/v1/points", json={
+            "content": "goal point with a word that is not in the set",
+            "kind": "goal", "goalState": "green"})
+        assert bad.status_code == 422, (bad.status_code, bad.text)
+        assert _vocabulary_in(bad.text), bad.text
+
+
+def test_rest_points_re_create_without_the_field_does_not_wipe_it(tmp_path):
+    """`dedup` folds onto the existing Point by content hash, so this door has
+    the same clobber exposure as the objects door."""
+    with _graph(str(tmp_path / "rest-points-repeat.db")) as ha, _rest_client() as client:
+        first = client.post("/v1/points", json={
+            "content": "a goal whose state must survive a repeat write",
+            "kind": "goal", "goalState": "met"})
+        assert first.status_code == 200, first.text
+        again = client.post("/v1/points", json={
+            "content": "a goal whose state must survive a repeat write",
+            "kind": "goal"})
+        assert again.status_code == 200, again.text
+        assert _stored(ha, first.json()["id"]) == "met"
+
+
 # ── Door 2 — MCP `tortoise_create_object` ───────────────────────────────────
 
 def test_mcp_create_persists_the_declared_goal_state_parameter(tmp_path):
@@ -247,30 +290,75 @@ def test_mcp_create_still_accepts_the_props_bag_form(tmp_path):
 def test_mcp_refuses_an_unknown_word_with_the_closed_set(tmp_path):
     from tortoise import mcp_server
 
-    with _graph(str(tmp_path / "mcp-bad.db")) as _ha, _mcp_ctx():
-        for out in (
-            mcp_server.tortoise_create_object("MCP-BAD", "goal",
-                                              goalState="green"),
-            mcp_server.tortoise_create_object("MCP-BAD-2", "goal",
-                                              props={"goalState": "green"}),
+    with _graph(str(tmp_path / "mcp-bad.db")) as ha, _mcp_ctx():
+        for name, out in (
+            ("MCP-BAD", mcp_server.tortoise_create_object(
+                "MCP-BAD", "goal", goalState="green")),
+            ("MCP-BAD-2", mcp_server.tortoise_create_object(
+                "MCP-BAD-2", "goal", props={"goalState": "green"})),
+            ("MCP-BAD-3", mcp_server.tortoise_create_entity(
+                "object", "MCP-BAD-3", goalState="green")),
+            ("MCP-BAD-4", mcp_server.tortoise_create_point(
+                "goal", "MCP-BAD-4", goalState="green")),
         ):
             assert isinstance(out, dict) and out.get("error"), out
             assert _vocabulary_in(out["error"]), out
+            # Refused BEFORE any graph write — the SDK guard's own promise, so
+            # it is pinned on this door too and not only on REST.
+            proj = ha._make_sdk(namespace=_ORG)._get_proj()
+            rows = proj.g.query(
+                "MATCH (n) WHERE n.name = $n OR n.content = $n RETURN count(n)",
+                params={"n": name}).result_set
+            assert rows[0][0] == 0, name
 
 
-def test_the_served_schema_advertises_goal_state():
-    """The DISCOVERABILITY half: `props` is an untyped `Any` with no
-    description, so an agent reading `tools/list` could not learn the field
-    existed and reached for the keyword that did not exist. The declared
-    parameter is what puts it in the advertised contract."""
+def test_mcp_entity_and_point_doors_persist_the_declared_parameter(tmp_path):
+    """The canonical entity door and the legacy goal-POINT door take the field
+    too — the issue's own shape (#7856's objective map) is a goal Point, so a
+    fix that declared it only on the object alias would leave both
+    undiscoverable."""
     from tortoise import mcp_server
 
-    tools = asyncio.run(mcp_server.mcp.list_tools())
-    spec = next(t for t in tools if t.name == "tortoise_create_object")
-    assert "goalState" in spec.parameters["properties"], spec.parameters
-    # A parameter, NOT a new surface: the tool keeps its name and its required
-    # arguments, and the SDK method behind it is the same one.
-    assert spec.parameters["required"] == ["name", "objectKind"]
+    with _graph(str(tmp_path / "mcp-entity.db")) as ha, _mcp_ctx():
+        ent = mcp_server.tortoise_create_entity(
+            "object", "MCP-ENTITY-GOAL", goalState="superseded")
+        assert not ent.get("error"), ent
+        node = ent.get("node", ent)
+        assert _stored(ha, node["id"]) == "superseded"
+
+        pt = mcp_server.tortoise_create_point(
+            "goal", "MCP-POINT-GOAL", goalState="guideline")
+        assert not pt.get("error"), pt
+        assert _stored(ha, pt["id"]) == "guideline"
+
+
+def test_the_served_schema_advertises_goal_state_on_every_create_door():
+    """The DISCOVERABILITY half: `props` is an untyped `Any` with no
+    description, so an agent reading `tools/list` could not learn the field
+    existed and reached for the keyword that did not exist.
+
+    All THREE create doors are pinned, not just the one the issue named: the
+    canonical door is `tortoise_create_entity` (the surface record recommends
+    merging the object alias into it), and a goal is a legacy POINT too
+    (ONTOLOGY §4.1), so declaring the field on the alias alone would leave the
+    recommended doors exactly as undiscoverable as before.
+    """
+    from tortoise import mcp_server
+
+    tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    for tool_name in (
+        "tortoise_create_object",
+        "tortoise_create_entity",
+        "tortoise_create_point",
+    ):
+        spec = tools[tool_name]
+        assert "goalState" in spec.parameters["properties"], (tool_name, spec.parameters)
+    # A parameter, NOT a new surface: the doors keep their names and their
+    # required arguments, and the SDK methods behind them are unchanged.
+    assert tools["tortoise_create_object"].parameters["required"] == [
+        "name", "objectKind"]
+    assert tools["tortoise_create_entity"].parameters["required"] == [
+        "type", "name"]
 
 
 # ── The two doors cannot drift apart ────────────────────────────────────────

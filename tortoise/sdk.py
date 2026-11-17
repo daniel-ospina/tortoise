@@ -347,18 +347,22 @@ GOAL_STATE_VALUES = frozenset({
 def validate_goal_state(value: object) -> object:
     """THE closed-vocabulary guard for a goal's achievement state (#13110).
 
-    One home for the rule, so every door refuses an unknown word with the SAME
-    sentence and the SAME set instead of each restating it:
+    One home for the rule, so every door that can carry the field refuses an
+    unknown word with the SAME sentence and the SAME set instead of each
+    restating it:
 
       * the SDK/props boundary (``_sanitize_props``, reached by ``create_point``,
         ``create_object``/``create_entity``, ``update_point``, ``update_entity``)
-        — the fail-closed backstop every write passes;
-      * the REST door (``hosted_api.CreateObjectRequest.valid_goal_state``) —
-        which must refuse BEFORE submitting the write, because the route's
-        blanket ``except Exception`` maps a ValueError raised inside
-        ``sdk.create_object`` to a 500 that names nothing;
-      * the MCP door (``tortoise_create_object(goalState=...)``), through the
-        same ``_sanitize_props`` backstop.
+        — the fail-closed backstop every write passes, and the ONLY guard the
+        door code calls rather than re-implements;
+      * the REST create doors that declare the field
+        (``hosted_api.CreateObjectRequest.valid_goal_state``,
+        ``CreatePointRequest.valid_goal_state``) — which must refuse BEFORE
+        submitting the write, because those routes' blanket ``except Exception``
+        maps a ValueError raised inside the SDK to a 500 that names nothing;
+      * the MCP doors that declare it (``tortoise_create_entity``,
+        ``tortoise_create_object``, ``tortoise_create_point``), through the same
+        ``_sanitize_props`` backstop.
 
     ``None`` is LEGAL and is returned unchanged: it is the explicit "no
     achievement state". Measured (#13110) — on the CREATE fold a ``None`` is a
