@@ -200,7 +200,10 @@ def test_a_vocabulary_only_kind_stays_on_the_door_the_caller_chose(sdk):
         r.get("advisories")
     # ...and the Subject-side read the door exists for still answers.
     p = sdk.create_point("statement", "A claim", authoredBy=r["id"])
-    assert sdk.provenance(p["id"])["subject"] is not None
+    # The chain is not an EP surface: the posterior gate is opted out, exactly as
+    # `_check_confidence_provenance` (mcp_server) does the same for the live door.
+    assert sdk.check_confidence(p["id"], include_provenance=True,
+        require_calibration=False)['provenance']["subject"] is not None
 
 
 def test_routing_never_turns_a_legal_write_into_a_refusal(sdk):

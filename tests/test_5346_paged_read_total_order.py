@@ -206,7 +206,7 @@ def test_search_sessions_legacy_fallback_pages_without_loss(sdk, monkeypatch):
     seen: list[str] = []
     offset = 0
     while True:
-        rows = sdk.search_sessions("zzprobe5346", limit=PAGE, offset=offset)
+        rows = sdk.search_knowledge("zzprobe5346", mode="sessions", limit=PAGE, offset=offset)
         seen.extend(row.get("eventId") for row in rows)
         if len(rows) < PAGE:
             break

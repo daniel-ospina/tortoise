@@ -193,7 +193,7 @@ class TestSessionMachineModelStamp:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2599_UUID_A)
+            key = sdk._apikey_create(tid, _2599_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             r = tc.post("/v1/sessions", headers=h, json={
                 "conversation": [{"role": "user", "content": "test machine model stamp."},
@@ -219,7 +219,7 @@ class TestSessionMachineModelStamp:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2599_UUID_A)
+            key = sdk._apikey_create(tid, _2599_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             r = tc.post("/v1/sessions", headers=h, json={
                 "conversation": [{"role": "user", "content": "no machine model."},
@@ -242,7 +242,7 @@ class TestSessionMachineModelStamp:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2599_UUID_A)
+            key = sdk._apikey_create(tid, _2599_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             r = tc.post("/v1/sessions", headers=h, json={
                 "conversation": [{"role": "user", "content": "machine only."}],
@@ -261,7 +261,7 @@ class TestSessionMachineModelStamp:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2599_UUID_A)
+            key = sdk._apikey_create(tid, _2599_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             r = tc.post("/v1/sessions", headers=h, json={
                 "conversation": [{"role": "user", "content": "model only."}],
@@ -283,8 +283,8 @@ class TestSessionMachineModelStamp:
         sdk, tid, tc = next(gen)
         try:
             uuidB = str(_uuid_lib.uuid4())
-            keyA = sdk.apikey_create(tid, _2599_UUID_A)
-            keyB = sdk.apikey_create(tid, uuidB)
+            keyA = sdk._apikey_create(tid, _2599_UUID_A)
+            keyB = sdk._apikey_create(tid, uuidB)
             hA = {"Authorization": f"Bearer {keyA['api_key']}"}
             hB = {"Authorization": f"Bearer {keyB['api_key']}"}
             conv = [{"role": "user", "content": "first capture."},
@@ -312,7 +312,7 @@ class TestSessionMachineModelStamp:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2599_UUID_A)
+            key = sdk._apikey_create(tid, _2599_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             tc.post("/v1/sessions", headers=h, json={
                 "conversation": [{"role": "user", "content": "list test."}],
@@ -341,7 +341,7 @@ class TestSessionMachineModelStamp:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2599_UUID_A)
+            key = sdk._apikey_create(tid, _2599_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             tc.post("/v1/sessions", headers=h, json={
                 "conversation": [{"role": "user", "content": "legacy compat."}],
@@ -365,7 +365,7 @@ class TestSessionMachineModelStamp:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            key = sdk.apikey_create(tid, _2599_UUID_A)
+            key = sdk._apikey_create(tid, _2599_UUID_A)
             h = {"Authorization": f"Bearer {key['api_key']}"}
             tc.post("/v1/sessions", headers=h, json={
                 "conversation": [{"role": "user", "content": "detail legacy."}],

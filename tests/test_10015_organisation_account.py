@@ -259,7 +259,7 @@ class TestReply:
         own = TortoiseSDK(db_path=str(tmp_path / "this-handles-store.db"),
                           namespace="registry")
         team = own.org_create("split-store-10015")
-        assert own.org_get(team["id"]) is not None   # the caller CAN see it
+        assert own._org_get(team["id"]) is not None   # the caller CAN see it
         own._record_tenant = (team["id"], "g-10015")
         with pytest.raises(ControlPlaneError) as exc:
             own.get_organisation_account()
@@ -336,7 +336,7 @@ class TestTenancy:
         """The `OrgNotFoundError` arm must not MATERIALISE the registry it probes.
 
         The arm asks the caller's own control plane whether the account exists —
-        `self.org_get` — and `org_get` resolves this handle's registry
+        `self._org_get` — and `org_get` resolves this handle's registry
         (`_get_registry` -> `_ensure_registry_indexes`' CREATE INDEX set), which
         brings `{ns}_control_plane` into existence on a store that has no graph
         by that name. That is the read-side mint #669 rejected: in Supabase mode
@@ -377,7 +377,7 @@ class TestTenancy:
             "this store already holds a registry graph — the control below "
             "cannot show what the probe would create"
         )
-        sdk.org_get("no-such-org-10015c")
+        sdk._org_get("no-such-org-10015c")
         after = sorted(str(g) for g in (db.list_graphs() or []))
         created = [g for g in after if g not in before]
         assert created, "org_get created no graph — then the pin above proves nothing"
@@ -396,7 +396,7 @@ class TestTenancy:
         """
         from tortoise.graph_delete_guard import safe_graph_delete
 
-        sdk.org_get("bootstrap-10015")           # materialise + cache the registry
+        sdk._org_get("bootstrap-10015")           # materialise + cache the registry
         name = sdk._registry_name
         assert name and sdk._get_registry(create=False) is not None
         db = sdk._get_proj().db

@@ -1,6 +1,6 @@
 """#1890: the terminal-state invite-ghost sweep must have a LIVE caller.
 
-``TortoiseSDK.sweep_invite_ghost_memberships`` (#1908) was correct and tested —
+``TortoiseSDK._sweep_invite_ghost_memberships`` (#1908) was correct and tested —
 and reachable only from ``graph-scripts/backfill_invite_ghost_members.py``,
 which an operator runs by hand. So an invite that expired by the clock AFTER
 that one-time backfill kept its ghost ``invite-{iid}`` placeholder in

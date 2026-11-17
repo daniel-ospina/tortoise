@@ -919,7 +919,7 @@ def test_bootstrap_key_persists_and_verifies(local_db):
     from tortoise.sdk import TortoiseSDK
     fresh = TortoiseSDK(namespace="registry")
     try:
-        res = fresh.apikey_verify(key)
+        res = fresh._apikey_verify(key)
         assert res and res.get("org_id"), "key must verify after restart"
     finally:
         fresh.close()

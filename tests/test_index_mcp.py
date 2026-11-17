@@ -309,7 +309,7 @@ class TestE2E17Dispatch:
                 assert len(urls) == len(set(urls))  # zero url overlap
                 assert _count(g2, "MATCH (s:Source) RETURN count(s)") == 2  # 2N
                 # by_kind / list_sources correct
-                srcs = sdk2.list_sources()
+                srcs = sdk2.list_knowledge("source")
                 assert {s["url"] for s in srcs} == set(urls)
                 assert all(s["sourceKind"] == "agentSession" for s in srcs)
                 assert _required_sweep_clean(g2) == 0
@@ -359,7 +359,7 @@ class TestE2E17HttpRefusal:
         reg = TortoiseSDK(os.path.join(str(tmp_path), "reg.db"),
                           namespace="registry")
         team = reg.org_create("e2e17-http")
-        key = reg.apikey_create(team["id"], "e2e17-fixture")["api_key"]
+        key = reg._apikey_create(team["id"], "e2e17-fixture")["api_key"]
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
                               _registry_sdk=reg)
         tc = _mounted_test_client(app)

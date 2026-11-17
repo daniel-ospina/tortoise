@@ -1267,7 +1267,7 @@ def test_search_sessions_re_owns_the_order_and_does_NOT_pay_for_a_rerank(sdk, mo
 
     monkeypatch.setattr(rerank, "load_scorer", _loader)
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
-    found = sdk.search_sessions(f"zebra {nonce}", limit=3)
+    found = sdk.search_knowledge(f"zebra {nonce}", mode="sessions", limit=3)
     assert found, "premise: the search must return sessions, or nothing ran"
     assert loads == [], (
         "search_sessions loaded the cross-encoder for a page it re-sorts by the "
@@ -1357,6 +1357,12 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
             "authorisation to run it",
         ("tortoise/mcp_server.py", "tortoise_query"): "user search (MCP text route)",
         ("tortoise/mcp_server.py", "tortoise_search"): "user search (MCP)",
+        ("tortoise/sdk.py", "search_knowledge"):
+            "the one SEARCH door (#11609): it is a WRAPPER, not a re-owner — the "
+            "page it returns is the read's own page, and the surfaces above "
+            "(`tortoise_search`/`tortoise_query`, hosted + self-hosted search) "
+            "reach the same read through it, so the rerank is the read those "
+            "surfaces price rather than a re-picked downstream order",
     }
     # ⛔ NO ROW FOR ``volunteer_context``. It binds the read as ``_search_fn=`` and
     # the opt-out rides in its ``_search_kwargs`` — MEASURED to matter: before

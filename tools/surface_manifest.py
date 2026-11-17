@@ -268,7 +268,18 @@ MANIFEST_HEADER = (
     "# cannot be green by construction.\n"
     "#\n"
     "#\n"
-    "# LOWERED 72 \u2192 67 (tools) and 150 \u2192 124 (SDK methods) on 2026-11-13 by the\n"
+    "# LOWERED 110 \u2192 94 (SDK methods) on 2026-11-16 by #12901 wave 2 \u2014 the\n"
+    "# control-plane partition (`N1`\u2013`N6`): sixteen members left the public surface and\n"
+    "# every body was privatised. The tools pin is unchanged at 55 (wave 2 touches no MCP\n"
+    "# tool). The pin is lowered to the count THIS tree derives \u2014 94, as `counts:` states \u2014\n"
+    "# and not to any one wave's arithmetic: wave 2 branched before the READ/QUERY\n"
+    "# containers (#11609 family A / #12951) landed their own \u22128, so its own\n"
+    "# \"118 \u2192 102\" is that PR's BEFORE/AFTER, not this tree's. Measured here: 110 \u2192 94.\n"
+    "# Same reason as every line below \u2014 slack above the live surface is a false PASS\n"
+    "# waiting to happen, and leaving it at 110 would let a re-added retired control-plane\n"
+    "# name (`apikey_create`, `graph_delete`, `org_get`, \u2026) land UNDER the ceiling while\n"
+    "# `surface-guard` step 7 stayed green over a surface that grew back by up to 16 names.\n"
+    "#\n"    "# LOWERED 72 \u2192 67 (tools) and 150 \u2192 124 (SDK methods) on 2026-11-13 by the\n"
     "# SOURCES/MINE/SESSION batch of #4282 Phase 2 (#11609 lane C), to the live counts that\n"
     "# batch produced. LOWERING, not raising, is what the pin needs here, and the reason is\n"
     "# the pin's own: slack above the live surface is a false PASS waiting to happen \u2014 a\n"
@@ -1065,7 +1076,13 @@ DERIVED_CLASSES = ("agent-reachable", "eval-only", "internal", "no-caller-found"
 # against it: "Every comparable we studied pins a smaller set" is a comparison, true only
 # while we advertise more than this — below it the sentence is false (Letta pins 18).
 LARGEST_COMPARABLE = 18
-AUTHORED_CONTROL_PLANE = frozenset({"apikey_revoke", "graph_delete"})
+AUTHORED_CONTROL_PLANE: frozenset[str] = frozenset()
+# ↑ EMPTY since #12901 wave 2. It held `apikey_revoke` and `graph_delete`, the two
+# control-plane mutators whose callers the derivation could not classify on their own;
+# both left the public surface in wave 2 (their bodies survive as `_apikey_revoke` /
+# `_graph_delete`), so the authored member that carried the judgement has no live row
+# left to mark. A future control-plane method whose callers misclassify adds its name
+# back here — the set is authored, so it cannot be regenerated into being.
 
 # §6.1 item 3. The catch-all clause is what makes this single-valued; the two
 # subpath carve-outs are what keep it from being two-valued.

@@ -139,13 +139,18 @@ class TestDeclaration:
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
 
-        # 118 is the number `config/surface-manifest.yml` derives
+        # 94 is the number `config/surface-manifest.yml` derives
         # (`counts.sdk_public_methods`, re-cut at this head) and the one
         # `tools/surface-guard.py` pins as the frozen baseline. Measured, not
-        # typed: `uv run python tools/sdk_surface.py --check` reads 118.
-        # The composition of the two #4282 Phase 2 waves: 125 -> 120 (#12901
-        # wave 1) -> 119 (lane B) -> 118 (this lane, +6 approved / -7 retired).
-        assert len(public) == 118, f"SDK surface changed: {len(public)} != 118"
+        # typed: `uv run python tools/sdk_surface.py --check` reads 94.
+        # The composition: 125 -> 120 (#12901 wave 1) -> 112 (#11609 READ/QUERY
+        # family A, #12951: +6 containers / -14 re-privatised) -> 111 (lane B, -4
+        # retired / +3 approved) -> 110 (lane C, -7 retired / +6 approved) -> 94
+        # (#12901 wave 2: the sixteen control-plane doors of the canonical N1-N6
+        # partition left the public surface, every body kept PRIVATE — an off-surface
+        # departure, so the approved 40 and `high_water_counts.tools` are untouched and
+        # the SDK pin moves DOWN to 94).
+        assert len(public) == 94, f"SDK surface changed: {len(public)} != 94"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK

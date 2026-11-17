@@ -660,7 +660,10 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 #:   re-keys carry both columns again. The number is re-derived from the MERGED manifest,
 #:   never carried from either side — 38 was main's own measured count and was two short
 #:   here, which is exactly the allowance this floor exists to forbid.
-COMPARABLE_CALLER_ROWS_FLOOR = 40
+#:   40 -> 25 on 2026-11-16 (#12901 wave 2): fifteen of the sixteen retired rows carried a
+#:   caller list in both columns (`org_create`'s N1 neighbours are the exception), so they
+#:   left the comparison with the row. Re-derived from THIS manifest, never carried.
+COMPARABLE_CALLER_ROWS_FLOOR = 25
 
 
 def test_the_reason_dependency_cross_check_can_fail():
@@ -4864,7 +4867,11 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #11609 lane C composes with lane B on this tree: 60 -> 59 (six SOURCES/MINE/SESSION
     # containers in, seven advertised members retired into them; the 68 the branch started
     # from is lane B's pre-wave number, so the merged arithmetic is 68 + 6 + 6 - 7 - 14).
-    assert live["mcp"] == manifest["counts"]["tools"] == 59
+    # #11609 family A's READ/QUERY containers (#12951, merged after this pin was last cut)
+    # then retired nine advertised doors into six containers: 59 - 9 + 5 = 55. The pin had
+    # gone stale on `main` by exactly that wave — this corrects it to the derived count
+    # rather than to any prose, and `surface-target-check.py` reads the same 55.
+    assert live["mcp"] == manifest["counts"]["tools"] == 55
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
@@ -4889,7 +4896,13 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # ⛔ `adjust_relationship` and `refresh_confidence` are NOT implemented rows: they are
     # approved targets still ABSENT from the live class (see the 23 the declaration gate
     # prints), so naming them as delivered here was false.
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 118
+    # 110 -> 94 on 2026-11-16 (#12901 wave 2): the canonical control-plane partition
+    # (`N1`–`N6`) left the PUBLIC surface — sixteen members, every body privatised as the
+    # seam its hosted caller now uses — so the live set shrank again without touching the
+    # approved 40 (none of the sixteen was an approved row). 110 is this tree's BEFORE:
+    # the wave branched before #12951's READ/QUERY containers, so its own "118 -> 102"
+    # never saw that wave's -8. The manifest under test is the one re-cut HERE.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 94
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():
