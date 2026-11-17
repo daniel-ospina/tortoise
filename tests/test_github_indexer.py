@@ -482,6 +482,7 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
         # exactly one close and then stops. Without this, a reader that never
         # answers "closed" at all would pass the loop above.
         proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) SET o.status=null, "
+                     "o.outdated=null, "
                      "o.isClosed=false, o.pipelineStageId='in_progress', "
                      "o.pipelineSlot='active'")
         t.issues_by_repo["acme/repo1"] = [gh_issue(
