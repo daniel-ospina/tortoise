@@ -7511,7 +7511,8 @@ def _refuse_an_enumerated_replay(cursor: Any, org_id: str,
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str, start_seq: int = 1,
            position: bool = True,
-           allocate: bool = False) -> ReplayReport:
+           allocate: bool = False,
+           carried_positions: bool = False) -> ReplayReport:
     """Replay a journal into the record, on the CALLER's transaction.
 
     `§3`: *"One transaction covers the journal and its projection — no dual
@@ -7554,6 +7555,32 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     ``position=seq is not None`` and layer 1 is populated by production traffic,
     not only by a replay. ``True`` (the default) keeps every caller that
     predates the parameter byte-identical.
+
+    ⛔ WHO OWNS THE ORDINAL IS AN EXPLICIT INPUT, NEVER INFERRED FROM THE RECORD
+    (#13043 review P1-3). ``carried_positions`` says which SHAPE this batch has:
+
+    - ``False`` (the default) — a **JOURNAL-sourced** batch: the live append, a
+      JSONL replay, the session backfill, the reconciler. The ordinal is the
+      enumeration from the caller's ``start_seq``, and a top-level ``seq``
+      property on a record is **IGNORED**. That property is residue, not a
+      reading: the pre-reservation SDK let ``update_point(pid, seq=…)`` put one
+      on the line, and a `:Session` copy carried one, so a pre-existing journal
+      can hold a line asserting a number that has nothing to do with its
+      position. Inferring the read from key PRESENCE made one such line refuse
+      that record's live write **and** its only repair
+      (`_refuse_an_enumerated_replay` refuses the enumerated arm once the graph
+      is cut over), with no in-band fix — so the default must not read it.
+    - ``True`` — a **RECORD-sourced** batch: rows read from
+      ``public.journal_event``, whose ``seq`` IS a column. The number is READ
+      (:func:`_carried_position`), a disagreement with the enumeration is a
+      REFUSAL naming both numbers, and a value that is not an ``int`` is refused
+      rather than coerced. A caller of this shape that forgets the flag gets
+      enumeration — which is why this parameter is the one thing a
+      record-sourced reader must state about itself.
+
+    `write_live_record` passes ``False`` deliberately: its record IS the journal
+    line, and the number that line must be written at is the append's — which the
+    door already carries as ``start_seq``.
 
     ⛔ AND AN ENUMERATED REPLAY IS REFUSED ONCE THE GRAPH IS CUT OVER (#9190).
     Before a single plan statement, and only when ``position`` is on and
@@ -7631,7 +7658,8 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
 
     plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
                        start_seq=start_seq, position=position,
-                       allocate=allocate)
+                       allocate=allocate,
+                       carried_positions=carried_positions)
     # ⛔ THE ISOLATION GUARD RUNS INSIDE THE CALLER'S TRANSACTION, before any
     # statement: the allocator's "allocation order = commit order" is a READ
     # COMMITTED property, and under REPEATABLE READ/SERIALIZABLE the counter's
@@ -7731,7 +7759,8 @@ _JOURNAL_INSERT_PREFIX = "INSERT INTO public.journal_event"
 def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
                 graph_id: str, start_seq: int = 1,
                 position: bool = True,
-                allocate: bool = False) -> list[Statement]:
+                allocate: bool = False,
+                carried_positions: bool = False) -> list[Statement]:
     """Every statement a full replay emits, in order, WITHOUT executing any.
 
     The totality gate lives here: an undeclared record type raises before a
@@ -7759,6 +7788,12 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
     `record_writer.write_live_record` writes the row from it — so layer 1 is
     populated by production traffic, not only by a replay. The layer mutations
     are unaffected either way.
+
+    ``carried_positions`` SELECTS THE ORDINAL'S SOURCE, and the default is the
+    journal's enumeration (see :func:`replay`'s docstring for the two shapes, and
+    for why key PRESENCE alone must not decide it — #13043 review P1-3). A record
+    that carries ``seq`` while the flag is off does not disagree with anything:
+    it is a journal line, and the enumeration is its position.
     """
     if start_seq < 1:
         raise RecordProjectionError(
@@ -7807,10 +7842,18 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
         # come first, then its position row (an identity row must precede the
         # node row it names — `tests/test_record_projection.py` pins four such
         # legs). Only the READ moved.
+        #
+        # ⛔ AND THE READ IS GATED ON WHICH SHAPE THIS BATCH IS (#13043 review
+        # P1-3). `carried_positions` off means a JOURNAL-sourced batch: the
+        # ordinal is this enumeration and a `seq` prop on the line is residue
+        # that must not be able to refuse the write (see `replay`'s docstring).
+        # On means a RECORD-sourced batch (rows from `public.journal_event`) and
+        # the carried column is the reading.
         plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
                                   columns=columns, refused=refused))
         if position:
-            seq = _carried_position(record, start_seq + index, index)
+            seq = (_carried_position(record, start_seq + index, index)
+                   if carried_positions else start_seq + index)
             plan.append(_journal_row(record, seq, org_id, graph_id))
     return plan
 
@@ -7818,6 +7861,13 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
 def _carried_position(record: Mapping[str, Any], enumerated: int,
                       index: int) -> int:
     """The record's OWN position when it carries one, else the enumeration (#9190).
+
+    ⛔ CALLED ONLY ON A RECORD-SOURCED BATCH (#13043 review P1-3). The caller
+    selects this reading with ``carried_positions=True``; on the default
+    (journal-sourced) path the enumeration stands and a top-level ``seq`` property
+    is residue that is IGNORED. Nothing here may be inferred from presence again —
+    the docstring below described that inference as the defect it is, and the
+    implementation did it anyway.
 
     THE RULING'S SECOND HALF. `#9190` reopened this issue because replay DERIVED
     the number (`enumerate(records, start=1)`) instead of reading it: the record
@@ -7882,17 +7932,15 @@ def _carried_position(record: Mapping[str, Any], enumerated: int,
             f"record {index} carries journal position {carried_seq} but the "
             f"enumeration puts it at {enumerated}. The record and the read "
             f"disagree about the ordinal, so NEITHER is renumbered here -- "
-            f"repair the batch (or the caller's start_seq) and re-run. If this "
-            f"`seq` is a CALLER PROPERTY and not a carried position, the batch "
-            f"is not record-sourced: strip `seq` at the producer (it is a "
-            f"reserved journal-envelope name) and re-run -- the two are "
-            f"indistinguishable here, because this reads a shape, not a claim. "
-            f"⛔ A STRIP AT THE PRODUCER ONLY PREVENTS FUTURE LINES: the journal "
-            f"is append-only, so a line ALREADY on disk keeps its `seq` for "
-            f"ever, and this raises while BUILDING the plan -- no partial "
-            f"repair. No journal-line migration ships today, so a graph whose "
-            f"journal already carries a top-level `seq` cannot have its record "
-            f"rebuilt from that journal until one does"
+            f"repair the batch (or the caller's start_seq) and re-run. If these "
+            f"records are JOURNAL lines (the append's number, a JSONL read, a "
+            f"session backfill) and a leftover `seq` PROPERTY rode along, then "
+            f"this batch is not record-sourced at all: call it with "
+            f"`carried_positions=False` (the default) and the enumeration is the "
+            f"position — that is the shape a pre-existing journal's legacy lines "
+            f"need, and no journal-line migration is required. `carried_positions` "
+            f"is a claim about where the batch CAME FROM, so do not set it to "
+            f"describe what the records happen to contain."
         )
     return carried_seq
 

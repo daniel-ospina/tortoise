@@ -1725,10 +1725,12 @@ def test_a_rolled_back_allocation_is_reissued_exactly_once(schema, tenant, app):
 
 # ── (3c) replay READS the carried ordinal ──────────────────────────────────
 
-def _position_plan(records, *, start_seq: int):
+def _position_plan(records, *, start_seq: int,
+                   carried_positions: bool = False):
     """The journal-position statements of a plan, with the `seq` each binds."""
     plan = rp.replay_plan(records, org_id="o", graph_id="g",
-                          start_seq=start_seq)
+                          start_seq=start_seq,
+                          carried_positions=carried_positions)
     out = []
     for statement in plan:
         if statement.sql.startswith(rp._JOURNAL_INSERT_PREFIX):
@@ -1753,7 +1755,7 @@ def test_replay_reads_a_carried_ordinal():
     disagreement — which is `test_replay_refuses_a_carried_ordinal_that_disagrees`.
     """
     carried = [{**RECORD, "seq": 5}, {**RECORD, "seq": 6}]
-    assert _position_plan(carried, start_seq=5) == [5, 6]
+    assert _position_plan(carried, start_seq=5, carried_positions=True) == [5, 6]
     # A record with no `seq` still enumerates (the JSONL journal's shape — no
     # producer emits one as of this change, because the three intakes now strip
     # or refuse the name. It was MEASURED false before, so this is a consequence
@@ -1775,14 +1777,15 @@ def test_replay_refuses_a_carried_ordinal_that_disagrees():
     for carried_value, start in ((9, 1), (6, 1)):
         with pytest.raises(rp.RecordProjectionError) as raised:
             rp.replay_plan([{**RECORD, "seq": carried_value}], org_id="o",
-                           graph_id="g", start_seq=start)
+                           graph_id="g", start_seq=start,
+                           carried_positions=True)
         message = str(raised.value)
         assert str(carried_value) in message and str(start) in message, (
             f"the refusal does not name both numbers: {message}")
 
     with pytest.raises(rp.RecordProjectionError):
         rp.replay_plan([{**RECORD, "seq": "not-a-number"}], org_id="o",
-                       graph_id="g", start_seq=1)
+                       graph_id="g", start_seq=1, carried_positions=True)
 
     # ⛔ AND A VALUE THAT ONLY *COERCES* TO THE RIGHT-NUMBERED POSITION IS A
     # DISAGREEMENT, NOT A MATCH (#12894 review cycle 4, P2). `int(carried)` used
@@ -1794,7 +1797,7 @@ def test_replay_refuses_a_carried_ordinal_that_disagrees():
     for wrong_type in (5.9, "5", True):
         with pytest.raises(rp.RecordProjectionError) as coercion:
             rp.replay_plan([{**RECORD, "seq": wrong_type}], org_id="o",
-                           graph_id="g", start_seq=5)
+                           graph_id="g", start_seq=5, carried_positions=True)
         assert "not an integer" in str(coercion.value), (
             f"seq={wrong_type!r} was accepted or refused for the wrong reason: "
             f"{coercion.value}")
@@ -1813,7 +1816,8 @@ def test_a_carried_ordinal_is_not_validated_when_no_position_is_written():
     replay(...)`).
     """
     plan = rp.replay_plan([{**RECORD, "seq": 9}], org_id="o", graph_id="g",
-                          position=False, start_seq=1)
+                          position=False, start_seq=1,
+                          carried_positions=True)
     assert plan, (
         "the position=False plan is empty — the record's own mutations vanished "
         "along with the ordinal that was skipped")
@@ -1822,7 +1826,89 @@ def test_a_carried_ordinal_is_not_validated_when_no_position_is_written():
     # scope fix and not a hole: `position=True` refuses the same record.
     with pytest.raises(rp.RecordProjectionError):
         rp.replay_plan([{**RECORD, "seq": 9}], org_id="o", graph_id="g",
-                       start_seq=1)
+                       start_seq=1, carried_positions=True)
+
+
+def test_a_record_sourced_batch_is_the_only_shape_that_READS_the_carried_ordinal():
+    """⛔ WHO OWNS THE ORDINAL IS AN EXPLICIT INPUT, NEVER KEY PRESENCE (#13043 P1-3).
+
+    THE DEFECT THIS CLOSES, reproduced on the pre-fix tree:
+
+        replay_plan([{… "seq": 42}], start_seq=7) -> REFUSED
+
+    A pre-existing journal can hold such a line — the pre-reservation SDK put a
+    caller's `seq=` on the line's top level, and `backfill_copy_turns` copied one
+    off a `:Session`. ONE of them made that record's live write refuse (the door
+    passes `position=True` and the append's `seq` as `start_seq`), AND refused its
+    only repair, because `_refuse_an_enumerated_replay` refuses the enumerated arm
+    on a cut-over graph. There was no in-band fix: the number in the prop is
+    residue that has nothing to do with where the line actually sits.
+
+    Both halves are asserted, and the DEFAULT one is the one that was red:
+
+    (a) journal-sourced (the default) IGNORES the prop — the enumeration stands;
+    (b) record-sourced (`carried_positions=True`) READS it and refuses a
+        disagreement, naming both numbers.
+
+    ⚠️ The two halves are the same record. Only the DELETE-side fact changed
+    (where the batch came from), so a plan that decided this by inspecting the
+    records cannot pass both.
+    """
+    legacy = [{**RECORD, "seq": 42}]
+
+    # (a) THE DEFAULT PATH MUST NOT REFUSE. This is the leg that was RED: on the
+    # pre-fix tree it raised, so a legacy line's live write and its repair both
+    # refused forever.
+    assert _position_plan(legacy, start_seq=7) == [7], (
+        "a journal-sourced batch carrying a leftover `seq` prop was renumbered "
+        "from its POSITION — the prop is residue and must not be read")
+
+    # (b) …and the explicit input still refuses, so (a) is a scope fix rather
+    # than the refusal being deleted.
+    with pytest.raises(rp.RecordProjectionError) as raised:
+        _position_plan(legacy, start_seq=7, carried_positions=True)
+    message = str(raised.value)
+    assert "42" in message and "7" in message, (
+        f"the record-sourced refusal does not name both numbers: {message}")
+
+    # The same batch with the flag ON and an AGREEING carried number is read, not
+    # enumerated — so the flag is not merely "refuse more".
+    agreeing = [{**RECORD, "seq": 7}, {**RECORD, "seq": 8}]
+    assert _position_plan(agreeing, start_seq=7) == [7, 8]
+    assert _position_plan(agreeing, start_seq=7, carried_positions=True) == [7, 8]
+
+
+def test_the_live_door_writes_a_legacy_line_that_carries_a_stray_seq_prop(
+        schema, tenant, app, monkeypatch):
+    """⛔ THE DB-BACKED HALF OF P1-3, THROUGH THE REAL DOOR (#13043).
+
+    The plan-level leg above proves the argument; this one proves the CONSEQUENCE
+    the review named: a pre-existing record whose journal holds a line with a
+    leftover top-level `seq` prop. The append reports the line's REAL position (3
+    here), and the prop says 42 — residue from the pre-reservation SDK's
+    `update_point(pid, seq=…)` or from a `:Session` copy.
+
+    Pre-fix this refused the record's live write (`RecordProjectionError` from
+    `_carried_position`, surfaced by the door as a `write_failed` refusal) — and
+    on a cut-over graph it refused the enumerated replay that is the only repair,
+    so the record was wedged with no in-band fix. The door must write the row at
+    the number the JOURNAL reported and ignore the prop.
+
+    The graph is deliberately NOT cut over: this is the enumerated arm, which is
+    the arm every pre-cutover graph is on, and the arm the legacy line exists on.
+    """
+    org, graph = tenant
+    _append_positions(schema, org, graph, [1, 2])
+    _arm_door(monkeypatch, flag=False)
+
+    write = rw.write_live_record({**RECORD, "seq": 42}, durable=True, seq=3,
+                                 tenant=(org, graph))
+    assert write is not None and write.applied, (
+        f"the door refused a journal line because it carried a leftover `seq` "
+        f"prop: {write!r}")
+    assert [row[0] for row in _journal_rows(schema, org, graph)] == [1, 2, 3], (
+        "the position row was not written at the journal's own position — the "
+        "stray prop renumbered it or the row is missing")
 
 
 # ── (3d) the journal line and its row carry the SAME number ────────────────

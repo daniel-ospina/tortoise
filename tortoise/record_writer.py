@@ -1574,6 +1574,7 @@ class RecordWriter:
         conn: Any | None = None,
         position: bool = True,
         allocate: bool = False,
+        carried_positions: bool = False,
     ) -> RecordWrite:
         """Apply `records` to the record, on a transaction the CALLER owns.
 
@@ -1604,6 +1605,19 @@ class RecordWriter:
             graph's cursor must exist in mode `active`
             (:mod:`tortoise.record_allocator`); a `seeded`/`halted`/absent
             cursor raises `CursorNotActive` rather than inventing a number.
+        :param carried_positions: **which shape this batch is** (#13043 review
+            P1-3), passed straight through to
+            :func:`record_projection.replay`. ``False`` (the default, and what
+            every production caller wants) means a **journal-sourced** batch:
+            `first_seq` enumerates, and a top-level ``seq`` property on a record
+            is IGNORED rather than trusted — that property is residue from the
+            pre-reservation SDK or a `:Session` copy, and reading it made one
+            legacy line refuse its own record's live write AND the only repair
+            for it. ``True`` means a **record-sourced** batch (rows read from
+            `public.journal_event`, whose ``seq`` is a column): the carried
+            number is READ and a disagreement with the enumeration is a refusal.
+            ⛔ Do not set this to describe what the records happen to CONTAIN;
+            it describes where they CAME FROM.
 
         :raises RecordWriteError: the record was ARMED and the write did not
             happen (malformed DSN, unreachable record, totality refusal, or a
@@ -1665,6 +1679,7 @@ class RecordWriter:
             report = record_projection.replay(
                 records, target, org_id=org_id, graph_id=graph_id,
                 start_seq=first_seq, position=position, allocate=allocate,
+                carried_positions=carried_positions,
             )
         except Exception as exc:
             # Totality (an undeclared/refused record type raises before the
@@ -1873,6 +1888,7 @@ def write_records(
     position: bool = True,
     allocate: bool = False,
     writer: RecordWriter | None = None,
+    carried_positions: bool = False,
 ) -> RecordWrite:
     """One-call form of :meth:`RecordWriter.write` — the chokepoint's entry point.
 
@@ -1883,11 +1899,14 @@ def write_records(
     have to invent one.
 
     ``allocate`` is passed through unchanged: #12894's allocator is a property
-    of the WRITE, not of this convenience wrapper.
+    of the WRITE, not of this convenience wrapper. ``carried_positions`` is
+    passed through for the same reason — it describes the batch's ORIGIN
+    (journal or record), not this call (#13043 review P1-3).
     """
     return (writer or RecordWriter()).write(
         records, org_id=org_id, graph_id=graph_id, first_seq=first_seq,
         conn=conn, position=position, allocate=allocate,
+        carried_positions=carried_positions,
     )
 
 
