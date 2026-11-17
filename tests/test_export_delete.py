@@ -1079,12 +1079,13 @@ class TestDashboardCreatedTeamRoundTrip:
         # #13205: the purge drops EVERY graph the org owns, not just its stored
         # default — the legacy `team_{org_id}` spelling is this org's data graph
         # for any org minted before #3543, and a hard delete is the last moment
-        # anything knows it existed. Order is the deprovision list's order
-        # (`_org_graph_names`: stored name first, then the canonical spelling,
-        # then the legacy one); the assertion stays STRICT equality so an
-        # accidental third target (a foreign namespace) cannot slip in.
-        assert dropped == [(org_id, f"org_{org_id}"),
-                           (org_id, f"team_{org_id}")]
+        # anything knows it existed. The order is `_org_graph_names`': the bind
+        # target (`org_{org_id}`) is always LAST so every bind precedes its
+        # delete — see that function, this ordering is a correctness property.
+        # The assertion stays STRICT equality so an accidental third target (a
+        # foreign namespace) cannot slip in.
+        assert dropped == [(org_id, f"team_{org_id}"),
+                           (org_id, f"org_{org_id}")]
         assert not any(t["id"] == org_id for t in fake.tables["organizations"])
         ops = [e["operation"] for e in capture_audit]
         assert "team_delete_purged" in ops

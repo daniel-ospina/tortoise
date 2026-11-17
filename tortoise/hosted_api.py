@@ -34272,13 +34272,37 @@ def _org_graph_names(org_id: str, graph_name: str | None = None) -> list[str]:
     above need no read at all, so an unreadable control plane (or a schema a
     migration behind, or the registry lane with no ``graphs`` table) still
     drops the default instead of failing the whole purge on a listing error.
+
+    ⛔ THE CANONICAL NAME IS RETURNED **LAST**, and that ordering is a
+    CORRECTNESS requirement, not tidiness. Every drop goes through
+    :func:`_drop_org_graph_impl`, which obtains its DB handle by BINDING
+    ``org_{org_id}`` (``_make_sdk(namespace=org_id)._get_proj()``). Binding a
+    graph the store does not hold MATERIALISES it — that is measured and
+    documented at ``projection.FalkorProjection.__init__`` (#11113: the
+    open-time health probe creates the graph; write-freedom needs the PAIR
+    ``skip_health_check=True, ensure_indexes=False``) — and on the live lane a
+    bind after a ``GRAPH.DELETE`` brings the graph back WITH ITS NODES
+    (reproduced 2026-11-17 on ``falkordb-server:v4.20.6``: delete → bind →
+    ``GRAPH.LIST`` holds it again, ``MATCH (n) RETURN count(n)`` = 1). So a list
+    that dropped the canonical name FIRST and then bound it again on the next
+    name would end the purge with the tenant's data graph still present — the
+    erasure silently undone by its own deprovision loop. Putting the bind
+    target last means every bind happens BEFORE its delete.
+
+    ⚠️ Residual, stated rather than hidden: the bind still TRANSIENTLY
+    materialises ``org_{org_id}`` on a legacy org whose only other graph is
+    ``team_{org_id}`` — the empty graph is created by the first iteration's bind
+    and removed by the last iteration's delete, so a process killed inside that
+    window leaves one empty graph behind. Removing the bind altogether means
+    changing ``_drop_org_graph_impl``'s handle (a write-free projection), which
+    is a wider change than this fix and is filed as follow-up work.
     """
     prefixes = (f"org_{org_id}_", f"team_{org_id}_")
     own_defaults = {f"org_{org_id}", f"team_{org_id}"}
     if graph_name:
         own_defaults.add(str(graph_name))
+    bind_target = canonical_org_graph_name(org_id)
     candidates: list[str] = [str(graph_name)] if graph_name else []
-    candidates.append(canonical_org_graph_name(org_id))
     candidates.append(f"team_{org_id}")  # pre-#3543 spelling; no migration rewrote it
     try:
         from tortoise.supabase_control import (
@@ -34305,10 +34329,13 @@ def _org_graph_names(org_id: str, graph_name: str | None = None) -> list[str]:
     for name in candidates:
         if not name or not isinstance(name, str):
             continue
+        if name == bind_target:
+            continue  # appended LAST, below
         if name not in own_defaults and not name.startswith(prefixes):
             continue  # not provably this org's — never drop it
         if name not in out:
             out.append(name)
+    out.append(bind_target)  # the bind target, always last (see the docstring)
     return out
 
 
@@ -34326,6 +34353,9 @@ def _drop_org_graphs_strict(org_id: str, graph_name: str | None = None) -> list[
     list is safe to re-run; a REAL failure (auth, dead connection) propagates so
     the caller keeps the org row as the retry anchor (#926) rather than
     committing an erasure that orphaned a live graph.
+
+    ⛔ The list's LAST name is the one the drop seam BINDS, which is why the
+    canonical name is ordered last — see :func:`_org_graph_names`.
     """
     names = _org_graph_names(org_id, graph_name)
     for name in names:

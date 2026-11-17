@@ -26,6 +26,7 @@ drops ``[org_x]`` where it must drop the whole owned set, (3) has no tool at all
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -162,11 +163,38 @@ class TestDeprovisionOnDelete:
                                 [{"id": "o1", "graph_name": "org_o1"}],
                                 graphs=[{"org_id": "o1", "namespace": "org_o1_g_abc"}]))
         names = ha._org_graph_names("o1", "org_o1")
-        assert names[0] == "org_o1"          # the stored default stays FIRST
-        assert "org_o1" in names
         assert "team_o1" in names            # pre-#3543 spelling, still on disk
         assert "org_o1_g_abc" in names       # the custom graph: the actual leak
+        assert "org_o1" in names             # the canonical default
+        assert names[-1] == "org_o1"         # the bind target, LAST (see below)
         assert len(names) == len(set(names))
+
+    def test_the_bind_target_is_dropped_LAST(self, monkeypatch):
+        """⛔ ORDER IS A CORRECTNESS PROPERTY, not tidiness (#13205 review, P0).
+
+        Every drop binds ``org_{org_id}`` (``_drop_org_graph_impl`` calls
+        ``_make_sdk(namespace=org_id)._get_proj()``), and binding a graph the
+        store does not hold MATERIALISES it — so a list that deleted the
+        canonical name and then bound it again on the NEXT name would end the
+        purge with the tenant's graph still present. Measured on the live lane
+        (``falkordb-server:v4.20.6``): delete → bind → the graph is back in
+        ``GRAPH.LIST`` with its node. The bind target must therefore be the last
+        element, which is what makes every bind precede its delete.
+        """
+        from tortoise import hosted_api as ha
+
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: self._fake_cp(
+                                [{"id": "o1", "graph_name": "team_o1"}],
+                                graphs=[{"org_id": "o1", "namespace": "org_o1_g_1"},
+                                        {"org_id": "o1", "namespace": "org_o1_g_2"}]))
+        names = ha._org_graph_names("o1", "team_o1")
+        assert names[-1] == "org_o1", names
+        assert names.count("org_o1") == 1, names
+        for other in ("team_o1", "org_o1_g_1", "org_o1_g_2"):
+            assert other in names and names.index(other) < len(names) - 1, names
 
     def test_a_foreign_or_malformed_row_is_never_dropped(self, monkeypatch):
         """The enumerator supplies CANDIDATES; ownership decides. A corrupt
@@ -182,7 +210,7 @@ class TestDeprovisionOnDelete:
                                         {"org_id": "o1", "namespace": "org_o1x_g_1"},
                                         {"org_id": "o1", "namespace": None}]))
         names = ha._org_graph_names("o1", "org_o1")
-        assert names == ["org_o1", "team_o1"], names
+        assert names == ["team_o1", "org_o1"], names
 
     def test_a_legacy_stored_name_is_dropped_alongside_the_canonical_one(self, monkeypatch):
         """A pre-#3543 org stores ``team_{id}``. Both spellings are dropped: the
@@ -195,7 +223,6 @@ class TestDeprovisionOnDelete:
                             lambda: self._fake_cp(
                                 [{"id": "o1", "graph_name": "team_o1"}]))
         assert ha._org_graph_names("o1", "team_o1") == ["team_o1", "org_o1"]
-
     def test_an_unreadable_enumeration_still_drops_the_derived_names(self, monkeypatch):
         """A listing failure must not block the erasure of the derived names —
         and must not silently widen it either."""
@@ -209,7 +236,49 @@ class TestDeprovisionOnDelete:
                             lambda: True)
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: _Broken())
-        assert ha._org_graph_names("o1", "org_o1") == ["org_o1", "team_o1"]
+        assert ha._org_graph_names("o1", "org_o1") == ["team_o1", "org_o1"]
+
+    def test_the_whole_org_is_ACTUALLY_GONE_from_a_live_store(self, monkeypatch):
+        """THE FALSIFIER for the ordering rule — a live store, the real seam.
+
+        Every other test here monkeypatches the drop, so none of them can see the
+        engine behaviour that makes ordering load-bearing: binding a graph the
+        store does not hold MATERIALISES it, and a bind AFTER a ``GRAPH.DELETE``
+        brings the graph back. Measured on ``falkordb-server:v4.20.6`` — with the
+        list in the WRONG order this test's final assertion fails
+        (``['org_<id>']`` still listed), which is exactly the silent un-erasure
+        the PR review caught.
+
+        ⛔ Read ``list_graphs()``, never ``select_graph(name)`` — the second is the
+        very bind that resurrects the graph, so an assertion written that way
+        would recreate what it is checking.
+        """
+        import os
+
+        if not os.environ.get("TORTOISE_DB_URI"):
+            pytest.skip("needs a live store (TORTOISE_DB_URI)")
+        from tortoise import hosted_api as ha
+
+        org = f"z13205probe{os.getpid():x}"
+        canonical, legacy = f"org_{org}", f"team_{org}"
+        db = ha._make_sdk(graph_name="tortoise")._get_proj().db
+        for name in (canonical, legacy):
+            db.select_graph(name).query("CREATE (:Probe13205 {i: 0})")
+        try:
+            assert canonical in db.list_graphs(), "seed failed"
+            monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                                lambda: False)
+            names = ha._drop_org_graphs_strict(org, canonical)
+            assert names[-1] == canonical, names
+            listed = set(db.list_graphs() or [])
+            assert canonical not in listed, (
+                "the org's data graph survived its own purge — the drop loop "
+                "bound it again after deleting it")
+            assert legacy not in listed, listed
+        finally:
+            for name in (canonical, legacy):
+                with contextlib.suppress(Exception):
+                    db.select_graph(name).delete()
 
     def test_strict_deprovision_drops_each_name_and_is_rerunnable(self, monkeypatch):
         """The strict seam the purge calls: one drop per owned name, and a second
@@ -219,20 +288,36 @@ class TestDeprovisionOnDelete:
 
         dropped: list[str] = []
         monkeypatch.setattr(ha, "_org_graph_names",
-                            lambda org_id, graph_name=None: ["org_o1", "team_o1"])
+                            lambda org_id, graph_name=None: ["team_o1", "org_o1"])
         monkeypatch.setattr(ha, "_drop_org_graph_strict",
                             lambda org_id, graph_name=None: dropped.append(graph_name))
-        assert ha._drop_org_graphs_strict("o1", "org_o1") == ["org_o1", "team_o1"]
-        assert dropped == ["org_o1", "team_o1"]
+        assert ha._drop_org_graphs_strict("o1", "org_o1") == ["team_o1", "org_o1"]
+        assert dropped == ["team_o1", "org_o1"]
         dropped.clear()
         ha._drop_org_graphs_strict("o1", "org_o1")
-        assert dropped == ["org_o1", "team_o1"]
+        assert dropped == ["team_o1", "org_o1"]
 
 
 # ── 3. the reaper: safe by construction ──────────────────────────────────────
 
 def _org(org_id, name="acme", email=None):
     return {"id": org_id, "name": name, "email": email, "graph_name": f"org_{org_id}"}
+
+
+class _FakeCP:
+    """A control plane that answers by table, so the REAL index runs."""
+
+    def __init__(self, *, orgs, graphs):
+        self._orgs = orgs
+        self._graphs = graphs
+
+    def query(self, table, **kw):
+        return self._orgs if table == "organizations" else self._graphs
+
+
+def _owned(org, gid=None):
+    """One ``_namespace_index`` entry: the owning row plus a custom graph's gid."""
+    return {"org": org, "gid": gid}
 
 
 class TestReaperRefusesRatherThanGuesses:
@@ -252,7 +337,7 @@ class TestReaperRefusesRatherThanGuesses:
     def test_reserved_control_plane_graphs_are_refused_even_if_empty(self):
         for name in ["registry_control_plane", "registry_tortoise", "tortoise"]:
             bucket, _ = reaper.classify_graph(
-                name, org_index={"registry_tortoise": _org("x", "agent-x")},
+                name, org_index={"registry_tortoise": _owned(_org("x", "agent-x"))},
                 node_count=0)
             assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED, name
 
@@ -261,13 +346,13 @@ class TestReaperRefusesRatherThanGuesses:
         unresolvable graph never gets filed as "some org's, not test" — which
         would read like a decision about an owner that does not exist."""
         bucket, _ = reaper.classify_graph(
-            "org_nobody", org_index={"org_someone": _org("o", "agent-x")},
+            "org_nobody", org_index={"org_someone": _owned(_org("o", "agent-x"))},
             node_count=0)
         assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED
 
     def test_an_unreadable_emptiness_read_is_a_refusal(self):
         bucket, reason = reaper.classify_graph(
-            "org_o1", org_index={"org_o1": _org("o1", "agent-signup")},
+            "org_o1", org_index={"org_o1": _owned(_org("o1", "agent-signup"))},
             node_count=None)
         assert bucket == reaper.BUCKET_REFUSED_UNREADABLE
         assert "never assumed" in reason
@@ -279,7 +364,7 @@ class TestReaperRefusesRatherThanGuesses:
                     _org("o2", "xware"),
                     _org("o3", "Simone", "simone@gmail.com")]:
             bucket, _ = reaper.classify_graph(
-                f"org_{org['id']}", org_index={f"org_{org['id']}": org},
+                f"org_{org['id']}", org_index={f"org_{org['id']}": _owned(org)},
                 node_count=0)
             assert bucket == reaper.BUCKET_KEPT_NOT_TEST_ORG, org
 
@@ -288,7 +373,7 @@ class TestReaperRefusesRatherThanGuesses:
         content — an empty-only gate is what keeps a cleaner from being an
         incident."""
         bucket, reason = reaper.classify_graph(
-            "org_o1", org_index={"org_o1": _org("o1", "agent-x")}, node_count=3)
+            "org_o1", org_index={"org_o1": _owned(_org("o1", "agent-x"))}, node_count=3)
         assert bucket == reaper.BUCKET_KEPT_NOT_EMPTY
         assert "3 node(s)" in reason
 
@@ -330,6 +415,51 @@ class TestReaperRefusesRatherThanGuesses:
                             lambda: False)
         with pytest.raises(reaper.Refusal, match="no control plane"):
             reaper.build_report()
+
+    def test_a_foreign_graphs_row_cannot_borrow_a_test_org(self):
+        """⛔ THE FAIL-OPEN THIS TOOL MUST NOT HAVE (#13205 review).
+
+        `public.graphs.namespace` is trusted verbatim in the naive index, so a
+        malformed or hostile row ``{org_id: <test org>, namespace: "org_<a
+        customer>_g_x"}`` would attribute the CUSTOMER's graph to a test org —
+        and an empty customer graph would be deleted. Ownership is decided by
+        `_owns_namespace`, not by the row."""
+        cp = _FakeCP(
+            orgs=[_org("agent-1", "agent-signup"), _org("cust-1", "Daylight")],
+            graphs=[{"id": "g_x", "org_id": "agent-1",
+                     "namespace": "org_cust-1_g_x"}])
+        index = reaper._namespace_index(cp)
+        assert "org_cust-1_g_x" not in index, index
+        bucket, _ = reaper.classify_graph(
+            "org_cust-1_g_x", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED
+
+    def test_a_graph_name_claimed_by_two_orgs_is_refused_not_resolved_by_order(self):
+        """`setdefault` over an unordered query made the keep/reap decision
+        depend on PostgREST's row order. Ambiguity is a refusal, never a race."""
+        cp = _FakeCP(
+            orgs=[{"id": "o1", "name": "agent-one", "email": None,
+                   "graph_name": "org_shared"},
+                  {"id": "o2", "name": "Daylight", "email": None,
+                   "graph_name": "org_shared"}],
+            graphs=[])
+        index = reaper._namespace_index(cp)
+        assert "org_shared" not in index, index
+        bucket, _ = reaper.classify_graph(
+            "org_shared", org_index=index, node_count=0)
+        assert bucket == reaper.BUCKET_REFUSED_UNRESOLVED
+
+    def test_a_custom_graph_row_carries_its_gid_for_the_acl_drop(self):
+        """A custom graph's per-graph ACL user is GLOBAL state keyed on the gid;
+        reaping the graph without it leaves a live credential behind (#2113 C4).
+        The report therefore has to carry the gid to `reap`."""
+        cp = _FakeCP(
+            orgs=[_org("agent-1", "agent-signup")],
+            graphs=[{"id": "g_abc", "org_id": "agent-1",
+                     "namespace": "org_agent-1_g_abc"}])
+        index = reaper._namespace_index(cp)
+        assert index["org_agent-1_g_abc"]["gid"] == "g_abc"
+        assert index["org_agent-1"]["gid"] is None
 
     def test_dry_run_is_the_default_and_deletes_nothing(self, monkeypatch, capsys):
         """The flag changes ONLY the last step: without ``--execute`` the same
@@ -375,8 +505,8 @@ def _boom(*a, **k):
 def _real_report(proj):
     """The real classifier over a fake projection and a fake org index."""
     org_index = {
-        "org_o1": _org("o1", "agent-signup"),
-        "org_customer": _org("c1", "Daylight Computer Co"),
+        "org_o1": _owned(_org("o1", "agent-signup")),
+        "org_customer": _owned(_org("c1", "Daylight Computer Co")),
     }
     rows = []
     for name in proj.db.list_graphs():
@@ -384,10 +514,11 @@ def _real_report(proj):
         count = 0 if needs else None
         bucket, reason = reaper.classify_graph(
             name, org_index=org_index, node_count=count)
+        entry = org_index.get(name) or {}
         rows.append({"graph": name, "bucket": bucket, "reason": reason,
-                     "org_id": (org_index.get(name) or {}).get("id"),
-                     "org_name": (org_index.get(name) or {}).get("name"),
-                     "node_count": count})
+                     "org_id": (entry.get("org") or {}).get("id"),
+                     "org_name": (entry.get("org") or {}).get("name"),
+                     "gid": entry.get("gid"), "node_count": count})
     counts: dict[str, int] = {}
     for row in rows:
         counts[row["bucket"]] = counts.get(row["bucket"], 0) + 1
@@ -422,3 +553,68 @@ class TestReaperExecute:
         assert deleted == ["org_o1"], deleted
         assert [o["graph"] for o in outcome] == ["org_o1"]
         assert all(o["deleted"] for o in outcome)
+
+    def test_a_custom_graph_drops_its_acl_user_before_the_graph(self, monkeypatch):
+        """Order, and the reason for it: the ACL user is the live credential that
+        outlives the graph. A failed user drop must SKIP the deletion rather
+        than orphan it."""
+        order: list[str] = []
+        monkeypatch.setattr("tortoise.hosted_api._acl_user_drop_hook",
+                            lambda gid: order.append(f"acl:{gid}"))
+
+        class _Graph:
+            def __init__(self, name):
+                self.name = name
+
+            def delete(self):
+                order.append(f"graph:{self.name}")
+
+        class _Proj:
+            db = type("D", (), {"select_graph": lambda self, n: _Graph(n)})()
+
+        report = {"graphs": [
+            {"graph": "org_a_g_1", "bucket": reaper.BUCKET_REAPABLE,
+             "org_id": "a", "gid": "g_1"},
+            {"graph": "org_a", "bucket": reaper.BUCKET_REAPABLE,
+             "org_id": "a", "gid": None},
+        ], "counts": {}, "total": 2}
+        outcome = reaper.reap(report, proj=_Proj())
+        assert order == ["acl:g_1", "graph:org_a_g_1", "graph:org_a"], order
+        assert all(o["deleted"] for o in outcome)
+
+    def test_a_failed_acl_drop_does_not_orphan_a_live_credential(self, monkeypatch):
+        deleted: list[str] = []
+
+        def _boom(gid):
+            raise RuntimeError("ACL DELUSER refused")
+
+        monkeypatch.setattr("tortoise.hosted_api._acl_user_drop_hook", _boom)
+
+        class _Proj:
+            db = type("D", (), {
+                "select_graph": lambda self, n: type(
+                    "G", (), {"delete": lambda s: deleted.append(n)})()})()
+
+        report = {"graphs": [
+            {"graph": "org_a_g_1", "bucket": reaper.BUCKET_REAPABLE,
+             "org_id": "a", "gid": "g_1"}], "counts": {}, "total": 1}
+        outcome = reaper.reap(report, proj=_Proj())
+        assert deleted == [], "the graph was deleted with its ACL user still live"
+        assert outcome[0]["deleted"] is False
+        assert "acl-user drop failed" in outcome[0]["error"]
+
+    def test_json_stdout_is_one_parseable_document(self, monkeypatch, capsys):
+        """`--json` is documented as machine-readable. The human notice used to
+        be appended to the same stdout, so `| jq` got a parse error (#13218
+        review)."""
+        import json as _json
+
+        monkeypatch.setattr(reaper, "build_report", lambda **kw: _real_report(
+            type("P", (), {"db": type("D", (), {
+                "list_graphs": lambda self: [
+                    "org_o1", "org_customer", "orphan"]})()})()))
+        rc = reaper.main(["--json"])
+        out = capsys.readouterr().out
+        doc = _json.loads(out)  # the whole stdout is ONE document
+        assert doc["total"] == 3
+        assert rc == 0

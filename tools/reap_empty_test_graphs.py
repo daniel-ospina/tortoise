@@ -126,34 +126,62 @@ class Refusal(Exception):
     """The report cannot be produced honestly — exit 2, never a clean report."""
 
 
-def _namespace_index(cp) -> dict[str, dict]:
-    """Every accepted graph-name spelling → the org row that owns it.
+def _owns_namespace(org_id: str, namespace: str) -> bool:
+    """Does ``namespace`` PROVABLY belong to ``org_id``?
 
-    Three spellings reach a tenant graph and all three must resolve here, or the
-    resolver would refuse graphs the product itself considers owned:
+    The same clause `hosted_api._org_graph_names` uses, and it is the whole safety
+    property of the index below: the control plane supplies CANDIDATES, ownership
+    decides. Without it a malformed (or hostile) ``public.graphs`` row
+    ``{org_id: <a test org>, namespace: "org_<a customer>_g_x"}`` would attribute
+    a customer's graph to a test org, and an EMPTY customer graph would land in
+    ``reapable`` and be deleted — exactly what this tool promises never to do.
+    """
+    if not org_id or not namespace:
+        return False
+    own = (canonical_org_graph_name(org_id), f"team_{org_id}", f"org_{org_id}",
+           f"team_{org_id}")
+    if namespace in own:
+        return True
+    return namespace.startswith((f"org_{org_id}_", f"team_{org_id}_"))
+
+
+def _namespace_index(cp) -> dict[str, dict]:
+    """Every accepted graph-name spelling → ``{"org": row, "gid": str | None}``.
+
+    The spellings a tenant graph is stored under, all of which must resolve here
+    or the resolver would refuse graphs the product itself considers owned:
 
     * ``organizations.graph_name`` **verbatim** — the canonical pointer, and the
       ONLY spelling that is authoritative for an SDK-lane org (``org_{name}``,
-      #2023) or a legacy org (``team_{id}``);
+      #2023) or a legacy org (``team_{id}``). Its type is not checked against the
+      org id: ``graph_name`` IS the pointer, by definition.
     * ``canonical_org_graph_name(org_id)`` — what every resolver derives from a
-      bare id (``org_{id}``);
-    * ``team_{org_id}`` — the pre-#3543 physical spelling, still live on disk for
-      older orgs (no migration rewrote those graphs);
+      bare id;
+    * ``team_{org_id}`` — the pre-#3543 physical spelling, still live on disk;
     * every ``public.graphs.namespace`` row — one per CUSTOM graph
-      (``org_{org_id}_{gid}``). Custom graphs are org-owned too, and leaving them
-      out would make the resolver refuse a graph it could have attributed.
+      (``org_{org_id}_{gid}``), carrying its ``id`` so the reaper can also drop
+      that graph's per-graph ACL user (:func:`reap`).
 
-    Raises :class:`Refusal` on any read failure: a resolver that degrades to
-    "unknown" would be indistinguishable from "no owner", and this tool REFUSES
-    on no owner — so a silent degradation would look like a clean run over
-    hundreds of refusals. The operator must see the failure.
+    ⛔ TWO refusals, both fail-closed:
+
+    1. a ``graphs`` row whose namespace is not PROVABLY the row org's
+       (:func:`_owns_namespace`) is DISCARDED — never indexed, so the graph it
+       names reads as unresolved and is refused; and
+    2. a name claimed by more than one org is dropped from the index entirely
+       and reported as ambiguous. The old `setdefault` over an unordered query
+       made the keeper depend on PostgREST's row order, i.e. the keep/reap
+       decision was nondeterministic on an estate with registry-era rows.
+
+    Raises :class:`Refusal` on any ``organizations`` read failure: a resolver that
+    degrades to "unknown" is indistinguishable from "no owner", and this tool
+    REFUSES on no owner — so a silent degradation would read as a clean run.
     """
     try:
         orgs = cp.query("organizations", select=["id", "name", "email", "graph_name"])
     except Exception as e:
         raise Refusal(f"organizations read failed: {e}") from e
     try:
-        graph_rows = cp.query("graphs", select=["org_id", "namespace"])
+        graph_rows = cp.query("graphs", select=["id", "org_id", "namespace"])
     except Exception as e:
         # A schema one migration behind has no `graphs` table; the default-graph
         # spellings still resolve, so degrade to default-only rather than
@@ -161,7 +189,18 @@ def _namespace_index(cp) -> dict[str, dict]:
         print(f"[warn] graphs read failed ({e}) — resolving default graphs only; "
               f"custom-graph names will be REFUSED, not reaped", file=sys.stderr)
         graph_rows = []
-    index: dict[str, dict] = {}
+    claims: dict[str, dict] = {}
+    ambiguous: set[str] = set()
+
+    def _claim(namespace: object, org: dict, gid: str | None) -> None:
+        if not isinstance(namespace, str) or not namespace:
+            return
+        held = claims.get(namespace)
+        if held is not None and held["org"].get("id") != org.get("id"):
+            ambiguous.add(namespace)
+            return
+        claims.setdefault(namespace, {"org": org, "gid": gid})
+
     by_id: dict[str, dict] = {}
     for row in orgs:
         org_id = row.get("id")
@@ -171,14 +210,18 @@ def _namespace_index(cp) -> dict[str, dict]:
         for name in (row.get("graph_name"),
                      canonical_org_graph_name(str(org_id)),
                      f"team_{org_id}"):
-            if name:
-                index.setdefault(str(name), row)
+            _claim(name, row, None)
     for row in graph_rows:
         org = by_id.get(str(row.get("org_id")))
         namespace = row.get("namespace")
-        if org and namespace:
-            index.setdefault(str(namespace), org)
-    return index
+        if org and _owns_namespace(str(row.get("org_id")), str(namespace or "")):
+            _claim(namespace, org, row.get("id"))
+    for name in ambiguous:
+        claims.pop(name, None)
+        print(f"[warn] {name!r} is claimed by more than one organization — "
+              f"REFUSED (ambiguity is never resolved by row order)",
+              file=sys.stderr)
+    return claims
 
 
 def is_test_org(org: dict, explicitly_named: frozenset[str] = frozenset()) -> bool:
@@ -212,11 +255,12 @@ def classify_graph(graph_name: str, *, org_index: dict[str, dict],
     if graph_name in RESERVED_GRAPH_NAMES or graph_name.startswith("registry_"):
         return (BUCKET_REFUSED_UNRESOLVED,
                 "reserved control-plane graph — needs adjudication, not a cleaner")
-    org = org_index.get(graph_name)
-    if org is None:
+    entry = org_index.get(graph_name)
+    if entry is None:
         return (BUCKET_REFUSED_UNRESOLVED,
                 "no organizations row owns this graph name — an orphan needs "
                 "adjudication, never a cleaner")
+    org = entry["org"]
     if not is_test_org(org, explicitly_named):
         return (BUCKET_KEPT_NOT_TEST_ORG,
                 f"owner {org.get('id')!r} ({org.get('name')!r}) is not marked "
@@ -242,6 +286,35 @@ def _node_count(proj, graph_name: str) -> int | None:
         return None
 
 
+def _read_handle():
+    """A DB handle that CANNOT materialise the graph it lists (#13205).
+
+    ⛔ `_make_sdk(graph_name="tortoise")._get_proj()` is NOT read-only: the
+    open-time health probe is a `GRAPH.QUERY`, and on a graph the store does not
+    hold the FIRST ONE CREATES IT (measured #11113). A "dry run" that mints the
+    `tortoise` graph would spend exactly the resource this tool exists to reclaim
+    — and `tortoise` is in `RESERVED_GRAPH_NAMES`, so the tool could never
+    reclaim what it just created. Write-freedom is the PAIR
+    (`skip_health_check=True, ensure_indexes=False`); `ensure_indexes=False`
+    ALONE still creates a missing graph through the health probe
+    (`test_write_freedom_needs_the_flag_PAIR_not_ensure_indexes_alone`).
+    """
+    import os
+
+    from tortoise.projection import FalkorProjection
+
+    db_uri = os.environ.get("TORTOISE_DB_URI")
+    if db_uri:
+        return FalkorProjection.from_uri(
+            db_uri, graph_name="tortoise",
+            skip_health_check=True, ensure_indexes=False)
+    from tortoise.config import resolve_db_path
+
+    return FalkorProjection(
+        path=resolve_db_path(), graph_name="tortoise",
+        skip_health_check=True, ensure_indexes=False)
+
+
 def build_report(*, explicitly_named: frozenset[str] = frozenset(),
                  proj=None, cp=None) -> dict:
     """The full verdict for every graph on the instance. NEVER deletes anything."""
@@ -256,8 +329,7 @@ def build_report(*, explicitly_named: frozenset[str] = frozenset(),
         cp = get_control_plane()
     org_index = _namespace_index(cp)
     if proj is None:
-        from tortoise.hosted_api import _make_sdk
-        proj = _make_sdk(graph_name="tortoise")._get_proj()
+        proj = _read_handle()
     try:
         names = sorted(proj.db.list_graphs() or [])
     except Exception as e:
@@ -267,7 +339,8 @@ def build_report(*, explicitly_named: frozenset[str] = frozenset(),
         # `node_count` is only read for names that could possibly be reaped —
         # a read per graph is cheap, but a read per CUSTOMER graph is a
         # needless scan of live tenants' data.
-        org = org_index.get(name)
+        entry = org_index.get(name)
+        org = (entry or {}).get("org")
         needs_count = (name not in RESERVED_GRAPH_NAMES
                        and not name.startswith("registry_")
                        and org is not None
@@ -282,6 +355,7 @@ def build_report(*, explicitly_named: frozenset[str] = frozenset(),
             "reason": reason,
             "org_id": (org or {}).get("id"),
             "org_name": (org or {}).get("name"),
+            "gid": (entry or {}).get("gid"),
             "node_count": count,
         })
     counts: dict[str, int] = {}
@@ -296,7 +370,15 @@ def reap(report: dict, *, proj) -> list[dict]:
     Re-derives nothing: it acts on the report it was handed, so the dry run the
     operator read IS the plan. Absent-graph raises are success (the end state is
     the graph being gone), matching ``hosted_api._drop_org_graph_impl``.
+
+    ⛔ Each CUSTOM graph's per-graph ACL user is dropped FIRST, from the ``gid``
+    the report carries (#13205 review). Custom graphs are minted with a
+    GLOBAL ``tenant_<gid>`` FalkorDB user; deleting the graph alone leaves that
+    credential live forever — the exact reason the org purge drops ACL users
+    before the graphs (#2113 C4). The reaper keeps the org row, so nothing else
+    will ever revisit it.
     """
+    from tortoise.hosted_api import _acl_user_drop_hook
     from tortoise.projection import is_missing_graph_error
 
     outcome = []
@@ -305,6 +387,13 @@ def reap(report: dict, *, proj) -> list[dict]:
             continue
         entry = {"graph": row["graph"], "org_id": row.get("org_id"),
                  "deleted": False, "error": None}
+        if row.get("gid"):
+            try:
+                _acl_user_drop_hook(str(row["gid"]))
+            except Exception as e:
+                entry["error"] = f"acl-user drop failed: {type(e).__name__}: {e}"
+                outcome.append(entry)
+                continue  # never orphan a live credential behind a deletion
         try:
             proj.db.select_graph(row["graph"]).delete()
             entry["deleted"] = True
@@ -335,6 +424,13 @@ def _print_report(report: dict, *, as_json: bool) -> None:
             print(f"  [{row['bucket']}] {row['graph']} — {row['reason']}")
 
 
+def _note(msg: str, *, as_json: bool) -> None:
+    """A human line. Under ``--json`` it goes to STDERR so stdout stays one
+    parseable document — the old code appended it to the JSON, so any caller
+    piping to ``jq`` got a parse error (PR #13218 review)."""
+    print(msg, file=sys.stderr if as_json else sys.stdout)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Reap EMPTY graphs owned by test/agent orgs (dry-run default).")
@@ -352,13 +448,24 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     _print_report(report, as_json=args.json)
     if not args.execute:
-        print("\nDRY RUN — nothing deleted. Re-run with --execute to delete the "
-              f"{report['counts'].get(BUCKET_REAPABLE, 0)} reapable graph(s).")
+        _note("\nDRY RUN — nothing deleted. Re-run with --execute to delete the "
+              f"{report['counts'].get(BUCKET_REAPABLE, 0)} reapable graph(s).",
+              as_json=args.json)
         return 0
     from tortoise.hosted_api import _make_sdk
     proj = _make_sdk(graph_name="tortoise")._get_proj()
     outcome = reap(report, proj=proj)
-    failed = [o for o in outcome if not o["deleted"] or o["error"] not in (None, "already absent")]
+    failed = [o for o in outcome
+              if not o["deleted"] or o["error"] not in (None, "already absent")]
+    if args.json:
+        print(json.dumps({"report": report, "outcome": outcome,
+                          "failed": len(failed)}, indent=2, sort_keys=True))
+        for o in outcome:
+            print(f"  {'deleted' if o['deleted'] else 'FAILED '} {o['graph']}"
+                  + (f" — {o['error']}" if o["error"] else ""), file=sys.stderr)
+        print(f"\n{len(outcome) - len(failed)} deleted, {len(failed)} failed",
+              file=sys.stderr)
+        return 1 if failed else 0
     for o in outcome:
         print(f"  {'deleted' if o['deleted'] else 'FAILED '} {o['graph']}"
               + (f" — {o['error']}" if o["error"] else ""))
