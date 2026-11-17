@@ -380,6 +380,15 @@ def load_or_make_population(path: Path, *, harvested, snapshot_digest_: str,
     population file drawn against a DIFFERENT frozen corpus would silently pair
     item ids whose names come from another corpus — so a snapshot or name digest
     that does not recompute is refused rather than reused.
+
+    ⛔ And a file drawn at a different SAMPLE / POPULATION / SEED is refused too
+    (`#13267` review 6 F5): only the snapshot and name digests used to be checked,
+    so `--sample 300 --seed 20261117` pointed at a stale `population-<n>.json`
+    silently measured the OTHER sample while `construction` — written from argv —
+    went on saying 300/20261117. Every field a reader consults for "what did this
+    run measure" then describes a run that did not happen. The file's own triple
+    is what the run actually used, so a disagreement is a refusal, never a
+    preference for one of the two.
     """
     path = Path(path).expanduser()
     if path.exists():
@@ -395,6 +404,15 @@ def load_or_make_population(path: Path, *, harvested, snapshot_digest_: str,
             "\n".join(r["name"] for r in body["items"]).encode())
         if recomputed != body["names_sha256"]:
             raise Refused(f"{path} is internally inconsistent (names digest)")
+        for field, wanted in (("sample", sample), ("population", population),
+                              ("seed", seed)):
+            if body.get(field) != wanted:
+                raise Refused(
+                    f"{path} was drawn with --{field.replace('sample', 'sample')} "
+                    f"{body.get(field)!r}, but this run asks for {wanted!r} — the "
+                    f"file's items are the ones the run would measure, so "
+                    f"`construction.{field}` (written from argv) would describe a "
+                    f"sample this run did not take. Re-draw to a new path.")
         return body["items"], body
     rows = draw_population(harvested, population=population, sample=sample, seed=seed)
     body = population_body(rows, snapshot_digest_=snapshot_digest_,
@@ -1245,12 +1263,16 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
             "derived_recomputable": [
                 name for name, datum in (
                     ("expansion_fired_items", _has_ids_digests),
+                    ("expansion_identical_items", _has_ids_digests),
                     ("ranked_lists_compared", _has_ids_digests),
                     ("seed_effect", _has_seed_ranks),
                 ) if datum],
-            "derived_unpinned": ["off_topk_displacement"] if _has_ids_digests
-            else ["off_topk_displacement", "seed_effect",
-                  "expansion_fired_items", "ranked_lists_compared"],
+            "derived_unpinned": (["items_whose_read_grew", "off_topk_displacement"]
+                                 if _has_ids_digests else
+                                 ["items_whose_read_grew", "off_topk_displacement",
+                                  "seed_effect", "expansion_fired_items",
+                                  "expansion_identical_items",
+                                  "ranked_lists_compared"]),
             "derived_note": (
                 "`off_topk_displacement` is NOT RE-DERIVABLE: it needs "
                 "the ranked-list IDS and `per_item` records only their digests. "

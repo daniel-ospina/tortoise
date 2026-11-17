@@ -4,9 +4,11 @@
       "derived_note": "LEGACY // NOT RE-DERIVABLE: these runs recorded no per-item seed rank and no per-item ranked-list id digests, so `seed_effect`, `expansion_fired_items` and `ranked_lists_compared` are this run's own OUTPUT but cannot be recomputed from the artifact \u2014 a consistent re-staling of the figure in the artifact AND the brief is invisible to the suite (`#13267` review 5 F1). `off_topk_displacement` is NOT RE-DERIVABLE even for the new generation: it needs the ranked-list IDS, and the artifact records only their digests. The tool now records `per_item.off_seed_rank` / `on_seed_rank` and declares, per arm, which derived figures it makes re-derivable (`derived_recomputable`).",
       "derived_recomputable": [],
       "derived_unpinned": [
+        "items_whose_read_grew",
         "off_topk_displacement",
         "seed_effect",
         "expansion_fired_items",
+        "expansion_identical_items",
         "ranked_lists_compared"
       ],
       "expansion_fired_items": null,

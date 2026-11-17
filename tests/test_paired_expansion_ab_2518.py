@@ -964,12 +964,30 @@ def test_the_docs_index_row_repeats_only_what_the_evidence_carries():
         (f"{head['snapshot']['file_count']} files", "the corpus file count"),
     ]
     delta15 = (k15["on_hits"] - k15["off_hits"]) / n * 100
+    delta3 = (k3["on_hits"] - k3["off_hits"]) / n * 100
     row_checks.append((f"+{delta15:.2f} pp", "the k=15 paired delta (pp)"))
+    # ⛔ `#13267` review 6 F3: `OFF = 0/300` — the number R1's class-conditional
+    # disclosure is ABOUT — and the k=3 delta were both unpinned. Measured GREEN:
+    # `OFF = 0/300 -> OFF = 7/300` left the row asserting "class-conditional
+    # recall" beside a false count, and `+1.67 pp -> +9.99 pp` printed a k=3 delta
+    # six times the artifact's in a sentence claiming it is BELOW the MDE.
+    row_checks += [
+        (f"OFF = {k3['off_hits']}/{n}", "the OFF count the disclosure is about"),
+        # ⛔ the k=3 delta must be pinned IN THE SENTENCE, not anywhere in the row:
+        # `1.67 pp` also appears in the short-query harm cell, so a bare
+        # membership check let `at k=3 the +9.99 pp is BELOW` stay green.
+        (f"at k=3 the +{delta3:.2f} pp is BELOW the "
+         f"{k3['mde_paired'] * 100:.2f} pp MDE",
+         "the k=3 delta in the sentence that calls it BELOW its MDE"),
+    ]
     for shown, what in row_checks:
         assert shown in row, (
             f"the index row does not carry {what} as {shown!r}: {row[:400]}")
     # and the class-conditional caveat travels with the lift
     assert "class-conditional" in row
+    assert f"{delta3:.2f} pp" in row and "BELOW" in row, (
+        "the row's 'the k=3 delta is BELOW the MDE' claim must carry the "
+        "artifact's k=3 delta")
 
     # ⛔ Measured survivors at `3ae4980b1d` (six substitutions, each green on the
     # whole suite): `p = 2 × 10⁻⁵ → 0.5`, `CI [+3.33, +8.33] → [+3.33, +9.99]`,
@@ -2015,7 +2033,15 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
 # Same shape as 2g: each test names the mutant the reviewer PROVED survived at
 # the head it reviewed, and the fix that now reds it.
 
+# ⛔ `#13267` review 6 F4: this set was the FOUR names the first fix happened to
+# classify, and the pin asserted `declared | unpinned == _DERIVED` — exhaustive
+# over a hand-written constant, not over the artifact's derived figures.
+# `expansion_identical_items` and `items_whose_read_grew` were derived from the
+# same per-item reads and were in neither list, so `expansion_identical_items:
+# 7 -> 0` together with `items_whose_read_grew: 0 -> 300` stayed green while the
+# artifact contradicted its own `expansion_fired_items: 293`.
 _DERIVED = {"off_topk_displacement", "seed_effect", "expansion_fired_items",
+            "expansion_identical_items", "items_whose_read_grew",
             "ranked_lists_compared"}
 
 
@@ -2044,6 +2070,21 @@ def _assert_derived_figures_recompute(art: dict, where: str) -> None:
             assert "NOT RE-DERIVABLE" in (block.get("derived_note") or ""), (
                 f"{where}/{arm}: an unpinned derived figure with no note saying so")
 
+        # ⛔ `#13267` review 6 F4: fired + identical must be the compared reads, on
+        # EVERY artifact generation — a derived count that contradicts the
+        # artifact's own sibling counts is a re-stale no recomputation path is
+        # needed to see (measured GREEN without this: `expansion_identical_items`
+        # 7 -> 0 beside `expansion_fired_items: 293` and `ranked_lists_compared:
+        # 300`, i.e. 293 + 0 != 300).
+        fired_n = block.get("expansion_fired_items")
+        ident_n = block.get("expansion_identical_items")
+        compared_n = block.get("ranked_lists_compared")
+        if None not in (fired_n, ident_n, compared_n):
+            assert fired_n + ident_n == compared_n, (
+                f"{where}/{arm}: fired {fired_n} + identical {ident_n} != "
+                f"{compared_n} compared reads — a derived count has been "
+                "re-staled against its siblings")
+
         per_item = block.get("per_item") or {}
         item_ids = sorted(per_item)
         if "seed_effect" in declared:
@@ -2070,6 +2111,23 @@ def _assert_derived_figures_recompute(art: dict, where: str) -> None:
                 f"{where}/{arm}: recorded ranked_lists_compared="
                 f"{block['ranked_lists_compared']} but {both} rows carry both "
                 "sides' digests")
+            assert block["expansion_identical_items"] == both - fired, (
+                f"{where}/{arm}: recorded expansion_identical_items="
+                f"{block['expansion_identical_items']} but {both} compared reads "
+                f"leave {both - fired} identical — and a fired + identical split "
+                "that does not sum to the compared reads is a re-staled count")
+        # ⛔ the classification must be exhaustive over the ARTIFACT'S derived
+        # fields, not over `_DERIVED` alone: a field nobody listed was invisible.
+        present = (_DERIVED | set(declared) | set(unpinned)) & set(block)
+        unclassified = {k for k in block
+                        if k.startswith(("expansion_", "items_whose_", "ranked_",
+                                         "off_topk_", "seed_"))
+                        and k not in declared and k not in unpinned
+                        and not k.endswith(("_note", "_entries", "_provenance"))}
+        assert not unclassified, (
+            f"{where}/{arm}: derived field(s) {sorted(unclassified)} are in the "
+            "artifact but classified as neither recomputable nor unpinned")
+        del present
 
 
 def test_the_committed_artifacts_declare_which_derived_figures_they_pin():
@@ -2098,8 +2156,10 @@ def test_a_tool_produced_artifact_recomputes_its_derived_figures(
     art, _ = _build_fake_artifact(
         point_off=off, point_on=on, object_off=off, object_on=off)
     block = art["arms"]["point"]
-    assert set(block["derived_recomputable"]) == _DERIVED - {"off_topk_displacement"}
-    assert block["derived_unpinned"] == ["off_topk_displacement"]
+    assert set(block["derived_recomputable"]) == _DERIVED - {
+        "off_topk_displacement", "items_whose_read_grew"}
+    assert block["derived_unpinned"] == ["items_whose_read_grew",
+                                         "off_topk_displacement"]
     _assert_derived_figures_recompute(art, "tool-produced")
 
     # ⛔ the mutant the reviewer measured GREEN at the reviewed head
@@ -2230,3 +2290,138 @@ def test_the_seed_effect_producer_matches_a_hand_computed_case():
     narrow = {"a": {"seed_rank": 0}, "b": {"seed_rank": 2}}
     assert P._seed_effect(narrow, {"a": {"seed_rank": 9}, "b": {"seed_rank": 2}},
                           ["a", "b"], k=3)["seed_lost_from_window"] == 1
+
+
+def test_every_pp_and_every_scientific_p_the_brief_prints_is_a_recorded_one():
+    """F1 — the brief's PROSE restatements were unpinned, only its tables were.
+
+    `#13267` review 6 F1: four substitutions in prose (not tables) were GREEN at
+    the reviewed head — `At k = 15 it recovers 17 of` → `3 of`, `p = 2 × 10⁻⁵` →
+    `2 × 10⁻⁹`, `k = 10 (+4.33 against 3.35)` → `(+9.99 …)`, and §7's
+    `(+5.67 pp @15, p = 2 × 10⁻⁵)` → `(+9.99 pp @15, p = 2 × 10⁻⁹)` — each while
+    the §4 table above it still read `17/300` / `0.00002`. The pins walked tables
+    and the `(@k)` tail shape, so prose was read by nothing, and the PR body's
+    "reds if the prose re-stales" was false.
+
+    So: EVERY `±X.XX pp` figure and EVERY `p = N × 10⁻ⁿ` tail the brief prints must
+    be some artifact's recorded value. This is an allow-list, not a cell map — it
+    does not care which sentence carries the figure, only that the figure exists
+    in the evidence.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+
+    # ── every delta / MDE in percentage points ────────────────────────────
+    allowed_pp = set()
+    for name in _ARTIFACTS:
+        art = _artifact(name)
+        n = art["population"]["sample"]
+        for block in art["arms"].values():
+            for cell in block["per_k"].values():
+                allowed_pp.add(round((cell["on_hits"] - cell["off_hits"]) / n * 100, 2))
+                for cell_key in ("mde_paired", "mde_independent"):
+                    value = cell.get(cell_key)
+                    if value is not None and value == value:  # not NaN
+                        allowed_pp.add(round(value * 100, 2))
+    # ⛔ §0 is a QUOTATION of another PR's published run — 75.0/76.3 % @3 and
+    # 88.0/85.0 % @15 from `#13118` — so its two deltas are those subtractions,
+    # its SE (2.8 pp) is that PR's own published figure, and its 7.82 pp is THIS
+    # tool's independent-design MDE for that design. They are pinned as quoted,
+    # not silently allowed: the four recalls must be in the brief and the two
+    # deltas must be their difference.
+    quoted = {"before3": 75.0, "after3": 76.3, "before15": 88.0, "after15": 85.0}
+    for label, value in quoted.items():
+        assert f"{value} %" in brief, f"§0 no longer quotes {label} = {value} %"
+    allowed_pp |= {round(quoted["after3"] - quoted["before3"], 2),
+                   round(quoted["after15"] - quoted["before15"], 2)}
+    allowed_pp.add(round(P.independent_effect(300, 0.865) * 100, 2))
+    quoted_se = {2.8}          # `#13118`'s own published SE, quoted in §0
+
+    shown_pp = {round(float(v), 2)
+                for v in re.findall(r"[+]?(\d+\.\d+)\s*pp\b", brief)}
+    assert shown_pp, "the brief prints percentage-point figures"
+    # the brief prints magnitudes ("3.0 pp" for the -3.0 delta), so compare on
+    # the absolute value — a sign flip is a re-stale of direction, caught above by
+    # the §0 arithmetic assertion, not by this allow-list
+    strays = {abs(v) for v in shown_pp} - {abs(v) for v in allowed_pp} - quoted_se
+    assert not strays, (
+        f"the brief prints {sorted(strays)} pp, which no artifact records as a "
+        f"delta or an MDE (recorded: {sorted(allowed_pp)})")
+
+    # ── every exact McNemar tail printed in superscript form ──────────────
+    allowed_p = set()
+    for name in _ARTIFACTS:
+        for block in _artifact(name)["arms"].values():
+            for cell in block["per_k"].values():
+                allowed_p.add(round(cell["mcnemar_exact_p"], 12))
+    tails = re.findall(r"([\d.]+)\s*×\s*10⁻([⁰¹²³⁴⁵⁶⁷⁸⁹]+)", brief)
+    assert tails, "the brief prints the exact tails in prose"
+    sup = "⁰¹²³⁴⁵⁶⁷⁸⁹"
+    for mantissa, exponent in tails:
+        power = int("".join(str(sup.index(c)) for c in exponent))
+        value = float(mantissa) * 10 ** -power
+        # the brief ROUNDS for prose (`1.5e-05` -> `2 × 10⁻⁵`), so the honest
+        # bound is one unit in the last printed place — the same rule `_printed`
+        # uses for table cells. `2 × 10⁻⁹` and `7 × 10⁻⁵` are far outside it.
+        tol = 10 ** -power
+        assert any(abs(value - a) <= tol for a in allowed_p), (
+            f"the brief prints p = {mantissa} × 10⁻{power} ({value!r}), which no "
+            f"artifact records within its printed precision (recorded tails: "
+            f"{sorted(allowed_p)})")
+
+    # ── the §5 winner-rule cell prints "(delta against MDE)" with NO `pp` suffix,
+    # so the allow-list above cannot see it (`#13267` review 6 F1: `+4.33 -> +9.99`
+    # stayed green). Each pair must be a recorded (delta, mde) for the SAME k.
+    pairs = {(round((c["on_hits"] - c["off_hits"]) / n * 100, 2),
+              round(c["mde_paired"] * 100, 2))
+             for a in _ARTIFACTS
+             for n in [_artifact(a)["population"]["sample"]]
+             for blk in _artifact(a)["arms"].values()
+             for c in blk["per_k"].values()
+             if c.get("mde_paired") == c.get("mde_paired")}
+    for shown_delta, shown_mde in re.findall(
+            r"\(([+-]?\d+\.\d+) against (\d+\.\d+)\)", brief):
+        assert (round(float(shown_delta.lstrip("+")), 2),
+                round(float(shown_mde), 2)) in pairs, (
+            f"the brief prints '({shown_delta} against {shown_mde})', which is not "
+            f"a recorded (delta, MDE) pair for any k — recorded pairs: "
+            f"{sorted(pairs)}")
+
+    # ── and the headline prose figure, in the cell a reader reads it ───────
+    head = _artifact("paired-point-300.json")
+    n = head["population"]["sample"]
+    k15 = head["arms"]["point"]["per_k"]["k=15"]
+    assert f"recovers {k15['on_hits']} of" in brief, (
+        f"§4's reading bullet must say the artifact's k=15 count "
+        f"({k15['on_hits']} of {n})")
+
+
+def test_a_population_file_drawn_for_another_sample_is_refused(tmp_path):
+    """F5 — the loader checked the corpus, never the sample triple.
+
+    `#13267` review 6 F5 measured GREEN at the reviewed head: a
+    `population-300.json` (sample 300, seed 20261117) loaded by a run asking for
+    `--sample 60 --seed 99` was ACCEPTED, and `construction.sample`/`seed`/
+    `population` — written from argv — then described a run that did not happen,
+    while the items actually measured came from the other sample. The file is the
+    one the tool itself leaves in the snapshot directory, so this is the shape a
+    reproduce command hits.
+    """
+    digest = "d" * 64
+    rows = [{"name": f"the name {i}", "query": "q", "target": "t"}
+            for i in range(5)]
+    body = P.population_body(rows, snapshot_digest_=digest, population=1000,
+                             sample=300, seed=20261117)
+    path = tmp_path / "population-300.json"
+    path.write_text(json.dumps(body, indent=2, sort_keys=True))
+    assert P.load_or_make_population(path, harvested={},
+                                     snapshot_digest_=digest, population=1000,
+                                     sample=300, seed=20261117)[0] == rows
+    for field, kwargs in (
+            ("sample", dict(population=1000, sample=60, seed=20261117)),
+            ("seed", dict(population=1000, sample=300, seed=99)),
+            ("population", dict(population=7, sample=300, seed=20261117))):
+        with pytest.raises(P.Refused, match=field):
+            P.load_or_make_population(path, harvested={}, snapshot_digest_=digest,
+                                      **kwargs)
+    # the file is left exactly as it was — a refusal never rewrites evidence
+    assert json.loads(path.read_text())["sample"] == 300
