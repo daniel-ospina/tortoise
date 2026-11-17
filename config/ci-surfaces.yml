@@ -2505,6 +2505,17 @@ surfaces:
   # claims the diff. DB-free at the door level: every record is a fake and the SDK
   # arm reuses `test_record_serve.py`'s recording doubles.
   - test_12941_read_your_writes.py
+  # #13034 (registered here 2026-11-17, #13052): the reader rule reads BOTH endings —
+  # the lifecycle WORD (`status` terminal vocabulary / legacy `outdated`) and the
+  # POSITION axis (`isClosed`, a stage in `terminal`) — across five consumers, and
+  # pins `tortoise/live.py::_terminal_excluded` / `is_terminal_status` themselves.
+  # Same home and same reason as #12586/#9649 above: the subject is a `live.py`
+  # shared predicate, and `tortoise/live.py` alone matches no SOURCE_PATTERNS rule,
+  # so `core` is what runs this guard on the change that can delete the predicate.
+  # The file landed with its PR unregistered, so `main`'s tree (not this PR's diff)
+  # failed `manifest-integrity` — the #11978 class; registered here because that red
+  # is on `python-ci-gate`'s required path and this PR's merge ref inherits it.
+  - test_13034_currency_rule_reads_position.py
   # #12444: the tier-NAMING pin — `pro` is the identifier, Builder is the display
   # name (#4336). `core` is the classifying surface because `tortoise/pricing.py`
   # (where `TIER_DISPLAY_NAMES` now lives) is a `core` source. The `tier1` row is
