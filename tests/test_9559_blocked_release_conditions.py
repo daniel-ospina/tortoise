@@ -1746,6 +1746,42 @@ def _strip_sql_comments(sql: str) -> str:
     return "".join(out)
 
 
+def _find_closing_tag(code: str, start: int, tag: str) -> int:
+    """Index of the `tag` that CLOSES a dollar-quoted body beginning at `start`.
+
+    ⛔ STRING LITERALS ARE SKIPPED, because a `$$` inside one does not close the
+    body — PostgreSQL's own scanner does exactly this. A plain `str.find` does
+    not, and the consequence was MEASURED on this tree: a correctly guarded body
+    carrying `PERFORM 'a $$ literal';` before the guard had its window truncated
+    at the literal (19 characters instead of 231), so ``_GATE_GUARD_RX`` found
+    nothing and the gate reported **"the zeroing UPDATE is no longer GUARDED"**
+    over a body that IS guarded. Fail-closed, so never a false PASS — but the
+    message is the entire product of a failure, and it named a defect the file
+    does not have.
+
+    Returns -1 when the tag never closes; the caller REDs with a message naming
+    the file rather than reading to end-of-file.
+    """
+    i, n = start, len(code)
+    while i < n:
+        if code.startswith(tag, i):
+            return i
+        if code[i] == "'":
+            j = i + 1
+            while j < n:
+                if code[j] == "'":
+                    if code.startswith("''", j):
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            i = j
+            continue
+        i += 1
+    return -1
+
+
 def _replayable_migration(path: Path) -> bool:
     """Whether the CLI would APPLY this file at all.
 
@@ -1812,7 +1848,7 @@ def _function_body(sql: str, decl_rx: re.Pattern[str]) -> str | None:
     opener = _DOLLAR_TAG.search(code, decl.end())
     if opener is None:
         return None
-    closer = code.find(opener.group(0), opener.end())
+    closer = _find_closing_tag(code, opener.end(), opener.group(0))
     if closer < 0:
         return None
     return code[opener.end():closer]
@@ -2019,6 +2055,44 @@ def test_the_body_scan_honours_a_named_dollar_tag():
     assert code is not None
     assert "RAISE WARNING" in code
     assert "after" not in code, f"the scan ran past the closing tag: {code!r}"
+
+
+def test_a_doubled_dollar_inside_a_STRING_LITERAL_does_not_close_the_body():
+    """A `$$` inside a `'…'` literal does not end a `$$`-tagged body.
+
+    REVIEW FINDING (P3, fail-closed but a FALSE DIAGNOSIS): PostgreSQL's scanner
+    skips string literals when it looks for the closing dollar tag; `str.find`
+    does not. MEASURED on this tree — a correctly GUARDED body carrying
+    `PERFORM 'a $$ literal';` before its guard had its window truncated at the
+    literal (19 chars instead of 231), so the guard assertion fired and reported
+    "the zeroing UPDATE is no longer GUARDED" over a body that is guarded.
+
+    The named-tag test above cannot catch this: with `$function$` the inner `$$`
+    never equals the tag, so the naive search happens to be right. The failure
+    needs the SAME tag inside a literal.
+    """
+    decl_rx = re.compile(r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.literal\b")
+    sql = (
+        "CREATE OR REPLACE FUNCTION public.literal()\n"
+        "RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  PERFORM 'a $$ literal';\n"
+        "  IF 1 = 1 THEN RAISE WARNING 'kept'; END IF;\n"
+        "  RETURN;\n"
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n"
+    )
+    code = _function_body(sql, decl_rx)
+    assert code is not None
+    assert "RAISE WARNING 'kept'" in code, (
+        f"the body window closed at the `$$` inside a string literal: {code!r}")
+    # ⛔ NON-VACUITY, asserted rather than assumed: the search this replaces MUST
+    # truncate before the warning on THIS text, or the row has lost its subject.
+    naive_open = sql.index("AS $$") + len("AS $$")
+    naive_close = sql.find("$$", naive_open)
+    assert naive_close < sql.index("RAISE WARNING"), (
+        "this row no longer discriminates: `str.find` does not truncate at the "
+        "literal any more, so a plain find would pass it — re-measure the shape")
 
 
 # --------------------------------------------------------------------------- #
