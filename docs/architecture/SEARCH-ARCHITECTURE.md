@@ -64,8 +64,8 @@ once"*:**
 | `Point`, operator | **yes** — the `point` table, with the operator identity predicate | **yes**, and expressible: `_STATUS_COLUMN['point']` reads `status` (+ the legacy `outdated` flag) | no *structural* blocker — the status gate is already expressible in SQL. What remains is the record's own **no-backfill shortfall** (`record_vector.ARMING_ENV`'s comment, `record_vector.py:160`: a record holds a vector only for content written *after* the move is deployed; `cutover_armed`, :410, is the switch that decides it), which is why this is a cutover SWITCH and not a default |
 | `Source`, `Document` | **yes** — the `source` table, split on `document_kind` | no — `Source` is not in `_STATUS_FILTERED_LABELS` | the vector has to ARRIVE: the column and the HNSW index already exist (`20261109000001_record_embedding_vector.sql`, `#11660`) |
 | `Event` | **yes** — the `event` table | no — `Event` is not in the list either | same as `Source`: column and index exist, the vector has to arrive |
-| `Object` | **no** | **yes, and NOT expressible** — no status column, and the fold answers only `live`/`superseded` | the status fold first (paragraph above), then the label |
-| `Subject` | **no** | same as `Object` | same as `Object` |
+| `Object` | **no** | **yes, and NOT expressible** — no status column, and the fold answers only `live`/`superseded` | the status fold first (paragraph above), then the column and the label — `object` has **no embedding column on `main` yet** (`#13265`'s migration, unmerged), which is the widest gap of any label here |
+| `Subject` | **no** | same as `Object` | same as `Object`, column included: **no embedding column on `main` yet** (`#13265`) |
 
 **⇒ The arming order follows from the table rather than from preference: `Point`/operator → `Source`/
 `Event` → `Object`/`Subject`, with the status fold as the last two labels' precondition.** Taking the labels
