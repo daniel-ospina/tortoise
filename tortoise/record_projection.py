@@ -7685,6 +7685,16 @@ class JournalCoverage:
     within_prefix: int = 0
     first_gap: int | None = None
     enumerated: int | None = None
+    #: Did this reading MEASURE :attr:`first_gap`? ``JournalCoverage`` is also
+    #: produced by `journal_coverage(..., want_gap=False)` for callers that ask
+    #: only the aggregate question (the dense leg's readiness gate, #13331 review
+    #: F3 — it must not spend the read's budget on a statement it never reads).
+    #: An unmeasured gap must not be reported as a measured ABSENCE: an empty
+    #: `first_gap` would otherwise make :attr:`contiguous` answer ``True`` for a
+    #: record with a hole in the middle, which is the silent-green claim of
+    #: coverage `#5090` Q2 forbids. APPENDED LAST for the positional-rebind
+    #: reason `RecordReconcileResult.journal` is.
+    gap_measured: bool = True
 
     @property
     def unprojected(self) -> int | None:
@@ -7700,7 +7710,7 @@ class JournalCoverage:
         return max(int(self.enumerated) - int(self.within_prefix), 0)
 
     @property
-    def contiguous(self) -> bool:
+    def contiguous(self) -> bool | None:
         """No hole below the high-water mark AND no missing prefix.
 
         Both edges, because they are different defects: a hole means a middle
@@ -7708,7 +7718,13 @@ class JournalCoverage:
         above position 1 (the ordinary shape for a graph armed after its journal
         already held lines — `record_runner.read_checkpoint` measures the same
         edge and refuses to call it contiguous either).
+
+        ``None`` when the gap was NOT measured (:attr:`gap_measured`): the hole
+        edge is then unknown, and a ``True`` derived from an empty `first_gap`
+        nobody read would be a coverage claim no reading supports.
         """
+        if not self.gap_measured:
+            return None
         return self.first_gap is None and self.min_seq in (0, 1)
 
     def as_dict(self) -> dict[str, Any]:
@@ -7721,12 +7737,22 @@ class JournalCoverage:
             "enumerated": self.enumerated,
             "unprojected": self.unprojected,
             "contiguous": self.contiguous,
+            "gap_measured": self.gap_measured,
         }
 
 
 def journal_coverage(conn: Any, *, org_id: str, graph_id: str,
-                     enumerated: int | None = None) -> JournalCoverage:
+                     enumerated: int | None = None,
+                     want_gap: bool = True) -> JournalCoverage:
     """Read the record's coverage of one tenant's journal (#13331).
+
+    ``want_gap=False`` SKIPS the second statement (``_FIRST_GAP_SQL``) and
+    reports the hole edge as NOT measured (:attr:`JournalCoverage.gap_measured`,
+    whose :attr:`~JournalCoverage.contiguous` is then ``None``). Use it only
+    where the hole edge is genuinely not asked: the dense leg's readiness gate
+    reads ``unprojected``/``present`` alone, and every statement it issues costs
+    the request's own budget (#13331 review F3). ``unprojected`` is unaffected —
+    it is ``enumerated - within_prefix``.
 
     SCOPES THE CONNECTION (§R6): `journal_event`'s policy filters on
     `app.current_org_id`, so an unscoped read returns ZERO rows and this would
@@ -7759,7 +7785,7 @@ def journal_coverage(conn: Any, *, org_id: str, graph_id: str,
         high, present, low = int(high or 0), int(present or 0), int(low or 0)
         within = int(within or 0)
         gap = None
-        if present:
+        if present and want_gap:
             cursor.execute(_FIRST_GAP_SQL, (org_id, graph_id))
             gap_row = cursor.fetchone()
             if gap_row:
@@ -7771,6 +7797,7 @@ def journal_coverage(conn: Any, *, org_id: str, graph_id: str,
         present=present, high_seq=high, min_seq=low, within_prefix=within,
         first_gap=gap,
         enumerated=None if enumerated is None else int(enumerated),
+        gap_measured=bool(want_gap),
     )
 
 

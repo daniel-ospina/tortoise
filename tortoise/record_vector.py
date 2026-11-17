@@ -496,7 +496,8 @@ def reset_readiness_cache() -> None:
 
 
 def journal_ready(scope: _Scope, *, record_dsn: str | None = None,
-                  now: float | None = None) -> bool:
+                  now: float | None = None,
+                  timeout_ms: int | None = None) -> bool:
     """Does the record hold this tenant's journal? The dense leg's gate (#13331).
 
     `ARMING_ENV` is a DEPLOYMENT switch; this is the per-tenant CONDITION that
@@ -537,6 +538,11 @@ def journal_ready(scope: _Scope, *, record_dsn: str | None = None,
     missing dependency — every failure keeps the graph branch, which is a correct
     answer (`#11642` P1), and a check that cannot run must never be read as
     "ready".
+
+    ⛔ THE MEASUREMENT IS BOUND BY THE READ'S OWN BUDGET (`timeout_ms`), because
+    it runs on the REQUEST's thread *before* :func:`searcher` returns; an
+    unbounded read here is the `#11691` defect re-opened one function above the
+    fix for it. See :func:`_measure_readiness`.
     """
     if not os.environ.get(RECORD_JOURNAL_ENV):
         _warn_readiness_undeclared()
@@ -547,7 +553,8 @@ def journal_ready(scope: _Scope, *, record_dsn: str | None = None,
         cached = _READINESS.get(key)
     if cached is not None and clock - cached[0] < READINESS_TTL_SECONDS:
         return cached[1]
-    ready = _measure_readiness(scope, record_dsn=record_dsn)
+    ready = _measure_readiness(scope, record_dsn=record_dsn,
+                               timeout_ms=timeout_ms)
     with _READINESS_LOCK:
         _READINESS[key] = (clock, ready)
     return ready
@@ -574,13 +581,31 @@ def _warn_readiness_undeclared() -> None:
         ARMING_ENV, RECORD_JOURNAL_ENV)
 
 
-def _measure_readiness(scope: _Scope, *, record_dsn: str | None) -> bool:
+def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
+                       timeout_ms: int | None = None) -> bool:
     """The coverage read behind :func:`journal_ready`. Never raises.
 
     ⛔ ``present > 0`` IS PART OF THE ANSWER, not a formality: `contiguous` is
     true for an EMPTY record (there is no hole to find), so without it a tenant
     whose backfill never ran would read as ready and be served an empty dense
     leg as though it were a small corpus.
+
+    ⛔ BOUNDED BY THE READ'S BUDGET, AND ONLY THE STATEMENT IT NEEDS (#13331
+    review F3). This runs on the REQUEST's thread, before :func:`searcher`
+    returns, so an unbounded door here is the `#11691` defect one function above
+    the fix for it: the door's ceiling is ``RECORD_STATEMENT_TIMEOUT_MS`` (15 s)
+    and the read's own budget is typically 500 ms, so a wedged record could
+    stall the request for the door's ceiling *before* the leg's budget existed
+    at all. Two things keep that shut, and both are needed:
+
+    * the budget is DIVIDED by :func:`record_statement_ms` — the same one
+      convention :func:`vector_search` uses — and reaches the door as its
+      ``statement_timeout_ms``, so the read's budget TIGHTENS the ceiling and
+      never widens it;
+    * ``want_gap=False``: :func:`journal_coverage` otherwise issues a SECOND
+      statement (``_FIRST_GAP_SQL``) whose answer this function never reads —
+      readiness asks only ``unprojected`` and ``present``. Issuing it would
+      spend the read's budget on a fact nobody consumes.
     """
     path = os.environ.get(RECORD_JOURNAL_ENV)
     try:
@@ -597,10 +622,17 @@ def _measure_readiness(scope: _Scope, *, record_dsn: str | None) -> bool:
         from .record_projection import journal_coverage
         from .record_serve import open_record
 
-        conn = open_record(record_dsn)
+        # ⚠️ TWO CALL SHAPES ON PURPOSE, as in `vector_search`: with no budget
+        # the door is asked exactly as it was before this fix (no kwarg, the
+        # door's own bound), so the unbudgeted callers and the one-argument
+        # doubles that stub this door stay honest about what is asked for.
+        conn = (open_record(record_dsn) if timeout_ms is None
+                else open_record(record_dsn,
+                                 statement_timeout_ms=record_statement_ms(timeout_ms)))
         cov = journal_coverage(conn, org_id=scope.org_id,
                                graph_id=scope.graph_id,
-                               enumerated=enumerated)
+                               enumerated=enumerated,
+                               want_gap=False)
     except Exception as exc:
         logging.getLogger(LOG_NAME).debug(
             "record dense leg: the coverage check could not answer (%s) — "
@@ -741,7 +773,8 @@ def searcher(
     # is the arm `#13210` §7.4 said could only start moving once live writes were
     # wired: a fresh tenant's positions are consumed at write time, so its record
     # is authoritative for new rows with no backfill to wait for.
-    if not journal_ready(scope, record_dsn=record_dsn):
+    if not journal_ready(scope, record_dsn=record_dsn,
+                         timeout_ms=timeout_ms):
         logging.getLogger(LOG_NAME).debug(
             "record dense leg: tenant %s/%s's record does not hold its journal "
             "yet (or could not be measured) — the graph branch answers, which "

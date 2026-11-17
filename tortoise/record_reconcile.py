@@ -667,9 +667,14 @@ class RecordReconcileResult:
         """Journal positions the record does NOT hold (``0`` when not measured).
 
         ``0`` for a caller that supplied no journal enumeration is deliberate and
-        is NOT a claim of coverage: :meth:`as_dict` omits the field in that case
-        (``journal: null``), so "we did not look" and "we looked and found none"
-        stay distinguishable at the boundary — the `#5090` Q2 rule.
+        is NOT a claim of coverage: :meth:`as_dict` reports ``None`` for BOTH the
+        journal reading and this count in that case (``journal: null``,
+        ``unprojected_journal: null``), so "we did not look" and "we looked and
+        found none" stay distinguishable at the boundary — the `#5090` Q2 rule.
+        ⛔ The in-memory ``0`` is what makes the four-verdict arithmetic total
+        (:meth:`verdict`); it must never reach the WIRE as a measured number,
+        which is why :meth:`as_dict` — not this property — is where the two
+        states are separated (#13331 review F2).
         """
         if self.journal is None:
             return 0
@@ -714,7 +719,15 @@ class RecordReconcileResult:
             "declaration_coverage": self.declaration.coverage,
             "declaration_source": self.declaration.source,
             "journal": None if self.journal is None else self.journal.as_dict(),
-            "unprojected_journal": self.unprojected_journal,
+            # ⛔ NOT `self.unprojected_journal`: that property answers ``0`` for a
+            # leg that never ran (so `verdict()` stays total), and a ``0`` on the
+            # wire is a MEASURED zero — `python -m tortoise record-reconcile
+            # --json` without `--journal` would then tell a scheduler the record
+            # holds the whole journal. "not measured" and "measured none" are
+            # reported differently, which is the `#5090` Q2 rule this module
+            # applies everywhere else (`#13331` review F2).
+            "unprojected_journal": (None if self.journal is None
+                                    else self.unprojected_journal),
         })
         return payload
 

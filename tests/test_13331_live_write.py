@@ -263,7 +263,18 @@ def test_a_coherent_record_is_clean_and_says_the_journal_leg_was_measured():
 def test_no_journal_leg_is_null_not_zero():
     """`0` must never be reported for a check that did not run (#5090 Q2)."""
     unmeasured = _result()
-    assert unmeasured.as_dict()["journal"] is None
+    payload = unmeasured.as_dict()
+    assert payload["journal"] is None
+    # ⛔ AND THE COUNT, not only the reading (#13331 review F2): the property
+    # answers `0` so the verdict arithmetic stays total, but a `0` on the WIRE is
+    # a MEASURED zero — `record-reconcile --json` without `--journal` then tells
+    # a scheduler the record holds the whole journal, which is the silent green
+    # this module refuses everywhere else. RED on the pre-fix code, which wrote
+    # `self.unprojected_journal` here.
+    assert payload["unprojected_journal"] is None, (
+        "an unmeasured journal leg reported a COUNT: 0 on the wire is "
+        "indistinguishable from 'measured, and the record is complete'")
+    assert unmeasured.unprojected_journal == 0   # in memory: the verdict stays total
     line = log_result(unmeasured)
     assert "journal:" not in line
 
@@ -285,11 +296,96 @@ def test_the_rendered_line_names_the_lag_and_its_repair():
 
 
 def test_passing_the_journal_leg_through_the_pure_composition():
+    """The composition must CARRY the leg — a coherent fixture proves nothing.
+
+    ⛔ A LAGGING coverage on purpose (#13331 review F4). The earlier cut of this
+    test used a coherent one, where `unprojected_journal == 0` and
+    `verdict() == clean` hold IDENTICALLY with the `journal=` argument dropped:
+    the mutant (`journal=journal,` deleted from the `RecordReconcileResult(...)`
+    construction) left the suite green, so the one assertion claiming to test the
+    threading tested nothing. With lagging coverage the same deletion falls to
+    `journal is None`, i.e. `0` / `clean` — red.
+    """
     result = reconcile_record_and_cache(
         {"k": {"v": 1}}, {"k": {"v": 1}},
-        journal=_coverage(1, 1, 1, 1, None, 1))
-    assert result.unprojected_journal == 0
-    assert result.verdict() == VERDICT_CLEAN
+        journal=_coverage(2, 3, 1, 2, 2, 3))
+    assert result.journal is not None, "the leg was not carried into the result"
+    assert result.unprojected_journal == 1
+    assert result.verdict() == VERDICT_UNPROJECTED
+    assert result.as_dict()["unprojected_journal"] == 1
+    assert exit_code_for(result) == EXIT_DIVERGENT
+
+
+def test_the_cli_threads_the_journal_leg_it_measured(monkeypatch, tmp_path):
+    """`record-reconcile --journal <path>` must PASS ON the leg it read.
+
+    ⛔ The neighbouring wiring had NO assertion at all (#13331 review F4):
+    `_cmd_record_reconcile` builds `journal_leg = _coverage(...)` and hands it to
+    the composition, and deleting those eight lines left every test in the repo
+    green while `record-reconcile` silently stopped reporting the third leg. This
+    pin drives the VERB (not the composition) and asserts the leg arrived.
+
+    DB-free: the record and cache sides are stubs, the journal is a real file.
+    """
+    import sys
+    import types as _types
+
+    import tortoise.cache_projection as cache_projection
+    import tortoise.projection as projection
+    import tortoise.record_projection as record_projection
+    import tortoise.record_reconcile as record_reconcile
+    import tortoise.record_writer as record_writer
+    import tortoise.residency as residency
+    from tortoise.__main__ import _cmd_record_reconcile
+
+    journal = tmp_path / "events.jsonl"
+    journal.write_text("{}\n{}\n{}\n")            # enumerated == 3
+
+    seen: dict = {}
+    real_compose = record_reconcile.reconcile_record_and_cache
+
+    def spy_compose(record, cache, **kwargs):
+        seen.update(kwargs)
+        return real_compose(record, cache, **kwargs)
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "psycopg2",
+                        _types.SimpleNamespace(connect=lambda *a, **k: _Conn()))
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://localhost/record")
+    monkeypatch.setattr(cache_projection, "read_record_view",
+                        lambda conn, *, org_id, graph_id: {"k": {"v": 1}})
+    monkeypatch.setattr(record_reconcile, "record_key_map",
+                        lambda view: dict(view))
+    monkeypatch.setattr(record_reconcile, "scan_cache_view",
+                        lambda g, *, timeout_ms: _types.SimpleNamespace(
+                            view={"k": {"v": 1}}, placed={}))
+    monkeypatch.setattr(record_reconcile, "reconcile_record_and_cache",
+                        spy_compose)
+    monkeypatch.setattr(residency, "read_declaration",
+                        lambda g: ResidencyDeclaration(source=None))
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        _types.SimpleNamespace(
+                            from_uri=lambda uri, graph_name=None: _types.SimpleNamespace(
+                                g=object(), close=lambda: None)))
+    # the record-side coverage reader: this pin is the THREADING, not the SQL
+    monkeypatch.setattr(record_projection, "journal_coverage",
+                        lambda conn, *, org_id, graph_id, enumerated=None,
+                        want_gap=True: _coverage(2, 3, 1, 2, 2, enumerated))
+
+    args = _types.SimpleNamespace(
+        record_dsn=None, db="redis://unused", cache_graph="org_o",
+        org="o", graph="g", journal=str(journal), timeout_ms=None, json=False)
+    rc = _cmd_record_reconcile(args)
+
+    assert seen.get("journal") is not None, (
+        "the CLI measured the journal leg and did NOT pass it on — the third "
+        "leg is unreachable from the production trigger")
+    assert seen["journal"].unprojected == 1
+    assert rc == EXIT_DIVERGENT
 
 
 # ── 4. the dense leg's per-tenant gate ─────────────────────────────────────
@@ -326,7 +422,7 @@ def test_a_tenant_whose_record_holds_its_journal_is_ready(vector, monkeypatch, t
 
     asked = {}
 
-    def fake_measure(scope, *, record_dsn=None):
+    def fake_measure(scope, *, record_dsn=None, timeout_ms=None):
         asked["called"] = True
         return True
 
@@ -340,7 +436,7 @@ def test_the_readiness_verdict_is_cached_for_the_ttl(vector, monkeypatch):
     scope = vector._Scope(org_id="org-1", graph_id="graph-1")
     calls = []
 
-    def fake_measure(scope, *, record_dsn=None):
+    def fake_measure(scope, *, record_dsn=None, timeout_ms=None):
         calls.append(1)
         return len(calls) == 1        # ready, then not
 
@@ -351,12 +447,44 @@ def test_the_readiness_verdict_is_cached_for_the_ttl(vector, monkeypatch):
     assert len(calls) == 2
 
 
-def test_a_lagging_tenant_keeps_the_graph_branch(vector, monkeypatch):
+def test_a_lagging_tenant_never_reaches_the_dense_leg(vector, monkeypatch):
+    """Requirement 5's LIVE wiring: `searcher()` itself must refuse.
+
+    ⛔ This test used to assert `journal_ready(scope) is False` and stop there, so
+    it never reached `searcher()` — the six lines that ARE the wiring
+    (`record_vector.py`: `if not journal_ready(...): return None`) could be
+    deleted with the whole suite still green (#13331 review F5), and every armed
+    tenant whose record is short of its journal would then be served from the
+    dense leg as `mechanism=pgvector, reason=ok` — the silent-invisibility class
+    `#5090` Q2 forbids.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    monkeypatch.setenv(vector.ARMING_ENV, "1")
     monkeypatch.setenv(vector.RECORD_JOURNAL_ENV, "/tmp/whatever/events.jsonl")
-    monkeypatch.setattr(vector, "_measure_readiness",
-                        lambda scope, *, record_dsn=None: False)
-    scope = vector._Scope(org_id="org-1", graph_id="graph-1")
-    assert vector.journal_ready(scope) is False
+    tenant = ("org-1", "graph-1")
+
+    asked: list = []
+
+    def gate(scope, *, record_dsn=None, timeout_ms=None):
+        asked.append((scope.org_id, scope.graph_id, timeout_ms))
+        return False                       # the tenant's record LAGS its journal
+
+    monkeypatch.setattr(vector, "journal_ready", gate)
+    assert vector.searcher(carried=tenant, timeout_ms=500) is None, (
+        "a tenant whose record does not hold its journal was handed a dense "
+        "searcher — the per-tenant condition on the deployment switch is gone")
+    # …and the gate was asked about THIS tenant, with the read's own budget, so
+    # the coverage read it performs cannot outlive the request (#13331 F3).
+    assert asked == [("org-1", "graph-1", 500)]
+
+    # the control: the same tenant, ready, DOES get a searcher.
+    monkeypatch.setattr(vector, "journal_ready",
+                        lambda scope, *, record_dsn=None, timeout_ms=None: True)
+    monkeypatch.setattr(vector, "vector_search",
+                        lambda *a, **k: [("p1", 0.1, None)])
+    searcher = vector.searcher(carried=tenant, timeout_ms=500)
+    assert searcher is not None, "a ready tenant must be served from the record"
+    assert searcher("Point", [0.1] * 4, 5) == [("p1", 0.1, None)]
 
 
 def test_an_unreadable_journal_is_not_ready(vector, monkeypatch, tmp_path):
