@@ -270,6 +270,12 @@ RELEASE_CONDITIONS: dict[str, str] = {
         "the HNSW vector index is measurable, so a cap MAY be wired to the graph "
         "reading (evidence: ``graph_storage.PRECISION_NOTE`` no longer forbids "
         "it)"),
+    "per_graph_overhead_attributed": (
+        "the per-graph OVERHEAD is attributed to the graph that causes it, so a "
+        "cap on the graph reading cannot be side-stepped by spreading storage "
+        "over many graphs (evidence: ``graph_storage.EXCLUDED_OVERHEAD`` no "
+        "longer excludes per-graph overhead, and combining readings CHARGES it "
+        "per graph rather than reporting a zero-cost empty graph)"),
 }
 
 
@@ -633,13 +639,28 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
         meter=_graph_storage_mb,
         stale_after_seconds=STALE_AFTER_SECONDS,
         blocked_reason=(
-            "the graph byte meter exists but its own contract forbids capping on "
-            "the ledger figure: the vector-index share is under-reported 8.5x-21.7x "
-            "(~2x on the total) and metering.get_graph_storage_reading returns the "
-            "uncorrected numerics (tortoise/graph_storage.py: 'a cap MUST NOT be "
-            "wired to the ledger figure for vector-bearing tenants'). BLOCKED on "
-            "the corrected ledger figure"),
-        release=("vector_index_measurable",),
+            "TWO independent blindnesses, and the release names both, because "
+            "clearing either ONE still leaves a figure a cap must not be wired "
+            "to. "
+            "(1) THE VECTOR INDEX: the index share is under-reported 8.5x-21.7x "
+            "(~2x on the total) and metering.get_graph_storage_reading returns "
+            "the uncorrected numerics (tortoise/graph_storage.py: 'a cap MUST "
+            "NOT be wired to the ledger figure for vector-bearing tenants'). "
+            "(2) PER-GRAPH OVERHEAD, measured on production 2026-11-16: the "
+            "instance holds 841 MB while the sum of per-graph readings over 182 "
+            "graphs is 419 MB — the meter sees about HALF. Deleting 148 EMPTY "
+            "tenant graphs freed 216 MB, i.e. ~1.46 MB of rent per graph that "
+            "``GRAPH.MEMORY USAGE`` attributes to NO graph (a newly-created "
+            "graph reads ~346 KiB). That is not a rounding error, it is an "
+            "EVASION: a tenant that spreads its storage over empty graphs pays "
+            "~1.46 MB each while the reading sees a few hundred KiB, so a cap "
+            "summed from these readings never fires for the tenant who grows "
+            "that way. BLOCKED on the corrected ledger figure AND on overhead "
+            "attribution — both, not either."),
+        release=(
+            "vector_index_measurable",
+            "per_graph_overhead_attributed",
+        ),
     ),
     _dimension(
         "postgres_storage", ALLOWANCE_KEYS["postgres_storage"],

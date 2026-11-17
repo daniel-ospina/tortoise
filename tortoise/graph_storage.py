@@ -148,6 +148,18 @@ VECTOR_INDEX_EXCLUDED = (
 #: What ``GRAPH.MEMORY USAGE`` does NOT include. The strings are part of the
 #: reading (not only of this docstring) because a consumer that only ever sees
 #: the number must still be able to read what it leaves out.
+#:
+#: ⛔ THE FIRST ENTRY IS MEASURED, AND IT IS NOT A ROUNDING ERROR: production,
+#: 2026-11-16 — the instance held **841 MB** while the sum of per-graph readings
+#: over **182** graphs was **419 MB** (the meter sees about HALF), and deleting
+#: **148 EMPTY** tenant graphs freed **216 MB**, i.e. **~1.46 MB** of rent per
+#: graph that is attributed to **NO** graph. A newly-created graph reads only
+#: ~**346 KiB**. ⇒ a cap summed from these readings is EVADABLE: a tenant that
+#: spreads its storage over near-empty graphs pays 1.46 MB each while the meter
+#: sees a few hundred KiB, so the cap never fires for the tenant who grows that
+#: way. That is why ``allowance_gate``'s graph block carries TWO release
+#: conditions (the vector index AND this), and why clearing one of them does not
+#: arm the dimension.
 EXCLUDED_OVERHEAD: tuple[str, ...] = (
     "per-graph overhead (the graph's registry entry and per-graph metadata)",
     "Redis-key overhead (the graph key and auxiliary keys)",
