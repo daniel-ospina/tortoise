@@ -417,46 +417,44 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     # pass did not, and both demanded a fence the declared limit never mentioned — so the reach the
     # comment claimed was wider than the reach the code had. The pattern is therefore compiled ONCE
     # and BOTH passes read it, which is the only version of this pin that cannot reintroduce the
-    # drift. It is form-tolerant: case-insensitive, optional `now`, a fence of `**`/`*`/`` ` ``/`_`/`__`
-    # or NONE, and any of space/em-dash/hyphen between the particles. The `N of N verified` triple
-    # is read from the ENCLOSING SENTENCE — back to the previous sentence break, forward to the
-    # next — not from a fixed character distance, so a triple stated BEFORE the phrase or far from
-    # it is still read, and an adjacent sentence's figure cannot be mistaken for this one's.
-    # ⛔ THE DECLARED RESIDUAL IS EXACTLY THE REACH: the pin reads
-    # `<anything>population is <number>`, with the triple taken from that number's own sentence; a
-    # PARAPHRASE that never uses the words `population is` (e.g. "the retired-forward population
-    # numbers N shims") is out of reach by construction, because prose is not enumerable. The
-    # durable closure for a reworded statement is to stop restating the count in free prose — not
-    # to widen this regex again; a reworded statement must update this pin in the same change.
-    population_statement = re.compile(
-        r"population is[\s\u2014-]+(?:now[\s\u2014-]+)?(?:[*`_]{1,2})?(\d+)(?:[*`_]{1,2})?",
-        re.I)
-
-    def _sentence_around(text: str, start: int, end: int) -> str:
-        """The sentence a match sits in: previous sentence break -> next one."""
-        breaks = (". ", ".\n", "!\n", "?\n", "\n\n")
-        left = max(text.rfind(b, 0, start) for b in breaks)
-        head = left + 2 if left >= 0 else 0
-        rights = [text.find(b, end) for b in breaks]
-        rights = [r for r in rights if r >= 0]
-        tail = min(rights) + 1 if rights else len(text)
-        return text[head:tail]
-
+    # drift — so the pin now reads ONE NORMALIZED VIEW, not a regex race between spellings.
+    # ⛔ NORMALIZE FIRST, MATCH SECOND (#13052 review at 3ebd3cb, then 2e1bfc93, P3 each time):
+    # six rounds were each defeated by an emphasis/wrapping/case spelling the pattern did not
+    # carry (`*N*`, `_N_`, `__N__`, `***N***`, `**N** of **N**`, a triple wrapped onto the next
+    # line, `Verified` capitalised). Those are not separate forms to enumerate — they are markup,
+    # so every paragraph is FLATTENED before anything is read: emphasis/backtick characters are
+    # stripped and all whitespace (including hard wraps) collapsed to single spaces. That single
+    # step subsumes every spelling above, so this pin can no longer trail the next one.
+    # WHAT THE PIN READS, EXACTLY: within a paragraph, every `population is [now] <number>` must
+    # equal the manifest's retired count, and every `N of N verified` in the CLAUSE that contains
+    # that number (bounded by the previous and next sentence/clause break, and never past the
+    # paragraph) must agree with it. OUT OF REACH, by construction and disclosed here: a
+    # paraphrase that never says `population is`; a figure stated only in a FOLLOWING sentence;
+    # and a reworded sentence whose new wording drops the number from that clause. The durable
+    # closure for any of those is to stop restating the count in free prose — not to widen this
+    # matcher again; a reworded statement must update this pin in the same change.
+    clause_breaks = (". ", "! ", "? ", "; ", ": ", " \u2014 ")
     stated_now = []
-    for statement in population_statement.finditer(canonical):
-        stated = int(statement.group(1))
-        stated_now.append(stated)
-        sentence = _sentence_around(canonical, statement.start(), statement.end())
-        for of_verified, verified in re.findall(r"(\d+) of (\d+) verified", sentence):
-            assert (int(of_verified), int(verified)) == (stated, stated), (
-                f"canonical-mcp-tools.md's sentence around `{statement.group(0)!r}` says the "
-                f"retired population is {stated} and then {of_verified} of {verified} "
-                f"verified; the two halves of that sentence disagree, and the manifest's "
-                f"retired rows number {retired}")
+    for paragraph in canonical.split("\n\n"):
+        flat = re.sub(r"\s+", " ", re.sub(r"[*`_]", "", paragraph))
+        for statement in re.finditer(r"population is (?:now )?(\d+)", flat, re.I):
+            stated = int(statement.group(1))
+            stated_now.append(stated)
+            left = max(flat.rfind(b, 0, statement.start()) for b in clause_breaks)
+            head = left + 2 if left >= 0 else 0
+            rights = [flat.find(b, statement.end()) for b in clause_breaks]
+            rights = [r for r in rights if r >= 0]
+            tail = min(rights) + 1 if rights else len(flat)
+            for of_verified, verified in re.findall(r"(\d+) of (\d+) verified", flat[head:tail], re.I):
+                assert (int(of_verified), int(verified)) == (stated, stated), (
+                    f"canonical-mcp-tools.md's clause around `{statement.group(0)!r}` says the "
+                    f"retired population is {stated} and then {of_verified} of {verified} "
+                    f"verified; the two halves of that sentence disagree, and the manifest's "
+                    f"retired rows number {retired}")
     assert stated_now, (
         "canonical-mcp-tools.md no longer states the retired population in present tense at "
-        "all (`population is <N>`, emphasis fence optional) — the amendment's SECOND statement "
-        "of that count. Its absence is a failure and not a vacuous pass: delete the sentence and "
+        "all (`population is [now] <N>`, any markup) — the amendment's SECOND statement of "
+        "that count. Its absence is a failure and not a vacuous pass: delete the sentence and "
         "the surviving clause is the only statement left to check"
     )
     assert stated_now == [retired] * len(stated_now), (
