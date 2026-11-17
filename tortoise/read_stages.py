@@ -63,11 +63,27 @@ import time
 #: dashboard grouping by stage cannot be split by a typo, and a test can assert
 #: completeness without guessing at future names.
 #:
-#: ``pre_handler`` is the answer that matters most and the one no per-stage
-#: timing inside the handler could ever produce: the bound expired before the
-#: read path marked ANY stage, so the time was spent in middleware / auth / org
-#: resolution — or waiting for the event loop itself, which is what a read
-#: refused while a concurrent request blocked the loop looks like from here.
+#: ``unmarked`` is the DEFAULT, and its meaning is deliberately narrow: **no read
+#: stage was recorded before the bound expired.** It is not a claim about where
+#: the time went. That distinction is #10893 review finding F4: the timeline is
+#: bound for ALL `data` traffic but only ``sdk.tortoise_fts_query`` marks anything,
+#: so a breach on `/v1/points/{id}`, `/v1/context` or any other read route accrues
+#: nothing — and publishing ``pre_handler`` for those would assert "the time went
+#: to middleware / auth / the event loop", which is TRUE for a search that never
+#: started and FALSE for a route that simply records no stages. One word cannot
+#: mean both, so the unattributed case says only what is knowable.
+#:
+#: ⛔ The loop-blocked-before-the-read signal is NOT lost, it MOVED: once the read
+#: does start, ``pre_handler`` appears in ``spent_ms()`` with its real duration, so
+#: a breach during ``embed_get`` carrying ``pre_handler: 8100.0`` still says "8.1 s
+#: went by before the read began". What is gone is the unsupported inference from
+#: silence.
+STAGE_UNMARKED = "unmarked"
+#: A stage that COMPLETED before the read path started: the bound's own pre-SSE
+#: cost — middleware, auth, org resolution, queueing for a worker slot — plus any
+#: time the request spent waiting for the event loop. Only ever present in
+#: ``spent_ms()``, never in ``current()``: it is by definition over by the time a
+#: later stage opens.
 STAGE_PRE_HANDLER = "pre_handler"
 #: ``EmbeddingModel.get()`` — the lazy one-time load (or the wait for another
 #: request's in-flight load). Separated from the encode because they are the two
@@ -95,6 +111,7 @@ STAGE_EP_ANNOTATION = "ep_annotation"
 STAGE_RESPONSE = "response"
 
 STAGES: tuple[str, ...] = (
+    STAGE_UNMARKED,
     STAGE_PRE_HANDLER,
     STAGE_EMBED_GET,
     STAGE_EMBED_ENCODE,
@@ -118,7 +135,7 @@ class ReadStages:
     the same seam when its bound expires.
     """
 
-    __slots__ = ("_started_at", "_stage", "_stage_t0", "_spent", "_lock")
+    __slots__ = ("_armed", "_lock", "_spent", "_stage", "_stage_t0", "_started_at")
 
     def __init__(self, started_at: float | None = None) -> None:
         now = time.monotonic()
@@ -127,7 +144,11 @@ class ReadStages:
         #: ``sum(spent_ms)`` is directly comparable to ``latency_ms`` on the same
         #: breach record. A default of "now" keeps an off-HTTP caller working.
         self._started_at = now if started_at is None else started_at
-        self._stage = STAGE_PRE_HANDLER
+        self._stage = STAGE_UNMARKED
+        #: True once the read path has marked ANY stage. It is what makes
+        #: ``unmarked`` (nothing recorded) distinguishable from ``pre_handler``
+        #: (recorded, and the read had not started yet) — see STAGE_UNMARKED.
+        self._armed = False
         self._stage_t0 = self._started_at
         self._spent: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -153,16 +174,30 @@ class ReadStages:
         with self._lock:
             if stage == self._stage:
                 return
-            self._spent[self._stage] = (
-                self._spent.get(self._stage, 0.0)
-                + (now - self._stage_t0) * 1000.0)
+            if not self._armed:
+                # The FIRST mark is what promotes this request from `unmarked`
+                # to a timed read: everything so far belongs to `pre_handler`,
+                # and from here on the timeline describes the read path.
+                self._armed = True
+                self._spent[STAGE_PRE_HANDLER] = (
+                    self._spent.get(STAGE_PRE_HANDLER, 0.0)
+                    + (now - self._stage_t0) * 1000.0)
+            else:
+                self._spent[self._stage] = (
+                    self._spent.get(self._stage, 0.0)
+                    + (now - self._stage_t0) * 1000.0)
             self._stage = stage
             self._stage_t0 = now
 
     # ── reading (the transport seam, at the deadline) ───────────────────────
 
     def current(self) -> str:
-        """The stage that was OPEN when the bound expired — the answer."""
+        """The stage that was OPEN when the bound expired.
+
+        ``unmarked`` when the read path never marked anything — see
+        :data:`STAGE_UNMARKED`: that is an absence of an observation, never a
+        claim about where the time went.
+        """
         with self._lock:
             return self._stage
 
@@ -201,23 +236,17 @@ class ReadStages:
     def wire_snapshot(self) -> dict | None:
         """The refusal-body shape, or ``None`` when there is nothing to say.
 
-        ⛔ THE WIRE IS STRICTER THAN TELEMETRY, deliberately. ``pre_handler`` is
-        the most valuable value this module produces for an OPERATOR — it is the
-        answer "the bound expired before the read marked anything, so the time
-        went to middleware/auth/queueing, not to retrieval", which is the one
-        attribution no per-stage timing inside the handler can produce. It is
-        the LEAST valuable value for a CALLER, because there is nothing it can
-        do with it: no stage was slow, so there is no lever to pull.
-
-        Three shipped tests pin a breached REST refusal's body to exactly
-        ``{"detail": …}``, and those bodies come from routes that run no read
-        path at all. Publishing ``{"stage": "pre_handler", "stages_ms": {}}``
-        on them would be noise on a wire contract, in exchange for a fact the
-        caller cannot act on — and noise is how a client breaks. So the wire
-        carries the attribution only once the read actually started; telemetry
-        and the log line carry it always.
+        ⛔ THE WIRE IS STRICTER THAN TELEMETRY, deliberately. ``unmarked`` is the
+        honest answer for an operator ("no read stage was recorded — this budget
+        did not go to any stage the server can name") and a useless one for a
+        CALLER, which has nothing to act on. Three shipped tests pin a breached
+        REST refusal's body to exactly ``{"detail": …}``, and those bodies come
+        from routes that run no read path at all. Publishing
+        ``{"stage": "unmarked", "stages_ms": {}}`` on them would be noise on a
+        wire contract, so the wire carries the attribution only once the read
+        actually started; telemetry and the log line carry it always.
         """
-        if self.current() == STAGE_PRE_HANDLER and not self.spent_ms():
+        if not self._armed:
             return None
         return self.snapshot()
 
@@ -282,9 +311,22 @@ def stage_view() -> dict | None:
 def stage_wire_view() -> dict | None:
     """The refusal-BODY shape: the attribution, or ``None`` when nothing ran.
 
-    See :meth:`ReadStages.wire_snapshot` — ``pre_handler`` with no accrued time
+    See :meth:`ReadStages.wire_snapshot` — ``unmarked`` with no accrued time
     means the bound expired before the read started, and a caller can act on
     that only as "retry", which it already knew.
     """
     stages = _stages.get()
     return None if stages is None else stages.wire_snapshot()
+
+
+def log_suffix(view: dict | None) -> str:
+    """The `` (stage=… spent_ms=…)`` tail both breach WARNINGs append.
+
+    One construction site: the REST seam and the MCP seam log the same refusal,
+    and two hand-rolled format strings is how they drift into reporting the same
+    stall two different ways. ``""`` for an unbound timeline keeps both log
+    lines byte-identical to the pre-#10893 shape.
+    """
+    if not view:
+        return ""
+    return f" (stage={view.get('stage')} spent_ms={view.get('stages_ms')})"

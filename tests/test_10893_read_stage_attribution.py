@@ -40,8 +40,6 @@ import os
 import threading
 from pathlib import Path
 
-import pytest
-
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 from tortoise import hosted_api as ha
@@ -53,8 +51,8 @@ from tortoise.read_stages import (
     STAGE_RESPONSE,
     STAGE_RETRIEVAL,
     STAGE_SET,
+    STAGE_UNMARKED,
     STAGES,
-    ReadStages,
     begin,
     mark,
     request_stages,
@@ -132,20 +130,53 @@ def test_the_open_stage_is_distinct_from_the_spent_stages():
 
 
 def test_remecking_the_same_stage_folds_rather_than_duplicating():
-    """A dense EXPANSION pass re-enters retrieval; the total must not double-count."""
+    """A dense EXPANSION pass re-enters retrieval; the total must not double-count.
+
+    ⛔ ASSERTS THE VALUE, not the key set (review finding F3). The key set is
+    identical whether the fold guard is present or not, so a key-set assertion
+    left the guard unfalsifiable: without the guard, ``mark(RETRIEVAL)`` closes
+    the bucket and re-opens it, and the next ``mark`` closes it again — the
+    parts still sum to the same span, and every key still appears. What the
+    guard actually buys is that the bucket is written ONCE, so the value is the
+    span and not a re-derived sum of a re-opened bucket.
+    """
     timeline = begin()
     with request_stages(timeline):
         mark(STAGE_EMBED_GET)
         mark(STAGE_RETRIEVAL)
+        first = timeline.spent_ms()[STAGE_EMBED_GET]
         mark(STAGE_RETRIEVAL)  # the #2518 expansion pass — a no-op re-mark
         mark(STAGE_RESPONSE)
+        spent = timeline.spent_ms()
 
-    spent = timeline.spent_ms()
     # `pre_handler` legitimately appears: a few µs elapse between `begin()` and
     # the first mark, and on a real request that interval is the auth/middleware
     # cost — the very thing "the bound expired before any stage ran" reports.
     assert set(spent) == {STAGE_PRE_HANDLER, STAGE_EMBED_GET, STAGE_RETRIEVAL}
     assert STAGE_RESPONSE not in spent
+    # The re-mark did not reopen or re-write the bucket: the embed_get figure is
+    # the one observed before it, unchanged.
+    assert spent[STAGE_EMBED_GET] == first
+
+
+def test_the_fold_guard_is_observable_while_the_restage_is_still_open():
+    """The guard's ONE observable effect: a breach arriving mid-re-mark.
+
+    With the guard, the re-mark is a no-op, so the re-marked stage is still the
+    OPEN one and appears in NEITHER ``spent_ms()`` nor ``current()``'s second
+    bucket. Without it the stage would have been closed and reopened, so a
+    snapshot taken between the two marks would report it as SPENT — claiming a
+    stage that had not finished, which is the confusion the module's "only
+    FINISHED stages appear" contract exists to prevent.
+    """
+    timeline = begin()
+    with request_stages(timeline):
+        mark(STAGE_EMBED_GET)
+        mark(STAGE_RETRIEVAL)
+        mark(STAGE_RETRIEVAL)
+        mid = timeline.spent_ms()
+    assert STAGE_RETRIEVAL not in mid
+    assert timeline.current() == STAGE_RETRIEVAL
 
 
 # ── 2. the closed vocabulary ────────────────────────────────────────────────
@@ -165,8 +196,8 @@ def test_an_unknown_stage_is_refused_rather_than_published():
 
 
 def test_the_vocabulary_is_a_closed_set_of_named_stages():
-    assert STAGES == tuple(dict.fromkeys(STAGES)), "duplicate stage name"
-    assert STAGE_SET == frozenset(STAGES)
+    assert tuple(dict.fromkeys(STAGES)) == STAGES, "duplicate stage name"
+    assert frozenset(STAGES) == STAGE_SET
     # Every stage the read path marks is a member — a `mark` call naming a
     # non-member is a silent no-op, which is exactly how an instrument dies.
     assert {STAGE_PRE_HANDLER, STAGE_EMBED_GET, STAGE_EMBED_ENCODE,
@@ -182,16 +213,34 @@ def test_unbound_marks_are_a_noop_and_publish_nothing():
 
 
 def test_the_wire_view_withholds_an_attribution_for_a_read_that_never_started():
-    """``pre_handler`` + no accrued time is the operator's answer, not the
-    caller's: no stage was slow, so there is no lever for the caller to pull,
-    and publishing it would put noise on a wire contract three shipped tests
-    pin to exactly ``{"detail": …}``."""
+    """``unmarked`` + no accrued time is the operator's answer, not the caller's:
+    it says only that NO stage was recorded, and a caller has no lever in it.
+    Publishing it would also put noise on a wire contract three shipped tests pin
+    to exactly ``{"detail": …}``."""
     timeline = begin()
     with request_stages(timeline):
-        # Nothing marked — the bound expired before the read path started.
+        # Nothing marked — either the bound expired before the read path started,
+        # or this route records no stages at all. The vocabulary says exactly
+        # that and no more (review finding F4).
         assert timeline.wire_snapshot() is None
-        # …while telemetry still reports the (informative) stage.
-        assert stage_view() == {"stage": STAGE_PRE_HANDLER, "stages_ms": {}}
+        assert stage_view() == {"stage": STAGE_UNMARKED, "stages_ms": {}}
+
+
+def test_pre_handler_is_only_claimed_once_the_read_actually_started():
+    """The F4 distinction: ``unmarked`` is an ABSENCE of an observation.
+
+    Once the read starts, the interval before it is a real measurement and is
+    published as ``pre_handler`` — that is the "8.1 s went by before the read
+    began" signal, and it is the only form in which the claim is supportable.
+    """
+    timeline = begin()
+    with request_stages(timeline):
+        mark(STAGE_EMBED_GET)
+        spent = timeline.spent_ms()
+        current = timeline.current()
+    assert current == STAGE_EMBED_GET
+    assert STAGE_PRE_HANDLER in spent
+    assert STAGE_UNMARKED not in spent
 
 
 def test_the_wire_view_publishes_once_a_stage_has_been_marked():
@@ -249,6 +298,52 @@ def test_the_rest_body_is_untouched_for_a_timeline_that_never_started():
         _collect_send(messages), {"type": "http", "headers": [], "method": "GET"},
         "/v1/search", stages=view))
     assert set(_decode(messages)) == {"detail"}
+
+
+def test_a_marked_rest_refusal_is_still_recognised_by_the_verdict_contract():
+    """Review finding F2 — the assertion this diff was missing.
+
+    ``tests/_verdict.py::is_transport_wait_bound_refusal`` used EXACT body
+    equality for the REST arm. A breached **/v1/search** that had already marked
+    a stage is the one request class this instrument exists for, and it emitted
+    two extra keys — so the detector stopped recognising it and handed the
+    refusal to the caller's assertions as if it were an ANSWER: a false FAIL
+    charged to the property under test, which is the failure class that module's
+    rule-1 INCONCLUSIVE arm exists to prevent.
+
+    Driven through the REAL builder and the REAL detector, not a hand-written
+    body, because the defect was precisely that the two disagreed.
+    """
+    from tests import _verdict
+
+    class _Resp:
+        status_code = 504
+
+        def __init__(self, body: bytes) -> None:
+            self.content = body
+
+    messages: list = []
+    asyncio.run(ha._send_wait_bound_refusal(
+        _collect_send(messages), {"type": "http", "headers": [], "method": "GET"},
+        "/v1/search",
+        stages={"stage": STAGE_RETRIEVAL,
+                "stages_ms": {STAGE_EMBED_GET: 40.0}}))
+    body = messages[-1]["body"]
+    assert "stage" in body.decode(), "precondition: the body carries the attribution"
+    assert _verdict.is_transport_wait_bound_refusal(_Resp(body)) is True
+
+
+def test_an_unrelated_extra_key_is_still_not_the_refusal():
+    """The widening is a documented ALLOWLIST, not a wildcard: the #8579 rule —
+    "never the message text alone" — still holds."""
+    from tests import _verdict
+
+    class _Resp:
+        status_code = 504
+        content = json.dumps({"detail": _TRANSPORT_WAIT_BOUND_MESSAGE,
+                              "something_else": 1}).encode()
+
+    assert _verdict.is_transport_wait_bound_refusal(_Resp()) is False
 
 
 def test_the_jsonrpc_refusal_keeps_its_envelope_and_gains_the_stage():

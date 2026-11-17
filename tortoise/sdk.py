@@ -159,7 +159,7 @@ from .read_stages import (
     STAGE_FUSION,
     STAGE_RESPONSE,
     STAGE_RETRIEVAL,
-)  # noqa: F401 — STAGE_* are the closed vocabulary the marks below use
+)
 from .read_stages import mark as _mark_read_stage
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,

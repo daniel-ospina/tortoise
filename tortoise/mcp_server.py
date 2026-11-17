@@ -1844,12 +1844,11 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         # import froze the loop and delivered the refusal seconds late.
         _emit_mcp_wait_bound_breach_off_loop(
             _current_org_id.get() or "", latency_ms, name, stages=stages_view)
+        from tortoise.read_stages import log_suffix as _stage_log_suffix
         _log.warning(
             "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
             "refusing legibly%s", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name,
-            (" (stage=%s spent_ms=%s)" % (stages_view["stage"],
-                                          stages_view["stages_ms"])
-             if stages_view else ""))
+            _stage_log_suffix(stages_view))
     return _wait_bound_refusal_result(name, arguments, stages=wire_stages)
 
 

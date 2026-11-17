@@ -6541,12 +6541,11 @@ class WaitBoundMiddleware:
         # prop. The operatives who re-measured this issue a dozen times were
         # reading a terminal, and a breach that names its stage is the difference
         # between "the plane is wedged" and "the encode is wedged".
+        from tortoise.read_stages import log_suffix as _stage_log_suffix
         _logger.warning(
             "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly%s",
             _mcp_auth._TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path,
-            (" (stage=%s spent_ms=%s)" % (stages_view["stage"],
-                                          stages_view["stages_ms"])
-             if stages_view else ""))
+            _stage_log_suffix(stages_view))
         # The task has already outlived the refusal decision, so register it
         # BEFORE the send: the send happens 10 s in, where a client that has
         # already gone makes uvicorn raise (ConnectionResetError /
