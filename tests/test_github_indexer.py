@@ -550,7 +550,15 @@ def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk)
 
 
 def test_a_FALSY_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
-    """#13288 review R2/F1, the half that had no pin: `isClosed=0`.
+    """#13326 (measured on `origin/main` `54682177bc`), the half that had no pin: `isClosed=0`.
+
+    ⚠️ Attribution corrected (#13326 review P3): this half was NOT #13288 round-2 `F1`
+    — that finding is "the position arm shadows the unresolvable guard, and the new
+    comment says it cannot", and no #13288 comment mentions `isClosed=0`, `Integer`,
+    or a falsy non-boolean marker. The closest prior record is #13289's review P3
+    ("a falsy non-boolean `outdated` (`0`, `''`) reads live in Python but terminal in
+    Cypher — RECORDED, NOT FIXED") — the same excluded middle one FIELD over; the
+    `isClosed` field itself was found for #13326.
 
     `create_object(..., isClosed=1)` is documented at the truthy pin BELOW
     (`test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`); the
