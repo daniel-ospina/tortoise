@@ -3169,8 +3169,11 @@ try {
 // first time the snapshot ran. This calls it on a seeded two-org journal and
 // asserts the four things the allowance gate depends on:
 //   * one row per org, carrying the bytes the AUDIT attributed to that org;
-//   * `measured_at` populated (the gate ages the reading from it, and an
-//     unageable reading is refused on a bounded dimension);
+//   * `measured_at` is the audit's OWN `captured_at` and is never in the future
+//     (the gate ages the reading from it, so a future stamp would age as fresh
+//     forever and defeat the bound in the fail-OPEN direction — review finding 6,
+//     which measured the previous `!ga.measured_at` assertion as unable to vary
+//     at all on a `timestamptz NOT NULL` column);
 //   * re-running is IDEMPOTENT (the upsert, not a growing table);
 //   * the per-org figure is the org's OWN rows — a second org's bytes must not
 //     leak into the first, which is the split #4492 refused.
@@ -3195,7 +3198,7 @@ try {
               jsonb_build_object('pad', repeat('b', 4000)))
       ON CONFLICT DO NOTHING;
   `);
-  await db.exec('SELECT * FROM public.postgres_residency_snapshot()');
+  const refresh1 = await db.query('SELECT * FROM public.postgres_residency_snapshot()');
   const first = await db.query(`SELECT org_id, stored_bytes, rows, measured_at
       FROM public.org_postgres_residency
      WHERE org_id IN ('9559-gauge-a', '9559-gauge-b') ORDER BY org_id`);
@@ -3251,7 +3254,11 @@ try {
     pg_catalog.has_function_privilege('anon',
       'public.postgres_residency_snapshot()', 'EXECUTE') AS anon_exec,
     pg_catalog.has_function_privilege('service_role',
-      'public.postgres_residency_snapshot()', 'EXECUTE') AS svc_exec`);
+      'public.postgres_residency_snapshot()', 'EXECUTE') AS svc_exec,
+    (SELECT count(*)::int FROM pg_catalog.pg_index i
+       JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+      WHERE c.relname = 'org_postgres_residency_measured_at_idx')
+      AS measured_at_idx`);
   const p0 = posture.rows[0] || {};
   if (p0.rls_on !== true) {
     console.error('✗ #9559: RLS is not ENABLED on org_postgres_residency — every '
@@ -3269,16 +3276,62 @@ try {
       + 'SECURITY DEFINER whole-table audit reachable by a public caller');
     process.exit(1);
   }
+  // ⛔ THE ABSENT-ORG ACCESS PATH IS PART OF THE AFFORDABILITY CLAIM, so it is
+  // EXECUTED too (review finding 4): the table's only other key is `org_id`, and
+  // the no-row branch reads the NEWEST `measured_at`. Without this index that
+  // probe is a seq scan + sort over one row per org — O(orgs) on a gated write
+  // path — while the migration header and the ops doc still call it O(1).
+  if (Number(p0.measured_at_idx) !== 1) {
+    console.error('✗ #9559: org_postgres_residency_measured_at_idx is MISSING — the '
+      + 'absent-org probe (ORDER BY measured_at DESC LIMIT 1) is a full scan of one '
+      + 'row per org on the gated write path, not the O(1) lookup the affordability '
+      + 'argument claims');
+    process.exit(1);
+  }
   if (p0.svc_exec !== true) {
     console.error('✗ #9559: service_role CANNOT execute the refresh — the gauge '
       + 'could never be updated, so every reading would stay stale and refuse');
     process.exit(1);
   }
 
-  if (!ga.measured_at) {
-    console.error('✗ #9559: the snapshot row carries no measured_at — the gate could '
-      + 'not age it, and refuses an unageable reading on a bounded dimension');
+  // ⛔ `measured_at` MUST BE THE AUDIT'S INSTANT, AND MUST NOT BE IN THE FUTURE.
+  // It used to be `if (!ga.measured_at)`, which CANNOT VARY: the column is
+  // `timestamptz NOT NULL`, so no refresh can produce a NULL and no mutation of
+  // this migration could ever red it (review finding 6). The property the gate
+  // actually depends on is narrower and falsifiable in BOTH directions:
+  //   * EQUAL to the `captured_at` the refresh itself reported — the row carries
+  //     WHEN THE AUDIT MEASURED, not an independently-stamped clock, and the
+  //     value is now derived from two places instead of asserted non-null; and
+  //   * NOT AFTER the read — a stamp in the future ages as fresh forever, which
+  //     defeats the gate's `stale_after_seconds` bound in the fail-OPEN
+  //     direction (a stale figure that looks young is enforced, not refused).
+  const refreshCapturedAt = refresh1.rows[0] && refresh1.rows[0].captured_at;
+  if (!refreshCapturedAt) {
+    console.error('✗ #9559: the refresh reported no `captured_at`, so the row\'s '
+      + '`measured_at` has nothing it must agree with');
     process.exit(1);
+  }
+  for (const [label, row] of [['a', ga], ['b', gb]]) {
+    const stamped = Date.parse(row.measured_at);
+    if (!row.measured_at || Number.isNaN(stamped)) {
+      console.error(`✗ #9559: the snapshot row for org ${label} carries no parseable `
+        + `measured_at (${row.measured_at}) — the gate could not age it, and refuses `
+        + 'an unageable reading on a bounded dimension');
+      process.exit(1);
+    }
+    if (stamped !== Date.parse(refreshCapturedAt)) {
+      console.error(`✗ #9559: org ${label}'s measured_at (${row.measured_at}) is not `
+        + `the instant the refresh reported (${refreshCapturedAt}) — the row must carry `
+        + 'WHEN THE AUDIT MEASURED, not a separate clock; the gate ages the reading '
+        + 'from this column');
+      process.exit(1);
+    }
+    if (stamped > Date.now()) {
+      console.error(`✗ #9559: org ${label}'s measured_at (${row.measured_at}) is in the `
+        + 'FUTURE — a future stamp ages as fresh forever, so the gate would ENFORCE a '
+        + 'figure it can no longer defend instead of refusing it');
+      process.exit(1);
+    }
   }
   // The upsert must UPDATE, not append — and "count is still 2" cannot tell
   // `DO UPDATE` from `DO NOTHING` (measured: swapping them passed). So the DATA
@@ -3318,8 +3371,9 @@ try {
      DELETE FROM public.graphs WHERE id IN ('9559-gauge-graph-a', '9559-gauge-graph-b');
      DELETE FROM public.organizations WHERE id IN ('9559-gauge-a', '9559-gauge-b');`);
   console.log('✓ #9559: `postgres_residency_snapshot()` writes ONE row per org from '
-    + 'the audit, per-org bytes never leak across orgs, `measured_at` is populated, '
-    + 'and a re-run upserts instead of appending');
+    + 'the audit, per-org bytes never leak across orgs, `measured_at` is the '
+    + 'audit\'s own instant and never in the future, and a re-run upserts instead '
+    + 'of appending');
 } catch (e) {
   console.error(`✗ #9559 RESIDENCY GAUGE FAILED:\n  ${e.message.split('\n').slice(0, 20).join('\n  ')}`);
   process.exit(1);

@@ -678,8 +678,20 @@ def test_a_stale_snapshot_is_refused_rather_than_enforced(monkeypatch):
     ``stale_after_seconds`` at all, and why the answer to "too old" is a refusal
     rather than a silent pass.
 
+    ⛔ THE GATE-LEVEL LEG DRIVES AN **UNBLOCKED** DIMENSION (review finding 5).
+    It used to call ``enforce_allowances`` on the LIVE ``postgres_storage``,
+    which still carries ``blocked_reason`` — so ``_reading``'s TOP guard raised
+    *before any meter was consulted*, and the assert passed only because that
+    BLOCKED message happens to contain the token ``stale_after_seconds``. The
+    line meant "a stale snapshot is refused, naming staleness" and proved "a
+    blocked dimension is refused": deleting ``_reading``'s stale arm left it
+    GREEN (measured — round 5 recorded it, round 6 measured it still here).
+    It now asserts a phrase staleness OWNS (``older than``, which the blocked
+    reason does not contain) on a dimension the block cannot pre-empt.
+
     Mutation this REDs: drop ``stale_after_seconds`` from the dimension (the
-    reading then enforces at any age), or ignore ``measured_at`` in ``_stale``.
+    reading then enforces at any age), or ignore ``measured_at`` in ``_stale``,
+    or delete ``_reading``'s stale raise.
     """
     dim = _dim("postgres_storage")
     assert dim.stale_after_seconds, (
@@ -692,21 +704,30 @@ def test_a_stale_snapshot_is_refused_rather_than_enforced(monkeypatch):
                 "stored_bytes": 1_000, "rows": 1,
                 "measured_at": "2000-01-01T00:00:00+00:00", "source": "audit"}
 
-    # A real call path: a configured allowance on this dimension, with the meter
-    # injected so no database is needed.
     monkeypatch.setattr(metering, "get_postgres_residency", old_reader, raising=True)
     assert allowance_gate._stale(
         allowance_gate._postgres_stored_bytes("org_old"), dim) is True, (
         "a 2000-vintage snapshot is stale against a 24 h bound")
+
+    # ⛔ THE ARMED COPY, exactly as the sibling "fresh org" test builds it: the
+    # LIVE dimension is BLOCKED, so a gate-level call on it can never reach the
+    # staleness arm. This is the state that exists AFTER the block lifts, which
+    # is the state the arm has to be right for.
+    armed = dataclasses.replace(dim, blocked_reason=None)
+    monkeypatch.setattr(allowance_gate, "DIMENSIONS",
+                        tuple(armed if d.dimension == dim.dimension else d
+                              for d in DIMENSIONS))
     # The gate's own entry point (``quota`` reaches it through
     # ``enforce_org_limit``, which takes no meter seam). This is the same function
     # the configured-allowance path calls.
     with pytest.raises(allowance_gate.QuotaCheckError) as excinfo:
         allowance_gate.enforce_allowances(
             {dim.limit_key: 10_000}, org_id="org_old", resource="points")
-    assert "stale" in str(excinfo.value).lower(), (
-        "a stale snapshot must be REFUSED with a message that names staleness, "
-        f"got: {excinfo.value}")
+    message = str(excinfo.value)
+    assert "older than" in message and str(dim.stale_after_seconds) in message, (
+        "a stale snapshot must be REFUSED with the message the STALENESS arm "
+        "owns (the age and the bound), not with a blocked-dimension message "
+        f"that merely quotes ``stale_after_seconds``, got: {message}")
 
 
 def test_the_residency_refusal_still_fires():

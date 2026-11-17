@@ -3077,6 +3077,12 @@ def get_postgres_residency(org_id: str) -> dict:
             # run 400 days ago would then serve every never-snapshotted org at 0
             # bytes indefinitely and silently, while an org WITH a row of the same
             # age is refused. Measured in review round 5.
+            # ⛔ AND IT IS INDEXED, or this one probe would undo the whole
+            # affordability argument (review finding 4): the migration creates
+            # ``org_postgres_residency_measured_at_idx`` on this column, so the
+            # ordered LIMIT 1 is an index lookup. Without it the absent-org
+            # branch is a seq scan + sort over one row per org — O(orgs) on a
+            # GATED WRITE path, growing with the fleet's tenant count.
             anywhere = plane.query("org_postgres_residency",
                                    select=["measured_at"],
                                    order="measured_at.desc", limit=1)
@@ -3086,8 +3092,9 @@ def get_postgres_residency(org_id: str) -> dict:
                 "team=%s error=%s", org_id, e,
             )
             return _unmeasured("read_error")
-        # One row per ORG, so this stays O(orgs) at worst and is off the hot
-        # path: only an org with no row of its own pays for it.
+        # Only an org with NO row of its own pays for this, and it is one
+        # index-ordered lookup (``org_postgres_residency_measured_at_idx``),
+        # not a scan: the cost does not grow with the org count.
         if not anywhere:
             return _unmeasured("unreported")
         gauge_at = anywhere[0].get("measured_at")
