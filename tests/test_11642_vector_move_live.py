@@ -150,14 +150,50 @@ def point_rows(tenant):
 
 @pytest.fixture(autouse=True)
 def _clean_tenant(schema):
-    """Every test starts from a known tenant, and leaves none behind."""
+    """Every test starts from a known RECORD tenant, and leaves no record ROWS behind.
+
+    ⛔ THE SWEEP RUNS BEFORE **AND AFTER** THE TEST. Only the leading half was
+    here, so the docstring promised a teardown the fixture did not do: #13220's
+    test left `object=2 subject=2` behind, measured after the whole file ran on a
+    virgin `pgvector/pgvector:pg16` (review of #13265 P2) — and
+    `test-record-postgres` runs these files in ONE container, so a row that
+    survives here is ambient state the next file can pass on.
+
+    ⛔ SCOPED TO ROWS, NOT TO THE TENANT — the `tenant` fixture (:98) INSERTs
+    `public.organizations` / `public.graphs` and those deliberately SURVIVE every
+    test: the sweep below deletes records only, and the two parent rows are the
+    keys every seeded table FKs to. They are bounded (`ON CONFLICT (id) DO
+    NOTHING`), so this is not growth — but an absolute "leaves none behind"
+    claimed more than the sweep does, which is the same claim-vs-code class as the
+    `rollback` below (review of #13265, round 4 N3).
+
+    ⛔ `object`/`subject` are swept because that test writes them (the tuple only
+    ever named the two tables the point tests used).
+
+    ⛔ NO ROLLBACK, AND HERE IS WHY — this fixture's connection is AUTOCOMMIT.
+    `_conn()` sets `conn.autocommit = True` (:57) and `_ensure_record_schema`
+    never turns it off, so every statement commits as it runs and the test's
+    closing NEGATIVE CONTROL (an `INSERT` the props CHECK refuses) raises into an
+    IDLE session, not an aborted transaction: measured, `status: 0` after the
+    refusal, and a plain `DELETE` immediately after it succeeds. An earlier form
+    of this fixture carried a `rollback()` justified by an aborted transaction
+    that does not exist — a stated mechanism the code contradicted, which is the
+    class of comment this change exists to remove. If that connection ever stops
+    being autocommit, the teardown fails LOUDLY (`InFailedSqlTransaction`) rather
+    than silently skipping the sweep, which is the right direction.
+    """
     conn = schema
-    with conn.cursor() as cur:
-        for table in ("point", "node_identity"):
-            cur.execute(
-                f"DELETE FROM public.{table} WHERE org_id=%s AND graph_id=%s",
-                (ORG, GRAPH))
+
+    def _sweep() -> None:
+        with conn.cursor() as cur:
+            for table in ("point", "node_identity", "object", "subject"):
+                cur.execute(
+                    f"DELETE FROM public.{table} WHERE org_id=%s AND graph_id=%s",
+                    (ORG, GRAPH))
+
+    _sweep()
     yield
+    _sweep()
 
 
 def _unit(hot: int) -> list[float]:

@@ -1373,13 +1373,13 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # moves the two LATE rows and only them: the FTS call +1 (3038 -> 3039,
     # span 3039-3048) and the rank loop +2 (4544 -> 4546). Re-derived against
     # the live file after the forward-merge, not nudged by a constant.
-    ("tortoise/search_engine.py", 3075, "CALL db.idx.fulltext.queryNodes",
-     "`:3075-3084`"),
+    ("tortoise/search_engine.py", 3078, "CALL db.idx.fulltext.queryNodes",
+     "`:3078-3087`"),
     ("tortoise/search_engine.py", 2708, "def recency_tie_clause(",
      "`search_engine.py:2708`"),
-    ("tortoise/search_engine.py", 4704,
+    ("tortoise/search_engine.py", 4707,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4704`"),
+     "`tortoise/search_engine.py:4707`"),
     ("tortoise/projection/__init__.py", 20401, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:20401`"),
     ("tortoise/projection/__init__.py", 20829, "def _create_fulltext_index(",

@@ -147,6 +147,27 @@ class _RecordingGraph:
             if self._raise_on_indexes:
                 raise RuntimeError("db.indexes() unavailable")
             return _MockResult(self._index_rows)
+        if low.startswith("drop") and "embedding" in low:
+            # ⛔ #13320: model the ENGINE, not the intent. On graph module 42006 a
+            # VECTOR index is dropped ONLY by `DROP VECTOR INDEX FOR …`; the
+            # generic forms answer `no such index` WHILE `CALL db.indexes()`
+            # reports the row. A fake that accepted either form is why the
+            # shipped sweep — which issued only the generic forms — kept these
+            # pins green while dropping nothing on a real store.
+            if "drop vector index" not in low:
+                raise RuntimeError(
+                    "Unable to drop index on :Point(embedding): no such index.")
+            # …and the drop really happens, so the post-drop catalogue read stops
+            # reporting the VECTOR type (the confirmation the projection makes).
+            self._index_rows = [
+                row for row in self._index_rows
+                if not (
+                    isinstance(row, (list, tuple)) and len(row) >= 3
+                    and str(row[0]) == "Point"
+                    and "VECTOR" in str(row[2]).upper()
+                )
+            ]
+            return _MockResult([])
         if "db.idx.vector.querynodes" in low:
             return _MockResult([("near-1", 0.95)])
         if "db.idx.vector.createnodeindex" in low:
@@ -411,9 +432,15 @@ def _is_vector_drop(statement: str) -> bool:
     `_fix_point_array_fts_props` also drops an index on `Point` (the fulltext one),
     so a bare `"DROP INDEX" in statement` would pass on a store that holds no
     VECTOR index at all — the exact vacuous assertion this pin exists to avoid.
+
+    ⛔ The match cannot be `"drop index"`, because the statement that ACTUALLY
+    drops a VECTOR index (#13320 — the only form a real engine honours) does not
+    contain that substring: `DROP VECTOR INDEX FOR (p:Point) ON (p.embedding)`.
+    Matching on it made these pins INSENSITIVE to the correct form and blind to
+    the two that never worked.
     """
     low = statement.lower()
-    return "drop index" in low and "embedding" in low
+    return low.startswith("drop") and "embedding" in low
 
 
 @pytest.fixture(autouse=True)

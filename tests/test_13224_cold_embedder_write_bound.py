@@ -139,8 +139,9 @@ def sdk(tmp_path):
         yield sdk
     finally:
         # Teardown must not mask a result (#13229): a close() fault would turn a
-        # PASSING row into a teardown ERROR. `contextlib.suppress` says exactly
-        # that and keeps the exception class explicit (SIM105).
+        # PASSING row into a teardown ERROR. `contextlib.suppress(Exception)` keeps
+        # the exception class explicit — SIM105's shape says the same thing the old
+        # `except` carried in its lint-suppression comment.
         with contextlib.suppress(Exception):
             sdk.close()
 

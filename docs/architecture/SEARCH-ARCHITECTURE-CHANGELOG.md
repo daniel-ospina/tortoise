@@ -243,7 +243,7 @@ What this does **not** decide: the vector leg (unarmed in this run, so every fig
 the byte-vs-node question (§8 budgets bytes, coverage here is a node share), and the lexical leg's own low
 ceiling on claims — M3's ranking matter, measured there and not re-run here.
 
-## 2026-11-17 — V2 and V3's index half are placement answers, and §3's coverage now says which labels that is (`#13220`)
+## `#13220` — 2026-11-17: V2 and V3's index half are placement answers, and §3's coverage now says which labels that is
 
 **The ruling, verbatim:** *"if indexing improves search for Object/Subject/Event of course we want that,
 and we just need it in Postgres and the search aligned with that and everything armed and working"* …
