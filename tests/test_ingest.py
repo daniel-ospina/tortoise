@@ -1586,10 +1586,23 @@ def test_sc4_deprecation_markers_present():
     # (`…_v2(directory, file_type="agent_session")`) satisfied the two substring
     # asserts above AND this one, so the arm was green over exactly the surface
     # question it exists to answer.
+    # ⛔ …and PIN the target while resolving it (round-6 review of #13085). Resolving
+    # alone only asks "is the callee SOME registered tool": a pointer to a DIFFERENT
+    # registered container that merely carries the live name as decoration
+    # (`tortoise_manage_sources(…) # tortoise_index_sources_from_directory`) resolves
+    # and stayed green — and it was measurably WEAKER than the literal it replaced,
+    # because it stopped asserting the live container is on the surface whenever the
+    # pointer was decorated. Two independent facts, so two assertions: the pointer must
+    # name the live container, AND that container must be registered.
     import tortoise.mcp_server as _ms
+    live_container = "tortoise_index_sources_from_directory"
     pointed = ptr.split("(", 1)[0].strip()
-    assert _ms._local_tool_component(pointed) is not None, (
-        f"the pointer names {pointed!r}, which is NOT on the registered surface")
+    assert pointed == live_container, (
+        f"the retired session-index door points at {pointed!r}, not the live "
+        f"{live_container!r} — a pointer may carry a discriminator, not a different door")
+    assert _ms._local_tool_component(live_container) is not None, (
+        f"{live_container!r} is NOT on the registered surface, so the pointer's "
+        "destination resolves nowhere")
 
     # the divergence is RECORDED (the flag semantics differ between paths)
     doc = inspect.getdoc(TortoiseSDK.ingest_corpus) or ""
