@@ -334,10 +334,24 @@ def test_the_terminal_mark_never_covers_a_graph_round_trip():
     scan ends. Measured: that string pin reported 0 failures on the surgically
     reverted source. A pin that cannot fail on its own defect is worse than none.
 
-    So: for every ``STAGE_RESPONSE`` mark, take the NEXT statement in its own
-    enclosing block. If that statement is a ``return``, nothing reachable from its
-    value may mention ``graph`` — no ``Attribute``/``Name`` reference anywhere in
-    the expression tree. That is exactly the "decorate first, then mark" rule.
+    So: for every ``STAGE_RESPONSE`` mark, take everything from the NEXT statement
+    in its own enclosing block up to and including the statement that LEAVES that
+    block (a ``return``/``raise``). Nothing in that span may mention ``graph`` —
+    no ``Attribute``/``Name`` reference anywhere in its expression tree. That is
+    exactly the "decorate first, then mark" rule.
+
+    ⛔ THE SPAN, NOT THE RETURN'S VALUE. Checking only a ``return`` that
+    *immediately* follows the mark leaves a second blind spot of the same family:
+
+        _mark_read_stage(STAGE_RESPONSE)
+        graph.query("RETURN 1")
+        return _with_read_status(hits)
+
+    is GREEN under a value-only check (the next statement is not a ``Return``, so
+    the site is skipped), while it publishes ``response`` over a store round trip
+    just as surely as the round-3 shape did. Round 4's string window happened to
+    catch it; the AST rewrite must not trade one blind spot for another, so the
+    whole mark-to-exit span is walked.
     """
     found, fn = _post_retrieval_returns()  # reuse the parse, ignore the returns
     assert found, "tortoise_fts_query must parse for this pin to mean anything"
@@ -373,17 +387,29 @@ def test_the_terminal_mark_never_covers_a_graph_round_trip():
                 if not is_terminal_mark(stmt):
                     continue
                 nxt = block[i + 1] if i + 1 < len(block) else None
-                if not isinstance(nxt, ast.Return):
-                    continue
-                checked += 1
-                if nxt.value is not None and mentions_graph(nxt.value):
+                if nxt is None:
+                    continue  # a mark that closes the block covers no time
+                # Every statement between the mark and the block's EXIT runs with
+                # `response` open — the exit's argument list included, because a
+                # `return`'s expression is evaluated after the mark. `exit_at`
+                # bounds the span; without an exit the tail of the block is the
+                # span (the time is still charged to `response`).
+                exit_at = next(
+                    (j for j in range(i + 1, len(block))
+                     if isinstance(block[j], (ast.Return, ast.Raise))),
+                    None,
+                )
+                span = block[i + 1: (exit_at + 1 if exit_at is not None else len(block))]
+                if isinstance(nxt, ast.Return):
+                    checked += 1  # the population guard counts the export arms
+                if any(mentions_graph(s) for s in span):
                     offenders.append(nxt.lineno)
     assert checked >= 4, (
         f"only {checked} terminal-mark-then-return sites found — this pin is only "
         "meaningful while the degraded arms exist"
     )
     assert not offenders, (
-        f"the :class:`Return` at line(s) {offenders} run a graph round trip with "
+        f"the block exiting at line(s) {offenders} runs a graph round trip with "
         "`response` already open — a breach blocked in the store would be "
         "published as 'the work is done, the answer is late'"
     )
