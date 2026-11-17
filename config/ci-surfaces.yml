@@ -5141,9 +5141,11 @@ surfaces:
   # places it in `test-slow (c)`. MEASURED on `main` at this PR's merge base (`55ec2c71b165`,
   # run 44025094904): `manifest-integrity` and `test-slow (c)` are BOTH red; `integrity()`
   # over `main`'s manifest reports exactly `['test_13034_currency_rule_reads_position.py']`,
-  # and over this head's reports `[]`. (That run's `test-slow (a)` and `test (e)` reds are
-  # OTHER causes — `test_slow (a)` is entirely `tests/test_surface_manifest.py`, the
-  # shallow-clone/`cut_at_commit` class named in the next paragraph.)
+  # and over this head's reports `[]`. (Not every red in that run is the drift's, though:
+  # `test-slow (a)` is a different cause entirely — every one of its failures is
+  # `tests/test_surface_manifest.py`, the shallow-clone/`cut_at_commit` class named in the
+  # next paragraph — and the shard mapping agrees, `slow_shard_entries()` places that file
+  # in shard (a).)
   # ⛔ `surface-guard` grades `config/surface-manifest.yml` (`tools/surface_manifest.py:232`)
   # and never reads this file (`grep -c ci-surfaces tools/surface-guard.py
   # tools/surface_manifest.py` -> 0, 0), and its job carries no `needs:` on
