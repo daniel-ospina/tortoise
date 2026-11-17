@@ -1955,6 +1955,47 @@ def test_the_snapshot_digest_and_every_load_trace_are_pinned_where_quoted():
         "not evidence")
 
 
+def test_the_prose_restatements_of_pinned_figures_match_their_tables():
+    """`#13267` review 7: the PROSE restatements of pinned figures were free.
+
+    Measured GREEN on the whole suite, each a single substitution: `17 of 300` →
+    `18 of 300`, `5 of 300 items (1.7 %)` → `6 of 300 (1.9 %)`, `+5.67 pp @15` →
+    `+5.77 pp`, and `5 of 300 items whose seed moved` → `6 of 300`. Those same
+    numbers ARE pinned in the §4/§4.1 tables and in the `docs/00_index.md` row, so
+    the prose could contradict its own tables while the suite stayed green — the
+    `#13267` class exactly. Derived here the way the tables are.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    head = _artifact("paired-point-300.json")["arms"]["point"]["per_k"]
+    short = _artifact("paired-point-300-short-query.json")["arms"]["point"]["per_k"]
+    h15, s15 = head["k=15"], short["k=15"]
+
+    # §4 "At k = 15 it recovers 17 of 300 targets"
+    m = re.search(r"it recovers (\d+) of\s+(\d+) targets", brief)
+    assert m, "the §4 reading bullet states how many targets k=15 recovers"
+    assert (int(m.group(1)), int(m.group(2))) == (h15["on_hits"], h15["n"])
+
+    # §4.1 + §7.2: the moved count is lost-from-window PLUS demoted-but-kept
+    moved = s15["seed_effect"]["seed_lost_from_window"] \
+        + s15["seed_effect"]["seed_demoted_but_kept"]
+    m = re.search(
+        r"(\d+) of (\d+) items \(([\d.]+) %\) had their own best match moved",
+        brief)
+    assert m, "§4.1 states the moved count and its rate"
+    assert (int(m.group(1)), int(m.group(2))) == (moved, s15["n"]), (
+        "§4.1's moved count must be seed_lost_from_window + seed_demoted_but_kept")
+    assert m.group(3) == f"{moved / s15['n'] * 100:.1f}", (
+        "§4.1's percentage must be the same count over n, not an independent figure")
+    m = re.search(r"(\d+) of (\d+) items whose seed moved", brief)
+    assert m, "§7.2 restates the moved count against the short-query arm"
+    assert (int(m.group(1)), int(m.group(2))) == (moved, s15["n"])
+
+    # §7.2 "+5.67 pp @15" — the headline benefit, to the printed precision
+    delta = (h15["on_hits"] - h15["off_hits"]) / h15["n"] * 100
+    assert f"+{delta:.2f} pp @15" in brief, (
+        f"§7.2 must quote the headline @15 delta as +{delta:.2f} pp")
+
+
 def test_every_published_sample_size_and_load_delta_recomputes():
     """`#13267` review 5: the sample sizes and load DELTAS were quoted but unpinned.
 

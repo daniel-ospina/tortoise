@@ -1238,9 +1238,27 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
         _has_ids_digests = has_per_item and all(
             off["per_item"][i]["ids"] is not None
             and on["per_item"][i]["ids"] is not None for i in item_ids)
-        _has_seed_ranks = has_per_item and all(
-            "seed_rank" in off["per_item"][i]
-            and "seed_rank" in on["per_item"][i] for i in item_ids)
+        # ⛔ key PRESENCE is not the datum: an artifact can carry `seed_rank` with
+        # every value `None` (measured: the object arm declared `seed_effect`
+        # recomputable while publishing no `seed_effect` cell at all and a null
+        # rank on every item). Require a REAL rank on at least one item per side,
+        # and gate the figure on the arm that actually publishes it.
+        _has_seed_ranks = (
+            has_per_item and arm == "point"
+            and any(off["per_item"][i].get("seed_rank") is not None
+                    for i in item_ids)
+            and any(on["per_item"][i].get("seed_rank") is not None
+                    for i in item_ids))
+        _PER_ITEM_DERIVED = (
+            "expansion_fired_items", "expansion_identical_items",
+            "ranked_lists_compared", "seed_effect",
+        )
+        _recomputable = [name for name, datum in (
+            ("expansion_fired_items", _has_ids_digests),
+            ("expansion_identical_items", _has_ids_digests),
+            ("ranked_lists_compared", _has_ids_digests),
+            ("seed_effect", _has_seed_ranks),
+        ) if datum]
         out_arms[arm].update({
             "expansion_provenance_entries": {"off": prov_off, "on": prov_on},
             "window_modes": modes,
@@ -1260,19 +1278,15 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
             # it merely reports. A figure in neither list is a free parameter; a
             # figure in `derived_unpinned` cannot be recomputed from `per_item` and
             # is therefore not protected by recomputation (`#13267` review 5 F1).
-            "derived_recomputable": [
-                name for name, datum in (
-                    ("expansion_fired_items", _has_ids_digests),
-                    ("expansion_identical_items", _has_ids_digests),
-                    ("ranked_lists_compared", _has_ids_digests),
-                    ("seed_effect", _has_seed_ranks),
-                ) if datum],
-            "derived_unpinned": (["items_whose_read_grew", "off_topk_displacement"]
-                                 if _has_ids_digests else
-                                 ["items_whose_read_grew", "off_topk_displacement",
-                                  "seed_effect", "expansion_fired_items",
-                                  "expansion_identical_items",
-                                  "ranked_lists_compared"]),
+            # ⛔ Every derived figure is classified as EITHER recomputable from
+            # `per_item` OR unpinned — never NEITHER. A figure in neither list is a
+            # free parameter, which is the defect this block exists to kill, and the
+            # classification is built from one list so a new figure cannot be
+            # forgotten in one of the two.
+            "derived_recomputable": _recomputable,
+            "derived_unpinned": (
+                ["items_whose_read_grew", "off_topk_displacement"]
+                + [n for n in _PER_ITEM_DERIVED if n not in _recomputable]),
             "derived_note": (
                 "`off_topk_displacement` is NOT RE-DERIVABLE: it needs "
                 "the ranked-list IDS and `per_item` records only their digests. "
