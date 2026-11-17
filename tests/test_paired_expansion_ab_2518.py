@@ -2196,6 +2196,11 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
 _DERIVED = {"off_topk_displacement", "seed_effect", "expansion_fired_items",
             "expansion_identical_items", "items_whose_read_grew",
             "ranked_lists_compared"}
+#: ⛔ these two are emitted on the POINT arm only (`#13267` review 7 F6): the
+#: object arm has no seed and no point-top-k, so declaring them there promises a
+#: field a reader will not find — and the presence-free recompute silently
+#: `continue`d every cell.
+_POINT_ONLY_DERIVED = {"off_topk_displacement", "seed_effect"}
 
 
 def _assert_derived_figures_recompute(art: dict, where: str) -> None:
@@ -2216,9 +2221,11 @@ def _assert_derived_figures_recompute(art: dict, where: str) -> None:
         assert not (declared & unpinned), (
             f"{where}/{arm}: {sorted(declared & unpinned)} is declared both "
             "recomputable and unpinned")
-        assert declared | unpinned == _DERIVED, (
-            f"{where}/{arm}: every derived figure must be classified; missing "
-            f"{sorted(_DERIVED - declared - unpinned)}")
+        expected = _DERIVED if arm == "point" else _DERIVED - _POINT_ONLY_DERIVED
+        assert declared | unpinned == expected, (
+            f"{where}/{arm}: every derived figure that arm emits must be "
+            f"classified; missing {sorted(expected - declared - unpinned)}, "
+            f"unexpected {sorted((declared | unpinned) - expected)}")
         if unpinned:
             assert "NOT RE-DERIVABLE" in (block.get("derived_note") or ""), (
                 f"{where}/{arm}: an unpinned derived figure with no note saying so")
@@ -2246,8 +2253,12 @@ def _assert_derived_figures_recompute(art: dict, where: str) -> None:
             on = {i: {"seed_rank": r["on_seed_rank"]} for i, r in per_item.items()}
             for key, cell in block["per_k"].items():
                 k = int(key.split("=")[1])
-                if cell.get("seed_effect") is None:
-                    continue
+                # ⛔ a DECLARED figure must be PRESENT: skipping a deleted one is
+                # how `#13267` review 7 F6's mutant survived
+                assert "seed_effect" in cell, (
+                    f"{where}/{arm}/{key}: `seed_effect` is declared recomputable "
+                    "but the cell does not carry it — a deleted figure is not a "
+                    "recomputable one")
                 assert P._seed_effect(off, on, item_ids, k=k) == cell["seed_effect"], (
                     f"{where}/{arm}/{key}: the recorded seed_effect does not "
                     "recompute from the artifact's own per-item seed ranks")
@@ -2292,8 +2303,14 @@ def test_the_committed_artifacts_declare_which_derived_figures_they_pin():
             assert block["derived_recomputable"] == [], (
                 f"{name}/{arm}: these runs recorded no per-item seed rank or id "
                 "digest, so NOTHING may be declared recomputable")
-            assert "seed_effect" in block["derived_unpinned"]
-            assert "off_topk_displacement" in block["derived_unpinned"]
+            # the point runs emit both point-only figures; the control (an
+            # OBJECT arm) emits neither, and must not claim to
+            if arm == "point":
+                assert "seed_effect" in block["derived_unpinned"]
+                assert "off_topk_displacement" in block["derived_unpinned"]
+            else:
+                assert "seed_effect" not in block["derived_unpinned"]
+                assert "off_topk_displacement" not in block["derived_unpinned"]
 
 
 def test_a_tool_produced_artifact_recomputes_its_derived_figures(
@@ -2578,3 +2595,136 @@ def test_a_population_file_drawn_for_another_sample_is_refused(tmp_path):
                                       **kwargs)
     # the file is left exactly as it was — a refusal never rewrites evidence
     assert json.loads(path.read_text())["sample"] == 300
+
+
+def test_the_window_modes_and_the_embedder_flag_are_pinned_where_quoted():
+    """F1 — the contamination falsifier's entire OUTPUT was unpinned.
+
+    `#13267` review 7 F1: the suite named `window_modes` only in the fake-arm
+    builder and in a fixture that CONSTRUCTS a mixed mode; no assertion read a
+    committed artifact's value, and nothing read the prose. Six substitutions were
+    GREEN — flipping `keyword_only 300/300` to `hybrid` in the artifact, in the
+    brief at TWO sites (§3 and the §5 row marked MET), and in the index row, plus
+    `environment.embedder: false -> true`. That is the evidence under R1 (uniform
+    sparse half) and R3 (the dense leg never ran).
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    index = (Path(__file__).resolve().parent.parent / "docs" / "00_index.md").read_text()
+    row = next(ln for ln in index.splitlines() if "2026-11-17-2518-paired-ab" in ln)
+    for name in _ARTIFACTS:
+        art = _artifact(name)
+        items = art["items"]["with_item"]
+        assert art["environment"]["embedder"] is False, (
+            f"{name} claims an embedder was present; this box has none, and the "
+            "brief's 'sparse half only' conclusion rests on its absence")
+        for arm, block in art["arms"].items():
+            assert block["window_modes"] == {"off": {"keyword_only": items},
+                                             "on": {"keyword_only": items}}, (
+                f"{name}/{arm}: window_modes is {block['window_modes']} — the "
+                "uniform `keyword_only` reading is the no-contamination claim")
+    # the prose, at every site, off the headline artifact's own numbers
+    head = _artifact("paired-point-300.json")
+    n = head["items"]["with_item"]
+    mode = next(iter(head["arms"]["point"]["window_modes"]["off"]))
+    assert f"`{mode}` {n}/{n} in both arms" in brief, (
+        "§3 must quote the artifact's own mode and count")
+    assert f"`{mode}` {n}/{n} both arms" in row, (
+        "the index row must quote the same mode and count")
+    # §5's MET cell is a second site of the same figure
+    assert brief.count(f"`{mode}` {n}/{n}") >= 2, (
+        "the mode is quoted at two sites (§3 and the §5 row marked MET); a single "
+        "occurrence means one of them was re-staled or dropped")
+
+
+def test_the_constructed_graph_counts_are_self_consistent_and_quoted():
+    """F3 — the method's graph sizes re-staled green in the brief and the artifact.
+
+    `#13267` review 7 F3: the paragraph is a SELF-CHECK against the artifact
+    ("it would read 1,400, against the artifact's `points_total: 1100`"), and both
+    the brief's three numbers and the artifact's `construction.graph` could move
+    without a red — under the combined mutant the warning nullified itself.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    for name in _ARTIFACTS:
+        art = _artifact(name)
+        graph = art["construction"]["graph"]
+        items = art["items"]["with_item"]
+        assert graph["anchors"] == items, (
+            f"{name}: `seed_graph` sets anchors = len(items)")
+        assert graph["linked_points"] == 2 * items, (
+            f"{name}: `seed_graph` sets linked_points = 2 * len(items)")
+        assert graph["points_total"] == graph["linked_points"] + graph["distractors"]
+    head = _artifact("paired-point-300.json")
+    graph = head["construction"]["graph"]
+    assert f"{graph['anchors']} anchors" in brief
+    assert f"= the {graph['linked_points']} points" in brief
+    assert f"plus {graph['distractors']} distractors" in brief
+    assert f"= {graph['points_total']:,} points" in brief or \
+           f"= {graph['points_total']} points" in brief
+    assert f"points_total: {graph['points_total']}" in brief, (
+        "the self-check quotes the artifact's own total; if that moved with the "
+        "prose the warning nullifies itself")
+
+
+def test_the_controls_repeat_check_is_pinned_as_the_brief_describes_it():
+    """F4 — §8 leans on the control's `compared: 60`; nothing read it.
+
+    `#13267` review 7 F4: `compared 60 -> 0` and `identical true -> false` both
+    stayed GREEN, while §8 says the control "records `compared: 60` and a real
+    60-of-60 equality … **not** zero items compared".
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    ctrl = _artifact("paired-object-60-control.json")
+    block = ctrl["arms"]["object"]
+    check = block["repeat_check"]
+    assert check["basis"] == P.REPEAT_BASIS_LEGACY
+    assert check["compared"] == ctrl["items"]["with_item"], (
+        f"the control compared {check['compared']} of "
+        f"{ctrl['items']['with_item']} items — every one is present in both reads")
+    assert check["identical"] is True
+    assert f"compared: {check['compared']}" in brief, (
+        "§8 must quote the block's own count")
+
+
+def test_every_bare_percentage_the_brief_prints_is_a_recorded_ratio():
+    """F5 — the round-6 allow-list read `pp` and `× 10⁻ⁿ`, not a bare `%`.
+
+    `#13267` review 7 F5: `5 of 300 items (1.7 %)` -> `(9.7 %)` and
+    `3 seeds … (1 % of items)` -> `9 %` both stayed GREEN, while the COUNTS beside
+    them are pinned — so a re-stale produced a self-contradicting sentence, on the
+    figure R4's "cost and benefit are the same order" conclusion rests on.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    allowed = set()
+    for name in _ARTIFACTS:
+        art = _artifact(name)
+        n = art["population"]["sample"]
+        for block in art["arms"].values():
+            for kid, cell in block["per_k"].items():
+                k = int(kid.split("=")[1])
+                for frac in ((cell["on_hits"] - cell["off_hits"]) / n,
+                             cell["off_hits"] / n, cell["on_hits"] / n):
+                    allowed.add(round(frac * 100, 1))
+                    allowed.add(round(frac * 100))
+                # the churn cell: displaced ids over ids compared, per k
+                disp = cell.get("off_topk_displacement") or {}
+                denom = disp.get("items_with_off_topk", 0) * k
+                if denom:
+                    churn = disp["displaced_ids"] / denom
+                    allowed.add(round(churn * 100, 1))
+                    allowed.add(round(churn * 100))
+                seed = cell.get("seed_effect") or {}
+                moved = (seed.get("seed_lost_from_window", 0)
+                         + seed.get("seed_demoted_but_kept", 0))
+                if n:
+                    allowed.add(round(moved / n * 100, 1))
+                    allowed.add(round(moved / n * 100))
+    shown = {v for v in re.findall(r"\((\d+(?:\.\d+)?)\s*%\)", brief)}
+    shown |= {m for m in re.findall(r"(\d+(?:\.\d+)?)\s*% of items", brief)}
+    assert shown, "the brief states at least one bare percentage"
+    numeric = {float(v) for v in shown}
+    strays = {v for v in numeric
+              if round(v, 1) not in allowed and round(v) not in allowed}
+    assert not strays, (
+        f"the brief prints {sorted(strays)} %, which is not a ratio any artifact "
+        f"records (allowed: {sorted(allowed)})")

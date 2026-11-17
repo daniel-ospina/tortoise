@@ -1249,15 +1249,21 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
                     for i in item_ids)
             and any(on["per_item"][i].get("seed_rank") is not None
                     for i in item_ids))
+        # ⛔ `seed_effect` and `off_topk_displacement` exist on the POINT arm
+        # only — declaring them for an arm that emits neither is a claim about a
+        # field a reader will not find (`#13267` review 7 F6)
         _PER_ITEM_DERIVED = (
-            "expansion_fired_items", "expansion_identical_items",
-            "ranked_lists_compared", "seed_effect",
+            ("expansion_fired_items", "expansion_identical_items",
+             "ranked_lists_compared", "seed_effect")
+            if arm == "point" else
+            ("expansion_fired_items", "expansion_identical_items",
+             "ranked_lists_compared")
         )
         _recomputable = [name for name, datum in (
             ("expansion_fired_items", _has_ids_digests),
             ("expansion_identical_items", _has_ids_digests),
             ("ranked_lists_compared", _has_ids_digests),
-            ("seed_effect", _has_seed_ranks),
+            ("seed_effect", _has_seed_ranks and arm == "point"),
         ) if datum]
         out_arms[arm].update({
             "expansion_provenance_entries": {"off": prov_off, "on": prov_on},
@@ -1285,7 +1291,8 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
             # forgotten in one of the two.
             "derived_recomputable": _recomputable,
             "derived_unpinned": (
-                ["items_whose_read_grew", "off_topk_displacement"]
+                ["items_whose_read_grew"]
+                + (["off_topk_displacement"] if arm == "point" else [])
                 + [n for n in _PER_ITEM_DERIVED if n not in _recomputable]),
             "derived_note": (
                 "`off_topk_displacement` is NOT RE-DERIVABLE: it needs "

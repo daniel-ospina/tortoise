@@ -5,8 +5,6 @@
       "derived_recomputable": [],
       "derived_unpinned": [
         "items_whose_read_grew",
-        "off_topk_displacement",
-        "seed_effect",
         "expansion_fired_items",
         "expansion_identical_items",
         "ranked_lists_compared"

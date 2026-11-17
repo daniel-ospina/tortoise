@@ -365,8 +365,9 @@ drawn `population-300.json` was never committed — so `items.name_digest` can b
 (it equals `population.names_sha256`) but the names behind it cannot be re-derived here. The artifacts say
 so rather than implying otherwise.
 
-⛔ **And FIVE field groups in these three files are ANNOTATIONS, not run output** (this count has
-been wrong twice — `#13267` review 6 F6 — so the fifth is named explicitly below). The control's
+⛔ **And SIX field groups in these three files are ANNOTATIONS, not run output** (this count has been
+wrong three times — `#13267` reviews 6 F6 and 7 F2 — so each one is listed, and they are counted at
+the end rather than guessed at the start). The control's
 `identity_measured: false` + its `identity_note`; the two POINT files' `ranked_lists_compared_note`, which
 *asserts* "fired/identical was a real element-wise comparison" and which **no version of the tool
 emits** — the other hand-added field that described a measurement rather than its absence; all three files'
@@ -387,8 +388,8 @@ check of the read, but **not** zero items compared (`#13267` review 5 F5). The t
 artifact-shape helper holds for a tool-produced artifact as well as these three, so a correct
 re-generation is not punished by the pins that document the older shape.
 
-⛔ **The fifth annotation group is the derived-figure declaration, and this is the residual it names.**
-All three files also carry
+⛔ **The sixth and last annotation group is the derived-figure declaration, and this is the residual it
+names.** All three files also carry
 `derived_recomputable: []` / `derived_unpinned: [...]` / `derived_note`. These runs recorded no per-item
 seed rank and no per-item ranked-list id digests, so **`seed_effect`, `expansion_fired_items` and
 `ranked_lists_compared` are the run's own output but CANNOT be recomputed from the artifact**: the suite
