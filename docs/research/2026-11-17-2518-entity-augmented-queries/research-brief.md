@@ -181,6 +181,7 @@ below**. That is what makes the ON/OFF comparison paired at the population level
 | run | artifact | retrieval shape | `window_modes` |
 |---|---|---|---|
 | **hybrid, HEAD** | `measurement-hybrid.json` | fused read, dense leg live | **`hybrid`: 4372, `keyword_only`: 0** (`uniform_windows: true`) |
+| **hybrid, HEAD — REPEAT** | `measurement-hybrid-repeat.json` | same, independent second run 6 min later | `hybrid`: 4372, `keyword_only`: 0 (`uniform_windows: true`) |
 | **lexical, composite ON** | `measurement-keyword-only-composite-on.json` | lexical window only | `keyword_only`: 4372 |
 | **lexical, composite OFF** | `measurement-keyword-only-composite-off.json` | lexical window only, `TORTOISE_UNDERSCORE_TERMS=0` | `keyword_only`: 4372 |
 
@@ -197,6 +198,12 @@ below**. That is what makes the ON/OFF comparison paired at the population level
 
 By class at k=3 → k=15: definite **178 → 180** (of 180), ident **90 → 90** (of 90), path **30 → 30**
 (of 30).
+
+**Stability, measured rather than assumed:** an independent REPEAT of this exact run 6 minutes later
+(`measurement-hybrid-repeat.json`, corpus `123 961` → `123 981` definite names) returns the **same
+row for every cell** — `in_window` **298 / 299 / 300 / 300**, `miss_absent_at_max_k` **0**,
+`miss_past_k` **2 / 1 / 0 / 0**, `rank_sum` **331 / 335 / 341 / 341**, and the same per-class cells
+(definite 178→180, ident 90→90, path 30→30). The 0-absent result is not a one-run artefact.
 
 **KEYWORD-ONLY, composite ON (HEAD's lexical shape)**
 
