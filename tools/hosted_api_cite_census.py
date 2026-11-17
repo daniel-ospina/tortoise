@@ -151,19 +151,33 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: then replaced two comment lines above it 1-for-1 (net 0 lines, site unchanged)
 #: and re-derived nothing either, so the pin stayed red (tracked on #12755, third
 #: recurrence of the class). Re-derived here by `--refresh` for the two notes and
-#: the test's `_PIVOT`, and by hand for this constant: `_NOTES` has no row naming
-#: THIS file, so neither verb can see it — `_PIVOT` has one, a bare constant in a
-#: test file, so "not prose" is not the criterion and a row here would make the
-#: constant machine-re-stated. Not added in this repair, which is the red only.
+#: the test's `_PIVOT`.
+#:
+#: ⛔ AND THIS CONSTANT NOW HAS A ROW OF ITS OWN (#12755, closing the class). While
+#: `_NOTES` named only the OTHER three sites, a recurrence could not be repaired by
+#: the verb that documents itself as re-stating "every figure": `--check` derived
+#: the site from the tree correctly and still printed `every stated figure is the
+#: measured one` with exit 0 over a stale constant here — so every occurrence cost
+#: a hand edit, which is how the pin went stale three times. It is a bare constant
+#: rather than prose; "not prose" was never the criterion, as `_PIVOT` (also a bare
+#: constant in a test file) has had a row all along. Measured, not asserted: with
+#: this constant moved off the site, `--check` now exits 1 naming this row, and
+#: `tests/test_demo_session_read_exclusion_8290.py`'s
+#: `test_the_census_sees_and_restates_its_own_fallback_pivot` reds on the pre-row
+#: table (it exited 0 there).
 DEFAULT_PIVOT = 24864
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
 _TEST = "tests/test_demo_session_read_exclusion_8290.py"
+_CENSUS = "tools/hosted_api_cite_census.py"
 
 #: `(label, path, pattern, figure keys)` — the sentence each figure lives in, and
 #: the figure it must state. Both `--check` and `--refresh` read exactly these: a
-#: re-worded note is a REFUSAL, and a new figure means a new row here.
+#: re-worded note is a REFUSAL, and a new figure means a new row here — and NOTHING
+#: else: the set of files the verbs read is DERIVED from this table (`_note_paths`),
+#: because the hardcoded three-path dict it used to be made that promise false for
+#: any row naming a fourth file (a `KeyError` — a crash, not a check).
 _NOTES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("scorecard PIVOT cite", _SCORECARD,
      r"PRODUCTION execution is ``hosted_api\.py:(\d+)``", ("pivot",)),
@@ -189,7 +203,26 @@ _NOTES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
      r"tracked files \((\d+) distinct", ("distinct_targets",)),
     ("test contract pin _PIVOT", _TEST,
      r"(?m)^_PIVOT = (\d+)$", ("pivot",)),
+    # ⛔ THE TOOL'S OWN FALLBACK (#12755, third recurrence): every other row states a
+    # figure OBSERVED beside the pivot, so while this constant had no row a stale one
+    # here was invisible to both verbs — the notes said the measured site while the
+    # fallback said the old one, and `--check` exited 0 over it. The pattern is line-
+    # anchored so it cannot match the prose above or a `DEFAULT_PIVOT` reference in an
+    # expression; `--refresh` rewrites it in place like any other figure.
+    ("census DEFAULT_PIVOT", _CENSUS,
+     r"(?m)^DEFAULT_PIVOT = (\d+)$", ("pivot",)),
 )
+
+
+def _note_paths() -> tuple[str, ...]:
+    """Every distinct file a `_NOTES` row reads, DERIVED from that table.
+
+    ⛔ One registry, never a second hand-kept list: a new row must need no other
+    edit (the docstring above promises exactly that). The three-path dict this
+    replaces answered `KeyError` — a crash, not a check — for any row naming a
+    fourth file, which is what adding the `DEFAULT_PIVOT` row found.
+    """
+    return tuple(dict.fromkeys(path for _label, path, _pattern, _keys in _NOTES))
 
 
 def lifetime_query_sites(repo: Path = REPO) -> list[int]:
@@ -321,9 +354,8 @@ def _sweep(measured: dict, refresh: bool) -> int:
     1 = stale rows (reported, or just rewritten — the caller re-measures),
     2 = a note's sentence is gone, so nothing was written at all.
     """
-    sources = {_SCORECARD: (REPO / _SCORECARD).read_text(encoding="utf-8"),
-               _HOSTED: (REPO / _HOSTED).read_text(encoding="utf-8"),
-               _TEST: (REPO / _TEST).read_text(encoding="utf-8")}
+    sources = {path: (REPO / path).read_text(encoding="utf-8")
+               for path in _note_paths()}
     rewritten = dict(sources)
     stale: list[str] = []
     refused: list[str] = []
