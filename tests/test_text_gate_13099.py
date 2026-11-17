@@ -444,7 +444,7 @@ def test_the_operational_facts_table_quotes_the_artifact():
         "in-graph": [
             f"{graph['fulltext_index_build_s']:.3f} s",   # index build
             f"{graph['seed_s']:.3f} s",                   # seeding
-            f"{graph['graph_memory_usage']['used_memory_human'].rstrip('M')} MB",
+            f"{graph['graph_memory_usage']['used_memory_human'].rstrip('M')} MiB",
         ],
         "ts_rank": [
             f"{pg['gin_index_build_s']:.3f} s",
@@ -505,7 +505,7 @@ def test_the_operational_facts_table_quotes_the_artifact():
     repeat_expected = {
         "in-graph": [
             f"{r_graph['seed_s']:.3f} s",
-            f"{r_graph['graph_memory_usage']['used_memory_human'].rstrip('M')} MB",
+            f"{r_graph['graph_memory_usage']['used_memory_human'].rstrip('M')} MiB",
         ],
         "ts_rank": [f"{r_pg['gin_index_build_s']:.3f} s"],
         "pg_search": [f"{r_pg['bm25_index_build_s']:.3f} s"],
@@ -584,6 +584,17 @@ def test_the_like_for_like_store_comparison_is_quoted():
     assert missing == [], (
         "§0 does not carry these adoption-cost figures, so the like-for-like claim "
         "cannot be checked where it is made: " + repr(missing))
+
+    # ⛔ AND THE SAME FIGURES IN §6, PER SECTION. The saving is stated in TWO
+    # places (§0's verdict and §6's adoption paragraph). Checking §0 alone let the
+    # two disagree: measured, flipping §6's "~47 %" to "~44 %" stayed GREEN while
+    # §0 still said 47 — and §6 is the section the record calls "the part that
+    # actually decides adoption". Both sections must carry the same figures.
+    sec6 = _readme_section("6. Operational facts")
+    missing6 = [f"{what} ({val})" for what, val in expected.items() if val not in sec6]
+    assert missing6 == [], (
+        "§6 does not carry these adoption-cost figures, so §0 and §6 can disagree "
+        "without anything going red: " + repr(missing6))
 
 
 def test_an_arm_that_raised_is_disqualified_not_scored_as_a_loss():
