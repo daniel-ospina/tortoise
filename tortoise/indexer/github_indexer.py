@@ -49,7 +49,6 @@ Lifecycle decision table (THE rule):
      truthy half self-heal is that this reader ANSWERS ``"closed"`` for it, so
      the fold is triggered at all (#13326).
   ⚠️ Stated trade, symmetric: these rows record no transition at all, so neither
-  ⚠️ Stated trade, symmetric: these rows record no transition at all, so neither
   ``-closed`` nor ``-reopened``. Bounded and inspectable; an unbounded mint loop is
   neither (#13143, #13288 F1). This is NOT the pre-#13143 bug returning — that was
   a real close reading as "first ingest". For families 1 and 2 no fold ever
