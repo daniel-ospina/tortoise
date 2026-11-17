@@ -116,7 +116,38 @@ jobs:
       # wrong) but it can no longer hide the differential evidence. The refresh
       # procedure is §7 of `docs/architecture/CYPHER-INVENTORY.md`.
       - name: install postgresql-client (the `psql` that `--bootstrap-record` drives)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+        # ⛔ INSTALLING THE METAPACKAGE IS NOT PROVING THE BINARY EXISTS (measured, run
+        # 44158572832 at `aff4eaef81`): `apt-get install postgresql-client` reported
+        # `Setting up postgresql-client (16+257build1.1)` — nothing was even unpacked but
+        # the metapackage, because the image already "satisfied" the dependency — and the
+        # VERY NEXT step died with `cypher-diff: could not run — `psql` is not usable here:
+        # FileNotFoundError: [Errno 2] No such file or directory: 'psql'`. A green install
+        # step over a missing binary is exactly the no-op gate this workflow exists to
+        # avoid, so the step now RESOLVES the binary, repairs PATH if the versioned client
+        # landed outside it, and fails with the diagnostic rather than letting the harness
+        # report it as "could not run" (exit 2) one step later.
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client postgresql-client-common
+
+          psql_bin="$(command -v psql || true)"
+          if [ -z "$psql_bin" ]; then
+            # Debian/Ubuntu put the versioned client under /usr/lib/postgresql/<n>/bin and
+            # expose it through `postgresql-client-common`'s pg_wrapper at /usr/bin/psql.
+            # A trimmed image can carry the former without the latter.
+            dir="$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1 || true)"
+            if [ -n "$dir" ] && [ -x "$dir/psql" ]; then psql_bin="$dir/psql"; fi
+          fi
+          if [ -z "$psql_bin" ]; then
+            echo "::error::postgresql-client is installed but no `psql` binary resolves — checked PATH and /usr/lib/postgresql/*/bin. The harness drives `psql` directly, so this gate cannot run."
+            echo "--- diagnostics ---"
+            dpkg -l 'postgresql-client*' 2>/dev/null | tail -5 || true
+            ls -l /usr/bin/psql /usr/lib/postgresql/*/bin/psql 2>&1 || true
+            exit 1
+          fi
+          echo "psql: $psql_bin ($("$psql_bin" --version))"
+          echo "$(dirname "$psql_bin")" >> "$GITHUB_PATH"
       - name: agreement run (must be EMPTY, exit 0)
         run: |
           for c in point-by-id point-listing point-by-absent-id; do
