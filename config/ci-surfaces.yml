@@ -1054,9 +1054,11 @@ surfaces:
   # list-route arm `test_the_hosted_list_route_drops_it` is a method of
   # `TestAClosedObjectIsNeverCurrent`, one of the FOUR `@_needs_db` classes, so this row
   # guarantees SELECTION, not EXECUTION — the arm EXECUTES wherever a FalkorDB is reachable
-  # through the `TORTOISE_TEST_DOCKER_PORT` seam (every `python-ci` test job provisions one and
-  # exports it, tier-2 legs included) and SKIPS only where that seam has no server behind it
-  # (measured with the seam unset: `TORTOISE_TEST_CARVE_OUT=1` -> 23 passed, 90 skipped).
+  # through the `TORTOISE_TEST_DOCKER_PORT` seam. The jobs that provision one are `test`,
+  # `test-slow`, `test-concurrency-falkor` and `test-track-b` — the workflow's ONLY
+  # `.github/actions/falkordb-provision` uses — and the tier-2 shape of `test` runs it too;
+  # where that seam has no server behind it the arm SKIPS (measured with the seam unset:
+  # `TORTOISE_TEST_CARVE_OUT=1` -> 23 passed, 90 skipped).
   # ⛔ NOT on "any URI-less leg": the two URI conditions part company here. With NO
   # `TORTOISE_DB_URI` the P4 session gate REFUSES the run before a test starts UNLESS
   # `TORTOISE_TEST_CARVE_OUT` is set — and the tier-2 legs and the carve-out job BOTH set it
@@ -5240,11 +5242,17 @@ surfaces:
   # where the `TORTOISE_TEST_DOCKER_PORT` seam has no server behind it (measured with the seam
   # unset: 23 passed, 90 skipped), and a `durations` row is exactly what a verifier reads
   # INSTEAD of the test (the reason `test_consent_key_runbook_10488.py`'s row documents
-  # itself). ⛔ The SEAM decides execution, and every `python-ci` test job sets it: the
-  # provision step carries no `if:`, it writes the assigned port into `$GITHUB_ENV`, and the
-  # module probe builds its URI from it — so the TIER-2 PR legs run these four classes too
-  # (measured against a passworded container built as `provision.sh` builds it: 113 passed, 0
-  # skipped). The 23-skipped reading is the NO-DOCKER shape, not the tier-2 leg's.
+  # itself). ⛔ The SEAM decides execution, and the jobs that provision it set it: `test`,
+  # `test-slow`, `test-concurrency-falkor` and `test-track-b` are the workflow's only
+  # `.github/actions/falkordb-provision` uses, their provision step carries no `if:`, it
+  # writes the assigned port into `$GITHUB_ENV`, and the module probe builds its URI from it
+  # — so the TIER-2 shape of `test` runs these four classes too (measured against a
+  # passworded container built as `provision.sh` builds it: 113 passed, 0 skipped). The
+  # 23-skipped reading is the NO-DOCKER shape, not the tier-2 leg's. ⛔ NOT every pytest job
+  # in this workflow provisions one: `test-carve-out` and `test-d14-hosted-api` (both URI
+  # DELIBERATELY unset) and `test-record-postgres` (Postgres, not FalkorDB) have no FalkorDB
+  # provision step, so a DB-armed file registered in `carve_out` would skip silently there —
+  # this file is in neither `carve_out` nor `slow_files`, so it never runs in them.
   # ⛔ Not "any URI-less leg", and the two conditions part company: with NO `TORTOISE_DB_URI`
   # the P4 session gate REFUSES the run UNLESS `TORTOISE_TEST_CARVE_OUT` is set
   # (`tests/_embedded.py::_assert_p4_uri_required` returns early via `_carve_out_opted_in()`);
