@@ -2171,7 +2171,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     }
     packet = _judge_packet(narrative, answers, ingestor.refs, header, ingest_log)
     packet_path = out_dir / "judge-packet.json"
-    packet_path.write_text(json.dumps(packet, indent=2, default=str))
+    # NOT written yet (#13303 cycle 9, P1): the publish guard below runs first, and a
+    # REFUSED run used to replace the committed `judge-packet.json` while its own message
+    # said "Nothing was written" — leaving a packet from a run that never produced a board.
 
     judged: dict = {}
     judge_meta: dict = {"mode": args.judge}
@@ -2222,6 +2224,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         return 1
 
+    packet_path.write_text(json.dumps(packet, indent=2, default=str))
     run_json = out_dir / f"run-{target.kind}.json"
     # The guard above keys on the MODE; this one keys on the ARTIFACT (#13303 cycle 8, P1).
     # `--judge fresh` whose reader cannot run (not found, timeout, unparseable) and
@@ -2242,7 +2245,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         # Same rule as the board: the bundle's verdicts come from a COMPLETE run, so a
         # partial run cannot leave `verdicts-baseline.json` describing a different run than
         # the `run-local.json` beside it (#13303 cycle 8, P2).
-        if not may_publish(board, verdicts_out.parent):
+        if verdicts_out.parent.resolve() == DEFAULT_OUT.resolve() and not publishing:
             print(
                 f"capstone: refusing to write verdicts into the bundle {DEFAULT_OUT} — "
                 "the board is not fully judged, so it would not describe the committed run",
@@ -2369,6 +2372,18 @@ def cmd_judge(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # The same identity rule as `run`: a re-score must not drop its verdicts into the
+    # bundle, where they would describe a run the committed board does not (#13303 c9, P2).
+    if getattr(args, "verdicts_out", None):
+        vo = Path(args.verdicts_out).resolve()
+        if vo.parent == DEFAULT_OUT.resolve():
+            print(
+                f"capstone: refusing --verdicts-out into the evidence bundle {DEFAULT_OUT} "
+                "— `judge` does not produce the baseline",
+                file=sys.stderr,
+            )
+            return 2
+
     if args.verdicts:
         try:
             judged = _load_verdicts_map(args.verdicts)
