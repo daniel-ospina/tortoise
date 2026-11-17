@@ -423,11 +423,12 @@ fan-out respected; C8 holds.
 from `sdk.py`'s point-creation path at `:19287` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
-`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6661` and
+`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6664` and
 consumed at `sdk.py:10522`/`:10575` — ⚠️ all three are LINE cites, not symbols (nothing in this tree
 keys them by symbol, and an earlier version of this parenthesis said the pair was), so an insert
 above any of them moves the claim: this PR's own +22-line tail to `search_engine.py` moved the definition
-`6637` -> `6659` at the merge of `origin/main` `070d97360c`, re-derived from the merged tree
+`6637` -> `6659` at the merge of `origin/main` `070d97360c`, and #12184's `_searchText`-per-door
+docstring (`run_fts_query`, +3 above this line) moved it to `6664` — both re-derived from the merged tree
 rather than carried from either side), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —

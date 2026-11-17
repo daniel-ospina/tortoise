@@ -6160,15 +6160,22 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # documents that state them — a row per document, because a row scopes to
         # one FILE and the consume pair was re-pointed in one document while the
         # definition stayed wrong in both.
+        # ⛔ RE-DERIVED at #12184's `_searchText`-per-door docstring: that edit
+        # expands `run_fts_query`'s docstring by +3 lines (2839-2845), which is
+        # ABOVE this definition, so `6661` -> `6664` on the merged tree. Measured,
+        # never carried: `grep -nF 'def subject_binding_available(graph) -> bool:'
+        # tortoise/search_engine.py`. Both rows and both documents move together —
+        # the definition had gone stale before precisely because one side moved
+        # alone.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
-            ("6661", "def subject_binding_available(graph) -> bool:"),
+            ("6664", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
             ("10522", "subject_binding_available,"),
             ("10575", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("6661", "def subject_binding_available(graph) -> bool:"),
+            ("6664", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
