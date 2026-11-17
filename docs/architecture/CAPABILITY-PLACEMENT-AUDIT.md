@@ -302,7 +302,7 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 | `:ContextSubscription` | `webhook_delivery.py:425`, `:435`, `:444`, `:452`, `:461`, `:1113`; `why_snapshot.py:557` (reads; `:406` is the `CREATE` named in §1) | **none** |
 | `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:759-763` (`MATCH (n:OnboardingState {org_id:$org_id})-[:COMPLETED_STEP]->(s:OnboardingStep) RETURN s.step_id`) | **adjacency** → **`graph`** (§3 row 11c) — listed here only so the label is not missing from the table |
 
-**Verdict `record_only` for the twelve above except `:OnboardingState`/`:OnboardingStep`, which is `graph`.**
+**Verdict `record_only` for every row above except `:OnboardingState`/`:OnboardingStep` (which is `graph`)** — that is **12 record-only labels across 11 rows**, `:PackInstall`+`:PackSelection` sharing one.
 Each row cites readers; where a line is a **read-modify-write** it is labelled `RMW` rather than presented as
 a pure read, and the writer itself is the one named in §1. ⚠️ Two labels were moved OUT of this table by
 review: `:Tag` (`graph` — see §2.5) and the onboarding pair (`graph` — row above). §5.2's blocker is
