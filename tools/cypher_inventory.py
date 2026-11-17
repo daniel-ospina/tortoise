@@ -100,8 +100,9 @@ import sys
 # #4053/#11342: the refusal must not wear a VERDICT's status. This tool's
 # answers are 0 (census produced) and 1 (`--check` reports doc drift), and
 # `raise SystemExit(<message>)` exits 1 — so an old interpreter would report
-# DRIFT against a doc nobody touched. 2 is "could not run" (argparse's own code;
-# `main()` never returns it), which is what an old interpreter IS.
+# DRIFT against a doc nobody touched. 2 is this tool's own "could not run"
+# (`check()` already returns it when the doc is absent), which is exactly what an
+# old interpreter is, so the refusal is reused on purpose rather than invented.
 # `SystemExit(<int>)` carries no message, so the refusal is printed explicitly.
 # Pinned by `tests/test_entry_point_python_guard.py::REFUSAL_CODES`.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
