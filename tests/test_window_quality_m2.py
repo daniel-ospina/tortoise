@@ -1909,6 +1909,13 @@ def test_the_measured_findings_are_stated_and_cannot_be_inverted_green(artifact)
         README verdict        "different claim rather than an empty answer" -> reversed
         README Finding 3      "It is **not** a figure about the fused production read" -> "It is"
         README verdict        "not a guarantee the shipped path makes" -> "a guarantee"
+        README header         "and a `fallback` entry **ran**" -> "the snapshot tier was **reached**"
+        README header         "a `fallback` entry **ran**" -> "a `fallback` entry **served**"
+
+    The last two are round 9's finding: the word is load-bearing (route 1 is a
+    graph-bound tier built by `MATCH (n:Point)` vs. a text-index move, and only the
+    former can be described as "reached"), the corrected wording was pinned only in
+    its SECOND clause, and both rejected spellings were free at the site.
 
     "Nothing compensates" is the whole reason §7 cannot be armed on the grounds
     that another retrieval leg recovers the loss, and it is stated in FOUR places;
@@ -1956,7 +1963,11 @@ def test_the_measured_findings_are_stated_and_cannot_be_inverted_green(artifact)
                 "Q2 is satisfied",
                 "empty answer rather than a different claim",
                 "It is **a figure about the fused production read**",
-                "configuration's, a guarantee the shipped path")
+                "configuration's, a guarantee the shipped path",
+                # round 9: the header's leg claim inverts to the two spellings rounds
+                # 6-7 rejected ("serving", "reached"); only "ran" is supportable.
+                "snapshot tier was **reached**", "`fallback` **serving**",
+                "`fallback` entry **served")
     corpus = _flat(readme) + " " + _flat(arch) + " " + _flat(changelog)
     found = [frag for frag in inverted if frag in corpus]
     assert not found, f"a measured finding is stated INVERTED: {found}"
@@ -1992,6 +2003,12 @@ def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
     assert getattr(record_serve.ANCHORED_READS["whole-graph"], "status",
                    record_serve.ANCHORED_READS["whole-graph"]) in (
         record_serve.NOT_SERVED, "not-served")
+    # ⛔ The header's "a `fallback` entry **ran**" is the artifact's OWN datum and
+    # nothing more: `retrieval.legs_seen.fallback` is a boolean OR over
+    # `entry["ran"]`, so the sentence cannot outlive the fact. Bound here as well as
+    # in the ledger below, because a prose claim is only as strong as the datum it
+    # reports (#13126 round 9, finding 1).
+    assert artifact["retrieval"]["legs_seen"]["fallback"] is True
 
     rows = [
         # (document, anchor, required near the anchor, what it must NOT say)
@@ -2034,6 +2051,20 @@ def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
          "A static eviction policy is a lever"),
         # the §9.1 sibling of the README's "appear in no module" row
         (arch, "and **no code path emits**", "no code path emits", "a code path emits"),
+        # ⛔ The header's FIRST clause — the one that states WHAT THE RUN DID — was
+        # left unbound by the rewrite that corrected its word (c21ac8c56751): the pin
+        # MOVED to the SECOND clause ("records only that some fallback entry ran, not
+        # WHICH reason fired"), so reverting the first clause to the rejected wording
+        # left the suite GREEN — 59 passed, measured (#13126 round 9, finding 1/P2).
+        # That is why both rejected spellings are forbidden AT THE SITE and not merely
+        # in the surface-wide net below: round 6 rejected "serving" and round 7
+        # rejected "reached", and only "ran" is supportable — the SDK sets
+        # `ran=True` for `no_fallback_applicable` with `count=0` on a read that
+        # returned nothing, which the `:Object` arms' own `empty` rates entail, so the
+        # snapshot tier need never be reached for `legs_seen.fallback` to be true.
+        # One row, both rejected spellings — the tuple shape round 10 introduced,
+        # because a claim inverted by either word is the same defect.
+        (readme, "and a `fallback` entry", "**ran**", ("reached", "serving")),
     ]
     bad = []
     for doc, anchor, required, forbidden in rows:
