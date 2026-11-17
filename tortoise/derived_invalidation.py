@@ -129,7 +129,10 @@ from .goal_judgement import (
     latest_judgement,
     live_judgements,
 )
-from .live import TERMINAL_EXCLUDED_STATUSES
+from .live import (
+    TERMINAL_EXCLUDED_STATUSES,
+    is_position_ended,  # #13034: the position half of the currency rule
+)
 
 __all__ = [
     "DEFINITION_BOUNDARY_PROP",
@@ -377,6 +380,24 @@ def _retirement(node: Any, *, goal: bool = False) -> str | None:
     # graph terminal): the direction this fix CLOSES, not its opposite.
     if bool(node.get("outdated")):
         return "its legacy outdated flag is set"
+    # ── the POSITION axis (#13034, design §6) ─────────────────────────────────
+    # The lifecycle word is only ONE of the two places an ending is declared. A
+    # target ended by the durable `isClosed` marker, or by sitting in a stage
+    # whose slot is `terminal`, is no longer a live input — and this sweep was
+    # answering currency entirely by itself (`status`, `outdated`,
+    # `supersededBy`, `goalState`), so its derived caches stayed live while
+    # every read surface had dropped the record. The two sources AGREE rather
+    # than override one another (`pipeline.py:924-943`): `isClosed` is the
+    # durable half, and a terminal slot ends a node whose marker was never
+    # written.
+    #
+    # ⛔ The test is the shared one (`live.is_position_ended`), not a status
+    # comparison spelled here: `isClosed` is read by `bool()` exactly as
+    # `advance_stage` reads it, and a stage is judged by its SLOT, never by a
+    # name a pack is free to rename (design §4.1).
+    if is_position_ended(is_closed=node.get("isClosed"),
+                         stage_slot=node.get("pipelineSlot")):
+        return "it is closed on the position axis (isClosed or a terminal stage)"
     successor = node.get("supersededBy") or node.get("superseded_by")
     if successor:
         return f"it was superseded by {successor!r}"

@@ -151,7 +151,11 @@ def inconclusive_on_timeout(
 # surface, and the product emits exactly two:
 #
 #   * REST — status 504, body `{"detail": mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE}`
-#     (`hosted_api._send_wait_bound_refusal`);
+#     (`hosted_api._send_wait_bound_refusal`), plus — since #10893 — at most two
+#     ADDITIVE keys on a breached READ that had already started: `stage` and
+#     `stages_ms`. The envelope (504 + that exact `detail`) is the identity; the
+#     additive pair is the attribution, enumerated in `_REST_ADDITIVE_KEYS` so an
+#     unrelated extra key is still not this refusal;
 #   * JSON-RPC / MCP — a `{code, message, data}` error mapping carrying
 #     `mcp_auth.ERR_TIMEOUT` + the same message, on status 504 for the `/mcp`
 #     route and inside a `CallToolResult(isError=True)` on the SSE arm (HTTP
@@ -284,9 +288,23 @@ def is_transport_wait_bound_refusal(response: Any) -> bool:
 
     status = getattr(response, "status_code", None)
     message = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+    #: The keys a REST refusal body may carry BEYOND ``detail``. #10893 adds the
+    #: read-stage attribution (`stage` / `stages_ms`) to a breached read, so the
+    #: shipped exact-equality test would have stopped recognising a refused
+    #: `/v1/search` — the one route the instrument exists for — and handed it to
+    #: the caller's own assertions as if it were an ANSWER (a false FAIL charged
+    #: to the property under test, the exact class this module's rule-1
+    #: INCONCLUSIVE arm exists to prevent).The identity is still the ENVELOPE
+    #: (504 + this exact ``detail``); these are its documented additive fields,
+    #: enumerated rather than wildcarded so an unrelated extra key is still a
+    #: non-answer.
+    _REST_ADDITIVE_KEYS = frozenset({"detail", "stage", "stages_ms"})
     for body in _json_objects(response):
-        # REST arm: 504 whose body is exactly the refusal.
-        if status == 504 and body == {"detail": message}:
+        # REST arm: 504 whose body is the refusal, plus at most the documented
+        # additive attribution (#10893).
+        if (status == 504 and isinstance(body, dict)
+                and body.get("detail") == message
+                and set(body) <= _REST_ADDITIVE_KEYS):
             return True
         # JSON-RPC / MCP arm: the product's error code AND message, on either
         # the `/mcp` route's 504 or the SSE arm's 200.

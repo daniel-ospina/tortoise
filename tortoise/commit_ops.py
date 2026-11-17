@@ -280,7 +280,7 @@ def remap_supersession_point_refs(records: list, id_map: dict) -> list:
     ``supersedes_by`` (the NEW payload point's content-addressed ``pt_<sha>``
     id). A ``supersedes_by`` whose payload point resolved to an existing graph
     node under a different id is the SAME two-id-space mismatch the operators
-    had: ``sdk.supersede(prior, '<payload id>')`` targets a node that does not
+    had: ``sdk.supersede_knowledge(prior, '<payload id>')`` targets a node that does not
     exist, RAISES, and ``apply_supersessions`` swallows it as ``point
     supersede '<prior>' → '<payload id>' failed: …`` — so the CORRECTS fold
     would be lost. (It is NOT the ``point supersession ref '<payload id>' not
@@ -654,7 +654,7 @@ def _supersession_fold_order(proj, records):
         if not ref or not supersedes_by or ref == supersedes_by \
                 or ref.startswith("pt_"):
             # missing/self are warned + skipped by the loop; pt_ records
-            # ride supersede() (separate lane) — none participate in edges
+            # ride supersede_knowledge() (separate lane) — none participate in edges
             continue
         entity.append((idx, ref, supersedes_by))
     if len(entity) < 2:
@@ -1783,7 +1783,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                         skipped=None):
     """Apply canonical supersession records — the ONE consumer-side
     discipline (producer side: extractor_v2._supersession_records).
-    pt_ records → supersede() CORRECTS (terminal-probed, idempotent);
+    pt_ records → supersede_point() CORRECTS (terminal-probed, idempotent);
     entity records → ObjectSuperseded event (id-style, journaled with
     full provenance) + _fold_object_superseded (count-verified).
     #2164/#2193: shared by capture (_extract_session_v2), eval ingest_v2,
@@ -1927,7 +1927,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             _skip(ref, supersedes_by, "self-supersession")
             continue
         if ref.startswith("pt_"):
-            # Point-level → the canonical supersede() CORRECTS (outdated +
+            # Point-level → the canonical supersede_point() CORRECTS (outdated +
             # edge transfer). Terminal-probed first: supersede_point RAISES
             # on a terminal old point (sdk.py supersede_point guard), so a
             # re-ingested/overlapping terminal record is an idempotent
@@ -1939,7 +1939,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             ).result_set
             # #7822: the verdict is over EVERY node carrying the id. The
             # pre-#7822 last-row-wins dict made it depend on server row order
-            # — and disagree with the guard the ``sdk.supersede`` below runs,
+            # — and disagree with the guard the ``sdk.supersede_knowledge`` below runs,
             # which refuses on ANY terminal row (point ids are not unique, and
             # a bare MATCH binds every matching node).
             present: set[str] = set()
@@ -1956,7 +1956,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # #2498: the SHARED terminal vocabulary (status set + the legacy
             # `outdated=true` flag) — the pre-#2498 3-status tuple let an
             # `outdated` / `deprecated` / flag-dead ref fall through to
-            # sdk.supersede, which now RAISES, turning this documented
+            # sdk.supersede_knowledge, which now RAISES, turning this documented
             # idempotent no-op into a spurious warning.
             if ref in terminal:
                 # already terminal — idempotent re-ingest no-op

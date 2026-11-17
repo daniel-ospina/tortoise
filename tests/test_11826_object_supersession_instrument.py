@@ -106,6 +106,23 @@ def _supersede_object(sdk, old_name: str, new_name: str) -> None:
         session_id="sess_11826_supersede")
 
 
+def _legacy_successorless_supersede(sdk, node_id: str) -> None:
+    """Write the SUCCESSORLESS superseded shape the way an EXISTING graph holds it.
+
+    ⛔ #12592 CLOSED THE DOOR THAT USED TO MINT THIS. ``update_knowledge(obj,
+    status='superseded')`` is now REFUSED (ONTOLOGY §4.3: the word names its
+    successor), so this shape can no longer be produced by the SDK — but it is
+    still IN every graph an older SDK or a raw producer wrote, and this check
+    exists to find it. Writing it raw is therefore the honest fixture: it measures
+    the LEGACY STATE the instrument must repair, not a state the engine can still
+    create. (Before #12592 these three cases drove the generic door and their
+    docstrings cited #11824's AX table for the acceptance; that table's entry is
+    reversed, and the fixture is what has to move with it.)
+    """
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded'",
+       {"i": node_id})
+
+
 # ── 1. the measured defect gets an instrument ─────────────────────
 
 
@@ -224,13 +241,19 @@ def test_the_check_exists_even_when_it_finds_nothing(sdk):
 
 
 def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
-    """The anchor is ``status='superseded'``, and the GENERIC door reaches that
-    status with no successor at all.
+    """The anchor is ``status='superseded'``, and a graph can hold that status
+    with no successor at all.
 
-    ``#11824``'s AX table records that ``update_entity(object,
-    status='superseded')`` is accepted ON PURPOSE (the mirror shape is out of the
-    guard — refusing it would over-block), so this is a state the engine produces,
-    not a hypothetical. The emitted repair must then name the step that can
+    ``#11824``'s AX table recorded that ``update_knowledge(object,
+    status='superseded')`` was accepted ON PURPOSE. ⛔ ``#12592`` REVERSED that
+    half — ONTOLOGY §4.3 says the word names its successor, so the live door
+    refuses the bare status — but the STATE is unchanged for real graphs: rows
+    written by an older SDK, a raw producer, or a pre-guard journal still carry it,
+    which is exactly the population this check exists for. The fixture therefore
+    writes the shape RAW (:func:`_legacy_successorless_supersede`) instead of
+    through the door.
+
+    The emitted repair must then name the step that can
     actually be taken: a successor "named by its supersededBy" does not exist in
     this state, so the plain transfer wording would be an unperformable repair
     (#7819's rule) — and ``archived`` must NOT be offered as the repair, because
@@ -241,11 +264,10 @@ def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
     v1 = _obj(sdk, "PolicyV1")
     op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
 
-    # The door the code deliberately permits (measured on this head).
-    sdk.update_knowledge(v1["id"], status="superseded")
+    _legacy_successorless_supersede(sdk, v1["id"])
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.status, o.supersededBy",
               {"i": v1["id"]}) == [["superseded", None]], \
-        "fixture drifted: this door no longer produces a successorless supersede"
+        "fixture drifted: the legacy shape must be a successorless supersede"
 
     issues = [i for i in _issues(sdk, "superseded_object_active_edges")
               if i.node_id == v1["id"]]
@@ -755,7 +777,7 @@ def test_a_supersession_chain_points_the_repair_at_the_live_head(sdk):
 def test_a_terminal_successor_with_no_chain_is_not_told_to_follow_one(sdk):
     """A successor can be terminal WITHOUT a supersession — then there is no chain.
 
-    `update_entity(object, status='archived')` is a legal Object write and leaves
+    `update_knowledge(object, status='archived')` is a legal Object write and leaves
     `supersededBy` absent, so "target the LIVE head of that chain" would name a node
     that does not exist (the #7819 rule this module refuses to emit).
     """
@@ -967,7 +989,7 @@ def test_a_self_pointer_is_not_a_successor(sdk):
 
     A plain name match is satisfied by the node that carries the name by
     definition, so without ``carrier.id <> sup.id`` a self-pointer read as
-    RESOLVED and nothing in the audit mentioned it (measured: ``update_entity(obj,
+    RESOLVED and nothing in the audit mentioned it (measured: ``update_knowledge(obj,
     supersededBy='<its own name>')`` is accepted). The repairable fact is the same
     one a dangling name is — name the real successor.
     """
@@ -1388,7 +1410,7 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
     v1 = _obj(sdk, "PolicyV1")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
     sdk.update_knowledge(actor["id"], is_operator=True)
-    sdk.update_knowledge(v1["id"], status="superseded")  # NO successor at all
+    _legacy_successorless_supersede(sdk, v1["id"])  # NO successor at all
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
               {"i": v1["id"]}) == [[None]], "fixture drifted"
 
@@ -1472,7 +1494,7 @@ def test_a_non_point_operator_is_not_an_operator_input(sdk):
     carrying ``is_operator=true`` is in NEITHER arm and no factor exists. Reading the
     flag alone took the operator arm, which told the reader to stamp an ``idx`` no
     factor would ever read. Door-reachable: ``create_direct_edge`` then
-    ``update_entity(..., is_operator=True)``.
+    ``update_knowledge(..., is_operator=True)``.
     """
     actor = sdk.create_entity("subject", "AcmeCorp")["node"]
     v1 = _obj(sdk, "PolicyV1")
@@ -1500,7 +1522,7 @@ def test_a_non_point_operator_is_not_an_operator_input(sdk):
 def test_a_legacy_outdated_successor_is_terminal_too(sdk):
     """EP's terminal test is the status vocab OR the legacy ``outdated`` flag.
 
-    ``update_entity(outdated=...)`` is refused on an Object (server-managed), so
+    ``update_knowledge(outdated=...)`` is refused on an Object (server-managed), so
     only a raw/legacy write reaches the state — but ``is_terminal_status(status,
     outdated)`` is True for it, so the ordinary "re-point and it works" arm left the
     factor degenerate while a re-audit read CLEAN.
@@ -1675,7 +1697,7 @@ def test_an_op_type_only_successor_is_read_by_the_operator_arm(sdk):
 
 
 def test_an_unnamed_object_is_not_reported_as_the_string_none(sdk):
-    """``update_entity(obj, name=None)`` is accepted, so a name can be absent.
+    """``update_knowledge(obj, name=None)`` is accepted, so a name can be absent.
 
     An f-string then interpolated Python's ``None`` into the finding, naming a node
     that exists nowhere in the graph.
@@ -1873,7 +1895,7 @@ def test_historical_knowledge_renders_an_absent_status_as_live(sdk):
 def test_a_string_flag_on_a_point_is_not_an_operator_input(sdk):
     """``is_operator='false'`` is a DOOR, and ``bool()`` is not EP's comparison.
 
-    ``update_entity(p, is_operator='false')`` is accepted and the property then holds
+    ``update_knowledge(p, is_operator='false')`` is accepted and the property then holds
     the STRING ``'false'`` (measured, on a ``:Point`` and on a ``:Object``). The
     engine compares with STRICT type semantics — ``RETURN 'false' = true, 'false' =
     false, 0 = false, 1 = true`` → ``[False, False, False, False]`` — so EP's
@@ -2075,7 +2097,7 @@ def test_the_successorless_shaped_arm_does_not_promise_the_flag_restores(sdk):
     v1 = _obj(sdk, "PolicyV1")
     sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
     sdk.update_knowledge(actor["id"], is_operator=True)
-    sdk.update_knowledge(v1["id"], status="superseded")  # NO successor
+    _legacy_successorless_supersede(sdk, v1["id"])  # NO successor
     assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
               {"i": v1["id"]}) == [[None]], "fixture drifted"
 
@@ -2098,7 +2120,7 @@ def test_the_successorless_shaped_arm_does_not_promise_the_flag_restores(sdk):
 def test_an_integer_one_flag_is_in_neither_arm(sdk):
     """``is_operator=1`` is a door, and this engine does NOT compare ``1 = true``.
 
-    ``update_entity(p, is_operator=1)`` stores the INTEGER ``1`` (measured), and
+    ``update_knowledge(p, is_operator=1)`` stores the INTEGER ``1`` (measured), and
     ``RETURN 1 = true, 1 = false, 0 = false`` → ``[False, False, False]`` — the same
     strictness that makes ``'false'`` neither arm. So EP's operator arm
     (``is_operator = true``) matches nothing, ``_non_op`` refuses it too (``1 =

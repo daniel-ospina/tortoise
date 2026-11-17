@@ -56,7 +56,9 @@ import math
 import os
 import re
 import secrets
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Protocol  # noqa: UP035
 
@@ -1483,7 +1485,18 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
 
 class BackupStorage(Protocol):
     def upload(self, key: str, data: bytes, content_type: str | None = None) -> None: ...
-    def download(self, key: str) -> bytes: ...
+    def download(self, key: str) -> bytes:
+        """Return the object's bytes.
+
+        ⛔ MUST be safe to call concurrently: `list_backups` issues up to
+        `_LIST_MANIFEST_MAX_INFLIGHT` of these at once from a thread pool. A
+        stateful or single-threaded implementation (a cursor, a shared mutable
+        request builder, a non-reentrant client) breaks the first time an org's
+        backups are listed, not at construction. Both shipped implementations are
+        safe: `R2Storage` shares one boto3 client (thread-safe for calls) and
+        `MemoryStorage` reads a dict.
+        """
+        ...
     def list(self, prefix: str) -> list[str]: ...
     def delete(self, key: str) -> None: ...
     def create_if_not_exists(self, key: str, data: bytes) -> bool: ...
@@ -1567,9 +1580,22 @@ class R2Storage:
                 "R2_SECRET_ACCESS_KEY, R2_BUCKET"
             )
         self._client = None
+        # #13097: the manifest pool makes 8 simultaneous first-callers routine, so
+        # this lazy init needs to be atomic. Without the lock a cold start builds
+        # up to one boto3 client PER THREAD (each with its own urllib3 pool), and
+        # since every thread then returns whatever `self._client` currently holds,
+        # several clients end up in concurrent use while the rest are dropped
+        # unclosed — splitting the connection budget and re-paying construction
+        # (credential chain + config load) on the first request after a deploy.
+        self._client_lock = threading.Lock()
 
     def _s3(self):
-        if self._client is None:
+        # Double-checked: the fast path (already built) must not take the lock.
+        if self._client is not None:
+            return self._client
+        with self._client_lock:
+            if self._client is not None:
+                return self._client
             try:
                 import boto3
             except ImportError as e:
@@ -1582,6 +1608,8 @@ class R2Storage:
                 aws_access_key_id=self._ak,
                 aws_secret_access_key=self._sk,
                 region_name="auto",
+                # #13097: pinned explicitly — see `_STORAGE_MAX_POOL_CONNECTIONS`.
+                config=_s3_client_config(),
             )
         return self._client
 
@@ -2276,6 +2304,57 @@ def create_backup(
     return manifest
 
 
+# #13097: how many manifest GETs `list_backups` keeps in flight. The listing is
+# O(backups) round trips — ONE `download` per manifest — so serial collection is
+# what pushed `GET /v1/backups` into the 60 s edge deadline (a 504 that a caller
+# cannot tell from "storage down" or "no backups exist"). Measured arithmetic in
+# the issue: ~35 manifests/graph under the default retention, org-wide listing
+# ≈ 420 sequential GETs at 100-150 ms ≈ 42-63 s.
+#
+# ⛔ 8, and the number is COUPLED to the S3 client's connection pool, not chosen
+# for roundness. An in-flight count above the pool size makes urllib3 close and
+# discard the overflow connection on every wave — each dropped connection re-pays
+# TCP+TLS, i.e. the exact latency this fixes, plus a "Connection pool is full"
+# warning per dropped connection. Staying under the pool keeps every GET of THIS
+# invocation on a reused connection.
+#
+# The pool is therefore pinned EXPLICITLY (`_STORAGE_MAX_POOL_CONNECTIONS`,
+# passed to the client as `config=_s3_client_config()`), not inherited from
+# botocore's default of 10. Two reasons, and the second is why this is not a
+# constant-to-constant comparison:
+#   1. that budget is shared, not per call: `_backup_storage()` caches ONE
+#      `R2Storage` with ONE client, so concurrent listings and the sweep's writes
+#      draw on the same pool — two simultaneous `/v1/backups` requests would
+#      saturate a 10-connection default between them;
+#   2. a test that compares this constant to a HAND-WRITTEN copy of the library
+#      default cannot fail when the real ceiling moves (a botocore change, or a
+#      future `Config(...)` added to `_s3()`), so it would report a coupling it
+#      does not measure. `test_the_manifest_concurrency_bound_stays_under_the_
+#      client_pool` asserts the number the CLIENT IS BUILT WITH instead.
+#
+# The per-invocation bound stays per invocation on purpose: a process-wide
+# semaphore would let one slow listing starve a peer request.
+_LIST_MANIFEST_MAX_INFLIGHT = 8
+
+# The connection budget the storage client is BUILT with. Must stay at or above
+# `_LIST_MANIFEST_MAX_INFLIGHT` (pinned by the test named above); the headroom
+# covers concurrent listings plus the sweep's writes sharing one cached client.
+_STORAGE_MAX_POOL_CONNECTIONS = 32
+
+
+def _s3_client_config():
+    """The botocore config every storage client is built with.
+
+    `max_pool_connections` is pinned here rather than left to the library
+    default, so the ceiling the manifest pool is coupled to is a property of
+    THIS code and is measurable from it. One definition: the client construction
+    below and the coupling test both read it.
+    """
+    from botocore.config import Config
+
+    return Config(max_pool_connections=_STORAGE_MAX_POOL_CONNECTIONS)
+
+
 def list_backups(storage: BackupStorage, org_id: str,
                  graph_id: str | None = None) -> list[dict]:
     """Return manifests for an org's backups, newest first.
@@ -2284,23 +2363,102 @@ def list_backups(storage: BackupStorage, org_id: str,
     graph key-segment prefix). When None, lists the whole org pool — both
     legacy flat artifacts and per-graph nested ones (manifest-based listing
     carries graph_name/graph_id, so org-wide consumers keep working).
+
+    #13097: the per-manifest GETs run through a BOUNDED pool. Two properties are
+    load-bearing and must survive any future edit here:
+
+    * **The result is complete or it raises.** A partial list would read as "this
+      org has fewer restore points" — or as none — during the one procedure that
+      depends on it, so a storage failure still propagates rather than being
+      collected as an empty/short answer (see the comment in ``_fetch``).
+    * **Only the unreadable/vanished class is skipped** — a corrupt manifest and a
+      concurrently-pruned object are ordinary states of a live bucket, not an
+      outage, and on the SUCCESS path they are logged (`logger.warning`) exactly
+      as before. On the FAILURE path `Executor.map` SUBMITS every key up front and
+      CANCELS only what is still QUEUED, and that cancel fires only once the
+      in-INPUT-order iterator reaches the failing key — so keys a freed worker had
+      already picked up still run. Measured over 40 keys, non-failing keys 10 ms,
+      the FIRST key in `storage.list()` order failing with `PermissionError`
+      (`_LIST_MANIFEST_MAX_INFLIGHT` forced to the column value):
+
+      | first-key delay | w=2 | w=4 | w=8 | w=16 |
+      |---|---|---|---|---|
+      | 0 ms | 2–3 | 5 | 9 | 17 |
+      | 50 ms | 7 | 17 | 37 | 40 |
+
+      Read cells, not a rule — this paragraph has now outlived three prose
+      summaries of this table, and each summary was false in a different
+      direction, so the cells are the statement. Two facts about the table itself:
+      the 0 ms / w=2 cell is a RACE (both 2 and 3 observed across runs), and the
+      50 ms row moves 7 → 17 → 37 → 40 with `w` alone, so a number quoted from it
+      means nothing without its column. Measured separately: a backend that stalls
+      every request (all keys 500 ms, w=8) issues 9 of 40 downloads — it does not
+      drain. `map`'s `with` block then
+      waits for the in-flight batch before the exception reaches the caller, so a
+      decisive failure can arrive up to one download CALL later than the serial
+      loop, which never started the keys after the failing one. ⚠️ That call is not
+      one timeout: `_s3()` passes neither a timeout nor a retry config, so botocore's
+      own defaults apply (60 s connect / 60 s read, cited at `hosted_api.py`'s #3820
+      note) and its default retries are wrapped INSIDE a single `get_object`, so the
+      worst case is a multiple of one timeout, not one. That wait is
+      deliberate: returning while workers still hold connections would move the
+      load onto a request that has already failed.
+      ⛔ Do NOT replace this table with a conclusion. Three attempts were wrong and
+      are recorded here so they are not re-invented: "keys already submitted still
+      run" (they are cancelled); "at most `_LIST_MANIFEST_MAX_INFLIGHT` still runs"
+      (it quoted a 9 against a bound of 8); "depends on the delay, NOT on the
+      worker count" (the drain rate IS the worker count). Any replacement must
+      carry its own measurement.
     """
     _validate_org_id(org_id)
     if graph_id is not None:
         _validate_graph_id(graph_id)
     prefix = f"backups/{org_id}/{graph_id}/" if graph_id is not None \
         else f"backups/{org_id}/"
-    out: list[dict] = []
-    for key in storage.list(prefix):
-        if key.endswith("/manifest.json"):
-            try:
-                out.append(json.loads(storage.download(key)))
-            except (json.JSONDecodeError, ValueError, UnicodeDecodeError, KeyError) as e:
-                logger.warning("unreadable/vanished backup manifest %s: %s", key, e)
-            # Storage/network failures (AccessDenied, timeouts) propagate — a
-            # partial outage must not masquerade as "no backups exist" during
-            # disaster recovery. KeyError (concurrently pruned object) is the
-            # same unreadable-manifest class and is skipped.
+    keys = [k for k in storage.list(prefix) if k.endswith("/manifest.json")]
+
+    def _fetch(key: str) -> dict | None:
+        """One manifest, or None when it is the skipped (unreadable) class.
+
+        Storage/network failures (AccessDenied, timeouts) are deliberately NOT
+        caught: a partial outage must not masquerade as "no backups exist"
+        during disaster recovery. KeyError (concurrently pruned object) and the
+        decode errors are the same unreadable-manifest class and are skipped.
+
+        The SHAPE check is part of that same rule, not a second one: `None` is
+        this function's "skip" sentinel, so a manifest body of JSON `null`
+        (which is a legal `json.loads` result) must take the documented skip path
+        explicitly — otherwise it would be silently dropped by the sentinel, while
+        a non-dict body such as `[1,2]` would instead reach the sort and raise
+        `AttributeError`. One rule for malformed manifests, whichever shape.
+        """
+        try:
+            manifest = json.loads(storage.download(key))
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError, KeyError) as e:
+            logger.warning("unreadable/vanished backup manifest %s: %s", key, e)
+            return None
+        if not isinstance(manifest, dict):
+            logger.warning(
+                "backup manifest %s is not an object (%s) — skipped",
+                key, type(manifest).__name__)
+            return None
+        return manifest
+
+    if not keys:
+        return []
+    if len(keys) == 1:
+        # One GET: a pool would cost more than the download it wraps.
+        loaded: list[dict | None] = [_fetch(keys[0])]
+    else:
+        workers = min(_LIST_MANIFEST_MAX_INFLIGHT, len(keys))
+        # ⛔ `map` (not `as_completed`): it yields in INPUT order, so which
+        # exception surfaces first — and therefore which error a caller sees — is
+        # identical to the serial loop this replaced. `as_completed` would make
+        # the reported failure depend on network timing.
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="list-backups") as pool:
+            loaded = list(pool.map(_fetch, keys))
+    out = [m for m in loaded if m is not None]
     out.sort(key=lambda m: str(m.get("created_at", "")), reverse=True)
     return out
 
