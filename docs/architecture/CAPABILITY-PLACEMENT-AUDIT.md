@@ -414,6 +414,7 @@ instead of another audit.
 No guessed verdicts. Each of these is a shape the census **cannot** settle from the code alone.
 
 ### 6.1 `:Session` capture telemetry family — verdict `record_only`, move blocked
+
 `capture_redactions`, `capture_ok`, `capture_extractor`, `machine_id`, `model`,
 `client_captured_at*`, `entity_links_attempted/created`, `value_nodes_created/held`, `draft_count`,
 `commit_count`.
@@ -427,6 +428,7 @@ No guessed verdicts. Each of these is a shape the census **cannot** settle from 
   nothing reads them but a test, they are dead weight on both stores and should be dropped, not tiered.
 
 ### 6.2 `:Point` listing-only families (`pointKind` filters, `domain_validators` reads)
+
 - **Why it is arguable:** `MATCH (p:Point) WHERE p.pointKind IN …` is Cypher, and it is **SQL-shaped** —
   it does not need a graph. Under the capability rule the shape is `record_only`; under "a Cypher reader
   exists" it may not move without blanking that reader.
@@ -434,6 +436,7 @@ No guessed verdicts. Each of these is a shape the census **cannot** settle from 
   measurement (`#13082` §2), not a census fact. Verdict deferred, not guessed.
 
 ### 6.3 `:GraphEvent` — the *verdict* is settled, the *move* is not
+
 - **The question:** *does `public.journal_event` already carry every field `poll_events` serves, with a
   stable cursor?* The census says every `:GraphEvent` emit sits behind a journal append (`sdk._emit_event`
   → `event_store.append_event`), and `journal_event` is the position table — so the answer is very likely
@@ -441,11 +444,13 @@ No guessed verdicts. Each of these is a shape the census **cannot** settle from 
   match on a real tenant before proposing it**; a cursor that moves by one is a silent subscriber gap.
 
 ### 6.4 `:Source.embedding` on a non-episodic Source
+
 - **Why it is arguable:** §9.4 makes the *link* mandatory and the *summary vector* optional ("it buys exactly
   one query class"). Whether a given Source's vector is read by that class is a demand question.
 - **The question:** *what share of vector queries hit a `:Source` embedding?* — P0-c's query-mix measurement.
 
 ### 6.5 `UnservedVectorLabels` — already decided, cited not reopened
+
 `:Session` vectors are declared unwritable (`#11747`, `UNSERVED_VECTOR_LABELS`); this census agrees and
 changes nothing.
 
