@@ -1,13 +1,18 @@
 # #9556 (#9189 follow-on) — S2 wiring census: production call sites of the two-store chain
 #   (reconciliation.reconcile / record_projection.replay /
 #   cache_projection.read_record_view / FalkorProjection.rebuild_from_record).
-# Measured at: feat/13220-vectors-postgres@0353484f32 on 2026-11-17, re-cut for #13220 (the code
-#   measured is that commit's; this log is re-cut on top of it). ⛔ FOURTH cut of the
-#   `record_writer` ordinal: `09b34b4f17` re-cut it to 2076 attributing the move to "the F9
+# Measured at: feat/13220-vectors-postgres@63cc6314e2 on 2026-11-17, re-cut for #13220 (the code
+#   measured is that commit's; this paste is ONE live run at it). ⛔ FIFTH cut: the branch was
+#   rebased onto a newer `origin/main` (`54682177bc`, carrying #13277's
+#   `20261117000002_postgres_residency_gauge.sql`), and that rebase inserted 8 lines above
+#   `tools/record_runner.py`'s import — its ordinal moved 738 -> 746. Every COUNT is unchanged.
+#   The previous cut's provenance sha `0353484f32` is NOT an ancestor of this head after that
+#   rebase, so the sha above is the one a reader can actually check out.
+#   ⛔ FOURTH cut, kept as history: `09b34b4f17` re-cut the
+#   `record_writer` ordinal to 2076 attributing the move to "the F9
 #   prose fix", but that fix had NOT landed (`record_writer.py:1778` still said "merges it
-#   over the snapshot") — the move it recorded did not exist. `0353484f32` is the commit
-#   that actually applies the F9 prose fix, and it moved the call 2076 -> 2081; this paste
-#   is ONE live run at that head, printed below.
+#   over the snapshot") — the move it recorded did not exist. `0353484f32` is the (pre-rebase)
+#   commit that actually applies the F9 prose fix, and it moved the call 2076 -> 2081.
 #   HISTORY of the earlier cuts: TWO things
 #   moved since the cut before them (fix/9556-record-restore@b5768749e, 2026-10-22, R8):
 #   #13210 added `tools/record_runner.py`, a SECOND production caller of
@@ -43,7 +48,7 @@ production population: ['tortoise', 'tools', 'scripts']/**/*.py
 
 == record_projection.replay: 2 production call site(s) ==
   tortoise/record_writer.py:2081: report = record_projection.replay(
-  tools/record_runner.py:738: from tortoise.record_projection import replay
+  tools/record_runner.py:746: from tortoise.record_projection import replay
 
 == cache_projection.read_record_view: 2 production call site(s) ==
   tortoise/__main__.py:817: view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
