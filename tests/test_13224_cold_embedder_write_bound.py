@@ -261,6 +261,78 @@ def test_the_opt_out_keeps_the_pre_13224_synchronous_contract(monkeypatch):
         EmbeddingModel._reset()
 
 
+def test_the_opt_out_wins_over_a_designed_absence(monkeypatch):
+    """#13229 review F1: the opt-out arm must be decided BEFORE the other two.
+
+    ⛔ THE ORDERING IS THE DEFECT, and it was invisible to every row this file had:
+    `test_the_opt_out_keeps_the_pre_13224_synchronous_contract` calls `_reset()`
+    first, so it only ever exercises the CLEAN state (no failure kind, no
+    cooldown) — the one state in which the opt-out arm was reachable at all.
+    With the flag OFF and either `_last_failure_kind == "not_installed"` (the
+    DOCUMENTED default install: a plain `uv sync` is keyword-only) or a load that
+    failed inside `_FAIL_COOLDOWN_S`, `await_write_ready` used to return False,
+    so `encode_for_row(bounded=True)` returned None WITHOUT calling
+    `encode_for_store` → `compute_embedding`.
+
+    That is not "no vector either way": `compute_embedding` is a REPLACEABLE
+    seam (an installed `EncodeCache`, a test stub), so a replacement that CAN
+    produce a vector silently stopped being consulted for the four derived-entity
+    folds. The opt-out's documented contract is that it keeps the PRE-#13224
+    synchronous contract EXACTLY, and pre-#13224 the seam was reached
+    unconditionally — so this row asserts the SEAM WAS REACHED, not merely that a
+    call returned.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+    EmbeddingModel._reset()
+    try:
+        # (a) the designed absence — the documented default install
+        EmbeddingModel._last_failure_kind = "not_installed"
+        EmbeddingModel._last_failed_at = (
+            time.monotonic() - EmbeddingModel._FAIL_COOLDOWN_S - 1)
+        assert EmbeddingModel.await_write_ready(0.0) is True, (
+            "with the background lane opted OUT, a designed absence must not "
+            "answer 'not ready' — there is no lane to wait on, so the caller "
+            "loads synchronously as it did before #13224"
+        )
+        assert EmbeddingModel._warm_up_started is False, (
+            "the opt-out must not kick a background load"
+        )
+        seen: list[str] = []
+        with mock.patch("tortoise.embeddings.compute_embedding",
+                        lambda text, **kw: seen.append(text) or [0.7] * _DIM):
+            vec = encode_for_row(f"optout absent {time.time_ns()}", _DIM,
+                                 bounded=True)
+        assert seen, (
+            "the `compute_embedding` SEAM was never consulted — the opt-out path "
+            "declined the row instead of loading synchronously, so an installed "
+            "EncodeCache or test stub silently stops producing vectors"
+        )
+        assert vec is not None, (
+            "a replacement encoder CAN produce a vector here; the opt-out must "
+            "reach it"
+        )
+
+        # (b) a load that FAILED inside the negative-cache cooldown
+        EmbeddingModel._reset()
+        EmbeddingModel._last_failed_at = time.monotonic()
+        assert EmbeddingModel.await_write_ready(0.0) is True, (
+            "with the background lane opted OUT, the failure cooldown must not "
+            "answer 'not ready' — the cooldown exists to stop re-kicking a "
+            "background load, and there is none"
+        )
+        seen.clear()
+        with mock.patch("tortoise.embeddings.compute_embedding",
+                        lambda text, **kw: seen.append(text) or [0.7] * _DIM):
+            vec = encode_for_row(f"optout cooldown {time.time_ns()}", _DIM,
+                                 bounded=True)
+        assert seen and vec is not None, (
+            "the cooldown arm decided before the opt-out arm, so the seam was "
+            "skipped under the opt-out"
+        )
+    finally:
+        EmbeddingModel._reset()
+
+
 def test_a_failed_load_answers_from_the_negative_cache_inside_its_cooldown(
         cold_embedder):
     """`#399`'s cooldown answers without waiting — the WITHIN-window half only.
@@ -405,8 +477,9 @@ def test_the_default_caller_never_consults_the_bound(monkeypatch):
     """
     consulted: list[float] = []
     monkeypatch.setattr(
-        EmbeddingModel, "await_write_ready",
-        classmethod(lambda cls, budget: consulted.append(budget) or False))
+        EmbeddingModel, "await_write_ready_reason",
+        classmethod(
+            lambda cls, budget: consulted.append(budget) or "budget_expired"))
     with mock.patch("tortoise.embeddings.compute_embedding",
                     lambda text, **kw: [0.5] * _DIM):
         vec = encode_for_row(f"record truth {time.time_ns()}", _DIM)
@@ -533,6 +606,18 @@ def test_a_projection_fault_reads_as_replay(monkeypatch):
     )
 
 
+# ── the OPERATOR SIGNAL: one line per cause, naming the actual cause ───────
+
+#: The phrase every decline line carries (so a filter is not coupled to severity).
+_COLD_WRITE_PROBE = "DERIVED entity row"
+
+
+def _decline_lines(caplog):  # noqa: ANN001, ANN202
+    return [r for r in caplog.records
+            if r.name == "tortoise.embeddings"
+            and _COLD_WRITE_PROBE in r.getMessage()]
+
+
 def test_the_cold_decline_is_logged_once_per_process_and_rearmed(cold_embedder, caplog):
     """The LOG half of the decline: ONE line, naming the budget and the repair.
 
@@ -560,7 +645,8 @@ def test_the_cold_decline_is_logged_once_per_process_and_rearmed(cold_embedder, 
         first = _cold_lines(caplog.records)
     assert len(first) == 1, (
         f"two declining rows produced {len(first)} cold-write line(s); the latch must "
-        f"make it EXACTLY one per process, and zero means the report was removed"
+        f"make it EXACTLY one per cause per process, and zero means the report was "
+        f"removed"
     )
     msg = first[0].getMessage()
     assert f"{WRITE_EMBED_BUDGET_S:.2f}s" in msg, (
@@ -577,9 +663,20 @@ def test_the_cold_decline_is_logged_once_per_process_and_rearmed(cold_embedder, 
     # the re-arm of the LOAD attempt has its own row
     # (`test_a_spent_load_attempt_does_not_charge_the_budget`), and a 6 s join in this
     # test would buy nothing this assertion does not already carry.
+    #
+    # ⛔ THE STUB MUST BE AN ALIVE THREAD, and the cause must be the SAME one as
+    # above (`budget_expired`). The latch is per CAUSE (#13229 F2), so a second
+    # phase that answered from a DIFFERENT arm would log because its own cause is
+    # new — and the mutant this row exists to kill (delete
+    # `_rearm_cold_write_report()` from `_reset()`) would no longer redden it.
+    # `start_warm_up()` returns a live thread only when `_warm_up_started` is set
+    # AND `_warm_up_thread` is alive; with the thread None the arm below is the
+    # spent-attempt one instead.
     EmbeddingModel._reset()
+    cold_stub = threading.Thread(target=time.sleep, args=(_LOAD_S,), daemon=True)
+    cold_stub.start()
     EmbeddingModel._warm_up_started = True
-    EmbeddingModel._warm_up_thread = None
+    EmbeddingModel._warm_up_thread = cold_stub
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="tortoise.embeddings"):
         assert encode_for_row(
@@ -602,6 +699,103 @@ def test_the_cold_decline_is_counted_not_silent(cold_embedder, monkeypatch):
         "a row written without a vector because the embedder was cold must be "
         "counted (#4488), or it is indistinguishable from a designed absence"
     )
+
+
+def test_a_designed_absence_is_reported_as_an_absence_not_a_cold_wait(
+        monkeypatch, caplog):
+    """#13229 review F2: the absence is NOT the cold window, in cause or severity.
+
+    ⛔ FOUR CAUSES SHARE ONE DECLINE SITE, and they need opposite operator
+    responses: install the extra / repair a broken load / retry later / wait
+    longer. The single message this row used to emit merged all four into
+    *"still COLD … after waiting 0.25s … until backfill_embeddings.py re-encodes
+    it"* — which, for a DESIGNED absence, asserts a wait that never happened and
+    names a repair that has no encoder to run, on the DOCUMENTED default install
+    (plain `uv sync` is keyword-only). It also logged WARNING for a state
+    `warm_up()` deliberately logs INFO for (`#2952`, same module, same process).
+
+    Nothing pinned the negative direction before: the only row for this state
+    (`test_a_designed_absence_answers_immediately`) calls `await_write_ready`
+    DIRECTLY and asserts no log at all, so the wrong line was free to ship.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    EmbeddingModel._reset()
+    try:
+        EmbeddingModel._last_failure_kind = "not_installed"
+        EmbeddingModel._last_failed_at = (
+            time.monotonic() - EmbeddingModel._FAIL_COOLDOWN_S - 1)
+        with caplog.at_level(logging.DEBUG, logger="tortoise.embeddings"):
+            assert encode_for_row(f"absent log {time.time_ns()}", _DIM,
+                                  bounded=True) is None
+        lines = _decline_lines(caplog)
+        assert len(lines) == 1, (
+            f"a designed absence produced {len(lines)} decline line(s) — it must "
+            f"report the absence ONCE (zero means the cause is silent again)"
+        )
+        msg = lines[0].getMessage()
+        assert lines[0].levelno == logging.INFO, (
+            f"a designed absence was logged at {lines[0].levelname} — `warm_up()` "
+            f"logs the SAME state at INFO (#2952), and a WARNING sends an "
+            f"operator hunting a fault that is a documented install choice: {msg!r}"
+        )
+        assert "not installed" in msg.lower(), (
+            "the line must NAME the cause (the extra is absent), not merely that "
+            f"a row lost its vector: {msg!r}"
+        )
+        assert "after waiting" not in msg, (
+            f"nothing is waited for a designed absence — the line claims a wait "
+            f"that did not happen: {msg!r}"
+        )
+        assert "still COLD" not in msg, (
+            "a designed absence is not a cold window: there is no model to be "
+            f"cold, and the two need opposite repairs: {msg!r}"
+        )
+    finally:
+        EmbeddingModel._reset()
+
+
+#: Each zero-wait cause, set up so `await_write_ready_reason` answers with it.
+_ZERO_WAIT_CAUSES = (
+    ("fail_cooldown", lambda: setattr(
+        EmbeddingModel, "_last_failed_at", time.monotonic())),
+    ("attempt_spent", lambda: (
+        setattr(EmbeddingModel, "_warm_up_started", True),
+        setattr(EmbeddingModel, "_warm_up_thread", None))),
+)
+
+
+@pytest.mark.parametrize("setup", [c[1] for c in _ZERO_WAIT_CAUSES],
+                         ids=[c[0] for c in _ZERO_WAIT_CAUSES])
+def test_a_zero_wait_decline_never_claims_a_wait(setup, monkeypatch, caplog):
+    """#13229 review F2: only the budget-expiry cause actually waited.
+
+    The shared message ended *"after waiting 0.25s"* for every cause. For a load
+    that already FAILED inside the cooldown, and for a spent once-per-process
+    attempt (which re-arms one background retry and declines instantly, verified
+    by `test_a_spent_load_attempt_does_not_charge_the_budget`), 0 s is waited —
+    so the line sent an operator to look for a slow load that was never slow.
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+    EmbeddingModel._reset()
+    try:
+        setup()
+        with caplog.at_level(logging.DEBUG, logger="tortoise.embeddings"):
+            assert encode_for_row(f"zerowait {time.time_ns()}", _DIM,
+                                  bounded=True) is None
+        lines = _decline_lines(caplog)
+        assert len(lines) == 1, (
+            f"this decline cause produced {len(lines)} line(s); each cause must "
+            f"report itself once"
+        )
+        msg = lines[0].getMessage()
+        assert "after waiting" not in msg, (
+            f"this cause waited 0 s, and the line says it waited: {msg!r}"
+        )
+        assert "backfill_embeddings.py" in msg, (
+            f"the repair an operator runs must still be named: {msg!r}"
+        )
+    finally:
+        EmbeddingModel._reset()
 
 
 def test_a_spent_load_attempt_does_not_charge_the_budget(monkeypatch):

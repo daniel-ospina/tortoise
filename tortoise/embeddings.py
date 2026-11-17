@@ -1137,6 +1137,28 @@ class EmbeddingModel:
     def await_write_ready(cls, budget: float) -> bool:
         """True when the model is loaded — waiting at most ``budget`` s (#13224).
 
+        Thin boolean wrapper over :meth:`await_write_ready_reason`, which is the
+        ONE predicate: a caller that only needs the verdict must not re-derive
+        the cause, and a caller that reports the cause must not re-derive the
+        verdict. See there for the full contract.
+        """
+        return cls.await_write_ready_reason(budget) is None
+
+    @classmethod
+    def await_write_ready_reason(cls, budget: float) -> str | None:
+        """``None`` when the model is loaded — else WHY, waiting at most ``budget`` s (#13224).
+
+        ⛔ THE ANSWER IS A CAUSE, NOT A BOOLEAN (#13229 review F2). There are four
+        distinct reasons a bounded write declines, and they need OPPOSITE operator
+        responses: install the extra / repair a broken load / retry later / wait
+        longer. Collapsing them into one ``False`` forced the decline's one log
+        line to assert a cause and a wait that had not happened — measured: a
+        designed absence (``not_installed``, the DOCUMENTED default install)
+        reported "still COLD … after waiting 0.25s" when nothing was waited and no
+        encoder existed to backfill with. Same-state-different-severity was the
+        second symptom: ``warm_up()`` deliberately logs INFO for that state
+        (#2952) while this path logged WARNING.
+
         ⛔ THE DEFECT THIS EXISTS TO REMOVE. ``get()`` blocks its caller for up
         to ``_LOAD_TIMEOUT_S`` (90 s) while the model loads, and during a warm
         window it blocks on ``cls._lock`` for the WHOLE load — the caller's own
@@ -1177,23 +1199,35 @@ class EmbeddingModel:
         """
         inst = cls._instance
         if inst is not None and inst._model is not None:
-            return True
+            return None
+        # ⛔ THE OPT-OUT IS DECIDED FIRST (#13229 review F1). "No background lane
+        # ⇒ nothing to bound" is a statement about the CONFIGURATION, so it does
+        # not depend on WHY a previous load failed — yet with the flag off and
+        # either of the two arms below true, this used to return ``False`` and the
+        # write then skipped ``encode_for_store`` → ``compute_embedding``
+        # entirely. That is not "no vector either way": ``compute_embedding`` is
+        # a REPLACEABLE seam (an ``EncodeCache``, a test stub), so a replacement
+        # that CAN produce a vector silently stopped being consulted for the four
+        # derived-entity folds — in exactly the two states where the embedder is
+        # not warm, which is the case the bound exists for. The arms below buy
+        # "don't pay the budget" and the opt-out already returns ready, so
+        # hoisting costs nothing and restores the documented contract.
+        if not _embedder_warmup_enabled():
+            # No background lane to hand the load to — preserve the synchronous
+            # contract (#13224: the bound must never change dev/test behaviour,
+            # and `tests/conftest.py` pins this flag off for the whole suite).
+            return None
         # ⛔ A DESIGNED ABSENCE IS PERMANENT BY CONTRACT (#2952): with the
         # `embeddings` extra absent the model can never load, so neither waiting
         # nor retrying can help. This is the DOCUMENTED DEFAULT install (a plain
         # `uv sync` is keyword-only), so answering instantly here is what keeps
         # the bound from adding 0.25 s to every write on it.
         if cls._last_failure_kind == "not_installed":
-            return False
+            return _WRITE_DECLINE_NOT_INSTALLED
         now = time.monotonic()
         if cls._last_failed_at is not None and \
                 (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
-            return False
-        if not _embedder_warmup_enabled():
-            # No background lane to hand the load to — preserve the synchronous
-            # contract (#13224: the bound must never change dev/test behaviour,
-            # and `tests/conftest.py` pins this flag off for the whole suite).
-            return True
+            return _WRITE_DECLINE_FAIL_COOLDOWN
         # Idempotent: a no-op while the lifespan pre-warm is already running,
         # and the thing that starts one when a write is first past the post.
         if cls.start_warm_up() is None:
@@ -1205,19 +1239,19 @@ class EmbeddingModel:
             # and decline without waiting, so the retry's answer is ready for the
             # next write and no write pays for a load that cannot make progress.
             cls._rearm_warm_up()
-            return False
+            return _WRITE_DECLINE_ATTEMPT_SPENT
         deadline = now + max(0.0, budget)
         while True:
             inst = cls._instance
             if inst is not None and inst._model is not None:
-                return True
+                return None
             now = time.monotonic()
             if cls._last_failed_at is not None and \
                     (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
-                return False
+                return _WRITE_DECLINE_FAIL_COOLDOWN
             remaining = deadline - now
             if remaining <= 0:
-                return False
+                return _WRITE_DECLINE_BUDGET_EXPIRED
             time.sleep(min(_WRITE_READY_POLL_S, remaining))
 
     @classmethod
@@ -1677,6 +1711,16 @@ def encode_for_store(
 #: wait; never by an operator (a bigger number just moves the stall back).
 WRITE_EMBED_BUDGET_S = 0.25
 
+#: #13229 review F2 — the four DISTINCT reasons a bounded write declines.
+#: They are not interchangeable: a designed absence needs the extra installed, a
+#: failed load needs the cause repaired, a spent attempt needs a later write, and
+#: only the last one actually waited. `await_write_ready_reason` is the ONE
+#: predicate that decides them; `_note_cold_write` reports the one it was handed.
+_WRITE_DECLINE_NOT_INSTALLED = "not_installed"
+_WRITE_DECLINE_FAIL_COOLDOWN = "fail_cooldown"
+_WRITE_DECLINE_ATTEMPT_SPENT = "attempt_spent"
+_WRITE_DECLINE_BUDGET_EXPIRED = "budget_expired"
+
 #: Poll interval for the bounded wait above — small enough that a model that
 #: becomes ready mid-budget is used, coarse enough not to spin (<= 25 wakeups).
 _WRITE_READY_POLL_S = 0.01
@@ -1805,25 +1849,47 @@ def encode_for_row(
     # stamped by `stamp_journal_embedding` with PRESENCE IS OWNERSHIP, #5004)
     # must never be dropped, since a cold `None` there is recorded as an explicit
     # CLEAR that a rebuild reproduces and no graph-side backfill can reach.
-    if bounded and not _in_replay_scope() and \
-            not EmbeddingModel.await_write_ready(WRITE_EMBED_BUDGET_S):
-        # Visible, not silent: counted on the existing "ran no model work"
-        # metering term (#4488) and logged once per process — a bulk write must
-        # not storm the log with one line per row.
-        _note_embed_skip(1)
-        _note_cold_write(WRITE_EMBED_BUDGET_S)
-        return None
+    if bounded and not _in_replay_scope():
+        decline = EmbeddingModel.await_write_ready_reason(WRITE_EMBED_BUDGET_S)
+        if decline is not None:
+            # Visible, not silent: counted on the existing "ran no model work"
+            # metering term (#4488) and logged once per process PER CAUSE — a bulk
+            # write must not storm the log with one line per row, and the cause
+            # travels with the line so the one entry an operator reads names what
+            # actually happened (#13229 review F2).
+            _note_embed_skip(1)
+            _note_cold_write(WRITE_EMBED_BUDGET_S, reason=decline)
+            return None
     return encode_for_store(content, expected_dim)
 
 
-def _note_cold_write(budget: float) -> None:
-    """Log ONCE that a row was written without a vector for a COLD embedder.
+def _note_cold_write(budget: float, *, reason: str) -> None:
+    """Log ONCE per process PER CAUSE that a row was written without a vector.
 
     The metering term above counts every occurrence; this line explains what the
     count MEANS, because "skipped" alone cannot distinguish a cold window from a
-    designed absence or a broken load (the #4488 ambiguity). Latched on module
-    state rather than a counter so a bulk write costs one line, and re-armed by
-    `EmbeddingModel._reset()` (tests) so a later window is reportable again.
+    designed absence or a broken load (the #4488 ambiguity). That distinction is
+    the whole point, so ``reason`` — the value ``await_write_ready_reason``
+    returned — selects the message AND the severity (#13229 review F2):
+
+    * ``not_installed`` — a DESIGNED absence (the ``embeddings`` extra is not
+      installed, the documented default install). Nothing was waited, no encoder
+      exists in this process, and retrying cannot help ⇒ **INFO**, matching
+      ``warm_up()``'s own recorded contract for this state (#2952). The repair is
+      to install the extra, then re-encode.
+    * ``fail_cooldown`` — a load attempt FAILED inside ``_FAIL_COOLDOWN_S`` ⇒
+      WARNING; the repair starts with the load (the ``embedder warm-up FAILED``
+      line), and only then does a backfill have an encoder to run.
+    * ``attempt_spent`` — the once-per-process attempt is spent and nothing is in
+      flight ⇒ WARNING; a fresh background attempt was re-armed, and this write
+      did NOT wait.
+    * ``budget_expired`` — a load is genuinely in flight and the budget ran out ⇒
+      WARNING; the only cause where a wait happened, so the only one that names
+      the budget it waited.
+
+    Latched per cause on module state rather than a counter so a bulk write costs
+    at most one line per cause, and re-armed by `EmbeddingModel._reset()` (tests)
+    so a later window is reportable again.
 
     ⛔ The repair named here is the graph-side one, and it is truthful only for
     the DERIVED-entity vectors this bound is scoped to: `_upsert_subject` and
@@ -1832,9 +1898,45 @@ def _note_cold_write(budget: float) -> None:
     dropped here — see `encode_for_row`'s `bounded` note.
     """
     global _COLD_WRITE_REPORTED
-    if _COLD_WRITE_REPORTED:
+    if reason in _COLD_WRITE_REPORTED:
         return
-    _COLD_WRITE_REPORTED = True
+    _COLD_WRITE_REPORTED.add(reason)
+    if reason == _WRITE_DECLINE_NOT_INSTALLED:
+        logger.info(
+            "embedder is NOT INSTALLED (designed zero-dependency path, #2952) — "
+            "this DERIVED entity row was stored WITHOUT a vector because no "
+            "encoder exists in this process (#13224). Nothing was waited and no "
+            "retry can help: install the `embeddings` extra "
+            "(`uv sync --extra embeddings`) and then re-encode graph rows with "
+            "`graph-scripts/backfill_embeddings.py` if the dense leg is wanted. "
+            "Further occurrences are counted on embed metering's `skipped` term, "
+            "not logged.",
+        )
+        return
+    if reason == _WRITE_DECLINE_FAIL_COOLDOWN:
+        logger.warning(
+            "the embedder's last load attempt FAILED within the last %.0fs — this "
+            "DERIVED entity row was stored WITHOUT a vector (#13224) and this "
+            "write did not wait for a load that cannot succeed yet. Repair the "
+            "load first (see the `embedder warm-up FAILED` line); once the vector "
+            "leg returns, re-encode the graph row with "
+            "`graph-scripts/backfill_embeddings.py`. Further occurrences are "
+            "counted on embed metering's `skipped` term, not logged.",
+            EmbeddingModel._FAIL_COOLDOWN_S,
+        )
+        return
+    if reason == _WRITE_DECLINE_ATTEMPT_SPENT:
+        logger.warning(
+            "the once-per-process embedder load attempt is already spent and "
+            "nothing is in flight — this DERIVED entity row was stored WITHOUT a "
+            "vector (#13224). No wait happened: one fresh background attempt was "
+            "re-armed for a later write, instead of charging this one for a load "
+            "that cannot make progress. Re-encode the graph row with "
+            "`graph-scripts/backfill_embeddings.py` once the vector leg returns. "
+            "Further occurrences are counted on embed metering's `skipped` term, "
+            "not logged.",
+        )
+        return
     logger.warning(
         "embedder is still COLD — this DERIVED entity row was stored WITHOUT a "
         "vector after waiting %.2fs (#13224). The row is visible to every "
@@ -1845,14 +1947,13 @@ def _note_cold_write(budget: float) -> None:
     )
 
 
-#: #13224: one-line latch for `_note_cold_write` — see there.
-_COLD_WRITE_REPORTED = False
+#: #13224: one-line-per-CAUSE latch for `_note_cold_write` — see there.
+_COLD_WRITE_REPORTED: set[str] = set()
 
 
 def _rearm_cold_write_report() -> None:
     """Test/reset hook for the #13224 cold-write latch."""
-    global _COLD_WRITE_REPORTED
-    _COLD_WRITE_REPORTED = False
+    _COLD_WRITE_REPORTED.clear()
 
 
 def encode_batch_for_store(
