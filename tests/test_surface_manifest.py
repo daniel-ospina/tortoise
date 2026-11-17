@@ -338,6 +338,43 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         f"{sum(per_keyword.values())} and the manifest derives counts.tools = {live}"
     )
 
+    # 1c. The SAME movement is also stated as ARITHMETIC, in the parenthetical that opens "(68 −
+    # 9 + 5 − 14 + 6 − 7 + 6 = 55, then the door wave's −7 … = 48, and 23 + 9 + 14 + 7 + 7 = 60)".
+    # Nothing parsed that form (#13052 review at 7752959, finding 2's second half): a movement
+    # stated as arithmetic is a claim with no machine behind it, and the earlier pin only read the
+    # "… → …" form, so an error here stayed green. Every equation is evaluated against its own
+    # stated result, and the two results that ARE claims about this head are bound to the manifest.
+    paren_start = canonical.index("(68 − 9 + 5")
+    arithmetic = canonical[paren_start : canonical.index("SERVED population", paren_start)]
+    equations = re.findall(r"(\d+(?:\s*[−+-]\s*\d+)+)\s*=\s*(\d+)", arithmetic)
+    assert len(equations) >= 2, (
+        f"canonical-mcp-tools.md's composed-surface parenthetical states {len(equations)} "
+        f"evaluable equation(s); it must state the advertised and the retired totals"
+    )
+    for lhs, rhs in equations:
+        computed = eval(lhs.replace("−", "-"), {"__builtins__": {}}, {})  # digits and ± only
+        assert computed == int(rhs), (
+            f"canonical-mcp-tools.md states `{lhs} = {rhs}`, which evaluates to {computed} — "
+            f"the composed arithmetic does not add up"
+        )
+    door_wave = re.search(r"the door wave's\s*−(\d+) with no container row arriving\s*=\s*(\d+)", arithmetic)
+    assert door_wave, (
+        "canonical-mcp-tools.md's parenthetical stopped stating the door wave's subtraction and "
+        "its result; that is half the movement this container's own arithmetic records"
+    )
+    assert int(door_wave.group(2)) == live, (
+        f"canonical-mcp-tools.md says the door wave lands the surface on {door_wave.group(2)} "
+        f"advertised tools; the manifest derives {live}"
+    )
+    assert int(equations[0][1]) - int(door_wave.group(1)) == live, (
+        f"canonical-mcp-tools.md's own terms stop composing: {equations[0][1]} − "
+        f"{door_wave.group(1)} = {int(equations[0][1]) - int(door_wave.group(1))}, not {live}"
+    )
+    assert int(equations[-1][1]) == retired, (
+        f"canonical-mcp-tools.md's retired-forward arithmetic ends on {equations[-1][1]}; the "
+        f"manifest carries {retired}"
+    )
+
     # 2. The live surface's MOVEMENTS — they COMPOSE, so the rule is the chain.
     # The doc records the whole history in one blockquote and states each movement with a
     # different verb: `moved the live surface 72 → 68`, then `took it 68 → 60`, `took it
