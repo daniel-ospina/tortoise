@@ -47,6 +47,9 @@ import _live_utils  # noqa: E402
 
 PYTHON_CI = ROOT / ".github" / "workflows" / "python-ci.yml"
 PMV = ROOT / ".github" / "workflows" / "post-merge-validation.yml"
+CYPHER_DIFF = ROOT / ".github" / "workflows" / "cypher-diff.yml"
+EVAL_SUITE = ROOT / ".github" / "workflows" / "eval-suite-manual.yml"
+WORKFLOW_DIR = ROOT / ".github" / "workflows"
 ACTION_DIR = ROOT / ".github" / "actions"
 
 # The one engine pin every provisioned job resolves to (#6386). Named once so
@@ -75,6 +78,18 @@ PROVISIONED_JOBS = [
     (PYTHON_CI, "test-concurrency-falkor", "tortoise", "false"),
     (PYTHON_CI, "test-track-b", "tortoise_test_matrix", "false"),
     (PMV, "validate", "tortoise_test_matrix", "true"),
+    # #13098 review P1: this workflow was ADDED with a fixed-port `services:`
+    # block and the guard was parametrised over a literal two-file list, so the
+    # existing pin was green by ABSENCE — it never read the file that carried
+    # the defect. The row below makes the census see it; the population itself is
+    # now derived (`test_the_services_ban_covers_every_workflow_in_the_directory`).
+    (CYPHER_DIFF, "differential", None, "false"),
+    # A PRE-EXISTING caller that no row named (`#13098` review P1's other half):
+    # `test_every_falkordb_provision_call_has_a_contract_row` found it the moment
+    # the population stopped being this list. It passes no `with:` at all, so it
+    # takes the action's defaults — `uri_graph` empty (its URI is computed in a
+    # later step) and the passwordless legacy service started.
+    (EVAL_SUITE, "eval-suite", None, "true"),
 ]
 
 
@@ -304,16 +319,9 @@ def test_every_provisioned_job_pins_the_v4206_image():
         )
 
 
-@pytest.mark.parametrize("wf_path", [PYTHON_CI, PMV], ids=["python-ci", "pmv"])
-def test_no_fixed_port_service_mapping_anywhere(wf_path):
-    text = wf_path.read_text()
-    assert "    services:" not in text, f"{wf_path.name}: a services: block came back"
-    for mapping in ("- 6379:6379", "- 16379:6379"):
-        assert mapping not in text, (
-            f"{wf_path.name}: the fixed host-port mapping {mapping!r} is the "
-            "#6673 collision; the port must be Docker-assigned and "
-            "loopback-bound (-p 127.0.0.1:0:6379)"
-        )
+# ⛔ THIS ONE POPULATION REPLACED A `[python-ci.yml, post-merge-validation.yml]`
+# LIST, which is why it is stated only here: the list form was green over
+# `cypher-diff.yml`'s fixed-port `services:` block (`#13098` review P1).
 
 
 def test_published_falkordb_compose_ports_bind_loopback():
@@ -349,6 +357,78 @@ def test_published_falkordb_compose_ports_bind_loopback():
     assert checked, (
         "no compose file publishes a FalkorDB port — the guard no longer "
         "covers the services it exists for"
+    )
+
+
+def test_the_services_ban_covers_every_workflow_in_the_directory():
+    """⛔ THE POPULATION IS THE DIRECTORY, NOT A LIST (#13098 review P1).
+
+    This replaced a guard parametrised over a literal
+    `[python-ci.yml, post-merge-validation.yml]`. That parametrisation was green
+    while `cypher-diff.yml` — a NEW workflow, in this same PR — shipped a
+    fixed-port `services:` block on `6379:6379` **and** `5432:5432`. It could not
+    see the file: a pin whose population has to be remembered is not a pin — the
+    file that carries the defect is exactly the file nobody remembered to add,
+    so the guard reads green over every file EXCEPT the one that would fail it.
+
+    Two pins are merged here rather than kept side by side: a raw-text scan AND a
+    YAML parse of every job. Two populations over the same rule is how the
+    original drifted, so there is exactly one.
+    """
+    workflows = sorted(p for p in WORKFLOW_DIR.glob("*.yml"))
+    workflows += sorted(p for p in WORKFLOW_DIR.glob("*.yaml"))
+    assert workflows, f"no workflow matched {WORKFLOW_DIR}/ — the guard is vacuous"
+    assert CYPHER_DIFF in workflows, (
+        "the enumerated population must contain the workflow that carried the "
+        "fixed-port block; if it does not, this test is reading a different tree"
+    )
+
+    fixed = {
+        "- 6379:6379": "the #6673 FalkorDB collision",
+        "- 16379:6379": "the #6673 passwordless-legacy collision",
+        "- 5432:5432": "the #9551 record-Postgres collision (same shared daemon)",
+    }
+    for path in workflows:
+        text = path.read_text()
+        doc = yaml.safe_load(text) or {}
+        for job_name, job in (doc.get("jobs") or {}).items():
+            assert "services" not in (job or {}), (
+                f"{path.name}:{job_name}: a `services:` block is back. It pins a "
+                "FIXED host port, and every self-hosted runner here shares one "
+                "Docker daemon — that is the #6673 collision (a false red in "
+                "~9s with zero tests). Provision through "
+                "`.github/actions/falkordb-provision` / `postgres-provision`."
+            )
+        for mapping, why in fixed.items():
+            assert mapping not in text, (
+                f"{path.name}: the fixed host-port mapping {mapping!r} is {why}; "
+                "the port must be Docker-assigned and loopback-bound "
+                "(-p 127.0.0.1:0:<container port>)"
+            )
+
+
+def test_every_falkordb_provision_call_has_a_contract_row():
+    """The other half of the absence: a NEW caller must not skip the contract.
+
+    Deriving the `services:` population does not by itself force a new job into
+    `PROVISIONED_JOBS`, so a job could provision ephemerally and still never be
+    checked for `legacy`/`uri_graph`/the engine pin. This asserts the set of
+    jobs that actually call `falkordb-provision` — read from the workflows, not
+    from the list — is exactly the set the contract rows name.
+    """
+    declared = {(p.name, j) for p, j, _u, _l in PROVISIONED_JOBS}
+    found: set[tuple[str, str]] = set()
+    for path in sorted(WORKFLOW_DIR.glob("*.y*ml")):
+        doc = yaml.safe_load(path.read_text()) or {}
+        for job_name, job in (doc.get("jobs") or {}).items():
+            for step in (job or {}).get("steps") or []:
+                if str(step.get("uses", "")).endswith("falkordb-provision"):
+                    found.add((path.name, job_name))
+    assert found, "no workflow calls falkordb-provision — this census is vacuous"
+    assert found == declared, (
+        "the falkordb-provision callers and the contract rows disagree: "
+        f"uncontracted={sorted(found - declared)} "
+        f"stale-rows={sorted(declared - found)}"
     )
 
 

@@ -1543,6 +1543,28 @@ class EventLog:
         ``POSITION`` block above.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # ⛔ THE RESERVED POSITION NAME IS STRIPPED AT THE ONE CHOKEPOINT (#13043
+        # review P2-1). `seq` is `public.journal_event`'s POSITION column: a
+        # top-level `seq` on a journal line is a property nothing reads and one
+        # thing misreads — `_carried_position` treated its PRESENCE as a claim
+        # about the record's ordinal, so a line carrying one (the pre-
+        # reservation SDK put it there for `update_point(pid, seq=…)`, and a
+        # `:Session` copy carries one) could refuse its own record's write. The
+        # reservation was enforced at each prop INTAKE instead, which is why it
+        # took several review cycles and missed `_skip_sanitize=True` doors; this
+        # is the ONE function every journal write goes through, so the name can
+        # no longer reach a line at all.
+        #
+        # A COPY, not a mutation: the caller still owns the dict it passed and a
+        # producer that inspects it after the append must see what it built. Cost
+        # is nil on the healthy path (the key is absent, so the object is reused
+        # and `json.dumps` sees exactly what it saw before).
+        #
+        # `isinstance` first: `append(None)` is a supported call (it writes a
+        # JSON `null`, pinned by `tests/test_log.py::test_append_none_writes_null`),
+        # and a non-mapping record has no key to reserve.
+        if isinstance(event, dict) and "seq" in event:
+            event = {k: v for k, v in event.items() if k != "seq"}
         # #11821 P0: COMPACT separators. The journal is byte-metered and never
         # pretty-printed (nothing reads it back as text), so the default
         # ``(", ", ": ")`` spent ONE space per separator: measured on the
