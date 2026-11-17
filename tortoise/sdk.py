@@ -365,10 +365,14 @@ def validate_goal_state(value: object) -> object:
         ``_sanitize_props`` backstop.
 
     ``None`` is LEGAL and is returned unchanged: it is the explicit "no
-    achievement state". Measured (#13110) — on the CREATE fold a ``None`` is a
-    no-op that PRESERVES a stored state (so an idempotent re-create cannot wipe
-    one, the #9572 clobber class), while the UPDATE door (``update_knowledge``)
-    clears it. Both are the SDK's contract; this function does not change it.
+    achievement state". ⛔ ``None``'s effect on a re-write is the FOLD's, not
+    this function's, and the two folds DIFFER — measured (#13110): the Object/
+    entity fold PRESERVES a stored state on a ``None`` (so an idempotent re-create
+    cannot wipe one, the #9572 clobber class), while the Point dedup fold
+    (``create_point`` → ``update_point(pid, **props)``) DELETES the property.
+    ``create_point`` therefore POPS a ``None`` before the fold (same rule as
+    ``mentions``, #11239), and ``update_knowledge(…, goalState=None)`` is the
+    documented clear. A create door never clears.
 
     Sits beside ``GOAL_STATE_VALUES`` on purpose: the set and its rule are one
     object, so a widening edit cannot update one and miss the other.
@@ -15359,6 +15363,19 @@ class TortoiseSDK:
         # than forwarded.
         if props.get("mentions") is None:
             props.pop("mentions", None)
+        # #13110 (review round 3): the SAME rule for the goal's achievement
+        # state, and the same measured failure. A CREATE must not DELETE: an
+        # explicit ``goalState=None`` reaches the dedup fold's
+        # ``self.update_point(pid, **props)`` below, where a `None` in a generic
+        # prop REMOVES the property — measured: `create_point(goalState=None,
+        # dedup=True)` on an existing ``met`` goal left ``p.goalState`` UNSET,
+        # while ``create_object(goalState=None)`` on the Object twin PRESERVED
+        # it. The door-level guards in `hosted_api` cover only the two REST
+        # spellings; this is the one place that covers every channel (the MCP
+        # ``goalState=`` parameter, the ``props`` bag, and a direct SDK call).
+        # `update_knowledge(…, goalState=None)` is the documented clear.
+        if props.get("goalState") is None:
+            props.pop("goalState", None)
         # #10122: a `name` the index does not hold is a stored-but-unfindable
         # identifier — advise here, at the door that accepted it (after the
         # flatten, so the coverage check sees the stored `search_keys` form).

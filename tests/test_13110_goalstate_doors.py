@@ -199,11 +199,15 @@ def test_rest_re_create_without_the_field_does_not_wipe_a_stored_state(tmp_path)
 
 def test_rest_explicit_null_is_accepted_and_clearing_stays_the_update_door(tmp_path):
     """`None` is a LEGAL value (never a 4xx) — it is the explicit "no
-    achievement state". Measured SDK contract, which this door must not
-    re-invent: on the CREATE fold a named `None` preserves a stored state (so a
-    re-create cannot clobber), while `update_knowledge(…, goalState=None)`
-    CLEARS it. Pinned here so a later "None should clear" reading of the issue
-    cannot silently turn the create door into a wiping door."""
+    achievement state" — and a CREATE door must not clear with it.
+
+    ⛔ The effect of `None` on a re-write belongs to the FOLD, and the folds
+    DIFFER (measured, #13110): the Object/entity fold PRESERVES, while the Point
+    dedup fold DELETES (`create_point` → `update_point`, which is why
+    `create_point` now pops a `None`, the `mentions` rule). So "the SDK would
+    have preserved it anyway" is NOT the invariant — a create door never clears
+    is. `update_knowledge(…, goalState=None)` is the clear, and is pinned below.
+    """
     with _graph(str(tmp_path / "rest-null.db")) as ha, _rest_client() as client:
         first = client.post("/v1/objects", json={
             "name": "NULLED", "objectKind": "goal", "goalState": "active"})
@@ -279,6 +283,50 @@ def test_rest_points_re_create_without_the_field_does_not_wipe_it(tmp_path):
         assert nulled.status_code == 200, nulled.text
         assert nulled.json()["id"] == node_id
         assert _stored(ha, node_id) == "met"
+
+
+def test_no_create_channel_can_erase_a_stored_goal_state(tmp_path):
+    """The rule at the FOLD, not just at the doors (#13110 review round 3).
+
+    A door-level `is not None` guard covers only the spelling that door owns. The
+    erase lives one level down, where `create_point`'s dedup fold calls
+    `update_point(pid, **props)` and a generic `None` REMOVES the property — so
+    it is reachable through three channels, all of them supported: the MCP
+    `goalState=` parameter, the MCP `props` bag, and a direct SDK call. Measured
+    before the fix: `create_point("goal", …, goalState=None, dedup=True)` on an
+    existing `met` goal left `goalState` UNSET, while `create_object(goalState=
+    None)` on the Object twin preserved it.
+    """
+    from tortoise import mcp_server
+
+    with _graph(str(tmp_path / "fold-null.db")) as ha, _mcp_ctx():
+        sdk = ha._make_sdk(namespace=_ORG)
+        try:
+            # channel 3 — the SDK directly
+            a = sdk.create_point("goal", "fold goal A", goalState="met",
+                                 dedup=True)
+            sdk.create_point("goal", "fold goal A", goalState=None, dedup=True)
+            assert sdk.get_entity(a["id"]).get("goalState") == "met"
+        finally:
+            sdk.close()
+
+        # channel 2 — the MCP `goalState=` parameter (dedup defaults True)
+        pt = mcp_server.tortoise_create_point("goal", "fold goal B",
+                                              goalState="blocked")
+        assert not pt.get("error"), pt
+        again = mcp_server.tortoise_create_point("goal", "fold goal B",
+                                                 goalState=None)
+        assert not again.get("error"), again
+        assert _stored(ha, pt["id"]) == "blocked"
+
+        # channel 1 — the MCP `props` bag, which is a SUPPORTED channel
+        prop_pt = mcp_server.tortoise_create_point(
+            "goal", "fold goal C", props={"goalState": "guideline"})
+        assert not prop_pt.get("error"), prop_pt
+        wiped = mcp_server.tortoise_create_point(
+            "goal", "fold goal C", props={"goalState": None})
+        assert not wiped.get("error"), wiped
+        assert _stored(ha, prop_pt["id"]) == "guideline"
 
 
 # ── Door 2 — MCP `tortoise_create_object` ───────────────────────────────────
