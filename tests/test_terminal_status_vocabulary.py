@@ -20,8 +20,15 @@ This file pins four things:
    inherit the derivation by construction. ⛔ Since `#11824` S0 the WRITE set
    and the READ set are deliberately NOT the same set, so the pre-S0 identity
    ``TERMINAL_STATUS_VALUES == POINT_STATUS_VALUES - CURRENT_POINT_STATUS_VALUES``
-   is retired by that decision (design §8: "what a reader hides is wider than
-   what a writer may create"), not loosened here.
+   no longer holds **while ``tortoise/live.py`` keeps its pre-S2 split** — that
+   is a partitioning artefact in one module, NOT something a decision retired.
+   `docs/plans/2026-11-16-state-lifecycle-implementation.md` §S2 names this very
+   identity as *"what FORCES the ``live.py`` edit"*, and §S4 repeats it, both
+   restoring the equality by moving the legacy words into
+   ``LEGACY_NON_CURRENT_STATUS_VALUES`` with ``TERMINAL_EXCLUDED_STATUSES`` held
+   constant. The equality's absence here licenses no one to leave the split; do
+   not read this file as its retirement (design §8: "what a reader hides is
+   wider than what a writer may create").
 2. **No reader re-declares a status literal** — an AST scan over the fixed
    consumers' executable string constants, so an inline ``IN [...]`` subset
    cannot reappear in a query body (the exact shape of the defect).
@@ -96,8 +103,15 @@ def test_terminal_set_is_the_vocabularys_terminal_half() -> None:
     ``superseded``) while the READ set keeps every legacy word a reader must
     still hide (``retracted``/``outdated``/``archived``), because stored rows
     keep whatever they hold and nothing is backfilled (`#11824` §1, design §8).
-    The equality is therefore retired by the decision of record, and what
-    replaces it is the pair of properties that decision implies.
+    ⛔ That equality is NOT retired by the decision — it is **unsatisfiable while
+    ``live.py`` holds its pre-S2 split**, and the plan of record names this very
+    assertion as the thing that forces the re-partition:
+    ``docs/plans/2026-11-16-state-lifecycle-implementation.md`` §S2 — *"it is
+    what FORCES the ``live.py`` edit … true only if ``retracted``/``outdated``
+    leave the terminal set and ``deprecated`` joins it — with
+    ``TERMINAL_EXCLUDED_STATUSES`` held constant"* — and §S4 repeats it for
+    ``archived``. Until S2 and S4 land, what holds instead is the pair of
+    properties the split implies.
 
     ⚠️ A narrowing of the READ set is NOT caught here — ``TERMINAL_STATUS_VALUES``
     and ``TERMINAL_EXCLUDED_STATUSES`` are derived from each other, so they move
@@ -109,16 +123,17 @@ def test_terminal_set_is_the_vocabularys_terminal_half() -> None:
     writable_terminal = writable - CURRENT_POINT_STATUS_VALUES
     # every word a writer may set is CURRENT or NOT-CURRENT — a total split
     assert writable == CURRENT_POINT_STATUS_VALUES | writable_terminal
-    # a word a writer may set as an ending is never served as current...
+    # a word a writer may set as an ending is never served as current (design §8:
+    # "what a reader hides is wider than what a writer may create"). Its ABSOLUTE
+    # width cannot be checked by derivation in this file: EXCLUDED is BUILT from
+    # TERMINAL_STATUS_VALUES, so a shrinking READ set moves both and this `<=`
+    # stays true — that literal pin is `tests/test_lifecycle_guards.py:80-82`.
     assert writable_terminal <= TERMINAL_EXCLUDED_STATUSES, (
         "a status a writer may set is served as current: "
         f"{sorted(writable_terminal - TERMINAL_EXCLUDED_STATUSES)}"
     )
-    # ...and the set a reader HIDES is never narrower than the endings a writer
-    # may set (design §8) — the relation S0's split preserves. Its ABSOLUTE width
-    # cannot be checked by derivation in this file: EXCLUDED is BUILT from
-    # TERMINAL_STATUS_VALUES, so a shrinking READ set moves both and the equality
-    # above stays true — that literal pin is `tests/test_lifecycle_guards.py:80-82`.
+    # …and the opposite end holds too: no word a writer may create as CURRENT is
+    # also in the hide-set, so the split cannot serve a live row as already ended.
     assert not (CURRENT_POINT_STATUS_VALUES & TERMINAL_EXCLUDED_STATUSES)
 
 
