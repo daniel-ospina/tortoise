@@ -841,7 +841,7 @@ def _quietly(fn) -> None:
 
 
 def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
-    """The damage disclosure EVERY verb owes, in one place (review P1, #13210).
+    """The damage disclosure, in one place (review P1, #13210).
 
     ⛔ `plan` published it from the beginning; `status` and `apply` did not, so
     the one verb an operator chains on could say `fully_consumed: true` over a
@@ -854,38 +854,56 @@ def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
     property rather than a comment: it drives all three renders over one damaged
     journal.
 
-    ⛔ TWO DAMAGE CLASSES, TWO SENTENCES (review F2, #13275). One sentence for
-    both was FALSE for one of them: a **mid-file** line was a record the journal
-    held and lost, so skipping it SHIFTS every later position and voids a
-    completeness claim; a **torn fragment** was never a complete record (a SIGKILL
-    mid-append, or a fragment sealed by the following append — `log.py`'s
-    `_keep_torn`, #5917), so the complete-record sequence is UNSHIFTED. Printing
-    "NOT a completeness claim" over a torn-only read made the render contradict
-    the payload of the same run (`fully_consumed: true` in the JSON, "not a
-    claim" in the text) — the "report lying about what it measured" class this
-    series exists to remove. The tail class still MATTERS, just not positionally:
-    a dropped fragment can REVIVE removed state, which is the replay's #3316
-    check (`torn_tail_revival_records`) and #13280's fold gap — named, not
-    silently absorbed.
+    ⛔ TWO DAMAGE CLASSES, TWO SENTENCES (review P2 #13272, F2 #13275). One
+    sentence for both was FALSE for one of them — see the inline note on the body
+    below. Printing "NOT a completeness claim" over a torn-only read made the
+    render contradict the payload of the same run.
 
     The `None` arm is a CONTRACT, not a layout: both readers now report both
     counters (`read_all_segments_reporting_damage`, `EventLog.read_all`), so only
     a hand-built `Journal` reaches it, and "no counter" must never render as "no
     damage".
+
+    ⚠ WHAT `apply` DOES WITH WHAT IT NOW DISCLOSES IS STILL OPEN (review P2
+    #13272; #13280). `apply` refuses `--salvage`, and a non-salvage read RAISES on
+    MID-FILE damage (`journal_segments.py:949-953`) — so a fold cannot skip a
+    RECORD that was never sealed. But a torn fragment is tolerated by BOTH readers:
+    the segmented one only warns (`:954-957`), and `EventLog.read_all` tolerates a
+    malformed line at EOF (`log.py:2491-2493`) AND a MID-FILE fragment sealed by
+    `append` (`:2494-2498`) — both via `_keep_torn` (`:2508-2525`), where the
+    fragment is SKIPPED, counted in `torn_trailing_count`, and its full text kept
+    in `torn_trailing_raw` for the #3316 classifier. So `apply` can DISCLOSE a
+    dropped fragment now, but it still never consults
+    `torn_tail_revival_records()` — the #3316 contract that a torn tail whose loss
+    could REVIVE removed state must be refused before any wipe or fold
+    (`log.py:2355-2365`). That gap is pre-existing and out of this file's scope;
+    this docstring states it instead of asserting the state cannot occur, because
+    a maintainer reading "impossible" would not go looking for it.
     """
     if j["corrupt_lines"] is None or j["torn_tails"] is None:
-        return ["  ⚠ damage NOT REPORTED: this journal's reader returned no damage "
-                "counters, so this run cannot account for input"]
+        return ["  ⚠ damage counters NOT REPORTED: this read returned no counters "
+                "(a `Journal` built outside `read_journal`), so damage here "
+                "is unmeasured rather than absent"]
+    # ⛔ TWO DAMAGE CLASSES, TWO DIFFERENT FACTS (review P2 #13272). A mid-file
+    # skipped line SHIFTS every later position, so it voids the completeness
+    # claim; a torn TAIL fragment was never a complete record, so it shifts
+    # nothing and `fully_consumed: true` is correct for that input. Rendering one
+    # sentence for both made the payload's `fully_consumed` contradict the render
+    # of the SAME input (measured: torn-only, `fully_consumed: true` where the
+    # text said "this is NOT a completeness claim"). The tail class still matters —
+    # a dropped REMOVAL record is #3316's check — so it is named, just not as a
+    # positional lie.
     lines: list[str] = []
     if j["corrupt_lines"]:
-        lines.append(f"  ⚠ damaged input: {j['corrupt_lines']} mid-file line(s) — "
-                     f"a SKIPPED line SHIFTS every later record's position, so "
-                     f"this is NOT a completeness claim")
+        lines.append(
+            f"  ⚠ damaged input: {j['corrupt_lines']} mid-file line(s) — a "
+            f"SKIPPED line SHIFTS every later record's position, so this is NOT "
+            f"a completeness claim")
     if j["torn_tails"]:
-        lines.append(f"  ⚠ torn tail: {j['torn_tails']} fragment(s) tolerated — a "
-                     f"fragment was never a complete record, so positions are "
-                     f"UNSHIFTED; a dropped fragment can still REVIVE removed "
-                     f"state, which the fold must check (#3316, #13280)")
+        lines.append(
+            f"  ⚠ torn tail: {j['torn_tails']} fragment(s) — a tail fragment was "
+            f"never a complete record, so positions are UNSHIFTED; a dropped "
+            f"removal record is #3316's check (#13280)")
     return lines
 
 
@@ -1220,40 +1238,20 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
                     f"they are not the same journal")
     else:
         remaining = len(journal.records) - (cp.next_seq - 1)
-    # ⛔ A READ WHOSE COMPLETENESS IS UNKNOWN CANNOT COMPLETE ANYTHING (review P1).
-    # A mid-file line that was SKIPPED shifts every later position — so
-    # `remaining` can reach 0 while the record is missing that record's mutation.
-    # `fully_consumed` is the field a chain gates on, so it takes the same `None`
-    # the cut-over and the mismatch arms take, and the damage lines say why.
-    #
-    # ⛔ THE PREDICATE IS THE COUNTERS — not the MODE and not the LAYOUT
-    # (review P2/P3 of #13210, then F1/F2 of #13275).
-    #
-    # * NOT the mode: `--salvage` is how the operator ASKED to read; it is not
-    #   evidence that anything was skipped. `--salvage` on a clean journal skips
-    #   nothing, and reporting that read as unaccountable is a sentence the same
-    #   payload's `corrupt_lines: 0` denies. (#13272 pins `journal.salvage`
-    #   alone and therefore still withdraws the claim from a clean salvage read;
-    #   this PR keeps the exact reading.)
-    # * NOT the layout: `corrupt is None` used to mean "this layout's reader
-    #   returns no counters", and it was `None` for EVERY segmented read — i.e.
-    #   for every `<graph dir>`, the documented `--journal` form. That made
-    #   `fully_consumed: None` the answer for every directory-backed graph,
-    #   including a pristine one (#13269). The counters are measured now
-    #   (`read_all_segments_reporting_damage`), so `damage_unreported` is the
-    #   hand-built-`Journal` contract and nothing else.
-    # * MID-FILE damage withdraws the claim; a TORN FRAGMENT does not. A skipped
-    #   line was a record the journal HELD and lost (positions shift); a torn
-    #   fragment was never a complete record (`log.py::_keep_torn`, #5917 — a
-    #   sealed fragment never costs the record appended after it), so the
-    #   complete-record sequence is unshifted and `fully_consumed: true` is
-    #   supportable — what the fragment can still do is REVIVE removed state,
-    #   which is the replay's #3316 check and #13280's fold gap, not a positional
-    #   one. Keying this on `torn` too would withdraw the claim on the commonest
-    #   damage case (a SIGKILL mid-append) where nothing is shifted, and it made
-    #   the render contradict its own payload.
-    damage_unreported = journal.corrupt is None or journal.torn is None
-    completeness_unknown = damage_unreported or bool(journal.corrupt)
+    # ⛔ A READ THAT SKIPPED A LINE CANNOT COMPLETE ANYTHING (review P1). `salvage`
+    # means a mid-file line was SKIPPED, and a skipped line SHIFTS every later
+    # position — so `remaining` can reach 0 while the record is missing that
+    # record's mutation. `fully_consumed` is the field a chain gates on, so it
+    # takes the same `None` the cut-over and the mismatch arms take, and the
+    # damage lines say why.
+    # ⚠ `salvage` ALONE, not `salvage or corrupt is None` (review P2 #13210): an
+    # UNREPORTED counter is not an UNKNOWN completion. The segmented reader is
+    # strict unless asked to salvage, so a `<graph dir>` read that returns has
+    # lost no COMPLETE record (a torn tail fragment can still be dropped — it
+    # shifts no position, and #13280 carries it), so keying on `corrupt is None`
+    # withdrew the claim on every directory read, which is a documented input
+    # (`--journal <graph dir>`).
+    completeness_unknown = journal.salvage
     payload = {
         "verb": "status",
         "org_id": args.org_id,
@@ -1275,11 +1273,6 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
         #: True when this read cannot support a completeness claim at all — the
         #: reason `fully_consumed` is `None`, stated so a caller need not infer it.
         "completeness_unknown": completeness_unknown,
-        #: True when the READ returned no damage counters — the hand-built
-        #: `Journal` contract, not a layout: both readers report both counts, so
-        #: this is `False` for every real read and the report must not describe
-        #: the input as damage it saw.
-        "damage_unreported": damage_unreported,
     }
     text = "\n".join([
         f"journal: {journal.path} — {len(journal.records)} records"
@@ -1293,10 +1286,8 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
          "not apply" if allocated
          else f"events remaining: unknown — {mismatch}" if mismatch is not None
          else f"events remaining: {max(0, remaining)}"),
-        *(["complete: UNKNOWN — this read reported no damage counters, so it "
-           "cannot account for input"] if damage_unreported
-          else ["complete: UNKNOWN — this read SKIPPED damaged input, so it is "
-                "not a completeness claim"] if completeness_unknown else []),
+        *(["complete: UNKNOWN — this read SKIPPED damaged input, so it is "
+           "not a completeness claim"] if completeness_unknown else []),
         "cutover: " + ("none (positions are the journal's)" if cursor is None
                        else f"cursor present (seq {cursor[0]}, mode {cursor[1]})"),
     ])
