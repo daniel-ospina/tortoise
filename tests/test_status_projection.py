@@ -3172,7 +3172,8 @@ class TestNonScalarStatus12869:
             #     payload would pin that site and pass with this one reverted
             #     (MEASURED: its message is the object door's "which value
             #     lands"). A subject-legal payload (`status='live'` + a second
-            #     rendering key) DOES route and reach this raise.
+            #     rendering key) DOES route and reach this raise — that claim is
+            #     the SECOND half of this arm, executed rather than asserted.
             with pytest.raises(ValueError) as ei:
                 sdk.create_subject(RaisingReprStr("rr-subj-amb"),
                                    "core:organization",
@@ -3181,9 +3182,43 @@ class TestNonScalarStatus12869:
             assert "RaisingReprStr" in str(ei.value), (
                 "the Subject door's ambiguity refusal did not use "
                 "`_refusal_repr` on its name: " + str(ei.value))
+            # ⛔ THE MECHANISM, NOT ONLY THE OPERAND (#12910 fix lane). Deleting
+            # the ambiguity guard leaves the NEXT check raising `ValueError`
+            # (`Invalid status None for a :Subject`) — MEASURED — so the name
+            # assertion above covers that mutation only by accident: it reds
+            # because that message happens not to name the operand. Naming the
+            # raise makes the discriminator explicit and independent of the
+            # fallback message's wording.
+            assert "CONFLICTING status write" in str(ei.value), (
+                "the Subject door's ambiguity GUARD did not fire: "
+                + str(ei.value))
             assert "repr-boom" not in str(ei.value)
             assert _carrier_row(sdk, "Subject", "rr-subj-amb") is None, (
                 "a refused Subject create left a node behind")
+
+            #     …and the ROUTED entry reaches the SAME raise, which is the
+            #     sentence above as an executable pin. `_kind_layer_note` sends
+            #     an object-declared create to the Subject layer when the
+            #     first-wins status is subject-legal, so this arm proves the
+            #     entry a `create_object(type='object')` caller actually takes —
+            #     not one the `create_subject` arm could stand in for. Reverting
+            #     the site to `!r` reds it (`RuntimeError: id-repr-boom`,
+            #     MEASURED) and DELETING the `raise` reds it `DID NOT RAISE`
+            #     (MEASURED), so the routed entry cannot silently drift back to
+            #     the Object door's guard — which is the vacuous shape this note
+            #     warns about, arriving from the other side.
+            with pytest.raises(ValueError) as ei:
+                sdk.create_object(RaisingReprStr("rr-subj-route"),
+                                  "core:organization",
+                                  **{"status": "live",
+                                     KHash("status"): "archived"})
+            assert "RaisingReprStr" in str(ei.value), (
+                "the ROUTED Subject-door refusal did not use `_refusal_repr` "
+                "on its name: " + str(ei.value))
+            assert "id-repr-boom" not in str(ei.value)
+            for _lbl in ("Subject", "Object"):
+                assert _carrier_row(sdk, _lbl, "rr-subj-route") is None, (
+                    "a refused routed create left a " + _lbl + " row")
 
             # (f) the BUNDLE validator's non-string refusal (`sdk.py:31271`) —
             #     the SIXTH site, found by the review of THIS delta. The message
