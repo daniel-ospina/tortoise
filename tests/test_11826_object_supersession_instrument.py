@@ -1076,7 +1076,12 @@ def test_a_chain_whose_tail_is_terminal_names_no_live_head(sdk):
             "LIVE head of that chain" not in text, \
             "no live head exists, so naming one sends the write nowhere: " + text
         assert "is not a head either" in text, text
-        assert "'retracted'" in text, text
+        # ⚠️ #11824 S0: the instrument names the STORED word, and `retracted` is a
+        # DECLARED SYNONYM stored as `deprecated` (the write door canonicalises
+        # silently). The row is still terminal, which is what the sentence is
+        # about; asserting the caller's spelling would pin the door's INPUT here,
+        # which is not this module's subject.
+        assert "'deprecated'" in text, text
     # ...and the escape is named, so the reader is not left without a repair.
     assert "re-point onto whatever now carries the claim or delete the edge" in fix, fix
 
