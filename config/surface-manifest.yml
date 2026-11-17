@@ -1211,7 +1211,10 @@ rows:
 - name: tortoise_query
   # ⛔ #13075 changed this handler IN PLACE (`a09a0b3840`, "the currency rule reads the position
   # axis" — its diff is three hunks INSIDE `def tortoise_query`, so the handler was EDITED, not
-  # relocated) and left `served_from` at the value #12726 had hand-refreshed,
+  # relocated; it is four hunks in the file, the fourth being the module-level
+  # `from tortoise.live import is_terminal_status` import, so that count is scoped to the handler
+  # and no reader should take it as the file's total — a prior round enumerated three and
+  # silently dropped `@@ -37`) and left `served_from` at the value #12726 had hand-refreshed,
   # so `surface_manifest.py check --provenance-strict` has been red on `main` ITSELF since then —
   # the same FAIL row measured on a pristine worktree of `main` BOTH before #13144 (`55ec2c71b1`)
   # and at the head this branch is re-cut onto (`3d437429e9` — the re-cut whose only changed file
