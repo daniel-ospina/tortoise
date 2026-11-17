@@ -5130,7 +5130,11 @@ surfaces:
   # and never reads this file (`grep -c ci-surfaces tools/surface-guard.py
   # tools/surface_manifest.py` -> 0, 0), and its job carries no `needs:` on
   # manifest-integrity — so `surface-guard` is red on main for an UNRELATED reason
-  # (`tortoise_query`'s `served_from` digest, #13112) and this row cannot fix it.
+  # (`tortoise_query`'s `served_from` digest drifted from its recorded
+  # '5864fd98a914f746' to '59f8f7e5957d81d8'; tracked on #13139, and which commit did it
+  # is NOT established here — `git log -1 -- tortoise/mcp_server.py` names the last
+  # commit to touch the file, not the one that moved the digest) and this row cannot
+  # fix it.
   # `core` because its subjects are `tortoise/live.py` (the predicate) and
   # `tortoise/pipeline.py` (the position axis) — both EXACT `core` selections (measured:
   # `--changed-files tortoise/live.py` -> surfaces: ['core']); its `tortoise/sdk.py` /
