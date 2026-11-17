@@ -41,9 +41,19 @@ and this test should be updated IN THE BATCH THAT UNBLOCKS IT, not silently:
     (`tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`, #10914);
   · `issue_insight`, `session_context`, `search` carry a `rest_spec`, so retiring the
     registry entry deletes a public REST route with it;
-  · `create_point` / `diary_write` / `compute_confidence` have no arm on the container
-    whose destination the map records (`create_entity` types are
-    subject|object|event|document; `check_confidence` does not recompute).
+  · `query` is the PAGED destination two ALREADY-retired pointers name
+    (`paginated_query`, `query_points_by_tag`), so retiring it is a re-pointing decision,
+    not a door removal;
+  · `create_point` / `diary_write` / `compute_confidence` / `recall` have no arm on the
+    container the map records: `create_entity` routes subject|object|event|document only,
+    `check_confidence` does not recompute a posterior, and it takes no `mode`/`query`
+    selector at all, so `recall`'s four-intent dispatch (confidence gate, centrality
+    weighting, NAND/mitigation surfacing) is unreachable through it.
+
+  8 (envelope) + 3 (rest_spec) + 1 (paged destination) + 4 (no arm) + 9 (destination not
+  an MCP door yet) = 25, and `TestProtectedDoorsStayLive` reads EVERY one of the first
+  sixteen back from the code — a name that lands in this list without an assertion behind
+  it is the shape the #13052 review caught.
 
 NO ARCHIVE ROW IS EXPECTED HERE. `archive/mcp-tools/` holds doors with NO destination
 (owner ruling 2026-11-12, `archive/README.md`); a forwarded name is STILL SERVED, so the
@@ -132,6 +142,18 @@ NO_CONTAINER_YET = {
 
 def _live() -> dict:
     return {t.name: t for t in TOOL_REGISTRY}
+
+
+def _destination(name: str) -> str:
+    """The container `tools/bridge_table.py`'s Part A map records for `name`.
+
+    Read from the generator's own map rather than restated here: every "no arm" reason in
+    `PROTECTED` names a container, and that map is where the container is decided — so the
+    assertion follows the map instead of a copy of it.
+    """
+    from tools.bridge_table import DESTINATION
+
+    return DESTINATION[name]
 
 
 #: The same first-token read the generators use (`tools/bridge_table.py`'s
@@ -407,12 +429,23 @@ class TestProtectedDoorsStayLive:
     """A recorded decision, asserted against the code that makes it true.
 
     ⛔ WHAT IS PINNED, AND WHAT IS ONLY ENUMERATED. The registry's `#11609 lane E` block
-    names 25 live doors off the 27-target. SIXTEEN of them carry a retaining PROPERTY
-    this file asserts (`PROTECTED`: the list envelope, the `rest_spec`, a paged
-    destination, or a container with no arm). The other NINE (`NO_CONTAINER_YET`) have
-    no live container at all, so the only thing to measure is "still live, still not
-    retired" — pinned below for them too. The two tables together are what make the
-    enumeration checkable as a POPULATION; neither alone is 25 of 25.
+    names 25 live doors off the 27-target. SIXTEEN of them carry a retaining PROPERTY,
+    and EVERY ONE is read back from the code below — none is a name that only appears in
+    the `PROTECTED` dict, which is the weaker treatment this class reserves for
+    `NO_CONTAINER_YET` (#13052 review F3):
+
+      · 8 envelope doors — the `-> list[dict]` annotation, from `inspect.signature`;
+      · 3 `rest_spec` doors — the registry entry's own `rest_spec`;
+      · 1 paged destination (`tortoise_query`) — the two retired pointers that name it,
+        and the paging parameters those pointers and the live door agree on;
+      · 4 "no arm on the recorded container" doors — the container itself:
+        `_ENTITY_ITEM_LABELS` for the two write doors, the parameter SET for the two
+        `check_confidence` doors.
+
+    The other NINE (`NO_CONTAINER_YET`) have no live container at all, so the only thing
+    to measure is "still live, still not retired" — pinned below for them too. The two
+    tables together are what make the enumeration checkable as a POPULATION; neither
+    alone is 25 of 25.
     """
 
     def test_the_two_tables_cover_the_enumerated_population_and_do_not_overlap(self):
@@ -468,3 +501,82 @@ class TestProtectedDoorsStayLive:
         assert getattr(entry, "rest_spec", None) is not None, (
             f"{name} no longer carries a `rest_spec`, so retiring the entry no longer "
             "deletes a REST route — it may be retirable in that batch")
+
+    @pytest.mark.parametrize("name,kind", [
+        ("tortoise_create_point", "point"),
+        ("tortoise_diary_write", "diary"),
+    ])
+    def test_create_entity_still_has_no_arm_for_the_write(self, name, kind):
+        """`create_entity`'s "arm" is a TYPE LABEL, so absence is read from the label map.
+
+        Read from `_ENTITY_ITEM_LABELS` — the constant `create_entity` validates against —
+        and not from the registry prose: the reason this table records is that retiring
+        the door would remove the WRITE, and the write exists only if the label routes.
+        """
+        from tortoise.sdk import _ENTITY_ITEM_LABELS
+
+        destination = _destination(name)
+        assert destination == "create_entity", (
+            f"{name} is recorded as landing on {destination!r}, not `create_entity` — the "
+            "reason this table records for it cannot be asserted against that container")
+        assert kind not in _ENTITY_ITEM_LABELS, (
+            f"`create_entity` now routes type={kind!r}, so {name!r} HAS an arm and its "
+            f"recorded reason ({PROTECTED[name]}) no longer holds: re-check whether it is "
+            "retirable in the batch that added the arm, and move it out of this table in "
+            "that same change")
+
+    @pytest.mark.parametrize("name,forbidden", [
+        ("tortoise_compute_confidence", ("recompute", "posterior")),
+        ("tortoise_recall", ("mode", "query")),
+    ])
+    def test_the_recorded_container_still_has_no_arm_for_it(self, name, forbidden):
+        """The "no arm" reason, asserted against the CONTAINER rather than as prose.
+
+        This is the one category whose retaining property is an ABSENCE, and an absence
+        stated only in a comment is exactly what an arm landing later leaves behind —
+        `recall` would then look protected while its container could serve it. `forbidden`
+        names the parameters whose ARRIVAL on the container would open an arm; measured
+        from the door's own signature, so a `mode=`/`recompute=` selector cannot be added
+        without reddening this row.
+        """
+        destination = _destination(name)
+        door = destination if destination.startswith("tortoise_") else f"tortoise_{destination}"
+        container = getattr(ms, door, None)
+        assert container is not None, (
+            f"{name}'s recorded container {door} is no longer a door, so the reason this "
+            "table records for it cannot be asserted — re-derive it before retiring")
+        params = set(inspect.signature(container).parameters)
+        arrived = sorted(set(forbidden) & params)
+        assert not arrived, (
+            f"{door} now accepts {arrived}, so {name!r}'s recorded reason "
+            f"({PROTECTED[name]}) no longer holds — it may serve the operation now. "
+            "Re-check whether it is retirable in the batch that added the arm")
+
+    def test_query_is_still_the_paged_destination_of_two_retired_pointers(self):
+        """`tortoise_query`'s reason is a ROLE, so it is read back from the pointers.
+
+        The recorded reason is not a property of the door alone: it is that two ALREADY
+        retired names point at it with paging arguments. Measured both ways — the pointers
+        still name `tortoise_query` in one hop, and the live door still accepts the paging
+        parameters the pointers advertise, so re-pointing the shim or dropping paging
+        reddens here instead of silently orphaning two retired names.
+        """
+        pointers = {
+            retired_name: RETIRED_USE_INSTEAD[retired_name]
+            for retired_name in ("tortoise_paginated_query", "tortoise_query_points_by_tag")
+        }
+        for retired_name, pointer in pointers.items():
+            target = pointer.split("(", 1)[0].strip()
+            assert target == "tortoise_query", (
+                f"{retired_name} points at {pointer!r}, not at `tortoise_query` — the paged "
+                "destination this table protects has moved, so tortoise_query's recorded "
+                f"reason ({PROTECTED['tortoise_query']}) no longer holds")
+            assert "offset=" in pointer and "limit=" in pointer, (
+                f"{retired_name}'s pointer {pointer!r} no longer names the paging "
+                "arguments it was migrated onto")
+        params = set(inspect.signature(ms.tortoise_query).parameters)
+        missing = sorted({"offset", "limit"} - params)
+        assert not missing, (
+            f"`tortoise_query` no longer accepts {missing}: it is protected as the PAGED "
+            f"destination ({PROTECTED['tortoise_query']}) and both retired pointers name "
+            "that paging — re-point them in the batch that removes it")
