@@ -162,9 +162,15 @@ def test_a_NONE_status_is_refused_on_a_POINT_though_it_DELETES_on_an_Object(env)
     assert _mutations(events, pid) == before
 
     # …and the other half: on an Object the same argument DELETES the property.
-    sdk.create_object("placeholder", kind="core:entity")
     sdk._get_proj().g.query(
         "MATCH (n:Object {id:$id}) SET n.status='live'", params={"id": obj})
+    # ⛔ THE PRE-STATE IS ASSERTED (#13143 review F3, P3). Without it the pin
+    # would pass VACUOUSLY if that raw SET ever no-opped (wrong id property, an
+    # engine that ignores the clause): the property would read `None` after the
+    # delete because it was never written, not because the delete removed it.
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object {id:$id}) RETURN n.status", params={"id": obj}
+    ).result_set[0][0] == "live", "the precondition must hold or the delete is unproven"
     sdk.update_knowledge(obj, status=None)
     got = sdk._get_proj().g.query(
         "MATCH (n:Object {id:$id}) RETURN n.status", params={"id": obj}
@@ -172,6 +178,82 @@ def test_a_NONE_status_is_refused_on_a_POINT_though_it_DELETES_on_an_Object(env)
     assert got is None, (
         "`status=None` is the declared property DELETE on a non-Point door: "
         + repr(got))
+
+
+class _RenderedStatusKey(str):
+    """A key whose CONTENT is not ``status`` while its ``__str__`` is.
+
+    This is the renderer asymmetry the vocabulary guards exist for: the journal
+    keeps the CONTENT and the live transport applies ``str(key)``, so a
+    literal-name test (``"status" in props``) cannot see a write that the node
+    receives as ``status``. Pinned against BOTH ``:Point`` doors below.
+    """
+
+    def __str__(self) -> str:
+        """Render as ``status`` while the dict key keeps its own content."""
+        return "status"
+
+
+def test_the_DEDICATED_point_doors_grade_a_renderer_named_status_key(env):
+    """⛔ #13143 review **F1** (P1): the two Point doors read the LITERAL name.
+
+    ``create_point`` tested ``"status" in props`` / popped ``"status"`` and
+    ``update_point`` tested ``'status' in props``, while the transport applies
+    ``str(key)``. Measured on this branch BEFORE the fix:
+
+        create_point({<content 'zzz', __str__ 'status'>: 'in_progress'})
+          -> ACCEPTED, stored status='in_progress'   (and 'garbage')
+        update_point(the same shape) -> ACCEPTED, stored 'garbage'
+
+    — an ungraded word no read leg excludes, i.e. one that reads as CURRENT,
+    which is the fail-open #10371 / #11824 exists to close; the identical bags
+    were already refused by ``create_object`` (the two-key case) and
+    ``update_knowledge`` (the single-key case). This test therefore pins the
+    family DISAGREEING before the fix and agreeing after it, on both doors and
+    on the two-key bag.
+
+    It also pins the DELIVERY: a rendered key is re-filed under the literal
+    spelling, so a bag that IS accepted lands exactly one ``status`` column —
+    never the graded word plus a raw renderer key.
+    """
+    sdk, events = env
+    key = _RenderedStatusKey("zzz")
+
+    # 1. a single renderer-named key carrying a position/junk word: REFUSED.
+    for word in ("in_progress", "garbage"):
+        with pytest.raises(ValueError, match="was refused"):
+            sdk.create_point("statement", f"rendered key {word}", dedup=False,
+                             **{key: word})
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.status IN ['in_progress','garbage'] "
+        "RETURN count(n)").result_set[0][0]
+    assert rows == 0, (
+        "neither refused word may be stored anywhere — a refusal that writes is "
+        f"the defect itself; found {rows} row(s)")
+
+    # 2. the same shape through the dedicated UPDATE door: REFUSED, untouched.
+    pid = _multilabel_point(sdk, status="draft")
+    before = _mutations(events, pid)
+    with pytest.raises(ValueError, match="was refused"):
+        sdk.update_point(pid, **{key: "garbage"})
+    assert _status(sdk, pid) == "draft", "a refused update must write nothing"
+    assert _mutations(events, pid) == before
+
+    # 3. the TWO-key bag: both Point doors refuse it as CONFLICTING, exactly as
+    #    the entity door does — the landing word of two status keys cannot be
+    #    known, and guessing is a bypass (#12786).
+    with pytest.raises(ValueError, match="CONFLICTING status write"):
+        sdk.create_point("statement", "rendered ambiguity", dedup=False,
+                         **{key: "garbage", "status": "live"})
+    with pytest.raises(ValueError, match="CONFLICTING status write"):
+        sdk.update_point(pid, **{key: "garbage", "status": "live"})
+    assert _status(sdk, pid) == "draft"
+
+    # 4. CONTROL — the fix must not over-reject: a rendered CONSISTENT word is
+    #    accepted and delivered as exactly one `status` column.
+    ok = sdk.create_point("statement", "rendered consistent", dedup=False,
+                          **{key: "live"})["id"]
+    assert _status(sdk, ok) == "live", "a legal rendered status must still land"
 
 
 # ── Acceptance 2: the write is journaled and survives a rebuild ───────────
@@ -366,7 +448,7 @@ def test_vocabulary_values_are_accepted_and_journaled(env, good):
 
 
 @pytest.mark.parametrize("word", ["outdated", "archived"])
-def test_an_undeclared_transition_is_refused_as_a_TRANSITION(env, word):
+def test_a_WORD_problem_is_refused_as_a_WORD_while_a_declared_synonym_lands(env, word):
     """⛔ #11824 S0 RESHAPED THIS ARM: neither word is "a legal word with an
     undeclared transition" any more, so the two halves are pinned by what each
     now IS rather than by one shared message.
@@ -379,8 +461,14 @@ def test_an_undeclared_transition_is_refused_as_a_TRANSITION(env, word):
       ``draft -> deprecated`` IS declared, so it LANDS (stored canonically,
       silently). It is no longer *"reserved — no v1 write path"*.
 
-    What the test keeps from its original claim: the door distinguishes a WORD
-    problem from a TRANSITION problem, and a refusal writes and journals nothing.
+    ⛔ WHAT THIS TEST DOES **NOT** PIN, and the name now says so (#13143 review
+    **F2**): the TRANSITION half. ``test_an_undeclared_transition_is_refused_as_
+    a_TRANSITION`` claimed it in its name while both of its arms are WORD-level
+    outcomes, so a reader scanning names was told a transition was pinned here
+    when nothing in the body exercised one. The transition refusal has its own
+    home — ``tests/test_9649_update_entity_point_lifecycle.py::
+    test_an_undeclared_transition_from_live_is_refused`` — and the name is part
+    of the claim, the same standard this branch applied to the cache pin.
     """
     sdk, events = env
     pid = _multilabel_point(sdk)

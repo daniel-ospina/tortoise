@@ -5805,6 +5805,52 @@ door cannot answer, whatever the two values say.
     return sum(1 for key in props if id(key) in ids) > 1
 
 
+def _rehome_rendered_status_key(props: dict, *, door: str, label: str) -> bool:
+    """Refuse an ambiguous status write, and file a renderer-named one under ``status``.
+
+    #13143 review (F1, P1) — measured on this tree: the two DEDICATED Point
+    doors tested the LITERAL NAME (``"status" in props`` /
+    ``props.pop("status", "live")``) while the transport applies ``str(key)``.
+    A ``str`` subclass whose content and ``__str__`` differ therefore slipped
+    past the test and was written as ``status`` by ``SET n += $props``:
+
+        ``create_point({<K content 'zzz', __str__ 'status'>: 'in_progress'})``
+        STORED ``status='in_progress'`` (and ``'garbage'``)
+        ``update_point(same shape)`` → same, where ``update_knowledge`` REFUSED
+        both — an ungraded word no read leg excludes, i.e. one that reads as
+        CURRENT, which is exactly the fail-open #10371 / #11824 exists to close.
+
+    The entity doors had already been moved onto the renderer union
+    (:func:`keys_rendering_as`, :func:`_status_write_is_ambiguous`); this is the
+    same rule for the Point doors, so the family cannot answer differently
+    again. Call it BEFORE the door's own ``'status' in props`` arms: after it,
+    a status-rendering key has the literal spelling, so every arm below sees the
+    write the transport will apply.
+
+    Returns True when the call carried a status at all (the caller's
+    ``explicit_status`` question), and refuses more than one rendered key — the
+    landing word of a two-key write cannot be known here (#12786).
+    """
+    if _status_write_is_ambiguous(props):
+        raise ValueError(
+            f"{door} refused a CONFLICTING status write for {label}: more "
+            f"than one key in this call renders as `status`. A `str` subclass "
+            f"whose content and `__str__` differ is filed under one name by "
+            f"the live write and the other by the journal, so which word "
+            f"lands cannot be known here. Pass `status` ONCE, as a plain "
+            f"str, with the word you mean."
+        )
+    keys = list(keys_rendering_as(props, {"status"}))
+    if not keys:
+        return False
+    # ⛔ ONE key, guaranteed by the refusal above. It is POPPED and re-filed
+    # under the literal name: leaving it in place would let the same call land
+    # the column twice (the door's graded word AND the raw renderer key), which
+    # is the divergence the renderer-union guard exists to refuse.
+    props["status"] = props.pop(keys[0])
+    return True
+
+
 def _status_key_leaves_the_dead_state(props: dict) -> bool:
     """Does EVERY key naming ``status`` actually WRITE it, in both channels?
 
@@ -15574,7 +15620,14 @@ class TortoiseSDK:
         # the invisibility were the SAME mechanism — a goal created plainly
         # and wired only as an operator TARGET was never promoted, so EP
         # discarded the whole arm while the run still reported converged=True.
-        explicit_status = "status" in props
+        # ⛔ #13143 review (F1, P1): the renderer UNION, never the literal name —
+        # a `str` subclass whose content and `__str__` differ is written as
+        # `status` by the transport while a literal-name test misses it, so an
+        # ungraded word landed and read as CURRENT (see
+        # :func:`_rehome_rendered_status_key`, which also refuses a two-key bag
+        # this door would otherwise answer differently from `create_object`).
+        explicit_status = _rehome_rendered_status_key(
+            props, door="create_point", label="a Point")
         # Status is popped+validated BEFORE the dedup branch (#1905): a dedup
         # hit must never forward the caller's status into update_point (which
         # rejects any non-'live' status — a gated re-ingest of the same draft
@@ -20908,6 +20961,17 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # ⛔ #13143 review (F1, P1): FIRST, before any of this door's own
+        # `'status' in props` arms — they test the LITERAL name while the
+        # transport applies `str(key)`, so a renderer-named key was written as
+        # `status` by `SET n += $props` and never graded (measured:
+        # `update_point({<K content 'zzz', __str__ 'status'>: 'garbage'})`
+        # STORED `status='garbage'`, where `update_knowledge` refused it).
+        # Re-filing it under the literal spelling makes every arm below see the
+        # same write the transport will apply, and refuses a two-key bag whose
+        # landing word cannot be known (#12786).
+        _rehome_rendered_status_key(
+            props, door="update_point", label=f"point {id!r}")
         # #10000 / §9.1: `update_point` writes with a raw `SET n += $props` and
         # consults no point deny-set, so it accepted the narrative and journalled
         # it as `PointRevised` — measured at #10389 review cycle 3, which is also
