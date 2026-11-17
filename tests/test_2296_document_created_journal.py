@@ -78,6 +78,11 @@ def _forged_prop_value(name: str, forged_ts: str):
         return "X"
     if name == "new_content":
         return "FORGED"
+    if name == "seq":
+        # A journal POSITION, and a divergent one: if this survived to the line
+        # top level, `record_projection._carried_position` reads it and refuses
+        # the record's write AND every replay of it (#12894 review, P1).
+        return 42
     return forged_ts  # ts / recorded_ts
 
 
@@ -394,6 +399,64 @@ def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
         assert _sources(sdk._get_proj(), _id), (
             "a Document/Source was live-only: `rebuild_all` destroyed it "
             "(#2296)")
+
+
+def test_a_caller_seq_prop_cannot_forge_a_journal_position(env):
+    """A caller ``seq`` prop must never reach the journal line's TOP level (#12894).
+
+    THE DEFECT THIS PINS (review cycle 4, P1). `#9190` makes the record CARRY its
+    ordinal, so `record_projection._carried_position` READS a record's ``seq`` and
+    REFUSES the write when it disagrees with the enumeration. ``seq`` is a normal
+    caller prop name — it was in neither `_RESERVED_ENVELOPE_PROPS` nor
+    `_JOURNAL_ENVELOPE_KEYS` — so this reached the append:
+
+        add_entity_property / update_point(pid, seq=42)
+          → `_sanitize_props` (no reservation) → `emit_props`
+          → `_emit_event(..., **emit_props)` → `event.update(extra)`   (TOP LEVEL)
+
+    and the line then carried a position no enumeration could agree with. Because
+    the live door is deliberately FAIL-SOFT, the consequence was silent: the row
+    never landed (counted on `record_write_failures`), and replay reads the SAME
+    key, so the advertised repair — a replay — refused too. `_refuse_an_
+    enumerated_replay` blocks the enumerated path on any cut-over graph, so the
+    record was unhealable by user data.
+
+    The invariant was already declared: `record_projection.ENVELOPE_KEYS` lists
+    ``seq`` as an `_emit_event`-owned envelope key. This leg is what makes the
+    SDK's strip enforce it.
+
+    ⚠️ WHICH HALF IS RED, stated precisely (#12894 review cycle 10, P2 — an
+    earlier draft of this docstring over-claimed). Only the UPDATE half
+    discriminates on the line's TOP level: `update_point` splats caller props
+    through `**emit_props` into `event.update(extra)`. `create_point` hands them
+    through the ``point`` SNAPSHOT instead (`_emit_event("PointAdded", {...},
+    point=_intended)`), so pre-fix a caller ``seq`` was stored INSIDE
+    ``point`` — and on the node — while the line's top level stayed clean.
+    Measured on the pre-fix tree: `lines=2, lines_carrying_top_level_seq=1`, the
+    single hit being `PointRevised`. Both halves are asserted below because both
+    are wrong pre-fix, but only the update half is a top-level leak.
+    """
+    sdk, events = env
+    point = sdk.create_point("observation", "seq must not survive",
+                             seq=42, key="seq-forge")
+    sdk.update_point(point["id"], seq=43, content="revised")
+    lines = _journal(events)
+    assert lines, "the journal is empty — this leg proves nothing"
+    for line in lines:
+        assert "seq" not in line, (
+            "a caller `seq` prop reached the journal line's top level, where "
+            "`_carried_position` reads it as the record's ORDINAL and refuses "
+            "the write and every replay of it (#12894): "
+            f"{line!r}"
+        )
+        snapshot = line.get("point")
+        if isinstance(snapshot, dict):
+            assert "seq" not in snapshot, (
+                "a caller `seq` prop survived inside the record's `point` "
+                "snapshot, where replay's `{**ev, **ev['point']}` splice lifts "
+                "it over the envelope (#12894): "
+                f"{line!r}"
+            )
 
 
 def test_update_entity_source_refuses_reserved_props_loudly(env):

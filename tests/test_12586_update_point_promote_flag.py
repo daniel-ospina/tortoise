@@ -173,7 +173,12 @@ def test_the_refused_promote_journals_nothing(env):
 
 
 def test_the_two_point_doors_agree_on_the_flag_dead_row(env):
-    """``update_point`` refuses exactly what ``update_entity`` refuses.
+    """``update_point`` refuses exactly what ``update_knowledge`` refuses.
+
+    #12915 retired the public ``update_entity`` into ``update_knowledge`` (the same
+    ``_update_entity_any`` relay), so the second door a caller can reach is the
+    container — the agreement this issue closed must hold through BOTH names that
+    still resolve, not through the retired one.
 
     FALSIFIABLE: revert either door and this fails on that door only, which is
     the disagreement the issue exists to close.
@@ -182,7 +187,7 @@ def test_the_two_point_doors_agree_on_the_flag_dead_row(env):
     pid = sdk.create_point("statement", "a claim to kill", dedup=False)["id"]
     _force(sdk, pid, status=None, outdated=True)
 
-    for door in ("update_point", "update_entity"):
+    for door in ("update_point", "update_knowledge"):
         with pytest.raises(ValueError) as exc:
             getattr(sdk, door)(pid, status="live")
         assert "terminal" in str(exc.value), door

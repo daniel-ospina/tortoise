@@ -166,6 +166,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -560,6 +561,26 @@ class RecordUnavailable(RecordServeError):
     Raised only in :data:`MODE_RECORD`, where a fallback is not permitted. In
     :data:`MODE_PREFER` the same condition is a *named* fallback instead.
     """
+
+
+class RecordReadBoundMiss(RecordServeError):
+    """The record WAS ASKED and did not answer inside the caller's bound.
+
+    The synchronous twin of the lane-bound miss the hosted door already
+    discriminates on (#10602): ``refused`` is ``False`` because the submission
+    RAN — the record is neither down nor unasked, it was slower than the budget
+    the caller's lane allows. An abandoned worker may still answer; the caller
+    does not wait for it.
+
+    It is its OWN class, not a bare ``TimeoutError``, so a door cannot mistake
+    it for a structural fault: the repair is capacity, and the two armed modes
+    answer it differently (``prefer`` falls back to the cache and NAMES
+    :data:`FALLBACK_RECORD_BOUND_MISS`; ``record`` has no cache branch and must
+    RAISE, because turning "too slow" into an absence is the §17.2 inversion).
+    """
+
+    #: Mirrors the lane-miss shape `hosted_api` reads: `True` = never ran.
+    refused = False
 
 
 # ── the mode ────────────────────────────────────────────────────────────────
@@ -1312,6 +1333,67 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
         return _fell_back(FALLBACK_RECORD_MISS)
     return ServedAnswer(read=READ_POINT_BY_ID, coordinate=coordinate,
                         served_from="record", props=props)
+
+
+def serve_point_bounded(*, bound_s: float, **kwargs: Any) -> ServedAnswer:
+    """`:func:`serve_point`, bounded by WALL CLOCK — the SYNCHRONOUS doors' bound.
+
+    WHY THIS EXISTS (#12947 finding 1, P1). :func:`serve_point`'s callee is a
+    Postgres round trip whose ceilings are ``record_writer.CONNECT_TIMEOUT_SECONDS``
+    (10 s) plus ``RECORD_STATEMENT_TIMEOUT_MS`` (15 s) — both ABOVE
+    ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` (10 s). The hosted route submits the same
+    call to ``_read_offload(..., timeout=record_read_timeout_s())``, so it is
+    bounded there; the MCP door and the SDK call it on the caller's thread, where
+    nothing bounded it at all. Under a record slowdown an agent therefore got the
+    transport's ``-32009`` ("the work may still complete") instead of the cache
+    answer ``prefer`` promises, and :data:`FALLBACK_RECORD_BOUND_MISS` was
+    unreachable from those doors — the fallback was named in this module and
+    counted nowhere.
+
+    ONE bound governs all three doors: ``monitoring.record_read_timeout_s()``
+    (9.0 s today), which ``monitoring.py`` pins BELOW the transport's 10 s so the
+    lane's legible refusal — not a transport timeout describing queued work as
+    in-flight — is what a saturated caller sees.
+
+    ``bound_s``     the wall-clock budget for the WHOLE seam call. ``prefer``
+                    callers pass the DEFERRED shape (``cache_answer=None``) so
+                    the cache read stays on their own lane and a fallback they
+                    own; this wrapper never touches a graph handle.
+
+    A miss raises :class:`RecordReadBoundMiss`. ⛔ The WORKER IS NOT CANCELLED —
+    CPython cannot cancel a started thread — so the abandoned callable keeps its
+    slot until the driver's own ceiling. That is the same accepted saturation
+    policy `hosted_api` documents for its lane, stated here rather than implied:
+    the bound buys the CALLER a bounded answer, not the record a cheap abort.
+    """
+    if bound_s <= 0:
+        # A non-positive bound is not a bound (the driver reads 0 as "wait
+        # forever"); refuse rather than silently unbound the leg.
+        raise ValueError(f"bound_s must be positive, got {bound_s!r}")
+
+    box: dict[str, Any] = {}
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            box["answer"] = serve_point(**kwargs)
+        except BaseException as exc:      # re-raised on the caller's thread
+            box["error"] = exc
+            box["tb"] = sys.exc_info()[2]
+        finally:
+            done.set()
+
+    # A DAEMON thread on purpose: `ThreadPoolExecutor` registers an atexit hook
+    # that JOINS its workers, so a record that never answers could hold the
+    # interpreter open at shutdown. This worker must not be able to.
+    worker = threading.Thread(target=_run, name="record-read-bound", daemon=True)
+    worker.start()
+    if not done.wait(bound_s):
+        raise RecordReadBoundMiss(
+            f"the record was asked and did not answer inside {bound_s:.1f}s")
+    if "error" in box:
+        raise box["error"].with_traceback(box["tb"])
+    return box["answer"]
 
 
 # ── parity: the comparison rule ─────────────────────────────────────────────

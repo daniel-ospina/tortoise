@@ -1793,6 +1793,29 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # this file's suite (the same #1349/#3332/#3616 silent-drop class as
              # queue_resweep/batch_open above).
              "tools/next_work.py",
+             # #13099: `tools/text_gate_13099.py` is the text-index quality gate's
+             # harness (the measurement `SEARCH-ARCHITECTURE.md` §6.2's stop
+             # condition rests on), and `tests/test_text_gate_13099.py` — the pins
+             # for its corpus determinism, its verbatim query reuse and its
+             # CI-DIRECTION decision rule — is registered `core`. `tools/` is in
+             # `NON_PYTHON_PREFIXES`, so without this entry a harness-only change is
+             # filtered out BEFORE the "not matched -> core" fallback and takes the
+             # docs-only early return: `select(["tools/text_gate_13099.py"])` yields
+             # NO surface.
+             # ⛔ COVERAGE DOES NOT VANISH THERE, and this entry must not be
+             # justified as if it did: the pin is also `tier1`-registered, and
+             # `python-ci.yml` runs the tier-1 smoke on every PR, so the file still
+             # reaches `test_files` without this entry — MEASURED, without it:
+             # `surfaces: []` AND the pin still in `test_files` (via tier-1); with
+             # it: `surfaces: ['core']`. What was missing is that the OWNING surface
+             # did not select it — coverage held by accident of the tier-1 row, not
+             # by design. This entry makes `core` select it, which is the same
+             # distinction the served_skills entry above draws ("the guards still
+             # ran there … this entry makes the owning surface select them by
+             # design"). (`integrity()` does NOT read CORE_ALSO — measured: `[]`
+             # either way — so it is not a pin; the manifest row above is what keeps
+             # the file classified.)
+             "tools/text_gate_13099.py",
              # #6388: `tools/seal_session_events.py` is the session-events seal
              # policy, guarded by tests/test_session_events_seal.py, which is
              # `core`-registered — but `tools/` is swallowed by
