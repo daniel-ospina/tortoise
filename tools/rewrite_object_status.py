@@ -1215,15 +1215,28 @@ def rewrite(sdk, rep: Report) -> Report:
 def _discharge_locked(rep, log, _discharged, _marker_ids) -> Report:
     _on_disk = _read_pending(rep.journal)
     if _on_disk is None:
-        # An unreadable marker is not an empty one (see `_read_pending`); do not
-        # shrink a set nobody could read, and say so.
-        _on_disk = set(_marker_ids)
+        # ⛔ AN UNREADABLE MARKER IS NOT A SET TO SHRINK — LEAVE THE FILE ALONE.
+        # Its ids are unknown, so every write here is a guess: recomputing the set
+        # from this run's own ids DROPS whatever a peer merged (or whatever a
+        # previous run left), and when this run's own rows look clean the branch
+        # below UNLINKS the file — erasing the only durable trace of a live-only
+        # row, after which the next preview prints the `0 rows ⇒ dead weight`
+        # reading this marker exists to prevent. Leaving it untouched keeps the
+        # next reader on the fail-closed path (`REFUSE_PENDING_UNREADABLE`, exit
+        # 2) instead of on "no marker". `_read_pending` returns `None` for an
+        # EMPTY file too (a torn write), which is the same unknown content.
+        rep.pending = sorted(set(_marker_ids))
         rep.failures.append({
             "id": None,
             "error": (f"{REFUSE_PENDING_UNREADABLE}: the durability marker "
                       f"{_pending_path(rep.journal)} became unreadable during "
-                      "the run, so its ids could not be discharged."),
+                      "the run. Its ids are UNKNOWN, so it was left untouched "
+                      "rather than rewritten from this run's own set — rewriting "
+                      "it would drop a peer's merge and, on a clean run, delete "
+                      "the only trace of a live-only row. Read it by hand, then "
+                      "delete it once every id it names is confirmed."),
         })
+        return rep
     _still = [pid for pid in _kept_pending(
         sorted(set(_on_disk) | _marker_ids), _population_ids(rep), log)
         if pid not in _discharged]
@@ -1571,8 +1584,14 @@ def main(argv: list[str] | None = None) -> int:
             f"the next rebuild would revert it. {repair} Nothing was written.\n")
         return 2
 
-    # ⛔ ONE run at a time on this journal (see `_acquire_run_lock`). Held across
-    # both arms, so the preview cannot be interleaved with another run's writes.
+    # ⛔ THE LOCK GUARANTEE DIFFERS BY ARM, and the comment must not flatten it
+    # (see `_acquire_run_lock`). The EXECUTE arm is exclusive: `required=True`
+    # REFUSES when the lock is held or cannot be created, so two writers never
+    # interleave. The PREVIEW arm is BEST-EFFORT: `required=False` returns `None`
+    # when the lock is busy or uncreatable and the preview then proceeds
+    # UNLOCKED — deliberately, because a measurement must not be blocked by (or
+    # block) a peer's write, and it writes nothing but its own marker. Its
+    # reading therefore rests on the marker read below, never on holding this.
     try:
         _lock = _acquire_run_lock(journal, required=args.execute)
     except Refused as refused:

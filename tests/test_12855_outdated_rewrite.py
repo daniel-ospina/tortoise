@@ -842,6 +842,49 @@ def test_an_UNREADABLE_marker_refuses_the_PREVIEW_with_exit_2(env):
     assert "Traceback" not in err.getvalue(), err.getvalue()
 
 
+def test_a_marker_that_turns_UNREADABLE_mid_run_is_never_rewritten_or_deleted(
+        env, monkeypatch):
+    """The discharge may not write a set it could not read.
+
+    ⛔ An unreadable marker has UNKNOWN ids, so recomputing the set from this
+    run's own ids is a guess: it drops whatever a peer merged in, and when this
+    run's own rows look clean the discharge UNLINKS the file — erasing the only
+    durable trace of a live-only row, after which the next preview prints the
+    `0 rows ⇒ dead weight` reading the marker exists to prevent. The file must be
+    left exactly as it was, so the next reader lands on the fail-closed path.
+
+    Measured before the fix: the marker was rewritten to this run's own (empty)
+    set and then deleted, on a run whose other rows were all clean.
+    """
+    sdk, events = env
+    journal = sdk._get_event_log()
+    marker = Path(str(events / "events.jsonl") + ".rewrite-pending")
+    peer_id = "peer-live-only-12855"
+    tool._set_pending(str(journal.path), [peer_id])
+    before = marker.read_text(encoding="utf-8")
+
+    real_read = tool._read_pending
+    calls = {"n": 0}
+
+    def _flaky(path):
+        calls["n"] += 1
+        # The run's opening read succeeds; the discharge's re-read does not.
+        return real_read(path) if calls["n"] == 1 else None
+
+    monkeypatch.setattr(tool, "_read_pending", _flaky)
+    rep = tool.run(sdk, execute=True)
+
+    assert marker.exists(), "an unreadable marker must never be deleted"
+    assert marker.read_text(encoding="utf-8") == before, (
+        "an unreadable marker must be left byte-identical, not rewritten")
+    assert rep.pending == [peer_id], (
+        "the unreadable marker's ids stay REPORTED (the graph is not measured), "
+        f"got {rep.pending!r}")
+    errs = [f for f in rep.failures if f.get("id") is None]
+    assert any(tool.REFUSE_PENDING_UNREADABLE in f["error"] for f in errs), (
+        rep.failures)
+
+
 def test_a_PENDING_marker_is_not_reported_as_a_refusal():
     """The refusal advice must not be printed for a marker-only preview.
 
