@@ -115,8 +115,8 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
-import math
 import random
 import re
 import statistics
@@ -266,15 +266,15 @@ def labels_for(oracle: Any, live_by_topic: dict[int, list[str]],
 # ── seeding ─────────────────────────────────────────────────────────────────
 
 def seed_graph(fg_host: str, fg_port: int, points: list[dict]) -> dict:
-    from benchmarks.synthetic_corpus import seed_corpus
     from falkordb import FalkorDB
+
+    from benchmarks.synthetic_corpus import seed_corpus
 
     db = FalkorDB(host=fg_host, port=fg_port)
     g = db.select_graph(GRAPH_NAME)
-    try:
+    # A first run has no graph to drop; the delete is best-effort by design.
+    with contextlib.suppress(Exception):
         g.delete()
-    except Exception:
-        pass
     t0 = time.perf_counter()
     n = seed_corpus(g, points)
     seed_s = time.perf_counter() - t0
@@ -301,7 +301,7 @@ def seed_graph(fg_host: str, fg_port: int, points: list[dict]) -> dict:
                    if ln.startswith(('used_memory_human', 'used_memory_dataset',
                                      'used_memory_peak_human'))}
             mem['container'] = name[0]
-    except Exception as exc:  # noqa: BLE001 — recorded, never silent
+    except Exception as exc:  # recorded, never silent
         mem = {"error": f"{type(exc).__name__}: {exc}"}
     return {"points": n, "seed_s": round(seed_s, 3),
             "fulltext_index_build_s": round(index_s, 3),
@@ -404,8 +404,8 @@ def bm25_query_string(tokens: list[str]) -> str | None:
 
 class Arms:
     def __init__(self, fg_host: str, fg_port: int, pg_dsn: str):
-        from falkordb import FalkorDB
         import psycopg
+        from falkordb import FalkorDB
 
         self.db = FalkorDB(host=fg_host, port=fg_port)
         self.g = self.db.select_graph(GRAPH_NAME)
@@ -583,14 +583,14 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
             for name, fn in attempts.items():
                 try:
                     lists[name] = fn()
-                except Exception as exc:  # noqa: BLE001 — recorded, never silent
+                except Exception as exc:  # recorded, never silent
                     errors.append({"class": cls, "qid": q["qid"], "arm": name,
                                    "error": f"{type(exc).__name__}: {exc}"})
                     lists[name] = []
 
             try:
                 vlist = arms.pg_vector(qvec(text))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 errors.append({"class": cls, "qid": q["qid"], "arm": "pg_vector",
                                "error": f"{type(exc).__name__}: {exc}"})
                 vlist = []
@@ -602,7 +602,7 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
                 try:
                     fused = rrf_fusion([lex, vlist], k=RRF_K)
                     lists[hname] = sorted(fused.items(), key=lambda kv: (-kv[1], kv[0]))
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # recorded, never silent
                     errors.append({"class": cls, "qid": q["qid"], "arm": hname,
                                    "error": f"{type(exc).__name__}: {exc}"})
                     lists[hname] = []
@@ -627,7 +627,6 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
                 if g_ids and labels.get(g_ids[0]) != 2:
                     tgt = q.get("doc_id")
                     gmap = dict(lists.get("in_graph_fulltext", []))
-                    pmap = dict(lists.get("pg_ts_rank", []))
                     worked.append({
                         "class": cls, "qid": q["qid"], "query": text,
                         "target_doc": tgt,

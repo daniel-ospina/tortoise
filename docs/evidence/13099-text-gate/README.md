@@ -198,7 +198,7 @@ builder is part of the measurement and not a detail.
 
 `worked_examples[0]` in `artifact.json`, reproducible from the harness:
 
-```
+```text
 query   "cap-dominated boot cold-start band verdict"        (a live stored document, p-0000022)
 in-graph top-1   p-0000023  score 9.0000  grade 1   ("cap-dominated fingerprint provenance handoff sha git")
 in-graph target  p-0000022  score 4.1429  rank 99   (matches ALL SEVEN query terms)
@@ -302,14 +302,14 @@ at the head and significantly ahead at depth; none loses.
 uv run python tools/test_lane.py uri          # note the printed port
 
 # 2. the Postgres lane
-docker run -d --name pg13099 -e POSTGRES_PASSWORD=s3cret -e POSTGRES_DB=tg13099 \\
+docker run -d --name pg13099 -e POSTGRES_PASSWORD=s3cret -e POSTGRES_DB=tg13099 \
     -p 15499:5432 paradedb/paradedb:0.26.6-pg16
 docker exec pg13099 psql -U postgres -d tg13099 -c 'CREATE EXTENSION vector; CREATE EXTENSION pg_search;'
 
 # 3. measure (seeds both backends from the committed corpus, runs all arms)
-uv run --with "psycopg[binary]" python tools/text_gate_13099.py run \\
-    --fg-port <lane port> \\
-    --pg-dsn 'postgresql://postgres:s3cret@127.0.0.1:15499/tg13099' \\
+uv run --with "psycopg[binary]" python tools/text_gate_13099.py run \
+    --fg-port <lane port> \
+    --pg-dsn 'postgresql://postgres:s3cret@127.0.0.1:15499/tg13099' \
     --out docs/evidence/13099-text-gate/artifact.json
 
 # 4. repeat for the determinism check
