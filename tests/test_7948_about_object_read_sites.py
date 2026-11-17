@@ -660,10 +660,6 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
     # DELEGATION would have left the census blind to the shared query itself (a
     # refactor could stop reading the edge behind a still-green pin, which is the
     # false PASS this table exists to stop).
-    "ranking.py::fetch_entity_signals": (
-        'preds = "|".join(tuple(extra_preds) + tuple(ABOUT_EDGE_TYPES))',
-        '"OPTIONAL MATCH (p)-[a:" + preds + "]->(n) "',
-    ),
     "sdk.py::TortoiseSDK._state_related_objects": (
         '"MATCH (n:Point)-[a:" + self._ABOUT_TYPES + "]->(t) "',
     ),

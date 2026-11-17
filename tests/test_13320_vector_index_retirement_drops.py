@@ -475,6 +475,65 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
         "the SURVIVOR line must keep the measured cost/arming claim — it is the "
         f"one arm where that statement was measured: {joined!r}")
 
+    # ⛔ THE LATCH IS THE WHOLE PER-REQUEST PROPERTY (#13330 review P2, round 4).
+    # This method runs on the hosted PER-REQUEST path
+    # (`_data_sdk_offloaded(..., attach_projection=True)` builds a projection per
+    # request) and an unable-to-retire store is a PERMANENT state, so an
+    # unlatched survivor WARNING is a per-request log storm. Until here the pin
+    # drove ONE setup, so `if self._retirement_failure_is_news("index-survived")`
+    # could be deleted with the suite green — the property was asserted in prose
+    # and nowhere in code. A SECOND sweep on the same store must produce no
+    # second line; only the LINE is latched, so the sweep still runs — its gate
+    # still READS the catalogue and its DROPs are still re-attempted (both
+    # asserted below, because "still runs" is the half that keeps a store
+    # repaired between sweeps able to announce the repair).
+    #
+    # ⛔ THE ASSERTION IS THE CATALOGUE READ, not the DROP count (#13330 review,
+    # finding 2). `graph.drops` counts DROP attempts, so it cannot tell "the
+    # report is latched" from "the whole measure+report block is latched" — and
+    # at the tip this rebases onto (`5c5ccfac`), a DEFINITIVE `no such index`
+    # refusal no longer forces the post-drop confirmation re-read, so a DROP
+    # count would pass over a sweep that re-measured nothing at all. The gate's
+    # `CALL db.indexes()` is issued on EVERY armed sweep regardless of that, so
+    # it is the read that must not be silenced.
+    reads_after_first = [c for c in graph.calls if "db.indexes()" in c.lower()]
+    drops_after_first = len(graph.drops)
+    with caplog.at_level(logging.DEBUG):
+        _bare(graph)._ensure_indexes()
+
+    reads_after_second = [c for c in graph.calls if "db.indexes()" in c.lower()]
+    assert len(reads_after_second) > len(reads_after_first), (
+        "the latch silenced the MEASUREMENT, not just the line: the second "
+        "sweep issued no catalogue read at all, so a store repaired between "
+        f"sweeps could never announce the repair (reads: {len(reads_after_first)}"
+        f" -> {len(reads_after_second)})")
+    assert len(graph.drops) > drops_after_first, (
+        "the second sweep did not even re-attempt its DROPs — the latch must "
+        f"silence the LINE only (drops: {len(graph.drops)})")
+    assert len(_retirement_warnings(caplog)) == 1, (
+        "the survivor line is not latched: two sweeps on one store produced "
+        f"{len(_retirement_warnings(caplog))} #13320 WARNINGs. On the hosted "
+        "PER-REQUEST path that is one warning per request for the life of the "
+        "deployment (R3, the reason `_retirement_failure_is_news` exists)")
+
+
+class _RefusedWithUnparsedNeighbour(_EngineLikeGraph):
+    """Every DROP refused with the engine's own `no such index`, and the GATE read
+    carries one row the store cannot interpret beside the target.
+
+    Nothing is written, so the inventory reuses the gate's rows; the unparsed
+    neighbour withholds the property half. The sweep still MEASURED the index
+    present — that is what armed it — so the line must be SURVIVED.
+    """
+
+    def __init__(self):
+        super().__init__(drop_accepts="none")
+        self._rows = [
+            _catalogue_row("Point", "embedding", "VECTOR"),
+            ("Object", ["name"], "a reshaped cell", 0, 0, 0, "NODE",
+             "OPERATIONAL", ""),
+        ]
+
 
 def _retirement_warnings(caplog) -> list[str]:
     return [
@@ -887,6 +946,12 @@ def test_an_ANSWERED_but_unparseable_catalogue_is_not_a_measurement_of_absence(
     assert warnings, (
         "an armed store whose catalogue answered but could not be parsed was "
         "silent — 'cannot read it' and 'there is none' are indistinguishable")
+    # ⛔ ONE line (#13330 review 7): the PARTIALLY-readable arm must not also fire
+    # here and claim "some rows were readable" when none were.
+    assert len(warnings) == 1, (
+        f"one unreadable catalogue produced {len(warnings)} #13320 lines: {warnings}")
+    assert "could not be fully parsed" not in warnings[0], (
+        f"the line misdescribes the cause as a partial read: {warnings[0]!r}")
     assert "could not read the index catalogue" in warnings[0], warnings[0]
     assert "not one of them parsed" in warnings[0], (
         f"the line must say the catalogue ANSWERED and could not be parsed: "
@@ -1084,3 +1149,31 @@ def test_a_DEFINITIVE_refusal_does_not_cost_an_extra_catalogue_read(
     assert len(reads2) == 3, (
         "an AMBIGUOUS drop failure must still force the confirmation read: "
         f"{len(reads2)} reads, calls={t.calls!r}")
+
+
+def test_a_REUSED_pre_drop_read_is_reported_as_the_MEASUREMENT_it_is(
+        monkeypatch, caplog):
+    """No write ⇒ the gate's reading stands; do not call it "nothing measured" (#13330 review 7).
+
+    When every candidate DROP is DEFINITIVELY refused, the inventory reuses the
+    gate's pre-drop rows — there is no post-drop read. If an unrelated row in that
+    reuse failed to parse, `_vector_index_props` is withheld and the sweep
+    reported "was NOT CONFIRMED removed: the post-drop catalogue answered in a
+    shape this store could not parse" — naming a read that never happened, and
+    demoting the SURVIVED measurement it DID take (that measurement is why the
+    gate fired at all).
+    """
+    _arm(monkeypatch)
+    graph = _RefusedWithUnparsedNeighbour()
+    proj = _bare(graph, graph="test_13320_reused_rows")
+
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    warnings = _retirement_warnings(caplog)
+    assert warnings, "the survivor was silent"
+    line = warnings[0]
+    assert "SURVIVED" in line, (
+        f"a measured survivor was reported as unmeasured: {line!r}")
+    assert "post-drop" not in line, (
+        f"there was no post-drop read — the rows were the gate's: {line!r}")
