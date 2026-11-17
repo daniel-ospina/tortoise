@@ -1177,21 +1177,29 @@ class EmbeddingModel:
         """
         if cls._instance is not None and cls._instance._model is not None:
             return True
+        now = time.monotonic()
+        # A load that FAILED must not re-charge the budget on every write:
+        # `get()`'s negative cache already says "do not retry yet", so the answer
+        # is "no vector" without waiting (#399's cooldown, reused). Checked
+        # BEFORE the warm-up opt-out below, because "the load broke" is a fact
+        # in both modes — the caller would get `None` either way, and this way it
+        # does not pay for a `get()` that is already known to decline.
+        if cls._last_failed_at is not None and \
+                (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
+            return False
         if not _embedder_warmup_enabled():
             # No background lane to hand the load to — preserve the synchronous
-            # contract (#13224: the bound must never change dev/test behaviour).
+            # contract (#13224: the bound must never change dev/test behaviour,
+            # and `tests/conftest.py` pins this flag off for the whole suite).
             return True
         # Idempotent: a no-op while the lifespan pre-warm is already running,
         # and the thing that starts one when a write is first past the post.
         cls.start_warm_up()
-        deadline = time.monotonic() + max(0.0, budget)
+        deadline = now + max(0.0, budget)
         while True:
             if cls._instance is not None and cls._instance._model is not None:
                 return True
             now = time.monotonic()
-            # A load that FAILED must not re-charge the budget on every write:
-            # `get()`'s negative cache already says "do not retry yet", so the
-            # answer is "no vector" without waiting (#399's cooldown, reused).
             if cls._last_failed_at is not None and \
                     (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
                 return False
