@@ -720,11 +720,15 @@ def _parse_iso(value) -> datetime | None:
 #     the row's whole surface (a Point carries ``content`` instead). See
 #     ``_identity_match``. ⚠️ The surface READ is the row's ``content``, not a
 #     ``name`` key: the ranker sees ``SearchResult.to_dict()``, which has no
-#     ``name``. For ``:Object``/``:Subject`` that content IS the entity's name,
-#     so the term is exact. For ``source``/``document`` the FTS leg indexes
-#     ``_searchText`` (title+summary+topics), so there the term is effectively
-#     INERT rather than wrong — stated, not claimed as an identity verdict it
-#     cannot make.
+#     ``name``. What fills ``content`` is the ENTITY FETCH, per label —
+#     ``n.name`` for ``:Object``/``:Subject``, ``n.title`` for
+#     ``source``/``document`` — so the term is exact on the name-shaped rows
+#     and NARROW on the title-shaped ones: a query equal to a Source's own
+#     TITLE IS an identity hit, and that row then sorts ahead of every scored
+#     row. It is never INERT there. The FTS leg's ``_searchText`` is not the
+#     compared surface and has no bearing on this verdict — that field (the
+#     title when the writer had one, else the topic lexicon, else the summary)
+#     decides RECALL; this term decides identity.
 #   * ``created`` — the row's timestamp, for the existing recency term.
 #
 # ``operator`` routes to the POINT fetch on purpose and is not a fallback: an
