@@ -556,6 +556,39 @@ def test_blocked_is_never_folded_into_wrong_or_overridden_by_a_right(narrative):
     )
 
 
+def test_a_judge_file_without_verdicts_is_a_refusal_not_a_traceback(tmp_path):
+    """`--verdicts` is optional in argparse; the refusal must still be the documented one.
+
+    #13303 cycle 5: `_load_verdicts_map(None)` hit `Path(None)` → `TypeError`, which the
+    callers do not catch, so `run --judge file` with the flag omitted printed a Python
+    traceback where EXIT CODES promises "2 usage".
+    """
+    (tmp_path / "n.json").write_text(json.dumps({"questions": []}))
+    assert cap.cmd_run(
+        type("A", (), {"narrative": str(tmp_path / "n.json"), "out": str(tmp_path),
+                      "judge": "file", "verdicts": None})()
+    ) == 2
+    assert cap.cmd_judge(
+        type("A", (), {"packet": str(tmp_path / "p.json"), "verdicts": None,
+                      "judge_cmd": None, "out": None})()
+    ) == 2
+
+
+def test_a_credential_in_the_deployed_api_url_never_reaches_the_recorded_header():
+    """The deployed half of the redaction promise (#13303 cycle 5, coverage gap).
+
+    `run-deployed-refused.json` is written into the COMMITTED evidence directory, and a
+    deployed API URL can carry userinfo exactly as a store URI can. Constructing the
+    target is hermetic (no network); the header copies `provenance()['api']` into `store`.
+    """
+    target = cap.DeployedTarget(
+        api_url="https://user:hunter2@127.0.0.1:9", api_key="tt_abcdefghijkl"
+    )
+    prov = target.provenance()
+    assert "hunter2" not in prov["api"] and "<redacted>" in prov["api"]
+    assert "hunter2" not in str(prov) and "tt_abcdefghijkl" not in str(prov)
+
+
 def test_run_judge_file_refuses_a_verdicts_document_before_measuring(tmp_path, narrative):
     """`run --judge file` has the SAME `--verdicts` door as `judge` (#13303 cycle 4, P1).
 
