@@ -977,7 +977,7 @@ one session were refused on an idle-looking box, and the investigation into them
 The body carries
 
 ```json
-"capture": {"in_flight": 0, "max_in_flight": 8, "workers": 4, "refused_total": 0,
+"capture": {"in_flight": 0, "max_in_flight": 8, "workers": 4, "capacity_refused_total": 0,
             "last_refused_at": null, "refusing": false, "refusal_window_s": 300.0,
             "code": "capture_capacity_saturated", "retry_after": 30, "error": null}
 ```
@@ -988,10 +988,14 @@ the process would neither drain the extractions holding the slots nor clear a bu
 
 Four properties, because each is a different misread:
 
-- **`refusing` is the WINDOW, `refused_total` is the HISTORY.** `refused_total` is cumulative since
-  process start and never resets; `refusing` is true only when the last refusal is within
-  `refusal_window_s` (300 s — 10× the advertised `Retry-After`). Reading the cumulative total as
-  "the gate is refusing" is the forever-red failure #10185 forbids. Sample twice for a rate.
+- **`refusing` is the WINDOW, `capacity_refused_total` is the HISTORY.**
+  `capacity_refused_total` counts **capacity refusals only** — the `429` this gate raises at
+  `in_flight >= max_in_flight` — cumulatively since process start and never resets. The gate's other
+  refusal, the `409` duplicate-in-flight, is a DIFFERENT class and is deliberately NOT counted here
+  (it is a concurrency condition, not saturation, so folding it in would make one label answer two
+  questions). `refusing` is true only when the last CAPACITY refusal is within `refusal_window_s`
+  (300 s — 10× the advertised `Retry-After`). Reading the cumulative total as "the gate is refusing"
+  is the forever-red failure #10185 forbids. Sample twice for a rate.
 - **`workers` is NOT `max_in_flight`.** The gate ADMITS 8 (a process-global int,
   `TORTOISE_CAPTURE_IN_FLIGHT`, clamped `[1, 16]`) while the pool RUNS 4
   (`TORTOISE_CAPTURE_WORKERS`, clamped `[1, 8]`), so up to four admitted captures hold their slots
@@ -1009,11 +1013,21 @@ fly ssh console -a tortoise-y4mjjq -C \
   "curl -s localhost:8000/health" | jq .capture
 ```
 
-**The refusal itself is typed** (#12992): `429` answers
+**The refusal itself is typed, on REST** (#12992). `POST /v1/sessions` answers `429` with
 `{"detail": {"code": "capture_capacity_saturated", "message": …, "retry_after": 30,
-"in_flight": n, "limit": n}}` **and** the `Retry-After: 30` header. A client must branch on
+"in_flight": n, "limit": n}}` **and** the `Retry-After: 30` header. A REST client must branch on
 `detail.code` and wait at least `detail.retry_after`; prose-matching the message is not a contract
-(#11225). A `429` here is a DEFERRAL, not a lost capture **so long as the drain runs**: the record is
+(#11225) — the message is kept **verbatim** from the pre-#12992 wording, so an old prose matcher
+still matches, but it is not what a client should read.
+
+⛔ **The MCP tool `tortoise_session_capture` is NOT that surface and does not carry `code` or
+`retry_after`.** It reports a capacity refusal as `status: 429` plus the `message` sentence: its
+`code` field is the NUMERIC JSON-RPC vocabulary (`ERR_QUOTA = -32006`), so there is no field that
+can carry the door's string code without one of the two meanings silently changing (the decision is
+recorded at `tortoise/mcp_server.py`, `tortoise_session_capture`'s error path). An agent on the MCP
+surface branches on the numeric status and the sentence; a typed-field reader is a REST reader.
+
+A `429` here is a DEFERRAL, not a lost capture **so long as the drain runs**: the record is
 on the client's durable substrate and the drain retries it (the cursor does not advance on a
 refusal) — but a refusal with no drain behind it is deferred forever, which is the P0
 condition #12992 measured: the cursor substrate EXISTED and a sweep had still shipped nothing,

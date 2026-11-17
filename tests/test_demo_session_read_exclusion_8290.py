@@ -804,14 +804,20 @@ def test_every_pivot_spelling_in_the_note_is_the_pivot_the_test_derives():
 
 
 def _census_tmp_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A throwaway copy of the three note files, with the census pointed at it.
+    """A throwaway copy of the census's note files, with the census pointed at it.
 
     The census verbs WRITE, so nothing here may touch the real checkout: ``_sweep``
     resolves every path through the module-global ``REPO``, which is redirected.
+
+    ⛔ ``_CENSUS`` IS ONE OF THE NOTE FILES NOW (#13000 review P1). `DEFAULT_PIVOT`
+    is a pivot SPELLING like the three prose ones, so it is a `_NOTES` row and
+    `_sweep` reads it from this copy like any other — a fixture that copied only
+    three files would make every verb here die on the fourth.
     """
     from tools import hosted_api_cite_census as census_mod
 
-    for rel in (census_mod._SCORECARD, census_mod._HOSTED, census_mod._TEST):
+    for rel in (census_mod._SCORECARD, census_mod._HOSTED, census_mod._TEST,
+                census_mod._CENSUS):
         dest = tmp_path / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(_src(rel), encoding="utf-8")
@@ -1046,6 +1052,47 @@ def test_the_census_refresh_restates_every_pivot_spelling(tmp_path, monkeypatch)
     # and the next pass converges (a rewrite that cannot be re-matched is the
     # corruption Finding 2 of the same review names).
     assert census_mod._sweep(moved, refresh=True) == 0
+
+
+def test_the_census_check_verb_sees_the_tools_own_default_pivot(
+        tmp_path, monkeypatch):
+    """`DEFAULT_PIVOT` is a pivot SPELLING too — `--check` must RED when it lags.
+
+    Why this exists (#13000 review P1): `_NOTES` covered the three prose notes and
+    this file's pin, and left the census tool's OWN fallback unread. Measure the
+    consequence rather than assume it: at `e743e35748` the pin read `25005` while
+    `DEFAULT_PIVOT` still read `24903`, and `--check` printed "every stated figure
+    is the measured one" over that split. The fallback is what every DEFAULTED call
+    (`census()`, `pivot_is_the_lifetime_site()`) answers from, so a stale value
+    there does not merely mislabel a note — it silently re-points the tool at a
+    comment line.
+
+    REDS IF: the `census DEFAULT_PIVOT` row is dropped from `_NOTES`, or its
+    pattern stops matching the assignment it targets.
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    repo = _census_tmp_repo(tmp_path, monkeypatch)
+    tool_src = repo / census_mod._CENSUS
+    measured = census_mod.census(_PIVOT)
+    stale = measured["pivot"] + 1372
+    tool_src.write_text(
+        re.sub(r"(?m)^DEFAULT_PIVOT = \d+$", f"DEFAULT_PIVOT = {stale}",
+               tool_src.read_text(encoding="utf-8"), count=1),
+        encoding="utf-8")
+    assert f"DEFAULT_PIVOT = {stale}" in tool_src.read_text(encoding="utf-8"), (
+        "the degradation did not land: the pattern no longer matches the "
+        "assignment, so this arm would prove nothing")
+
+    assert census_mod._sweep(measured, refresh=False) == 1, (
+        "`--check` green-lit a lagging `DEFAULT_PIVOT` — every defaulted call then "
+        "answers about a line that is not the LIFETIME_MEMORY_QUERY site")
+    assert census_mod._sweep(measured, refresh=True) == 1, (
+        "`--refresh` did not treat the tool's own fallback as stale work")
+    assert f"DEFAULT_PIVOT = {measured['pivot']}" in tool_src.read_text(
+        encoding="utf-8"), (
+        "`--refresh` left the tool's fallback on its old value — the two verbs "
+        "would split it again on the next re-derivation")
 
 
 def test_the_census_refuses_an_unmeasurable_figure_instead_of_writing_None(

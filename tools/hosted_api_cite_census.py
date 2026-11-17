@@ -154,15 +154,19 @@ _CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 #: and then again after the forward merge onto `aa8413ca38`, where `#13043` moved it
 #: once more, 24903 -> 25005 (measured: `grep -n 'proj.g.query(LIFETIME_MEMORY_QUERY)'
 #: tortoise/hosted_api.py` -> 25005): the tool that owns these figures wrote it, not a hand.
-#: ⛔ THIS CONSTANT IS THE ONE THE `--check` VERB CANNOT SEE — `_NOTES` covers the notes and
-#: the test's `_PIVOT`, so a stale DEFAULT_PIVOT leaves `--check` at exit 0 while every
-#: defaulted call (`census()`, `pivot_is_the_lifetime_site()`) answers about a comment line.
-#: `tests/test_demo_session_read_exclusion_8290.py` is the pin that reds on it (#13000 review P1).
+#: ⛔ THIS CONSTANT USED TO BE THE ONE THE `--check` VERB COULD NOT SEE: `_NOTES`
+#: covered the three PROSE notes and the test's `_PIVOT`, so a stale DEFAULT_PIVOT
+#: left `--check` at exit 0 while every defaulted call (`census()`,
+#: `pivot_is_the_lifetime_site()`) answered about a comment line — measured at
+#: `e743e35748`, where the pin read 25005 and this constant still read 24903. It is
+#: now a `_NOTES` row of its own (`census DEFAULT_PIVOT`) so BOTH verbs write it, and
+#: `tests/test_demo_session_read_exclusion_8290.py` is the pin that reds as well.
 DEFAULT_PIVOT = 25005
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
 _TEST = "tests/test_demo_session_read_exclusion_8290.py"
+_CENSUS = "tools/hosted_api_cite_census.py"
 
 #: `(label, path, pattern, figure keys)` — the sentence each figure lives in, and
 #: the figure it must state. Both `--check` and `--refresh` read exactly these: a
@@ -192,6 +196,15 @@ _NOTES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
      r"tracked files \((\d+) distinct", ("distinct_targets",)),
     ("test contract pin _PIVOT", _TEST,
      r"(?m)^_PIVOT = (\d+)$", ("pivot",)),
+    # ⛔ THIS CONSTANT IS A FOURTH SPELLING OF THE PIVOT, AND IT WAS THE ONE
+    # NEITHER VERB READ (#13000 review P1). The rows above cover the three PROSE
+    # notes and the test's pin; `DEFAULT_PIVOT` was left to that pin alone, so a
+    # re-derivation wrote the notes and the pin and left the fallback behind —
+    # `_PIVOT` 25005 beside `DEFAULT_PIVOT` 24903 at `e743e35748`, and `--check`
+    # reported "every stated figure is the measured one" over the split because
+    # it never looked here. Reading it makes all four visible to both verbs.
+    ("census DEFAULT_PIVOT", _CENSUS,
+     r"(?m)^DEFAULT_PIVOT = (\d+)$", ("pivot",)),
 )
 
 
@@ -326,7 +339,8 @@ def _sweep(measured: dict, refresh: bool) -> int:
     """
     sources = {_SCORECARD: (REPO / _SCORECARD).read_text(encoding="utf-8"),
                _HOSTED: (REPO / _HOSTED).read_text(encoding="utf-8"),
-               _TEST: (REPO / _TEST).read_text(encoding="utf-8")}
+               _TEST: (REPO / _TEST).read_text(encoding="utf-8"),
+               _CENSUS: (REPO / _CENSUS).read_text(encoding="utf-8")}
     rewritten = dict(sources)
     stale: list[str] = []
     refused: list[str] = []

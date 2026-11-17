@@ -465,13 +465,13 @@ _CAPTURE_CAPACITY_MESSAGE = (
 #: Refusals the capacity gate has ANSWERED, and when it last did.
 #:
 #: Two values, because they answer two different questions and only one of them
-#: is ever a rate: `_CAPTURE_REFUSED_TOTAL` is cumulative since process start
-#: (never reset), and `_CAPTURE_LAST_REFUSED_AT` is the wall clock of the most
-#: recent refusal — which is what lets `/health` answer "is this happening NOW"
-#: instead of "has this ever happened". Reading the cumulative counter as "the
-#: gate is refusing" is the forever-red failure #10185 forbids, which is why the
-#: block below keys `refusing` on the WINDOW, not on the total.
-_CAPTURE_REFUSED_TOTAL = 0
+#: is ever a rate: `_CAPTURE_CAPACITY_REFUSED_TOTAL` (= CAPACITY refusals only —
+#: the sibling ``409`` duplicate-in-flight is a different class and is deliberately
+#: uncounted here, so one label never answers two questions) is cumulative since
+#: process start (never reset), and `_CAPTURE_LAST_REFUSED_AT` is the wall clock of
+#: the most recent refusal — which is what lets `/health` answer "is this happening
+#: NOW" instead of "has this ever happened" (#10185's forever-red: `refusing` keys on the WINDOW).
+_CAPTURE_CAPACITY_REFUSED_TOTAL = 0
 _CAPTURE_LAST_REFUSED_AT: float | None = None
 #: How recently a refusal must have happened for `/health` to call the gate
 #: "refusing". 10x the advertised `Retry-After`: long enough that a client
@@ -1287,7 +1287,7 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     ``detail.retry_after``, with the ``Retry-After`` header retained) and every
     one of them is counted for ``/health`` — see ``_CAPTURE_CAPACITY_CODE``.
     """
-    global _CAPTURE_IN_FLIGHT, _CAPTURE_REFUSED_TOTAL, _CAPTURE_LAST_REFUSED_AT
+    global _CAPTURE_IN_FLIGHT, _CAPTURE_CAPACITY_REFUSED_TOTAL, _CAPTURE_LAST_REFUSED_AT
     session_key = session_key or None
     with _CAPTURE_IN_FLIGHT_LOCK:
         if _CAPTURE_IN_FLIGHT >= _CAPTURE_MAX_IN_FLIGHT:
@@ -1295,7 +1295,7 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
             # refusal is always already COUNTED. ⛔ One direction only — nothing makes
             # the increment and the raise atomic. Read INSIDE the lock and passed in
             # the body, the value is LIVE: the gate raises on `>=`, so it EQUALS the limit.
-            _CAPTURE_REFUSED_TOTAL += 1
+            _CAPTURE_CAPACITY_REFUSED_TOTAL += 1
             _CAPTURE_LAST_REFUSED_AT = time.time()
             raise HTTPException(
                 status_code=429,
@@ -7430,8 +7430,8 @@ def _capture_health() -> dict:
     It publishes the CAPACITY facts (``in_flight`` / ``max_in_flight`` /
     ``workers``) beside the REFUSAL facts, because the two together are what
     distinguish the failure modes: a gate at 8/8 refusing steadily is a saturated
-    consumer, while ``refused_total`` climbing with ``in_flight`` low is a burst
-    of arrivals that each waited and left. Neither is derivable from the other.
+    consumer, while ``capacity_refused_total`` climbing with ``in_flight`` low is a
+    burst of arrivals that each waited and left — neither is derivable from the other.
 
     `workers` is on the block deliberately: `_CAPTURE_MAX_IN_FLIGHT` (8) is
     ABOVE the pool size (4), so up to four ADMITTED captures hold their slots
@@ -7452,7 +7452,7 @@ def _capture_health() -> dict:
     try:
         with _CAPTURE_IN_FLIGHT_LOCK:
             in_flight = _CAPTURE_IN_FLIGHT
-            refused = _CAPTURE_REFUSED_TOTAL
+            refused = _CAPTURE_CAPACITY_REFUSED_TOTAL
             last = _CAPTURE_LAST_REFUSED_AT
             ceiling = _CAPTURE_MAX_IN_FLIGHT
             # `_max_workers` survives a shut-down executor, so it needs no guard.
@@ -7470,7 +7470,7 @@ def _capture_health() -> dict:
         # contract in `docs/infra-runbook.md` §4.1.1b documents ten keys, so a
         # jq `.capture.retry_after` on this arm must not raise.
         return {"in_flight": None, "max_in_flight": None, "workers": None,
-                "refused_total": None, "last_refused_at": None,
+                "capacity_refused_total": None, "last_refused_at": None,
                 "refusing": None, "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
                 "code": _CAPTURE_CAPACITY_CODE,
                 "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
@@ -7480,7 +7480,7 @@ def _capture_health() -> dict:
         "in_flight": in_flight,
         "max_in_flight": ceiling,
         "workers": workers,
-        "refused_total": refused,
+        "capacity_refused_total": refused,
         "last_refused_at": last_refused_at,
         "refusing": refusing,
         "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
@@ -8245,7 +8245,7 @@ async def health():
 
     Capture-gate check (#12992): ``capture`` publishes the capture admission
     gate's capacity and its REFUSALS — ``in_flight``, ``max_in_flight``,
-    ``workers``, ``refused_total``, ``last_refused_at``, ``refusing`` (a window,
+    ``workers``, ``capacity_refused_total``, ``last_refused_at``, ``refusing`` (a window,
     not the cumulative total). Same class as ``change_feed``: state that lives in
     process memory and was previously visible only as a log line on the CLIENT
     that was refused. It does NOT fold into ``status`` (see ``_capture_health``):

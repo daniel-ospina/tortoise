@@ -106,7 +106,7 @@ def test_the_duplicate_in_flight_refusal_is_UNCHANGED(
     `refusing: true` on `/health` for a duplicate-in-flight collision — a
     refusal `_capture_health` does not claim to count ("Refusals the capacity
     gate has ANSWERED") and `docs/infra-runbook.md` §4.1.1b does not document.
-    Mutating `_CAPTURE_REFUSED_TOTAL += 1` into this arm kept the whole file
+    Mutating `_CAPTURE_CAPACITY_REFUSED_TOTAL += 1` into this arm kept the whole file
     green before the two asserts below existed.
     """
     monkeypatch.setattr(ha, "_CAPTURE_MAX_IN_FLIGHT", 4)
@@ -117,7 +117,7 @@ def test_the_duplicate_in_flight_refusal_is_UNCHANGED(
     # `== 0` assertion would fail for ORDER, not for the defect it is pinning
     # (measured: passes alone, reds in the file). Seeding also makes the
     # mutation visible in either order.
-    monkeypatch.setattr(ha, "_CAPTURE_REFUSED_TOTAL", 0)
+    monkeypatch.setattr(ha, "_CAPTURE_CAPACITY_REFUSED_TOTAL", 0)
     monkeypatch.setattr(ha, "_CAPTURE_LAST_REFUSED_AT", None)
     slot = ha._reserve_capture_slot("same-session")
     try:
@@ -127,7 +127,7 @@ def test_the_duplicate_in_flight_refusal_is_UNCHANGED(
         slot.release()
     assert excinfo.value.status_code == 409
     assert excinfo.value.detail == ha._CAPTURE_SESSION_IN_FLIGHT_DETAIL
-    assert ha._CAPTURE_REFUSED_TOTAL == 0, (
+    assert ha._CAPTURE_CAPACITY_REFUSED_TOTAL == 0, (
         "a 409 duplicate-in-flight collision was COUNTED — `/health` would then "
         "report `refusing: true` for a refusal the capacity gate never issued")
     assert ha._CAPTURE_LAST_REFUSED_AT is None, (
@@ -140,22 +140,22 @@ def test_a_refusal_is_counted_and_surfaces_on_health(
 ) -> None:
     """`/health` answers "is the gate refusing NOW" — the datum the brief lacked.
 
-    MUTATION THAT REDS THIS: drop the `_CAPTURE_REFUSED_TOTAL += 1` /
+    MUTATION THAT REDS THIS: drop the `_CAPTURE_CAPACITY_REFUSED_TOTAL += 1` /
     `_CAPTURE_LAST_REFUSED_AT = ...` pair from the raise site -> the counter does
     not move and the refusal is invisible again, which is defect #3 of the issue.
     """
-    monkeypatch.setattr(ha, "_CAPTURE_REFUSED_TOTAL", 0)
+    monkeypatch.setattr(ha, "_CAPTURE_CAPACITY_REFUSED_TOTAL", 0)
     monkeypatch.setattr(ha, "_CAPTURE_LAST_REFUSED_AT", None)
 
     before = ha._capture_health()
-    assert before["refused_total"] == 0
+    assert before["capacity_refused_total"] == 0
     assert before["refusing"] is False
     assert before["error"] is None
 
     _reserve_with_ceiling(monkeypatch, 1)
 
     after = ha._capture_health()
-    assert after["refused_total"] == 1
+    assert after["capacity_refused_total"] == 1
     assert after["refusing"] is True, (
         "a refusal that JUST happened did not mark the window — the read is "
         "answering 'has this ever happened', not 'is this happening'")
@@ -178,14 +178,14 @@ def test_an_old_refusal_does_not_read_as_refusing_now(
     09:00 must not make `/health` claim the gate is refusing at 17:00 for the life
     of the process.
     """
-    monkeypatch.setattr(ha, "_CAPTURE_REFUSED_TOTAL", 7)
+    monkeypatch.setattr(ha, "_CAPTURE_CAPACITY_REFUSED_TOTAL", 7)
     monkeypatch.setattr(
         ha, "_CAPTURE_LAST_REFUSED_AT",
         time.time() - (ha._CAPTURE_REFUSAL_WINDOW_S + 60))
 
     block = ha._capture_health()
 
-    assert block["refused_total"] == 7  # the history is still reported...
+    assert block["capacity_refused_total"] == 7  # the history is still reported...
     assert block["refusing"] is False   # ...and is not a claim about NOW
     assert block["last_refused_at"] is not None
 
@@ -217,7 +217,7 @@ def test_a_saturated_gate_does_not_degrade_health_status(
     # Order-independent: the earlier tests in this file raise REAL refusals, and
     # these two globals are not in `tests/_verdict.PROCESS_GLOBALS`, so a control
     # that read them unset would depend on which test ran first.
-    monkeypatch.setattr(ha, "_CAPTURE_REFUSED_TOTAL", 0)
+    monkeypatch.setattr(ha, "_CAPTURE_CAPACITY_REFUSED_TOTAL", 0)
     monkeypatch.setattr(ha, "_CAPTURE_LAST_REFUSED_AT", None)
     monkeypatch.setattr(ha, "_CAPTURE_IN_FLIGHT", 0)
     monkeypatch.setattr(ha, "_CAPTURE_MAX_IN_FLIGHT", 8)
@@ -228,7 +228,7 @@ def test_a_saturated_gate_does_not_degrade_health_status(
 
     monkeypatch.setattr(ha, "_CAPTURE_MAX_IN_FLIGHT", 1)
     monkeypatch.setattr(ha, "_CAPTURE_IN_FLIGHT", 1)  # gate full, right now
-    monkeypatch.setattr(ha, "_CAPTURE_REFUSED_TOTAL", 3)
+    monkeypatch.setattr(ha, "_CAPTURE_CAPACITY_REFUSED_TOTAL", 3)
     monkeypatch.setattr(ha, "_CAPTURE_LAST_REFUSED_AT", time.time())
 
     body = asyncio.run(ha.health())
@@ -320,7 +320,7 @@ def test_the_refusal_reaches_the_wire_as_a_typed_body_and_a_header(
     monkeypatch.setattr(ha, "_CAPTURE_MAX_IN_FLIGHT", 1)
     monkeypatch.setattr(ha, "_CAPTURE_IN_FLIGHT", 0)
     monkeypatch.setattr(ha, "_CAPTURE_SESSIONS", {})
-    monkeypatch.setattr(ha, "_CAPTURE_REFUSED_TOTAL", 0)
+    monkeypatch.setattr(ha, "_CAPTURE_CAPACITY_REFUSED_TOTAL", 0)
     monkeypatch.setattr(ha, "_CAPTURE_LAST_REFUSED_AT", None)
 
     # `legacy_full_access` is the documented scope short-circuit, so the handler
@@ -337,7 +337,7 @@ def test_the_refusal_reaches_the_wire_as_a_typed_body_and_a_header(
         # Read BEFORE the holder is released: a refusal must not add a slot of its
         # own, so the count is the holder's 1 and no more.
         in_flight_after_refusal = ha._CAPTURE_IN_FLIGHT
-        refused_after = ha._CAPTURE_REFUSED_TOTAL
+        refused_after = ha._CAPTURE_CAPACITY_REFUSED_TOTAL
     finally:
         for slot in held:
             slot.release()
