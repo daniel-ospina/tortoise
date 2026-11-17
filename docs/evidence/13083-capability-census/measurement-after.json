@@ -1,7 +1,7 @@
 {
   "arm": "after",
   "tree": {
-    "git_head": "17307a1b1502a5e04e927c305afa60089c74d895",
+    "git_head": "6850b74c147a898bd8b682d99045bf478e4556c5",
     "module": "/home/cmux/tortoise/.worktrees/13083-capability-audit/tortoise/sdk.py"
   },
   "corpus": {
@@ -25,9 +25,9 @@
     }
   },
   "used_memory_bytes": {
-    "before": 5402352,
-    "after": 7763368,
-    "delta": 2361016
+    "before": 5013704,
+    "after": 7735992,
+    "delta": 2722288
   },
   "repr_bytes_by_label": {
     "EpMeta": {
@@ -142,7 +142,7 @@
   },
   "legacy_prose_arm": true,
   "limits": [
-    "sum(size(prop)) is stored VALUE bytes; it excludes the per-property attribute-block entry, so it is a LOWER bound on a property's residency.",
-    "used_memory includes block/index matrices; small corpora over-state the marginal per-node cost."
+    "repr_bytes_by_label is a RENDERED size, not the engine's stored size: it is exact for a STRING and over-reports a numeric ARRAY by ~4.7x (a 384-dim float vector renders as ~7,187 characters; its stored float32 payload is 1536 B). Derive an array's footprint from its width; never read it off this column.",
+    "used_memory includes block/index matrices; small corpora over-state the marginal per-node cost, and its baseline drifts between runs."
   ]
 }

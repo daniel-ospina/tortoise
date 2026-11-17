@@ -13,11 +13,15 @@ WHAT IT MEASURES
     ``docs/evidence/10000-turns-bytes/probe_turn_bytes.py`` uses and for the same
     reasons (#5331: ``GRAPH.MEMORY USAGE`` is blind to the HNSW ``vectorset``
     module and reports whole MB).
-  * Per-property bytes are ``sum(size(n.<prop>))`` over the label, which is how
-    §9.1's narrative measurement counted prose (``sum(size(n.story_arc))``).
-    FalkorDB's ``size()`` is the stored size of the VALUE, not the node's
-    attribute-block overhead, so these are a SHAPE's payload bytes and not its
-    full residency cost. The doc says so beside every number.
+  * Per-property figures are **RENDERED** sizes — ``len(str(value).encode())`` summed
+    per label, emitted as ``repr_bytes_by_label`` because that is what it is. ⚠️
+    This is NOT ``sum(size(n.<prop>))``: ``size()`` refuses a scalar and returns
+    an ELEMENT COUNT for a list, so no single Cypher spelling yields stored bytes
+    for every property type. For a STRING the two coincide and the figure is
+    exact; for a numeric ARRAY the rendered size over-reports by ~4.7x (a 384-dim
+    float vector renders as ~7,187 characters where its stored ``float32`` payload
+    is 384 x 4 = 1,536 bytes), so an array's stored footprint must be DERIVED FROM
+    THE WIDTH, never read off this column.
   * The CORPUS is SYNTHETIC and FIXED: the same ids, the same texts and the same
     deterministic vectors in every arm, so a re-run on any machine reproduces it
     and no figure is a snapshot of tenant data.
@@ -27,9 +31,12 @@ WHAT IT MEASURES
   * ``used_memory`` includes block/attribute/index matrices, so a small corpus
     over-states the marginal per-node cost (FalkorDB allocates in blocks). The
     corpus size is a flag and is printed WITH the figure.
-  * ``sum(size())`` under-counts: it excludes the attribute block entry per
-    property per node (the reason a property REMOVAL buys more than the payload).
-    It is a LOWER bound on what a property family costs.
+  * The per-property column is RENDERED (``len(str(v).encode())``), not stored:
+    exact for a string, an ~4.7x OVER-report for a numeric array (a 384-dim
+    float32 vector is 1536 stored B but ~7187 rendered characters). Derive an
+    array's footprint from its width; never read it off that column. It also
+    excludes the attribute-block entry per property per node, so it is a
+    payload figure and never a residency figure.
 
 RUN IT (a PRIVATE lane — never the shared 6379, and never the one-line
 ``eval "$(…)"`` form: a failed run prints nothing on stdout and ``eval ""``
@@ -37,8 +44,15 @@ returns 0, leaving a previously exported URI silently measured):
 
     uri="$(uv run python tools/test_lane.py uri)" || exit 1
     eval "$uri"
+    # ⛔ BOTH arms carry `--legacy-prose`, and the corpus is the one the
+    # committed JSONs used (6 x 10, not the 10 x 20 this block used to show —
+    # a different corpus cannot reproduce them).
     uv run python docs/evidence/13083-capability-census/probe_shape_bytes.py \
-        --arm before --sessions 10 --turns 20
+        --arm before --sessions 6 --turns 10 --legacy-prose > measurement-before.json
+    uv run python docs/evidence/13083-capability-census/probe_shape_bytes.py \
+        --arm after  --sessions 6 --turns 10 --legacy-prose > measurement-after.json
+    # `--arm after` WITHOUT the flag exits 2 by design: it would seed no prose,
+    # differing from `before` by the SEEDING rather than the declaration.
 
     uv run python tools/test_lane.py down
 """
@@ -276,10 +290,13 @@ def main() -> int:
             "repr_bytes_by_label": _property_bytes(g),
             "legacy_prose_arm": bool(args.legacy_prose),
             "limits": [
-                "sum(size(prop)) is stored VALUE bytes; it excludes the per-property "
-                "attribute-block entry, so it is a LOWER bound on a property's residency.",
+                "repr_bytes_by_label is a RENDERED size, not the engine's stored "
+                "size: it is exact for a STRING and over-reports a numeric ARRAY by "
+                "~4.7x (a 384-dim float vector renders as ~7,187 characters; its "
+                "stored float32 payload is 1536 B). Derive an array's footprint from "
+                "its width; never read it off this column.",
                 "used_memory includes block/index matrices; small corpora over-state "
-                "the marginal per-node cost.",
+                "the marginal per-node cost, and its baseline drifts between runs.",
             ],
         }
         print(json.dumps(report, indent=2, default=str))

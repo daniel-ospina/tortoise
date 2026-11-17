@@ -49,8 +49,13 @@ every number rather than trust it.
 
 ## 1. The population — enumerated from the WRITERS
 
-The population is not the ontology's wish list; it is what a writer **actually puts on a node**. Two
-writers reach the graph, and both were read:
+The population is not the ontology's wish list; it is what a writer **actually puts on a node**. ⚠️ **The claim
+is scoped, not 'everything in the database':** it covers the **memory substrate** (rows 1–6) plus every
+**graph-only bookkeeping label reached from the code paths this audit read** (rows 7–16). It is **not** a census
+of the registry / tenancy / metering substrate — and the labels found but NOT censused are listed in row 17
+rather than silently omitted.
+
+Two writers reach the graph, and both were read:
 
 1. the **live tenant write path** (`sdk.*` + `projection/entities.py`'s folds), and
 2. the **record → cache projection** (`cache_projection.py`, `NODE_TABLES` → 6 labels), which is what a
@@ -73,11 +78,17 @@ record table** (relevant in §5.2).
 | 9 | `:EpMeta` (EP version) | `sdk._advance_ep_version` | — | 1 |
 | 10 | `:Meta` (residency declaration) | `residency.py:284` | — | 0 (arm not exercised) |
 | 11 | `:WhySnapshot` | `why_snapshot.py:484` | — | 0 (arm not exercised) |
-| 12 | `:Tag` | `sdk` tag sync (`:21727`) | — | 0 (arm not exercised) |
+| 12 | `:Tag` | `projection/edges.py:1881` (`MERGE (t:Tag {name:$tag})`, reached from `sdk`'s tag sync) | — | 0 (arm not exercised) |
 | 13 | `:CommitRecord` (idempotency) | `commit_idempotency.py:45` | — | 0 (not exercised) |
 | 14 | `:DeliveryReceipt` (webhook) | `webhook_delivery.py:487` | — | 0 (not exercised) |
 | 15 | `:Batch`, `:PipelineStage`, `:PackInstall`, `:PackSelection` | `mining.py`, `pipeline.py`, `pack_state.py`, `hosted_api:32965` | — | 0 (not exercised) |
 | 16 | `:ContextSubscription` (webhook registration) | `webhook_delivery.py:406` (`CREATE (s:ContextSubscription {…})`) | — | 0 (not exercised) |
+| 17 | **found, NOT censused** — `:Pipeline` (`pipeline.py:525`), `:MeteringRecord` (`metering.py:108`, `:840`, `:1146`, `:1608`), `:MeteringUnmeteredIncrement` (`metering.py:616`), `:WebhookEvent` (`hosted_api.py:47787`), and the tenancy/registry labels `:Team` (`sdk.py:46612`), `:Membership` (`:47262`), `:APIKey` (`:47409`), `:TeamMeta` (`:46671`), `:Graph` (`:46753`), `:SignupToken` (`hosted_api.py:34901`), `:Invitation` (`hosted_api.py:30343`) | sdk / metering / pipeline | — | **not censused — a GAP, see §7** |
+
+⛔ **Row 17 is a real gap, labelled as one.** This audit read the memory-substrate writers and the bookkeeping
+labels on their paths; it did **not** classify the billing / tenancy / pipeline substrate. **No placement
+decision on `:Pipeline` or `:MeteringRecord` may be made from this document.** (`:Pipeline` is named
+explicitly because the same module writes the censused `:PipelineStage`.)
 
 Rows 10–16 are declared **not exercised by the instrument** rather than counted as zero-cost — a shape
 the corpus does not create is a shape this document has *not* measured, and saying so is the difference
@@ -89,12 +100,14 @@ between a census and a guess.
 ids, texts and 384-dim vectors), seeded through the **production chokepoints** (`sdk._write_session_and_turns`,
 `sdk._capture_session`, the `sdk.create_*` doors, and `cache_projection.record_plan` for the projection
 arm). Bytes are the server's own `INFO memory → used_memory` (the instrument §9.1's own measurement uses,
-`docs/evidence/10000-turns-bytes/README.md`) plus per-property `sum(size(n.<prop>))` summed in Python
-because `size()` refuses a scalar and `toString()` refuses a list.
+`docs/evidence/10000-turns-bytes/README.md`) plus per-property figures summed in Python as `len(str(value).encode())` and emitted as `repr_bytes_by_label`
+— a **RENDERED** size, because `size()` refuses a scalar and returns an ELEMENT COUNT for a list, so no
+single Cypher spelling yields stored bytes for every property type.
 
-**Its limits are quoted, not discovered later** — `used_memory` includes block/index matrices, so a small
-corpus over-states the marginal per-node cost; `sum(size())` **excludes** the per-property attribute-block
-entry and is therefore a **lower bound**, a fact §5.1 turns into a number.
+**Its limits are quoted, not discovered later** — `used_memory` includes block/index matrices and its
+baseline drifts between runs; and the per-property column is a **rendered** size: exact for a string, but an
+**over-report of ~4.7×** for a numeric array (a 384-dim float vector renders as ~7,187 characters; its stored
+`float32` payload is 1,536 B). §4 shows both columns and derives an array's footprint from its width.
 
 ---
 
@@ -120,7 +133,7 @@ needs none of the five is SQL-shaped and is marked **none**.
 | the vector leg (`vector_write` / search) | HNSW over `Point.embedding` | **vector index** |
 | `tortoise/domain_validators.py:106`–`:244` | `MATCH (req:Point) WHERE req.pointKind IN …` — kind filters, no walk | **none** |
 
-**Verdict: `graph`.** Six independent capability readers; a record-backed copy could not answer any of
+**Verdict: `graph`.** Eleven capability-carrying readers across nine files; a record-backed copy could not answer any of
 them without re-implementing belief propagation, the fulltext index or HNSW in SQL (which is `#13082`
 Phase 2 and its stop condition).
 
@@ -166,15 +179,16 @@ a **property-level** question and is listed in §6, not silently folded into thi
 | reader (`file:line`) | what it does | capability |
 |---|---|---|
 | `tortoise/assembly.py:2629` | `(o:Object)<-[:aboutObject]-(e:Event)` | **adjacency** |
-| `tortoise/audit.py:810` (and `:2445`, `:2456`) | `OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy` — the supersession chain | **adjacency** |
-| `tortoise/definite_description_backfill.py:433` | `MATCH (o:Object) OPTIONAL MATCH (o)<-[r]-() WITH o, count(r) …` — degree census | **adjacency** |
+| `tortoise/audit.py:810` (and `:2445`, `:2456`) | `OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy AND id(carrier) <> id(sup)` — **no relationship in the pattern**; a property-equality scan | **none** |
+| `tortoise/definite_description_backfill.py:434` | `MATCH (o:Object) OPTIONAL MATCH (o)<-[r]-() WITH o, count(r) …` — degree census | **adjacency** |
 | `tortoise/sdk.py:34355` | `MATCH (s:Subject {id:$sid})-[r]->(n)` | **adjacency** |
 
 `:Tag` belongs on this row too, and an earlier draft got it **wrong** by calling it bookkeeping: every tag
 read resolves the node **through the edge** — `sdk.py:28069`
 (`MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) RETURN properties(p)`),
 `sdk.py:28051` (`MATCH (t:Tag) OPTIONAL MATCH (p:Point)-[:TAGGED]->(t) …` — the tag list with counts),
-`sdk.py:21865` / `mcp_server.py:10730` (`OPTIONAL MATCH (t)<-[:TAGGED]-(q)`), and
+`sdk.py:21865` (`MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) WHERE t.name IN $names`) /
+`mcp_server.py:10730` (`OPTIONAL MATCH (t)<-[:TAGGED]-(q)`), and
 `sdk.py:22209` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC). A traversal needs its
 **endpoint in the graph**, so "the node is only the endpoint label" is not an exemption — it is the
 justification. **Verdict: `graph`.**
@@ -210,17 +224,17 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 | shape | readers (`file:line`) | capability |
 |---|---|---|
 | `:GraphEventMeta` | `event_store.py:491` (MERGE), `:557`, `:657`, `:738`, `:1103`; `hosted_backup.py:842`; `sdk.py:13761` | **none** |
-| `:EpMeta` | `sdk.py:36069`, `:36491`; `ep.py:473` | **none** |
-| `:Meta` | `residency.py:244`, `:284`, `:292`, `:298`; `sdk.py:55647` | **none** |
-| `:WhySnapshot` | `why_snapshot.py:237`, `:303`, `:350`, `:484` | **none** |
-| `:CommitRecord` | `commit_idempotency.py:45`, `:57`, `:65`, `:194` | **none** |
+| `:EpMeta` | `sdk.py:36069`; `ep.py:473` | **none** |
+| `:Meta` | `residency.py:244`, `:292`, `:298`; `sdk.py:55647` | **none** |
+| `:WhySnapshot` | `why_snapshot.py:237`, `:303`, `:350` | **none** |
+| `:CommitRecord` | `commit_idempotency.py:57`, `:65`, `:194` | **none** |
 | `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`), `:502` (page) — `:487` is the CREATE, not a reader | **none** |
-| `:Batch` | `mining.py:94`, `:150`, `:178`; `projection/__init__.py:14295` | **none** |
-| `:PipelineStage` | `pipeline.py:349`, `:482`, `:685`, `:731` | **none** |
+| `:Batch` | `mining.py:94`, `:178`; `projection/__init__.py:14295` | **none** |
+| `:PipelineStage` | `pipeline.py:349`, `:685`, `:731` | **none** |
 | `:PackInstall` / `:PackSelection` | `export.py:126` (`:PackInstall`); `pack_state.py:878-881` (`MATCH (s:PackSelection) RETURN s.revision, s.configured_at, s.updated_by`) | **none** |
 | `:ContextSubscription` | `webhook_delivery.py:406` (CREATE), `:425`, `:435`, `:444`, `:452`, `:461`, `:1113`; `why_snapshot.py:557` | **none** |
 
-**Verdict `record_only` for all eleven** (⚠️ `:Tag` was in this list in an earlier draft and is **`graph`** — see §2.5), with the §5.2 blocker recorded — none has a record table, so none
+**Verdict `record_only` for all eleven** (each row cites **readers only** — a `MERGE`/`CREATE` that appears in §1 as the writer is not repeated here) (⚠️ `:Tag` was in this list in an earlier draft and is **`graph`** — see §2.5), with the §5.2 blocker recorded — none has a record table, so none
 can be expressed as a tier today. They are cheap *individually* (1–2 nodes per graph) and this document
 does not pretend otherwise: they are listed because the census is complete, not because they are a lever.
 
@@ -240,10 +254,10 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 5 | `:Event` core | §2.3 | **yes** — `aboutObject`/`aboutSubject` | **graph** | lifecycle edges are how status folds |
 | 6 | `:Session` core (`id`, `harness`, counters) | §2.4 | **yes** — `CONTAINS` | **graph** | the session→turn/claim walk is the read path |
 | 7 | `:Session` capture telemetry family | whole-node reads only | **no** | **`record_only`** (property-level; §6.2) | a write stamp, not an edge — but see the blocker |
-| 8 | `:Object` / `:Subject` core | §2.5 | **yes** — `aboutObject`, supersession, degree | **graph** | supersession is a chain, not a column |
+| 8 | `:Object` / `:Subject` core | §2.5 | **yes** — `aboutObject` adjacency (`assembly.py:2629`) and the `-[r]->` walk (`sdk.py:34355`) | **graph** | an Event reaches its Object by EDGE; ⚠️ `supersededBy` is a **string matched by equality** (`audit.py:810`), not a walk — SQL-shaped, and an earlier draft wrongly cited it as the reason |
 | 9 | `story_arc` (on **any** label) | **none** — zero Cypher readers | **no** | **`record_only`** ⛔ **move gated on a deliberate pin decision** (§5.1) | its one reader is `public.session_narrative`; the mechanism CAN deny it, two policy pins currently refuse the entry |
 | 10 | `:GraphEvent` | §2.6 | **no** | **`record_only`** ⛔ blocked | ordered scan + aggregates; no record table (§5.2) |
-| 11 | bookkeeping labels (§2.7) | §2.7 | **no** | **`record_only`** ⛔ blocked | key lookups; no record table (§5.2) |
+| 11 | bookkeeping labels (§2.7) | §2.7 | **no** | **`record_only`** ⛔ blocked | key lookups and label scans; no record table (§5.2) |
 | 11b | `:Tag` | §2.5 | **yes** — `TAGGED` is how every tag is read | **graph** | the edge is the read; the node is its endpoint |
 | 12 | `_searchText` on a **non**-episodic `:Source` | FTS | **yes** | **graph** | the fulltext index's field set |
 | 13 | `Source.summary`/`_searchText` on an **episodic** Source | declined already (`#10853`) | **no** | **`record_only`** ✅ already shipped | §9.1's prose rule, per ROW |
@@ -254,8 +268,8 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 ## 4. Measured bytes per shape
 
 Corpus: `--sessions 6 --turns 10`, `--turn-chars 1500`, 384-dim vectors, record **unarmed** (so turns are
-nodes — the population a `record_only` move removes from). Payload = `sum(size(prop))`, a **lower bound**
-(§1.1). Full output: `docs/evidence/13083-capability-census/measurement-*.json`; every figure below is
+nodes — the population a `record_only` move removes from). Per-property figures are **rendered** sizes
+(§1.1), with an array's stored footprint derived from its width. Full output: `docs/evidence/13083-capability-census/measurement-*.json`; every figure below is
 re-derived from those files.
 
 **⚠️ The per-property column is a RENDERED size, not the engine's stored size.** The probe reads each value
@@ -266,7 +280,7 @@ characters of digits, commas and spaces, while its stored `float32` payload is 3
 review caught the first cut publishing the rendered figure as bytes. Both are shown below; the **stored**
 figure is derived from the width, never read off the rendered column.
 
-| shape | nodes | rendered bytes | stored footprint | share of stored |
+| shape | nodes | rendered bytes | stored footprint | share (of the RENDERED total) |
 |---|---|---|---|---|
 | `:Point` | 66 | **668,014** | | |
 | … of which `embedding` | | 474,348 (rendered) | **101,376** (66 × 384 × 4 B, `float32`) | **14.8 %** |
@@ -356,10 +370,12 @@ That is **exactly 1,500 B/turn** over 60 seeded legacy turn points, and the whol
 `Point.content` and `Point.embedding` are identical between the arms (93,287 and 474,348 in both), which is
 the check that the arms are one variable. Total `:Point` payload falls **13.5 %**.
 
-⚠️ **`used_memory` is NOT quoted for this pair.** The two runs' baselines differ by **847,688 B** — larger
-than the payload delta — so the residency marginal is inside the instrument's noise and would be a fabricated
-precision. The payload figure is exact and deterministic; the residency figure is unmeasured, and saying so
-is the difference between a measurement and a decoration.
+⚠️ **`used_memory` is NOT quoted for this pair.** The instrument's baseline is not stable between runs: the
+committed pair differs by **847,064 B**, and an earlier pair (same code, same corpus) differed by **49,504 B**.
+Because the drift is run-dependent and has been observed both larger and far smaller than the 90,000 B payload
+delta, any residency marginal read off it is a number the next run can contradict. The **payload** figure is
+exact and deterministic; the residency figure is **unmeasured**, and saying so is the difference between a
+measurement and a decoration.
 
 **The instrument and both JSON arms are committed** (`docs/evidence/13083-capability-census/`) so `#10429` can
 re-run the closure the moment the pin decision lands.
@@ -387,7 +403,7 @@ eviction policy — that is `#13084` and P0-c.
 
 | precondition | shapes it blocks | what unblocks it |
 |---|---|---|
-| **no record table** → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the nine other bookkeeping labels | a record home, then `cache_tier` (§5.2) |
+| **no record table** → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the ten other bookkeeping labels | a record home, then `cache_tier` (§5.2) |
 | **a policy pin** → the declaration is refused although the seam would honour it | `point.story_arc` | `#10429`: widen the completeness pin with a tail-only category (§5.1) |
 
 Neither is a census failure. Both are the mechanism's **precondition**, named so the next slice is executable
@@ -442,8 +458,12 @@ changes nothing.
 - **It arms nothing** — no cap (`#13084`), no retention, no eviction.
 - **It bounds nothing.** `journal_event` is untouched (`#9025`), and no per-graph cap or node-count rule is
   introduced (`#11758`): this is *what may be resident*, never how many graphs or nodes a tenant may have.
-- **It does not delete.** The one shipped move stops a write; no graph copy is removed, and the destructive
-  leg remains `#10017`'s tooling.
+- **It does not delete.** No product code changed in this slice, so nothing was removed from any graph; the
+  destructive leg remains `#10017`'s tooling.
+- ⛔ **It is NOT a census of the whole database.** Row 17 of §1 lists the labels found but **not censused**
+  (`:Pipeline`, the metering substrate, the tenancy/registry labels). Those get no reader census and no
+  verdict here, and a placement decision on them must not be made from this document. That is a **gap**, not
+  a scope choice dressed as one.
 
 ---
 

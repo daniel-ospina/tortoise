@@ -19,6 +19,12 @@ the authority for what ran, and it names this branch), private lane
 `probe_shape_bytes.py` in this directory. Raw output: `measurement-before.json`,
 `measurement-after.json`.
 
+**Provenance, stated precisely.** Each JSON records `tree.git_head` = the branch head **at run time**. ⚠️ That
+is **not** `8762578f8c` (`origin/main` at dispatch — the probe does not exist there), and it is not necessarily
+the final tip either: the instrument was corrected twice under review, so the head moved between runs.
+**The tree to reproduce these figures from is the commit that contains the probe AND both JSONs** (they land
+together), not the sha inside the JSON. The audit's base is `8762578f8c`.
+
 **Why this file exists.** The capability audit
 (`docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md`) states which READERS touch each shape. Its byte
 columns come from here, and this is the home for the method, the arms and — most importantly — the
@@ -51,17 +57,20 @@ lane is the population a `record_only` move would remove from.
 
 ## ⚠️ Limits — quoted, not discovered later
 
-1. **`sum(size(prop))` is a LOWER BOUND.** It excludes the per-property attribute-block entry, so a
-   payload figure is never a residency figure. This instrument **does not quantify that gap** — an earlier
-   draft quoted ~2,520 B/point from a `used_memory` difference that later proved to be baseline noise
-   (limit 3), and the claim was withdrawn rather than repaired.
+1. **`repr_bytes_by_label` is a RENDERED size, not a stored one.** For a string that is exact; for a numeric
+   array it **over-reports** (~4.7x for a 384-dim float vector: ~7,187 rendered characters vs a 1,536 B
+   stored `float32` payload), so an array's real footprint must be derived from its width. It is also not a
+   *residency* figure: the per-property attribute-block entry is excluded, and this instrument does not
+   quantify that gap. An earlier draft did — it quoted ~2,520 B/point from a `used_memory` difference that
+   later proved to be baseline noise (limit 3). The claim was withdrawn, not repaired.
 2. **`used_memory` includes block and index matrices**, so a small corpus over-states the marginal
    per-node cost (FalkorDB allocates in blocks). The corpus size is printed WITH the figure, so every
    number here is a per-shape marginal **at this corpus**, never a per-node constant.
 3. **`used_memory` is not a calibrated A/B on this box.** Across the committed pair the baseline differs
-   by **847,688 B** (4,163,696 vs 5,011,384), which is larger than the 90,000 B payload delta — so
-   `used_memory` is **not used** for any figure in this record or the audit. Only the deterministic
-   `sum(size())` payload numbers are quoted.
+   by **847,064 B** in the committed pair (4,166,640 vs 5,013,704) and by **49,504 B** in the pair before it
+   — same code, same corpus. The drift is run-dependent and has been both larger and far smaller than the
+   90,000 B payload delta, so `used_memory` is **not used for any figure** in this record or the audit. Only
+   the deterministic rendered-size numbers are quoted.
 4. **Seven shape-groups are declared UNEXERCISED rather than counted as zero**: `:Meta`, `:WhySnapshot`,
    `:Tag`, `:ContextSubscription`, `:CommitRecord`, `:DeliveryReceipt`, and the
    `:Batch`/`:PipelineStage`/`:PackInstall`/`:PackSelection` group. The corpus does not create them, so this
@@ -87,9 +96,10 @@ invariant at the top of the arm is what stops that regressing.)
 60 seeded legacy turn points ⇒ **exactly 1,500 B/turn**. `content` and `embedding` are byte-identical
 between the arms, which is the check that this is one variable and not a corpus difference.
 
-⚠️ **`used_memory` is NOT quoted for this pair.** The two runs' baselines differ by **847,688 B**, larger
-than the payload delta, so any residency marginal here would be the instrument's noise dressed as a
-measurement. The payload figure is exact and deterministic; the residency figure is **unmeasured**.
+⚠️ **`used_memory` is NOT quoted for this pair.** The two runs' baselines differ by **847,064 B** — larger than
+the payload delta — and the previous pair's differed by **49,504 B**. The drift is run-dependent, so any
+residency marginal here would be the instrument's noise dressed as a measurement. The payload figure is exact
+and deterministic; the residency figure is **unmeasured**.
 
 **This arm measures the SIZE OF THE PRIZE, not a shipped change.** The move was withdrawn: two policy pins
 in `tests/test_cache_projection.py` (`:185-190`, `:243-246`) refuse the declaration until it is widened
@@ -108,6 +118,7 @@ honour the entry (`_props_from_row`'s `tail_denied` is the plain forbidden set p
 | `:Session` | 303 | 7 nodes — the capture-telemetry family is ~20 B/session |
 | `:Object` | 198 | 2 nodes |
 | `:Subject` | 139 | 2 nodes |
+| `:GraphEventMeta` / `:EpMeta` | 4 | 2 nodes |
 | **total (rendered)** | **683,022** | `:Point` is 97.8 % of rendered payload |
 
 ## Re-running it
