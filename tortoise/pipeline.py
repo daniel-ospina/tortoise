@@ -409,10 +409,17 @@ def current_stage(graph, object_ref: str) -> dict:
     legal (#3590 D2), and the bare ``LIMIT 1`` silently picked one carrier, so
     this read could answer from the wrong Object.
     """
-    # #12120: over the WRITER's folded union — the raw resolver missed a
-    # spelling the write door had resolved onto this Object, so the stage read
-    # answered from no node.
-    oid = resolve_entity_id_same_entity(graph, "Object", object_ref)
+    # #12120: over the WRITER's folded union — and #13034: with the currency
+    # predicate OFF for the NAME arm. This read's whole subject is an object's
+    # POSITION, and a closed object is exactly the one whose position must stay
+    # readable (to report `isClosed`, and for `advance_stage`'s terminal guard
+    # and explicit reopen). Resolving it through the live-only arm made the
+    # position axis refuse to name the records it exists to describe — measured:
+    # `current_stage(<a closed object>)` answered `{}` and `advance_stage`
+    # reported "no Object named …" for an Object that plainly exists. Design §6
+    # puts this on the by-name arm: asking by name IS the request.
+    oid = resolve_entity_id_same_entity(graph, "Object", object_ref,
+                                        live_only=False)
     if oid is None:
         return {}
     cols = ", ".join(f"o.{p}" for p in STAGE_PROPS)
@@ -785,8 +792,11 @@ def _resolve_object(graph, ref: str) -> tuple[str, dict] | None:
     against the wrong current stage. The resolver routes a name to exactly one
     id and REFUSES on ambiguity; the props are then read by that id.
     """
-    # #12120: over the WRITER's folded union (see the note on the sibling site).
-    oid = resolve_entity_id_same_entity(graph, "Object", ref)
+    # #12120: over the WRITER's folded union (see the note on the sibling site);
+    # #13034: `live_only=False` for the same reason — a stage MOVE must find a
+    # closed Object, or the terminal guard and `reopen=True` are unreachable by
+    # name, which is the resurrection this module's guards exist to stop.
+    oid = resolve_entity_id_same_entity(graph, "Object", ref, live_only=False)
     if oid is None:
         return None
     rows = graph.query(

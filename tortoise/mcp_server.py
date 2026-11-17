@@ -37,6 +37,7 @@ from tortoise import code_freshness as _code_freshness
 # ``create_direct_edge`` / 2a-DIRECT transfer probe it in this exact order) —
 # imported, never re-listed, so the preview cannot drift from the write.
 from tortoise.live import EPISTEMIC_LABELS
+from tortoise.live import is_terminal_status as _is_terminal_status  # #12502/#13034
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
                                _current_graph_id, _transport_mode, _tool_group,
@@ -4467,10 +4468,14 @@ def tortoise_query(kind: str | None = None,
       nothing else, and tag mode reads EVERY kind of tagged Point, so a named
       kind narrows nothing while looking like it did.
     - include_retracted=True surfaces tombstones on every path (structural,
-      paginated, text, and tag modes); default False excludes them. Known gap, tracked
-      in #12502: the TAG arm's own exclusion is `status != "retracted"` only, so
-      it still serves superseded/archived/outdated/deprecated rows by default,
-      where the structural and fts arms exclude the whole terminal vocabulary.
+      paginated, text, and tag modes); default False excludes them. The TAG
+      arm excluded only `status != "retracted"` until #13034 — a narrower
+      vocabulary that served superseded/archived/outdated/deprecated rows as
+      current on the one arm whose contract says otherwise (the gap #12502
+      filed). It now asks the same shared predicate as the structural and fts
+      arms (`live.is_terminal_status`), so every mode excludes the whole
+      terminal vocabulary plus the position axis (a closed Object, or one in a
+      `terminal` pipeline stage).
 
     Validation: page must be >= 1, offset >= 0, limit >= 1 — violations return
     a structured error dict. A `kind` that is SET but not a string (`True`, `1`,
@@ -4967,9 +4972,11 @@ def tortoise_query(kind: str | None = None,
     # `filters` into its own parameter above, and the `text=` arm now forwards it
     # as the fts leg's `include_terminal`. Refusing a name that is not a property
     # filter would be a false block; leaving it unapplied was the same defect one
-    # level down. NOTE the `tag=` arm APPLIES the flag but with a narrower
-    # vocabulary than the other arms (`status != "retracted"` only) — a real gap
-    # filed as #12502, and the reason this comment does not say the arms agree.
+    # level down. NOTE the `tag=` arm APPLIES the flag through the SAME shared
+    # predicate the other arms use (#12502, closed by #13034): it used to carry
+    # its own `status != "retracted"` test — a narrower vocabulary than every
+    # sibling arm — and now asks `live.is_terminal_status`, position axis
+    # included.
     if filters and (text or tag is not None):
         _arm = "tag=" if tag is not None else "text="
         # A caller who set BOTH must drop both to reach the structural path —
@@ -4998,10 +5005,22 @@ def tortoise_query(kind: str | None = None,
         rows = _safe(_get_org_sdk().query_points_by_tag, tag, _record_reads=False)
         if not isinstance(rows, list):
             return rows
-        # query_points_by_tag has no retracted exclusion in the SDK — mirror
-        # the tombstone contract of the other paths here (Epic #888).
+        # #12502: this arm used to carry its OWN tombstone test
+        # (``status != "retracted"``) — a hand-written SUBSET of the terminal
+        # vocabulary, so a superseded / deprecated / archived / ``outdated``
+        # row was served as current on the one arm whose docstring promises
+        # tombstones on every path. #13034: it now asks the ONE shared predicate
+        # (``live.is_terminal_status``) instead of re-spelling a status set, and
+        # passes the POSITION axis too — the rows are full ``properties(p)``
+        # dicts, so a closed Object (``isClosed``) or one parked in a
+        # ``terminal`` pipeline stage is excluded like any other ended record.
+        # ``include_retracted`` is still the escape hatch: an audit caller
+        # asking for tombstones gets every ended row.
         if not include_retracted:
-            rows = [r for r in rows if r.get("status") != "retracted"]
+            rows = [r for r in rows if not _is_terminal_status(
+                r.get("status"), bool(r.get("outdated")),
+                is_closed=r.get("isClosed"),
+                stage_slot=r.get("pipelineSlot"))]
         if not paginated:
             # #10602 review 3: a lone `limit=` used to be ignored HERE too, so a caller
             # asking for 2 rows of a large tag got the whole tagged population back —

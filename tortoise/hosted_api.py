@@ -13726,11 +13726,20 @@ async def list_points(
     # identical SDK (`_data_sdk`), so only WHERE the call runs changes.
     sdk = await _data_sdk_offloaded(org, attach_projection=True)
     conditions = ["n.is_operator = false"]
-    # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
-    # default listing surface — tombstone contract: retrievable by id via
+    # #432 Task 2 / #689 / #13034: ended Points are EXCLUDED from the default
+    # listing surface — tombstone contract: retrievable by id via
     # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
     # minimal).
-    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
+    #
+    # ⛔ This used to be a hand-written ``(n.status IS NULL OR n.status <>
+    # 'retracted')``, appended TWICE (once for #432, once for #689), and it is
+    # the exact defect #13034 records: a hand-written SUBSET of the terminal
+    # vocabulary served a ``superseded`` / ``deprecated`` / ``archived`` Point
+    # as current on the highest-traffic list route. It is the ONE shared
+    # predicate now, so the vocabulary and the position axis (``isClosed`` /
+    # a ``terminal`` pipeline slot) are read here exactly as every other read
+    # surface reads them.
+    conditions.append(_terminal_excluded("n.status"))
     # #8447 (C2): this route capped at ``limit`` and answered
     # ``{"points": …, "count": len(results)}`` — a FULL page was byte-identical
     # to a COMPLETE one, and there is no offset and no cursor on this surface, so
@@ -13752,8 +13761,6 @@ async def list_points(
         params["tag"] = tag
     else:
         tag_clause = ""
-    # #689: exclude retracted (tombstoned) points from the list endpoint.
-    conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
     query = (
         f"MATCH (n:Point){tag_clause} WHERE "
         + " AND ".join(conditions)
@@ -13904,9 +13911,19 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
         # Called from a worker thread (both call sites are off-loop), so the SDK
         # built on the loop is queried off it — the pre-#7970 shape.
+        #
+        # #13034: the cache applies the ENDPOINT's currency rule through the one
+        # shared predicate. It used to hand-write the ``retracted`` tombstone
+        # test, so a superseded/closed Point was still served from the hot set
+        # while every list/search surface had dropped it. A Point the predicate
+        # excludes now answers ``None`` here, which is a cache MISS, never a 404:
+        # the route falls through to the store (which returns ended records to a
+        # caller who asked by NAME — design §6's by-name arm) and
+        # ``_cache_sees_node`` below keeps that apart from "the cache cannot see
+        # this id at all".
         rows = sdk._get_proj().g.query(
             "MATCH (p:Point {id: $id}) "
-            "WHERE p.status IS NULL OR p.status <> 'retracted' "
+            f"WHERE {_terminal_excluded('p.status')} "
             "RETURN properties(p)",
             params={"id": point_id},
         ).result_set
@@ -14125,6 +14142,16 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     # The tombstone rule is the ENDPOINT's, not the store's: a retracted point
     # stays retrievable by get_point on the SDK but not here, whichever store
     # answered (#432 Task 2).
+    #
+    # ⛔ DELIBERATELY NOT CONVERTED to the shared predicate (#13034), and the
+    # distinction is the point: this arm asks "is this record a TOMBSTONE this
+    # route refuses to name", not "is it still current". Design §6's by-name
+    # row says a caller who asks for a record BY NAME gets it, with the word that
+    # says how it ended — so widening this to every terminal word would turn
+    # `superseded`/`deprecated`/`archived`/closed reads into 404s and change a
+    # documented REST contract (#432/#689), which is a different decision from
+    # the one this issue takes. The CURRENCY question on this route is the
+    # cache read above (``_cache_props``), which does use the predicate.
     if props.get("status") == "retracted":
         # A second 404 arm, and the attribution rule is the same one: a caller
         # that armed the record must be able to tell WHICH store answered even

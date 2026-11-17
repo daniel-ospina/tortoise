@@ -38069,9 +38069,20 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         # #689: retracted points must not feed Beta priors into EP.
+        #
+        # #13034: the hand-written `status <> 'retracted'` test below this
+        # comment was a SUBSET of the terminal vocabulary, so a claim ended by
+        # `superseded`/`deprecated`/`archived` (or by the legacy `outdated`
+        # flag, or by `isClosed`/a terminal pipeline stage) kept its stored
+        # prior in the SDK's persistent evidence set. Measured consequence: the
+        # hydrated ghost is passed to EP as an evidence ROOT, so a run
+        # (`compute_confidence()` with no anchors) assembled the operator wired
+        # to it and WROTE a fresh posterior onto a live downstream claim that
+        # nothing had touched — a dead claim voting by proxy. The shared
+        # predicate is the one rule every other read surface applies.
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
-            "AND (n.status IS NULL OR n.status <> 'retracted') "
+            f"AND {_terminal_excluded('n.status')} "
             "RETURN n.id, n.ep_alpha, n.ep_beta"
         ).result_set
         for pid, alpha, beta in rows:
