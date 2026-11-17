@@ -225,7 +225,11 @@ _RELEASED_PHRASES = {
         # makes that a class-level guarantee rather than this one fix.
         "the included amounts are not confirmed",
         "NOT OWNER-CONFIRMED",
-        "included amounts are still undecided",
+        # ⛔ NO THIRD ENTRY "just in case". Reviewer round 7 measured a candidate
+        # third phrase, "included amounts are still undecided", as inert against
+        # the live block — a dead entry is the exact shape this commit removed one
+        # row over, and the liveness arm needs only one live phrase while the
+        # satisfied arm is covered by both above.
     ),
     "vector_index_measurable": (
         "cap MUST NOT be wired",
@@ -873,6 +877,35 @@ def _code_only(path: Path) -> str:
     return "\n".join(" ".join(keep.get(i, [])) for i in range(1, len(lines) + 1))
 
 
+def _dispatch_bindings(path: Path) -> list[str]:
+    """Lines that BIND ``args.cmd == "record-restore"`` to its handler, in code.
+
+    ⛔ Token-level, not text-level. A line grep is satisfied by a docstring (one
+    STRING token) or an inline comment, so a renamed dispatch literal with the
+    old text left in prose stayed GREEN — measured, with ``ruff`` also clean
+    (reviewer round 7). Keeping ``STRING`` here and matching the token SEQUENCE
+    ``args . cmd == "record-restore"`` on a single line cannot be forged by
+    prose: a docstring's literal text is a single token, never six.
+    """
+    found: list[str] = []
+    with path.open("rb") as fh:
+        per_line: dict[int, list[str]] = {}
+        for tok in tokenize.tokenize(fh.readline):
+            if tok.type in (tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE,
+                            tokenize.INDENT, tokenize.DEDENT,
+                            tokenize.ENCODING, tokenize.ENDMARKER):
+                continue
+            per_line.setdefault(tok.start[0], []).append(tok.string)
+    for lineno in sorted(per_line):
+        toks = per_line[lineno]
+        for i in range(len(toks) - 5):
+            window = toks[i:i + 6]
+            if (window[0] == "args" and window[1] == "." and window[2] == "cmd"
+                    and window[3] == "==" and window[4] == '"record-restore"'):
+                found.append(f"{lineno}: {' '.join(toks)}")
+    return found
+
+
 def test_the_restore_verb_still_exists():
     """The G5 pin above is scoped by names; if one moves, the pin must move too.
 
@@ -899,15 +932,25 @@ def test_the_restore_verb_still_exists():
     #      literal is a string, which `_code_only` blanks, so it is matched on
     #      non-comment source lines, where the binding is the fact.
     main_path = _REPO / "tortoise" / "__main__.py"
-    assert "_cmd_record_restore" in _code_only(main_path), (
-        "the `record-restore` CLI handler is no longer in tortoise/__main__.py's "
-        "CODE — the G5 pin keeps scanning that file, so the door would be "
-        "uncovered. Add the verb's new home to the scan set above.")
-    bound = [
-        line for line in main_path.read_text(encoding="utf-8").splitlines()
-        if 'args.cmd == "record-restore"' in line
-        and not line.lstrip().startswith("#")
-    ]
+    # ⛔ A `def`, WORD-BOUNDED. Reviewer round 7 measured the bare-substring form:
+    # renaming the handler to `_cmd_record_restore_v2` at BOTH its definition and
+    # its call site stayed GREEN (the substring survives), so the assertion did
+    # not test the thing its own comment claims. Requiring the `def` — and the
+    # `\b` before the name — REDs on that refactor and on a rename of the `def`
+    # alone, which leaves a name that is called and does not resolve.
+    handler_def = re.compile(r"\bdef _cmd_record_restore\s*\(")
+    assert handler_def.search(_code_only(main_path)), (
+        "the `record-restore` CLI handler is no longer DEFINED in "
+        "tortoise/__main__.py's code — the G5 pin keeps scanning that file, so "
+        "the door would be uncovered. Add the verb's new home to the scan set "
+        "above.")
+    # ⛔ A TOKEN SUBSEQUENCE, not a substring on a non-`#` line. Reviewer round 7
+    # measured the weaker form: a DOCSTRING line reading
+    # `Dispatch contract: args.cmd == "record-restore" routes here.` satisfied it
+    # while the dispatch compared against a renamed literal — a dead verb, green,
+    # and `ruff` clean. Tokenising with STRING KEPT makes a docstring one STRING
+    # token, which can never form the comparison's token sequence.
+    bound = _dispatch_bindings(main_path)
     assert bound, (
         'no non-comment line binds `args.cmd == "record-restore"` to a handler in '
         "tortoise/__main__.py — the verb is quoted only in prose (or renamed), so "
