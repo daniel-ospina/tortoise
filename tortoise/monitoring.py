@@ -961,7 +961,10 @@ for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
 #
 # ⚠️ COVERAGE IS NOT SYMMETRIC ACROSS THE TWO SURFACES, and the payload cannot
 # say so per-child, so it is stated here: the `rest` child counts every served-late
-# shape EXCEPT a cancelled-after-head one (exclusion 3, below). The `mcp` child
+# shape EXCEPT a cancelled-after-head one (exclusion 3, below) and, on a #4055
+# cold start, a head emitted after the first budget but BEFORE the re-arm
+# (exclusion 4 — the drain's lateness is not charged to the request; such a
+# caller is reported by neither channel). The `mcp` child
 # counts a `mcp`-labelled request the same way — a PRE-SSE stall whose head
 # MISSED the budget IS counted as `mcp` (pinned by
 # `test_a_head_that_misses_the_bound_is_counted`) — but a streamable-HTTP tool
@@ -973,7 +976,7 @@ for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
 # wiring as the tracked residual. Stating the asymmetry is the minimum; the wiring is a change
 # to a seam with its own pinned call shape, not a tweak to this counter.
 #
-# ⛔ THREE exclusions make it "served late" rather than "took a while". Two are in
+# ⛔ FOUR exclusions make it "served late" rather than "took a while". Three are in
 # `WaitBoundMiddleware._count_starved`: (1) a refusal was already SUBSTITUTED —
 # the MCP seam refuses by returning its `-32009` result rather than raising, so
 # the seam's own claim flag is what keeps a refusal from being reported as a
@@ -982,7 +985,14 @@ for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
 # (`GET /mcp`) that closes much later is not a breach. A head that goes out AFTER
 # the budget that governed the answer (the re-armed one, when #4055 extended it)
 # IS counted: that caller really did wait, and nothing could be refused any more.
-# The third is on the arm itself: (3) THE REQUEST WAS CANCELLED after a head was
+# (3) ON A #4055 COLD START, a head emitted after the FIRST budget but BEFORE the
+# re-arm is not counted either: the origin published for the started arm is the
+# RE-ARMED instant, so that head's delta is negative and the drain's lateness is
+# charged to the drain, not to the request. (Measured without the re-armed origin:
+# 0.5 s bound, 0.9 s drain, head at ≈0.95 s ⇒ `starved +1`, indistinguishable
+# from a genuinely late head.) A caller in that window is reported by neither
+# channel.
+# The last is on the arm itself: (4) THE REQUEST WAS CANCELLED after a head was
 # emitted — the caller took no answer, so that arm raises before counting and the
 # class is reported by NEITHER channel. A deliberate gap, not an oversight: a
 # deploy cancels every in-flight stream, and booking that as breaches would be
@@ -2481,7 +2491,7 @@ def record_wait_bound_starved(surface: str) -> None:
     ``test_the_timeout_race_arm_is_counted``). The counter reports the OUTCOME
     (served, not refused), not whether a timer callback ran.
 
-    ⛔ THREE EXCLUSIONS make it "served late" rather than "took a while":
+    ⛔ FOUR EXCLUSIONS make it "served late" rather than "took a while":
 
     * a refusal was already substituted for this request (the MCP seam refuses
       by RETURNING its ``-32009`` result, so an outer boundary sees an ordinary
@@ -2489,6 +2499,10 @@ def record_wait_bound_starved(surface: str) -> None:
     * the response HEAD reached the caller inside the bound — the promise is
       about when the caller learns something, so a long-lived SSE stream that
       closes much later is not a breach;
+    * on a #4055 cold start, the response HEAD went out after the FIRST budget
+      but BEFORE the re-arm: the origin is the re-armed instant, so its delta is
+      negative and the drain's lateness is not charged to the request — reported
+      by NEITHER channel;
     * the request was CANCELLED after a head was emitted (client disconnect,
       server shutdown). The caller took no answer, so the middleware raises
       before counting and this class is reported by NEITHER channel — a

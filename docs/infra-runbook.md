@@ -1039,7 +1039,8 @@ question:
   except a cancelled one (see the cancellation note above) **and, on a #4055 cold
   start, a head emitted after the first budget but BEFORE the re-arm** (that
   lateness belongs to the drain, so such a caller is reported by neither
-  channel). The `mcp` child
+  channel — this is the second case in which the two channels together still do
+  not see a late caller, and both are named here on purpose). The `mcp` child
   counts a `mcp`-labelled exchange the same way — **a pre-SSE stall whose head
   MISSED the budget IS counted as `mcp`** — but a streamable-HTTP tool call sends
   its SSE head *before* the tool is dispatched, so by this section's own head
