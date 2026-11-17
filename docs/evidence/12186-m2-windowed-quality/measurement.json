@@ -583,10 +583,10 @@
     }
   },
   "provenance": {
-    "tool_sha256": "34e0901ba816bc08762049462e202f7e258e16960d6c78ea808af3391d79b5af"
+    "tool_sha256": "5473d43e1d953fb5e3b0f8e1327aa78bfcf6aef5f6d576090f00985abd0095bc"
   },
   "reproducibility": {
-    "conclusions_rest_on_gap_pp": "13 to 43",
+    "conclusions_rest_on_gap_pp": "13.3 to 48.3",
     "found_deep_max_delta_pp": 0.33,
     "invariants_held_in_every_run": [
       "found_deep == resident_share in every :Object arm",

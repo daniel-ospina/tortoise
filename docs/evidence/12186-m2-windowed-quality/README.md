@@ -13,9 +13,13 @@ aboutObjects: "#12186, SEARCH-ARCHITECTURE.md §7, SEARCH-ARCHITECTURE.md §9, #
 
 **Verdict: §7's window is NOT SAFE AS SPECIFIED — it must not be armed.**
 On the **text leg** — the one §6.2 keeps in the graph, and the only leg this run exercised — the
-window's retrieval cost is **the eviction itself, with nothing compensating**: a demoted node is never
+window's retrieval cost is **the eviction itself, with nothing compensating**: in a run that invalidates
+the degraded snapshot after each demotion, a demoted node is never
 handed back as a candidate at any rank, the caller is never told a store was partial, and on the claim
-population a demoted query returns a **different claim** rather than an empty answer. ⛔ **"Cost equals
+population a demoted query returns a **different claim** rather than an empty answer. ⛔ **That zero is
+this configuration's, not a guarantee the shipped path makes**: `tortoise/cache_evictor.py::_delete_nodes`
+issues a bare `DETACH DELETE` and never invalidates `fallback_snapshot`, so today's evictor leaves a
+demoted node returnable for up to 60 s (Finding 6, filed as **#13123**). ⛔ **And "Cost equals
 the eviction share" is a `:Object` identity, not a statement about the text leg as a whole.**
 `found@deep` equals the resident share in every `:Object` arm but in **no** `:Point` arm, where the loss
 is the eviction **plus** a ranking weakness the window did not cause — and the two must not be added
@@ -366,8 +370,12 @@ every arm is measured on its own fresh graph, and why **a tie-counting result is
 and an ordering only, never as a single-run magnitude**.
 
 ⛔ **The ratio, stated honestly, because the first version of this paragraph flattered it.** The
-smallest gap any conclusion rests on is **13 points** (the artifact records the range as `13 to 43`), so
-the tie band is up to **~3/4 of the smallest gap** — *not* the "barely 1/8" an earlier cut claimed. The
+gaps the **verdict** rests on run **13.3 to 48.3 points** (the artifact records the range as `13.3 to
+48.3`): 13.3 is the misbind move against the complete graph, 48.3 is `found@deep` at §8's target size. So
+the tie band is up to **~3/4 of the SMALLEST of those gaps** — *not* the "barely 1/8" an earlier cut
+claimed, and *not* a small fraction of any of them. Two secondary sentences below rest on smaller gaps
+(~3 points for the superseded first-window rule, 7.3 for `:Point` `recall@3`); they are labelled as an
+approximation and as a ranking-ceiling attribution there, and the verdict does not rest on them. The
 27.7 % → 41.0 % misbind move is exactly such a tie-counting rate: its 13.3-point gap carries a
 ~9.9-point band. **The verdict does not depend on it** — `found_deep_of_demoted == 0` and
 `recall@k <= resident_share` are *not* tie-counting quantities, they held in every arm of every run, and

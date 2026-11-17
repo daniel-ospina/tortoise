@@ -658,7 +658,7 @@ share, while §8 budgets BYTES. And the lexical leg's own ceiling is low on clai
 (recall@3 15.7 %, `found@deep` 71.3 %) — the ranking matter **M3** owns, not a window effect. And the
 record carries its own reproducibility bound, in the artifact: across three runs of identical input
 `found@deep` moved by at most 0.33 points, `recall@k` by at most 1.0, and the tie-counting rates by at
-most 9.9 — every conclusion rests on a gap of 13 to 43 points, and the two quantities the verdict turns
+most 9.9 — the gaps the verdict rests on run 13.3 to 48.3 points, and the two quantities the verdict turns
 on (`found@deep == resident_share`, and `found_deep_of_demoted == 0`) held in every arm of every run.
 
 **Consequence for §7.** Arming needs a decision this measurement cannot make on its own, and §10 names

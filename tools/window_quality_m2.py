@@ -251,9 +251,11 @@ EVICT_SEED_OFFSET = 1_000_003
 #: tie-counting conclusion is quoted as a DIRECTION and an ORDERING only, never
 #: as a single-run magnitude.
 #:
-#: ⚠️ And the honest ratio: every conclusion in the record rests on a gap of 13
-#: to 43 points, so the tie band is up to ~3/4 of the SMALLEST gap — not a small
-#: fraction of it. The 27.7 % -> 41.0 % misbind move is a tie-counting rate, so
+#: ⚠️ And the honest ratio: the gaps the VERDICT rests on run 13.3 to 48.3
+#: points (the misbind move vs the `complete` graph, up to `found@deep` at §8's
+#: target size), so the tie band is up to ~3/4 of the SMALLEST of them — not a
+#: small fraction of it. Two secondary sentences in the record rest on smaller
+#: gaps (~3, 7.3) and are labelled as approximations or attributions there. The 27.7 % -> 41.0 % misbind move is a tie-counting rate, so
 #: its 13.3-point gap carries a ~9.9-point band; the verdict survives because
 #: `found_deep_of_demoted == 0` and `recall <= resident_share` are NOT
 #: tie-counting quantities and are stable in every arm.
@@ -263,7 +265,7 @@ REPRODUCIBILITY_BOUND: dict[str, object] = {
     "recall_at_k_max_delta_pp": 1.0,
     "tie_counting_max_delta_pp": 9.85,
     "tie_counting_metric": "silent_zero (object tail@0.9)",
-    "conclusions_rest_on_gap_pp": "13 to 43",
+    "conclusions_rest_on_gap_pp": "13.3 to 48.3",
     "invariants_held_in_every_run": [
         "found_deep == resident_share in every :Object arm",
         "found_deep_of_demoted == 0.0 in every arm of both populations",

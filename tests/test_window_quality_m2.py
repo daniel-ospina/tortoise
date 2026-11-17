@@ -415,6 +415,14 @@ def test_the_artifact_binds_its_own_provenance(artifact):
     for key in ("found_deep_max_delta_pp", "recall_at_k_max_delta_pp",
                 "tie_counting_max_delta_pp"):
         assert isinstance(rep[key], (int, float)) and rep[key] >= 0.0, key
+    # (5) the recorded gap range must be the COMPUTED one, so the constant cannot
+    #     certify itself (#12186 review P2-2: `13 to 43` matched neither endpoint —
+    #     the record's real gaps run 13.3 (misbind) to 48.3 (found@deep@0.5)).
+    low, _, high = rep["conclusions_rest_on_gap_pp"].partition(" to ")
+    want_low, want_high = _gap_endpoints(artifact)
+    assert (low, high) == (want_low, want_high), (
+        f"reproducibility.conclusions_rest_on_gap_pp says {low!r}-{high!r} but the "
+        f"gaps the record quotes compute to {want_low}-{want_high}")
     low, _, high = rep["conclusions_rest_on_gap_pp"].partition(" to ")
     assert float(low) < float(high), "the recorded gap range is not a range"
     # the tie band must not be presented as small against that gap
@@ -544,14 +552,13 @@ def test_the_claim_population_ceiling_matches_the_record(artifact):
 _NON_ARTIFACT_FIGURES = {
     # §8's sizing (a budget in MB, quoted to bound the target size)
     "77", "150", "50",
-    # the corpus mix (#11901's own audit, not this run) — DERIVED from
-    # `corpus.names_harvested`, so it re-states the artifact rather than
-    # inventing a figure: ident 12,557 / 156,449 = 8.03 %, path 5,314 = 3.40 %.
-    "8.0", "3.4", "60", "30", "10", "22", "653", "786", "1000", "300", "11901",
-    # the recall@3-realized-per-resident rate at object/tail@0.25 (0.2033/0.2333)
-    "87.1",
+    # the corpus mix (#11901's own audit, not this run). The two PERCENTAGES
+    # (8.0 / 3.4) are derived in `_derived_figures` from `names_harvested` and are
+    # deliberately NOT listed here: a literal shadows the derivation and the scan
+    # then passes while the prose goes stale (#12186 review P2-3).
+    "60", "30", "10", "22", "653", "786", "1000", "300", "11901",
     # §7's literature figure and §5's threshold
-    "54", "1.0",
+    "54",
     # the rule comparison the instrument's docstring records (a superseded rule)
     "19.0",
     # §9's own M-numbering and the other measurements' figures
@@ -580,6 +587,32 @@ _NON_ARTIFACT_FIGURES = {
 #: rate passed membership while the statistic was wrong (#12186 review P2-5).
 _DOC_RANGE_RE = re.compile(
     r"(\d+(?:\.\d+)?)\s*(?:–|-|\bto\b)\s*(\d+(?:\.\d+)?)\s*(?:%|pp\b|(?:percentage\s+)?points?\b)")
+
+#: ⛔ The `A vs B` shape — a PROSE comparison. It usually carries no unit at all
+#: (`recall@3 46.0 vs 46.3`), so `_DOC_FIGURE_RE` could not see either operand, and
+#: this pair is the entire evidence of Finding 4 ("no static policy is a lever"):
+#: re-staling it in the README AND the changelog left the suite green under the
+#: previous scan (#12186 review P2-4).
+_DOC_VS_RE = re.compile(
+    r"(?<![\d.])(\d+\.\d)\s*(?:%|pp)?\s*vs\.?\s+(\d+\.\d)\s*(?:%|pp)?")
+
+
+def _gap_endpoints(artifact: dict) -> list[str]:
+    """The gaps the VERDICT rests on, computed — the source of `13.3 to 48.3`.
+
+    ⛔ Derived, never read from `reproducibility.conclusions_rest_on_gap_pp`: a
+    value that seeds its own allow-list cannot be wrong (#12186 review P2-2).
+    """
+    obj = artifact["populations"]["object"]["arms"]
+    complete = obj["complete"]
+    half = obj["tail@0.5"]
+    gaps = [
+        (complete["recall@3"] - half["recall@3"]) * 100,
+        (complete["recall@15"] - half["recall@15"]) * 100,
+        (complete["found_deep"] - half["found_deep"]) * 100,
+        (half["misbind_at_1"] - complete["misbind_at_1"]) * 100,
+    ]
+    return [f"{min(gaps):.1f}", f"{max(gaps):.1f}"]
 
 
 def _derived_figures(artifact: dict) -> set[str]:
@@ -742,6 +775,14 @@ def test_no_doc_states_a_percentage_the_artifact_does_not_hold():
                         f"bound {end_} is not a figure the artifact holds")
             if float(low) >= float(high):
                 bad.append(f"{name}:{line} states {m.group(0)!r} — not a range")
+        for m in _DOC_VS_RE.finditer(text):
+            a, b = m.group(1), m.group(2)
+            line = text[: m.start()].count("\n") + 1
+            for op in (a, b):
+                if op not in allowed:
+                    bad.append(
+                        f"{name}:{line} compares {m.group(0)!r} and the operand "
+                        f"{op} is not a figure the artifact holds")
         for m in _DOC_FIGURE_RE.finditer(text):
             figure = m.group(1)
             if figure not in allowed:
