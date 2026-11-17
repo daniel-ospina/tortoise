@@ -1521,9 +1521,12 @@ def test_sc4_deprecation_markers_present():
         #   "The live path is index_sources_from_directory.\n\n"
         #   "Use ``index_directory`` if the container is unavailable.\n"
         #
-        # stayed GREEN before this commit and REDS after it — on the blanket arm, never
-        # reaching the scoped one. That is the very defect this test exists to catch, so
-        # the blanket ban is not redundant belt-and-braces: it is the arm that catches it.
+        # stayed GREEN at `5bc0f67f8d` — the head that carried the paragraph arm ALONE —
+        # and REDS from `7476af3597` on, when the blanket arm was added; it reds on that
+        # blanket arm and never reaches the scoped one. The word-delimited form this head
+        # uses reds the same shape the same way. That is the very defect this test exists
+        # to catch, so the blanket ban is not redundant belt-and-braces: it is the arm
+        # that catches it.
         #
         # The blanket ban is cheap HERE because it is measured, not assumed: at this
         # head both in-scope docstrings carry ZERO occurrences of the retired name
