@@ -899,13 +899,19 @@ _VECTOR_INDEX_PAIR_LOCK = threading.Lock()
 
 
 def _reset_vector_gap_warnings() -> None:
-    """Test hook: drop EVERY per-`(endpoint, graph)` register this module keeps.
+    """Test hook: drop EVERY process-global vector-index register this module keeps.
 
-    `_VECTOR_INDEX_GAP_WARNED` (the #4997 WARNING latch),
+    Three registers, TWO KEY SHAPES — the headline above says "every" rather than
+    naming a shape, because the shapes differ (#13330 review P3):
+    `_VECTOR_INDEX_GAP_WARNED` (the #4997 WARNING latch) and
     `_VECTOR_INDEX_PAIR_REPORTED` (the #11087 pair report's value latch,
-    registered by `_record_vector_index_inventory`) and
-    `_VECTOR_INDEX_DROP_FAILED_WARNED` (the #13320 "could not retire it" latch)
-    are process-global, so without this a latch entry from one test suppresses the
+    registered by `_record_vector_index_inventory`) are keyed per
+    `(endpoint, graph)`, while `_VECTOR_INDEX_DROP_FAILED_WARNED` (the #13320
+    "could not retire it" latch) is keyed per `(endpoint, graph, KIND)` — one
+    bucket per kind, because a transient read failure must never spend the
+    permanent survivor verdict's budget. A reader auditing the clear work must not
+    be told one shape applies to all three.
+    All are process-global, so without this a latch entry from one test suppresses the
     warning — or the REPORT — in the next one on the same (endpoint, graph).
     ⛔ Adding a register here and NOT to this hook is how a pin becomes
     order-dependent: #13320's survivor test reds on a second in-process run when
