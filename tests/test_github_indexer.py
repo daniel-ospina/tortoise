@@ -552,17 +552,24 @@ def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk)
 def test_a_FALSY_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
     """#13288 review R2/F1, the half that had no pin: `isClosed=0`.
 
-    `create_object(..., isClosed=1)` is documented at the truthy pin BELOW
-    (`test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`); the
-    FALSY half is reachable through the other door, `update_knowledge(id,
-    isClosed=0)`, which stores the INTEGER `0` (measured on the merged head:
-    `typeof(o.isClosed)` → `['Integer']`). The two sides then disagree
-    irreconcilably: this module reads it by `bool()` (→ live), while the fold's
-    live-holder probe compares `coalesce(n.isClosed, false) = false` in Cypher,
-    where `0 = false` is FALSE under FalkorDB's strict types (measured:
-    `RETURN 0 = false, typeof(0)` → `[False, 'Integer']`; vendor-documented, and
-    `toBoolean(0)` is the explicit coercion). So the row has NO live holder, no
-    fold runs on it, and the marker is never repaired.
+    EVERY props door stores the marker VERBATIM and none of them coerces:
+    `create_object(..., isClosed=1)` stores the INTEGER `1` (the truthy pin BELOW,
+    `test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`) and
+    `create_object(..., isClosed=0)` / `update_knowledge(id, isClosed=0)` both store
+    the INTEGER `0` (measured: `typeof(o.isClosed)` → `['Integer']` on either door —
+    the door set is NOT a singleton, so this pin uses the update path and the truthy
+    sibling uses the create path, without claiming either is the only way in). The
+    two sides then disagree irreconcilably: this module reads the marker by `bool()`
+    (→ live), while the fold's live-holder probe compares
+    `coalesce(n.isClosed, false) = false` in Cypher, where `0 = false` is FALSE
+    under FalkorDB's strict types (measured: `RETURN 0 = false, typeof(0)` →
+    `[False, 'Integer']`; vendor-documented, and `toBoolean(0)` is the explicit
+    coercion). So the row has NO live holder and no CLOSE fold is dispatched for
+    it — and because this reader answers `None`, no fold is triggered on it either,
+    so the marker is never repaired. (That is a statement about the TRIGGER, not
+    about what a fold could write: a `github.issue.reopened` fold that REACHES such
+    a row does replace the marker with a real boolean — which is exactly why the
+    arm must sit below the arms that CAN reach it, see the two sibling pins.)
 
     Measured pre-fix on the merged head, four polls of a CLOSED issue: mints
     `[1, 1, 1, 1]`, four permanent `-closed` Events, the row byte-identical. The
@@ -685,6 +692,75 @@ def test_a_FALSY_isClosed_on_an_ENDED_position_still_records_its_reopen(sdk):
         f"the reopen must leave a live position: {repaired!r}")
     assert [_run(_indexer(t), sdk)["events_minted"] for _ in range(2)] == [0, 0], (
         "the repaired row must be settled — nothing further to record")
+
+
+def test_a_FALSY_isClosed_on_a_FROZEN_word_row_still_records_its_reopen(sdk):
+    """#13326 placement pin: the falsy arm must also sit BELOW the lifecycle block.
+
+    `#13326` F1 pinned the arm's placement against the POSITION arms only — a falsy
+    marker on an ENDED position must still read `"closed"`. That pin keeps the arm
+    out of the position arms, but it does not constrain the arm against the
+    LIFECYCLE block above it (`_row_is_frozen`), because the two shapes are
+    disjoint: the ended-position fixture has both axis props terminal, so the
+    position arm answers it and the lifecycle block is never reached.
+
+    This pin is the other side of the same invariant, and it is the placement that
+    is NOT self-evident: a row carrying a WIDE lifecycle term (`outdated`,
+    `status='outdated'`) with NO stage position has no live holder — so the CLOSE
+    fold is never dispatched — but the REOPEN fold IS (`_reopen_targets_closed`
+    needs "no live holder" + one registered incarnation, both true here), and it
+    APPLIES, because the fold's latch set (`OBJECT_TERMINAL_STATUSES`) has no
+    `outdated` member. So this direction is reconcilable, and the word answer
+    inside the lifecycle block is the reading that reconciles it.
+
+    A falsy `isClosed` does not change any of that: it is one more reason the row
+    has no live holder, not a reason the answer becomes `None`. Hoisting the falsy
+    arm ABOVE `_row_is_frozen` — a placement the F1 pin above does not catch —
+    answers `None` for this shape, so no `-reopened` is minted, no fold runs, and
+    the row keeps its `completed`/`outdated` word for ever. That is the silent
+    false negative `#13289` round 4 removed, one field over.
+    """
+    oid = "github-issue-acme/repo1-1"
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (o:Object) DETACH DELETE o")
+    proj.g.query("MATCH (e:Event) DETACH DELETE e")
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    # The shape: a WIDE lifecycle term, an INTEGER marker (the falsy non-boolean
+    # this PR is about, through the same public door the sibling pins use), and NO
+    # stage position — so the lifecycle block, not a position arm, decides.
+    sdk.update_knowledge(oid, isClosed=0)
+    proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) SET o.status='completed', o.outdated=true "
+        "REMOVE o.pipelineStageId, o.pipelineSlot, o.pipelineStageKey")
+    stored = proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) RETURN o.status, o.outdated, o.isClosed, "
+        "typeof(o.isClosed), o.pipelineStageId, o.pipelineSlot").result_set[0]
+    assert stored[0] == "completed" and stored[1] is True and stored[4] is None, (
+        f"the precondition is not the shape this pin is about ({stored!r})")
+    assert stored[2] == 0 and stored[3] == "Integer", (
+        f"the marker is not the falsy non-boolean this PR is about ({stored!r})")
+    # THE PLACEMENT CLAIM, read directly: the arm must not shadow the word answer.
+    assert GitHubIndexer._object_state_to_issue_state(proj, oid) == "closed", (
+        "a falsy marker shadowed the lifecycle block's word answer: the reopen the "
+        "projection WOULD apply is dropped, and the row keeps its terminal word for "
+        "ever (the falsy arm is placed above `_row_is_frozen`)")
+    # …and the read is worth what the fold can DO with it: exactly one `-reopened`,
+    # then silence, and the row must actually reach the live position.
+    t.issues_by_repo["acme/repo1"] = [gh_issue(
+        1, state="open", closed_at=None, updated_at="2026-07-24T08:00:00Z")]
+    mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+    assert mints == [1, 0, 0], (
+        f"exactly one `-reopened` must be minted and then stop ({mints}) — a "
+        "repeat means the fold refused the row, so `\"closed\"` would loop here")
+    repaired = proj.g.query(
+        f"MATCH (o:Object {{id:'{oid}'}}) RETURN o.pipelineStageId, o.pipelineSlot, "
+        "o.isClosed, typeof(o.isClosed)").result_set[0]
+    assert repaired[0] == "in_progress" and repaired[1] == "active", (
+        f"the reopen did not reach the row ({repaired!r}), so the mint above is "
+        "itself a loop and `\"closed\"` is not a convergent answer for this shape")
+    assert repaired[2] is False and repaired[3] == "Boolean", (
+        f"the fold did not repair the marker to a real boolean ({repaired!r})")
 
 
 def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):

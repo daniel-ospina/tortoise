@@ -1563,21 +1563,36 @@ class GitHubIndexer:
         # (`pipeline.py:434`, `"isClosed": target.is_terminal`). What makes the
         # truthy half self-heal is not the fold's reach — it is that this reader
         # ANSWERS `"closed"` for it, so the fold is triggered at all.
-        # The asymmetry that DOES justify `None` is the folds that REFUSE. `None`
-        # cannot loop under ANY fold outcome (it gates the transition arm off,
-        # `if prev_state is not None:`). `"closed"` loops unboundedly wherever the
-        # reopen fold refuses the row while GitHub says open: `len(_held) != 1`
+        # The asymmetry that DOES justify `None` is the folds that REFUSE, and the
+        # arm sits at a point where the answer it REPLACES is `"open"` (the arm
+        # below) or a word answer (the fallthrough) — so state the choice against
+        # `"open"` first, which is the measured loop: this row has no live holder,
+        # the CLOSE fold is never dispatched for it, so reading it `"open"` mints a
+        # `-closed` on EVERY poll of a closed issue (measured `[1, 1, 1, 1]`, row
+        # byte-identical). `"closed"` is not the alternative here, but it is the
+        # other answer that can loop: it mints `-reopened` per poll wherever the
+        # REOPEN fold refuses the row while GitHub says open — `len(_held) != 1`
         # (the name is held by 2+ incarnations), the regression guard,
-        # `unresolvable-current-stage`, `cross-pipeline` — one `-reopened` per poll,
-        # for ever. That is the choice, and it is the one not to reverse.
-        # ⛔ AND IT IS ANSWERED AFTER THE POSITION ARMS, deliberately: a falsy marker
-        # on an ENDED position still reads `"closed"` above, which is the reading
-        # the fold reaches and REPAIRS. Answering `None` there would cost that row
-        # its entire remaining close/reopen history (no mint ⇒ no fold ⇒ no repair,
-        # every poll for ever — pinned by
-        # `test_a_FALSY_isClosed_on_an_ENDED_position_still_records_its_reopen`).
-        # The shape the bug was measured on is an ACTIVE slot, where BOTH position
-        # arms are `False`, so narrowing costs that fix nothing.
+        # `unresolvable-current-stage`, `cross-pipeline`. `None` cannot loop under
+        # ANY fold outcome (it gates the transition arm off, `if prev_state is not
+        # None:`), which is what makes it the only answer that is safe without
+        # knowing which fold will run. That is the choice, and it is the one not to
+        # reverse.
+        # ⛔ AND IT IS ANSWERED AFTER THE POSITION ARMS *AND* AFTER THE LIFECYCLE
+        # BLOCK above (`_row_is_frozen`), deliberately — both are places a falsy
+        # marker can still be RECONCILED, and answering `None` there costs the row
+        # its remaining close/reopen history (no mint ⇒ no fold ⇒ no repair, every
+        # poll for ever):
+        #   * on an ENDED position it reads `"closed"` above, which is the reading
+        #     the fold reaches and REPAIRS (pinned by
+        #     `test_a_FALSY_isClosed_on_an_ENDED_position_still_records_its_reopen`);
+        #   * on a row carrying a WIDE lifecycle term with NO stage position it reads
+        #     the word answer inside that block (pinned by
+        #     `test_a_FALSY_isClosed_on_a_FROZEN_word_row_still_records_its_reopen`) —
+        #     hoisting this arm above either one reds the corresponding pin.
+        # The shape the bug was measured on is a LIVE position with no lifecycle
+        # term, so both of those arms are already `False` for it and narrowing here
+        # costs that fix nothing.
         # Cost, stated: one lost transition on a row no in-contract writer produces,
         # against an unbounded journal mint, which is not a defensible alternative.
         if is_closed is not None and not isinstance(is_closed, bool) and not is_closed:
