@@ -509,8 +509,19 @@ def test_the_content_fetch_and_epistemic_read_are_charged_to_retrieval():
     the dominant graph read of a search is still attributed to something that had
     returned. So the window is walked from the closing mark and BOTH of step 7's
     graph round trips must be inside it — the batch content fetch (any store
-    reference) and ``fetch_point_epistemic_state`` — with ``ordering``, the next
-    stage's mark, as its closer.
+    reference OTHER than the epistemic read) and ``fetch_point_epistemic_state``
+    — with ``ordering``, the next stage's mark, as its closer.
+
+    ⛔ THE STORE SCAN EXCLUDES THE EPISTEMIC READ, and that exclusion is the whole
+    difference between a pin and a tautology (#13297 review IS-1).
+    ``fetch_point_epistemic_state(graph, ...)`` PASSES ``graph``, so it satisfies
+    ``_mentions_store`` on its own — a bare ``any(_mentions_store(...))`` is
+    therefore ENTAILED by the assertion above it and can never be the row that
+    reddens. Measured at the fixed head: blanking step 7's content fetch, the 7.5
+    relationships read and the subject probe (every store statement in the window
+    but the epistemic read) left the unexcluded form GREEN. Excluding the read the
+    sibling assertion already pins is what makes THIS one observe the content
+    fetch it names.
 
     Read together with the sibling above, this is the whole claim: the content
     fetch and the epistemic-state read are attributed to ``retrieval``, never to
@@ -537,7 +548,10 @@ def test_the_content_fetch_and_epistemic_read_are_charged_to_retrieval():
         "window — a breach blocked in that read would be blamed on a stage that "
         "had already returned"
     )
-    assert any(_mentions_store(stmt) for stmt in span), (
+    assert any(
+        _mentions_store(stmt) for stmt in span
+        if not _calls_name(stmt, "fetch_point_epistemic_state")
+    ), (
         "no store round trip sits inside the ``retrieval`` window after "
         "``ep_annotation`` — step 7's batch content fetch is the dominant graph "
         "read of a search, and this pin is only meaningful while it exists here"
