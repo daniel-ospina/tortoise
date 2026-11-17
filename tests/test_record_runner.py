@@ -563,12 +563,20 @@ def test_status_DISCLOSES_a_salvage_read_and_withdraws_the_completion_claim(
     assert "complete: UNKNOWN" in out
 
 
-def test_status_on_a_SEGMENTED_layout_cannot_claim_completion(monkeypatch, capsys):
-    """The worse arm: a segmented reader ALWAYS salvages and returns no counters.
+def test_status_on_a_SALVAGED_segmented_layout_cannot_claim_completion(
+        monkeypatch, capsys):
+    """The segmented arm, SALVAGED — the only segmented state that skips a line.
 
-    `corrupt is None` means NOT REPORTED, so there is not even a number to print —
-    which is why `fully_consumed` must be `None` here and the text must say the
-    damage is unreportable rather than print a reassuring zero.
+    `corrupt is None` means NOT REPORTED, so there is no number to print; and with
+    `salvage=True` a mid-file line WAS skipped, so `fully_consumed` must be `None`
+    and the text must say the damage is unreportable rather than print a
+    reassuring zero.
+
+    ⛔ `salvage` is what makes it unknown, NOT `corrupt is None` (review P2,
+    #13210): the segmented reader is strict unless asked to salvage, so a clean
+    `<graph dir>` read that RETURNS has skipped nothing. Keying this on
+    `corrupt is None` withdrew the completion claim on EVERY directory read —
+    the companion test below is the other side of that boundary.
     """
     journal = Journal(path=FIXTURE,
                       records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
@@ -589,8 +597,42 @@ def test_status_on_a_SEGMENTED_layout_cannot_claim_completion(monkeypatch, capsy
                "--journal", str(FIXTURE)])
     assert rc == EXIT_OK
     out = capsys.readouterr().out
-    assert "damage NOT REPORTED" in out
+    assert "damage counters NOT REPORTED" in out
     assert "complete: UNKNOWN" in out
+
+
+def test_a_CLEAN_segmented_read_STILL_reports_completion(monkeypatch, capsys):
+    """The other side of the boundary: `--journal <graph dir>`, no damage.
+
+    A directory IS the segmented arm (`read_journal` marks every graph dir
+    `segmented=True`), so a predicate keyed on `corrupt is None` turned the
+    completion claim off for EVERY documented directory read — measured before
+    this fix: clean dir at completion -> `fully_consumed: None`, while the same
+    records passed as a FILE path gave `True`. The counter is unreported and the
+    render says so (information), but the reader REFUSES damage rather than
+    skipping it, so the claim is supportable and must stay `True`.
+    """
+    journal = Journal(path=FIXTURE,
+                      records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
+                      segmented=True, salvage=False, corrupt=None, torn=None)
+    monkeypatch.setattr(record_runner, "read_journal", lambda *a, **k: journal)
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(FIXTURE), "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["fully_consumed"] is True
+    assert payload["completeness_unknown"] is False
+    # the unmeasured counter is still DISCLOSED — information, not a retraction
+    assert payload["journal"]["corrupt_lines"] is None
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "damage counters NOT REPORTED" in out
+    assert "complete: UNKNOWN" not in out
 
 
 def test_plan_allocate_does_not_hand_over_an_acknowledgement(monkeypatch, capsys):

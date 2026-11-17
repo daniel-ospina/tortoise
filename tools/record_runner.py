@@ -250,12 +250,17 @@ def read_journal(path: str | Path, *, salvage: bool = False) -> Journal:
                 f"<graph dir>/events.jsonl (or the graph dir)")
         # ⛔ DAMAGE IS REPORTED AS UNKNOWN, NOT AS ZERO (review P2).
         # `read_all_segments` counts a mid-file damage per segment INTERNALLY and
-        # then discards the count (it raises or logs, and returns only records) —
-        # and it reads every segment through `read_for_replay`, i.e. ALWAYS in
-        # salvage mode. So for a segmented layout this tool cannot report the
-        # count, and printing `0` would assert "no damage" over a read that had
-        # skipped a line and thereby SHIFTED every later record's enumeration.
-        # `None` is the only honest value here; the render says "not reported".
+        # then discards the count (it raises or logs, and returns only records),
+        # so for a segmented layout this tool cannot report the count and printing
+        # `0` would assert "no damage" it did not measure. `None` is the only
+        # honest value; the render says "not reported".
+        # ⚠ BUT AN UNREPORTED COUNT IS NOT AN UNKNOWN COMPLETENESS: the reader is
+        # STRICT unless `salvage=True` (`journal_segments.py:949-953` raises
+        # `JournalLayoutError`), so a non-salvage segmented read that RETURNS has
+        # skipped nothing and its completion claim is supportable. That is why
+        # `cmd_status` keys `completeness_unknown` on `salvage` alone and not on
+        # `corrupt is None` (review P2 #13210: keying it on `corrupt is None`
+        # withdrew the claim on every `<graph dir>` read, clean or not).
         return Journal(path=graph_dir, records=records, segmented=True,
                        salvage=salvage, corrupt=None, torn=None)
 
@@ -825,20 +830,24 @@ def _quietly(fn) -> None:
 
 
 def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
-    """The damage disclosure EVERY verb owes, in one place (review P1, #13210).
+    """The damage disclosure, in one place (review P1, #13210).
 
-    ⛔ `plan` and `apply` published it from the beginning and `status` did not, so
-    the one verb an operator chains on could say `fully_consumed: true` over a
-    read that had SKIPPED a record — the harmonic of `read_journal`'s own promise
-    ("salvaging is an explicit, recorded choice and the report says when it was
-    taken"). Factored rather than re-spelled so the three verbs cannot drift, and
-    so a fourth verb inherits it by construction.
+    ⛔ `plan` and `status` both call it: `status` used to drop the damage keys
+    entirely and could say `fully_consumed: true` over a read that skipped a
+    record — the harmonic of `read_journal`'s own promise ("salvaging is an
+    explicit, recorded choice and the report says when it was taken"). Factoring
+    it means a further verb inherits it by construction instead of re-spelling it.
+
+    ⚠ `apply` does NOT call it, deliberately and not by drift: it refuses
+    `--salvage` outright, and a non-salvage segmented read RAISES rather than
+    skipping — so there is no damage state `apply` can be in without having
+    already refused. (`plan` and `status` DO accept `--salvage`, which is why the
+    disclosure is load-bearing for them.)
     """
     if j["corrupt_lines"] is None or j["torn_tails"] is None:
-        return ["  ⚠ damage NOT REPORTED: this layout's reader does not "
-                "return its damage counters, and it reads every segment in "
-                "SALVAGE mode — so a skipped mid-file line would have "
-                "SHIFTED the enumeration and this run cannot see it"]
+        return ["  ⚠ damage counters NOT REPORTED: this layout's reader does not "
+                "return them — it RAISES on damage unless asked to salvage — "
+                "so damage here is unmeasured rather than absent"]
     if j["corrupt_lines"] or j["torn_tails"]:
         return [f"  ⚠ damaged input: {j['corrupt_lines']} mid-file line(s), "
                 f"{j['torn_tails']} torn tail fragment(s) — a SKIPPED line "
@@ -1174,15 +1183,18 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
                     f"they are not the same journal")
     else:
         remaining = len(journal.records) - (cp.next_seq - 1)
-    # ⛔ A READ WHOSE COMPLETENESS IS UNKNOWN CANNOT COMPLETE ANYTHING (review P1).
-    # `salvage` means a mid-file line was SKIPPED, and a skipped line SHIFTS every
-    # later position — so `remaining` can reach 0 while the record is missing that
-    # record's mutation. The segmented layout is worse: its reader always salvages
-    # and returns no counters at all (`corrupt is None`), so even the `--salvage`
-    # warning `plan`/`apply` print has no number to carry. `fully_consumed` is the
-    # field a chain gates on, so it takes the same `None` the cut-over and the
-    # mismatch arms take, and the damage lines say why.
-    completeness_unknown = journal.salvage or journal.corrupt is None
+    # ⛔ A READ THAT SKIPPED A LINE CANNOT COMPLETE ANYTHING (review P1). `salvage`
+    # means a mid-file line was SKIPPED, and a skipped line SHIFTS every later
+    # position — so `remaining` can reach 0 while the record is missing that
+    # record's mutation. `fully_consumed` is the field a chain gates on, so it
+    # takes the same `None` the cut-over and the mismatch arms take, and the
+    # damage lines say why.
+    # ⚠ `salvage` ALONE, not `salvage or corrupt is None` (review P2 #13210): an
+    # UNREPORTED counter is not an UNKNOWN completion. The segmented reader is
+    # strict unless asked to salvage, so a `<graph dir>` read that returns has
+    # skipped nothing — keying on `corrupt is None` withdrew the claim on every
+    # directory read, which is a documented input (`--journal <graph dir>`).
+    completeness_unknown = journal.salvage
     payload = {
         "verb": "status",
         "org_id": args.org_id,
