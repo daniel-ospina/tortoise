@@ -431,8 +431,11 @@ def test_reading_declares_the_vector_index_blind_spot():
     ``vectorset`` module, so it is in NEITHER the total NOR the index share.
 
     This is the load-bearing pin: the reading previously said "Acceptable as a
-    CAP INPUT", and a cap wired to it would charge for the cheap part of a
-    vector-bearing tenant while missing the component that dominates residency.
+    CAP INPUT", and a cap read from it as EXACT bytes would charge for the cheap
+    part of a vector-bearing tenant while missing the component that dominates
+    residency. Since #13084 the note must ALSO say the one use that survives the
+    blind spot — the error is one-directional, so the figure is a LOWER BOUND
+    (warn at the cap, hard-refuse at 1.5x), never exact.
     """
     r = measure_graph_storage(_FakeClient([_reply(9)]), "org_x")
     # the blind spot is on the reading, not only in the docstring
@@ -440,7 +443,8 @@ def test_reading_declares_the_vector_index_blind_spot():
     assert "vector index" in r.precision_note
     # and the false all-clear is GONE — a cap designer must not read it
     assert "Acceptable as a CAP INPUT" not in r.precision_note
-    assert "DO NOT use this" in r.precision_note
+    # …and the surviving use is stated as a LOWER BOUND, not as a figure
+    assert "LOWER BOUND" in r.precision_note
     # WIRING, not a change-detector: the constant is the thing the reading
     # publishes, so removing it from EXCLUDED_OVERHEAD fails HERE.
     assert VECTOR_INDEX_EXCLUDED in EXCLUDED_OVERHEAD

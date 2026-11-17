@@ -655,6 +655,54 @@ def derived_tier(org_row: dict) -> str:
         return tier
 
 
+def _arm_graph_storage(limits: dict, tier: str) -> dict:
+    """Arm the per-ACCOUNT graph-storage cap on ``limits`` when the tier has one.
+
+    ``#13084``. This is the ONE place the cap enters a resolved limits dict, so
+    ``carry_resolved_allowances`` reaches every surface (REST's
+    ``hosted_api._check_org_limit`` and MCP's ``_enforce_quota`` both fill from
+    ``ALLOWANCE_KEYS``) without a second edit — the seam #9567 D12 built.
+
+    ⛔ THE NUMBER COMES FROM THE ARTIFACT, never from this file. The derivation
+    (recorded in ``product/pricing.json`` ->
+    ``billing.storage._included_amounts_status`` and restated at the declaration
+    in ``allowance_gate.DIMENSIONS['graph_storage']``): a tier's hot window may
+    cost at most 30 % of its monthly price, and a resident GB costs
+    ~$74/GB-month — so solo $19 x 30 % = $5.70 -> **77 MB**, pro $25 x 30 % ->
+    **102 MB**, team $149 x 30 % -> **615 MB**. Decimal MB, the meter's own
+    unit, so no MiB/MB factor is applied (that mix is the measured 3.77x error
+    class). The key NAME is read from the artifact's declared dimension too,
+    for the same reason: two spellings of one allowance is how an arming edit
+    silently lands on a key the gate never reads.
+
+    ⛔ ``free``/``anon`` ARE LEFT UNARMED, and that is a correctness fix, not an
+    omission. The artifact carries ``0`` for their hot window because the owner
+    has not set those tiers; the gate's rule is ``used >= allowance``, so a 0
+    would refuse EVERY gated write — including the very first byte — on a tier
+    that still grants a graph. An unset amount is omitted here (absent key =
+    unconfigured = unlimited, and the dimension keeps being metered by its own
+    writer); the gate declares the same rule defensively as
+    ``zero_means_unarmed``.
+    """
+    from tortoise.pricing import storage_dimensions, storage_limits
+
+    key = storage_dimensions()["graph_storage"]["allowance_key"]
+    value = storage_limits(tier)[key]
+    if value is None:
+        return limits
+    try:
+        mb = int(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        # FAIL CLOSED on an unreadable amount: a hand-edited artifact value we
+        # cannot read must not silently disarm a cap (the mirror of the
+        # resolver's own #4051 rule).
+        raise QuotaCheckError(
+            f"pricing.json tier {tier!r} {key} is unreadable ({value!r})") from e
+    if mb > 0:
+        limits[key] = mb
+    return limits
+
+
 def resolve_org_limits(org_id: str) -> dict:
     """Resolve an org's limits from the control plane.
 
@@ -749,7 +797,7 @@ def resolve_org_limits(org_id: str) -> dict:
         mp = row.get("max_points")
         if mp is None:
             mp = row.get("graph_size_cap")
-        return {
+        out = {
             "org_id": org_id, "tier": tier,
             "max_users": (lim["max_users_per_team"] if anon_override
                            else (int(mu) if mu is not None else None)),
@@ -760,6 +808,8 @@ def resolve_org_limits(org_id: str) -> dict:
             "max_api_keys": lim["max_api_keys"],
             "max_sessions": None,
         }
+        _arm_graph_storage(out, tier)
+        return out
     reg = _make_sdk(namespace="registry")
     rows = reg._get_registry().query(
         "MATCH (t:Team {id:$id}) "
@@ -773,7 +823,7 @@ def resolve_org_limits(org_id: str) -> dict:
     tier = tier or "free"
     from tortoise.pricing import tier_limits
     lim = tier_limits(tier)
-    return {
+    out = {
         "org_id": org_id,
         "tier": tier,
         # max_users/max_graphs: None means unlimited (Team tier); preserve it.
@@ -791,6 +841,8 @@ def resolve_org_limits(org_id: str) -> dict:
         # actually decides.
         "max_sessions": None,
     }
+    _arm_graph_storage(out, tier)
+    return out
 
 
 def api_key_occupies_slot(org_id: str, key_id: str, sdk=None) -> bool:
