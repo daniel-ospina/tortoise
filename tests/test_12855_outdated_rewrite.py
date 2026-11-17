@@ -317,6 +317,30 @@ def test_the_legacy_outdated_FLAG_is_reported_and_not_rewritten(env):
 # ══ the refusals ═════════════════════════════════════════════════════════
 
 
+def test_a_dual_labelled_point_row_is_reported_not_silently_skipped(env):
+    """A row labelled BOTH `:Point` and `:Object` is REFUSED, and the run says so.
+
+    `update_knowledge` dispatches on the label, so such a row takes the Point
+    arm, where a terminal Point declares no outgoing transition (#2498: a dead
+    claim is answered by minting a successor, never by re-stamping it). This
+    tool must not work around that — overriding it would be a REOPEN of #2498 —
+    but it also must not let the row vanish from the count: the operator has to
+    see the id and the refusal, or a graph holding such a row would read clean.
+    """
+    sdk, _events = env
+    oid = sdk.create_object("dual", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "retracted")
+    sdk._get_proj().g.query(
+        "MATCH (n:Object {id:$id}) SET n:Point", params={"id": oid})
+
+    rep = tool.run(sdk, execute=True)
+
+    assert rep.rewritten == [], "a refused row must never be counted as rewritten"
+    assert [f.get("id") for f in rep.failures] == [oid], rep.failures
+    assert "dead claim" in rep.failures[0]["error"], rep.failures[0]["error"]
+    assert _legacy_rows(sdk) == [[oid]], "the row is untouched, and still counted"
+
+
 def test_a_missing_journal_refuses_before_any_write(tmp_path, monkeypatch):
     """No journal ⇒ every write would be live-only and a rebuild would revert
     it, so the tool refuses by name instead of producing that. Asserted through

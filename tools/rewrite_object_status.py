@@ -68,6 +68,20 @@ WHAT IT REWRITES, AND WHAT IT DELIBERATELY DOES NOT
   in the preview, because rewriting the status leaves the carrier in place — the
   operator sees that shape rather than this tool silently deciding what it means.
 
+⛔ A ROW LABELLED **BOTH** `:Point` AND `:Object` IS REFUSED, AND THAT IS
+DELIBERATE. `update_knowledge` dispatches on the label, so such a row takes the
+Point arm, where a terminal Point declares NO outgoing transition (#2498: *a
+dead claim is answered by minting a successor, never by re-stamping it*) and the
+write raises `update_entity refused ['status'] on a dead claim`. This tool does
+NOT work around that: overriding it is a REOPEN of #2498, not a migration step,
+and nothing here is authorised to reverse a recorded decision. The row is
+reported as a FAILURE by id and the run exits 1 — never silently skipped, and
+never counted as rewritten. Measured on the canonical instance (2026-11-17):
+exactly one such row exists (`org_probe8884b_5d1a9fd5`, a probe graph), and it
+is the ONLY `:Object` row in the whole instance carrying a legacy word — so this
+refusal, not a rewrite, is what an operator sees there. Read that as the tool
+answering honestly, not as the rewrite having failed.
+
 PAGING AND THE CROSS-CHECK (#5062 / #4515)
 ==========================================
 FalkorDB applies a server-global `RESULTSET_SIZE` (default 10 000) silently, so
