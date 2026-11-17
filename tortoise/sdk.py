@@ -27313,13 +27313,13 @@ class TortoiseSDK:
         # ── the CALLER-FACING read (#12941) — opt-in, so an unarmed caller and
         # every mid-write caller above keep the pre-#12941 shape exactly.
         from .record_serve import (
-            CacheAnswerRequired,
             FALLBACK_RECORD_BOUND_MISS,
             FALLBACK_RECORD_TENANT_UNRESOLVED,
             MODE_OFF,
             MODE_PREFER,
             MODE_RECORD,
             READ_POINT_BY_ID,
+            CacheAnswerRequired,
             RecordReadBoundMiss,
             RecordServeError,
             RecordUnavailable,
@@ -27411,15 +27411,16 @@ class TortoiseSDK:
                 # `prefer` only: the record missed or could not be asked, so the
                 # reason is the SEAM's and the answer is the cache's.
                 answer = _cache_answered(needed.reason)
-            except RecordReadBoundMiss:
+            except RecordReadBoundMiss as bound_miss:
                 if mode == MODE_RECORD:
                     # No cache branch exists, so "too slow" must RAISE: turning a
                     # capacity condition into an absence is the §17.2 inversion
-                    # this whole module exists to prevent.
+                    # this whole module exists to prevent. Chained from the seam's
+                    # own miss so the cause survives the translation.
                     raise RecordUnavailable(
                         f"the record did not answer {coordinate} inside "
                         f"{bound_s:.1f}s — in 'record' mode there is no cache "
-                        f"branch, so an absence is NOT established")
+                        f"branch, so an absence is NOT established") from bound_miss
                 answer = _cache_answered(FALLBACK_RECORD_BOUND_MISS)
         served_out.update(answer.as_wire())
         # ⛔ THE SEAM DECIDES HERE, NOT THE DECLARATION. In an armed mode the
