@@ -176,7 +176,14 @@ Run 2026-10-24 against `tests/test_record_serve.py` (53 tests, re-derived with `
   and no query has to read both stores (§2.0: *"for now we keep the limit in falkor high so we don't
   need to rush"*). This unit builds the **capability** the epic's acceptance names — *"a read path
   answers from Postgres with the graph engine stopped"* — as an **opt-in arm**, not by re-plumbing the
-  1,074 sites. Nothing here widens the read path beyond the two named reads.
+  1,074 sites. Nothing here widens the read path beyond the two named reads. **THE ARMING SURFACE IS
+  `docs/infra-runbook.md` → §"Arming the READ path — `TORTOISE_RECORD_SERVE`"**: the three modes
+  (`off` default · `prefer` recommended · `record` strict), **`TORTOISE_RECORD_DSN` as a HARD
+  PRECONDITION** (arming without a resolvable DSN is a structural `RecordServeError` — a 500 on every
+  read, *not* a fallback), the latency consequence (record-first ⇒ a Postgres round trip per read), and
+  the fact that unsetting restores today's behaviour byte-for-byte. ⚠️ **`prefer` is RECORD-FIRST, not
+  "cache when warm"** — `_from_record()` runs before any cache consult; the `OVERRIDES:` line on
+  #12941 records that decision, so a later lane reading the issue cannot re-derive the opposite.
 * **A record miss is an absence; a record OUTAGE is not.** That asymmetry is the mirror of §17.2:
   the record is authoritative, so a miss there is a real absence — **but only where the record is
   complete**, which is a deployment fact, not a property of this code. `record` mode asserts it;

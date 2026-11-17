@@ -35,6 +35,7 @@ query, so the test pins the SEAM and the DOOR, not a live deployment.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import ClassVar
 
 import pytest
@@ -666,6 +667,152 @@ def test_hosted_off_mode_does_not_mark_a_RETRACTED_point_not_hot(monkeypatch):
 
 
 # ── 4. the three modes, named once ────────────────────────────────────────
+
+
+# ── the POST-MERGE findings on #12947 ──────────────────────────────────────
+#
+# A fresh-context review of PR #12947 (comment IC_kwDOToroq88AAAABnSEWl_) returned
+# seven findings. ONE of them is pinned here — the P1 that leaves the dogfood's
+# own verify-after-write broken with no signal at all:
+#
+#   1. the MCP door's RECORD leg had no elapsed bound, so a slow record produced
+#      the transport's `-32009` ("the work may still complete") instead of the
+#      cache answer with a NAMED reason the `prefer` contract promises.
+#
+# ⚠️ Finding 2 (`tortoise_get_entity` answering a bare `{}`) is NOT fixed here and
+# its tests are deliberately absent rather than weakened: `tortoise_get_entity` is
+# the LIVE canonical tool, so `tools/surface-guard.py` fingerprints its handler's
+# code object, and a verdict emitted inside that handler is a served-surface change
+# that needs Daniel's approval plus a baseline re-cut (CONTRIBUTING.md → "The MCP
+# tool surface… cannot grow by accident"). #12947 could wire the point/operator
+# doors freely only because those are RETIRED aliases. Tracked on #13093.
+#
+# ⚠️ Findings 3 (the `if props:` texts) and 6 (the PR body's test counts) were
+# already closed by the rounds that shipped; finding 7's "retired-description
+# line-count rule" does not exist at the lines it cites (that region is
+# `tortoise_get_operator`'s docstring). Verified in the PR body, not re-fixed.
+
+
+def _slow_opener(delay):
+    """A record whose OPEN takes `delay` seconds — a record that is merely SLOW.
+
+    Slowness, not an error, is the condition the missing bound hid: an error
+    already fell back (`record-unavailable`), while a slow read ran past the
+    transport's wait bound and the caller got `-32009`.
+    """
+    calls = []
+
+    def _open(_dsn=None):
+        calls.append(_dsn)
+        time.sleep(delay)
+        return _FakeConn(rows=[_row()])
+
+    _open.calls = calls
+    return _open
+
+
+def _await_opener(opened, *, timeout=2.0):
+    """The opener's recorded calls, once the record was really ASKED.
+
+    ⛔ Pin the OPENER, not the counter — the rule the two older tests in this
+    file state, and the one the two bound-miss tests were missing: the whole
+    point of :class:`rs.RecordReadBoundMiss` is that it separates *"the record
+    was asked and too slow"* from *"the record was never asked"*, so a test
+    that reads only `prefer`'s ANSWER cannot see a `serve_point_bounded` that
+    returns a miss without opening anything. That regression would file every
+    armed `prefer` read as CAPACITY and stop `prefer` consulting the record at
+    all, with a counter pointing the operator at the wrong repair.
+
+    Bounded, and awaited rather than assumed: the append happens on the
+    WORKER, and a started thread is not guaranteed to have run by the time
+    `Event.wait` times out (list `append` is atomic, but its *scheduling* is
+    not ours), so this waits for the call instead of racing it.
+    """
+    deadline = time.monotonic() + timeout
+    while not opened.calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return opened.calls
+
+
+def test_MCP_a_slow_record_answers_from_the_cache_inside_the_bound(
+        monkeypatch, mcp_harness):
+    """#12947 finding 1 (P1): the record leg has a lane bound like the others.
+
+    `hosted_api` submits the SAME `serve_point` under
+    `record_read_timeout_s()` (`monitoring.py` states the `9.0 < 10.0`
+    invariant against `mcp_auth._TRANSPORT_WAIT_BOUND_S`), but the MCP door
+    called it synchronously with no bound at all — so under a record slowdown
+    the agent got the transport's `-32009` "the work may still complete"
+    instead of the cache answer `prefer` promises, and
+    `FALLBACK_RECORD_BOUND_MISS` was unreachable from this door.
+
+    The record here ANSWERS, just too slowly. The assertion is the named reason
+    plus the counter — a bound that fired would not answer `servedFrom: record`
+    with a row, which is the mutation this discriminates.
+    """
+    from tortoise import monitoring
+    from tortoise.mcp_server import tortoise_get_point
+
+    rs.reset_fallback_counts()
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
+    opened = _slow_opener(0.5)
+    monkeypatch.setattr(rs, "open_record", opened)
+    monkeypatch.setattr(monitoring, "record_read_timeout_s", lambda: 0.05)
+    mcp_harness(None)  # the cache is COLD
+
+    started = time.monotonic()
+    out = tortoise_get_point("p-1")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.4, (
+        f"the MCP door waited {elapsed:.2f}s on a record bounded at 0.05s — "
+        "the leg is still unbounded")
+    assert out.get("residency") == RESIDENCY_NOT_HOT, (
+        "a record that could not answer inside the bound must leave the read "
+        f"not-hot, never an absence claim — got {out!r}")
+    assert out.get("servedFrom") == "cache"
+    assert out.get("fallbackReason") == rs.FALLBACK_RECORD_BOUND_MISS, (
+        "a ran-but-too-slow record is neither 'unavailable' nor 'never asked' "
+        f"— got {out.get('fallbackReason')!r}")
+    assert out.get("id") is None, "a bound miss must not serve the slow row"
+    assert rs.fallback_counts().get(rs.FALLBACK_RECORD_BOUND_MISS) == 1, (
+        "the fallback must be COUNTED, not only named")
+    assert _await_opener(opened) == [None], (
+        "the record was never ASKED — a bound miss must mean 'the record RAN "
+        "and was slower than the bound', never 'this door opened no record "
+        "connection at all'"
+    )
+
+
+def test_SDK_record_mode_refuses_on_a_bound_miss(monkeypatch):
+    """`record` mode has no cache branch, so a bound miss must RAISE.
+
+    The lenient shape must not leak into the strict mode: answering `not-hot`
+    (or an absence) in `record` mode would turn "the record did not answer in
+    time" into a finding about the graph, which is the §17.2 inversion.
+    """
+    from tortoise import monitoring
+
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
+    opened = _slow_opener(0.5)
+    monkeypatch.setattr(rs, "open_record", opened)
+    monkeypatch.setattr(monitoring, "record_read_timeout_s", lambda: 0.05)
+    stub = _sdk_class()(None)
+
+    with pytest.raises(rs.RecordUnavailable) as caught:
+        stub.get_point("p-1", served_out={})
+
+    cause = caught.value.__cause__
+    assert isinstance(cause, rs.RecordReadBoundMiss), (
+        "'record' mode must refuse FROM the seam's own miss — `from None` "
+        f"would discard the only record of why it refused — got {cause!r}")
+    assert cause.refused is False, (
+        "the submission RAN, so `refused` must stay False: it is the "
+        "discriminator the lane-miss fallback reasons branch on, and True "
+        "would misfile this as 'the record was never asked'")
+    assert _await_opener(opened) == [None], (
+        "the strict mode must ASK the record before refusing — the opener is "
+        "the falsifiable property, not the exception's existence")
 
 
 def test_the_three_modes_and_the_absent_verdict():

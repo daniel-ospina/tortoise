@@ -652,7 +652,12 @@ def test_the_sdk_containers_point_arm_journals_the_status(tmp_path):
         pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
         before = len(_entity_mutations(events, pid))
 
-        sdk.update_knowledge(pid, status="superseded")
+        # ⛔ THE WORD NEEDS ITS PARTNER (#12592): a bare `status="superseded"`
+        # is refused at this door now, and this case pins the JOURNAL record a
+        # container status write leaves — not the successor rule (that is pinned
+        # in `tests/test_12592_supersede_door.py`). Naming a successor keeps the
+        # intent and takes the same `restatus` path.
+        sdk.update_knowledge(pid, status="superseded", supersededBy="a claim v2")
 
         written = _entity_mutations(events, pid)[before:]
         assert len(written) == 1, (
@@ -722,8 +727,9 @@ def test_the_mcp_containers_props_arm_journals_the_status(tmp_path, monkeypatch)
         pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
         before = len(_entity_mutations(events, pid))
 
+        # Same shape as the SDK case above: the pair, not the bare word (#12592).
         got = mcp_server.tortoise_update_knowledge(
-            pid, props={"status": "superseded"})
+            pid, props={"status": "superseded", "supersededBy": "a claim v2"})
 
         assert not (isinstance(got, dict) and got.get("error")), (
             "the advertised door refused a status write the door it absorbs "

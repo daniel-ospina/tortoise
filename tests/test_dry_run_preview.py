@@ -1091,6 +1091,34 @@ class TestBlastRadius:
         preview = _preview_supersede(sdk, "olddup2", new)
         assert preview["nodes_affected"] == 2, preview
 
+    def test_family_supersede_preview_counts_a_duplicate_old_id(self, sdk):
+        """The FAMILY write is a bare `MATCH (n:<label> {id:$id}) SET n += $props`
+        — it stamps EVERY bound row, so the family preview's `nodes_affected` must
+        count them rather than hardcode 1 (#12914 round-4 P2: it hardcoded 1 and
+        reported two `:Object` rows sharing one id as ONE). Twin of the Point pin
+        above, and it pins the other half of the same fix: `rows` is a
+        PREVIEW-only key computed for this count and must never leak into the
+        write's public result.
+
+        Mutation: restore `nodes_affected=1` -> reds on the count; move
+        `"rows": old["rows"]` into the write's return -> reds on the key.
+        """
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (a:Object {id:'objdup1', name:'Dup v1', status:'live'})")
+        proj.g.query(
+            "CREATE (b:Object {id:'objdup1', name:'Dup v1', status:'live'})")
+        proj.g.query(
+            "CREATE (c:Object {id:'objnew1', name:'Dup v2', status:'live'})")
+
+        from tortoise.mcp_server import _preview_family_supersede
+
+        preview = _preview_family_supersede(sdk, "Object", "objdup1", "objnew1")
+        assert preview["nodes_affected"] == 2, preview
+
+        out = sdk.supersede_knowledge("objdup1", "objnew1")
+        assert "rows" not in out, out
+
     def test_delete_entity_preview_uses_the_canonical_id_property_table(
             self, mcp, sdk, monkeypatch):
         """The label→id-property table is IMPORTED from
