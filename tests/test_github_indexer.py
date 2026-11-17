@@ -673,6 +673,51 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
             "mint above is itself a loop")
 
 
+def test_a_POSITIONLESS_wide_term_row_answers_one_direction_only(sdk):
+    """#13289 review round 6 (P2): the position-less legacy row is the SAME asymmetry.
+
+    Gating the wide arm on "has a position" fixed the `status='completed'` case and
+    put the loop back for `status='in_progress'`: with no pipeline props the read
+    fell through to `_STATUS_TO_STATE`, answered `"open"` for a row whose close fold
+    can never be dispatched (no live holder — `resolve_fold_name` →
+    `live._terminal_excluded`, which carries the `outdated` conjunct), and minted
+    `-closed` on every poll.
+
+    The rule is per-direction here too: the word is answered where it says
+    `closed` (the reopen direction can still fold and converges), and `None` where
+    it says `open` (a close could never be applied).
+    """
+    oid = "github-issue-acme/repo1-1"
+    shapes = {
+        # (mutate, expected read, expected mints against a GitHub OPEN issue)
+        # ── the P2 win: the word says closed, so a reopen is still recordable ──
+        "a legacy pre-S0 CLOSED row + the legacy flag": (
+            "SET o.status='completed', o.outdated=true, o.pipelineStageId=null, "
+            "o.pipelineSlot=null, o.isClosed=null", "closed", [1, 0, 0]),
+        # ── the arm that must NOT answer: a close could never be dispatched ──
+        "a legacy OPEN row + the legacy flag": (
+            "SET o.status='in_progress', o.outdated=true, o.pipelineStageId=null, "
+            "o.pipelineSlot=null, o.isClosed=null", None, [0, 0, 0]),
+    }
+    for why, (mutate, expected, expected_mints) in shapes.items():
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (o:Object) DETACH DELETE o")
+        proj.g.query("MATCH (e:Event) DETACH DELETE e")
+        t = MockGitHubTransport(issues=[gh_issue(1)])
+        _run(_indexer(t), sdk)
+        proj.g.query(f"MATCH (o:Object {{id:'{oid}'}}) {mutate}")
+        got = GitHubIndexer._object_state_to_issue_state(proj, oid)
+        assert got == expected, (
+            f"{why}: expected {expected!r} from a position-less row carrying a wide "
+            f"lifecycle term, got {got!r}")
+        t.issues_by_repo["acme/repo1"] = [gh_issue(
+            1, state="open", updated_at="2026-07-26T08:00:00Z")]
+        mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
+        assert mints == expected_mints, (
+            f"{why}: expected {expected_mints} against a GitHub-open issue, got "
+            f"{mints} — a close minted here can never be folded, so it re-fires")
+
+
 def test_a_stale_pipelineSlot_prop_does_not_outvote_the_declaration(sdk):
     """#13289 review F1, second instance: the fold NEVER reads `pipelineSlot`.
 

@@ -295,11 +295,17 @@ def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
     one the fold refuses to move.
 
     ⛔ ``None`` means "cannot resolve", and the caller does NOT fall back to the
-    prop when a `stageId` is present — that is `#13289` F4's correction to F2, and
-    restoring the fallback reintroduces the `-reopened` loop. A row whose id
-    resolves to no slot by declaration is one of `apply_stage_fold`'s two
+    prop when a TRUTHY `stageId` is present — that is `#13289` F4's correction to
+    F2, and restoring the fallback reintroduces the `-reopened` loop. A row whose
+    id resolves to no slot by declaration is one of `apply_stage_fold`'s two
     refusals (`cross-pipeline`, `unresolvable-current-stage`), so the reader
-    answers `None`; the prop is consulted only when there is no `stageId` at all.
+    answers `None`.
+
+    ⚠️ A FALSY id (`''`) is a third case and not a refusal at all:
+    `apply_stage_fold`'s `if cur_id:` (`pipeline.py:490`) SKIPS the guard block
+    and admits the move, so the stored `pipelineSlot` PROP is the only position
+    answer such a row has, and the caller uses it. That is why the caller's test
+    is truthiness and not `is not None`.
     """
     if stage_id is None:
         return None
@@ -1366,9 +1372,23 @@ class GitHubIndexer:
         # registered incarnation and no live holder). With no position this read
         # falls through to `_STATUS_TO_STATE` instead, which is where a legacy
         # row's answer has always lived.
-        if (stage_id is not None or slot is not None or is_closed is not None) \
-                and _row_is_frozen(status, outdated):
-            return None
+        if _row_is_frozen(status, outdated):
+            if (stage_id is not None or slot is not None
+                    or is_closed is not None):
+                return None
+            # ⛔ A POSITION-LESS legacy row is the same asymmetry in one fewer
+            # dimension: the REOPEN fold can still be dispatched and applies, the
+            # CLOSE fold cannot be dispatched at all. So the word is answered ONLY
+            # where it says "closed" — that is the direction a GitHub `open` can
+            # reconcile — and `None` where it says "open", because minting a close
+            # against a row with no live holder would re-fire for ever
+            # (`resolve_fold_name` → `live._terminal_excluded`, which carries the
+            # `outdated` conjunct; `entities.py:6157-6160`).
+            # ⚠️ Falling through unconditionally here instead put the loop back:
+            # `status='in_progress'` + `outdated=true`, GitHub closed, minted
+            # `-closed` on every poll.
+            if _STATUS_TO_STATE.get(str(status)) != "closed":
+                return None
         if stage_id is not None or slot is not None:
             return "open"
         if status is None:
