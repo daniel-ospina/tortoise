@@ -1031,7 +1031,7 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             #             cap-EXEMPT — this count was the ONE outlier that
             #             omitted the exclusion every recovery-mint lane
             #             already carries (hosted_api.session_key both lanes,
-            #             sdk.signup_token_recover, recover_team_key), so a
+            #             sdk._signup_token_recover, recover_team_key), so a
             #             session credential silently burned a paid durable
             #             slot. The exclusion is NULL-TOLERANT: a NULL/legacy
             #             created_via is a DURABLE row and COUNTS

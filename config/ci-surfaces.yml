@@ -3851,6 +3851,14 @@ surfaces:
   # `tortoise/sdk.py` and `tortoise/tool_registry.py` are both SHARED_MODULEs (a full
   # matrix anyway), so `core` is the honest floor rather than a reach claim.
   - test_sdk_retirement.py
+  # #12901 (wave 2): the control-plane retirement's own gate — every one of the sixteen
+  # names is gone AND its private seam exists, the failure is the documented removal
+  # error with no false hint, no production caller still reaches a closed door, and no
+  # wave-2 name is on the owner's approved list, in the frozen surface, or in the
+  # manifest. `core`, on the same basis as the row above: the subject spans
+  # `tortoise/sdk.py` and `tortoise/hosted_api.py`, both SHARED_MODULEs, so `core` is the
+  # honest floor rather than a reach claim.
+  - test_12901_wave2_control_plane.py
   - test_4282_memory_graph_surface.py
   - test_record_schema_placement.py
   # #11075 — the DECLARED-TYPE contract pin: every column the record's write
@@ -12288,7 +12296,7 @@ durations:
   test_ai_review_gate_contract.py: 2.7  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.3
   test_bfs_audit.py: 0.4  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.3
   test_calibration_tools.py: 0.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.5
-  test_embeddings.py: 0.5  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.4 — ⚠️ #10010: the 0.2 is a census reading of the 14-case file the 2026-11-02 sample saw, and #10010 carries the file to 24 top-level `def test_` (`grep -c '^def test_'` -> 24; 14 on `origin/main`) plus a torch import — the 23rd is the #10010 review P3-2 pin that the `TORTOISE_EMBED_THREADS` lever reaches the encode path AFTER load, and the 24th is the review P3 pin that `search_points`' dense READ leg re-asserts the pin before it encodes, so 0.2 is ~630x below the 126 s the file measures once the model loads; What the count citation buys is that the ONE mechanically re-derivable claim in this row cannot go stale silently — `tests/test_ci_selection.py::test_no_durations_row_states_a_stale_case_count` reads exactly that spelling, and before this note cited it the row was invisible to the pin (the same blindness #10010 review F6 found on the `test_provenance_extractedfrom_3263.py` and `test_source_version_extractedfrom_5038.py` rows, where nothing redded while the stated count was a head behind) — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.4
+  test_embeddings.py: 0.5  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.4 — ⚠️ #10010: the 0.2 is a census reading of the 14-case file the 2026-11-02 sample saw, and #10296's own lane carries the file to 25 top-level `def test_` (`grep -c '^def test_'` -> 25) — the 25th is the env-contract pin that `TORTOISE_EMBED_THREADS` is DECLARED in `.env.example` (#10296's "must be observable" criterion applied to the operator lever, the same doctrine `tests/test_env_contract_covers_supabase_config.py` states for the Supabase config; the count was 24 at the #10010 fold head and is 24 on `origin/main` today (the 14 this note first cited was `origin/main` BEFORE #10010 merged)) plus a torch import — the 21st is the #10010 review P3-2 pin that the `TORTOISE_EMBED_THREADS` lever reaches the encode path AFTER load, and the 23rd is the review P3 pin that `search_points`' dense READ leg re-asserts the pin before it encodes, so 0.2 is ~630x below the 126 s the file measures once the model loads; What the count citation buys is that the ONE mechanically re-derivable claim in this row cannot go stale silently — `tests/test_ci_selection.py::test_no_durations_row_states_a_stale_case_count` reads exactly that spelling, and before this note cited it the row was invisible to the pin (the same blindness #10010 review F6 found on the `test_provenance_extractedfrom_3263.py` and `test_source_version_extractedfrom_5038.py` rows, where nothing redded while the stated count was a head behind) — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.4
   test_extractor.py: 1.4  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 1.0
   test_extractor_doc.py: 1.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.0
   test_extractor_v4_step_list_consistency.py: 0.2  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded) — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.1
@@ -13455,6 +13463,7 @@ durations:
   test_record_projection.py: 2.6  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 3.2
   test_record_reconcile_trigger.py: 2.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.5
   test_record_schema_placement.py: 0.2
+  test_12901_wave2_control_plane.py: 2.0  # new in #12901 (PR wave 2) — a file a PR ADDS can never carry a CI junit reading yet (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ('a default is not a reading'): the `core` registration above is what puts the file in `fast_pool()`. ⚠️ MEASURED LOCALLY as context, NOT as the weight: whole-file through `tools/test_lane.py run` measured **50 passed in 8.57 s** on a private lane container at head `b4ca3f2849`, so the flat 2.0 UNDERSTATES it until a sweep re-bases it. `--integrity` is the authority and the refresher replaces this row from junit.
   test_10663_placement_table_packaged.py: 0.1  # new in #10663 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.0
   test_11075_record_declared_type_contract.py: 0.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.3
   test_record_writer_seam.py: 0.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.2

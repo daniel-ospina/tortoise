@@ -365,7 +365,7 @@ class TestRegistryLane:
         sdk = ha_mod._make_sdk(namespace="registry")
         # A attempts to revoke B's token through the same SDK call the
         # endpoint makes after auth — refused, B's node untouched
-        out = sdk.signup_token_revoke(b["signup_token"], a["org_id"])
+        out = sdk._signup_token_revoke(b["signup_token"], a["org_id"])
         assert out == {"org_id": a["org_id"], "status": "not_owned"}
         rows = sdk._get_registry().query(
             "MATCH (n:SignupToken {org_id:$tid}) RETURN n.revoked_at",

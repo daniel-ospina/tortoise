@@ -118,7 +118,7 @@ class TestNodeInit:
         try:
             first = sdk.org_create(f"w5a{uuid.uuid4().hex[:8]}")
             user_id = f"user-{uuid.uuid4().hex[:8]}"
-            sdk.membership_create(first["id"], user_id, "owner")
+            sdk._membership_create(first["id"], user_id, "owner")
             second = sdk.org_create(f"w5b{uuid.uuid4().hex[:8]}",
                                      owner_user_id=user_id)
             node = onboarding_state.read_onboarding_node(
@@ -137,7 +137,7 @@ class TestNodeInit:
         try:
             first = sdk.org_create(f"w5c{uuid.uuid4().hex[:8]}")
             user_id = f"user-{uuid.uuid4().hex[:8]}"
-            sdk.membership_create(first["id"], user_id, "owner")
+            sdk._membership_create(first["id"], user_id, "owner")
             # creator answers the fork card on the FIRST org → 'build'
             onboarding_state.write_fork(
                 sdk._get_proj().db.select_graph(first["graph_name"]),

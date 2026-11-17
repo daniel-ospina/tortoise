@@ -2390,7 +2390,7 @@ def _sweep_oauth_retention() -> None:
 def _sweep_invite_ghosts() -> None:
     """#1890: give the terminal-state invite-ghost sweep a LIVE caller.
 
-    ``TortoiseSDK.sweep_invite_ghost_memberships`` (#1908) deletes every
+    ``TortoiseSDK._sweep_invite_ghost_memberships`` (#1908) deletes every
     ``invite-{iid}`` placeholder Membership whose Invitation node is terminal
     (accepted / revoked / expired / orphaned) — but it shipped with exactly
     ONE caller: ``graph-scripts/backfill_invite_ghost_members.py``, which an
@@ -2420,7 +2420,7 @@ def _sweep_invite_ghosts() -> None:
         if is_supabase_enabled():
             return
         sdk = _make_sdk(namespace="registry")
-        result = sdk.sweep_invite_ghost_memberships()
+        result = sdk._sweep_invite_ghost_memberships()
         if result.get("deleted"):
             _logger.info("invite ghost sweep deleted %s terminal placeholder "
                          "row(s) of %s examined",
@@ -16664,7 +16664,7 @@ def _org_node_sync_limits(org_id: str) -> dict:
         row = org_by_id(get_control_plane(), org_id)
         return _org_limits_from_node(row) if row else {}
     sdk = _make_sdk(namespace="registry")
-    node = sdk.org_get(org_id)
+    node = sdk._org_get(org_id)
     return _org_limits_from_node(node) if node else {}
 
 
@@ -16813,7 +16813,7 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
         # node — capture BOTH so the envelope's key.id and key_plaintext
         # match the registry node (revoke/shrink in C3 must hit the real
         # id; a revealed plaintext must verify against the stored hash).
-        created = sdk.apikey_create(
+        created = sdk._apikey_create(
             org_id, session_user_id or "api",
             graph_id=graph_id, scopes=final_scopes or None,
             created_by_key_id=caller_key_id, delegation_depth=delegation_depth,
@@ -27467,7 +27467,7 @@ def _revoke_minted_key(org_id: str, key_id: str) -> None:
     if is_supabase_enabled():
         revoke_api_key(get_control_plane(), key_id)
     else:
-        _make_sdk(namespace="registry").apikey_revoke(key_id)
+        _make_sdk(namespace="registry")._apikey_revoke(key_id)
 
 
 def _revoke_graph_keys(org_id: str, graph_id: str | None) -> None:
@@ -27500,9 +27500,9 @@ def _revoke_graph_keys(org_id: str, graph_id: str | None) -> None:
             except Exception:
                 pass
     else:
-        for kid in sdk.graph_key_ids(org_id, graph_id):
+        for kid in sdk._graph_key_ids(org_id, graph_id):
             try:  # noqa: SIM105
-                sdk.apikey_revoke(kid)
+                sdk._apikey_revoke(kid)
             except Exception:
                 pass
 
@@ -29243,9 +29243,9 @@ async def delete_graph(graph_id: str, org_id: str,
         # its sibling below was wrapped, which is the inconsistency, not a
         # deliberate exemption.
         deleted = await _graph_offload(
-            lambda: sdk.graph_delete(org_id, graph_id), op="graph_delete")
+            lambda: sdk._graph_delete(org_id, graph_id), op="graph_delete")
         key_ids = await _graph_offload(
-            lambda: sdk.graph_key_ids(org_id, graph_id), op="graph_key_ids")
+            lambda: sdk._graph_key_ids(org_id, graph_id), op="graph_key_ids")
     if not deleted:
         # #10180: reachable now — a promotion can commit between the kind read
         # above and the tombstone, and `soft_delete_graph`'s PATCH is conditioned
@@ -29280,7 +29280,7 @@ async def delete_graph(graph_id: str, org_id: str,
                     lambda kid=kid: sb_revoke(get_control_plane(), kid),
                     op="revoke_api_key")
             else:
-                sdk.apikey_revoke(kid)
+                sdk._apikey_revoke(kid)
         except Exception:
             _logger.error(
                 "delete_graph cascade revoke failed (key stays active): "
@@ -29491,7 +29491,7 @@ async def list_trash(org_id: str,
         from tortoise.supabase_control import trash_graphs as sb_trash
         trash = await asyncio.to_thread(sb_trash, cp, org_id)
     else:
-        trash = await asyncio.to_thread(sdk.trash_graphs, org_id)
+        trash = await asyncio.to_thread(sdk._trash_graphs, org_id)
     return [{"graph_id": t["graph_id"], "name": t["name"],
              "kind": "custom", "deleted_at": t.get("deleted_at")}
             for t in trash]
@@ -29812,7 +29812,7 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user_graph_l
                     get_control_plane(), org_id, g["graph_id"]),
                 op="count_graph_keys")
         else:
-            key_count = sdk.graph_active_key_count(org_id, g["graph_id"])
+            key_count = sdk._graph_active_key_count(org_id, g["graph_id"])
         out.append({
             "graph_id": g["graph_id"], "name": g["name"],
             "kind": g["kind"], "status": g.get("status", "active"),
@@ -30517,7 +30517,7 @@ def _sweep_terminal_invite_placeholders(sdk, org_id: str, email: str) -> int:
     and ``cleanup_expired_invitations`` use: nothing live ever writes
     ``status='expired'``, so a status-only predicate would keep the ghost of
     an invite that expired by the clock. The predicate mirrors
-    ``TortoiseSDK.sweep_invite_ghost_memberships`` so the two cannot classify
+    ``TortoiseSDK._sweep_invite_ghost_memberships`` so the two cannot classify
     a node differently.
 
     Deletes go through ``_delete_fake_invite_membership`` (best-effort, one
@@ -30732,7 +30732,7 @@ async def accept_invite(body: dict, request: Request,
                                 detail="Invitation has already been accepted")
         # Create the active membership (route through membership_create for the max_users gate)
         try:
-            sdk.membership_create(invite["org_id"], user["user_id"], invite["role"])
+            sdk._membership_create(invite["org_id"], user["user_id"], invite["role"])
         except Exception as e:
             # #1880: the accepted_at write above ran BEFORE membership_create, so a
             # membership_create failure (non-capacity: org deleted between the
@@ -31185,7 +31185,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
             raise HTTPException(status_code=409,
                                 detail="Invitation has already been accepted")
         try:
-            sdk.membership_create(org_id, user["user_id"], invite["role"])
+            sdk._membership_create(org_id, user["user_id"], invite["role"])
         except Exception as e:
             _delete_fake_invite_membership(sdk, org_id, invite["id"])
             raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
@@ -31570,7 +31570,7 @@ async def list_invites(org_id: str, user: dict = Depends(get_current_user)):  # 
     # Registry accept sets accepted_at but LEAVES status='pending' — a
     # consumed invite must not appear as actionable (code-review P2,
     # PR #864).
-    return [i for i in sdk.invitation_list(org_id)
+    return [i for i in sdk._invitation_list(org_id)
             if i.get("status") in (None, "pending")
             and i.get("accepted_at") is None]
 
@@ -31717,7 +31717,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
             raise HTTPException(status_code=409,
                                 detail="Invitation has already been accepted")
         try:
-            sdk.membership_create(org_id, user["user_id"], role)
+            sdk._membership_create(org_id, user["user_id"], role)
         except Exception as e:
             _delete_fake_invite_membership(sdk, org_id, iid)
             raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
@@ -31853,7 +31853,7 @@ async def rescind_invite(invitation_id: str, org_id: str,
                                 detail="Invites unavailable (control plane error)")
     await _require_owner_admin(user["user_id"], org_id)
     sdk = _make_sdk(namespace="registry")
-    inv = sdk.invitation_get_by_id(invitation_id)
+    inv = sdk._invitation_get_by_id(invitation_id)
     if inv is None or inv.get("org_id") != org_id:
         raise HTTPException(status_code=404, detail="Invitation not found")
     # Registry accept sets accepted_at but leaves status='pending' — check
@@ -31861,7 +31861,7 @@ async def rescind_invite(invitation_id: str, org_id: str,
     if inv.get("status") == "accepted" or inv.get("accepted_at"):
         raise HTTPException(status_code=409,
                             detail="Invitation already accepted — cannot rescind")
-    result = sdk.invitation_revoke(invitation_id)
+    result = sdk._invitation_revoke(invitation_id)
     # #1880: ghost-members cleanup — the fake row dies with the invite
     _delete_fake_invite_membership(sdk, org_id, invitation_id)
     return result
@@ -34674,19 +34674,19 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
     sdk = _make_sdk(namespace="registry")
     try:
-        node = sdk.signup_token_lookup(signup_token)
+        node = sdk._signup_token_lookup(signup_token)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Agent signup failed") from e
     if node is None:
         raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
     org_id = node.get("org_id") or ""
-    org = sdk.org_get(org_id)
+    org = sdk._org_get(org_id)
     if org is None or org.get("deleted_at"):
         raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
     if org.get("suspended_at") is not None:
         raise HTTPException(status_code=403, detail=_suspended_detail())
     try:
-        rec = sdk.signup_token_recover(signup_token)
+        rec = sdk._signup_token_recover(signup_token)
     except ControlPlaneError as e:
         # token revoked between lookup and recover, or org deleted
         # concurrently → uniform 422 (fail closed, never a partial mint)
@@ -35045,7 +35045,7 @@ async def agent_token_revoke(request: Request, org: dict = Depends(get_current_o
     # ── Registry lane (selfhost) ──
     sdk = _make_sdk(namespace="registry")
     try:
-        out = sdk.signup_token_revoke(signup_token, org_id)
+        out = sdk._signup_token_revoke(signup_token, org_id)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("agent_token_revoke failed")

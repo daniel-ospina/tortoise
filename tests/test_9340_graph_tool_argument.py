@@ -642,7 +642,7 @@ class TestTheRefusalIsMeasurable:
 def test_a_bound_credential_with_no_resolved_namespace_never_reads_the_default():
     """A HALF-resolved graph credential must fail closed, as REST does.
 
-    `supabase_control._graph_namespace_for` and `sdk.apikey_verify` both return
+    `supabase_control._graph_namespace_for` and `sdk._apikey_verify` both return
     `None` on a missing row OR a failed read, and both document that as
     fail-closed; the REST lane refuses the identical state (403
     GRAPH_NOT_FOUND). `_get_org_sdk()` used to fall through to

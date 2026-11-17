@@ -6088,12 +6088,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # (`grep -nF 'export function postCapture(' …`) and re-measured at the head this
         # de-conflict merges at (`0449273b`), which still reads `:1023`/`:1015`; repaired
         # at this head rather than carried, because a red on `main` blocks every head.
-        # ⛔ THAT REPAIR IS PAIR-SCOPED: it re-points the `pi_hooks` pair only, and the
-        # rows above it are pins on files under `tortoise/` (`sdk.py`, `search_engine.py`,
-        # `pack_registry.py`), which this branch does not touch — `git diff --stat`
-        # `origin/main...HEAD -- tortoise/` is EMPTY. Read "repaired" as "this pair is
-        # re-pointed", never as a claim about any other row. (Written at `b6003e180e`,
-        # when the `sdk` rows sat one line behind; `main` re-derived them — GREEN here.)
+        # ⛔ THAT REPAIR IS PAIR-SCOPED: it re-points the `pi_hooks` pair only.
+        # ⚠️ CORRECTED: this paragraph used to add "the rows above it are pins on files
+        # under `tortoise/` … which this branch does not touch — `git diff --stat`
+        # `origin/main...HEAD -- tortoise/` is EMPTY". That was true when it was written
+        # and is FALSE on the #12592 branch, which carries 626 inserted lines in
+        # `tortoise/sdk.py` alone (measured: `git diff --stat origin/main...HEAD --
+        # tortoise/` -> `tortoise/sdk.py | 626 +++…`). The `sdk` row for `04-plan.md`
+        # below therefore had to be re-derived at this merge too; it was, and both
+        # numbers there are measured at this head. Read "pair-scoped" as "this repair
+        # touched this pair", never as a claim about any other row.
         # The two `def`s are always
         # **8 apart** in this file, and that is exactly the trap: an offset read off
         # a stale pair re-derives `948` → `957`, which WAS `postCapture`'s parameter
@@ -6101,15 +6105,24 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `6916a6cd89` `:957` is a comment and that list is at `:1009`. Re-open the
         # line; the row is held by CONTENT, so a wrong pair reds rather than
         # silently resolving.
-        # RE-DERIVED by CONTENT on the merged tree (the de-conflict of `main` into
-        # `#12295`): `grep -n 'export function postCapture(\|export function postInstallProbe('
-        # tortoise/pi-hooks/tortoise-capture.ts` -> 1023 / 1015, still 8 apart. The
-        # `:1007`/`:999` pair above is this pin's own head-bound record of `6916a6cd89`
-        # and is RED here, measured: main's tortoise-capture.ts carries +16 lines above
-        # both `def`s that neither of that row's two sides moved.
+        # RE-DERIVED by CONTENT on THIS merged tree (the #12592 de-conflict of
+        # `origin/main` `8762578f8c`):
+        # `grep -n 'export function postCapture(\|export function postInstallProbe('
+        # tortoise/pi-hooks/tortoise-capture.ts` -> **1030 / 1022**, still 8 apart. The
+        # pair this row carried (`:1023`/`:1015`) was measured at `0449273b`, and
+        # `#13039` then landed the generation-24 marker block — 8 insertions / 1
+        # deletion, net +7, ABOVE both `def`s (measured: `git diff --stat`
+        # `b9f6d2d3c8 -- tortoise/pi-hooks/tortoise-capture.ts` -> `8 insertions(+), 1
+        # deletion(-)`, and `head -1` reads `// tortoise-hook-version: 23` on this
+        # branch's pre-merge head against `24` on `origin/main`) — WITHOUT re-deriving
+        # any cite. So `main` itself is RED on this row (`git show
+        # origin/main:tortoise/pi-hooks/tortoise-capture.ts | sed -n '1023p'` reads
+        # `cfg: CaptureConfig,`), which is why it is repaired here rather than carried.
+        # The `:1007`/`:999` pair above is this pin's own head-bound record of
+        # `6916a6cd89` and stays as that record.
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("1023", "export function postCapture("),
-            ("1015", "export function postInstallProbe("),
+            ("1030", "export function postCapture("),
+            ("1022", "export function postInstallProbe("),
         ), "pi_hooks"),
         # ⛔ THE SENTENCE'S THIRD FILE (`hosted_api.py`) HAD NO READER EITHER (#12462
         # review round 5), in the very row this PR re-points the other two cites of:
@@ -6170,8 +6183,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("11410", 'elif pkind.lower() not in {k.lower() for k in master["points"]}:'),
             ("11686", '"pointKind": pkind,'),
         ), "extractor_v2"),
+        # RE-DERIVED at this merged head, not carried: `#12592`'s supersede-door work
+        # inserts 626 lines into `tortoise/sdk.py` ABOVE this anchor, so the cite this
+        # row carried (`:26452`) had drifted 102 lines behind the tree it names — a red
+        # this branch introduced itself, found by running this file over the merge.
+        # Measured: `grep -nF 'declared = declared_relation_predicates()'
+        # tortoise/sdk.py` -> **26554**, the file's only occurrence (on `origin/main` the
+        # same grep reads 25928, which is that side's number and NOT this tree's).
         ("04-plan.md", "operator / label path", (
-            ("26452", "declared = declared_relation_predicates()"),
+            ("26554", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # ⛔ THE RECONCILE APPENDIX'S OWN REPRODUCTION BLOCK (#12462 review round 2).
         # `RECONCILE-A1-A2-A5.md` is in NEITHER `_BUNDLE_DOCS` nor any sweep, so the
