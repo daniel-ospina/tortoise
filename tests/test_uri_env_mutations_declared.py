@@ -1241,6 +1241,94 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # value, and neither that test nor any arm of this module dials it.
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@localhost:6379/g"',
     ],
+    # #13158: `test_13034_currency_rule_reads_position.py` landed with SIX raw
+    # URI mutations — at module scope and in an autouse fixture — and no entry
+    # here, so this gate reds on `main` (run 44025094904, `test (j)`
+    # 133859918399: the only failure in 4007 tests). It is the same "module
+    # landed without its entry" shape as #9664 and #12275 above, on the very
+    # file #13144/#13146 register in ci-surfaces — a manifest row cannot fix
+    # it, because this guard scans the FILES, not the manifest.
+    #
+    # All six are DELIBERATE_URI, and none is this guard's vacuity vector (a
+    # docker-half test silently constructing embedded): the module's SUBJECT is
+    # a LIVE Docker/FalkorDB graph, so the docker DSN is pinned at both entry
+    # points and restored afterwards. Nothing here claims a docker-half green
+    # on a URI it did not set.
+    #   :66  the module-level `FALKORDB_AVAILABLE` probe. The pin IS the point:
+    #        `DB_URI` is `_live_utils.docker_uri(...)`, the probe constructs a
+    #        real SDK and runs `RETURN 1`, and the `finally` restores. Without
+    #        the pin the probe would ride whatever ambient URI the box has, so
+    #        the skipif would be decided by the environment rather than by a
+    #        reachable Docker.
+    #   :75/:77  the probe's restore pair — assign the saved value back, or pop
+    #        it when the prior value was unset. A restore, not a second
+    #        mutation; the pair is why the module-scope write cannot leak into
+    #        a later test in the same process.
+    #   :86  the `autouse` `_isolated_db_uri` fixture — seeds the same docker
+    #        DSN per test so no case inherits an ambient one, and the assertion
+    #        target is the graph `DB_URI` names.
+    #   :89/:91  the fixture's restore pair (same save/restore contract, run at
+    #        teardown).
+    #
+    # WHERE THE ARMS ARE NARROW, AND WHERE THEY ARE NOT — the two SET arms are
+    # bound by NAME: `DB_URI` for the pins and the saved `_OLD_URI`/`_old` for
+    # the restores. Each arm is anchored at BOTH ends with `^`…`$` (valid
+    # because declarations are matched per STRIPPED line — see `_is_declared`;
+    # ⛔ anchoring at both ends is NEW for this table: of its OTHER 189
+    # patterns, only 11 end in `$` and 178 carry no `$` at all, and none of
+    # those 11 also leads with `^` — so the unanchored prefix match is the
+    # convention, `^`-leading is new too, and no other row anchors at both ends.
+    # The leading `^` is load-bearing, not cosmetic: without it an
+    # unanchored arm also matches INSIDE a commented-out line, because the
+    # census regex has no comment awareness).
+    #
+    # ⛔ The honest LIMIT, stated rather than claimed away: the POP arm is bound
+    # by NOTHING, and cannot be. `os.environ.pop("TORTOISE_DB_URI", None)` is
+    # byte-identical whether it RESTORES a saved value or UNSETS the URI to
+    # force the embedded lane — the #942 vacuity vector this guard exists to
+    # catch — and that force-embedded spelling is live elsewhere in `tests/`
+    # (`test_cli_context.py`'s `db_env` fixture). So a FUTURE
+    # `pop("TORTOISE_DB_URI", None)` in THIS file is SILENCED by this row and
+    # must be triaged BY HAND. The two SET arms are a real narrowing, not a
+    # bound over the pop.
+    #
+    # Measured per ARM (appending each candidate to the REAL module source and
+    # running the census over it) across the ELEVEN spellings the census can
+    # see. TEN are REJECTED — each reds on a new site: a different literal
+    # (`= "docker://…"`), `= _other`, `= DB_URI + ""`, `= _OLD_URI or ""`, a
+    # bare `pop("TORTOISE_DB_URI")`, `pop(…, "")`, `monkeypatch.setenv`,
+    # `monkeypatch.delenv`, `del`, and the same assignment COMMENTED OUT. The
+    # eleventh, `pop(…, None)`, is AUTHORIZED — the LIMIT above, and the one
+    # spelling this row leaks.
+    # That scan is deliberately NOT cited for
+    # `os.environ.setdefault("TORTOISE_DB_URI", …)`: it CANNOT distinguish
+    # "authorized by this row" from "never censused" (both print as no
+    # undeclared site), and the true answer is the second — `_MUTATION_RE` has
+    # no `setdefault` arm, so reading the REGEX directly (not the scan) shows
+    # the census never sees such a site in ANY file. That blind spot predates
+    # this row and is unaffected by it; it is recorded here so a later reader
+    # neither mistakes it for this declaration's doing nor reads this row as
+    # covering it.
+    #
+    # ⛔ COLLISION, to be handled at merge: #13146 (open) adds a SECOND row for
+    # this SAME key, with ONE broad unanchored arm
+    # (`os\.environ(?:\[…\]\s*=|\.pop\(…)`) that authorizes every `=`/`pop(…)`
+    # form in the file at once — measured against the same eleven census-visible
+    # spellings, 8 of them. It is not unlimited: a future
+    # `monkeypatch.setenv`/`monkeypatch.delenv`/`del` site still reds there, the
+    # `del` because that alternative is nested inside `os\.environ(?:…` and so
+    # cannot match `del os.environ[…`. Two rows for one key is a duplicate dict
+    # literal —
+    # `ruff` reds it (measured: `Found 1 error` on a two-key sample under this
+    # repo's config) and `test_dod_5090_probe.py`'s duplicate-key scan reds it
+    # in the pytest shard, while at RUNTIME the later key silently shadows the
+    # earlier anyway. So whichever PR lands SECOND must drop the duplicate row
+    # — not add a third — and if #13146 lands first, its broad arm is replaced
+    # by these three.
+    "test_13034_currency_rule_reads_position.py": [
+        r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
+        r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
+        r'^os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
