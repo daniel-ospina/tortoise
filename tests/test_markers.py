@@ -1126,18 +1126,15 @@ def test_no_redirect_stems_registry_exact():
         # `carve_out:`, TEST_NO_REDIRECT_STEMS and this declaration — so the pin
         # reding on the addition is the pin working as designed.
         "test_why_snapshot_8099",
-        # #13224 (review F1): the cold-embedder write bound. The `sdk` fixture
-        # builds `TortoiseSDK(tmp_path/…)` and reads the Subject row back off
-        # that store, and the end-to-end case drives the hosted client against
-        # it — so the load-bearing reason is the REDIRECT: a URI-set lane would
-        # point the create and the read-back at a server graph, and the one
-        # assertion that proves the row was STORED WITHOUT A VECTOR would
-        # certify a graph the file does not target. The file carries no
-        # module-level `embedded_only` marker, so it is not skipped under a URI
-        # — it would RUN, redirected, and pass for the wrong reason. Registered
-        # in all three homes (config/ci-surfaces.yml `carve_out:`,
-        # TEST_NO_REDIRECT_STEMS, and this declaration), the omission this pin
-        # exists to catch.
+        # #13224: the cold-embedder WRITE BOUND (`encode_for_row(bounded=True)`'s ceiling on
+        # the WAIT, the replay-scope exemption, the once-per-process cold-write report).
+        # Every case builds a `TortoiseSDK(<tmp_path>)` path store and reads the graph back
+        # off it, and the end-to-end arm drives `tests.test_hosted_api.client` (embedded
+        # registry), so the load-bearing reason is the REDIRECT: a URI-set lane would discard
+        # the path and connect the construction to the server, grading a graph this file never
+        # seeded. The module carries NO module-level `embedded_only` marker. Registered in all
+        # THREE homes — config/ci-surfaces.yml `carve_out:`, TEST_NO_REDIRECT_STEMS and this
+        # declaration — so the pin reding on the addition is the pin working as designed.
         "test_13224_cold_embedder_write_bound",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (

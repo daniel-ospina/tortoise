@@ -4592,7 +4592,6 @@ def _handle_only_write_scope(reason: str):
         _RAW_QUERY_CLOSED_DEPTH.reset(token)
 
 
-@contextlib.contextmanager
 def _replay_write_scope():
     """The replay engines' scope: the record came FROM the journal.
 
@@ -4602,22 +4601,8 @@ def _replay_write_scope():
     it (`_handle_only_write_scope`). A rebuild never needs that lane: it projects
     derived state through the projection, and the lane exists precisely to bypass
     it.
-
-    ⛔ #13224 F3: the SAME window is also the embedding-replay declaration
-    (`tortoise.embeddings.replay_write_scope`). The fold RE-ENCODES each row from
-    the event text and never restores a journaled vector for Subjects, Objects,
-    Documents or Events, so it is the one lane where a cold embedder is
-    GUARANTEED — and where #13224's request-shaped write budget must not apply.
-    Declaring it here, at the single seam every replay engine already opens
-    (`rebuild`, `rebuild_all`, the restore folds, the consistency recovery),
-    means a new engine inherits the exemption by using the lane it must use
-    anyway, rather than by remembering a second call.
     """
-    from tortoise.embeddings import replay_write_scope  # noqa: PLC0415 — avoided
-    # at module scope: embeddings is imported lazily by the fold writers too
-    # (`projection/entities.py`), and this keeps that direction unchanged.
-    with _handle_only_write_scope(_REPLAY_WRITE_LANE), replay_write_scope():
-        yield
+    return _handle_only_write_scope(_REPLAY_WRITE_LANE)
 
 
 # ── §17.1'S CLIENT-LEVEL DOOR (#9079, escapes 2 and 3) ────────────────────

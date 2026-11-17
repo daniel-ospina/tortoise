@@ -4842,8 +4842,14 @@ class _EntityHandlers:
         embedding = None
         try:
             from tortoise.embeddings import encode_for_row
+            # #13224: `bounded=True` — a DERIVED entity vector, recomputed from
+            # the payload text on replay, so it is repairable from the graph and
+            # a live request may decline to wait for a cold embedder. Scoped
+            # here and to the three sibling entity folds ONLY: a Point's vector
+            # is record truth (#5004) and is never dropped. The bound is
+            # suppressed under a replay scope, so a rebuild stays deterministic.
             embedding = encode_for_row(
-                name, self.required_embedding_dim)
+                name, self.required_embedding_dim, bounded=True)
         except Exception:
             pass
         # #1918: canonical id must win on MATCH too — parity with the #1155
@@ -5029,8 +5035,9 @@ class _EntityHandlers:
         embedding = None
         try:
             from tortoise.embeddings import encode_for_row
+            # #13224: DERIVED vector — see `_upsert_subject` for the scope.
             embedding = encode_for_row(
-                name, self.required_embedding_dim)
+                name, self.required_embedding_dim, bounded=True)
         except Exception:
             pass
         # #1155-P1: canonical id must win on MATCH too. The produces-edge
@@ -5390,8 +5397,9 @@ class _EntityHandlers:
                 # #5008: through the EMBED gate — an identifier-only text earns no vector.
                 try:
                     from tortoise.embeddings import encode_for_row
+                    # #13224: DERIVED vector — see `_upsert_subject` for the scope.
                     embedding = encode_for_row(
-                        doc_content, self.required_embedding_dim)
+                        doc_content, self.required_embedding_dim, bounded=True)
                 except Exception:
                     pass
         # #125 capture fields — use ev.get(field) with NO default so None →
@@ -5758,8 +5766,9 @@ class _EntityHandlers:
                 # #5008: through the EMBED gate — an identifier-only text earns no vector.
                 try:
                     from tortoise.embeddings import encode_for_row
+                    # #13224: DERIVED vector — see `_upsert_subject` for the scope.
                     embedding = encode_for_row(
-                        event_content, self.required_embedding_dim)
+                        event_content, self.required_embedding_dim, bounded=True)
                 except Exception:
                     pass
         props = {
