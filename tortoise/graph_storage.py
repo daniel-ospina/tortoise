@@ -28,19 +28,42 @@ handle.
 ⇒ So the meter reports a **range** (``min_mb``/``max_mb``/``spread_mb``), the
 ``SAMPLES`` count it used, and the number of ``repeats``, and it does not
 claim a precision it does not have. ⛔ **There is NO graph shape for which this
-reading is a cap input, and the "no vector index" case is the one that looks
-safe and is not:** production, 2026-11-16 — **148 EMPTY** tenant graphs had
+reading is an EXACT cap input, and the "no vector index" case is the one that
+looks safe and is not:** production, 2026-11-16 — **148 EMPTY** tenant graphs had
 freed **216 MB** (≈**1.46 MB** of rent each) while a newly-created graph reads
 only ≈**346 KiB**, so a tenant spreads storage over near-empty graphs and a cap
 summed from these readings never fires (:data:`EXCLUDED_OVERHEAD`). For a
 vector-bearing graph the reading ALSO cannot see the dominant resident
-component (:data:`VECTOR_INDEX_EXCLUDED`). It is NOT invoice-grade either way.
-That is why ``allowance_gate``'s block carries **two** release conditions — the
-index AND overhead attribution — and why clearing one does not arm the
-dimension. The sentence
-is carried verbatim on every IN-PROCESS reading (:data:`PRECISION_NOTE`,
+component (:data:`VECTOR_INDEX_EXCLUDED`). It is NOT invoice-grade either way,
+and the two blindnesses are why ``allowance_gate``'s graph-storage block carried
+**two** release conditions — the index AND overhead attribution — so clearing one
+did not arm the dimension. #13084's arming is deliberately NOT an exact-cap
+reading of this figure: the paragraph below denominates the cap against a LOWER
+BOUND and states the error direction and the under-enforcement it costs. The
+sentence is carried verbatim on every IN-PROCESS reading (:data:`PRECISION_NOTE`,
 ``GraphStorageReading.precision_note``, and ``as_dict()``), so a reader of a
 reading cannot consume the number without it.
+
+⚠️ **BUT ITS ERROR HAS ONE DIRECTION *UP TO THE SAMPLING ERROR*, AND THAT IS WHAT
+MAKES A LOWER-BOUND CAP POSSIBLE (#13084).** Every exclusion above REMOVES bytes,
+so the reading is a
+**lower bound** on what the tenant actually holds resident: refusing at
+``reading >= X`` is a refusal only when the true figure is already ``>= X``.
+⛔ **THE SAMPLING HALF DOES NOT HAVE THAT DIRECTION** (#13102 P1-3): the figure is
+the MEDIAN of ``SAMPLES``-based estimates, which wobble in both directions — this
+repo says so of this same instrument (``SEARCH-ARCHITECTURE.md`` §8) — so the
+lower-bound property holds **up to the sampling error, and no further**. That is
+the one use of this number that survives the blind spot, and it is
+the use the allowance gate makes: it WARNS at the tier's cap, and hard-refuses only
+at **1.5x** it (a gap sampling noise should not explain), with the refusal
+labelled an ESTIMATE and a LOWER BOUND **whose error is stated** — the gate reads
+this reading's own ``min_mb``/``spread_mb``/``repeats``, refuses only once the
+OBSERVED MINIMUM is over the cap where several repeats exist, and says the error
+is UNMEASURED where only one repeat was taken. The cost of the direction is UNDER-enforcement —
+a vector-heavy graph can hold more than the cap before its measured share
+crosses — so this bounds residency late, never on the wrong side of what it can
+prove. **It still must not be
+read as the tenant's exact bytes.**
 
 ⚠️ **WHERE THIS CAVEAT DOES *NOT* REACH (open, #5331).** The durable ledger does
 **not** carry it. ``record_graph_storage`` →
@@ -53,8 +76,9 @@ wording. Those are the two surfaces a cap author is most likely to read, and
 they are **not** corrected here: an applied migration cannot be edited, and
 adding a further migration to a repo already carrying out-of-order pending
 migrations is a deploy decision rather than a docs one. Until they are
-corrected, **a cap MUST NOT be wired to the ledger figure for vector-bearing
-tenants.**
+corrected, **the ledger figure must not be read as a tenant's exact bytes for a
+vector-bearing tenant** — see the lower-bound rule above, which is the only
+consumption the gate makes of it.
 
 NOT A DIAL. Nothing here prices, caps, tiers, refuses or throttles. It is the
 instrument, not the setting (#5331 is measurement only). The declared
@@ -141,10 +165,13 @@ REPEATS_MAX = 32
 #:
 #: ⇒ For a VECTOR-BEARING graph the reported figure omits the single largest and
 #: most expensive resident component. Measured, not theorised: this is why the
-#: reading no longer claims to be safe as a cap input. The durable fix is a
-#: vendor answer (is there a supported way to size a tenant's vectors?), which
-#: is asked on `#5331` / the FalkorDB thread; until it lands, a cap MUST NOT be
-#: wired to this number for vector-bearing tenants.
+#: reading does not claim to be an EXACT cap input. #13084 makes the one use that
+#: survives it: the error is one-directional (under-report) **up to the sampling
+#: error** (#13102 P1-3 — a SAMPLES-based average also wobbles upward), so the
+#: reading is a LOWER BOUND up to that error and the allowance gate refuses only
+#: at 1.5x the cap or past a MEASURED spread, labelled an
+#: estimate. The durable fix is still a vendor answer (is there a supported way
+#: to size a tenant's vectors?), which is asked on `#5331` / the FalkorDB thread.
 VECTOR_INDEX_EXCLUDED = (
     "the HNSW VECTOR INDEX, which lives in the separately-loaded 'vectorset' "
     "module and is absent from BOTH `total_graph_sz_mb` and `indices_sz_mb` "
@@ -186,9 +213,11 @@ PRECISION_NOTE = (
     "nodes/edges), and it EXCLUDES per-graph and Redis-key overhead "
     "AND the HNSW vector index. For a vector-bearing graph the total is "
     "understated ~2x and the index share by 8.5x-21.7x, and for EVERY graph "
-    "~1.46 MB of per-graph rent is attributed to no graph at all. DO NOT use "
-    "this reading as a cap or cost input until the vector index is measurable "
-    "AND per-graph overhead is attributed. "
+    "~1.46 MB of per-graph rent is attributed to no graph at all — so this is a "
+    "LOWER BOUND on what is resident, and NEVER an exact cap input: it may WARN "
+    "at an allowance and, since #13084, hard-refuse only at 1.5x the cap. It "
+    "must not be read as the tenant's exact bytes, nor as a cost input, until "
+    "the vector index is measurable AND per-graph overhead is attributed. "
     "NOT invoice-grade."
 )
 

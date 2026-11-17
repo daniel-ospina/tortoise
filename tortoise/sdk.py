@@ -13369,8 +13369,9 @@ def _read_stored_number(value, default):
         return default
 
 
-def _ledger_record(label: str, rows: list[dict]) -> None:
-    """#7983: feed the READ LEDGER (the instrument for the hot fraction `f`).
+def _ledger_record(label: str, rows: list[dict], *, kind: str | None = None,
+                   seed: str | None = None) -> None:
+    """#7983/#13084: feed the READ LEDGER (the instrument for `f` and the mix).
 
     Called from EVERY caller-facing row-returning read path that has a known
     LABEL. The named set is carried by §17.4.6, not duplicated here — a case
@@ -13396,18 +13397,42 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
     reads an `f` that is too LOW (which flatters the split). #8877 carries the
     wiring; the coverage gaps are named in STORAGE-ARCHITECTURE.md §17.4.6.
 
+    ``kind`` (#13084) names WHAT QUESTION the call asked — one of
+    ``read_ledger.QUERY_KINDS`` — and makes this helper record a `query` event as
+    well, INCLUDING when the call returned nothing (the mix counts calls; a hit
+    distribution is a different, flattering question).
+
+    ⛔ ``seed`` IS THE DOOR'S OWN START KEY, passed by the caller that HAS one —
+    and NOTHING is synthesised when it does not. The two doors wired with
+    ``kind="traversal"`` today (``recall_state``, ``recall_gaps``) are filtered
+    and ranked retrieval over a pool, not seeded walks: they have no start key,
+    so they record none and land in the report's ``unseeded`` holes. Substituting
+    the rank-0 RETURNED row instead would answer a different question — "was the
+    first row I handed back already read", which for ``recall_gaps`` is close to
+    the COMPLEMENT of whether the traversal's origin was resident — and a hook
+    that answers a flattering question in the metric's own name is the failure
+    mode this instrument exists to avoid. A door with a real seed
+    (``recall_subgraph(seed=…)``) passes it once #8877 turns that leg on.
+
     OFF by default and never imported when off: one env lookup (the #4097 truthy
     contract), and a ledger failure is swallowed inside the module (a measurement
     may not break the thing it measures).
     """
-    if not rows or not is_truthy(os.environ.get("TORTOISE_READ_LEDGER")):
+    rows = rows or []
+    if not rows and kind is None:
+        return
+    if not is_truthy(os.environ.get("TORTOISE_READ_LEDGER")):
         return
     try:
         from . import read_ledger
     except Exception:  # pragma: no cover — a broken install must not break a read
         return
 
-    read_ledger.record_rows(label, rows)
+    if rows:
+        read_ledger.record_rows(label, rows)
+    if kind is not None:
+        read_ledger.record_query(kind, label=label, returned=len(rows),
+                                 seed=seed)
 
 
 #: ``entity_type`` values that resolve to a ``:Point`` read — the only rows
@@ -29581,7 +29606,7 @@ class TortoiseSDK:
         # read after one `recall_gaps()` call (f -> ~1) and bias `f` HIGH, the
         # direction that removes the saving the ledger exists to measure.
         if _record_reads:
-            _ledger_record("Point", points)
+            _ledger_record("Point", points, kind="lookup")
         return points
 
     def paginated_query(self, kind: str | None = None,
@@ -29676,7 +29701,7 @@ class TortoiseSDK:
         # `f` must see the structural query path, not only the FTS funnel, or the
         # keys it serves are reported as never read (the flattering direction for
         # the split's own saving).
-        _ledger_record("Point", results)
+        _ledger_record("Point", results, kind="lookup")
 
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
@@ -30122,7 +30147,7 @@ class TortoiseSDK:
             if not include_retracted:
                 rows = [r for r in rows if r.get("status") != "retracted"]
             page = rows[offset:offset + (limit or 100)]
-            _ledger_record("Point", page)  # #7983: the served page, not the tag
+            _ledger_record("Point", page, kind="lookup")  # #7983: the served page
             return {"results": page, "total": len(rows),
                     "hasMore": offset + (limit or 100) < len(rows)}
         if mode == "sessions":
@@ -30601,7 +30626,7 @@ class TortoiseSDK:
         ).result_set
         points = [r[0] for r in rows]
         if _record_reads:
-            _ledger_record("Point", points)  # #7983: a product read of these keys
+            _ledger_record("Point", points, kind="lookup")  # #7983: a product read
         return points
 
     def _list_namespaces(self) -> list[dict]:
@@ -43850,7 +43875,7 @@ class TortoiseSDK:
         if graph_ranker is not None and results:
             results = graph_ranker.rerank(results, entity_type="point", query=q)
 
-        _ledger_record("Point", results)  # #7983: the rows this call SERVES
+        _ledger_record("Point", results, kind="text")  # #7983: rows SERVED
         return results
 
     # ── Session Context (#6989) ──────────────────────────────
@@ -44115,7 +44140,7 @@ class TortoiseSDK:
 
         # #7983: the semantic pool opted out above; the hits that SURVIVE the
         # gate are what the caller receives, so record those (this is the read).
-        _ledger_record("Point", semantic_hits)
+        _ledger_record("Point", semantic_hits, kind="vector")
         data_points: list[dict] = []
         for h in semantic_hits:
             dp = {"kind": h.get("point_kind"), "content": (h.get("content") or "")[:200]}
@@ -45107,7 +45132,6 @@ class TortoiseSDK:
                     _caller_trace.extend(status_trace or ())
             if (
                 _read_ledger is not None
-                and rows
                 and _read_ledger_enabled
                 and _record_reads
             ):
@@ -45115,7 +45139,19 @@ class TortoiseSDK:
                 # `(label, key)` of every row this read returned, and a ledger
                 # failure is swallowed inside the module (a measurement may not
                 # break the thing it measures).
-                _read_ledger.record_rows(label, rows)
+                if rows:
+                    _read_ledger.record_rows(label, rows)
+                # #13084: the CALL is recorded whether or not it returned rows —
+                # the query mix counts questions asked, and an empty search is
+                # still a search (and the one that paid for a cold miss).
+                # The kind follows `classify_query`'s own rule below: the dense
+                # leg fires exactly when a text query is present, and a call with
+                # no query is the structural/full-scan read.
+                _read_ledger.record_query(
+                    "vector" if (query and str(query).strip()) else "lookup",
+                    label=label,
+                    returned=len(rows or ()),
+                )
             return rows
 
         def _with_claim_class(rows: list[dict],
@@ -48717,7 +48753,8 @@ class TortoiseSDK:
         # — these are the rows the caller actually receives, and they are what a
         # read of this path means for `f`.
         _ledger_record(
-            "Point", [i for i in out if i.get("entity_type") == "point"]
+            "Point", [i for i in out if i.get("entity_type") == "point"],
+            kind="traversal",
         )
         # NOT the Object leg — and since #9881 that is a WIRING choice (#8877),
         # not a shape limit. Before the move an Object's key was `name` and these
@@ -49097,7 +49134,7 @@ class TortoiseSDK:
             and r["gaps_ranking"]["support"] <= max_support
         ][:limit]
         # #7983: the pool above opted out; the rows the caller RECEIVES are a read.
-        _ledger_record("Point", ranked)
+        _ledger_record("Point", ranked, kind="traversal")
         return ranked
 
     def recall_subgraph(self, seed: str, *,
