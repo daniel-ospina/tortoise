@@ -59,9 +59,9 @@ import httpx
 
 from tortoise import github_map
 from tortoise.live import (
-    TERMINAL_EXCLUDED_STATUSES,
     _terminal_excluded,  # #2901 canonical non-current predicate
     is_position_ended,
+    is_terminal_status,
 )
 from tortoise.pipeline import (
     CORE_WORK_ITEM_PIPELINE,
@@ -243,16 +243,22 @@ def _row_is_frozen(status, outdated) -> bool:
     transition mint in both directions instead of minting `-reopened-N` without
     bound against a row the projection refuses.
 
-    ⚠️ The set is the READER's vocabulary (``live.TERMINAL_EXCLUDED_STATUSES``),
-    deliberately WIDER than the fold's ``excluded``. ``_fold_object_stage`` does
-    not fetch ``o.outdated`` and its set is ``OBJECT_TERMINAL_STATUSES``, which
-    has no ``outdated`` member (``entities.py:6196-6204``; ``commit_ops.py:75-82``
-    says so from the other side: the render-time probe *"adds `outdated` … which
-    this fold does not"*). The wider set is correct HERE because the invariant is
-    "no writer can clear it", not "the fold latches on it" — see the second bullet
+    ⚠️ The SET is the shared ``live`` predicate's, whose vocabulary
+    (``live.TERMINAL_EXCLUDED_STATUSES``) is deliberately WIDER than the fold's
+    ``OBJECT_TERMINAL_STATUSES``. ``_fold_object_stage`` does not fetch
+    ``o.outdated`` and its set has no ``outdated`` member
+    (``entities.py:6196-6204``; ``commit_ops.py:75-82`` says so from the other
+    side: the render-time probe *"adds `outdated` … which this fold does not"*).
+    The wider set is correct HERE because the invariant this helper tests is "no
+    writer can clear it", not "the fold latches on it" — see the second bullet
     above, which is exactly the case the narrower set would miss.
+
+    ⚠️ It is the SHARED predicate, not a local re-spelling, and the POSITION axis
+    is deliberately not passed: this helper answers only whether the LIFECYCLE
+    terms have latched. Position is the axis a diff CAN converge on, so it is
+    read separately below.
     """
-    return ((status or "") in TERMINAL_EXCLUDED_STATUSES) or bool(outdated)
+    return is_terminal_status(status, outdated)
 
 
 def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
