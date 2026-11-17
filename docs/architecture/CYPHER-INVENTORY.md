@@ -89,7 +89,7 @@ shape total, so a total cannot be inflated by them.
 
 The `rg`-style predicates, computed in-process so they are reproducible without a shell:
 
-```
+```text
 rg -o '\.(ro_)?(query|execute)\s*\(' tortoise/   → 1,609 occurrences across 105 files
 rg -o '\b(MATCH|MERGE)\s*\(' tortoise/           → 2,326 occurrences across 140 files
 
@@ -313,14 +313,14 @@ if both forms answer the same wrong thing, the diff is empty and says so honestl
 
 ## 6. What this lane does not decide
 
-- **No flip is taken here.** The first candidate is *proposed with a measurement* (§4) and the harness
+* **No flip is taken here.** The first candidate is *proposed with a measurement* (§4) and the harness
   authorises it; landing it deletes the Cypher form in the same PR, which is a caller-visible change
   owned by `#13083`'s placement table.
-- **No shape §3 keeps is proposed for a move.** `traversal` (3), `ep` (32), `fulltext`
+* **No shape §3 keeps is proposed for a move.** `traversal` (3), `ep` (32), `fulltext`
   (2) are `stays`, each citing its section. `adjacency` (289) is `measure`, not `move`.
-- The text index is **not** re-decided: `#13099` measured the gate and §6.2's STATUS note records that
+* The text index is **not** re-decided: `#13099` measured the gate and §6.2's STATUS note records that
   the decision stands; adopting from that measurement is a reopen on `#4051`, not a lane's move.
-- `cache_projection.py` and `cache_tier` are untouched — `#13083` owns them.
+* `cache_projection.py` and `cache_tier` are untouched — `#13083` owns them.
 
 ---
 
