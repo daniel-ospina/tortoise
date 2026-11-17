@@ -965,6 +965,39 @@ class TestThePlanPipeline:
         assert pos["ended"] is False
         assert pos["outcome"] is None
 
+    def test_a_POSITIONLESS_plan_never_reports_a_stale_outcome(self, sdk):
+        """`outcome` is the STAGE's outcome — no-position is not an exception.
+
+        `unresolvable` is gated on `bool(stage_id)`, so a plan with NO position is
+        NOT unresolvable, and the earlier `else (None if unresolvable else
+        outcome)` fallback reported the stored `pipelineOutcome` for that shape:
+        `ended: False` beside `outcome: 'lost'`, the same mixed-cache pair the
+        sibling test removes one input over (#13100 review round 13, P2). Pinned
+        through BOTH doors — the pure helper and the Q5 read a caller consumes.
+        """
+        pos = PO.plan_position(None, outcome="lost")
+        assert pos["has_position"] is False
+        assert pos["unresolvable"] is False
+        assert pos["ended"] is False
+        assert pos["outcome"] is None, (
+            "a position-less plan reported the STALE pipelineOutcome prop")
+        # The durable `isClosed` marker answers `ended` on its own, so the stored
+        # word is still not this field's answer.
+        closed = PO.plan_position(None, outcome="lost", is_closed=True)
+        assert closed["ended"] is True
+        assert closed["outcome"] is None
+
+        # The door a caller actually reads (Q5), not just the helper.
+        bare = sdk.create_entity("object", "positionless outcome",
+                                 objectKind=PO.PLAN_PIPELINE_KEY)["node"]
+        sdk.update_knowledge(bare["id"], pipelineOutcome="lost")
+        rows = {r["name"]: r for r in
+                PO.planned_without_occurrence(sdk._get_proj().g)}
+        row = rows["positionless outcome"]
+        assert row["ended"] is False
+        assert row["outcome"] is None, (
+            f"the Q5 read reported the stale stored pipelineOutcome: {row!r}")
+
     def test_create_plan_STAGES_a_positionless_live_holder(self, sdk):
         """A live plan holder with NO position is not a successful re-mention.
 

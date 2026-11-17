@@ -264,8 +264,15 @@ def plan_position(stage_id, *, outcome=None, is_closed=False,
         # pair `ended: False` with `outcome: 'lost'`). `unresolvable`/
         # `unresolvable_cause` answer a different question again: can a stage MOVE
         # be validated.
-        "outcome": (stage.outcome if stage is not None
-                    else (None if unresolvable else outcome)) or None,
+        # ⛔ NO POSITION is a "no stage resolves" case too, not an exception to
+        # this rule: `unresolvable` is gated on `bool(stage_id)`, so a
+        # position-less plan is NOT unresolvable and the earlier
+        # `else (None if unresolvable else outcome)` fallback reported the STORED
+        # prop for exactly that shape — the same mixed-cache pair this rule
+        # forbids, one input over (#13100 review round 13, P2, measured through
+        # both doors). `ended` still answers the durable `isClosed` marker, so a
+        # closed plan with a cleared stage loses no settlement here.
+        "outcome": (stage.outcome if stage is not None else None) or None,
         "has_position": bool(stage_id),
         "ended": bool(is_closed) or (stage is not None and stage.is_terminal),
         "unresolvable": unresolvable,
@@ -491,7 +498,6 @@ def create_plan(sdk, name: str, *, title: str | None = None,
         # position, so a FRESH create lands here (#13100 review round 10). It
         # therefore branches on what is actually known rather than calling a
         # brand-new record "settled".
-        # an earlier one").
         cur = pipeline.current_stage(sdk._get_proj().g, plan_id) or {}
         pos = plan_position(
             cur.get("stageId"), outcome=cur.get("outcome"),
