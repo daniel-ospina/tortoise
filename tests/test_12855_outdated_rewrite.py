@@ -353,6 +353,38 @@ def test_a_sibling_created_after_the_read_is_refused_at_write_time(env):
     assert statuses["Object"] == "outdated"
 
 
+def test_a_sibling_deleted_after_the_read_stops_being_reported_as_refused(env):
+    """The report must describe what the WRITE did, not what the read predicted.
+
+    `rep.fanout` is the PRE-read snapshot, so a sibling deleted between the read
+    and the write leaves a row in it that the write then rewrote — and the
+    operator reads "refused, never written" about a row the run just changed.
+    Deleting the reconciliation block leaves every other row green (measured
+    2026-11-17), so without this test the block is deletable in silence.
+    """
+    sdk, _events = env
+    oid = sdk.create_object("late-gone", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    # …a sibling present AT THE READ, so the snapshot really does refuse the row.
+    sdk.create_point("stmt", "sibling claim", id=oid)
+
+    preview = tool.run(sdk, execute=False)
+    assert [r.get("id") for r in preview.fanout] == [oid], (
+        f"precondition: the snapshot must refuse the row. got {preview.fanout!r}")
+
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) DELETE n", params={"id": oid})
+
+    rep = tool.run(sdk, execute=True, report=preview)
+
+    assert rep.rewritten == [oid], (
+        f"the sibling is gone, so the write must land. failures={rep.failures!r}")
+    assert rep.fanout == [], (
+        "a row this run REWROTE must not still be reported as refused: "
+        f"{rep.fanout!r}")
+    assert rep.journal_delta == 1, rep.journal_delta
+
+
 def test_a_url_only_source_stub_sharing_the_id_is_refused(env):
     """The resolution uses the WRITE DOOR's identity keys, not just `m.id`.
 
@@ -592,6 +624,38 @@ def test_a_missing_journal_refuses_before_any_write(tmp_path, monkeypatch):
         sdk.close()
 
 
+def test_rewrite_refuses_a_journal_less_target_instead_of_writing_live_only(
+        tmp_path, monkeypatch):
+    """`rewrite` is a PUBLIC writer, and it used to write before it checked.
+
+    `run` answers the journal precondition, but a direct `rewrite` call did not:
+    measured 2026-11-17, it restamped the row (`outdated` → `deprecated`,
+    LIVE-ONLY, revertable by the next `rebuild_all`) and then died on
+    `None.position()` — the exact write this tool exists to prevent, on the one
+    path the CLI's arm does not cover (review finding, 2026-11-17).
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+    db = tmp_path / "no-journal-writer.db"
+    sdk = TortoiseSDK(str(db))
+    try:
+        oid = sdk.create_object("unjournaled", objectKind="test:widget")["id"]
+        _mint_legacy(sdk, oid, "outdated")
+        assert sdk._get_event_log() is None, "precondition: no journal on this target"
+        rep = tool.collect(sdk._get_proj())
+        assert [r["id"] for r in rep.rows] == [oid], "precondition: one legacy row"
+
+        with pytest.raises(tool.Refused) as refused:
+            tool.rewrite(sdk, rep)
+
+        assert refused.value.reason == tool.REFUSE_NO_JOURNAL, refused.value.reason
+        assert rep.executed is False, "a refused write must not read as executed"
+        assert rep.rewritten == [], rep.rewritten
+        assert _status(sdk, oid) == "outdated", "the refusal must precede the write"
+    finally:
+        sdk.close()
+
+
 def test_an_empty_target_flag_is_refused_not_treated_as_absent(
         tmp_path, monkeypatch, capsys):
     """`--db-path ""` is a set-but-empty value: it would fall through to a
@@ -619,17 +683,39 @@ def test_an_empty_target_flag_is_refused_not_treated_as_absent(
     assert "--db-path" in err, "the refusal must name the flag that was empty"
 
 
-def test_two_targets_at_once_are_refused_not_silently_resolved(monkeypatch):
+def test_two_targets_at_once_are_refused_not_silently_resolved(
+        tmp_path, monkeypatch, capsys):
     """`--uri` AND `--db-path` name two stores, and the SDK prefers `db_path`.
 
     Resolving it silently writes the EMBEDDED graph while the operator believes
     the container was addressed — and the journal appended to is whichever
     `--event-log-path` names, so a production journal can receive a record for a
     write that never touched the production graph.
+
+    ⛔ A REAL JOURNAL IS PASSED AND THE REFUSAL IS ASSERTED BY NAME (review
+    finding, 2026-11-17): with no journal configured the journal-less refusal
+    answers `2` as well, so `rc == 2` alone stayed green with the ambiguity
+    clause deleted, and this row proved nothing about the guard it names.
     """
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    assert tool.main(["--uri", "bolt://127.0.0.1:1/none",
-                      "--db-path", "/tmp/does-not-matter.db"]) == 2
+    monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+    journal = tmp_path / "journal.jsonl"
+    journal.write_text("")
+    would_be_embedded = tmp_path / "should-never-exist.db"
+
+    rc = tool.main(["--uri", "bolt://127.0.0.1:1/none",
+                    "--db-path", str(would_be_embedded),
+                    "--event-log-path", str(journal)])
+
+    assert rc == 2, "two targets must be refused, not silently resolved"
+    err = capsys.readouterr().err
+    assert tool.REFUSE_EMPTY_FLAG in err, err
+    assert tool.REFUSE_NO_JOURNAL not in err, (
+        "the wrong refusal answered: a journal WAS supplied, so rc=2 must be the "
+        f"ambiguity guard's. stderr: {err!r}")
+    assert "--uri and --db-path" in err, "the refusal must name both flags"
+    assert not would_be_embedded.exists(), (
+        "nothing may be opened on a refused target")
 
 
 def test_run_refuses_a_journal_less_target_instead_of_crashing(tmp_path, monkeypatch):

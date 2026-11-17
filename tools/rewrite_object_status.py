@@ -543,6 +543,16 @@ def rewrite(sdk, rep: Report) -> Report:
         rep.executed = False
         raise refusal
     log = sdk._get_event_log()
+    # ⛔ THE JOURNAL PRECONDITION BELONGS HERE TOO (review finding, 2026-11-17).
+    # `run` answers it, but `rewrite` is the public writer the docstring above
+    # calls out — and measured, a direct call on a journal-less target WROTE the
+    # row (`outdated` → `deprecated`, live-only, revertable by the next
+    # `rebuild_all`) and then died on `None.position()` instead of refusing.
+    if log is None:
+        rep.executed = False
+        raise Refused(REFUSE_NO_JOURNAL, (
+            "the SDK reports no journal for this target, so every write would "
+            "be LIVE-ONLY and the next `rebuild_all` would revert it."))
     try:
         rep.journal_records_before = log.position()
     except (OSError, AttributeError) as exc:          # pragma: no cover
@@ -634,7 +644,7 @@ def rewrite(sdk, rep: Report) -> Report:
 
     try:
         rep.journal_records_after = log.position()
-    except OSError as exc:                            # pragma: no cover
+    except (OSError, AttributeError) as exc:          # pragma: no cover
         rep.failures.append({"phase": "journal-position", "error": str(exc)})
 
     after = collect(sdk._get_proj())
@@ -650,8 +660,7 @@ def rewrite(sdk, rep: Report) -> Report:
     # PRE-READ snapshot: a sibling can be deleted (or created) before the write,
     # and the write re-resolves the address. Left unreconciled, the report tells
     # an operator a row was "refused, never written" that the run just rewrote —
-    # and the exit code stays 1 on a clean run, blocking the sequencing step
-    # this tool exists to unblock.
+    # the one line an operator uses to decide whether to look closer.
     written = set(rep.rewritten)
     rep.fanout = [r for r in rep.fanout if r.get("id") not in written]
     _listed = {r.get("id") for r in rep.fanout}
