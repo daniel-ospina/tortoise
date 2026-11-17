@@ -114,8 +114,8 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.parse
 import traceback
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -770,7 +770,7 @@ class DeployedTarget:
                     out[path.strip("/").replace("/", "_")] = json.loads(
                         resp.read().decode("utf-8", "replace")
                     )
-            except Exception as exc:  # noqa: BLE001 — a probe records, it never raises
+            except Exception as exc:
                 out["error"] = _strip_userinfo(
                     f"{path}: {type(exc).__name__}: {_cut(str(exc), 160)}", self.api_url
                 )
@@ -850,7 +850,7 @@ class Ingestor:
     def run(self) -> list[dict]:
         for op in self.ops:
             name = op.get("op")
-            ref = op.get("ref") or op.get("old") or op.get("goal") or ""
+            ref = ingest_ref_key(op)
             missing = self._need(op.get("requires") or [])
             if missing:
                 self._record(ref, name, False, f"BLOCKED — target lacks capability: {missing}")
@@ -1275,6 +1275,31 @@ RECIPE_NEEDS = {
     "planned_never_happened": ["search_objects", "read_entity"],
     "withdrawn": ["search_points", "read_entity"],
 }
+
+#: Identities the SCENARIO creates that no question is scored against, and why each is
+#: allowed to go unwatched. Anything here can be refused without blocking a question — so an
+#: entry is a deliberate statement, not an oversight, and the pins assert every key still
+#: exists in the narrative (a stale allowlist would silently license a future gap).
+SCENARIO_ONLY_REFS = {
+    "core:plan": (
+        "the pipeline DECLARATION, which no question reads. Its refusal cannot hide: every "
+        "`advance_stage` on it then fails, and those ops are attributed to the plans "
+        "(`launch_plan`, `partner_call`), so the questions that need those stages block. "
+        "Allowed here because the cascade — not a direct declaration — is what carries it."
+    ),
+}
+
+
+def ingest_ref_key(op: dict) -> str:
+    """The key an ingest op's log row is attributed to (the one definition).
+
+    Used by `Ingestor.run()` AND by the manifest pin, so "every ref is load-bearing for
+    some question" cannot be checked against a narrower set than the one the log records
+    (#13303 review cycle 6: `produced` read only `op["ref"]`, so `old`/`goal`-shaped ops —
+    and `declare_pipeline` — were invisible to it).
+    """
+    return op.get("ref") or op.get("old") or op.get("goal") or op.get("pipeline") or ""
+
 
 #: Which INGESTED identities a recipe needs before it can be asked at all.
 #:

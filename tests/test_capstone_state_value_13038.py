@@ -482,7 +482,9 @@ def test_every_recipe_declares_the_refs_it_needs(narrative):
         "every recipe must declare its refs (empty list when it needs none), or the "
         "drift this map exists to catch is invisible for that recipe"
     )
-    produced = {op.get("ref") for op in narrative["ingest"]["ops"] if op.get("ref")}
+    # The SAME key set `Ingestor._record` attributes a log row to — `ref` OR `old` OR
+    # `goal` (and `pipeline`): reading only `op["ref"]` hid the `old`/`goal`-shaped ops.
+    produced = {cap.ingest_ref_key(op) for op in narrative["ingest"]["ops"]} - {""}
     for recipe, refs in cap.RECIPE_REFS.items():
         unknown = set(refs) - produced
         assert not unknown, (
@@ -496,9 +498,15 @@ def test_every_recipe_declares_the_refs_it_needs(narrative):
     # product's own judgement `met` from October, and the reader scored the instrument's
     # failed write as a product defect.
     watched = set().union(*cap.RECIPE_REFS.values())
-    assert produced <= watched, (
+    allowed = set(cap.SCENARIO_ONLY_REFS)
+    assert produced <= watched | allowed, (
         "these ingest refs are waited for by no question, so their refusal blocks nothing: "
-        f"{sorted(produced - watched)}"
+        f"{sorted(produced - watched - allowed)} — declare them on the question whose answer "
+        "key needs them, or add them to SCENARIO_ONLY_REFS with the reason"
+    )
+    assert allowed <= produced, (
+        f"SCENARIO_ONLY_REFS names refs the narrative no longer creates: {sorted(allowed - produced)} "
+        "— a stale allowlist silently licenses a future unwatched ref"
     )
 
 
@@ -512,6 +520,26 @@ def test_an_unresolved_ref_is_reported_and_never_silently_ignored():
     # `uptime_TARGET`, not `uptime_GOAL` (#13303 cycle 6, P2): the key names the 99.9 %
     # target as the commitment, so declaring the goal object let a refused `judge_goal`
     # write — a Q4 concern — block Q1 and drop its measured `wrong`.
+    # October is declared deliberately: the scenario is not the scenario without both
+    # readings, so the fail-closed direction wins (#13303 cycle 6, the lane's recorded
+    # decision). November is the one whose absence would make the judgement STALE.
+    assert cap.refs_unresolved("goal_met", {"uptime_goal": "g", "uptime_target": "t"}) == [
+        "uptime_oct",
+        "uptime_nov",
+    ]
+    assert cap.refs_unresolved(
+        "goal_met", {"uptime_goal": "g", "uptime_target": "t", "uptime_nov": "r"}
+    ) == ["uptime_oct"]
+    all_goal = {"uptime_goal": "g", "uptime_target": "t", "uptime_nov": "r", "uptime_oct": "r"}
+    assert cap.refs_unresolved("goal_met", all_goal) == []
+    # Both readings are declared, and the two reasons differ: NOVEMBER's absence would make
+    # the product's judgement STALE (October's 99.95 becomes newest → `met`), while OCTOBER
+    # is declared because a scenario missing one of its readings is not the frozen scenario
+    # — the fail-closed direction. (A reviewer proposed dropping October on the ground that
+    # its absence cannot stale the judgement; that reading is measured and true, and the
+    # declaration is a deliberate decision to prefer declining the question to scoring a
+    # thinner graph. Recorded here so the next reader does not re-litigate it as an oversight.)
+    assert {"uptime_oct", "uptime_nov"} <= set(cap.RECIPE_REFS["goal_met"])
     assert cap.refs_unresolved("current_commitments", {}) == [
         "q3_pricing",
         "q4_pricing",
@@ -588,14 +616,36 @@ def test_a_judge_file_without_verdicts_is_a_refusal_not_a_traceback(tmp_path):
     traceback where EXIT CODES promises "2 usage".
     """
     (tmp_path / "n.json").write_text(json.dumps({"questions": []}))
-    assert cap.cmd_run(
-        type("A", (), {"narrative": str(tmp_path / "n.json"), "out": str(tmp_path),
-                      "judge": "file", "verdicts": None})()
-    ) == 2
-    assert cap.cmd_judge(
-        type("A", (), {"packet": str(tmp_path / "p.json"), "verdicts": None,
-                      "judge_cmd": None, "out": None})()
-    ) == 2
+    assert (
+        cap.cmd_run(
+            type(
+                "A",
+                (),
+                {
+                    "narrative": str(tmp_path / "n.json"),
+                    "out": str(tmp_path),
+                    "judge": "file",
+                    "verdicts": None,
+                },
+            )()
+        )
+        == 2
+    )
+    assert (
+        cap.cmd_judge(
+            type(
+                "A",
+                (),
+                {
+                    "packet": str(tmp_path / "p.json"),
+                    "verdicts": None,
+                    "judge_cmd": None,
+                    "out": None,
+                },
+            )()
+        )
+        == 2
+    )
 
 
 def test_a_credential_in_the_deployed_api_url_never_reaches_the_recorded_header():
@@ -699,8 +749,9 @@ def test_judge_refuses_a_packet_holding_a_subset_of_the_frozen_scenario(tmp_path
     assert cap._same_questions_as_narrative(truncated) is False
     p = tmp_path / "truncated.json"
     p.write_text(json.dumps(truncated))
-    args = type("A", (), {"packet": str(p), "verdicts": None, "judge_cmd": None,
-                          "out": str(tmp_path / "o")})()
+    args = type(
+        "A", (), {"packet": str(p), "verdicts": None, "judge_cmd": None, "out": str(tmp_path / "o")}
+    )()
     assert cap.cmd_judge(args) == 2
 
 
