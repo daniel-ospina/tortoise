@@ -286,20 +286,28 @@ def test_rest_points_re_create_without_the_field_does_not_wipe_it(tmp_path):
 
 
 def test_no_create_channel_can_erase_a_stored_goal_state(tmp_path):
-    """The rule at the FOLD, not just at the doors (#13110 review round 3).
+    """The rule at the FOLD, not just at the doors (#13110 review rounds 3-5).
 
     A door-level `is not None` guard covers only the spelling that door owns. The
     erase lives one level down, where `create_point`'s dedup fold calls
     `update_point(pid, **props)` and a generic `None` REMOVES the property.
 
-    The TWO channels only the fold can cover are pinned here, and they are the
-    ones that FAIL if the pop is removed (measured, review round 4): the MCP
-    `props` bag and a direct SDK call. The MCP `goalState=` leg below is pinned
-    too, but it is the DOOR's guard it exercises, not the fold's — a `None` never
-    enters `props` that way (`if goalState is not None` in the tool body), so it
-    passes with or without the pop. Say so rather than counting it as fold
-    coverage: a reader who believed it covered the fold could "simplify" the
-    pop away on its strength.
+    The TWO channels PINNED here are the ones the pop alone closes, and they are
+    the ones that FAIL if the pop is removed (measured): the MCP `props` bag and
+    a direct SDK call. ⚠️ The pop also closes a THIRD spelling, the nested
+    `props=` flatten (`create_point(…, props={"goalState": None})`, a documented
+    SDK convention — `_coerce_props`), measured the same way but not repeated
+    here.
+
+    ⚠️ WHAT THE THIRD LEG BELOW DOES *NOT* PIN (measured, round 5): the MCP
+    `goalState=` parameter passes as long as AT LEAST ONE guard stands — it
+    passes with the pop removed (door guard intact) AND it passes with the tool
+    body forwarding `None` unconditionally (pop intact). So it pins their
+    CONJUNCTION only: "no channel erases while at least one guard stands". It is
+    not fold coverage and it is not door-guard coverage; the door guard is pinned
+    by `test_mcp_refuses_an_unknown_word_with_the_closed_set` and
+    `test_mcp_entity_and_point_doors_persist_the_declared_parameter`. Do not
+    read this leg as licence to remove the pop.
 
     Measured before the pop: `create_point("goal", …, goalState=None,
     dedup=True)` on an existing `met` goal left `goalState` UNSET, while
@@ -329,8 +337,8 @@ def test_no_create_channel_can_erase_a_stored_goal_state(tmp_path):
         assert not wiped.get("error"), wiped
         assert _stored(ha, prop_pt["id"]) == "guideline"
 
-        # DOOR GUARD (not fold coverage) — the declared parameter, whose `None`
-        # the tool body drops before the SDK ever sees it.
+        # CONJUNCTION LEG (see the docstring: this pins neither guard alone — it
+        # fails only when BOTH the pop and the tool-body guard are gone).
         pt = mcp_server.tortoise_create_point("goal", "fold goal B",
                                              goalState="blocked")
         assert not pt.get("error"), pt
