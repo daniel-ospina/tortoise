@@ -711,6 +711,29 @@ def _slow_opener(delay):
     return _open
 
 
+def _await_opener(opened, *, timeout=2.0):
+    """The opener's recorded calls, once the record was really ASKED.
+
+    ⛔ Pin the OPENER, not the counter — the rule the two older tests in this
+    file state, and the one the two bound-miss tests were missing: the whole
+    point of :class:`rs.RecordReadBoundMiss` is that it separates *"the record
+    was asked and too slow"* from *"the record was never asked"*, so a test
+    that reads only `prefer`'s ANSWER cannot see a `serve_point_bounded` that
+    returns a miss without opening anything. That regression would file every
+    armed `prefer` read as CAPACITY and stop `prefer` consulting the record at
+    all, with a counter pointing the operator at the wrong repair.
+
+    Bounded, and awaited rather than assumed: the append happens on the
+    WORKER, and a started thread is not guaranteed to have run by the time
+    `Event.wait` times out (list `append` is atomic, but its *scheduling* is
+    not ours), so this waits for the call instead of racing it.
+    """
+    deadline = time.monotonic() + timeout
+    while not opened.calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return opened.calls
+
+
 def test_MCP_a_slow_record_answers_from_the_cache_inside_the_bound(
         monkeypatch, mcp_harness):
     """#12947 finding 1 (P1): the record leg has a lane bound like the others.
@@ -732,7 +755,8 @@ def test_MCP_a_slow_record_answers_from_the_cache_inside_the_bound(
 
     rs.reset_fallback_counts()
     monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
-    monkeypatch.setattr(rs, "open_record", _slow_opener(0.5))
+    opened = _slow_opener(0.5)
+    monkeypatch.setattr(rs, "open_record", opened)
     monkeypatch.setattr(monitoring, "record_read_timeout_s", lambda: 0.05)
     mcp_harness(None)  # the cache is COLD
 
@@ -753,6 +777,11 @@ def test_MCP_a_slow_record_answers_from_the_cache_inside_the_bound(
     assert out.get("id") is None, "a bound miss must not serve the slow row"
     assert rs.fallback_counts().get(rs.FALLBACK_RECORD_BOUND_MISS) == 1, (
         "the fallback must be COUNTED, not only named")
+    assert _await_opener(opened) == [None], (
+        "the record was never ASKED — a bound miss must mean 'the record RAN "
+        "and was slower than the bound', never 'this door opened no record "
+        "connection at all'"
+    )
 
 
 def test_SDK_record_mode_refuses_on_a_bound_miss(monkeypatch):
@@ -765,12 +794,25 @@ def test_SDK_record_mode_refuses_on_a_bound_miss(monkeypatch):
     from tortoise import monitoring
 
     monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
-    monkeypatch.setattr(rs, "open_record", _slow_opener(0.5))
+    opened = _slow_opener(0.5)
+    monkeypatch.setattr(rs, "open_record", opened)
     monkeypatch.setattr(monitoring, "record_read_timeout_s", lambda: 0.05)
     stub = _sdk_class()(None)
 
-    with pytest.raises(rs.RecordUnavailable):
+    with pytest.raises(rs.RecordUnavailable) as caught:
         stub.get_point("p-1", served_out={})
+
+    cause = caught.value.__cause__
+    assert isinstance(cause, rs.RecordReadBoundMiss), (
+        "'record' mode must refuse FROM the seam's own miss — `from None` "
+        f"would discard the only record of why it refused — got {cause!r}")
+    assert cause.refused is False, (
+        "the submission RAN, so `refused` must stay False: it is the "
+        "discriminator the lane-miss fallback reasons branch on, and True "
+        "would misfile this as 'the record was never asked'")
+    assert _await_opener(opened) == [None], (
+        "the strict mode must ASK the record before refusing — the opener is "
+        "the falsifiable property, not the exception's existence")
 
 
 def test_the_three_modes_and_the_absent_verdict():

@@ -4036,8 +4036,11 @@ operator who read the line above as "CI defends this" would never run it.
 > `TORTOISE_RECORD_SERVE` selects **which store answers a read**; `TORTOISE_RECORD_DSN` is the
 > record's own connection string (see [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)).
 > Arming the read mode with **no resolvable DSN does not degrade to the cache**: `open_record` raises
-> a **structural** `RecordServeError`, `serve_point` re-raises structural errors, and — per the
-> contract below — **every point read on all three doors becomes a 500, not a fallback.**
+> a **structural** `RecordServeError` and `serve_point` re-raises structural errors, so the read
+> **fails instead of falling back — but the shape of the failure is per door**, and an operator sent
+> hunting one of them will miss the other two: the hosted `GET /v1/points/{id}` answers **500**, the
+> MCP door returns an **error payload** (`_safe`, which returns an `_SafeError` rather than raising),
+> and the **SDK raises** to its own caller. ⛔ **None of the three falls back to the cache.**
 > Check the DSN resolves *first* (`GET /health` → `"record":{"armed":true,…}`).
 
 The three modes (`tortoise/record_serve.py` — `serve_mode()`, ONE parser and ONE registry):
