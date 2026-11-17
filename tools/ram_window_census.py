@@ -228,7 +228,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tenant", help="the tenant (org) to fold — f is per tenant")
     ap.add_argument("--window-days", type=float, default=None)
     ap.add_argument("--restore-probe", action="store_true",
-                    help="time a DUMP/DEL/RESTORE for --graph (destructive)")
+                    help="time a DUMP -> RESTORE ... REPLACE of --graph "
+                         "(rewritten in place; NO DEL)")
     ap.add_argument("--graph-uri", default=None)
     ap.add_argument("--graph", default=None)
     ap.add_argument("--confirm-graph", default=None)
