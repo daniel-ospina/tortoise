@@ -132,7 +132,8 @@ needs none of the five is SQL-shaped and is marked **none**.
 | `tortoise/search_engine.py:6656` | `(n:Point)-[r:aboutSubject]->(:Subject)` — typed-degree prior | **adjacency** |
 | `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
 | `tortoise/search_engine.py:3938` | `CALL db.idx.vector.queryNodes('Point', 'embedding', $limit, vecf32($query_vec))` — the HNSW leg | **vector index** |
-| `tortoise/domain_validators.py:105` | `MATCH (req) WHERE (req:Point OR req:Object) AND req.pointKind IN $req_kinds`, then `OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow})` — **property-equality joins only**; no relationship appears in any pattern | **none** |
+| `tortoise/domain_validators.py:105` (and the same property-join shape at `:174-182`, `:197-205`) | `MATCH (req) WHERE (req:Point OR req:Object) AND req.pointKind IN $req_kinds`, then `OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow})` — **property-equality joins only**; no relationship appears in any pattern | **none** |
+| `tortoise/domain_validators.py:153-158` (`orphan_use_case`) | `OPTIONAL MATCH (uc)<-[:hasPart]-(op:Point {is_operator:true, op_type:'composedOf'})-[:hasPart]->(jtbd:Point)` — a **2-hop `hasPart` walk**, i.e. every parented use-case is found THROUGH the tree | **adjacency** |
 | `tortoise/domain_validators.py:241-243` | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT (n)--()` — the `orphaned_draft` rule (#131) tests **existence of any edge**, which is adjacency | **adjacency** |
 
 **Verdict: `graph`.** Thirteen capability-carrying readers across six files (§2.1's table spans
@@ -144,9 +145,11 @@ propagation, the fulltext index or HNSW in SQL (which is `#13082` Phase 2 and it
 `domain_validators.py:106`–`:244` as one "kind filters, no walk" row and quoted a query
 (`MATCH (req:Point) …`) that **does not exist** — the code reads `MATCH (req) WHERE (req:Point OR
 req:Object)`. The range also contains `:241-243`, whose `NOT (n)--()` is an **adjacency** predicate, which
-is the shape's own second capability. Both are fixed above: the cite is split, and the mis-quoted text is
-gone. The error was invisible to a reader who did not open the file, which is exactly the failure this
-document exists to prevent — recorded rather than quietly edited.
+is the shape's own second capability — and `:153-158`, whose two-hop `hasPart` pattern is a third: the
+first correction of this row split it only two ways and still filed `orphan_use_case` as `none`. All three
+are fixed above (three rows, not two): the cite is split, and the mis-quoted text is gone. The error was
+invisible to a reader who did not open the file, which is exactly the failure this document exists to
+prevent — recorded rather than quietly edited.
 
 ### 2.2 `:Source`
 
@@ -184,16 +187,20 @@ mechanism, not a citation nicety.
 | `tortoise/sdk.py:2917`, `:3499`, `:52258`, `:52381` | the same `CONTAINS` walk from the SDK door | **adjacency** |
 | `tortoise/session_reinjection.py:561` | `MATCH (s:Session)-[:CONTAINS]->(seed)` — multi-session evidence pooling | **adjacency** |
 | `tortoise/activation_scorecard.py:395` | `(s:Session)-[:CONTAINS]->(p:Point)` | **adjacency** |
+| `tortoise/session_schema.py:855-862`, `:892`, `:906-917` (`audit_session_retrofit`, reached by the shipped CLI `tools/session_retrofit_audit.py`) | the short-turns query counts `stored_turns` through `OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point)` before returning `s.capture_ok, s.capture_extractor`; `WHERE s.capture_ok = true RETURN count(s)`; and the entity-link under-count, `OPTIONAL MATCH (s)-[r1:aboutObject]->()` + `(s)-[:CONTAINS]->(t:Point)-[r2:aboutObject]->()`, `WHERE live_edges > s.entity_links_created` | **adjacency** |
 | `tortoise/quota.py:1155` | `MATCH (s:Session) RETURN count(s)` | **none** |
 
-**Verdict: `graph`.** ⚠️ Its **property families are another matter** — `capture_redactions`,
-`capture_ok`, `capture_extractor`, `machine_id`, `model`, `entity_links_*`, `value_nodes_*` are telemetry
-write-stamps with **no graph-capability reader**: some are named in Cypher predicates and projections
-(`session_schema.py:892` `WHERE s.capture_ok = true`, `:860` and `sdk.py:17082` projecting
-`s.capture_ok`/`s.capture_extractor`), all `none`-capability, and the rest read back through whole-node
-reads (§6.2). ⚠️ An earlier draft called them "no Cypher reader of their own", which is false as written —
-see §6.1 for the correction. That is a **property-level** question and is listed in §6, not silently folded
-into this row verdict.
+**Verdict: `graph`.** ⚠️ Its **property families are another matter, and the family SPLITS.**
+`capture_ok`, `capture_extractor`, `entity_links_created` and `entity_links_attempted` are **`graph`**
+(verdict row 7) and may not move: the retrofit audit (`session_schema.py`, row above) returns them from
+queries whose ANSWERS need adjacency — `stored_turns` comes from a `CONTAINS` walk, `live_edges` from two
+`aboutObject` walks — so a `public.session` row cannot reproduce either, however plain the projection looks.
+⚠️ An earlier draft said these properties had "no Cypher reader of their own", and its §2.4 table omitted
+`session_schema.py` entirely, which is why the falsifying readers went unseen; §6.1 records the correction.
+The **remainder** (`capture_redactions`, `machine_id`, `model`, `client_captured_at*`, `value_nodes_*`,
+`draft_count`, `commit_count`) has no Cypher reader at all and reads back only through whole-node reads —
+that is `record_only` (row 7b), a **property-level** question listed in §6, not silently folded into this
+row verdict.
 
 ### 2.5 `:Object` and `:Subject`
 
@@ -280,13 +287,14 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 
 | # | shape | readers (summary) | needs graph? | verdict | one-line reason |
 |---|---|---|---|---|---|
-| 1 | `:Point` core (`id`, content, `pointKind`, `status`) | §2.1, 12 readers | **yes** — EP walk, `IMPL`/`NAND`/`TAGGED`/`extractedFrom` adjacency, FTS, HNSW | **graph** | the belief walk *is* the product; six capabilities read it |
+| 1 | `:Point` core (`id`, content, `pointKind`, `status`) | §2.1, 14 readers | **yes** — EP walk, `IMPL`/`NAND`/`TAGGED`/`extractedFrom` adjacency, FTS, HNSW | **graph** | the belief walk *is* the product; six capabilities read it |
 | 2 | `:Point.ep_*`, `baseline_set`, `confidence` | `propagation.py:81,86`; `sdk.py:38073` | **yes** — EP state | **graph** | there is no EP in SQL without building one |
 | 3 | `:Point.embedding` | vector leg (HNSW) | **yes** — vector index | **graph** | the index lives in the engine (§12.1) |
 | 4 | `:Source` identity + `_searchText` | §2.2 | **yes** — `references`/`extractedFrom`, FTS | **graph** | §9.4 ① makes the link load-bearing |
 | 5 | `:Event` core | §2.3 | **yes** — `aboutObject`/`aboutSubject` | **graph** | lifecycle edges are how status folds |
 | 6 | `:Session` core (`id`, `harness`, counters) | §2.4 | **yes** — `CONTAINS` | **graph** | the session→turn/claim walk is the read path |
-| 7 | `:Session` capture telemetry family | whole-node reads + named property predicates (`session_schema.py:860`, `:892`; `sdk.py:17082`) | **no** | **`record_only`** (property-level; §6.2) | a write stamp, not an edge — but see the blocker |
+| 7 | `:Session` retrofit-audit properties (`capture_ok`, `capture_extractor`, `entity_links_created`, `entity_links_attempted`) | `session_schema.py:855-862`, `:892`, `:906-917`; `sdk.py:17082` | **yes** — returned from queries whose answers need `CONTAINS` / `aboutObject` adjacency | **graph** | the audit's shortfall count and its entity-link under-count ARE adjacency queries; no `public.session` row answers either |
+| 7b | `:Session` telemetry, the remainder (`capture_redactions`, `machine_id`, `model`, `client_captured_at*`, `value_nodes_*`, `draft_count`, `commit_count`) | whole-node reads only | **no** | **`record_only`** (property-level; §6.1) | a write stamp, not an edge — but see the blocker |
 | 8 | `:Object` / `:Subject` core | §2.5 | **yes** — `aboutObject` adjacency (`assembly.py:2629`) and the `-[r]->` walk (`sdk.py:34355`) | **graph** | an Event reaches its Object by EDGE; ⚠️ `supersededBy` is a **string matched by equality** (`audit.py:810`), not a walk — SQL-shaped, and an earlier draft wrongly cited it as the reason |
 | 9 | `story_arc` (on **any** label) | **none** — zero Cypher readers | **no** | **`record_only`** ⛔ **move gated on a deliberate pin decision** (§5.1) | its one reader is `public.session_narrative`; the mechanism CAN deny it, two policy pins currently refuse the entry |
 | 10 | `:GraphEvent` | §2.6 | **no** | **`record_only`** ⛔ blocked | ordered scan + aggregates; no record table (§5.2) |
@@ -447,26 +455,42 @@ instead of another audit.
 
 No guessed verdicts. Each of these is a shape the census **cannot** settle from the code alone.
 
-### 6.1 `:Session` capture telemetry family — verdict `record_only`, move blocked
+### 6.1 `:Session` capture telemetry — four properties ARE graph-read, the remainder is `record_only`
 
 `capture_redactions`, `capture_ok`, `capture_extractor`, `machine_id`, `model`,
 `client_captured_at*`, `entity_links_attempted/created`, `value_nodes_created/held`, `draft_count`,
 `commit_count`.
 
-- **Why it is arguable:** they are not **unread** — some are read by name in Cypher, and the rest come
-  back through whole-node reads (§6.2). ⚠️ An earlier draft said "no Cypher reader names any of
-  them", which is **false**: `session_schema.py:892` is `MATCH (s:Session) WHERE s.capture_ok = true RETURN
-  count(s)`, `session_schema.py:860` projects `s.capture_ok, s.capture_extractor, s.harness, s.capture_lane`,
-  and `sdk.py:17082` projects `s.capture_ok`/`s.capture_extractor` into the `session_existed` retry decision.
-  All three are **`none`** — property predicates and projections, no walk — so the `record_only` verdict
-  stands; the *reason* is "read, but by nothing needing the graph", not "unread". Moving them is a
-  **property-level** placement either way, which the row-level tier cannot express.
+⛔ **Correction — an earlier draft of this section said *no Cypher reader names any of them*, which is
+false.** `session_schema.py` names four, inside `audit_session_retrofit` (`tools/session_retrofit_audit.py`):
+`capture_ok`/`capture_extractor` are returned by the short-turns query at `:855-862`, whose row count comes
+from `OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point)`; and `entity_links_created`/`entity_links_attempted` are
+compared against `live_edges` at `:906-917`, computed from two `aboutObject` walks. `:892`
+(`WHERE s.capture_ok = true RETURN count(s)`) and `sdk.py:17082` (the `session_existed` retry decision) are
+`none` on their own — but the rule is *at least one reader*, and two of these readers need adjacency, so the
+four are **`graph`** (verdict row 7) and **must not move**. The docstring of `orphan_use_case`'s neighbour is
+not the point; the QUERY STRUCTURE is, and a projection can sit inside an adjacency query without looking
+like one. Note the earlier draft's own remedy — *"if nothing reads them but a test, they are dead weight …
+drop, not tier"* — would have deleted data two shipped audit classes depend on.
+
+What remains arguable is the **remainder** of the family — `capture_redactions`, `machine_id`, `model`,
+`client_captured_at*`, `value_nodes_*`, `draft_count`, `commit_count`:
+
+- **Why it is arguable:** no Cypher reader names those — but they **are** returned by whole-node reads, so
+  they are not unread, only un-*needed*. Moving them is a **property-level** placement, which the
+  row-level tier cannot express.
 - **The question that settles it:** *is there a whole-node read that returns them to a caller who would
   break without them?* If `get_session_detail`/`list_sessions` project them to an API consumer, the
   placement decision is a **contract change**, not a storage move, and belongs to a product ruling; if
   nothing reads them but a test, they are dead weight on both stores and should be dropped, not tiered.
 
-### 6.2 `:Point` listing-only families (`pointKind` filters, `domain_validators` reads)
+### 6.2 `:Point` listing-only families (`pointKind` filters)
+
+⛔ **Two rules in the same file are NOT in this family.** `domain_validators.py:153-158`
+(`orphan_use_case`, a 2-hop `hasPart` walk) and `:241-243` (`orphaned_draft`, `AND NOT (n)--()`) are
+classified **adjacency** in §2.1 and are **`graph`** — the first correction of §2.1 filed the whole
+`:106`–`:244` range as `none` and the second still missed `:153-158`. Only the pure kind/property-filter
+rules are arguable here.
 
 - **Why it is arguable:** `MATCH (p:Point) WHERE p.pointKind IN …` is Cypher, and it is **SQL-shaped** —
   it does not need a graph. Under the capability rule the shape is `record_only`; under "a Cypher reader

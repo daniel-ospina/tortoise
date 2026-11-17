@@ -101,7 +101,14 @@ def _nodes_by_label(g) -> dict:
 
 
 def _property_bytes(g) -> dict:
-    """per label → {prop: stored payload bytes}, from the graph's own ``size()``.
+    """per label → {prop: RENDERED payload bytes}, from ``len(str(value).encode())``.
+
+    ⚠️ This is a RENDERED size, NOT the engine's stored size, and ``size()`` cannot
+    supply the stored figure (it refuses a scalar and returns an ELEMENT COUNT for a
+    list). Exact for a string; an order-of-magnitude OVER-report for a numeric array
+    (a 384-dim float vector renders as ~7,187 characters; its stored ``float32``
+    payload is 1,536 B) — derive an array's footprint from its width, never from this
+    column. The output field is named ``repr_bytes_by_label`` for the same reason.
 
     The property name is taken from the node's own key set (``keys(n)``) rather
     than from a declaration, because the question is what the WRITER put there —
