@@ -8,7 +8,7 @@ is non-destructive: the retired carrier keeps its `name` and gains `resolved_fro
 and it writes **no** `status` (`entity_resolver.apply_entity_merge`'s candidate
 props). `:Object` is
 full-text indexed on `name` alone and the FTS leg filters `status` only
-(`search_engine.py:2973-2997`) — so a name search returns the survivor AND the
+(`search_engine.py:2998-3022`) — so a name search returns the survivor AND the
 carrier, and the capture path's candidate set never consulted the resolver. A
 mention could therefore bind to the node the merge already retired. **The first
 half of this file is the guard that closes it**, tested the way it fails: on a

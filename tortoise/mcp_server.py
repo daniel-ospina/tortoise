@@ -10050,20 +10050,76 @@ def tortoise_session_capture(conversation: list[dict],
             # ``_stored_session_harness`` fails open to None, which restores
             # the fresh-session rule (the claim only ever introduces a harness
             # the server has not stamped).
+            #
+            # ⛔ THE RAW `detail`, NEVER `str(detail)` (#12992 review P1). The
+            # helper stringifies a TYPED detail to its message
+            # (`hosted_api._record_capture_last_error`); pre-stringifying here
+            # defeated that branch, so a PLAIN dict detail — the 403 scope /
+            # graph-scoped-team refusals, the 503's `{error_code, message}`
+            # `_capture_control_plane_unavailable` — was written to the
+            # dashboard sub-line as a PYTHON REPR while the SAME refusal through
+            # REST (which passes `e.detail` untouched) painted the sentence. One
+            # detail, two renderings, and the org-visible one was the
+            # unreadable one.
+            #
+            # ⚠️ THE 402 IS THE COUNTER-EXAMPLE HERE, not an instance (#12992
+            # review P2): `quota_refusal_payload` returns a
+            # `quota.RefusalPayload` — a `dict` SUBCLASS whose own `__str__`
+            # returns `message` (#4614; `tortoise/quota.py:420-436` is the class
+            # and its `__str__`) — so `str(detail)` already painted that one. The repr this
+            # line fixes is the plain-dict arms above.
             with contextlib.suppress(Exception):
                 _record_capture_last_error(
                     org_id,
                     _observed_capture_harness(
                         org, harness,
                         asyncio.run(_stored_session_harness(org, session_id))),
-                    str(detail))
+                    detail)
         # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
         # — the points-estimate gate, the cohort cost cap, or the
         # ``_check_org_limit(org, "sessions")`` limit — so carry the shared
         # ERR_QUOTA code rather than making the caller interpret a bare status.
         # One mapping site covers every 402 this impl can raise, so REST and
         # MCP cannot drift on the class of a refusal.
-        out = _SafeError({"error": str(detail), "status": status})
+        #
+        # ⛔ A TYPED `detail` IS RENDERED AS ITS MESSAGE (#12992 review P2), WITH
+        # THE WHOLE-VALUE `str()` KEPT AS A FALLBACK — and that fallback IS a repr
+        # for a dict with no truthy `message`, so this is a CONVENTION the refusal
+        # shapes happen to satisfy, not an invariant this line enforces. Say it that
+        # way rather than claiming more: the capture door's 429s became dicts — the
+        # capacity refusal in this PR, and ``ingest_rate_limited`` before it — so
+        # `str(detail)` reached this tool surface as
+        # `"{'code': 'capture_capacity_saturated', 'message': '…', …}"`: a repr,
+        # not JSON, with `'` quoting that an agent's parser cannot read, and the
+        # plain sentence the refusal was worded as lost inside it. Every `detail=`
+        # the capture door can build at this head carries a `message` (the capacity
+        # 429, `_ingest_rate_limited`, `quota_refusal_payload`, the 503's
+        # `{error_code, message}` and the 403/404 shapes), so no in-repo refusal
+        # reaches the fallback — a NEW dict detail without one would.
+        # This is the SAME rule `hosted_api._record_capture_last_error` already
+        # records for the dashboard sub-line ("a Python repr would leak structure.
+        # Stringify to the message") — one file, one convention, so the two
+        # consumers of one detail cannot disagree about it.
+        error_text = (str(detail.get("message") or detail)
+                      if isinstance(detail, dict) else str(detail))
+        out = _SafeError({"error": error_text, "status": status})
+        # ⛔ A 429 IS DELIBERATELY NOT TYPED HERE, and the reason is the vocabulary,
+        # not an oversight (#12992 review P2). `code` on this surface is the NUMERIC
+        # JSON-RPC vocabulary (`ERR_QUOTA = -32006` above), so there is no field on
+        # this envelope that can carry the door's STRING code
+        # (`capture_capacity_saturated`) without one of the two meanings silently
+        # changing — and a `retry_after` beside a numeric `code` would be a second
+        # spellings of one contract. The capacity refusal therefore reaches this
+        # surface as `status: 429` plus the sentence; REST (`detail.code` /
+        # `detail.retry_after` / the `Retry-After` header) is the typed surface, and
+        # `docs/infra-runbook.md` §4.1.1b publishes it there. ⚠️ A `retry_after` key
+        # on this result dict — a response FIELD — is NOT the approval-gated MCP/SDK
+        # surface change AGENTS.md names: that rule covers adding, removing or
+        # renaming a TOOL (`TOOL_REGISTRY`) or a public SDK method, and
+        # `tools/surface_manifest.py` classifies `response_fields` as "outside the
+        # gated surface". So a typed arm here is a CONTRACT change that needs its own
+        # review, not an owner-approval gate; it is deferred for SCOPE (#12992 types
+        # the REST body, the counter and `/health`), not because a gate forbids it.
         if status == 402:
             out["code"] = ERR_QUOTA
         return out
@@ -11045,7 +11101,7 @@ def _preview_family_supersede(sdk, label: str, old_id: str, new_id: str) -> dict
 
     ⛔ RESIDUAL (#12914 round-4 P1, filed not fixed): the family WRITE continues
     into ``update_knowledge`` -> ``_update_entity``, whose label-surface guards
-    (``refuse_terminal_event_state`` on an ``:Event`` row, the ``:Source``
+    (``refuse_event_lifecycle_state`` on an ``:Event`` row, the ``:Source``
     closed-surface refusal) are NOT part of ``_supersede_entity``'s own checks. On
     the HYBRID shapes ``:Object:Event`` / ``:Subject:Event`` / ``:Object:Source`` /
     ``:Subject:Source`` this preview therefore answers `would supersede` and the
