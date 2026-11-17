@@ -97,19 +97,22 @@ uv run python tools/capstone_state_value.py judge \
     --out /tmp/capstone-rerender          # NOT the bundle directory — see below
 ```
 
-⚠️ **Point `--out` at a scratch directory, not at this bundle.** `judge` rebuilds the header from
-the packet's header, which was frozen *before* the reader ran — so writing to this directory would
-replace `run-local.json` / `scoreboard-local.md` with a lower-fidelity copy (`mode: file`, 62.8 s
-instead of the real `mode: fresh` · 150.2 s · 213.0 s) and silently make the `header` claims below
-false. It exits 0 while doing it. The same command into `/tmp` re-renders the identical six rows,
-which is the useful check.
+⚠️ **The bundle directory is REFUSED, not merely discouraged.** `judge` rebuilds the header from
+the packet's header, which was frozen *before* the reader ran, so writing here would replace
+`run-local.json` / `scoreboard-local.md` with a lower-fidelity copy (`mode: file`, 62.8 s instead of
+the real `mode: fresh` · 150.2 s · 213.0 s) and silently make the `header` claims below false — while
+exiting 0. It now returns 2 with that reason when the resolved `--out` (or the default, which is the
+packet's own directory) is this bundle. The same command into `/tmp` re-renders the identical six
+rows, which is the useful check.
 
-`judge` refuses a `--packet` that is not a judge packet (exit 2, nothing written). Without that
-guard a mistyped path — a `run-local.json`, a `verdicts-baseline.json` — rendered a **0-row**
-scoreboard that kept the correct identity header and the ingestion table while scoring nothing, and
-overwrote `run-{target}.json` / `scoreboard-{target}.md` in the packet's own directory. An empty
-scoreboard is not a result: `exit_code` treats an empty tally as a failure too, so that case cannot
-report success even if the shape check were bypassed.
+`judge` also refuses a packet whose questions are not the frozen scenario's (a truncated packet
+rendered a complete-looking board over a smaller denominator), and one that is not a judge packet at
+all (exit 2, nothing written). Without that second guard a mistyped path — a `run-local.json`, a
+`verdicts-baseline.json` — rendered a **0-row** scoreboard that kept the correct identity header and
+the ingestion table while scoring nothing, and overwrote `run-{target}.json` /
+`scoreboard-{target}.md` in the packet's own directory. An empty scoreboard is not a result:
+`exit_code` treats an empty tally as a failure too, so that case cannot report success even if the
+shape check were bypassed.
 
 `--judge fresh` spawns the fresh reader itself as `pi -p --no-session --no-tools`, in an EMPTY
 sandbox directory rather than the repo root, and writes its verdicts. Both halves of that are
