@@ -1616,41 +1616,55 @@ def test_search_projects_through_the_served_row_helper():
     # A stub SDK is enough: `search()` touches only `self.sdk` and `self.search_timeout_ms`.
     prose = "password rotation policy was superseded"
 
+    # ALL SEVEN keys, not just `what`: a duplicate that mis-reads `scores.rrf` or drops
+    # `supersedes` is invisible if the fixture leaves those fields empty (#13303 cycle 13).
+    row = {
+        "id": "x",
+        "content": prose,
+        "point_kind": "fact",
+        "status": "live",
+        "scores": {"rrf": 0.5},
+        "match_source": "fts",
+        "supersedes": [{"id": "y"}],
+    }
+
     class _SDK:
         def tortoise_fts_query(self, **_kwargs):
-            return [{"id": "x", "content": prose, "point_kind": "fact", "status": "live"}]
+            return [row]
 
     t = object.__new__(cap.LocalTarget)
     t._sdk = _SDK()
     t.search_timeout_ms = 0
-    rows = [{"id": "x", "content": prose, "point_kind": "fact", "status": "live"}]
     served = t.search("q").rows
-    assert served == [cap._served_row(r) for r in rows], (
+    assert served == [cap._served_row(row)], (
         "search() projected its rows somewhere other than `_served_row`"
     )
     assert served[0]["what"] == prose, (
         "the product's words were rewritten on the way into the packet"
     )
 
-    # …and no inline dict-literal projection may creep back in. AST: a reformat or a
-    # `map(_served_row, rows)` shape is fine, a dict literal is not.
+    # …and every binding of `served` must go through `_served_row`. A POSITIVE check, not a
+    # scan for dict literals: three shapes evaded the negative form (`served, _m = [...]`,
+    # `served += [...]`, and a duplicate moved into a helper), and a reformat such as
+    # `list(map(_served_row, rows))` must stay green.
     import ast
     import textwrap
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(cap.LocalTarget.search)))
-    inline = []
+    bindings = []
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
             continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        if not any(isinstance(t, ast.Name) and t.id == "served" for t in targets):
-            continue
-        elt = getattr(node.value, "elt", None)
-        if isinstance(elt, ast.Dict):
-            inline.append(ast.dump(elt)[:80])
-    assert not inline, (
-        "search() builds a dict-literal inline projection again — a duplicate that can drift "
-        f"from `_served_row` and that the helper's own pin cannot see: {inline}"
+        if any("served" in ast.dump(t) for t in targets):
+            bindings.append(node)
+    assert bindings, "search() no longer binds `served` — this pin has gone stale"
+    missing = [ast.unparse(n)[:90] for n in bindings if "_served_row" not in ast.dump(n.value)]
+    assert not missing, (
+        f"`served` is projected without `_served_row` (a duplicate that can drift): {missing}"
     )
 
 
@@ -1708,6 +1722,9 @@ def test_every_post_ingestion_refusal_drops_the_graph(monkeypatch, tmp_path):
     assert dropped == [True], (
         "a run refused at the --verdicts-out gate left its throwaway graph behind"
     )
-    assert not (scratch / "run-local.json").exists(), (
-        "the refusal happened AFTER the board was written"
+    # kind-independent: `run-local.json` is `f"run-{target.kind}.json"`, so keying the
+    # assert to `kind` let a two-line edit restore this pin's vacuity (#13303 cycle 13).
+    assert not list(scratch.iterdir()), (
+        "the refusal happened AFTER artifacts were written: "
+        f"{sorted(p.name for p in scratch.iterdir())}"
     )
