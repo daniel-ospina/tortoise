@@ -46,6 +46,9 @@ def _install_fake_sdk(monkeypatch, resolved_name: str) -> dict:
             return SimpleNamespace(name=resolved_name)
 
         def _sweep_invite_ghost_memberships(self, *, dry_run=False):
+            # #12901 wave 2 PRIVATISED the public `sweep_invite_ghost_memberships`
+            # (sdk_retired.py); the script under test calls `_sweep_…`, so modelling
+            # the retired public name made this fake blind to the real caller.
             calls["sweep_dry_run"] = dry_run
             return {"found": 0, "ghosts": 0, "deleted": 0}
 

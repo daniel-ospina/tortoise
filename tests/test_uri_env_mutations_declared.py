@@ -474,19 +474,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # embedded-green), and neither the probe's `finally` nor the fixture's restore
     # lets the lane leak into a later docker-lane test.
     "test_12184_ranker_entity_signals.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
-    # #13158: `test_13034_currency_rule_reads_position.py` landed on `main` via #13096
-    # (`55ec2c71`) with NEITHER half of this pair — no `ci-surfaces` row (that half is
-    # #13144, which this branch already carries) and no declaration. Its shape is the
-    # same as the three entries above it: a module-level live-FalkorDB probe (set to
-    # `DB_URI`, restore `_OLD_URI` in the `finally`, pop when it was unset: 3 sites)
-    # plus an autouse per-test fixture that re-points the lane at THIS module's own
-    # graph and restores it (3 more). DELIBERATE_URI is the point: the claim under
-    # test is the currency RULE reading a point's position out of a REAL FalkorDB,
-    # which no pure-function test can observe. An unreachable lane degrades to
-    # `FALKORDB_AVAILABLE = False` (the live arms `skipif`, so they never run
-    # embedded-green), and neither the probe's `finally` nor the fixture's restore
-    # lets the lane leak into a later docker-lane test.
-    "test_13034_currency_rule_reads_position.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
+    # ⛔ MERGE NOTE (#13158 vs #13176): `main`'s 5fae3f4f6f landed its OWN
+    # unanchored declaration for this file here, and this branch had already
+    # landed a narrowed one at the tail of this dict under the same KEY — an
+    # auto-merge that keeps BOTH is a duplicate dict key, and the last one wins
+    # SILENTLY, so the guard would have graded one row while the file showed two.
+    # The narrowed row is kept (it anchors every arm at both ends, so it cannot
+    # silence a commented-out mutation) and this copy is dropped rather than
+    # left to shadow it. One file, one row.
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
@@ -1266,6 +1261,115 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # value, and neither that test nor any arm of this module dials it.
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@localhost:6379/g"',
     ],
+    # #13158: `test_13034_currency_rule_reads_position.py` landed with SIX raw
+    # URI mutations — at module scope and in an autouse fixture — and no entry
+    # here, so this gate reds on `main` (run 44025094904, `test (j)`
+    # 133859918399: the only failure in 4007 tests). It is the same "module
+    # landed without its entry" shape as #9664 and #12275 above, on the very
+    # file #13144 register(s) in ci-surfaces (the row #13146 proposed, and
+    # which this line first named, was closed in #13144's favour) — a manifest
+    # row cannot fix it, because this guard scans the FILES, not the manifest.
+    #
+    # All six are DELIBERATE_URI, and none is this guard's vacuity vector (a
+    # docker-half test silently constructing embedded): the module's SUBJECT is
+    # a LIVE Docker/FalkorDB graph, so the docker DSN is pinned at both entry
+    # points and restored afterwards. Nothing here claims a docker-half green
+    # on a URI it did not set.
+    #   :66  the module-level `FALKORDB_AVAILABLE` probe. The pin IS the point:
+    #        `DB_URI` is `_live_utils.docker_uri(...)`, the probe constructs a
+    #        real SDK and runs `RETURN 1`, and the `finally` restores. Without
+    #        the pin the probe would ride whatever ambient URI the box has, so
+    #        the skipif would be decided by the environment rather than by a
+    #        reachable Docker.
+    #   :75/:77  the probe's restore pair — assign the saved value back, or pop
+    #        it when the prior value was unset. A restore, not a second
+    #        mutation; the pair is why the module-scope write cannot leak into
+    #        a later test in the same process.
+    #   :86  the `autouse` `_isolated_db_uri` fixture — seeds the same docker
+    #        DSN per test so no case inherits an ambient one, and the assertion
+    #        target is the graph `DB_URI` names.
+    #   :89/:91  the fixture's restore pair (same save/restore contract, run at
+    #        teardown).
+    #
+    # WHERE THE ARMS ARE NARROW, AND WHERE THEY ARE NOT — the two SET arms are
+    # bound by NAME: `DB_URI` for the pins and the saved `_OLD_URI`/`_old` for
+    # the restores. Each arm is anchored at BOTH ends with `^`…`$` (valid
+    # because declarations are matched per STRIPPED line — see `_is_declared`;
+    # ⛔ anchoring at both ends is NEW for this table: of its OTHER 189
+    # patterns, only 11 end in `$` and 178 carry no `$` at all, and none of
+    # those 11 also leads with `^` — so the unanchored prefix match is the
+    # convention, `^`-leading is new too, and no other row anchors at both ends.
+    # The leading `^` is load-bearing, not cosmetic: without it an
+    # unanchored arm also matches INSIDE a commented-out line, because the
+    # census regex has no comment awareness).
+    #
+    # ⛔ The honest LIMIT, stated rather than claimed away: the POP arm is bound
+    # by NOTHING, and cannot be. `os.environ.pop("TORTOISE_DB_URI", None)` is
+    # byte-identical whether it RESTORES a saved value or UNSETS the URI to
+    # force the embedded lane — the #942 vacuity vector this guard exists to
+    # catch — and that force-embedded spelling is live elsewhere in `tests/`
+    # (`test_cli_context.py`'s `db_env` fixture). So a FUTURE
+    # `pop("TORTOISE_DB_URI", None)` in THIS file is SILENCED by this row and
+    # must be triaged BY HAND. The two SET arms are a real narrowing, not a
+    # bound over the pop.
+    #
+    # Measured per ARM (appending each candidate to the REAL module source and
+    # running the census over it) across the ELEVEN spellings the census can
+    # see. TEN are REJECTED — each reds on a new site: a different literal
+    # (`= "docker://…"`), `= _other`, `= DB_URI + ""`, `= _OLD_URI or ""`, a
+    # bare `pop("TORTOISE_DB_URI")`, `pop(…, "")`, `monkeypatch.setenv`,
+    # `monkeypatch.delenv`, `del`, and the same assignment COMMENTED OUT. The
+    # eleventh, `pop(…, None)`, is AUTHORIZED — the LIMIT above, and the one
+    # spelling this row leaks.
+    # That scan is deliberately NOT cited for
+    # `os.environ.setdefault("TORTOISE_DB_URI", …)`: it CANNOT distinguish
+    # "authorized by this row" from "never censused" (both print as no
+    # undeclared site), and the true answer is the second — `_MUTATION_RE` has
+    # no `setdefault` arm, so reading the REGEX directly (not the scan) shows
+    # the census never sees such a site in ANY file. That blind spot predates
+    # this row and is unaffected by it; it is recorded here so a later reader
+    # neither mistakes it for this declaration's doing nor reads this row as
+    # covering it.
+    #
+    # ⛔ COLLISION, to be handled at merge — and the carrier is NOT the one
+    # first recorded here. Two rows for one key is a duplicate dict literal:
+    # `ruff` reds it (`F601 … Found 1 error`) and `test_dod_5090_probe.py`'s
+    # duplicate-key scan reds it in the pytest shard, while at RUNTIME the
+    # later key silently shadows the earlier anyway (#12631 is that class
+    # landing for real on this very file).
+    #   The row this entry originally named, #13146, is **CLOSED and was never
+    #   merged** — superseded by #13144 (`3d437429e98d`), which is what actually
+    #   registered `test_13034` in `ci-surfaces`. Measured at the entry's base:
+    #   `git show origin/main:tests/test_uri_env_mutations_declared.py` carries
+    #   NO row for this key, so #13146's broad arm can never land and cannot be
+    #   replaced by these three. Its measurement is kept only as history: ONE
+    #   unanchored arm (`os\.environ(?:\[…\]\s*=|\.pop\(…)`) authorized 8 of
+    #   the eleven census-visible spellings — not all: `monkeypatch.setenv`/
+    #   `monkeypatch.delenv`/`del` still red there, the `del` because that
+    #   alternative is nested inside `os\.environ(?:…` and so cannot match
+    #   `del os.environ[…`.
+    #   The LIVE duplicate carrier is **#13164** (open, `34f80298a2bf`), which
+    #   must land FIRST — it is the only carrier that clears `test (h)`'s
+    #   `_hydrate_evidence` and `test (i)`'s two raw `FalkorDB(...)` clients,
+    #   neither of which any row here can reach. It carries its OWN row for
+    #   this key at its `:482`, two loose arms
+    #   (`os\.environ\["TORTOISE_DB_URI"]\s*=` and
+    #   `os\.environ\.pop\(\s*"TORTOISE_DB_URI"`). Measured, not inferred,
+    #   at `d8790fd364f8` (the figures shift with any edit here, so they are
+    #   pinned to the head they were taken on):
+    #   `git merge-tree --write-tree --merge-base=3d437429e98d 34f80298a2bf
+    #   d8790fd364f8` → tree `4453be273594`, in which the key occurs TWICE
+    #   inside the one dict literal — `:482`, #13164's loose 2-arm row, and
+    #   `:1346`, this row's anchored 3 arms.
+    #   So the order is forced and the consequence is one-way: if this PR lands
+    #   after #13164 it MUST DROP this row (never add a third), which is why
+    #   the narrowing should instead be moved BEFORE that landing — #13164's
+    #   `:482` row takes these three `^`…`$` arms and this row is dropped, so
+    #   the tightening survives the merge instead of being lost with it.
+    "test_13034_currency_rule_reads_position.py": [
+        r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
+        r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
+        r'^os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
