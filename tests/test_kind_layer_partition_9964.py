@@ -614,11 +614,15 @@ def test_an_unhashable_status_is_refused_not_a_crash_in_the_routing_guard(sdk):
     ).result_set == [[0]], "a refused write must land nothing"
 
     # ── 2. #12869: the unhashable shape is a REFUSAL, never a crash ─────
-    # ⛔ RE-DERIVED at #12910's merge of #11824 S0: the shared lifecycle door
-    # refuses the shape as its FIRST arm, so the message is that door's
-    # ("was refused") — `main`'s arm immediately above states the same contract
-    # for the same fixture, and both now name the same authority.
-    with pytest.raises(ValueError, match=r"was refused"):
+    # ⛔ ONE ARM, NOT TWO (measured at the `origin/main` merge of `2f1d5a5ca0`, the
+    # commit that landed #11824 S0): the second arm used to assert #12869's own
+    # wording (``refused a non-string status``) on the SAME call, and S0's door now
+    # answers first — shape before vocabulary, the ordering that came FROM
+    # #12869/#12910 — so that message is unreachable at this door and the arm went
+    # red on a promise no caller can see. The property #12869 owns here is kept and
+    # asserted instead: nothing lands, and no row is left behind for the guard to
+    # trip over later.
+    with pytest.raises(ValueError):
         sdk.create_object("Q3b", objectKind="core:team", status=["active"])
     assert sdk._get_proj().g.query(
         "MATCH (n:Object {name:'Q3b'}) RETURN count(n)").result_set[0][0] == 0, (

@@ -71,7 +71,7 @@ from .lifecycle_vocabulary import (
     LIFECYCLE_STATUS_SYNONYMS as _LIFECYCLE_STATUS_SYNONYMS,
     LIFECYCLE_STATUS_VALUES as _LIFECYCLE_STATUS_VALUES,
     read_caller_status as _read_caller_status,
-    refusal_type_name, status_refusal_reason as _status_refusal_reason,
+    status_refusal_reason as _status_refusal_reason,
 )
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 # #12297: the fused-candidate rerank, imported at module scope because the read
@@ -6261,7 +6261,8 @@ def _is_lifecycle_word(value: object, vocabulary) -> bool:
 
 def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                                      goal_ending=None,
-                                     may_target_existing_node: bool = False) -> None:
+                                     may_target_existing_node: bool = False,
+                                     status_lands: bool | None = None) -> None:
     """Refuse a goal write that ends it on one field and runs it on the other.
 
     #13035. Operates on the STATE THE WRITE LEAVES — the value in ``props`` when
@@ -6349,6 +6350,14 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
     # and left unbound. Rebinding is behaviour-neutral for an honest `str`: a
     # plain subclass already stores its content today.
     _rebind_guarded_words(props, rendered)
+    if status_lands is False:
+        # The MERGE/ADOPT lane drops EVERY key rendering as `status`
+        # (`_persist_extra_props`' render-aware skip, #12869 round 3/4), so
+        # `status` cannot be part of a doubled-name ambiguity there: no word
+        # lands, and refusing would be a false block that also costs the
+        # already-stamped write. `goalState` is NOT dropped by that skip, so it
+        # keeps the unconditional treatment.
+        doubled = [name for name in doubled if name != "status"]
     if doubled:
         # ⛔ ONE WORDING WITH THE DOOR'S OWN CHECK (`update_entity`'s
         # `_status_write_is_ambiguous` refusal, #12786): a caller that trips this
@@ -8564,8 +8573,26 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
                     reject_claim_class: bool = False,
                     money_views: list[dict] | None = None,
                     value_shapes: frozenset[str] | None = None,
-                    goal_ending=None) -> dict:
+                    goal_ending=None,
+                    status_lands: bool | None = None) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
+
+    ``status_lands`` (#12869 merge reconciliation): does a `status` this call
+    declares actually REACH the node? ``False`` means the write MERGEs onto (or
+    ADOPTs) an existing node, where `_persist_extra_props`' skip drops every key
+    rendering as `status` — so nothing lands and the doubled-name ambiguity
+    below has no word to be ambiguous ABOUT. ``None`` (every door that does not
+    ask) keeps the refusal unconditional.
+
+    ⛔ WHY THIS IS A PARAMETER AND NOT A WEAKENING: the create door resolves
+    (and `_adopt_idless_holder` STAMPS an id onto an id-less live holder) BEFORE
+    this intake is reachable, so an unconditional refusal here is a refusal that
+    COSTS A WRITE — a live-without-durable row (#3590) produced by a call that
+    was supposed to write nothing (#9287/#10192, and the P2 `#12869` fix this
+    branch already carries). MEASURED at the merge head: `create_object` on an
+    existing holder with `{"status": None, KHash("status"): ["live"]}` raised
+    here with the id stamped and the journal at 0 lines. Where the status DOES
+    land (a fresh mint) the refusal is unchanged and still fires.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
     operator ``--upgrade-all`` path (projection maps ``source_path`` →
@@ -9187,7 +9214,8 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # `goalState`) while every other reader serves it as current (they read
     # `status`). See `_refuse_inconsistent_goal_ending`.
     _refuse_inconsistent_goal_ending(props, surface="_sanitize_props",
-                                     goal_ending=goal_ending)
+                                     goal_ending=goal_ending,
+                                     status_lands=status_lands)
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
     return props
@@ -13576,15 +13604,15 @@ def _refusal_type_name(value) -> str:
     #12914 review P3). Defensive for the same reason as ``_refusal_repr``
     below, and shared so the two cannot drift.
     """
-    # ⛔ ONE HOME (#12910's merge of #11824 S0): the shared lifecycle door needs
-    # the same reader for its own refusal, so the implementation lives there and
-    # this delegates. Two copies of a containment rule drift, and the drift is
-    # exactly the bug each copy was written to stop.
-    #
-    # It keeps BOTH axes: the NAME may raise (a metaclass property), and the
-    # READ surviving may ANSWER with a non-`str`, which an f-string renders with
-    # the caller's own `__format__` (measured: `RuntimeError: fmt-boom`).
-    return refusal_type_name(value)
+    try:
+        name = type(value).__name__
+    except Exception:  # noqa: BLE001, RUF100 — a hostile metaclass is the point
+        return "unreadable (its metaclass raises)"
+    # The READ surviving is not enough: the property may ANSWER with something
+    # that is not a `str`, and an f-string then renders it with the caller's own
+    # `__format__` (measured: `RuntimeError: fmt-boom`). Exact-`str` also keeps
+    # the value safe to hash and sort in a refusal that groups names.
+    return name if type(name) is str else "unreadable (its name is not a str)"
 
 
 def _refusal_repr(value) -> str:
@@ -32219,15 +32247,6 @@ class TortoiseSDK:
                 continue
             violations.append({
                 "section": "entities", "index": i,
-                # ⛔ `_refusal_repr`, NEVER the raw `!r` (#12910 review P2-1, and
-                # this is the regression its pin caught). The message is built
-                # into a violations LIST that `ingest` raises on, so a caller
-                # whose `__repr__` raises replaced that exception with its own
-                # — measured after #11824 S0 rewrote this arm: `_validate_bundle`
-                # raised `RuntimeError: repr-boom` for a `status=123` whose
-                # class defines a raising `__repr__`, instead of RETURNING the
-                # violation. The refusal's contract is the exception CLASS, so
-                # every operand is rendered through the contained helper.
                 "message": f"ingest: entities[{i}] declares status "
                            f"{_refusal_repr(own_status)} for a :{_item_label} — the writer "
                            f"validates against the declared lifecycle and "
@@ -50603,7 +50622,8 @@ class TortoiseSDK:
                        *, _skip_sanitize: bool = False,
                        is_episodic: bool | None = None,
                        _return_apply_result: bool = False,
-                       _journal_extra: dict | None = None) -> dict | tuple[dict, object]:
+                       _journal_extra: dict | None = None,
+                       _status_lands: bool | None = None) -> dict | tuple[dict, object]:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
@@ -50670,7 +50690,8 @@ class TortoiseSDK:
         # into the event dict AFTER sanitize.
         if not _skip_sanitize:
             props = _sanitize_props(props, reject_id=True,
-                                    reject_belief_props=True)
+                                    reject_belief_props=True,
+                                    status_lands=_status_lands)
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         # #10192: the CREATE door is the SECOND way to write a lifecycle CARRIER
@@ -54573,19 +54594,36 @@ class TortoiseSDK:
                 _obj_target, _obj_created = resolve_or_mint(
                     self._get_proj().g, "Object", name,
                     explicit_id=_server_id)
+                # ⛔ THE SAME QUESTION THE `lands` THUNK ASKS, asked ONCE so the
+                # two guards cannot disagree (#12869): does this call's declared
+                # `status` REACH a node, or is it dropped by the merge lane? The
+                # `_sanitize_props` ambiguity refusal must know it too — it runs
+                # inside `_create_entity`, i.e. AFTER `resolve_or_mint` has
+                # already stamped an id on the ADOPT path, so refusing there on a
+                # MERGE write would cost that write (a live-without-durable row,
+                # #3590). Asked only when the call NAMES a status, so a
+                # status-less create issues no extra read — the same economy the
+                # `declared`-first rule above states.
+                def _np_lands() -> bool:
+                    """Does a declared `status` REACH a node, or is it dropped?"""
+                    return not self._get_proj().g.query(
+                        "MATCH (n:Object {id:$id}) RETURN count(n)",
+                        params={"id": _obj_target},
+                    ).result_set[0][0]
+                _status_lands = (None
+                                 if not lifecycle_props_by_rendering(props, {"status"})
+                                 else _np_lands())
                 if _obj_created:
                     _refuse_non_string_object_status(
                         props, door="create_entity(type='object')",
                         target=name,
-                        lands=lambda: not self._get_proj().g.query(
-                            "MATCH (n:Object {id:$id}) RETURN count(n)",
-                            params={"id": _obj_target},
-                        ).result_set[0][0])
+                        lands=_np_lands)
                 node = self._create_entity(
                     "Object", _obj_target,
                     _entity_door_props(
                         "objectKind", name, _with_folded_entity_name(name, props)),
-                    "ObjectRegistered", is_episodic=is_episodic)
+                    "ObjectRegistered", is_episodic=is_episodic,
+                    _status_lands=_status_lands)
         elif t == "event":
             # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
             # stripped HERE, at the Event door, because ``event`` is the
