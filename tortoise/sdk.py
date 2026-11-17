@@ -51523,6 +51523,31 @@ class TortoiseSDK:
                         f"supersede this one with "
                         f"`supersede_point({_refusal_repr(_named_id)}, <new_id>)`."
                     )
+                # ⛔ AN ECHO WRITES THE WORD THE ROW ALREADY HOLDS (#11824 S0
+                # review, P2). The door answers "which word may be MINTED" and a
+                # declared synonym is minted as `deprecated` — but an entailed
+                # call mints nothing (#3305: an unchanged status cannot
+                # resurrect anything, and the terminal guard above is DISARMED
+                # on the strength of that). Writing the canonical spelling back
+                # over a stored `retracted`/`archived` would be a different
+                # write wearing an echo's clothes: it rewrites a legacy row
+                # nobody asked to change, and it makes a stale client's second
+                # echo inconsistent with its first. So when EVERY bound row
+                # holds the SAME word and that word MEANS the caller's, the word
+                # written is the one already stored — the call lands (it is
+                # journaled, it is not a refusal) and the row is untouched.
+                #
+                # A fan-out holding TWO different spellings of one meaning keeps
+                # the canonical word: there is no single stored word to echo.
+                _bound_words = {
+                    str.__str__(_stored_word) for _stored_word in
+                    (_pt_statuses or ())
+                    if issubclass(type(_stored_word), str)}
+                if len(_bound_words) == 1:
+                    (_echo_word,) = _bound_words
+                    if str.__eq__(
+                            _lifecycle_meaning(_echo_word), _status) is True:
+                        _status = _echo_word
                 # Write FIRST, journal SECOND, gated on the write having
                 # MATCHED (a missed/no-op write must never leave a phantom
                 # record — the count probe above and this SET are two
