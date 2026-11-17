@@ -15370,9 +15370,15 @@ class TortoiseSDK:
         # prop REMOVES the property — measured: `create_point(goalState=None,
         # dedup=True)` on an existing ``met`` goal left ``p.goalState`` UNSET,
         # while ``create_object(goalState=None)`` on the Object twin PRESERVED
-        # it. The door-level guards in `hosted_api` cover only the two REST
-        # spellings; this is the one place that covers every channel (the MCP
-        # ``goalState=`` parameter, the ``props`` bag, and a direct SDK call).
+        # it. ⚠️ WHAT THIS POP COVERS, exactly (round 4 review): the MCP ``props``
+        # bag, a direct SDK call, and the nested-``props`` flatten — NOT the MCP
+        # ``goalState=`` parameter, which the three tool bodies already guard
+        # with ``if goalState is not None`` before it reaches here. The two REST
+        # routes guard the same way. So this is the ONE place that covers every
+        # channel the guards cannot see; it is not the only place a guard sits,
+        # and it is not redundant — removing it re-opens the ``props`` bag and
+        # the SDK call (measured: that leg of
+        # ``test_no_create_channel_can_erase_a_stored_goal_state`` fails).
         # `update_knowledge(…, goalState=None)` is the documented clear.
         if props.get("goalState") is None:
             props.pop("goalState", None)

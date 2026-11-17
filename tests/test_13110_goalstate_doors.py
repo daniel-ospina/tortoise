@@ -290,36 +290,37 @@ def test_no_create_channel_can_erase_a_stored_goal_state(tmp_path):
 
     A door-level `is not None` guard covers only the spelling that door owns. The
     erase lives one level down, where `create_point`'s dedup fold calls
-    `update_point(pid, **props)` and a generic `None` REMOVES the property — so
-    it is reachable through three channels, all of them supported: the MCP
-    `goalState=` parameter, the MCP `props` bag, and a direct SDK call. Measured
-    before the fix: `create_point("goal", …, goalState=None, dedup=True)` on an
-    existing `met` goal left `goalState` UNSET, while `create_object(goalState=
-    None)` on the Object twin preserved it.
+    `update_point(pid, **props)` and a generic `None` REMOVES the property.
+
+    The TWO channels only the fold can cover are pinned here, and they are the
+    ones that FAIL if the pop is removed (measured, review round 4): the MCP
+    `props` bag and a direct SDK call. The MCP `goalState=` leg below is pinned
+    too, but it is the DOOR's guard it exercises, not the fold's — a `None` never
+    enters `props` that way (`if goalState is not None` in the tool body), so it
+    passes with or without the pop. Say so rather than counting it as fold
+    coverage: a reader who believed it covered the fold could "simplify" the
+    pop away on its strength.
+
+    Measured before the pop: `create_point("goal", …, goalState=None,
+    dedup=True)` on an existing `met` goal left `goalState` UNSET, while
+    `create_object(goalState=None)` on the Object twin preserved it.
     """
     from tortoise import mcp_server
 
     with _graph(str(tmp_path / "fold-null.db")) as ha, _mcp_ctx():
         sdk = ha._make_sdk(namespace=_ORG)
         try:
-            # channel 3 — the SDK directly
+            # FOLD CHANNEL 1 — the SDK directly (fails without the pop).
             a = sdk.create_point("goal", "fold goal A", goalState="met",
                                  dedup=True)
-            sdk.create_point("goal", "fold goal A", goalState=None, dedup=True)
+            again_a = sdk.create_point("goal", "fold goal A", goalState=None,
+                                       dedup=True)
+            assert again_a["id"] == a["id"], "dedup did not fold - test is vacuous"
             assert sdk.get_entity(a["id"]).get("goalState") == "met"
         finally:
             sdk.close()
 
-        # channel 2 — the MCP `goalState=` parameter (dedup defaults True)
-        pt = mcp_server.tortoise_create_point("goal", "fold goal B",
-                                              goalState="blocked")
-        assert not pt.get("error"), pt
-        again = mcp_server.tortoise_create_point("goal", "fold goal B",
-                                                 goalState=None)
-        assert not again.get("error"), again
-        assert _stored(ha, pt["id"]) == "blocked"
-
-        # channel 1 — the MCP `props` bag, which is a SUPPORTED channel
+        # FOLD CHANNEL 2 — the MCP `props` bag (fails without the pop).
         prop_pt = mcp_server.tortoise_create_point(
             "goal", "fold goal C", props={"goalState": "guideline"})
         assert not prop_pt.get("error"), prop_pt
@@ -327,6 +328,16 @@ def test_no_create_channel_can_erase_a_stored_goal_state(tmp_path):
             "goal", "fold goal C", props={"goalState": None})
         assert not wiped.get("error"), wiped
         assert _stored(ha, prop_pt["id"]) == "guideline"
+
+        # DOOR GUARD (not fold coverage) — the declared parameter, whose `None`
+        # the tool body drops before the SDK ever sees it.
+        pt = mcp_server.tortoise_create_point("goal", "fold goal B",
+                                             goalState="blocked")
+        assert not pt.get("error"), pt
+        nulls = mcp_server.tortoise_create_point("goal", "fold goal B",
+                                                goalState=None)
+        assert not nulls.get("error"), nulls
+        assert _stored(ha, pt["id"]) == "blocked"
 
 
 # ── Door 2 — MCP `tortoise_create_object` ───────────────────────────────────
