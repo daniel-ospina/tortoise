@@ -22404,7 +22404,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         "SET e.id=$eid, e.eventKind='AgentSession', e.name=$name, "
         "    e.capturedAt=$cap, e.startedAt=$cap, e.endedAt=$cap, "
         "    e.sessionId=$sid, e.summary=$sum, "
-        "    e.is_episodic=true, e.keywords=$kw, e.eventStatus='scheduled', "
+        "    e.is_episodic=true, e.keywords=$kw, e.eventStatus='pending', "
         "    e.updatedAt=$now",
         params={"eid": event_id, "name": payload.summary or session_id,
                 "cap": payload.captured_at, "sid": session_id,

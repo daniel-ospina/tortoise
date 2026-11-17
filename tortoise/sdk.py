@@ -147,7 +147,8 @@ from .live import terminal_row_marker  # …and ONE way to name it
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
-from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
+from .live import status_as_reported, refuse_event_lifecycle_state  # #9974 R1 + #13100
+from .live import endpoint_permits_operator_promotion  # #13100: the re-homed live/draft gate
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -22441,15 +22442,15 @@ class TortoiseSDK:
         # window rewrites and the non-terminal `draft -> live` promotion
         # included — because it delegates TERMINALITY to this one instrument.
         # Its `:Event` half is answered at its own call site by
-        # `refuse_terminal_event_state(props, ...)`, the PROPS-AWARE predicate
-        # that knows whether the RESULT status is terminal; this arm is
-        # label-only, so firing it for that door refused `draft -> live` on a
-        # hybrid — the prop lane #2788 pins and #11825's own
-        # `test_a_non_terminal_update_still_lands_on_a_multi_label_event`
-        # requires (measured at the merge head: 1 failed). So the arm is gated
-        # on a SECOND question, defaulted on for the doors that only ever write
-        # a terminal value, and switched off by the one door that decides from
-        # its props.
+        # `refuse_event_lifecycle_state(props, ...)`, the PROPS-AWARE predicate
+        # that reads the caller's DECLARED keys; this arm is
+        # label-only, so firing it for that door answered for the LABEL rather
+        # than the declaration — #11825's `test_a_non_terminal_update_still_lands_
+        # on_a_multi_label_event` required the prop lane there, and #13100 has
+        # since retracted that allowance at the DOOR, which is the site that owns
+        # the question. So the arm is gated on a SECOND question, defaulted on for
+        # the doors that only ever write a terminal value, and switched off by the
+        # one door that decides from its props.
         if (refuse_terminal and refuse_event_terminalization
                 and self._get_proj().g.query(
                 "MATCH (n:Point:Event {id:$id}) RETURN count(n)",
@@ -24971,12 +24972,19 @@ class TortoiseSDK:
         live edge (the exact pollution the draft lifecycle prevents). The
         endpoint read is NOT Point-only: #7853 widened it to
         `epistemic_disjunction('s')`, so it covers all four epistemic labels
-        (`Point`, `Subject`, `Object`, `Event`) and a draft `:Event` endpoint
-        blocks promotion just as a draft `:Point` does. Unset-status operators
-        are LIVE under the canonical read model (projection coalesce default;
-        #944 review) and are skipped — never re-promoted into the event
+        (`Point`, `Subject`, `Object`, `Event`). An endpoint that is not live
+        blocks promotion — an explicitly non-``live`` stored word, a terminal one,
+        or (since #13100) a PLAN whose position is not terminal, because a plan
+        that has not reached a terminal stage has not happened. That last arm is
+        the live/draft suppression RE-HOMED off the ``:Event`` non-terminal
+        ``status`` this change retires; a legacy Event row that still carries the
+        word keeps suppressing through the status arm (#2977). Unset-status
+        operators are LIVE under the canonical read model (projection coalesce
+        default; #944 review) and are skipped — never re-promoted into the event
         stream.
         """
+        from .planned_occurrence import is_plan_kind
+
         rows: list = []
         # #7853: n is id-anchored — sweep the epistemic labels so a draft
         # operator incident to an Event/Subject/Object endpoint is promoted.
@@ -25002,21 +25010,28 @@ class TortoiseSDK:
             eps = proj.g.query(
                 "MATCH (o:Point {id:$oid})-[r]->(s) "
                 f"WHERE {epistemic_disjunction('s')} "
-                "RETURN s.id, s.status, coalesce(s.outdated, false)",
+                "RETURN s.id, s.status, coalesce(s.outdated, false), "
+                "       s.objectKind, s.pipelineSlot",
                 params={"oid": oid},
             ).result_set
             if not eps:
                 continue  # no endpoints — nothing to gate on
-            # TWO arms, and BOTH are needed (``live.is_terminal_status`` alone is
-            # NOT the gate): the terminal predicate is the canonical mirror of
-            # the flag + terminal-status exclusion, and ``draft`` is not in
-            # ``TERMINAL_EXCLUDED_STATUSES`` — a draft endpoint is un-promoted,
-            # not dead, and admitting it here would re-open the pollution #944
-            # closed. Unset status stays LIVE (the legacy-node rule), which is
-            # what ``(st or "live")`` preserves.
+            # The gate itself is ONE predicate (``live.endpoint_permits_
+            # operator_promotion``), not a condition spelled at this call site:
+            # three arms are needed and missing any of them re-opens a closed
+            # pollution. ``is_terminal_status`` alone is not the gate (a draft
+            # endpoint is un-promoted, not dead — #944), and since #13100 the
+            # retired non-terminal ``:Event`` status is replaced by the plan's
+            # POSITION: a plan that has not reached a terminal stage has not
+            # happened, so it suppresses exactly as ``status='scheduled'`` on an
+            # Event did. A stored legacy Event word still suppresses through the
+            # status arm (the reader net stays wider than the write door, #2977).
             all_live = all(
-                (st or "live") == "live" and not is_terminal_status(st, bool(od))
-                for _, st, od in eps
+                endpoint_permits_operator_promotion(
+                    st, bool(od),
+                    is_plan=is_plan_kind(kind),
+                    pipeline_slot=slot)
+                for _, st, od, kind, slot in eps
             )
             if not all_live:
                 continue  # keep draft until every endpoint is live
@@ -29891,9 +29906,10 @@ class TortoiseSDK:
         # `:Object` is deliberately NOT refused: its writer does not validate,
         # it STORES the value (measured), so a refusal here would reject bundles
         # the writer accepts — the over-rejection class this PR already fixed
-        # once. `:Event` is no longer in that sentence: since #11825 its door
-        # refuses the TERMINAL half, and the arm BELOW mirrors that refusal at
-        # Phase 1 for the same partial-mutation reason.
+        # once. `:Event` is no longer in that sentence: since #13100 its door
+        # refuses ANY `status` (the terminal half alone was #11825's interim
+        # boundary), and the arm BELOW mirrors that refusal at Phase 1 for the
+        # same partial-mutation reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
@@ -29914,18 +29930,16 @@ class TortoiseSDK:
                            f"rejected at validation. Must be one of: "
                            f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}",
             })
-        # ── #11825: the `:Event` TERMINAL half, refused at Phase 1 ──
+        # ── #11825 / #13100: an `:Event` `status`, refused at Phase 1 ──
         # The same class as the `:Subject` vocabulary arm directly above, and
         # for the same measured reason: `create_event` now runs
-        # `live.refuse_terminal_event_state`, so an item carrying a terminal
-        # status raises in step 3 AFTER the point items have committed. The
-        # predicate is `live.is_terminal_status` — the ONE mirror of the Cypher
-        # terminal rule — so a status added to the vocabulary moves the door and
-        # this arm together (`#2901`/`#3301`). NON-terminal statuses are NOT
-        # refused: the door accepts them and `_promote_incident_operators` reads
-        # `draft`/`live` as its gate (#7853, #10828), so refusing here would be
-        # this file's own over-rejection class. `outdated` needs no arm: the loop
-        # above already refuses it bundle-wide on ANY point or entity item.
+        # `live.refuse_event_lifecycle_state`, so an item carrying ANY status
+        # raises in step 3 AFTER the point items have committed. Since #13100 it
+        # is the whole KEY that is refused (the terminal half alone was #11825's
+        # interim boundary), so this arm and the door cannot disagree on a value
+        # or a type — the arm refuses whatever the door would. `outdated` needs
+        # no arm here: the loop above already refuses it bundle-wide on ANY point
+        # or entity item.
         # ⛔ EMITTED UNCONDITIONALLY, and the duplicate for a DIRECT-route
         # operator connection is the accepted cost — the same bargain the
         # `:Subject` vocabulary arm above makes. Deferring to the connection arm
@@ -30001,61 +30015,37 @@ class TortoiseSDK:
                                 if k not in _merged})
             _status_values = [v for k, v in _merged.items()
                               if "status" in _event_state_key_names(k)]
-            own_status = None
             if not _status_values:
-                _declares_status, own_status = _item_declared_status(
+                _declares_status, _own_status = _item_declared_status(
                     item, _item_flatten_depth(item, "entities"))
-                _status_values = [own_status] if _declares_status else []
-            else:
-                own_status = _status_values[-1]
+                _status_values = [_own_status] if _declares_status else []
             # `status: None` is the DOCUMENTED clear route the door ACCEPTS, so it
             # is not a violation (review cycle 5, P2).
             _status_values = [v for v in _status_values if v is not None]
             if not _status_values:
                 continue
-            # The TYPE dimension (review cycle 6, P1): a PERSISTABLE non-string is
-            # refused by the door, a discarded one is accepted-and-dropped.
-            from .live import _status_is_discarded_by_every_writer as _is_discarded
-            _stored_bad = [v for v in _status_values
-                           if not isinstance(v, str)
-                           and not _is_discarded(v)]
-            if _stored_bad:
-                violations.append({
-                    "section": "entities", "index": i,
-                    "message": f"ingest: entities[{i}] declares status "
-                               f"{_stored_bad[0]!r} for an :Event — `status` on "
-                               f"the node is a STRING drawn from the "
-                               f"vocabulary, or `None` to clear it, so the "
-                               f"bundle is rejected at validation rather "
-                               f"than mid-write. WHAT TO DO: pass a string "
-                               f"(the door accepts `scheduled`/`draft`/"
-                               f"`live`), or drop `status`.",
-                })
-                continue
-            # ⛔ NAME THE DECLARATION THAT FAILED, not the LAST one. The test above
-            # is an `any`, and the writer applies EVERY key of the map, so an item
-            # can declare both names — one terminal, one not. Rendering
-            # `_status_values[-1]` then indicted the LEGAL value and advised the
-            # caller to pass it, with the offending terminal declaration absent
-            # from the message (measured, review: conflict-sweep lane F — an item
-            # declaring `superseded` and `live` produced "declares status 'live' …
-            # use a non-terminal value", naming only the value that was fine).
-            _terminal_hits = [
-                v for v in _status_values
-                if isinstance(v, str) and is_terminal_status(str.__str__(v))
-            ]
-            if not _terminal_hits:
-                continue
+            # ⛔ EXACT PARITY WITH THE DOOR, and since #13100 that is the WHOLE
+            # axis: the door refuses any non-`None` `status` on an `:Event`
+            # (`live.refuse_event_lifecycle_state`), so Phase 1 refuses any
+            # declaration too — whatever its VALUE or TYPE. The earlier split
+            # (terminal refused, non-terminal and non-persistable values
+            # accepted) mirrored the interim #11825 boundary, and keeping it
+            # would let Phase 1 call a bundle clean that step 3 raises on AFTER
+            # the point items committed — the #2422/#7925 partial-mutation class
+            # this arm exists to prevent.
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] declares status "
-                           f"{', '.join(repr(v) for v in _terminal_hits)} for an "
+                           f"{', '.join(repr(v) for v in _status_values)} for an "
                            f":Event — an :Event "
-                           f"carries no lifecycle, so its door refuses the "
-                           f"terminal half mid-write and the bundle is rejected "
-                           f"at validation. WHAT TO DO: drop `status` from the "
-                           f"item, or use a non-terminal value (the door "
-                           f"accepts `scheduled`/`draft`/`live`).",
+                           f"carries no lifecycle at all (#13100), so its door "
+                           f"refuses the declaration mid-write and the bundle is "
+                           f"rejected at validation. WHAT TO DO: drop `status` "
+                           f"from the item. If the thing has not happened yet, "
+                           f"create a plan (`core:plan`) and record the :Event "
+                           f"when it does; for ingest bookkeeping use "
+                           f"`eventStatus` (`pending` -> `indexed`); to clear a "
+                           f"legacy word pass `status: None`.",
             })
         local: dict[str, tuple[str, dict]] = {}
         for section in ("sources", "points", "entities"):
@@ -31998,17 +31988,18 @@ class TortoiseSDK:
           ``SUBJECT_STATUS_VALUES`` before the name merge, so an invalid value
           (outside that set, non-string, or an explicit ``null``) on ANY entity
           item is a Phase-1 violation, while ``:Object``/``:Event`` statuses
-          are stored verbatim and stay accepted. ⛔ The ``:Event`` half of that
-          is now split, and the split is the whole point of #11825: a
-          NON-TERMINAL ``status`` (``scheduled``/``draft``/``live``) is still
-          stored verbatim, but the TERMINAL half is refused bundle-wide here
-          for exactly the reason the ``:Subject`` vocabulary is — the door
+          are stored verbatim and stay accepted. ⛔ A ``:Event`` status is
+          refused bundle-wide, and since #13100 (S7) that means ANY non-``None``
+          ``status`` — the terminal half alone was #11825's interim boundary, and
+          the non-terminal half is retired too because "will happen" is a PLAN's
+          job (`tortoise/planned_occurrence.py`). It is refused here for exactly
+          the reason the ``:Subject`` vocabulary is — the door
           (``create_event`` → ``create_entity(type='event')``) runs
-          ``live.refuse_terminal_event_state``, so leaving it to step 3 means the
-          point items commit and THEN the write raises (measured: a bundle with
-          one point and one ``status='superseded'`` event returned ``[]`` here
-          and raised a bare ``ValueError`` after ``Point 1`` was written — the
-          #2422/#7925 partial-mutation class, review cycle 3 P1). Props are read at the depth
+          ``live.refuse_event_lifecycle_state``, so leaving it to step 3 means the
+          point items commit and THEN the write raises (measured at #11825: a
+          bundle with one point and one ``status='superseded'`` event returned
+          ``[]`` here and raised a bare ``ValueError`` after ``Point 1`` was
+          written — the #2422/#7925 partial-mutation class, review cycle 3 P1). Props are read at the depth
           the ITEM'S write door flattens (``_item_prop_at_depth``): TWICE for a
           ``subject``/``object``/``event`` item (step 3 relays
           ``create_subject``/``create_object``/``create_event`` →
@@ -34121,7 +34112,7 @@ class TortoiseSDK:
             name=f"human approval of {artifact_ref}",
             eventKind="humanApproval",
             startedAt=now,
-            eventStatus="completed",
+            eventStatus="indexed",
         )
         event_id = event["eventId"]
         # Wire provenance: approver performs; uses artifact; aboutPoint each
@@ -40964,7 +40955,7 @@ class TortoiseSDK:
                                 "prs": metadata.get("prs", []),
                                 "critical_decisions": metadata.get("critical_decisions", []),
                             }),
-                            "eventStatus": "completed",
+                            "eventStatus": "indexed",
                             "classificationLevel": "internal",
                             "format": "markdown",
                         }
@@ -45258,9 +45249,9 @@ class TortoiseSDK:
         is layer-bound: `:Point` carries `status` (live / superseded /
         retracted / draft / outdated / archived), `:Object` and `:Subject`
         carry their own `status` families (which include `deprecated`), and an
-        `:Event` carries NO `status` at all — its lifecycle is `eventStatus`,
-        a different vocabulary this field deliberately does not mix in, so an
-        `:Event` peer reports `""`. `""` therefore means "this peer's layer
+        `:Event` carries NO `status` at all — it has no lifecycle (#13100), and
+        `eventStatus` is an INGEST marker this field deliberately does not mix
+        in, so an `:Event` peer reports `""`. `""` therefore means "this peer's layer
         exposes no `status`", and it is now reached by LOOKING at the peer's
         label rather than by never asking.
 
@@ -49477,7 +49468,7 @@ class TortoiseSDK:
                 "RETURN count(e)",
                 params={"id": id_val},
         ).result_set[0][0]:
-            refuse_terminal_event_state(props, door="update_entity")
+            refuse_event_lifecycle_state(props, door="update_entity")
             # ⛔ No `props` surgery here on purpose: a NON-terminal status is a
             # legal write on an `:Event` target (#2788's prop lane), and on a
             # multi-label node the property is shared, so there is no "Point side"
@@ -49737,7 +49728,7 @@ class TortoiseSDK:
                     # arm is the wrong question here — it refused `draft -> live`
                     # on a hybrid (the prop lane #2788 pins). The Event half is
                     # answered ABOVE, by the props-aware
-                    # `refuse_terminal_event_state`, which refuses exactly the
+                    # `refuse_event_lifecycle_state`, which refuses exactly the
                     # TERMINAL values and lets a non-terminal one ride that lane.
                     self._assert_lifecycle_guard(
                         _lifecycle_id, method="update_entity", missing_ok=True,
@@ -51230,7 +51221,7 @@ class TortoiseSDK:
             # stored it. Refused BEFORE any write or journal emission, so a
             # refused create leaves nothing behind (the Point/Subject doors'
             # shape, #9287/#1423).
-            refuse_terminal_event_state(props, door="create_entity(type='event')")
+            refuse_event_lifecycle_state(props, door="create_entity(type='event')")
             # Legacy create_event about* wiring — preserved verbatim (#888 W2).
             # W5 Phase F (#2104, TOCTOU): an explicit deterministic id
             # (server-ONLY channel via the ``_server_id`` keyword — the
@@ -51380,7 +51371,7 @@ class TortoiseSDK:
             # `unfolded-mention` exemption.
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
-                "eventStatus": "scheduled", **props}, "EventRecorded",
+                "eventStatus": "pending", **props}, "EventRecorded",
                 is_episodic=is_episodic,
                 _journal_extra={"aboutLinks": about_links} if about_links else None)
             # The writes use the SAME resolution the record was built from: an
@@ -53483,7 +53474,7 @@ class TortoiseSDK:
                 "prs": metadata.get("prs", []),
                 "critical_decisions": metadata.get("critical_decisions", []),
             }),
-            "eventStatus": "completed",
+            "eventStatus": "indexed",
             "classificationLevel": "internal",
             "format": "markdown",
         }
@@ -53585,7 +53576,7 @@ class TortoiseSDK:
             "source_file": sf_rel,
             "format": "markdown",
             "classificationLevel": "internal",
-            "eventStatus": "completed",
+            "eventStatus": "indexed",
         }
         resolved, rejected = proj._upsert_event(
             inner, guard=True, guard_source_file=sf_rel)
