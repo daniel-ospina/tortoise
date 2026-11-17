@@ -2111,6 +2111,54 @@ def test_a_restatus_is_applied_unguarded_within_the_replay():
     )
 
 
+def test_a_terminal_status_latches_the_STAGE_arms_of_the_replay_too():
+    """`live ≡ rebuilt` on the POSITION axis: the STATUS latch binds both arms.
+
+    The live fold has TWO latches and applies them on BOTH of its routes —
+    `apply_stage_fold`'s own (`isClosed` / a terminal current STAGE) and the
+    STATUS-terminal one (`entities.py::_fold_object_status` returns False when
+    the stored `status` is terminal, on the declared-stage arm and the built-in
+    arm alike).
+
+    The replay kept only the first on its stage arms (the status arm already
+    carried `if not _is_terminal_status(status)`), so a stream that made the row
+    terminal mid-flight — a `restatus` record, the order-blind window this
+    module already documents — was REFUSED a stage move live and GIVEN one by a
+    rebuild: the rebuilt Object held `pipelineStageId='done'` the graph never
+    wrote. #11824 S0 made that shape ordinary (a `deprecated` write touches no
+    stage prop), so the rebuild must answer what the graph answers.
+
+    The control is the second half: without the terminal `restatus` the same
+    stream DOES advance the stage — so a red here cannot be satisfied by
+    suppressing the fold altogether.
+    """
+    row = {"id": "o-latch", "name": "issue-latch", "object_kind": "issue",
+           "status": "live"}
+
+    def folded(events):
+        return cp.apply_event_stream_folds(
+            (cp.node_from_row("Object", row),), events)[0]
+
+    latched = folded((
+        cp.LifecycleEvent(seq=1, event_kind="", restatus_status="deprecated",
+                          target_id="o-latch", target_label="Object"),
+        cp.LifecycleEvent(seq=2, event_kind="github.issue.closed",
+                          object_name="issue-latch"),
+    ))
+    assert latched.props.get("status") == "deprecated", latched.props
+    assert "pipelineStageId" not in latched.props, (
+        "a rebuild moved a stage on a row the live fold refuses (its `status` "
+        f"is terminal): {latched.props!r}")
+
+    control = folded((
+        cp.LifecycleEvent(seq=1, event_kind="github.issue.closed",
+                          object_name="issue-latch"),
+    ))
+    assert control.props.get("pipelineStageId") == "done", (
+        "control: with no terminal status the same fold must still advance the "
+        f"stage — otherwise the assertion above proves nothing: {control.props!r}")
+
+
 def test_a_birth_record_cannot_resurrect_a_terminal_the_graph_holds():
     """Review P1: the birth arm must not overwrite a TERMINAL it finds held.
 

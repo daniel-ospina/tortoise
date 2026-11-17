@@ -3611,27 +3611,38 @@ def apply_event_stream_folds(
                     if kind_key not in index.kind_forms_for(fold_target.kind):
                         continue
                     if fold_target.axis == FOLD_AXIS_STAGE:
-                        # The POSITION axis. The latch is `apply_stage_fold`'s
-                        # own (`isClosed` / a terminal current slot), which is
-                        # the same guard the live fold applies — one decision,
-                        # two routes.
-                        _reason, _props = apply_stage_fold(
-                            stage, fold_target.kind,
-                            index.pipeline_for(fold_target.kind),
-                            fold_target.target, reopen=False)
-                        if _props:
-                            stage = {
-                                "stageId": _props.get("pipelineStageId"),
-                                "pipelineKey": _props.get("pipelineStageKey"),
-                                "isClosed": _props.get("isClosed"),
-                            }
-                            stage_props = _props
+                        # The POSITION axis. TWO latches, exactly as the live
+                        # fold applies TWO: `apply_stage_fold`'s own
+                        # (`isClosed` / a terminal current slot) AND the
+                        # STATUS-terminal latch (`entities.py::_fold_object_status`
+                        # returns False when the stored word is terminal, on
+                        # BOTH its arms). The second one is not `apply_stage_fold`'s
+                        # to make — it reads `status`, which that function never
+                        # sees — so it is applied here, mirroring the status arm
+                        # below. Without it a rebuild moved a stage the live fold
+                        # refused (live ≢ rebuilt on the position axis, #11824).
+                        if not _is_terminal_status(status):
+                            _reason, _props = apply_stage_fold(
+                                stage, fold_target.kind,
+                                index.pipeline_for(fold_target.kind),
+                                fold_target.target, reopen=False)
+                            if _props:
+                                stage = {
+                                    "stageId": _props.get("pipelineStageId"),
+                                    "pipelineKey": _props.get("pipelineStageKey"),
+                                    "isClosed": _props.get("isClosed"),
+                                }
+                                stage_props = _props
                         continue
                     if not _is_terminal_status(status):
                         status = fold_target.target
             if event.object_name == name:
                 builtin_stage = builtin_fold_stage(event.event_kind)
-                if builtin_stage is not None and not owns:
+                # The same STATUS-terminal latch the live built-in arm applies
+                # (`entities.py::_fold_object_status`: a terminal stored word
+                # latches, so a later event cannot resurrect the row).
+                if builtin_stage is not None and not owns \
+                        and not _is_terminal_status(status):
                     _reason, _props = apply_stage_fold(
                         stage, BUILTIN_CONNECTOR_PIPELINE_KEY,
                         BUILTIN_CONNECTOR_PIPELINE, builtin_stage,

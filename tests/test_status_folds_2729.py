@@ -108,11 +108,32 @@ class TestStatusDeclValidation:
         assert any("objectKinds" in e for e in errors)
 
     def test_well_formed_declaration_has_no_errors_or_warnings(self):
+        # #11824 S0: the declared words are LIFECYCLE words, because that is the
+        # only status vocabulary the write door accepts. A list of pack words
+        # here is still well-formed, and it now WARNS — pinned separately in
+        # `test_an_unmigrated_statuses_list_warns_about_the_migration`.
+        errors, warnings = self._validate(
+            {"statuses": ["draft", "deprecated"],
+             "folds": [_decl("trancheReleased", "deprecated")]})
+        assert errors == []
+        assert warnings == []
+
+    def test_an_unmigrated_statuses_list_warns_about_the_migration(self):
+        """#11824 S0: a pack declaring its own words as `statuses` installs CLEAN
+        and then has every one of them REFUSED at the write door — the failure
+        would surface as a runtime `ValueError` on a customer's first write, with
+        nothing in the install naming the cause.
+
+        A WARNING (not an error) so a pre-S0 pack still loads: those words are
+        what its stored rows hold. What may not happen is silence.
+        """
         errors, warnings = self._validate(
             {"statuses": ["queued", "released"],
              "folds": [_decl("trancheReleased", "released")]})
-        assert errors == []
-        assert warnings == []
+        assert errors == [], errors
+        assert any("pipeline" in w and "released" in w for w in warnings), (
+            f"an unmigrated `statuses` list must warn and name the migration: "
+            f"{warnings}")
 
     def test_unknown_fold_status_is_rejected(self):
         """The verification checklist's 'unknown status rejected' row."""
@@ -377,6 +398,16 @@ class TestBuiltinParity:
             "pm:cardCompleted": "done",
             "github.issue.closed": "done",
         }
+        # …and every value RESOLVES in the declared pipeline, with the closing
+        # folds on a terminal SLOT (the reopen path depends on it). A docstring
+        # claim is not a pin.
+        from tortoise.pipeline import CORE_WORK_ITEM_PIPELINE
+
+        stages = {s["id"]: s for s in CORE_WORK_ITEM_PIPELINE["stages"]}
+        for event, target in BUILTIN_CONNECTOR_FOLDS.items():
+            assert target in stages, (event, target)
+        for closing in ("pm:cardCompleted", "github.issue.closed"):
+            assert stages[BUILTIN_CONNECTOR_FOLDS[closing]]["slot"] == "terminal"
         assert BUILTIN_CONNECTOR_REOPENS == frozenset({"github.issue.reopened"})
 
     def test_builtin_lookup_helper_agrees(self):
@@ -510,6 +541,8 @@ class TestVentureDeclaration:
         ``pending``/``open`` are reused by the owner-approved lifecycles, and
         the registry says so instead of silently inheriting connector meaning.
         """
+        # #11824 S0: the words moved to the STAGE axis, so the overlap is
+        # reported there (the same amendment, on the axis the words now live on).
         msgs = venture_registry.lifecycle_warnings.get("venture", [])
         joined = " ".join(msgs)
         for word in ("active", "closed", "pending", "open"):

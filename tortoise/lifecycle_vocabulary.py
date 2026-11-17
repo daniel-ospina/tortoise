@@ -182,15 +182,23 @@ def _render(value: object) -> str:
         return f"<{type(value).__name__} whose repr() raised>"
 
 
-def _refusal(value: object, fault: str, repair: str) -> ValueError:
+def _refusal(value: object, fault: str, repair: str, *,
+             count: bool = True) -> ValueError:
     """Count, log and describe ONE refused caller status (#11824 S0).
 
     Three parts, in this order (AX rule 2): that it refused, exactly what
     failed, and exactly what to do about it. Returned (not raised) so the
     caller's ``raise ... from None`` keeps the caller-facing traceback free of
     this module's internals — the same device ``validity._end_refusal`` uses.
+
+    ``count=False`` is for a caller ASKING the question rather than ATTEMPTING
+    a write (``status_refusal_reason``): nothing was declined, so nothing may
+    land in ``STATUS_WRITE_OUTCOMES`` — a validator that asked about 200 items
+    of a rejected bundle would otherwise dominate a counter whose stated
+    purpose is *"is the vocabulary too narrow?"*.
     """
-    STATUS_WRITE_OUTCOMES["refused"] += 1
+    if count:
+        STATUS_WRITE_OUTCOMES["refused"] += 1
     message = (
         f"status {_render(value)} was refused: {fault}. {repair} "
         f"({_ACCEPTED_FORMS}; ONTOLOGY §3 of #11824's model.)"
@@ -199,7 +207,8 @@ def _refusal(value: object, fault: str, repair: str) -> ValueError:
     return ValueError(message)
 
 
-def read_caller_status(value: object, *, kind: str = "") -> str:
+def read_caller_status(value: object, *, kind: str = "",
+                       count: bool = True) -> str:
     """Read a caller's ``status`` for INTENT on the way in — THE one home.
 
     ``kind`` only shapes the message (``":Point"``, ``":Object"``, ``":Subject"``)
@@ -240,6 +249,7 @@ def read_caller_status(value: object, *, kind: str = "") -> str:
             f"a status must be a plain string, and {type(value).__name__} is "
             f"not one",
             "Pass the word itself, as a string.",
+            count=count,
         ) from None
     token = str.__str__(value).strip().lower()
     if token in LIFECYCLE_STATUS_SET:
@@ -248,13 +258,15 @@ def read_caller_status(value: object, *, kind: str = "") -> str:
             # reported to nobody (AX §1). Counted, because the ratio of
             # re-spellings to clean writes is the measurement that says whether
             # callers are guessing at the vocabulary.
-            STATUS_WRITE_OUTCOMES["normalised"] += 1
+            if count:
+                STATUS_WRITE_OUTCOMES["normalised"] += 1
         return token
     synonym = LIFECYCLE_STATUS_SYNONYMS.get(token)
     if synonym is not None:
         # A declared synonym: the meaning is one we already have, so the store
         # gets the canonical word and the caller gets no receipt (AX §1).
-        STATUS_WRITE_OUTCOMES["normalised"] += 1
+        if count:
+            STATUS_WRITE_OUTCOMES["normalised"] += 1
         return synonym
     if token == "outdated":
         raise _refusal(
@@ -262,6 +274,7 @@ def read_caller_status(value: object, *, kind: str = "") -> str:
             "it says the record ended but not whether anything replaced it, so "
             "it does not name a lifecycle word",
             _OUTDATED_REPAIR,
+            count=count,
         ) from None
     position = _POSITION_WORD_REPAIRS.get(token)
     if position is not None:
@@ -270,11 +283,13 @@ def read_caller_status(value: object, *, kind: str = "") -> str:
             "it is a position word written as a status, and position and "
             "lifecycle are different fields",
             position,
+            count=count,
         ) from None
     raise _refusal(
         value,
         f"it is not a lifecycle word for {kind or 'any knowledge kind'}",
         "Pass a lifecycle word.",
+        count=count,
     ) from None
 
 
@@ -287,9 +302,15 @@ def status_refusal_reason(value: object, *, kind: str = "") -> str | None:
     partial-mutation class). It must ask exactly the question the writer asks,
     so it calls this rather than re-spelling the vocabulary; ``None`` means the
     writer would accept the value.
+
+    ⛔ IT DOES NOT COUNT. ``read_caller_status`` increments
+    ``STATUS_WRITE_OUTCOMES``, but a bundle validation STORES nothing and
+    DECLINES nothing — it only asks. ``count=False`` keeps the measurement
+    device honest: a rejected 200-item bundle would otherwise flood a counter
+    documented as *"how many writes the door declined"*.
     """
     try:
-        read_caller_status(value, kind=kind)
+        read_caller_status(value, kind=kind, count=False)
     except ValueError as exc:
         return str(exc)
     return None

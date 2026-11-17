@@ -51813,10 +51813,20 @@ class TortoiseSDK:
                 # spelling.
                 if not _np_lifecycle_checked:
                     _np_lifecycle_checked = True
-                    _np_status = _read_caller_status(
-                        _np_status, kind=f":{_np_label}")
-                    for _np_key in list(keys_rendering_as(props, {"status"})):
-                        props[_np_key] = _np_status
+                    # ⛔ AN EXPLICIT ``None`` IS THE DOCUMENTED DELETE, NOT A
+                    # WORD (#11824 S0 review P2). ``_sanitize_props`` states the
+                    # contract this door must not break: *"``None`` REMOVES the
+                    # property outright (``SET n += $props`` with a None deletes
+                    # it)"*, and ``record_reconcile``/``cache_projection`` model
+                    # ``update_entity(obj, status=None)`` as a real clear on a
+                    # non-terminal row. Validating it as a vocabulary value would
+                    # turn a LEGAL write into a refusal (#1934). ``None`` is the
+                    # delete sentinel; every other value takes the vocabulary.
+                    if _np_status is not None:
+                        _np_status = _read_caller_status(
+                            _np_status, kind=f":{_np_label}")
+                        for _np_key in list(keys_rendering_as(props, {"status"})):
+                            props[_np_key] = _np_status
                 # `collect` DROPS NULLs, so an empty list means every bound row
                 # holds no status — the legacy shape, which reads as live and is
                 # the backfill's business, not this guard's.
@@ -52573,11 +52583,16 @@ class TortoiseSDK:
         if t in ("subject", "object"):
             _lifecycle_keys = list(keys_rendering_as(props, {"status"}))
             if _lifecycle_keys:
-                _lifecycle_word = _read_caller_status(
-                    lifecycle_props_by_rendering(props, {"status"})["status"],
-                    kind=f":{t.capitalize()}")
-                for _lifecycle_key in _lifecycle_keys:
-                    props[_lifecycle_key] = _lifecycle_word
+                # An explicit ``None`` is the DELETE sentinel `_sanitize_props`
+                # documents, not a word to grade — the same exemption the
+                # family write door makes, so create and update agree.
+                _lifecycle_value = lifecycle_props_by_rendering(
+                    props, {"status"})["status"]
+                if _lifecycle_value is not None:
+                    _lifecycle_word = _read_caller_status(
+                        _lifecycle_value, kind=f":{t.capitalize()}")
+                    for _lifecycle_key in _lifecycle_keys:
+                        props[_lifecycle_key] = _lifecycle_word
         if t == "subject":
             # #12047: a role Subject may DECLARE who holds it. The prop is a write
             # SHORTHAND for the sanctioned ``holdsRole`` edge (ONTOLOGY §3.6 —

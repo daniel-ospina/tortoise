@@ -1412,12 +1412,16 @@ class TestLifecycleCarrierCoherence:
                 params={"id": oid})
             before = _carrier_row(sdk, "Object", "delta")
             assert before[1] == "archived", before
-            # ⚠️ #11824 S0: the refusal now comes from the VOCABULARY door,
-            # which runs before the transition guard — a non-string is refused
-            # with a performable repair ("Pass the word itself, as a string.")
-            # rather than with the dead-set message. The ROW assertion below is
-            # the invariant both doors must keep, and it is unchanged.
-            with pytest.raises(ValueError, match="was refused"):
+            # ⚠️ #11824 S0: the refusal comes from ONE of two doors, and which
+            # one depends on the value. A non-string (list/dict/int/bool) is
+            # refused by the VOCABULARY door ("was refused: a status must be a
+            # plain string"). An explicit ``None`` is the DELETE sentinel, so it
+            # passes the vocabulary door and is refused HERE — by the dead-set
+            # transition guard, because deleting the status of a DEAD row is
+            # itself the resurrection. The ROW assertion below is the invariant
+            # both doors must keep.
+            with pytest.raises(ValueError,
+                               match="was refused|refused the status transition"):
                 sdk.update_knowledge(oid, status=target)
             assert _carrier_row(sdk, "Object", "delta") == before, (
                 "a refused resurrection moved the row: " +
@@ -1678,11 +1682,14 @@ class TestLifecycleCarrierCoherence:
             assert _carrier_row(sdk, "Object", "zeta")[1:] == (
                 "superseded", "zeta-v2", None)
             before = _carrier_row(sdk, "Object", "zeta")
-            # #11824 S0: a non-string target is refused by the VOCABULARY door,
-            # which precedes the coherence allowance — so this composed shape can
-            # no longer ride into the row at all, which is a STRONGER result than
-            # the allowance's `str` requirement.
-            with pytest.raises(ValueError, match="was refused"):
+            # #11824 S0: a non-string target is refused before it can ride into
+            # the row — by the VOCABULARY door for a list/dict/int/bool, and by
+            # the dead-set transition guard for an explicit ``None`` (the DELETE
+            # sentinel, which the vocabulary door passes through by design).
+            # Either way the composed shape can no longer reach the row, which is
+            # a STRONGER result than the allowance's `str` requirement.
+            with pytest.raises(ValueError,
+                               match="was refused|refused the status transition"):
                 sdk.update_knowledge(oid, status=target,
                                   supersededBy=None, supersededAt=None)
             assert _carrier_row(sdk, "Object", "zeta") == before, (
@@ -1721,6 +1728,43 @@ class TestLifecycleCarrierCoherence:
             assert _carrier_row(sdk, "Object", "epsilon") == before, (
                 "a REFUSED non-string status moved a live row: "
                 + repr(_carrier_row(sdk, "Object", "epsilon")))
+        finally:
+            sdk.close()
+
+    def test_an_explicit_None_is_still_the_documented_status_DELETE(
+            self, tmp_path):
+        """⛔ #11824 S0 must not turn a LEGAL write into a refusal (#1934).
+
+        `_sanitize_props` states the contract: *"`None` REMOVES the property
+        outright (`SET n += $props` with a None deletes it)"*, and
+        `record_reconcile` / `cache_projection` both model
+        `update_entity(obj, status=None)` as a real CLEAR on a non-terminal row.
+        The new vocabulary door ran on that same bag, so `None` hit its
+        non-`str` shape arm first and a documented delete started raising —
+        a silent behaviour change in a slice that did not intend one.
+
+        Both knowledge doors are pinned: `None` is the delete sentinel and
+        passes through untouched, while a `None`-shaped SPELLING of a bad word
+        (a non-string that is not `None`) is still refused.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t11824none.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "omicron")
+            sdk.update_knowledge(oid, status="live")
+            assert _carrier_row(sdk, "Object", "omicron")[1] == "live"
+
+            sdk.update_knowledge(oid, status=None)
+            assert _carrier_row(sdk, "Object", "omicron")[1] is None, (
+                "an explicit None must DELETE the status property, not raise")
+
+            # …and the creation door agrees (the Object's status is absent).
+            sdk.create_entity("object", "pi-none", status=None)
+            assert _carrier_row(sdk, "Object", "pi-none")[1] is None
+
+            # CONTROL: the delete sentinel is `None` and nothing else — a
+            # non-string non-None value is still refused as a status.
+            with pytest.raises(ValueError, match="was refused"):
+                sdk.update_knowledge(oid, status=["live"])
         finally:
             sdk.close()
 

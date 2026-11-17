@@ -335,6 +335,33 @@ def validate_status_decl(
                         f"fold does not apply to it), but the spelling is "
                         f"ambiguous to a reader; rename or record the intent"
                     )
+            # ── #11824 S0: an UNMIGRATED kind's declared statuses ──
+            # Since S0 the write door is ONE closed four-word set for every
+            # knowledge kind, and a pack's own words live on the pipeline STAGE
+            # axis. A declaration that still lists them as `statuses` therefore
+            # installs clean and then has every one of them REFUSED at the first
+            # write — the failure surfaces as a runtime `ValueError` on a
+            # customer's call instead of here. Reported as a WARNING, not an
+            # error: a pre-S0 pack must still load (those words are what its
+            # stored rows hold), but nothing may stay silent about the mismatch.
+            from .lifecycle_vocabulary import (
+                LIFECYCLE_STATUS_SET,
+                LIFECYCLE_STATUS_SYNONYMS,
+            )
+            outside = sorted({
+                value for value in str_statuses
+                if value.strip().lower() not in LIFECYCLE_STATUS_SET
+                and value.strip().lower() not in LIFECYCLE_STATUS_SYNONYMS
+            })
+            if outside:
+                warnings.append(
+                    f"kindDefs '{kind}': 'statuses' declares "
+                    f"{', '.join(outside)} — word(s) outside the lifecycle "
+                    f"vocabulary the write door accepts (draft, live, "
+                    f"deprecated, superseded). Declare a `pipeline:` and move "
+                    f"these words to stage ids (#11824 S0); as written, a "
+                    f"caller writing them as `status` is refused"
+                )
 
     folds_present = "folds" in spec
     # A second fold naming the same event on the same kind is a declaration

@@ -284,6 +284,40 @@ def test_a_position_word_is_refused_as_a_status_with_a_stage_repair(sdk, word):
     assert _stored(sdk, node)["status"] == "live"
 
 
+def test_the_outdated_repair_names_BOTH_words_and_the_supersede_route(sdk):
+    """`outdated` is refused because it names a CHOICE, and the choice is named.
+
+    The generic refusal cannot stand in for this one: it already contains the
+    word `outdated` (``_render`` interpolates the refused value) and already
+    names `superseded` (``_ACCEPTED_FORMS`` lists the vocabulary), so a
+    ``match="outdated"`` / ``match="deprecated"`` row stays GREEN if the
+    dedicated arm is deleted — the repair silently degrades to "pass a lifecycle
+    word", which picks neither meaning for the caller. The discriminating text
+    is the ROUTE: ``supersededBy`` (an Object) or ``supersede_point`` (a Point).
+
+    Both doors are pinned: the module question and the write the caller makes.
+    """
+    import re
+
+    from tortoise.lifecycle_vocabulary import read_caller_status
+
+    with pytest.raises(ValueError) as exc:
+        read_caller_status("outdated")
+    assert re.search(r"supersededBy|supersede_point", str(exc.value)), (
+        "the refusal must name the supersede ROUTE, not only the two words — "
+        f"otherwise it cannot be acted on: {exc.value}")
+
+    node = _object(sdk, "live")
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(node, status="outdated")
+    message = str(exc.value)
+    assert "deprecated" in message and "superseded" in message, (
+        f"`outdated` must be answered with BOTH words: {message}")
+    assert re.search(r"supersededBy|supersede_point", message), (
+        f"the write refusal must name the supersede route: {message}")
+    assert _stored(sdk, node)["status"] == "live", "a refused write stores nothing"
+
+
 @pytest.mark.parametrize("word", NON_LIFECYCLE_WORDS)
 def test_a_pack_or_connector_word_is_now_refused_as_a_status(sdk, word):
     """#11824 S0: the pack/connector word is REFUSED, with the vocabulary named.
