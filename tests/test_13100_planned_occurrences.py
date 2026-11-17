@@ -161,6 +161,48 @@ class TestThePlanPipeline:
             "MATCH (:Event)-[:aboutObject]->(:Object {id:$o}) RETURN count(*)",
             params={"o": goal["id"]}).result_set[0][0] == 0
 
+    def test_the_BARE_plan_spelling_is_refused_before_any_write(self, sdk):
+        """A bare `plan` kind is a plan to a READ and unbindable to a PIPELINE.
+
+        Pipelines key on the namespaced kind (#2767), so accepting the bare form
+        let the Event be written and journaled before the binding refusal — the
+        refused-call-that-left-a-write defect, one spelling over.
+        """
+        bare = sdk.create_entity("object", "bare plan",
+                                 objectKind="plan")["node"]
+        with pytest.raises(ValueError, match="no pipeline can bind"):
+            PO.record_occurrence(sdk, bare["id"])
+        assert sdk._get_proj().g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$o}) RETURN count(*)",
+            params={"o": bare["id"]}).result_set[0][0] == 0
+
+    def test_a_MARKER_CLOSED_plan_is_refused_before_any_write(self, sdk):
+        """§6's two inputs again — and this one cannot be retried away.
+
+        A marker-closed plan whose stage still reads `scheduled` used to reach
+        the write, journal the Event, and then hit the pipeline's terminal guard:
+        every retry added another Event, and the record answered NEITHER "it
+        happened" nor "planned but never happened".
+        """
+        plan = PO.create_plan(sdk, "Closed by marker, scheduled stage")
+        sdk.update_knowledge(plan["id"], isClosed=True)
+        g = sdk._get_proj().g
+        for _ in range(2):  # a retry must not mint a second Event
+            with pytest.raises(ValueError, match="closed marker set"):
+                PO.record_occurrence(sdk, plan["id"])
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 0
+        with pytest.raises(ValueError, match="closed marker set"):
+            PO.settle_plan(sdk, plan["id"], PO.STAGE_CANCELLED)
+
+    def test_create_plan_cannot_be_mis_kinded_by_a_caller_prop(self, sdk):
+        """The kind is the module's decision, not a `**props` override."""
+        node = PO.create_plan(sdk, "sneaky", objectKind="core:goal")
+        assert sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$o}) RETURN o.objectKind",
+            params={"o": node["id"]}).result_set[0][0] == PO.PLAN_PIPELINE_KEY
+
     def test_a_BACKFILLED_occurrence_is_not_a_stale_transition(self, sdk):
         """The date an occurrence actually happened is a correction, not a stale
         observation — a plan is recorded now and backfilled for last March."""

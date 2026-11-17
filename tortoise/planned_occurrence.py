@@ -47,6 +47,15 @@ predicate (``(e:Event)-[:aboutObject]->(p:Object)``), which is journaled as an
 * a plan without one has not — whether it is still ``scheduled`` (upcoming) or
   already ended ``missed`` / ``cancelled`` (it never will).
 
+⚠️ **ACCEPTED RESIDUAL, stated rather than hidden:** ``aboutObject`` is also the
+predicate an Event uses to *mention* an Object, so a plan linked by a
+non-occurrence Event (a note about the offsite, say) reads here as "it
+happened". The model has no separate occurrence predicate, and adding one is a
+surface decision (follow-up issue #13128). Treated as an
+accepted residual until that decision: the link means "an Event recorded about
+this plan", and a writer that wants to mention without claiming occurrence
+should not wire the plan.
+
 ## Why the pipeline key is namespaced
 
 Pipelines key on the NAMESPACED kind (#2767), so the plan Object is created
@@ -143,7 +152,11 @@ def create_plan(sdk, name: str, *, title: str | None = None,
     """
     from . import pipeline
 
-    door_props: dict[str, Any] = {"objectKind": PLAN_PIPELINE_KEY, **props}
+    # ⛔ The KIND is last, so a caller's `objectKind` cannot shadow it. With the
+    # reverse order a `create_plan(..., objectKind="core:goal")` wrote a
+    # core:goal Object and THEN raised the pipeline's kind-binding refusal — a
+    # refused create that left a record in the graph behind it.
+    door_props: dict[str, Any] = {**props, "objectKind": PLAN_PIPELINE_KEY}
     if title is not None:
         door_props.setdefault("title", title)
     created = sdk.create_entity("object", name, **door_props)
@@ -183,10 +196,16 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     from . import pipeline
 
     plan_id, cur = _resolve_plan(sdk, plan_ref)
-    if cur.get("slot") == "terminal":
+    # ⛔ TWO inputs, not one (§6): the stage slot OR the durable `isClosed`
+    # marker ends a plan. Reading the slot alone let a marker-closed plan reach
+    # the write, journal an :Event, and then hit the pipeline's terminal guard —
+    # leaving an occurrence the Q5 read then treats as "it happened" while the
+    # stage still says `scheduled`, i.e. a record that answers neither question.
+    if cur.get("slot") == "terminal" or cur.get("isClosed"):
         raise ValueError(
             f"Refused: the plan {plan_ref!r} is already settled at "
-            f"{cur.get('stageId')!r} (outcome {cur.get('outcome')!r}). WHAT TO "
+            f"{cur.get('stageId')!r} (outcome {cur.get('outcome')!r}"
+            f"{', closed marker set' if cur.get('isClosed') else ''}). WHAT TO "
             f"DO: a plan ends once. If the occurrence still needs a record, "
             f"write the :Event directly (`create_entity(type='event')`) — the "
             f"dated fact stands on its own; to correct the plan, that is a new "
@@ -247,11 +266,15 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
             f"call `record_occurrence`, which writes the :Event and settles the "
             f"plan at {STAGE_HELD!r}.")
     plan_id, cur = _resolve_plan(sdk, plan_ref)
-    if cur.get("slot") == "terminal":
+    if cur.get("slot") == "terminal" or cur.get("isClosed"):
+        # Same two inputs as `record_occurrence` (§6): a marker-closed plan is
+        # settled even while its stage still reads non-terminal, and this refusal
+        # is also the only place that NAMES the marker when the stage does not.
         raise ValueError(
             f"Refused: the plan {plan_ref!r} is already settled at "
-            f"{cur.get('stageId')!r}. WHAT TO DO: a plan ends once; a new plan "
-            f"is a new record.")
+            f"{cur.get('stageId')!r}"
+            f"{' (closed marker set)' if cur.get('isClosed') else ''}. WHAT TO "
+            f"DO: a plan ends once; a new plan is a new record.")
     move = pipeline.advance_stage(
         sdk, plan_id, PLAN_PIPELINE_KEY, stage, at=at,
         declared=PLAN_PIPELINE_DECL, reason=reason, source="settle",
@@ -302,6 +325,21 @@ def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
             f"create the plan with `create_plan` (kind {PLAN_PIPELINE_KEY!r}), or "
             f"if the thing is not a planned occurrence, record the :Event "
             f"directly with `create_entity(type='event')`.")
+    if str.__str__(object_kind) != PLAN_PIPELINE_KEY:
+        # ⛔ THE BARE SPELLING IS A PLAN BUT NOT A BINDABLE ONE. Pipelines key on
+        # the NAMESPACED kind (#2767), so `plan` and `core:plan` are one kind to
+        # a READ and two different strings to the stage write. Accepting the bare
+        # form here let the :Event be written and JOURNALED (with its durable
+        # aboutObject edge) before the binding refusal — the same
+        # refused-call-that-left-a-write behind round 1's finding, one spelling
+        # over, and with a message that called a plan "not a plan".
+        raise ValueError(
+            f"Refused: {plan_ref!r} is a plan, but its kind is the bare "
+            f"{object_kind!r} spelling, which no pipeline can bind (a pipeline "
+            f"keys on the namespaced kind). WHAT TO DO: create it with "
+            f"`create_plan` (kind {PLAN_PIPELINE_KEY!r}), or update its "
+            f"objectKind to {PLAN_PIPELINE_KEY!r} before recording the "
+            f"occurrence. Nothing has been written.")
     return plan_id, cur
 
 

@@ -891,28 +891,20 @@ class TestTheEventApiDoor:
         assert _journal_lines(sdk._test_log) == []
     @pytest.mark.parametrize("value", [{"a": 1}, {"a": {"b": []}}])
     def test_a_non_persistable_status_is_ALSO_refused(self, sdk, value):
-        """#7925 (recorded decision) — a value the WRITER DROPS is not refused.
+        """#13100 REOPENS #7925's over-rejection rule here, and this is the record.
 
-        `tests/test_ingest_event_endpoint.py::
-        test_direct_route_object_and_event_status_values_not_over_rejected` pins
-        this for the direct route: a map/set/bytes `status` is filtered out
-        before the `SET`, so the node never carries it and no predicate can read
-        it as terminal. Refusing it rejects a write the writers accept — the
-        over-rejection class #7925 round 4 already fixed once, which the first
-        revision of this guard re-introduced by asking only
-        `isinstance(status, str)` (measured RED there, and it is why this arm
-        asks `live._status_is_discarded_by_every_writer` instead).
+        #7925 round 4 fixed a real over-rejection: under a VALUE-scoped guard, a
+        map no writer keeps was filtered out before the `SET`, so refusing it
+        rejected a write the writers accepted. That rule governed a guard whose
+        question was "can this value make the Event terminal?".
 
-        Pinned as a REGRESSION guard, not a new-guard assertion: it passes on
-        the pre-fix code too, by design.
-
-        ⛔ SCOPE: a MAP, and only a map. `bytes`/`set`/`bytearray` are
-        non-persistable too, but they are NOT accepted: no journal can encode
-        them, so accepting one made the record append raise a bare `TypeError`
-        (and, at `emit_belief`, drop the record silently). They are refused by
-        name in
-        `test_a_value_the_journal_cannot_encode_is_refused_not_left_to_crash`,
-        which is the neighbouring arm of this same three-predicate rule.
+        #13100 changes the question to "was a lifecycle DECLARED at all?", and on
+        that question the value is irrelevant: a caller passing
+        `status={"a": 1}` is asking for a lifecycle the model does not have, and
+        "accepted and then silently dropped" is the half-honoured shape #11825
+        itself records. So the arm refuses it — and the sibling pin in
+        `tests/test_ingest_event_endpoint.py` now covers `:Object` only, which is
+        where #7925's rule still applies unchanged.
         """
         api = self._api(sdk)
         # #13100 refuses the DECLARATION, not the value: a map no writer keeps is
