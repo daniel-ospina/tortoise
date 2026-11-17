@@ -148,6 +148,20 @@ from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verd
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
+# #10893: the read-stage timeline, so a breached wait budget can NAME the stage it
+# died in. `mark` is a NO-OP when no timeline is bound (every CLI, unit test and
+# in-process SDK user), so the hot read path pays one ContextVar read per
+# boundary — see `tortoise/read_stages.py`.
+from .read_stages import (
+    STAGE_EMBED_ENCODE,
+    STAGE_EMBED_GET,
+    STAGE_EP_ANNOTATION,
+    STAGE_FUSION,
+    STAGE_ORDERING,
+    STAGE_RESPONSE,
+    STAGE_RETRIEVAL,
+)
+from .read_stages import mark as _mark_read_stage
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -5219,6 +5233,13 @@ def _deleted_point_payload(id: str) -> dict:
 _JOURNAL_ENVELOPE_KEYS = (
     "type", "id", "point", "payload",
     "event_id", "ts", "recorded_ts", "initiated_by", "projection_version",
+    # ``seq`` is a journal POSITION, not a tenant property (#12894). It is the
+    # name `record_projection._carried_position` reads to decide a record's
+    # ordinal, and `record_projection.ENVELOPE_KEYS` already declares it an
+    # `_emit_event`-owned envelope name — it is reserved here too so no caller
+    # prop can put one on a line. See `_RESERVED_ENVELOPE_PROPS` for the
+    # collision this closes.
+    "seq",
 )
 
 #: Every `_emit_event` ENVELOPE name a caller prop must not be able to set —
@@ -5252,9 +5273,34 @@ _JOURNAL_ENVELOPE_KEYS = (
 #
 # The set is spelled out rather than derived so an auditor sees it whole; it
 # must stay equal to `_JOURNAL_ENVELOPE_KEYS` minus ``id``.
+#
+# ⛔ ``seq`` IS LOAD-BEARING HERE, not tidiness (#12894). `#9190` makes the
+# record CARRY its ordinal, so `record_projection._carried_position` READS a
+# record's `seq` and REFUSES the write when it disagrees with the enumeration.
+# A caller prop named ``seq`` rode `event.update(extra)` onto the journal line
+# top level (neither this set nor `_JOURNAL_ENVELOPE_KEYS` named it), so
+# ``update_point(pid, seq=42)`` produced a line whose ``seq`` disagreed with
+# every enumeration the journal could ever make — refusing that record's live
+# write (fail-soft: counted on `record_write_failures`, the row never lands) AND
+# every replay of it, since replay reads the same key. Unhealable by the one
+# repair the seam advertises. Stripped at intake like the other envelope names,
+# so a caller ``seq`` cannot forge a position.
+#
+# ⛔ AND THAT STRIP IS A CALLER-VISIBLE PROPS CHANGE, stated rather than
+# glossed (#12894 review cycle 10, P2). Before this reservation
+# ``create_point(kind, content, seq=42)`` PERSISTED ``properties(n).seq = 42``
+# and journalled it; now the value is dropped at intake with the usual
+# "ignoring client-supplied 'seq'" warning. No documented tenant prop, and no
+# caller or test in the tree, relies on it — but a caller that did would see the
+# property stop being written, so this is not byte-identical for that prop
+# class. The SDK's posture for envelope names is strip-and-ignore, and that
+# is kept here; `tortoise/api.py`'s `EventAPI._emit` REFUSES the same name
+# loudly (`_ENVELOPE_KEYS`) because on a POSITION a silent drop is the worse
+# posture for a caller that believes it set an ordinal. Two postures, each
+# documented at its own door.
 _RESERVED_ENVELOPE_PROPS = (
     "type", "point", "payload", "event_id", "ts", "recorded_ts",
-    "initiated_by", "projection_version",
+    "initiated_by", "projection_version", "seq",
 )
 
 #: The SERVER-MANAGED embedding journal fields — the names a caller may never
@@ -38069,9 +38115,20 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         # #689: retracted points must not feed Beta priors into EP.
+        #
+        # #13034: the hand-written `status <> 'retracted'` test below this
+        # comment was a SUBSET of the terminal vocabulary, so a claim ended by
+        # `superseded`/`deprecated`/`archived` (or by the legacy `outdated`
+        # flag, or by `isClosed`/a terminal pipeline stage) kept its stored
+        # prior in the SDK's persistent evidence set. Measured consequence: the
+        # hydrated ghost is passed to EP as an evidence ROOT, so a run
+        # (`compute_confidence()` with no anchors) assembled the operator wired
+        # to it and WROTE a fresh posterior onto a live downstream claim that
+        # nothing had touched — a dead claim voting by proxy. The shared
+        # predicate is the one rule every other read surface applies.
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
-            "AND (n.status IS NULL OR n.status <> 'retracted') "
+            f"AND {_terminal_excluded('n.status')} "
             "RETURN n.id, n.ep_alpha, n.ep_beta"
         ).result_set
         for pid, alpha, beta in rows:
@@ -42695,6 +42752,16 @@ class TortoiseSDK:
         if strategies.get("vector") and query and query.strip():
             from .embeddings import EmbeddingModel
             from .exceptions import EmbedderUnavailableError
+            # #10893: stage marks for the wait-bound breach. `mark` is a NO-OP
+            # when no timeline is bound (every CLI/test/SDK-user process), so
+            # this costs one ContextVar read per boundary — see
+            # `tortoise/read_stages.py` for why the instrument must not be able
+            # to look like the latency it measures.
+            # ⛔ `embed_get` and `embed_encode` are SEPARATE stages on purpose: a
+            # COLD LOAD (~57 s measured) is setup the #4055 exemption already
+            # excuses, while an ENCODE is work this request owns. Collapsing
+            # them is how the two got argued as one thing on #10893.
+            _mark_read_stage(STAGE_EMBED_GET)
             model = None
             try:
                 model = EmbeddingModel.get()
@@ -42708,6 +42775,7 @@ class TortoiseSDK:
                 # ``no_embedder`` term names — carry the recorded cause.
                 _vec_reason = EmbeddingModel.absent_reason()
             else:
+                _mark_read_stage(STAGE_EMBED_ENCODE)
                 try:
                     query_vec = model.encode([_dense_query])[0].tolist()
                 except Exception:  # noqa: BLE001, RUF100
@@ -42847,6 +42915,12 @@ class TortoiseSDK:
             tuple(expanded_kinds)
             if leg_trace is not None and query_vec is not None
             and expanded_kinds else None)
+        # #10893: ONE stage for all three retrieval legs plus the expansion
+        # passes below that re-ask the store. The legs run in PARALLEL under a
+        # per-leg deadline, so a per-leg sum would exceed the stage that
+        # contains it; per-leg detail already has its own channel (`leg_trace`,
+        # a different question).
+        _mark_read_stage(STAGE_RETRIEVAL)
         raw_results = degradation_chain(
             graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
@@ -43342,6 +43416,7 @@ class TortoiseSDK:
                 # order by itself.
                 from tortoise.search_engine import clamp_lexical_fusion_weight
                 fusion_weights = clamp_lexical_fusion_weight(fusion_weights)
+            _mark_read_stage(STAGE_FUSION)
             fused = rrf_fusion(
                 ranked_lists,
                 strategy_names=list(raw_results.keys()),
@@ -44152,6 +44227,10 @@ class TortoiseSDK:
         result_ids = result_ids[:limit]
 
         # 6. EP annotation (Point only)
+        # #10893: the decoration read is the FIRST of the two graph round trips
+        # on this path (step 7's batch content fetch is the second), and the one
+        # a breach never used to be able to name.
+        _mark_read_stage(STAGE_EP_ANNOTATION)
         ep_breakdowns = annotate_ep_batch(graph, result_ids) if entity_type == "point" else {}
 
         # 7. Fetch entity content in BATCH (not N+1)
@@ -44667,6 +44746,12 @@ class TortoiseSDK:
                 r.subject_unavailable = SUBJECT_BINDING_UNAVAILABLE
 
         # 9. Order results
+        # #10893 review F1: the ordering pass is a READ of its own on the graph
+        # branch (`GraphRanker.rerank` -> its own `_fetch_signals`, plus W4
+        # enrichment), so it gets its own stage. Without it those round trips
+        # were charged to `ep_annotation` AFTER that stage had returned — a
+        # confident lie, which is the one thing this instrument must not do.
+        _mark_read_stage(STAGE_ORDERING)
         if order_by == "graph":
             # #25: graph-informed rerank — weighted fusion of similarity +
             # persisted EP confidence + operator connectivity + recency decay.
@@ -44699,6 +44784,11 @@ class TortoiseSDK:
             # and makes no claim. A duck-typed `graph_ranker` whose read we
             # cannot observe makes no claim either (None ⇒ key absent).
             _consulted, _answered = _belief_read(ranker, ranked)
+            # #10893 review F1: this branch RETURNS here, so without a mark of
+            # its own it would never reach the terminal stage and a breach in
+            # response assembly would be published as `ordering` — blaming the
+            # rerank for time the answer took to be written out.
+            _mark_read_stage(STAGE_RESPONSE)
             return _with_read_status(_belief_label(
                 ranked, consulted=_consulted, answered=_answered))
         belief_consulted = False
@@ -44773,6 +44863,10 @@ class TortoiseSDK:
         from .ranking import annotate_belief_order as _belief_label
         # `answered` is only meaningful on the confidence path, which is the
         # only one that reads (`read` stays None on the relevance path).
+        # #10893: TERMINAL stage. A breach that lands here says "the read is
+        # DONE and the answer is late" — the one attribution that points at
+        # response assembly or a blocked loop rather than at any retrieval step.
+        _mark_read_stage(STAGE_RESPONSE)
         return _with_read_status(_belief_label(
             out, consulted=belief_consulted,
             answered=answered if order_by == "confidence" else None))
