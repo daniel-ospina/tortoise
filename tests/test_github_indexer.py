@@ -550,7 +550,16 @@ def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk)
 
 
 def test_a_FALSY_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
-    """#13288 review R2/F1, the half that had no pin: `isClosed=0`.
+    """#13326, the half that had no pin: `isClosed=0`.
+
+    ⚠️ Attribution corrected (#13326 review P3): this half was NOT #13288 round-2 `F1`
+    — that finding is "the position arm SHADOWS the unresolvable guard, and the new
+    comment says it cannot", a different finding in a different file, and no #13288
+    comment mentions `isClosed=0`, `Integer`, or a falsy non-boolean marker (measured:
+    0 matches across that issue's whole comment set). The closest prior record is
+    #13289's review P3 — "a falsy non-boolean `outdated` (`0`, `''`) reads live in
+    Python but terminal in Cypher", recorded there as **RECORDED, NOT FIXED** — the same
+    excluded middle one FIELD over; the `isClosed` field itself was found for #13326.
 
     `create_object(..., isClosed=1)` is documented at the truthy pin BELOW
     (`test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`).
@@ -612,7 +621,7 @@ def test_a_FALSY_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
         "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) "
         "RETURN o.isClosed, o.pipelineSlot").result_set[0]
     assert mints == [0, 0, 0, 0], (
-        "`isClosed=0` has no live holder, so no fold can ever run on it — but it "
+        "`isClosed=0` has no live holder, so no CLOSING fold is dispatched for it — but it "
         f"was read as OPEN and every poll minted another close ({mints}); events "
         f"now {kinds}")
     assert kinds == ["github.issue.open"], f"a false close was minted: {kinds}"
@@ -1619,8 +1628,12 @@ def test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
     t = MockGitHubTransport(issues=[gh_issue(1)])
     _run(_indexer(t), sdk)
     proj = sdk._get_proj()
-    # A row the fold has already ended, with the marker written by a door that
-    # stores it uncoerced (`1`, not `True`) and the stage left non-terminal.
+    # A row the fold has already ended, with the marker written by a raw graph
+    # write, as a door would store it (`1`, not `True`), and the stage left
+    # non-terminal. In this file "door" means the PUBLIC entrypoint, which the
+    # falsy pin above spells out (`update_knowledge`, "not a raw query"), so
+    # calling this raw Cypher a door (as this comment did) named the wrong side
+    # of that distinction.
     proj.g.query(
         "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) "
         "SET o.isClosed = 1, o.pipelineStageId = 'in_progress', "
