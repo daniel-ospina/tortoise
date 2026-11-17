@@ -56,15 +56,16 @@ below it, with no symbol having changed. ⚠️ **That drift is already measurab
 `tortoise/sdk.py:` dedupes them to 151, which is why the as-written spelling is the one quoted), and
 not one of them names a symbol that went away. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
-Most rows do carry a handle — the writer named beside the cite, or the Cypher quoted on it (**13 of the
-18 census rows in §1**) — and that handle is what makes the line re-derivable. But **five rows carry the
-number and nothing else**: row 10 (`residency.py:284`), row 11 (`why_snapshot.py:484`), row 14
-(`webhook_delivery.py:487`), row 15 (module names plus `hosted_api:32965` and
-`pack_manifest_store.py:467`, and no writer symbol — the same shape as row 10), and row 18 (which
-declares itself `found, NOT censused` — a GAP, see §7). Those five drift silently and no symbol will be
-there to re-find: for them the number IS the citation, and it is stale on any head but this one. (For
-rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the Cypher — but
-the row's own WRITE cite is not.) Re-derive each cite from the text
+Most rows name the writer beside the cite, or quote the Cypher on it, and that handle is what makes the line
+re-derivable. ⛔ **No count of the rows that "carry a handle" is quoted here on purpose**: the figure turns
+on whether a bare module name counts as one, and it has already been read three different ways (15, 14 and
+13 of the 18 rows in §1). What IS checkable is the five rows carrying no re-findable handle at all: rows
+10 (`residency.py:284`), 11 (`why_snapshot.py:484`) and 14 (`webhook_delivery.py:487`) give a number and
+nothing else; row 15 gives bare module names beside `hosted_api:32965`, which is not even a `path.py`
+spelling; and row 18 declares itself `found, NOT censused` — a GAP, see §7. Those five drift silently and
+no symbol will be there to re-find: for them the number IS the citation, and it is stale on any head but
+this one. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
+Cypher — but the row's own WRITE cite is not.) Re-derive each cite from the text
 its own row carries, which is the rule §9.1 of `STORAGE-ARCHITECTURE.md` applies to its own cites.
 The **byte** figures do not drift this way: they are re-derivable from the committed JSON arms at any
 head (§1.1, §4).
