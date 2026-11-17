@@ -34749,10 +34749,13 @@ def _drop_org_acl_users(org_id: str) -> None:
     that arm's own hedge that they "may be orphaned" — emitted before it can
     know whether the sibling will certify — so nothing announces the LOSS once
     it has happened.
-    Same #13287, ten times the blast radius of the partial case, and strictly
-    more likely. One enumeration (deriving the gids from the certified namespace
-    list) closes both arms; until then the `except` arm is a fail-open and is
-    recorded as such.
+    Same #13287, and WORSE than the partial case rather than "ten times" it: the
+    partial arm loses only the rows past one page (`PAGE_READ_SIZE` = 1000, so
+    ZERO for an org within a page and a shrinking fraction as the org grows),
+    while this arm loses the WHOLE set — and it is the likelier trigger, an
+    ordinary 5xx rather than a store anomaly. One enumeration (deriving the gids
+    from the certified namespace list) closes both arms; until then the `except`
+    arm is a fail-open and is recorded as such.
     """
     from tortoise.supabase_control import (
         get_control_plane,
