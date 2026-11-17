@@ -128,7 +128,7 @@ example — **nine** are wrapped English sentences / docstring prose (e.g. `oaut
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone finds 175, which is why
+predicate over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone finds 176, which is why
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose inside the docstring,
 which is why the tool's verb total is an upper bound.
