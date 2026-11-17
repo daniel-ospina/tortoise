@@ -1712,3 +1712,165 @@ def test_the_pending_report_HEDGES_and_never_accuses_a_row(env, monkeypatch):
         "the report accused a row that may never have been written: " + text)
     assert "written without a durable journal record" not in text, (
         "the second arm still asserts the write happened: " + text)
+
+
+def test_an_EMPTY_marker_is_UNKNOWN_content_not_an_absent_marker(env):
+    """An empty marker reads as ``None`` (unreadable), never as ``[]`` (clean).
+
+    ⛔ THE DELETION DIRECTION IS FAIL-OPEN, which is why this needs its own row.
+    Revert `if not ids: return None` to `return ids` and an empty marker — a
+    kill inside an older `write_text`'s truncate-then-write window, or a file
+    another tool truncated — reads as "no marker": the next preview prints the
+    `0 rows ⇒ dead weight` sentence and exits **0**, certifying a graph it never
+    measured. That is the exact false PASS the marker exists to prevent.
+
+    Nothing reached this arm: every marker write goes through
+    `_write_pending_locked` (returns early on an empty set) or
+    `_set_pending_locked` (clears the file instead of writing), so no test could
+    ever put an empty marker on disk, and the one marker-path row that touches
+    the filesystem directly creates a DIRECTORY there — which exercises the
+    `except` arm, not this one. (Review finding 2.1, 2026-11-17.)
+    """
+    sdk, events = env
+    journal = str(events / "events.jsonl")
+    marker = Path(journal + ".rewrite-pending")
+    marker.write_text("", encoding="utf-8")
+
+    assert tool._read_pending(journal) is None, (
+        "an EMPTY marker read as 'no marker' — the next preview would print the "
+        "`0 rows ⇒ dead weight` sentence over an unmeasured graph")
+
+    with pytest.raises(tool.Refused) as raised:
+        tool.run(sdk, execute=False)
+    assert raised.value.reason == tool.REFUSE_PENDING_UNREADABLE
+
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        code = tool.main(["--db-path", str(sdk._db_path),
+                          "--event-log-path", journal])
+    assert code == 2, f"an empty marker exited {code} on the PREVIEW arm"
+    assert tool.REFUSE_PENDING_UNREADABLE in err.getvalue(), err.getvalue()
+    assert "Traceback" not in err.getvalue(), err.getvalue()
+    assert "dead weight" not in err.getvalue(), (
+        "an unreadable marker must not authorise the drop: " + err.getvalue())
+
+
+def test_a_marker_holding_INVALID_UTF8_refuses_BY_NAME_not_with_a_traceback(env):
+    """A non-UTF-8 marker is unreadable state: exit 2 with the refusal named.
+
+    `UnicodeDecodeError` is a `ValueError` — neither `OSError` nor
+    `AttributeError` — so leaving it out of `_read_pending`'s caught tuple let a
+    marker holding any byte that is not valid UTF-8 escape past `run`'s
+    unguarded call and past `main`'s `except Refused`: a TRACEBACK and exit 1,
+    with no `REFUSED` line and no repair instruction, on BOTH arms.
+
+    The exit STATUS stayed non-zero (fail-closed), but the module's documented
+    contract for a marker *"this run could not READ"* is exit 2 plus the refusal
+    name, and the preview is the arm an operator runs first — the same defect an
+    earlier round fixed for the directory case. (Review finding 3, 2026-11-17.)
+    """
+    sdk, events = env
+    journal = str(events / "events.jsonl")
+    Path(journal + ".rewrite-pending").write_bytes(b"\xff\xfe\n")
+
+    assert tool._read_pending(journal) is None, (
+        "a marker holding invalid UTF-8 must read as unreadable, not raise")
+
+    with pytest.raises(tool.Refused) as raised:
+        tool.run(sdk, execute=False)
+    assert raised.value.reason == tool.REFUSE_PENDING_UNREADABLE
+
+    for extra in ([], ["--execute"]):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = tool.main(["--db-path", str(sdk._db_path),
+                              "--event-log-path", journal] + extra)
+        arm = "execute" if extra else "preview"
+        assert code == 2, f"a non-UTF-8 marker exited {code} on the {arm} arm"
+        assert tool.REFUSE_PENDING_UNREADABLE in err.getvalue(), err.getvalue()
+        assert "Traceback" not in err.getvalue(), (
+            f"the {arm} arm died with a traceback instead of refusing: "
+            + err.getvalue())
+
+
+def test_rewrite_refuses_a_CALLER_BUILT_report_whose_marker_state_is_UNKNOWN(env):
+    """`rewrite` re-applies the marker gate a caller-built `Report` skipped.
+
+    ⛔ NO ASSERTION REACHED THIS GUARD. `Report.pending` defaults to `[]` and
+    every row that builds a `Report` sets a list, so deleting the four lines
+    left the whole suite green — while a direct `rewrite(...)` call carrying an
+    unknown marker state is exactly the caller that skipped `run`'s read, and an
+    unknown marker state is what must stop a write. It is agent-infra#3442 in
+    its inverse form: not an assertion that cannot vary, but a guard no
+    assertion reaches. (Review finding 2.2, 2026-11-17.)
+    """
+    sdk, events = env
+    oid = sdk.create_object("direct", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    journal = str(events / "events.jsonl")
+
+    rep = tool.Report(journal=journal, pending=None, total=1,
+                      rows=[{"id": oid, "status": "outdated"}])
+
+    with pytest.raises(tool.Refused) as raised:
+        tool.rewrite(sdk, rep)
+    assert raised.value.reason == tool.REFUSE_PENDING_UNREADABLE
+    assert "Nothing was written" in raised.value.message
+    assert rep.executed is False, (
+        "the report must not claim a run it refused to perform")
+    assert _status(sdk, oid) == "outdated", (
+        "an unknown marker state must stop the write, not be written past")
+    assert tool._read_pending(journal) == [], (
+        "a refused rewrite must not have touched the marker")
+
+
+def test_the_pending_DETAIL_arm_scopes_its_remedy_like_the_summary(env, monkeypatch):
+    """The two pending arms print in ONE report, so they must not contradict.
+
+    The detail block (`rep.pending`) is emitted BEFORE the preview summary, and
+    both strings land in the same stdout. The detail arm used to prescribe
+    ``re-run --execute after rebuild_all`` UNCONDITIONALLY while the summary
+    ~40 lines later prescribed ``--execute`` first and ``rebuild_all`` only for
+    the ids whose live status is already the new word — so an operator was told
+    to run a destructive whole-graph journal replay for ids that provably need
+    none, and told the opposite in the same breath. The marker cannot tell
+    "never written" from "written with no durable record", and only the second
+    needs a replay.
+
+    It also carried the cycle-12 P3: ``confirm each one by hand`` stated no
+    criterion, so an operator hand-clearing the canonical live-only id restored
+    the very ``dead weight`` sentence this marker exists to withhold (measured).
+    (Review findings 4 and the cycle-12 P3, 2026-11-17.)
+    """
+    sdk, events = env
+    oid = sdk.create_object("scoped", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    journal = str(events / "events.jsonl")
+
+    real_write = tool._write_pending
+
+    def die_after_marking(journal_arg, ids):
+        real_write(journal_arg, ids)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(tool, "_write_pending", die_after_marking)
+    with pytest.raises(KeyboardInterrupt):
+        tool.run(sdk, execute=True)
+    monkeypatch.setattr(tool, "_write_pending", real_write)
+
+    assert tool._read_pending(journal) == [oid], "precondition: the row is marked"
+
+    text = tool.render(tool.run(sdk, execute=False))
+
+    assert "re-run `--execute` after `rebuild_all`" not in text, (
+        "the detail arm still prescribes an unconditional journal replay: " + text)
+    assert ("`rebuild_all` only for the ids whose live status is already the new "
+            "word") in text, (
+        "neither arm scopes the replay to the ids that actually need one: " + text)
+    assert (f"live status `{tool.REWRITE_TO}` AND its last journal record "
+            f"`{tool.REWRITE_TO}`") in text, (
+        "`confirm by hand` states no criterion, so a live-only row can be "
+        "hand-cleared into the false `dead weight` reading: " + text)
+    assert "confirm each one by hand, and delete the file" not in text, (
+        "the detail arm still tells an operator to hand-delete the marker "
+        "without a criterion: " + text)

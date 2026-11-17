@@ -635,7 +635,16 @@ def _read_pending(journal: str | None) -> list[str] | None:
         return []
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, AttributeError):
+    except (OSError, AttributeError, UnicodeDecodeError):
+        # ⛔ `UnicodeDecodeError` is NEITHER `OSError` NOR `AttributeError` — it
+        # is a `ValueError`. Left out, a marker holding any non-UTF-8 byte (hand
+        # edited, or left by another tool — the same class of state the
+        # directory case below covers) propagated out of here, past `run`'s
+        # unguarded call and past `main`'s `except Refused`, and the operator got
+        # a TRACEBACK and exit 1 with no `REFUSED` line and no repair. The exit
+        # STATUS was still non-zero, but the documented contract for a marker
+        # "this run could not READ" is exit 2 with the refusal name, and that is
+        # the arm an operator runs first. (Review finding 3, 2026-11-17.)
         return None
     ids = [line.strip() for line in text.splitlines() if line.strip()]
     if not ids:
@@ -1323,12 +1332,26 @@ def render(rep: Report) -> str:
             "status may be the legacy word still, or the new one with no journal "
             "record behind it — in the latter case `rebuild_all` restores the "
             "legacy word. "
+            # ⛔ THE REMEDY IS SCOPED, NOT UNCONDITIONAL (review finding 4). This
+            # arm and the summary below it print in ONE report, so a blanket
+            # `rebuild_all` here contradicts the accurate sentence down there and
+            # sends an operator into a destructive whole-graph journal replay for
+            # ids that provably need none — the marker cannot tell "never written"
+            # from "written with no record", and only the LATTER needs a replay.
             "The `0 rows` reading on this graph is NOT a measurement until they "
-            "are repaired — re-run `--execute` after `rebuild_all`. An id whose "
-            "row no longer exists is discharged automatically once its journal "
-            "record says rewritten or deleted; for any id that survives that, "
-            "read the marker, confirm each one by hand, and delete the file — "
-            "no replay can clear a row that is gone.")
+            "are repaired — re-run `--execute` to finish them, and run "
+            "`rebuild_all` only for the ids whose live status is already the new "
+            "word with no record behind it. An id whose row no longer exists is "
+            "discharged automatically once its journal record says rewritten or "
+            "deleted. "
+            # ⛔ AND THE CONFIRMATION'S CONTENT IS STATED (cycle-12 P3): "confirm by
+            # hand" with no criterion told an operator to hand-clear a live-only
+            # row and then restored the very `dead weight` sentence this marker
+            # exists to withhold (measured on the canonical live-only id).
+            "For an id that survives that, the confirmation is: live status "
+            f"`{REWRITE_TO}` AND its last journal record `{REWRITE_TO}`. Anything "
+            "else has no record to stand on and is repaired by `--execute`, "
+            "never hand-cleared — no replay can clear a row that is gone.")
     if rep.flag_count:
         lines.append(
             f"  note: {rep.flag_count} :Object row(s) carry the legacy `outdated` "
