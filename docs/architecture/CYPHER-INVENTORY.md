@@ -100,8 +100,11 @@ rg -o '\b(MATCH|MERGE)\s*\(' tortoise/           → 2,326 occurrences across 14
 = 1301  classified Cypher statements + 256 non-Cypher door calls
 ```
 
-Every line of that subtraction is computed by the tool (`--json` → `rg_totals`); the **0** in the
-third row is a measurement, not a convenience — it is the residual the first version of this tool
+The first two rows are measured by the tool (`--json` → `rg_totals`), and so is the **−52**. ⛔ The
+**third** row is a **residual**, not a measurement — `rg_totals` has no such key; it is the value that
+balances the subtraction, printed so a reader can see the arithmetic close. An earlier revision said
+*every* line here was `rg_totals`-computed, which overstated it (`#13098` review P3). The **0** is a
+measurement, not a convenience — it is the residual the first version of this tool
 silently absorbed, and the `#13098` review caught it closing over a 52-statement undercount. The
 `MATCH|MERGE` figure is **not** a statement count and is printed only because a reader will run it:
 one statement can contain two node patterns, and a statement built with `UNWIND` contains none, so it
@@ -348,6 +351,7 @@ the order was fixed (`#13098` review F8).
 
 <!-- cypher-inventory:sites = 1301 -->
 <!-- cypher-inventory:files = 97 -->
+<!-- cypher-inventory:files_scanned = 295 -->
 <!-- cypher-inventory:unresolved = 104 -->
 <!-- cypher-inventory:candidates = 593 -->
 <!-- cypher-inventory:shape_adjacency = 289 -->

@@ -157,6 +157,12 @@ class Candidate:
     ordered: bool
     #: names of corpus rows this candidate's corpus must contain (refused if absent)
     requires: tuple[str, ...] = ()
+    #: rows whose EDGE-CASE PROPERTY must hold in both stores, as
+    #: `(row id, column, must_be_null)`. ⛔ Presence alone cannot fail for the thing
+    #: the row is named after: `p-null-created` being PRESENT proves nothing once a
+    #: seeding change gives it a `created_at`, and the `null-order` mutation then
+    #: reorders an `ORDER BY` with no NULLs in it (`#13098` review P3).
+    properties: tuple[tuple[str, str, bool], ...] = ()
     notes: str = ""
     #: the statement parameters THIS candidate binds (merged with the tenant).
     #: It used to be a name check in `main` (`if candidate.name == "point-by-id"`),
@@ -182,6 +188,7 @@ CANDIDATES: dict[str, Candidate] = {
         ordered=False,
         requires=("p-null-content",),
         params={"id": "p-null-content"},
+        properties=(("p-null-content", "content", True),),
         mutations={
             # a projection that silently drops the null-content row is the classic
             # "no answer reads as an absence" defect (§17.3)
@@ -240,6 +247,10 @@ CANDIDATES: dict[str, Candidate] = {
         columns=("id", "content", "created_at"),
         ordered=True,
         requires=("p-null-created", "p-retired"),
+        # the two properties that make those rows edge cases: the NULL the
+        # `null-order` mutation reorders, and the retraction `drop-row` removes
+        properties=(("p-null-created", "created_at", True),
+                    ("p-retired", "valid_to", False)),
         mutations={
             "null-order": "",  # mutated in `_mutated`: NULLS LAST is appended
             "drop-row": " AND id <> 'p-retired'",
@@ -291,12 +302,50 @@ def _redis_url(graph_uri: str) -> str:
     return graph_uri
 
 
+def _refuse_a_foreign_graph(graph, graph_name: str) -> None:
+    """Refuse to seed into a graph that is not the harness's own corpus graph.
+
+    ⛔ THE SEED DELETES EVERY `:Point` IN THE TARGET (it compares one corpus across
+    both stores, so it has to own the graph). That is only safe on a graph the
+    harness built — and the target is whatever the operator names, or (until this
+    change) whatever `TORTOISE_DB_URI` happened to point at — so a mistyped graph
+    name or a bare invocation in a developer shell would wipe a real graph's
+    points (`#13098` review P2-3). Two checks, both fail-closed (`main` turns the
+    raise into exit 2): a label this harness never writes, or a Point id it never
+    wrote.
+
+    ⚠️ This is a TARGET check, not a proof: a graph whose only label is `Point`
+    and whose ids all happen to be corpus ids is indistinguishable from a corpus.
+    It is here so the destructive path cannot be taken by ACCIDENT.
+    """
+    labels = {str(r[0]) for r in graph.query(
+        "MATCH (n) UNWIND labels(n) AS l RETURN DISTINCT l").result_set}
+    foreign_labels = sorted(labels - {"Point"})
+    if foreign_labels:
+        raise RuntimeError(
+            f"refusing to seed graph {graph_name!r}: it holds node label(s) {foreign_labels} "
+            "this harness never writes, so it is not a corpus graph — the seed would "
+            "DETACH DELETE every :Point in it. Point --graph-name at a fresh graph."
+        )
+    corpus_ids = {row["id"] for row in CORPUS}
+    written = {str(r[0]) for r in graph.query("MATCH (n:Point) RETURN n.id").result_set}
+    foreign_ids = sorted(i for i in written
+                         if i not in corpus_ids and not i.startswith("p-pad-"))
+    if foreign_ids:
+        raise RuntimeError(
+            f"refusing to seed graph {graph_name!r}: it already holds {len(foreign_ids)} :Point "
+            f"id(s) this harness never wrote (e.g. {foreign_ids[:4]}), so it is not a corpus "
+            "graph — the seed would DETACH DELETE them. Point --graph-name at a fresh graph."
+        )
+
+
 def seed_graph(graph_uri: str, graph_name: str) -> dict[str, Any]:
     """Seed the corpus into a real FalkorDB graph. Returns the lane it used."""
     from falkordb import FalkorDB  # local import: a missing driver must read as 2
 
     client = FalkorDB.from_url(_redis_url(graph_uri))
     graph = client.select_graph(graph_name)
+    _refuse_a_foreign_graph(graph, graph_name)
     graph.query("MATCH (n:Point) DETACH DELETE n")
     for row in CORPUS:
         props = {k: v for k, v in row.items() if v is not None}
@@ -721,15 +770,58 @@ def bench(graph_uri: str, graph_name: str, dsn: str, candidate: Candidate,
 
 
 # --------------------------------------------------------------------------- #
+# the edge-case PROPERTY pin
+# --------------------------------------------------------------------------- #
+def _disarmed_properties(graph_uri: str, graph_name: str, gdsn: str,
+                        candidate: Candidate) -> list[str]:
+    """Edge-case rows whose PROPERTY no longer holds, read back from BOTH stores.
+
+    The presence pin above (`id in seeded_graph & seeded_record`) cannot fail when
+    a seeding change leaves the row in place but strips the property that made it
+    an edge case: give `p-null-created` a `created_at` and the `null-order`
+    mutation has no NULL placement left to reverse, so the mismatch run still
+    exits 1 — over a corpus that no longer exercises the class the doc claims
+    (`#13098` review P3).
+
+    ⚠️ The column name and the predicate are interpolated from this module's own
+    declared `Candidate.properties` constants, never from argv, so a caller cannot
+    reach either: this is not an injection seam.
+    """
+    disarmed: list[str] = []
+    for row_id, column, must_be_null in candidate.properties:
+        predicate = "IS NULL" if must_be_null else "IS NOT NULL"
+        graph_rows = run_cypher(
+            graph_uri, graph_name,
+            f"MATCH (n:Point {{id:$id}}) WHERE n.{column} {predicate} RETURN n.id",
+            {"id": row_id},
+        )[0]
+        record_rows = run_sql(
+            gdsn,
+            "SELECT id FROM public.point "
+            "WHERE org_id = %(org_id)s AND graph_id = %(graph_id)s "
+            f"AND id = %(id)s AND {column} {predicate}",
+            _scoped_params({"id": row_id}),
+        )[0]
+        if not graph_rows or not record_rows:
+            disarmed.append(f"{row_id}.{column} {predicate} "
+                            f"(graph={bool(graph_rows)}, record={bool(record_rows)})")
+    return disarmed
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--graph-uri", default=os.environ.get("TORTOISE_DB_URI", ""),
-                        help="a real FalkorDB lane (docker://:pw@host:port)")
+    parser.add_argument("--graph-uri", default="",
+                        help="a real FalkorDB lane (docker://:pw@host:port) — REQUIRED and "
+                             "never taken from the environment: the seed DELETES the "
+                             "target graph's :Point rows")
     parser.add_argument("--graph-name", default=os.environ.get("CYPHER_DIFF_GRAPH", "cypher-diff"))
-    parser.add_argument("--record-dsn", default=os.environ.get("TORTOISE_RECORD_DSN", ""),
-                        help="a real record Postgres DSN")
+    parser.add_argument("--record-dsn", default="",
+                        help="a real record Postgres DSN — REQUIRED and never taken from the "
+                             "environment (the seed deletes and rewrites its tenant's "
+                             "public.point rows)")
     parser.add_argument("--candidate", default="point-by-id", choices=sorted(CANDIDATES) + ["all"])
     parser.add_argument("--mutate", default=None,
                         help="inject a deliberate porting defect (null-order / drop-row / drop-null)")
@@ -749,9 +841,20 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_NO_VERDICT
 
     if not args.graph_uri or not args.record_dsn:
+        # ⛔ NO AMBIENT DEFAULT for either target. They used to fall back to
+        # `TORTOISE_DB_URI` / `TORTOISE_RECORD_DSN` — the PRODUCT's own stores —
+        # while this harness DELETEs the target graph's :Point rows and rewrites
+        # its tenant's `public.point` rows, so a bare invocation in a developer
+        # shell could wipe the graph that shell pointed at (`#13098` review P2-3).
         print("cypher-diff: could not run — both --graph-uri and --record-dsn are required "
-              "(a diff without both stores would be comparing nothing to nothing)",
+              "(a diff without both stores would be comparing nothing to nothing; both are "
+              "named explicitly because the seed DELETES the target graph's :Point rows)",
               file=sys.stderr)
+        return 2
+
+    if args.bench and args.candidate == "all":
+        # refused BEFORE anything is seeded: a misuse must not touch a store
+        print("cypher-diff: --bench takes one --candidate", file=sys.stderr)
         return 2
 
     if args.bootstrap_record:
@@ -796,12 +899,23 @@ def main(argv: list[str] | None = None) -> int:
                   f"record={sorted(seeded_record)}); the diff would be vacuous for them",
                   file=sys.stderr)
             return 2
+        # ⛔ PRESENCE IS NOT THE PIN. A row can be in both stores and no longer
+        # BE the edge case it is named after (see `_disarmed_properties`).
+        try:
+            disarmed = _disarmed_properties(args.graph_uri, args.graph_name,
+                                            args.record_dsn, CANDIDATES[name])
+        except Exception as exc:  # noqa: BLE001 — a store that cannot answer is "could not run"
+            print(f"cypher-diff: could not verify the corpus edge properties — "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
+        if disarmed:
+            print(f"cypher-diff: could not run {name} — the corpus row(s) are present but the "
+                  f"PROPERTY that makes them edge cases does not hold: {disarmed}",
+                  file=sys.stderr)
+            return 2
 
     if args.bench:
-        # the measurement a flip depends on — run only for one candidate
-        if args.candidate == "all":
-            print("cypher-diff: --bench takes one --candidate", file=sys.stderr)
-            return 2
+        # the measurement a flip depends on — refused for "all" above, before the seed
         measurement = bench(args.graph_uri, args.graph_name, args.record_dsn,
                             CANDIDATES[args.candidate], args.bench, args.bench_iters)
         print(json.dumps(measurement, indent=2))

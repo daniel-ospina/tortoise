@@ -413,3 +413,130 @@ def test_bootstrap_tolerates_a_partial_apply_that_does_build_the_record(monkeypa
     monkeypatch.setattr(harness.subprocess, "run", _run)
     assert harness.bootstrap_record("postgresql://u:p@127.0.0.1/db") == 0
     assert calls["n"] > 1
+
+
+def test_the_files_scanned_count_is_pinned_too(tmp_path):
+    """§0 publishes "295 files scanned", which `files` (the files WITH a site) is not.
+
+    `check()` compared only the keys it computed, so the doc's scanned count could
+    drift by any amount while `--check` stayed green (`#13098` review P3).
+    """
+    result = census.census(("tortoise",))
+    doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    assert "<!-- cypher-inventory:files_scanned = " in doc_text
+    path = tmp_path / "doc.md"
+    path.write_text(doc_text.replace(
+        f"<!-- cypher-inventory:files_scanned = {result['files_scanned']} -->",
+        f"<!-- cypher-inventory:files_scanned = {result['files_scanned'] + 1} -->", 1),
+        encoding="utf-8")
+    assert census.check(path, result) == 1
+    # ⛔ AND it is reported as a COUNT MISMATCH, not as a pin the tool stopped
+    # computing: dropping the key from `check()`'s `actual` still reddens through
+    # the STALE arm, so `== 1` alone cannot tell the two apart (measured — that
+    # mutant survived this assertion).
+    import contextlib
+    import io
+
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        census.check(path, result)
+    assert "DRIFT files_scanned" in captured.getvalue(), captured.getvalue()
+
+
+def test_a_corpus_row_that_lost_its_edge_property_is_refused(monkeypatch, capsys):
+    """Presence is not the pin: the NULL that makes `p-null-created` an edge case is.
+
+    A seeding change that keeps the row in both stores but gives it a
+    `created_at` disarms the `null-order` mutation — the run still exits 1, for
+    the wrong reason — while the presence pin stays green (`#13098` review P3).
+    """
+    ids = [row["id"] for row in harness.CORPUS]
+    monkeypatch.setattr(harness, "seed_graph", lambda *_a, **_k: {"graph": "g", "points": 6})
+    monkeypatch.setattr(harness, "seed_record", lambda *_a, **_k: {"points": 6})
+
+    def _run(statement, *_a, **_k):
+        # every presence question is answered YES; every PROPERTY question is
+        # answered NO — exactly the shape a stripped property produces
+        if "WHERE n." in statement or " IS NULL" in statement or " IS NOT NULL" in statement:
+            return [], ["id"]
+        return [(i,) for i in ids], ["id"]
+
+    monkeypatch.setattr(harness, "run_cypher", lambda _u, _g, cypher, params: _run(cypher))
+    monkeypatch.setattr(harness, "run_sql", lambda _d, sql, params: _run(sql))
+    rc = harness.main(["--graph-uri", "docker://:p@127.0.0.1:1",
+                       "--record-dsn", "postgresql://u:p@127.0.0.1/db",
+                       "--candidate", "point-listing"])
+    assert rc == 2
+    assert "PROPERTY" in capsys.readouterr().err
+
+
+class _FakeGraph:
+    """A graph that reports its labels and its Point ids — nothing else is read."""
+
+    def __init__(self, labels, ids):
+        self.labels, self.ids = labels, ids
+
+    def query(self, statement):
+        from types import SimpleNamespace
+
+        if "UNWIND labels" in statement:
+            return SimpleNamespace(result_set=[(label,) for label in self.labels])
+        return SimpleNamespace(result_set=[(i,) for i in self.ids])
+
+
+def test_a_graph_this_harness_did_not_build_is_refused_not_wiped():
+    """The seed DETACH DELETEs every `:Point` in its target, so the target is checked.
+
+    Two refusals, both raising (which `main` turns into exit 2): a node label the
+    harness never writes, and a Point id it never wrote — the shapes a mistyped
+    `--graph-name`, or a target inherited from `TORTOISE_DB_URI`, would produce
+    (`#13098` review P2-3).
+    """
+    with pytest.raises(RuntimeError, match="Operator"):
+        harness._refuse_a_foreign_graph(_FakeGraph({"Point", "Operator"}, []), "real-graph")
+    with pytest.raises(RuntimeError, match="never wrote"):
+        harness._refuse_a_foreign_graph(_FakeGraph({"Point"}, ["a-real-point-id"]), "real-graph")
+    # its own corpus graph, and its own bench padding, is the one shape it accepts
+    harness._refuse_a_foreign_graph(
+        _FakeGraph({"Point"}, [row["id"] for row in harness.CORPUS] + ["p-pad-00001"]),
+        "cypher-diff",
+    )
+
+
+def test_the_seed_refuses_a_foreign_graph_before_it_deletes(monkeypatch):
+    """The guard is WIRED into `seed_graph`, not merely available.
+
+    ⛔ Calling `_refuse_a_foreign_graph` directly (the test above) stays green if
+    the call site is deleted — measured: replacing it with `pass` survived. This
+    drives `seed_graph` through a stand-in `falkordb` so a missing call REDDENS.
+    """
+    from types import SimpleNamespace
+
+    client = SimpleNamespace(select_graph=lambda name: _FakeGraph({"Point", "Operator"}, []))
+    monkeypatch.setitem(sys.modules, "falkordb",
+                        SimpleNamespace(FalkorDB=SimpleNamespace(from_url=lambda url: client)))
+    with pytest.raises(RuntimeError, match="Operator"):
+        harness.seed_graph("docker://:p@127.0.0.1:1", "real-graph")
+
+
+def test_the_store_targets_are_named_never_inherited_from_the_environment(monkeypatch, capsys):
+    """⛔ No ambient `TORTOISE_DB_URI` / `TORTOISE_RECORD_DSN` default.
+
+    Both targets defaulted to the PRODUCT's own stores while the seed DELETEs the
+    target graph's `:Point` rows and rewrites its tenant's `public.point` rows, so
+    a bare invocation in a developer shell could wipe the store that shell pointed
+    at (`#13098` review P2-3). They are command-line only now — including when the
+    environment DOES name a store.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379")
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://postgres:x@127.0.0.1:5432/db")
+    # ⛔ the refusal must happen BEFORE any store is touched: restoring EITHER
+    # ambient default is invisible to an exit-code-only assertion (the seed fails
+    # on an unreachable lane and returns 2 as well — measured, that mutant
+    # survived), so the stubs below fail loudly instead.
+    monkeypatch.setattr(harness, "seed_graph",
+                        lambda *_a, **_k: pytest.fail("must not seed from an ambient target"))
+    monkeypatch.setattr(harness, "seed_record",
+                        lambda *_a, **_k: pytest.fail("must not seed from an ambient target"))
+    assert harness.main(["--candidate", "point-by-id"]) == 2
+    assert "could not run" in capsys.readouterr().err

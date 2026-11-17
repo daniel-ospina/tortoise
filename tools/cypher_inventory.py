@@ -631,6 +631,11 @@ def check(doc: Path, result: dict) -> int:
     actual = {
         "sites": len(sites),
         "files": result["files_with_sites"],
+        # ⛔ `files_scanned` is pinned too: §0 publishes "295 files scanned" and
+        # `files` is a DIFFERENT number (the files that CARRY a site — 97). Before
+        # this key existed the doc's scanned count could drift by any amount while
+        # `--check` stayed green (`#13098` review P3).
+        "files_scanned": result["files_scanned"],
         "unresolved": sum(1 for s in sites if s.shape == "unresolved"),
         "candidates": sum(1 for s in sites if s.verdict.startswith("candidate")),
     }
