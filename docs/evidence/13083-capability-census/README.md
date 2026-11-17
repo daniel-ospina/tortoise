@@ -68,8 +68,11 @@ lane is the population a `record_only` move would remove from.
    per-node cost (FalkorDB allocates in blocks). The corpus size is printed WITH the figure, so every
    number here is a per-shape marginal **at this corpus**, never a per-node constant.
 3. **`used_memory` is not a calibrated A/B on this box.** Across the committed pair the baseline differs
-   by **847,064 B** in the committed pair (4,166,640 vs 5,013,704) and by **49,504 B** in the pair before it
-   — same code, same corpus. The drift is run-dependent and has been both larger and far smaller than the
+   by **847,064 B** (4,166,640 vs 5,013,704) — an order of magnitude larger than the 90,000 B payload delta.
+   ⚠️ An earlier revision also quoted a **49,504 B** difference from a prior pair; that run is not committed in
+   this branch, so the figure is not re-derivable and has been dropped rather than left standing as
+   something a reader would try (and fail) to reproduce. The drift is run-dependent and has been both larger and
+   far smaller than the
    90,000 B payload delta, so `used_memory` is **not used for any figure** in this record or the audit. Only
    the deterministic rendered-size numbers are quoted.
 4. **Nine shape-groups are declared UNEXERCISED rather than counted as zero**: `:Meta`, `:WhySnapshot`,
@@ -113,7 +116,8 @@ invariant at the top of the arm is what stops that regressing.)
 between the arms, which is the check that this is one variable and not a corpus difference.
 
 ⚠️ **`used_memory` is NOT quoted for this pair.** The two runs' baselines differ by **847,064 B** — larger than
-the payload delta — and the previous pair's differed by **49,504 B**. The drift is run-dependent, so any
+the payload delta (the earlier "49,504 B" figure from a prior, uncommitted pair has been dropped as
+non-re-derivable). The drift is run-dependent, so any
 residency marginal here would be the instrument's noise dressed as a measurement. The payload figure is exact
 and deterministic; the residency figure is **unmeasured**.
 
