@@ -52,9 +52,11 @@ Lifecycle decision table (THE rule):
      real boolean (``projection/entities.py:6158-6164`` → ``pipeline.py:434``);
      what makes the truthy half self-heal is that this reader ANSWERS ``"closed"``
      for it, so the fold is triggered at all. That is why the arm withholds the
-     ``"open"`` fall-through ONLY: an ENDED position, a ``_row_is_frozen`` row and
-     a legacy ``status`` word that says ``closed`` are all answered ABOVE it and
-     keep their own reading.
+     ``"open"`` fall-through ONLY: an ENDED position and a ``_row_is_frozen`` row are
+     answered ABOVE it and keep their own reading, and for every other answer the
+     arm returns the fall-through UNCHANGED. The legacy ``status='completed'`` row
+     is that case — its ``"closed"`` comes from ``_STATUS_TO_STATE`` through this
+     very arm, and it is the reading the reopen fold reaches and repairs.
   ⚠️ Stated trade, symmetric: the rows these answers are actually taken for record
   no transition at all, so neither ``-closed`` nor ``-reopened``. Bounded and
   inspectable; an unbounded mint loop is neither (#13143, #13288 F1). This is NOT
@@ -1612,7 +1614,8 @@ class GitHubIndexer:
         # arm is `False`, so narrowing costs that fix nothing.
         # Cost, stated: the shape the bug was measured on (a falsy marker on a LIVE
         # position, the row every props door can produce — `update_knowledge(id,
-        # isClosed=0)` stores the integer verbatim, `sdk.py:22337-22341`) then
+        # isClosed=0)` stores the integer verbatim, `sdk.py:22388-22563`, the door
+        # and the props relay it forwards to) then
         # records NO transition at all: `prev_state is None` gates the mint off and
         # nothing repairs the marker, so nothing re-fires. Bounded and inspectable —
         # the same symmetric trade the table above states — against an unbounded
