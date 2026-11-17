@@ -5271,12 +5271,23 @@ _JOURNAL_ENVELOPE_KEYS = (
 #   built, overwriting it (measured on ``update_point``: a caller ``ts``,
 #   ``event_id`` and ``projection_version`` all reached the record).
 #
-# The set is spelled out rather than derived so an auditor sees it whole; it
-# must stay equal to `_JOURNAL_ENVELOPE_KEYS` minus ``id``.
+# The set is spelled out rather than derived so an auditor sees it whole, and it
+# must stay EQUAL to `_JOURNAL_ENVELOPE_KEYS` minus ``id`` — nothing derives it,
+# and ``seq`` is a member of BOTH (the tuple lists it, `:5242`), so the
+# subtraction leaves it reserved. ⛔ An earlier cut of this paragraph called the
+# set the tuple "minus ``id`` PLUS ``seq``, since `seq` is not in the envelope
+# tuple" — FALSE at `origin/main`, `942786899b` and here; do NOT re-apply it
+# (`seq` joined the tuple at `142f7c59bb`; the passthrough doors pin their own).
 #
 # ⛔ ``seq`` IS LOAD-BEARING HERE, not tidiness (#12894). `#9190` makes the
-# record CARRY its ordinal, so `record_projection._carried_position` READS a
-# record's `seq` and REFUSES the write when it disagrees with the enumeration.
+# record CARRY its ordinal, so `record_projection.replay` READS a record's `seq`
+# — **only when the caller declares the batch RECORD-sourced**
+# (``carried_positions=True``), and then REFUSES the write when the carried number
+# disagrees with the enumeration (#13043 review P1-3). On a journal-sourced batch
+# the enumeration IS the position and the prop is ignored, which is what keeps a
+# legacy line on disk from refusing its own write. `EventLog.append` and
+# `_emit_event`'s `**extra` strip the name at the chokepoints as well, so no NEW
+# line can carry one.
 # A caller prop named ``seq`` rode `event.update(extra)` onto the journal line
 # top level (neither this set nor `_JOURNAL_ENVELOPE_KEYS` named it), so
 # ``update_point(pid, seq=42)`` produced a line whose ``seq`` disagreed with
@@ -14347,6 +14358,17 @@ class TortoiseSDK:
             event["point"] = clean
         if id is not None:
             event["id"] = id
+        # ⛔ THE RESERVED POSITION NAME IS STRIPPED AT THE CHOKEPOINT TOO (#13043
+        # review P2-1). `_sanitize_props` refuses `seq` at prop INTAKE, but this
+        # function is reachable from doors that build their own payload
+        # (`_skip_sanitize=True`) or splat props straight into `**extra` — and the
+        # reservation was enforced at each of those intakes, which is how it took
+        # several review cycles and still missed one. One strip here covers a
+        # caller `seq` regardless of which door it came through, and
+        # `EventLog.append` covers the journal itself; the two are the only paths
+        # a record can ride to a position row.
+        if "seq" in extra:
+            extra = {k: v for k, v in extra.items() if k != "seq"}
         event.update(extra)
         # #11835 review F1 (P1): EVERY journalled vector declares its width —
         # including the ones that arrive through `extra` on this (`id=`) branch,
