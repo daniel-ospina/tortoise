@@ -423,15 +423,24 @@ def test_the_goal_state_cache_writes_through_a_live_sdk_method():
     which #4282 RETIRED — `TortoiseSDK.__getattr__` raises, so every `met`/
     `unmet` judgement died inside the cache write.
 
-    The stub carries ONLY `update_knowledge`, which is the approved replacement.
-    Any call to a name that is not on this object raises, so the assertion
-    reddens the moment the retired spelling comes back.
+    The stub carries `update_knowledge`, which is the approved replacement, plus
+    the `get_entity` read the retirement guard added (round 13) legitimately
+    needs. Any call to a name that is not on this object raises, so the
+    assertion reddens the moment the retired spelling comes back.
+
+    ⛔ `get_entity` answers a LIVE goal: this test is about the WRITE path, and a
+    live goal is what reaches it. The unreadable-goal half (the guard is
+    fail-closed there) is pinned by
+    `test_13035_goal_ending_consistency.py::
+    test_a_goal_whose_status_CANNOT_BE_READ_is_treated_as_RETIRED`.
     """
     from tortoise.goal_judgement import _write_goal_state_cache
 
     written = []
     stub = _stub_sdk(update_knowledge=lambda node_id, **props: written.append(
-        (node_id, props)))
+        (node_id, props)),
+        get_entity=lambda _id: {"id": _id, "status": "live",
+                               "goalState": "active"})
 
     assert _write_goal_state_cache(stub, "goal-1", "met") == "met"
     assert written == [("goal-1", {"goalState": "met"})], written
@@ -680,6 +689,14 @@ def test_the_sdk_containers_point_arm_names_the_refused_transition(tmp_path):
     transition — so a caller could not tell an undeclared transition from a
     closed door. Non-vacuity: the target word below is asserted, and the
     pre-fix message does not contain it.
+
+    ⛔ #11824 S0 moved the ARM, not the claim: `archived` (the former target
+    here) is a DECLARED SYNONYM of `deprecated` now, and `live -> deprecated` IS
+    a declared transition, so that word LANDS. `draft` is the target whose
+    transition from `live` is still undeclared (`_ALLOWED_TRANSITIONS['live']`
+    is {deprecated, superseded}), and its refusal names BOTH the target and the
+    transition — measured: "refused the status transition 'live' -> 'draft' …
+    this door's declared Point transitions from 'live' are …".
     """
     sdk, events = _sdk_with_journal(tmp_path)
     try:
@@ -687,10 +704,10 @@ def test_the_sdk_containers_point_arm_names_the_refused_transition(tmp_path):
         before = len(_entity_mutations(events, pid))
 
         with pytest.raises(ValueError) as excinfo:
-            sdk.update_knowledge(pid, status="archived")
+            sdk.update_knowledge(pid, status="draft")
 
         message = str(excinfo.value)
-        assert "archived" in message, (
+        assert "draft" in message, (
             "the refusal does not name the refused target, so a caller cannot "
             f"tell a typo from a closed door: {message!r}")
         assert "live" in message, (
@@ -751,7 +768,13 @@ def test_the_mcp_containers_props_arm_names_the_refused_transition(
     """The other half of the same routing: the refusal must let a caller
     CORRECT the call (AIP-193). Pre-fix the container answered with
     `update_point`'s fixed sentence, which names neither the target word nor the
-    transition."""
+    transition.
+
+    ⛔ #11824 S0 moved the ARM, not the claim: `archived` is a DECLARED SYNONYM
+    of `deprecated` now, so `live -> archived` LANDS. `draft` is the word whose
+    transition from `live` is still undeclared, and its refusal names both the
+    target and the transition (see the sibling SDK case above).
+    """
     sdk, events = _sdk_with_journal(tmp_path)
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     try:
@@ -759,10 +782,10 @@ def test_the_mcp_containers_props_arm_names_the_refused_transition(
         before = len(_entity_mutations(events, pid))
 
         got = mcp_server.tortoise_update_knowledge(
-            pid, props={"status": "archived"})
+            pid, props={"status": "draft"})
 
         message = str(got.get("error", ""))
-        assert "archived" in message, (
+        assert "draft" in message, (
             "the refusal does not name the refused target, so a caller cannot "
             f"tell a typo from a closed door: {message!r}")
         assert "live" in message, (

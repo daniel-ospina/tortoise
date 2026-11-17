@@ -191,3 +191,54 @@ to the record. The reopen, if any, is argued on `#4051` / `#13082` phase 2 with 
 `ts_rank` is built-in — no extension, no worker, no restart-level config, a **64 KB** GIN index.
 `pg_search` needs `shared_preload_libraries`, is **AGPL-3.0-or-later**, and its index is **3.13 MB**
 (48×) for no head-quality gain over `ts_rank`. Evidence: `docs/evidence/13099-text-gate/`.
+
+---
+
+## `#12186` — M2 measured: the window's cost is its eviction, and it is silent
+
+§9 M2 asks whether a windowed graph loses retrieval quality, and §7 arms the window only on its answer.
+The measurement is `docs/evidence/12186-m2-windowed-quality/` — instrument `tools/window_quality_m2.py`,
+1000 `:Object` names and 786 `:Point` claims from this box's capture corpus, 300 fixed queries per arm,
+five coverages under two eviction policies.
+
+**On entity names the cost is exactly the eviction share and nothing compensates.** `found@deep` equals
+the resident share in **every windowed `:Object` arm of both policies**; the five `tail` arms read
+91.3 / 77.3 / 51.7 / 23.3 / 8.7 and the `random` arms read their **own** shares
+91.7 / 76.3 / 49.7 / 25.3 / 12.0, so what the window keeps it can still find, and what it demotes it
+never returns (`found_deep_of_demoted` is 0.0 in every **windowed** arm of both populations).
+⛔ Those `:Object` figures describe `#11901`'s deliberately class-stratified oversample (60 % `definite`,
+30 % `ident`, 10 % `path`) against a real mix the artifact holds at ~8.0 % / ~3.4 % — the shapes
+`#11901` chose to make the curve readable, **not** a weighted estimate of production entity-name
+retrieval. The bundle weights nothing and no row here is a production rate.
+The identity is `:Object`-only: on `:Point` keeping 52.7 % finds only 41.0 %, because the
+claim leg has a ceiling of its own — the loss there is the eviction PLUS a ranking weakness the window did
+not cause (it coincides at exactly one `:Point` arm, `random@0.1`, and falls short in every other
+windowed arm). At §8's own solo target — about
+half the complete graph — `recall@3` falls 88.3 % → 46.0 % and the top-1-is-wrong rate rises
+27.7 % → 41.0 %. On the claim population every demoted query returns **another claim**, never an empty
+answer — ⛔ a property of the **LEG**, not a window effect: `:Point` `empty` is 0.0 in all 11 arms
+including `complete`, so the rate is 100 % for any demoted subset by arithmetic, and the complete graph
+already reads 93.0 % `misbind@1`.
+
+**Why the answer is architectural rather than statistical.** A `db.idx.fulltext` index covers only the
+nodes the graph holds, and the record does not serve set-shaped reads — `record_serve.ANCHORED_READS` marks
+`whole-graph` and `anchored-neighbours` as not served. So §7's seed-materialisation repair has nothing to
+work on for a demoted candidate. The vector leg escapes this once it moves to Postgres (§3); the text leg
+does not, because §6.2's decision item 2 keeps it in the graph.
+
+**Two things the measurement changed that are not numbers.** The choice of *static* eviction order is not
+a lever: the two orders differ by at most 5.0 points on any gated metric, in either direction (recall@3
+46.0 vs 46.3 at 0.50; the cold-tail order ahead on some cells and **worse by 5.0 points at 0.25**),
+against a collapse of **42.0 to 50.3 points** at that target size depending on the order — so neither
+re-ranking moves the
+ceiling, which is what the verdict needs
+and is *not* the stronger claim that the orders are indistinguishable. ⛔ That
+order is a **static popularity** count, not recency (this corpus has no read ledger), so §7's *recency*
+claim was **not** re-tested and is not overturned here. And a
+demotion must invalidate `fallback_snapshot`, whose 60 s
+corpus is cleared by `SDK._mark_dirty` but not by a bare Cypher `DELETE`: without it the degraded path keeps
+serving the demoted corpus, which this instrument caught as recall above the arm's own resident share.
+
+What this does **not** decide: the vector leg (unarmed in this run, so every figure is the lexical leg's),
+the byte-vs-node question (§8 budgets bytes, coverage here is a node share), and the lexical leg's own low
+ceiling on claims — M3's ranking matter, measured there and not re-run here.

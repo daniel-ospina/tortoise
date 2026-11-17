@@ -604,19 +604,34 @@ def test_vision_doc_buckets_match_generated_doc() -> None:
 
     # Labels carry a number that the owner's rulings can change. Match the shape,
     # then assert the number -- so the doc cannot silently keep a stale count.
-    for label_pat, value in [
-        (r"Registry tools", total),
-        (r"Absorbed into the \d+ MCP targets", mcp),
-        (r"Absorbed into a builder-only SDK method \(not on the MCP\)", sdk_only),
-        (r"Tenancy \(SDK/REST only\)", tenancy),
-        (r"Retired", retired),
+    # ⛔ A number INSIDE the label is a `\d+` WILDCARD in the pattern, so it is
+    # asserted as well (round-2 review of #13085): `Absorbed into the \d+ MCP
+    # targets` let the label's own target count rot green -- the exact hole this
+    # file already closed for the headline a few lines above.
+    # ⛔ The label's OWN number is captured NAMED (`label`), never positionally: a
+    # pattern is a string a later edit can grow a group in, and `group(1)` would
+    # then silently re-bind to it and grade the wrong number (review cycle 2 of
+    # #13085 — the same coupling the `(?P<value>…)` rename removed for the cell).
+    for label_pat, value, label_number in [
+        (r"Registry tools", total, None),
+        (r"Absorbed into the (?P<label>\d+) MCP targets", mcp, mcp_targets),
+        (r"Absorbed into a builder-only SDK method \(not on the MCP\)", sdk_only, None),
+        (r"Tenancy \(SDK/REST only\)", tenancy, None),
+        (r"Retired", retired, None),
     ]:
-        row = re.search(rf"^\| {label_pat} \| \*\*(\d+)\*\* \|$", vision, re.M)
+        row = re.search(
+            rf"^\| {label_pat} \| \*\*(?P<value>\d+)\*\* \|$", vision, re.M)
         assert row, f"vision doc has no reconciliation row matching {label_pat!r}"
-        assert int(row.group(1)) == value, (
-            f"vision doc row {label_pat!r} = {row.group(1)}, generated doc says {value}. "
+        assert int(row.group("value")) == value, (
+            f"vision doc row {label_pat!r} = {row.group('value')}, generated doc says {value}. "
             "The vision doc restates computed numbers; update it with the generator's output."
         )
+        if label_number is not None:
+            assert int(row.group("label")) == label_number, (
+                f"vision doc row {label_pat!r} names {row.group('label')} in the label, the "
+                f"generator says {label_number}. A number inside a LABEL is still a "
+                "restated count -- re-derive it; the pattern's wildcard must not hide it."
+            )
 
 
 def test_destination_map_matches_registry() -> None:
@@ -797,10 +812,13 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     # 37 after #11609 Phase 2's WRITE/MUTATE batch retired fourteen doors into six
     # containers (the served registry is live + retired, so this counts the
     # shim-served population: 60 live + 37 retired = 97).
-    # 37 -> 53: this re-cut composes all four landed batches — 23 at the base
-    # + 14 (lane B's WRITE/MUTATE wave) + 9 (this PR's READ/QUERY wave) + 7 (lane C's
-    # SOURCES/MINE/SESSION wave) = 53, the same number `counts.retired` derives.
-    assert len(retired) == 53, f"expected 53 retired rows, got {len(retired)}"
+    # 37 -> 53: this re-cut composed all four landed batches — 23 at the base
+    # + 14 (lane B's WRITE/MUTATE wave) + 9 (#12951's READ/QUERY wave) + 7 (lane C's
+    # SOURCES/MINE/SESSION wave) = 53.
+    # 53 -> 60: #11609's DOOR-RETIREMENT wave (lane E) retires seven doors FORWARD into
+    # containers that were already advertised, so seven rows gain a `use_instead` and no
+    # container row arrives: 53 + 7 = 60, the same number `counts.retired` derives.
+    assert len(retired) == 60, f"expected 60 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "

@@ -1241,6 +1241,115 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # value, and neither that test nor any arm of this module dials it.
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:pw@localhost:6379/g"',
     ],
+    # #13158: `test_13034_currency_rule_reads_position.py` landed with SIX raw
+    # URI mutations — at module scope and in an autouse fixture — and no entry
+    # here, so this gate reds on `main` (run 44025094904, `test (j)`
+    # 133859918399: the only failure in 4007 tests). It is the same "module
+    # landed without its entry" shape as #9664 and #12275 above, on the very
+    # file #13144 register(s) in ci-surfaces (the row #13146 proposed, and
+    # which this line first named, was closed in #13144's favour) — a manifest
+    # row cannot fix it, because this guard scans the FILES, not the manifest.
+    #
+    # All six are DELIBERATE_URI, and none is this guard's vacuity vector (a
+    # docker-half test silently constructing embedded): the module's SUBJECT is
+    # a LIVE Docker/FalkorDB graph, so the docker DSN is pinned at both entry
+    # points and restored afterwards. Nothing here claims a docker-half green
+    # on a URI it did not set.
+    #   :66  the module-level `FALKORDB_AVAILABLE` probe. The pin IS the point:
+    #        `DB_URI` is `_live_utils.docker_uri(...)`, the probe constructs a
+    #        real SDK and runs `RETURN 1`, and the `finally` restores. Without
+    #        the pin the probe would ride whatever ambient URI the box has, so
+    #        the skipif would be decided by the environment rather than by a
+    #        reachable Docker.
+    #   :75/:77  the probe's restore pair — assign the saved value back, or pop
+    #        it when the prior value was unset. A restore, not a second
+    #        mutation; the pair is why the module-scope write cannot leak into
+    #        a later test in the same process.
+    #   :86  the `autouse` `_isolated_db_uri` fixture — seeds the same docker
+    #        DSN per test so no case inherits an ambient one, and the assertion
+    #        target is the graph `DB_URI` names.
+    #   :89/:91  the fixture's restore pair (same save/restore contract, run at
+    #        teardown).
+    #
+    # WHERE THE ARMS ARE NARROW, AND WHERE THEY ARE NOT — the two SET arms are
+    # bound by NAME: `DB_URI` for the pins and the saved `_OLD_URI`/`_old` for
+    # the restores. Each arm is anchored at BOTH ends with `^`…`$` (valid
+    # because declarations are matched per STRIPPED line — see `_is_declared`;
+    # ⛔ anchoring at both ends is NEW for this table: of its OTHER 189
+    # patterns, only 11 end in `$` and 178 carry no `$` at all, and none of
+    # those 11 also leads with `^` — so the unanchored prefix match is the
+    # convention, `^`-leading is new too, and no other row anchors at both ends.
+    # The leading `^` is load-bearing, not cosmetic: without it an
+    # unanchored arm also matches INSIDE a commented-out line, because the
+    # census regex has no comment awareness).
+    #
+    # ⛔ The honest LIMIT, stated rather than claimed away: the POP arm is bound
+    # by NOTHING, and cannot be. `os.environ.pop("TORTOISE_DB_URI", None)` is
+    # byte-identical whether it RESTORES a saved value or UNSETS the URI to
+    # force the embedded lane — the #942 vacuity vector this guard exists to
+    # catch — and that force-embedded spelling is live elsewhere in `tests/`
+    # (`test_cli_context.py`'s `db_env` fixture). So a FUTURE
+    # `pop("TORTOISE_DB_URI", None)` in THIS file is SILENCED by this row and
+    # must be triaged BY HAND. The two SET arms are a real narrowing, not a
+    # bound over the pop.
+    #
+    # Measured per ARM (appending each candidate to the REAL module source and
+    # running the census over it) across the ELEVEN spellings the census can
+    # see. TEN are REJECTED — each reds on a new site: a different literal
+    # (`= "docker://…"`), `= _other`, `= DB_URI + ""`, `= _OLD_URI or ""`, a
+    # bare `pop("TORTOISE_DB_URI")`, `pop(…, "")`, `monkeypatch.setenv`,
+    # `monkeypatch.delenv`, `del`, and the same assignment COMMENTED OUT. The
+    # eleventh, `pop(…, None)`, is AUTHORIZED — the LIMIT above, and the one
+    # spelling this row leaks.
+    # That scan is deliberately NOT cited for
+    # `os.environ.setdefault("TORTOISE_DB_URI", …)`: it CANNOT distinguish
+    # "authorized by this row" from "never censused" (both print as no
+    # undeclared site), and the true answer is the second — `_MUTATION_RE` has
+    # no `setdefault` arm, so reading the REGEX directly (not the scan) shows
+    # the census never sees such a site in ANY file. That blind spot predates
+    # this row and is unaffected by it; it is recorded here so a later reader
+    # neither mistakes it for this declaration's doing nor reads this row as
+    # covering it.
+    #
+    # ⛔ COLLISION, to be handled at merge — and the carrier is NOT the one
+    # first recorded here. Two rows for one key is a duplicate dict literal:
+    # `ruff` reds it (`F601 … Found 1 error`) and `test_dod_5090_probe.py`'s
+    # duplicate-key scan reds it in the pytest shard, while at RUNTIME the
+    # later key silently shadows the earlier anyway (#12631 is that class
+    # landing for real on this very file).
+    #   The row this entry originally named, #13146, is **CLOSED and was never
+    #   merged** — superseded by #13144 (`3d437429e98d`), which is what actually
+    #   registered `test_13034` in `ci-surfaces`. Measured at the entry's base:
+    #   `git show origin/main:tests/test_uri_env_mutations_declared.py` carries
+    #   NO row for this key, so #13146's broad arm can never land and cannot be
+    #   replaced by these three. Its measurement is kept only as history: ONE
+    #   unanchored arm (`os\.environ(?:\[…\]\s*=|\.pop\(…)`) authorized 8 of
+    #   the eleven census-visible spellings — not all: `monkeypatch.setenv`/
+    #   `monkeypatch.delenv`/`del` still red there, the `del` because that
+    #   alternative is nested inside `os\.environ(?:…` and so cannot match
+    #   `del os.environ[…`.
+    #   The LIVE duplicate carrier is **#13164** (open, `34f80298a2bf`), which
+    #   must land FIRST — it is the only carrier that clears `test (h)`'s
+    #   `_hydrate_evidence` and `test (i)`'s two raw `FalkorDB(...)` clients,
+    #   neither of which any row here can reach. It carries its OWN row for
+    #   this key at its `:482`, two loose arms
+    #   (`os\.environ\["TORTOISE_DB_URI"]\s*=` and
+    #   `os\.environ\.pop\(\s*"TORTOISE_DB_URI"`). Measured, not inferred,
+    #   at `d8790fd364f8` (the figures shift with any edit here, so they are
+    #   pinned to the head they were taken on):
+    #   `git merge-tree --write-tree --merge-base=3d437429e98d 34f80298a2bf
+    #   d8790fd364f8` → tree `4453be273594`, in which the key occurs TWICE
+    #   inside the one dict literal — `:482`, #13164's loose 2-arm row, and
+    #   `:1346`, this row's anchored 3 arms.
+    #   So the order is forced and the consequence is one-way: if this PR lands
+    #   after #13164 it MUST DROP this row (never add a third), which is why
+    #   the narrowing should instead be moved BEFORE that landing — #13164's
+    #   `:482` row takes these three `^`…`$` arms and this row is dropped, so
+    #   the tightening survives the merge instead of being lost with it.
+    "test_13034_currency_rule_reads_position.py": [
+        r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
+        r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
+        r'^os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
@@ -1302,6 +1411,29 @@ _MUTATION_RE = re.compile(
     # The restoration guard's RAW regex already spells it this way.
     r'|os\.environ\["TORTOISE_DB_URI"\]\s*=(?!=)'
     r'|os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'
+    # `setdefault` (#13177): a WRITE whenever the key is absent, which is
+    # exactly the property the ambient-lane hazards key on — a test that
+    # wants the embedded lane spells its unset this way and used to stay
+    # invisible. Measured before this arm: `_MUTATION_RE.search(
+    # 'os.environ.setdefault("TORTOISE_DB_URI", uri)')` returned None, so
+    # the form was censused in NO file and no DELIBERATE_URI_MUTATIONS row
+    # could ever cover it — a declaration can only match a site the census
+    # produces, which is why this is a REGEX fix and not a row.
+    # The `_os` alias is censused by substring, like the assignment arm; the
+    # quote parity (`["\']`) matches the pop/del arms above; and the arm is
+    # URI-KEY SPECIFIC like every other arm — the #12561 property (a NON-URI
+    # `setenv`/`setdefault` is not a URI mutation) is pinned behaviourally in
+    # `test_the_census_sees_the_setdefault_form`. Value-agnostic by design:
+    # `setdefault(key, None)` is a mutation ATTEMPT and has no valid use
+    # here, so it is censused rather than excused.
+    # ⛔ Scope boundary, stated the way this file states the bare-`mp.` one:
+    # this closes the DECLARATION census only. The restoration guard's raw
+    # regex (`_RAW_URI_MUTATION_RE`, #2084) still does not flag a module-scope
+    # or fixture-body `setdefault`, so the #2062 leak class is unchanged for
+    # this spelling — out of scope here on purpose, because requiring a
+    # save/restore PAIR for every `setdefault` changes what that guard
+    # DEMANDS rather than narrowing a census (#13190).
+    r'|os\.environ\.setdefault\(\s*["\']TORTOISE_DB_URI["\']'
     r'|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']]'
 )
 
@@ -1311,6 +1443,11 @@ _MUTATION_RE = re.compile(
 # auto-undoes it at teardown. A RAW mutation at module scope or inside a
 # fixture body has no auto-undo: it leaks into every later test in the same
 # pytest process unless paired with a save-restore (the #2062 class).
+# ⛔ NOT CENSUSED HERE YET: `os.environ.setdefault("TORTOISE_DB_URI", …)` is a
+# raw write of this same shape and has no arm below, so a module-scope or
+# fixture-body `setdefault` is outside the restoration requirement (#13190 —
+# declaration census covers it since #13177; this guard's coverage is the
+# open half). Stated, not implied: an unstated gap reads as coverage.
 _RAW_URI_MUTATION_RE = re.compile(
     r'(?P<assign>(?:os|_os)\.environ\["TORTOISE_DB_URI"\]\s*=(?!=))'
     r'|(?P<pop>(?:os|_os)\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\'])'
@@ -3079,6 +3216,84 @@ def test_declaration_regex_census_surface():
         assert not _MUTATION_RE.search(form), (
             f"_MUTATION_RE intentionally does not census the bare-instance "
             f"call form {form!r} (restoration guard covers it)")
+
+
+def test_the_census_sees_the_setdefault_form():
+    r"""#13177: `os.environ.setdefault("TORTOISE_DB_URI", <uri>)` is a URI
+    WRITE (it assigns when the key is absent) and was censused by NO arm, in
+    ANY file — a fail-open hole in a guard whose contract is "every mutation
+    spelling is classified". Measured on the pre-fix regex:
+
+        _MUTATION_RE.search('os.environ.setdefault("TORTOISE_DB_URI", u)')
+        -> None
+
+    so a test could plant the URI this way and no DELIBERATE_URI_MUTATIONS
+    row could cover it (a declaration matches only the lines the census
+    yields), which is what makes the hole fail OPEN rather than over-report.
+
+    ⛔ Zero-sites caveat, measured rather than assumed: at the arm's landing
+    the census surfaces **0** new sites (602 before and after). FOUR code
+    spellings of the form exist in the tree and NONE is in the scan
+    population: `tests/eval/retrieval/run.py:902` and
+    `tests/eval/retrieval/task0_probe.py:59` are eval RUNNERS, and
+    `_iter_test_module_paths()` enumerates `tests/**/test_*.py` only; while
+    `tortoise/__main__.py:1950` and `tools/longmem_eval/run.py:307` sit
+    outside `tests/` altogether — the separate census #2857 already records
+    at the `_URI_ENV` boundary note below. So the population, not this arm,
+    is why those four were invisible; the arm is what makes a FUTURE
+    `test_*.py` site visible. A pin here is therefore the only thing that can
+    keep the arm: a behavioural assertion cannot, because no scanned module
+    spells the form today.
+
+    ⛔ Half-fix boundary, stated rather than implied: this pins the
+    DECLARATION census. The restoration guard's raw regex
+    (`_RAW_URI_MUTATION_RE`, #2084) still does not flag a module-scope or
+    fixture-body `setdefault` — the #2062 leak class is unchanged for this
+    spelling, tracked separately (#13190) because closing it changes what
+    that guard DEMANDS (a save/restore pair) rather than narrowing a census.
+
+    Same shape as `test_declaration_regex_census_surface` (negative cases
+    included), so removing the arm reds HERE instead of silently reopening
+    the hole.
+    """
+    positives = (
+        'os.environ.setdefault("TORTOISE_DB_URI", db_arg)',
+        "os.environ.setdefault('TORTOISE_DB_URI', db_arg)",
+        'os.environ.setdefault( "TORTOISE_DB_URI", db_arg)',
+        # the `_os` alias — censused by substring, like the assignment arm
+        '_os.environ.setdefault("TORTOISE_DB_URI", db_arg)',
+        # a wrapped call: `\s*` crosses newlines (the #12561 lesson)
+        'os.environ.setdefault(\n    "TORTOISE_DB_URI",\n    db_arg,\n)',
+        # no valid use, still a mutation attempt — censused, not excused
+        'os.environ.setdefault("TORTOISE_DB_URI", None)',
+    )
+    for form in positives:
+        assert _MUTATION_RE.search(form), (
+            f"_MUTATION_RE must census the setdefault form {form!r} — it "
+            "writes the URI when the key is absent (#13177)")
+    # …and the arm is URI-KEY SPECIFIC (#12561). `os.environ.setdefault` on
+    # any other name is not a URI mutation, and censusing it would red every
+    # conftest-shaped module in the tree for a line that never touches the
+    # URI — the over-report direction that gets an arm deleted rather than
+    # narrowed.
+    for non_uri in (
+            'os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")',
+            'os.environ.setdefault("RATE_LIMIT_DISABLED", "1")',
+            'os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")',
+            # a bare-instance / non-environ `setdefault` is not this census's
+            'settings.setdefault("TORTOISE_DB_URI", uri)'):
+        assert not _MUTATION_RE.search(non_uri), (
+            f"_MUTATION_RE must not census the non-URI setdefault form "
+            f"{non_uri!r} — the census is URI-specific (#12561)")
+    # a READ of the URI is still not a mutation, in the setdefault-neighbour
+    # spelling too (the #11083 class: a read counted as a mutation forced a
+    # blanket file declaration to stay green).
+    for read_form in (
+            'assert os.environ.get("TORTOISE_DB_URI") == db_arg',
+            'if "TORTOISE_DB_URI" in os.environ:',
+    ):
+        assert not _MUTATION_RE.search(read_form), (
+            f"_MUTATION_RE must not census the READ form {read_form!r}")
 
 
 def test_declaration_path_rejects_undeclared():

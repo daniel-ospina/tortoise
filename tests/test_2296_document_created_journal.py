@@ -459,6 +459,65 @@ def test_a_caller_seq_prop_cannot_forge_a_journal_position(env):
             )
 
 
+def test_the_two_chokepoints_strip_a_caller_seq_that_bypasses_intake(env,
+                                                                    monkeypatch):
+    """⛔ THE STRIPS THEMSELVES, NOT THE INTAKE (#13043 review P2-1 / finding D).
+
+    `_sanitize_props` refuses `seq` at prop INTAKE, so the leg above is satisfied
+    UPSTREAM of both strips: delete `tortoise/log.py`'s `EventLog.append` strip, or
+    `tortoise/sdk.py`'s `_emit_event` `**extra` strip, and it stayed green while
+    the defect P2-1 named — a caller `seq` reaching a line through a door that
+    builds its OWN payload — was silently restored.
+
+    Both chokepoints are driven DIRECTLY here, with no intake in the way:
+
+    * `EventLog.append` is the ONE function every journal write goes through, so
+      a `seq` riding a caller's dict must not reach the line;
+    * `_emit_event`'s `**extra` is how a `_skip_sanitize=True` door splats
+      caller props onto the line's top level, where `_carried_position` reads
+      them as the record's ORDINAL.
+    """
+    sdk, events = env
+    # (a) the journal chokepoint, with no SDK involved at all.
+    position = EventLog(str(events / "direct.jsonl")).append(
+        {"type": "PointAdded", "seq": 42, "id": "p-direct"})
+    direct = EventLog(str(events / "direct.jsonl")).read_all()
+    assert position == 1, (
+        f"the append did not report the enumeration's position: {position}")
+    assert direct and "seq" not in direct[0], (
+        f"a caller `seq` reached the journal line: {direct!r}")
+    assert direct[0]["id"] == "p-direct", (
+        "the strip removed more than the reserved name: "
+        f"{direct[0]!r}")
+
+    # (b) the SDK door's `**extra`, which is `event.update(extra)` — no
+    # `_sanitize_props` on this path at all. ⚠️ The JOURNAL LINE cannot red this
+    # strip on its own (`EventLog.append` above strips the same name), so the
+    # observation point is the dict the SDK hands on: `_write_record_projection`
+    # takes `event` as the record's payload, and a `seq` there is the carried
+    # ORDINAL `_carried_position` reads. Captured, not asserted against a fake
+    # writer, so the strip is what the assertion is about.
+    captured: list[dict] = []
+    monkeypatch.setattr(sdk, "_write_record_projection",
+                        lambda event, seq=None: captured.append(dict(event)))
+    sdk._emit_event("PointRevised", id="p-extra", seq=44, content="x")
+    assert captured, (
+        "the emit produced no record payload to inspect — this leg proves "
+        "nothing about the `**extra` strip")
+    assert "seq" not in captured[0], (
+        "a caller `seq` reached the record's payload through `**extra`, where "
+        "`_carried_position` reads it as the ORDINAL and refuses the write and "
+        f"every replay of it (#12894): {captured[0]!r}")
+    assert captured[0].get("id") == "p-extra", (
+        f"the strip removed more than the reserved name: {captured[0]!r}")
+    lines = _journal(events)
+    for line in lines:
+        assert "seq" not in line, (
+            f"a caller `seq` reached a journal line: {line!r}")
+    assert any(line.get("id") == "p-extra" for line in lines), (
+        f"the emit wrote nothing to journal — this leg proves nothing: {lines!r}")
+
+
 def test_update_entity_source_refuses_reserved_props_loudly(env):
     """The intake strip must not silence the #3998/D30 ``:Source`` refusal.
 
