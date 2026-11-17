@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "config" / "surface-manifest.yml"
 RENDERED = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 CANONICAL = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
+SURFACE_ORDER = ROOT / "config" / "surface-order.yml"
 VISION = ROOT / "docs" / "product" / "vision-mcp-sdk-surface.md"
 
 #: A well-formed `--commit` for the `cut` tests: 40 lowercase hex, the ONE shape the write
@@ -301,6 +302,40 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     assert now_retired == [retired] * len(now_retired), (
         f"canonical-mcp-tools.md says {now_retired[0]} retired-forward entries; the manifest "
         f"carries {retired}"
+    )
+
+    # 1b. The SERVED population the clause above sits on, and the table it may NOT credit.
+    # The amendment had said the served figure "is what `config/surface-order.yml` totals", which
+    # is false — that table counts the ADVERTISED rows only. The sentence was corrected, but a
+    # correction is prose and prose drifts, so both halves are bound here: the split's arithmetic,
+    # and the number the sentence says that table sums to (#13052 review F5).
+    served_rows = re.findall(
+        r"SERVED population of\s+\*\*(\d+)\*\* rows \((\d+) live \+ (\d+) shims\)", canonical
+    )
+    assert served_rows, "the canonical doc's #4282 amendment stopped stating the served population"
+    for served_n, live_n, retired_n in served_rows:
+        assert (int(served_n), int(live_n), int(retired_n)) == (live + retired, live, retired), (
+            f"canonical-mcp-tools.md states a SERVED population of {served_n} ({live_n} live + "
+            f"{retired_n} shims); the manifest derives {live + retired} ({live} live + {retired} "
+            f"retired)"
+        )
+    per_keyword = yaml.safe_load(SURFACE_ORDER.read_text(encoding="utf-8"))["baseline_counts"]
+    assert sum(per_keyword.values()) == live, (
+        f"config/surface-order.yml's `baseline_counts` total {sum(per_keyword.values())} across "
+        f"its ten keywords, but that table is the one the amendment now measures against "
+        f"`counts.tools` = {live} — a keyword table that totals anything else makes the "
+        f"comparison it states untrue"
+    )
+    cited = re.findall(r"its `baseline_counts`\s+sum to the \*\*[a-z ]*(\d+)\*\*", canonical)
+    assert cited, (
+        "canonical-mcp-tools.md no longer states what `config/surface-order.yml`'s "
+        "`baseline_counts` sum to. That sentence exists to stop the served 108 being credited to "
+        "that table (#13052 review F5); delete the attribution and the false claim can return "
+        "unchecked, so its absence is a failure and not a vacuous pass"
+    )
+    assert [int(n) for n in cited] == [live] * len(cited), (
+        f"canonical-mcp-tools.md says `baseline_counts` sum to {cited}; the table totals "
+        f"{sum(per_keyword.values())} and the manifest derives counts.tools = {live}"
     )
 
     # 2. The live surface's MOVEMENTS — they COMPOSE, so the rule is the chain.
