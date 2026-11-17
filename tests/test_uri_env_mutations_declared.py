@@ -462,6 +462,24 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # arms skip), never to a silently-embedded green, and nothing leaks into a
     # later docker-lane test.
     "test_12360_underscore_or_terms.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
+    # #13075 (`a09a0b3840`, "the currency rule reads the position axis"): the
+    # module landed with no entry, which red-ed the required `test (j)` shard on
+    # `main` and on every head inheriting it (#13139 measures the same six sites).
+    # TWO save/restore pairs, both DELIBERATE_URI:
+    #   * a module-level live probe (`:66` set, `:75` restore, `:77` pop) — it
+    #     points `TORTOISE_DB_URI` at a PER-RUN graph (`docker_uri(GRAPH)`,
+    #     `GRAPH` keyed by `uuid4()`), opens `TortoiseSDK`, runs `RETURN 1`, and
+    #     restores in a `finally`;
+    #   * an autouse `_isolated_db_uri` fixture (`:86` set, `:89` restore, `:91`
+    #     pop) that holds the same per-run URI for the duration of every test.
+    # DELIBERATE_URI is the point rather than an accident: the claim under test is
+    # that the shared terminal vocabulary reads the POSITION axis (`isClosed`, a
+    # `terminal` pipeline slot) as well as the lifecycle word, which no
+    # pure-function test can observe. An unreachable lane degrades to
+    # `FALKORDB_AVAILABLE = False` (the live arms SKIP through `_needs_db`), never
+    # to a silently-embedded green, and both pairs restore — so nothing leaks into
+    # a later docker-lane test.
+    "test_13034_currency_rule_reads_position.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
