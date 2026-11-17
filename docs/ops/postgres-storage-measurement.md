@@ -315,10 +315,11 @@ snapshot row is **derived from the org's rows**, and rows only exist once a writ
 is served. Refusing `absent` refuses the very write that would create the row, so
 a fresh tenant's **first** write would be refused forever. Measured on the sibling
 gauge in CI (`#13084`/`#13102`): a paid tenant's first `POST /v1/points` returned
-**HTTP 500** from exactly that collapse. `absent_is_zero` is declared on the
-dimension so the gate consumes the answer in one place, and it is safe **strictly
-because** the empty table is `unreported` and still refuses — otherwise every org
-would compare as 0 bytes and pass any cap.
+**HTTP 500** from exactly that collapse. The answer is served, never declared: the
+dimension does **not** set `absent_is_zero` (that routes the unageable `ABSENT`
+sentinel around the bound), and the empty table stays `unreported` and still
+refuses — so the zero only ever exists where the gauge really has reported, and
+it carries that report's instant.
 
 ⛔ **Nothing schedules the refresh yet.** That is a deploy decision (no migration
 here declares `pg_cron`; an external caller is an operator's choice), and it is

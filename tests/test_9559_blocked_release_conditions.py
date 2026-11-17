@@ -596,9 +596,13 @@ def test_a_fresh_org_is_served_at_zero_instead_of_deadlocking(monkeypatch):
     sibling gauge in CI (`#13084`/`#13102`): `POST /v1/points` → HTTP 500 for a
     tenant far under its cap.
 
-    Mutation this REDs: drop ``absent_is_zero=True`` from the dimension (the
-    ABSENT sentinel then degrades to no-reading and the write is refused), or
-    make the meter return ``None`` for ``absent``.
+    Mutation this REDs: declare ``absent_is_zero=True`` on ``postgres_storage``
+    (the ``dim.absent_is_zero is False`` assertion below), make ``_reading``
+    treat a zero-valued reading as no-reading (the ``reading.used == 0.0``
+    assertion), or serve this zero without its age (the stale half below). The
+    ``ABSENT`` sentinel itself is not on this path: the injected meter hands back
+    a ``MeterReading``, so what this pins is that a STAMPED zero is served while
+    the same zero aged past the bound is refused.
     """
     # ⛔ The ARMED copy: the live dimension is BLOCKED, so the gate refuses
     # before any meter is consulted. This test is about the state that exists

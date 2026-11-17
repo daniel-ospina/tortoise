@@ -29,9 +29,10 @@
 -- ⛔ THE STALENESS IS DECLARED, NOT HIDDEN. A snapshot describes the table as of
 -- `measured_at`; the gate holds it to `STALE_AFTER_SECONDS` (allowance_gate) and
 -- REFUSES on an older reading rather than capping from a figure it cannot
--- defend — the same evidence-age bound the graph gauge already uses. A snapshot
--- that has not run leaves NO row, and no row is NO READING (never a zero), which
--- the gate fails closed on.
+-- defend — the same evidence-age bound the graph gauge already uses. An EMPTY
+-- table is NO READING (never a zero) and the gate fails closed on it; a row
+-- missing for ONE org while the table is non-empty is a measured zero, which is
+-- a different answer — see `metering.get_postgres_residency`'s three answers.
 --
 -- ⛔ WHAT THIS IS NOT. It is not a per-org split of the database TOTAL: the
 -- position #4492 took, and #12762 preserved, is that bytes an org's OWN rows
@@ -87,6 +88,7 @@ DECLARE
     v_audit   jsonb;
     v_at      timestamptz;
     v_written bigint;
+    v_zeroed  bigint;
 BEGIN
     v_audit := public.postgres_per_org_bytes();
     v_at    := coalesce((v_audit->>'captured_at')::timestamptz,
@@ -110,14 +112,54 @@ BEGIN
 
     GET DIAGNOSTICS v_written = ROW_COUNT;
 
-    -- ⛔ ORGS THE AUDIT NO LONGER REPORTS ARE REFUSED, NOT DELETED HERE. An
-    -- org vanishing from the audit means it has no journal rows left (a real
-    -- zero footprint) OR that the audit could not see it (a fault), and this
-    -- function cannot tell those apart. Deleting would silently turn the second
-    -- case into "no reading" while LOOKING like maintenance; leaving the row
-    -- lets the gate age it out via `measured_at`. The deletion, when wanted, is
-    -- an explicit operator action with the audit's output in hand.
-    RETURN QUERY SELECT v_written, v_at;
+    -- ⛔ ORGS THE AUDIT NO LONGER REPORTS ARE WRITTEN AS A MEASURED ZERO — NOT
+    -- LEFT FROZEN, AND NOT DELETED (review round 8, finding 1, P1, measured).
+    --
+    -- `postgres_per_org_bytes()` groups `public.journal_event` BY `org_id`, so an
+    -- org missing from its `orgs` array has NO journal rows. That is a genuine
+    -- zero footprint, not a fault: a fault is the audit RAISING, in which case
+    -- this function never reaches here at all.
+    --
+    -- Both earlier readings of this case were wrong:
+    --
+    --   * LEAVING THE ROW FREEZES ITS `measured_at`. Once it is older than
+    --     `STALE_AFTER_SECONDS` the gate refuses with `QuotaCheckError` — for
+    --     ever, because the write that would re-create the org's journal rows is
+    --     the one being refused. That is the fresh-tenant deadlock this whole
+    --     three-answer vocabulary exists to prevent (#13084/#13102), mirrored and
+    --     made permanent: an org that used the documented `record_journal_purge`
+    --     erasure path would 500 on its next write, with no remedy any doc or
+    --     tool provides.
+    --   * DELETING THE ROW turns the org into `absent`, which the reader serves
+    --     from the table's NEWEST `measured_at`. Correct for that org — but in a
+    --     database where the only org with rows is the one being zeroed, the
+    --     table goes EMPTY and every org flips to `unreported`, refusing
+    --     everyone.
+    --
+    -- Writing the zero does neither: the measurement is real (the org has no
+    -- journal rows), the row keeps the table non-empty so `absent` keeps its
+    -- meaning, and the fresh `measured_at` is what the gate ages.
+    --
+    -- ⛔ A ROW IS ONLY EVER ZEROED IF IT ALREADY EXISTS, so an org the audit has
+    -- never reported is never given an INVENTED row. That distinction is what
+    -- makes `absent` honest, and it is asserted in
+    -- `supabase/tests/pglite/validate.mjs`.
+    UPDATE public.org_postgres_residency r
+       SET stored_bytes = 0,
+           rows         = 0,
+           measured_at  = v_at,
+           source       = 'audit',
+           updated_at   = pg_catalog.now()
+     WHERE NOT EXISTS (
+         SELECT 1 FROM jsonb_array_elements(v_audit->'orgs') AS o
+          WHERE o->>'org_id' = r.org_id);
+
+    GET DIAGNOSTICS v_zeroed = ROW_COUNT;
+
+    -- `orgs_written` counts every row this refresh wrote: the audit's orgs
+    -- (inserted or updated) plus the orgs it no longer reports (zeroed), because
+    -- both are writes that move the gauge.
+    RETURN QUERY SELECT v_written + v_zeroed, v_at;
 END;
 $$;
 

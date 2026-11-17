@@ -3360,6 +3360,53 @@ try {
       + `every gated write`);
     process.exit(1);
   }
+  // ── #9559 (review round 8, finding 1, P1): an org the audit STOPS reporting ──
+  // `postgres_per_org_bytes()` groups `journal_event` BY `org_id`, so an org whose
+  // journal rows are erased — the documented `record_journal_purge` path this very
+  // block uses for cleanup — drops out of the audit's `orgs` array entirely. Two
+  // behaviours are wrong here and NEITHER reds without this check:
+  //   * a FROZEN row keeps its old `measured_at`, so after `stale_after_seconds`
+  //     the gate refuses that org for ever — the write that would re-create its
+  //     journal rows is the one being refused (the fresh-tenant deadlock
+  //     #13084/#13102, made permanent); and
+  //   * a DELETED row empties the table in a single-tenant database, flipping
+  //     every org to `unreported` and refusing everyone.
+  // The shipped refresh writes a MEASURED ZERO with a fresh instant instead, and
+  // only over rows that already exist (an org the audit has never reported still
+  // gets no invented row — asserted above).
+  await db.exec(`SET LOCAL app.record_journal_purge = 'on';
+     DELETE FROM public.journal_event WHERE org_id = '9559-gauge-b';`);
+  const vanishedRefresh = await db.query('SELECT * FROM public.postgres_residency_snapshot()');
+  const vanishedAt = vanishedRefresh.rows[0] && vanishedRefresh.rows[0].captured_at;
+  const vanished = await db.query(`SELECT org_id, stored_bytes, rows, measured_at
+      FROM public.org_postgres_residency
+     WHERE org_id IN ('9559-gauge-a', '9559-gauge-b') ORDER BY org_id`);
+  if (vanished.rows.length !== 2) {
+    console.error(`✗ #9559: an org the audit stopped reporting LOST its row `
+      + `(rows=${vanished.rows.length}) — in a single-tenant database the table then `
+      + `goes EMPTY, every org reads \`unreported\`, and every gated write is refused`);
+    process.exit(1);
+  }
+  const [va, vb] = vanished.rows;
+  if (Number(vb.stored_bytes) !== 0 || Number(vb.rows) !== 0) {
+    console.error(`✗ #9559: the org whose journal rows were erased still carries a `
+      + `footprint (bytes=${vb.stored_bytes}, rows=${vb.rows}) — its row was FROZEN at `
+      + `the last measurement, so it stays STALE for ever and refuses its own next `
+      + `write, with no recovery path any doc or tool provides`);
+    process.exit(1);
+  }
+  if (Date.parse(vb.measured_at) !== Date.parse(vanishedAt)) {
+    console.error(`✗ #9559: the zeroed row's measured_at (${vb.measured_at}) is not `
+      + `this refresh's instant (${vanishedAt}) — a measured zero carrying a stale age `
+      + `is refused exactly as a stale figure is, which is the same deadlock`);
+    process.exit(1);
+  }
+  if (Number(va.stored_bytes) <= 0) {
+    console.error(`✗ #9559: zeroing the vanished org also zeroed a still-reported `
+      + `org (a=${va.stored_bytes} B) — the zero is not org-scoped`);
+    process.exit(1);
+  }
+
   // The journal is APPEND-ONLY (a trigger refuses DELETE unless a tenant
   // erasure sets `app.record_journal_purge`), so the cleanup takes the documented
   // erasure path rather than fighting the guard it exists to prove.
@@ -3372,8 +3419,9 @@ try {
      DELETE FROM public.organizations WHERE id IN ('9559-gauge-a', '9559-gauge-b');`);
   console.log('✓ #9559: `postgres_residency_snapshot()` writes ONE row per org from '
     + 'the audit, per-org bytes never leak across orgs, `measured_at` is the '
-    + 'audit\'s own instant and never in the future, and a re-run upserts instead '
-    + 'of appending');
+    + "audit's own instant and never in the future, a re-run upserts instead of "
+    + 'appending, and an org the audit STOPS reporting is written as a fresh measured '
+    + 'ZERO rather than frozen stale or deleted');
 } catch (e) {
   console.error(`✗ #9559 RESIDENCY GAUGE FAILED:\n  ${e.message.split('\n').slice(0, 20).join('\n  ')}`);
   process.exit(1);
