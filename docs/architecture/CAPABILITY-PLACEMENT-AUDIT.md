@@ -271,7 +271,7 @@ Every Cypher site above is a point lookup or a property guard — capability **`
 | `tortoise/audit.py:810` (and `:2445`, `:2456`) | `OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy AND id(carrier) <> id(sup)` — **no relationship in the pattern**; a property-equality scan | **none** |
 | `tortoise/definite_description_backfill.py:434` | `MATCH (o:Object) OPTIONAL MATCH (o)<-[r]-() WITH o, count(r) …` — degree census | **adjacency** |
 | `tortoise/sdk.py:34355` | `MATCH (s:Subject {id:$sid})-[r]->(n)` | **adjacency** |
-| `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; no in-tree caller passes the literal `'subject'` — `mcp_server.py:4368` is a tool DOCSTRING, and the leg rides the caller-supplied value through the passthroughs at `mcp_server.py:5035`, `:5475`, `:7911`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6826` and `("Object", ["name"])` at `:6830` | **fulltext index** |
+| `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; no **product** caller passes the literal `'subject'` (test modules do — `tests/test_search_engine_gaps.py:1395`, `:1559`, `tests/test_integration_search.py`) — `mcp_server.py:4368` is a tool DOCSTRING, and the leg rides the caller-supplied value through the passthroughs at `mcp_server.py:5035`, `:5475`, `:7911`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6826` and `("Object", ["name"])` at `:6830` | **fulltext index** |
 
 `:Tag` belongs on this row too, and an earlier draft got it **wrong** by calling it bookkeeping: every tag
 read resolves the node **through the edge** — `sdk.py:28069`
@@ -292,7 +292,8 @@ justification. **Verdict: `graph`.**
 | `tortoise/event_store.py:991-993` (`read_after`, whose `def` is `:922`) | `e.seq > $after` **ordered range scan**, optional type filter, `LIMIT`/dedupe | **none** |
 | `tortoise/event_store.py:557`, `:657` | `MATCH (m:GraphEventMeta) RETURN max(m.last_seq)` — aggregate | **none** |
 | `tortoise/event_store.py:645`, `:1103` | `min(e.seq)` / `max(e.seq)` over `:GraphEvent` — aggregates | **none** |
-| `tortoise/event_store.py:801`, `:879`, `:1043` | per-page key existences and predicate deletes inside the emit/purge paths | **none** |
+| `tortoise/event_store.py:801`, `:879` | per-page key existences inside the emit path | **none** |
+| `tortoise/event_store.py:1043` | `MATCH (n:GraphEvent) RETURN count(n)` — the overflow path's whole-label total, counted BEFORE `purge_overflow` (`:1038`) decides the excess. An aggregate, not a key existence and not a delete; the two purge deletes are `:1029`/`:1053`, on the row below | **none** |
 | `tortoise/event_store.py:1029` (`purge_expired`) / `:1053` (`purge_overflow`) | predicate deletes — `WHERE n.ts < $cutoff` and `ORDER BY n.seq ASC LIMIT $overflow` + `DETACH DELETE` (the **def** lines are `:1014`/`:1038`) | **none** |
 | `tortoise/hosted_backup.py:842`, `:890`, `:1182`, `:1383` | `max(last_seq), max(first_seq)` and whole-graph export scans — aggregates | **none** |
 | `tortoise/sdk.py:13766` (the `read_after` call inside `poll_events`, `:13642`) | pages the feed | **none** |
@@ -323,7 +324,7 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 | `:PipelineStage` | `pipeline.py:349` (read); `:685`/`:731`/`:754-756` are `SET` statements — writes with no read of the node, not `RMW` and not reads | **none** |
 | `:PackManifest` | `pack_manifest_store.py:524` (`MATCH (m:PackManifest) RETURN m.namespace, …`), `:539` (`RETURN m.namespace, m.yaml`), `export.py:133` (`MATCH (m:PackManifest {namespace:$ns}) RETURN m.yaml`); `:550` is the `DELETE`, `:467` the writer named in §1 | **none** |
 | `:PackInstall` / `:PackSelection` | `export.py:126` (`:PackInstall`); `pack_state.py:878-881` (`MATCH (s:PackSelection) RETURN s.revision, s.configured_at, s.updated_by`); `projection/__init__.py:2335`, `:13801-13802`, `:17586-17587` (`MATCH (s:{_PACK_SELECTION_LABEL}) RETURN properties(s)` — **whole-node reads**, invisible to a `:PackSelection` grep because the label is the constant at `:2256`, the same interpolation that hid `:PackManifest`) | **none** |
-| `:ContextSubscription` | `webhook_delivery.py:425`, `:435`, `:444`, `:452`, `:1113`, `:1134-1136` (the due-subscription read); `why_snapshot.py:557` (reads; `:406` is the `CREATE` named in §1 and `:461` the `DETACH DELETE`, neither a reader) | **none** |
+| `:ContextSubscription` | `webhook_delivery.py:425`, `:435`, `:444`, `:452`, `:1113`, `:1134-1136` (the due-subscription read); `why_snapshot.py:557` (read). ⚠️ The `CREATE` and the `DETACH DELETE` named in §1 are both in **`webhook_delivery.py`** — `:406` and `:461` — not in `why_snapshot.py`, whose `:406` is `ids.append(pid)` and whose `:461` is a comment; neither file's writer is a reader | **none** |
 | `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:759-763` (`MATCH (n:OnboardingState {org_id:$org_id})-[:COMPLETED_STEP]->(s:OnboardingStep) RETURN s.step_id`) | **adjacency** → **`graph`** (§3 row 11c) — listed here only so the label is not missing from the table |
 
 **Verdict `record_only` for every row above except `:OnboardingState`/`:OnboardingStep` (which is `graph`)** — that is **12 record-only labels across 11 rows**, `:PackInstall`+`:PackSelection` sharing one.
@@ -352,7 +353,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 7 | `:Session` retrofit-audit / turn-mark properties (`capture_ok`, `capture_extractor`, `capture_lane`, `turn_max_index`, `entity_links_created`, `entity_links_attempted`) | `session_schema.py:855-862`, `:892`, `:906-917`; `sdk.py:17082`; and `hosted_api.py:43929-43946` (`RETURN s.turn_max_index, s.turn_count, count(t)` → `max(count(t), mark + 1)`, the anti-phantom prior count; note `sdk.py:4152-4159` returns the mark but consumes it WITHOUT the walk — see §2.4) | **yes** — returned from queries whose answers need `CONTAINS` / `aboutObject` adjacency | **graph** | the audit's shortfall count, its entity-link under-count and the hosted prior-count read ARE adjacency queries; no `public.session` row answers any of them |
 | 7b | `:Session` telemetry, the remainder (`capture_redactions`, `machine_id`, `model`, `client_captured_at*`, `value_nodes_*`, `draft_count`, `commit_count`) | point lookups and `SET`-that-reads: `hosted_api.py:21561`, `:22234-22240` (`value_nodes_*`, `draft_count`, `commit_count`), `sdk.py:52229-52251` (session detail), `sdk.py:4018-4021`; whole-node reads for `capture_redactions` (`tools/backfill_copy_turns.py:188-192`, `projection/__init__.py:14484`) | **no** — `none` capability | **`record_only`** (property-level; §6.1) | read, but by nothing that needs the graph — property guards and node dumps, not edges; the counter increments are graph-coupled though, so see §6.1 |
 | 8 | `:Object` / `:Subject` core | §2.5 | **yes** — `aboutObject` adjacency (`assembly.py:2629`), the `-[r]->` walk (`sdk.py:34355`) **and a fulltext index on `name`** | **graph** | an Event reaches its Object by EDGE; ⚠️ `supersededBy` is a **string matched by equality** (`audit.py:810`), not a walk — SQL-shaped, and an earlier draft wrongly cited it as the reason |
-| 9 | `story_arc` (on **any** label) | **none** — zero Cypher readers | **no** | **`record_only`** ⛔ **move gated on a deliberate pin decision** (§5.1) | its one reader is `public.session_narrative`; the mechanism CAN deny it, two policy pins currently refuse the entry |
+| 9 | `story_arc` (on **any** label) | **no Cypher query NAMES it** — but six whole-node reads carry it (`sdk.py:24633`, `:25506`, `:27101`, `:27197`, `:27296`, `:40513`); capability **`none`** | **no** | **`record_only`** ⛔ **move gated on a deliberate pin decision** (§5.1) | its one NAMED reader is `public.session_narrative`; the graph carries it only via `RETURN properties(n)`, which is `none`-capability by the same disposition row 14 gives `Point.mentions`; the mechanism CAN deny it, two policy pins currently refuse the entry |
 | 10 | `:GraphEvent` | §2.6 | **no** | **`record_only`** ⛔ blocked | ordered scan + aggregates; no record table (§5.2) |
 | 11 | bookkeeping labels (§2.7) | §2.7 | **no** | **`record_only`** ⛔ blocked | key lookups and label scans; no record table (§5.2) |
 | 11c | `:OnboardingState` / `:OnboardingStep` | §2.7 | **yes** — `completed_steps()` walks `COMPLETED_STEP` | **graph** | the docstring is explicit: *"Canonical completed-step ids from the edge set (never a second store)"* — the edge IS the store |
@@ -440,10 +441,20 @@ and `event` (`#10394`); the **`:Point`** route is named as open in §9.1's own r
 table is a SEPARATE route … a legacy turn snapshot whose `props` tail carried the prose can still land it on a
 `:Point` (`#10429`'s label)").
 
-**The census entitlement.** `story_arc` has **zero Cypher readers on any label**: `rg -n 'story_arc' tortoise/
--g '*.py'` returns 147 hits and **not one** is inside a `MATCH`/`RETURN`/`WHERE`. Its one reader is
-`public.session_narrative` (`record_text.serve_from_record`). The live write door already refuses it
+**The census entitlement.** `story_arc` is **named by no Cypher query on any label**: `rg -n 'story_arc'
+tortoise/ -g '*.py'` returns 147 hits and **not one** is inside a `MATCH`/`RETURN`/`WHERE`. Its one **named** reader
+is `public.session_narrative` (`record_text.serve_from_record`). The live write door already refuses it
 (`sdk._refuse_unpaired_narrative`).
+
+⚠️ **`story_arc` IS read — by whole-node reads, and an earlier draft's "zero Cypher readers" was false under this
+document's own rule.** Six product sites return the whole `:Point` node — `MATCH (n:Point {id:$id}) RETURN
+properties(n)` at `sdk.py:24633`, `:25506`, `:27101`, `:27197` (`:27296` inside `get_point`'s `_cache_answer`) and
+`:40513` — so a legacy point whose `props` tail carries the prose is returned WITH that key today, and the deny's
+visible effect is **`get_point` ceasing to return it for legacy points**. This is the exact error class §2.4 and
+row 14 record twice for `capture_redactions` and `Point.mentions`: "unread" is false, "capability `none`" is the
+real reason the verdict is `record_only`. **The verdict does not change** — a whole-node read needs none of the
+five capabilities — but the entitlement sentence did, and the `before` arm's `Point.story_arc` = 90,000 B is the
+proof the key is a node property at all.
 
 **The mechanism reaches it — measured, not assumed.** `_props_from_row`'s tail filter is
 `tail_denied = forbidden | {placement spellings}`, i.e. it denies the **plain** forbidden set as well as its
@@ -531,7 +542,7 @@ instead of another audit.
 
 No guessed verdicts. Each of these is a shape the census **cannot** settle from the code alone.
 
-### 6.1 `:Session` capture telemetry — four properties ARE graph-read, the remainder is `record_only`
+### 6.1 `:Session` capture telemetry — SIX properties ARE graph-read, the remainder is `record_only`
 
 `capture_redactions`, `capture_ok`, `capture_extractor`, `capture_lane`, `machine_id`, `model`,
 `client_captured_at*`, `turn_max_index`, `entity_links_attempted/created`, `value_nodes_created/held`,
