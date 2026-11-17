@@ -7915,6 +7915,7 @@ def _record_health() -> dict:
     """
     try:
         from tortoise import record_writer
+
         # #12943 (reopened): the live-write TARGET registry lives in
         # `cache_leg` (it is a bounded per-process map, not a Prometheus
         # counter — a per-graph label would be unbounded cardinality), so it is

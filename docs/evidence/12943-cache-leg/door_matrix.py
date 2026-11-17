@@ -46,6 +46,7 @@ Run (both stores real; the cache lane's URI comes from
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -193,10 +194,10 @@ def _cache_counts(graph_name: str) -> dict[str, int]:
             out[label] = int(res.result_set[0][0]) if res.result_set else 0
         return out
     finally:
-        try:
+        # A close that fails must not mask the count (SIM105: one home, not a
+        # bare try/except).
+        with contextlib.suppress(Exception):
             db.connection.close()
-        except Exception:
-            pass
 
 
 def _total(counts: dict[str, int]) -> int:
