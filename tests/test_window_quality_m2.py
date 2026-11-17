@@ -552,7 +552,13 @@ def test_the_policy_choice_is_not_a_lever(artifact):
     fraction of the collapse both of them suffer.
     """
     metrics = ("found_deep", "recall@3", "recall@5", "recall@10", "recall@15")
-    cap = 0.06
+    # ⛔ The ceiling IS the number the record publishes ("differ by at most 5.0
+    # points on any gated metric"), not a looser tolerance around it. An earlier
+    # cut bounded at 6.0 pp (and, through the collapse ratio, 7.25 pp) — both
+    # ABOVE the published bound, so the prose could go false with the suite
+    # green: setting `point/random@0.9 recall@10` to 0.252 makes the real
+    # divergence 5.8 pp and all 36 tests still passed.
+    published_bound = 0.05
     worst = 0.0
     for pop in ("object", "point"):
         arms = _arms(artifact, pop)
@@ -560,12 +566,10 @@ def test_the_policy_choice_is_not_a_lever(artifact):
             for m in metrics:
                 d = abs(arms[f"tail@{cov}"][m] - arms[f"random@{cov}"][m])
                 worst = max(worst, d)
-                # a re-ranking that bought back any material share reds here
-                assert d <= cap, (pop, cov, m, d)
+                # 1e-9 absorbs float noise only: the measured maximum is exactly
+                # 5.00 pp (object@0.25 recall@3), so the bound is tight, not slack.
+                assert d <= published_bound + 1e-9, (pop, cov, m, d)
     # …and the thing that DOES dwarf it, which is what the verdict rests on.
-    # Measured: the largest divergence is 5.0 pp against a 48.3-point collapse —
-    # just over a tenth — so 15 % is the ceiling and a re-ranking reaching a
-    # quarter of the loss would red this.
     complete = _arms(artifact, "object")["complete"]
     half = _arms(artifact, "object")["tail@0.5"]
     collapse = complete["found_deep"] - half["found_deep"]
@@ -694,8 +698,20 @@ def _derived_figures(artifact: dict) -> set[str]:
     out.add(f"{tail['recall@3'] / tail['resident_share'] * 100:.1f}")
     # the claim leg's unreachable share, complete
     out.add(f"{(1 - artifact['populations']['point']['arms']['complete']['found_deep']) * 100:.1f}")
-    # ⛔ The tail-vs-random divergences the record quotes in either direction.
-    # A cross-arm difference is a figure the artifact IMPLIES just as much as the
+    # ⛔ EVERY arm's drop from `complete`, on every gated metric, so the cost
+    # ranges the record quotes ("the cold-tail arm loses 42.3 to 48.3, the random
+    # control 42.0 to 50.3") are derived from the arms rather than whitelisted.
+    # The peer-half of this set — recall_gap_vs_complete — only carries the
+    # recall@k gaps; `found_deep` is a distance the record states too.
+    for pop in ("object", "point"):
+        arms = artifact["populations"][pop]["arms"]
+        complete = arms["complete"]
+        for arm, d in arms.items():
+            if arm == "complete":
+                continue
+            for m in ("found_deep", "recall@3", "recall@5", "recall@10", "recall@15"):
+                out.add(f"{abs(complete[m] - d[m]) * 100:.1f}")
+    # ⛔ The tail-vs-random divergences the record quotes in either direction.    # A cross-arm difference is a figure the artifact IMPLIES just as much as the
     # vs-`complete` deltas above. The record now compares the two orders
     # explicitly — including where `tail` is AHEAD, which is what makes "never
     # buys back" false — so these are derived rather than whitelisted.

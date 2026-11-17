@@ -622,7 +622,8 @@ stronger reading would need a run in which a demotion is performed WITHOUT that 
 only a few percent of what the window costs: the orders differ by at most 5.0 points on any gated metric
 (recall@3 46.0 vs 46.3 at 0.50; 81.0 vs 81.7 at 0.90), the cold-tail order is **ahead** on some cells
 (`found_deep` 51.7 vs 49.7 at 0.50) and **behind** where the resident set is small (20.3 vs 25.3 at 0.25)
-— against a 42.3-to-47.3-point collapse, so the choice of static order moves nothing that matters.
+— against a collapse of **42.0 to 50.3 points** depending on the order, so the choice of static order
+moves nothing that matters.
 ⛔ Do not read that as "the orders are indistinguishable": they are not, and "agree at every coverage"
 was an error this record carried for several revisions.
 

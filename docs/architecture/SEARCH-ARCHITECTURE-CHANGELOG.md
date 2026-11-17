@@ -230,7 +230,8 @@ does not, because §6.2's decision item 2 keeps it in the graph.
 **Two things the measurement changed that are not numbers.** The choice of *static* eviction order is not
 a lever: the two orders differ by at most 5.0 points on any gated metric, in either direction (recall@3
 46.0 vs 46.3 at 0.50; the cold-tail order ahead on some cells and **worse by 5.0 points at 0.25**),
-against a 42.3-to-47.3-point collapse — so neither re-ranking moves the ceiling, which is what the verdict needs
+against a collapse of **42.0 to 50.3 points** depending on the order — so neither re-ranking moves the
+ceiling, which is what the verdict needs
 and is *not* the stronger claim that the orders are indistinguishable. ⛔ That
 order is a **static popularity** count, not recency (this corpus has no read ledger), so §7's *recency*
 claim was **not** re-tested and is not overturned here. And a

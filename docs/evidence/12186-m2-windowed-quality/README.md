@@ -237,8 +237,9 @@ at 0.25, **8.7 vs 12.0** at 0.10, that 5.0-point gap being 5× the 1.0 pp `recal
 ⛔ **It is NOT true that `tail` never buys anything back, and an earlier cut of this record said so.**
 It is ahead on a few cells by more than the noise: up to **2.00 pp on `found_deep` at 0.50** (that
 metric's band is 0.33 pp) and **2.33 pp on `:Point` `recall@10` at 0.90**. What makes the policy choice
-irrelevant is the SCALE of the alternative, not an absence of difference: both orders lose **42.3 to
-47.3 points** to the eviction, so a 5.0-point edge is barely a tenth of the loss and changes nothing
+irrelevant is the SCALE of the alternative, not an absence of difference: the cold-tail arm loses
+**42.3 to 48.3 points** to the eviction and the random control **42.0 to 50.3** — so a 5.0-point edge is
+barely a tenth of the loss and changes nothing
 about whether a demoted node is retrievable — it is not, whichever reason selected it. Per resident
 query the two are 87.1 % vs 100.0 % at 0.25, and `recall@k` is bounded by the resident share in every
 arm of both policies.
@@ -254,8 +255,8 @@ conclusion is narrower than "the policy does not matter":
   (referenced-first vs random) are **bounded by the same ceiling**: what the window keeps it can still
   find, and *a demoted node is unretrievable whatever reason selected it*. They differ by at most a few
   points in either direction — `tail` ahead on some cells, **worse by 5.0 points at 0.25** — against a
-  42.3-to-47.3-point collapse, so read this as "neither re-ranking moves the ceiling by more than a
-  fraction of the loss", never as "the two are the same" and never as "the two agree";
+  collapse of **42.0 to 50.3 points** depending on the order, so read this as "neither re-ranking moves
+  the ceiling by more than a fraction of the loss", never as "the two are the same" and never as "the two agree";
 - **§7's actual claim — that *recency* beats static ranking — was NOT re-tested here** and this record
   does not overturn it on the retrieval axis. It refines it: recency may well pick a better 50 % to
   keep, and the curve above says the *kept* half then still loses exactly the evicted half. Whether
