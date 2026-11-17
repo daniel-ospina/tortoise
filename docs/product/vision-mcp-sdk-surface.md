@@ -110,7 +110,7 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 | MCP target tools | **27** |
 
 **The four bucket rows sum to 108.** (The last row is the target *surface*, not a bucket —
-27 targets received those 100 absorbed tools many-to-one, so it is not part of the sum.)
+27 targets received those 105 absorbed tools many-to-one, so it is not part of the sum.)
 
 > ✅ **These rows are the generator's current output, not a hand copy.** They are read out of
 > `docs/product/bridge-table.md`'s headline by

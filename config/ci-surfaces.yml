@@ -9026,8 +9026,13 @@ surfaces:
   # PERFORMS the absorbed operation (measured by substitution — a recorder replaces the
   # container door and the call must reach it, which a docstring cannot show), and the
   # 25 doors a RECORDED decision keeps live still hold their reasons in the code. Same
-  # surface as its two siblings: `sdk` is where `tortoise/tool_registry.py` diffs select,
-  # and a `core`-only row would leave this guard asleep on exactly the diff it gates.
+  # surface as its two siblings, and the file's subject is the `TortoiseSDK` doors it
+  # builds and monkeypatches. ⚠️ Do not read this row as the load-bearing one for a
+  # `tortoise/tool_registry.py` or `tortoise/sdk.py` diff: both are `SHARED_MODULES`, so
+  # `ci_selection.py --changed-files tortoise/tool_registry.py` answers
+  # `{"surfaces": [all eight], "full": true}` — the FULL matrix, not `sdk`. The row is
+  # what `--integrity` requires (a test file with no surface row is `manifest drift`,
+  # exit 1); the selection already covers the file on every diff that could red it.
   - test_11609_read_containers.py
   - test_11858_source_door_markers.py
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry

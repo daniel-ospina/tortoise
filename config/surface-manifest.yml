@@ -959,7 +959,7 @@ counts:
     operate: 2
 high_water_counts:
   tools: 48
-  sdk_public_methods: 110
+  sdk_public_methods: 94
 retired:
 - name: tortoise_annotate_operator
   use_instead: tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., directness=...)
