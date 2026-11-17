@@ -464,9 +464,11 @@ it is **1,311 rows over 1,313 lines**, of which **1,310** are distinct, the dupl
 unresolved door calls on `tortoise/session_source_migration.py:235` — with `31` attributed to no
 metric; then "137 of 1,311 rows", measured against an `origin/main` that `#13317` has since
 regenerated; then "one row", measured at `34bd33d22a`, a base seven commits old by the time it was
-read; then "709 of 1,311 rows over exactly five files", measured at `9cebd72ad7`, where the same
-method gives **745 over eight** (`search_engine.py` 21, `cache_projection.py` 2 and `ranking.py` 4
-are shifted there and are absent from its table) and two bases have moved since. All four are the
+read; then "709 of 1,311 rows over exactly five files" — that one DOES reproduce, but only against
+**its own** tree at `9cebd72ad7` (it is `main`'s own drift at that base, a DIFFERENT metric from the
+`origin/main`-versus-this-tree count above); against **this tree's** table that base gives **746 over
+eight** (`search_engine.py` 21, `cache_projection.py` 2 and `ranking.py` 5 are shifted there and are
+absent from its table), and two bases have moved since. All four are the
 same defect — a count taken off the wrong unit, off a base that has since
 moved, or off an unnamed metric — which is why the figure above names its base and its command.)
 

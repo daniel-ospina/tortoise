@@ -1310,8 +1310,8 @@ class GitHubIndexer:
         axis, OR one of the guards below applies — a latched word (always), an
         unplaceable position, or a WIDE (`outdated`) term. ⚠️ The WIDE term is the
         per-direction case, not a blanket `None`: its CLOSE fold is never dispatched
-        (no live holder), so it answers the POSITION and takes `None` only where that
-        position is live — `_project_issue` gates the mint on `prev_state is not None`.
+        (no live holder), so it answers the POSITION where the row HAS one, the WORD
+        where it has none, and `None` only where that position is live (`_project_issue`).
 
         ⛔ #13143 (S0 reader sweep): this read `Object.status` ONLY, and S0 moved
         the connector folds off that axis — a close now folds the terminal STAGE
