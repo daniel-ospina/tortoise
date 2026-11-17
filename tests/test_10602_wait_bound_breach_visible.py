@@ -1246,7 +1246,7 @@ async def test_a_started_response_that_RAISES_still_counts_the_breach(
         baseline, monkeypatch):
     """The started arm counts on the RAISING path too — `except BaseException`
     beside the `else`, NOT a `finally` (a `finally` would also count a cancelled
-    caller, exclusion 3): a handler that raises from an already-started response
+    caller, exclusion 4): a handler that raises from an already-started response
     is still a caller that waited past the budget with a head out.
 
     Measured before that arm existed: 0.05 s bound, head at 0.4 s, then
@@ -1368,7 +1368,7 @@ async def test_a_CANCELLED_request_is_not_a_served_breach(baseline, monkeypatch)
     count on cancellation (measured: a late-headed stream cancelled at 0.35 s →
     `starved +1`) books a deploy as a burst indistinguishable from a loop-block
     episode on this channel — which is why the class is reported by NEITHER
-    channel (see `monitoring.record_wait_bound_starved`, exclusion 3).
+    channel (see `monitoring.record_wait_bound_starved`, exclusion 4).
     """
     monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.05)
 

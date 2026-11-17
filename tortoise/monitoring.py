@@ -2515,7 +2515,7 @@ def record_wait_bound_starved(surface: str) -> None:
     keeps out of the share's denominator, and a return from
     ``await_under_wait_bound`` is not a refusal at all. (Exclusion 1 is the
     opposite case BY DESIGN — the refusal channel already counted it, which is
-    why this one abstains; exclusion 3 is reported by neither.)
+    why this one abstains; exclusions 3 and 4 are reported by neither.)
     Consequence measured on the live deployment (sha `55ec2c71b165`): a caller
     was answered a 401 at 20.27 s against a 10 s bound while
     `wait_bound_breaches.total` stayed 0 — the field an operator reads to answer

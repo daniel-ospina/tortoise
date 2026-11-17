@@ -6561,7 +6561,7 @@ class WaitBoundMiddleware:
             # task first, so the helper's `task.done()` arm catches that shape and
             # cannot discriminate this one). Not moved before the `await`: a
             # caller that cancels while the response is still in flight must
-            # count in NEITHER channel (exclusion 3), and only the outcome after
+            # count in NEITHER channel (exclusion 4), and only the outcome after
             # the await separates that from a served answer.
             try:
                 await task
