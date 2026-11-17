@@ -24983,7 +24983,7 @@ class TortoiseSDK:
         default; #944 review) and are skipped — never re-promoted into the event
         stream.
         """
-        from .planned_occurrence import is_plan_kind
+        from .planned_occurrence import is_plan_kind, plan_position
 
         rows: list = []
         # #7853: n is id-anchored — sweep the epistemic labels so a draft
@@ -25011,7 +25011,8 @@ class TortoiseSDK:
                 "MATCH (o:Point {id:$oid})-[r]->(s) "
                 f"WHERE {epistemic_disjunction('s')} "
                 "RETURN s.id, s.status, coalesce(s.outdated, false), "
-                "       s.objectKind, s.pipelineSlot, coalesce(s.isClosed, false)",
+                "       s.objectKind, s.pipelineStageId, s.pipelineSlot, "
+                "       s.pipelineOutcome, coalesce(s.isClosed, false)",
                 params={"oid": oid},
             ).result_set
             if not eps:
@@ -25030,10 +25031,16 @@ class TortoiseSDK:
             all_live = all(
                 endpoint_permits_operator_promotion(
                     st, bool(od),
-                    is_plan=is_plan_kind(kind),
-                    pipeline_slot=slot,
-                    is_closed=bool(closed))
-                for _, st, od, kind, slot, closed in eps
+                    # ⛔ The plan's position is resolved by the ONE helper the
+                    # plan writers and the Q5 read also use (`plan_position`), not
+                    # from the stored `pipelineSlot` PROP: a plan ended through the
+                    # generic door carries a terminal `pipelineStageId` beside a
+                    # stale slot, and reading the prop kept a settled plan
+                    # suppressing promotion for ever.
+                    plan_state=(plan_position(stage_id, slot, outcome,
+                                              is_closed=bool(closed))
+                                if is_plan_kind(kind) else None))
+                for _, st, od, kind, stage_id, slot, outcome, closed in eps
             )
             if not all_live:
                 continue  # keep draft until every endpoint is live

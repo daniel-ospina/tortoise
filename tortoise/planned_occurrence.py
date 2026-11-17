@@ -137,6 +137,69 @@ def is_plan_kind(object_kind: object) -> bool:
     return False
 
 
+#: The props only the STAGE WRITE may set on a plan. `create_plan` refuses them
+#: rather than letting `**props` park a position (or a closed marker) that the
+#: fresh `scheduled` advance then fails to overwrite — a create that returns a
+#: plan with no stage, which is the state `create_plan` exists to prevent.
+_STAGE_OWNED_PROPS: tuple[str, ...] = (
+    "pipelineStageId", "pipelineSlot", "pipelineOutcome", "pipelineStageSince",
+    "pipelineStageKey", "isClosed",
+)
+
+
+def plan_position(stage_id, slot=None, outcome=None, *,
+                  is_closed=False, declared: dict | None = None) -> dict:
+    """The plan's current position, resolved the way the WRITE resolves it.
+
+    ⛔ This is the ONE answer to "is this plan still open, ended, or
+    unresolvable?", and it exists because the pre-checks used the stored
+    ``pipelineSlot`` PROP as a proxy while ``pipeline.advance_stage`` decides
+    terminality from the RESOLVED stage — ``was_closed = bool(cur["isClosed"])
+    or (cur_stage is not None and cur_stage.is_terminal)``. A plan whose
+    ``pipelineStageId`` names a terminal stage but whose ``pipelineSlot`` prop is
+    absent or stale therefore read as OPEN to every pre-check (so the Event was
+    written and journaled before the writer's terminal guard refused) and as
+    still-upcoming to the Q5 read, while the gate suppressed promotion for ever.
+
+    Three inputs, in the writer's order:
+
+    * ``isClosed`` — the durable marker ends the record (§6);
+    * a ``stage_id`` that RESOLVES to a terminal stage of the effective
+      pipeline;
+    * a ``stage_id`` that does not resolve at all — the writer refuses any move
+      on such a plan (`unresolvable-current-stage`), so a pre-check must not
+      attempt one either.
+
+    ``has_position`` says whether any stage was recorded: a plan with NO position
+    (an extractor-minted ``core:plan`` Object) is not evidence of anything, so it
+    is neither ended nor "not yet" — that is why the promotion gate needs the
+    distinction rather than a boolean.
+
+    ⚠️ **STATED RESIDUAL (#13100 review round 3):** this resolves against the
+    DECLARED pipeline, not a per-graph `:Pipeline` override — it takes no graph,
+    while ``advance_stage`` resolves through ``effective_pipeline``, where an
+    override wins. No supported verb can change a stage's SLOT
+    (``rename_stage`` changes labels, ``add_stage`` adds ids, ``retire_stage``
+    sets a status ``by_id`` ignores), so a divergence needs a hand-written
+    override — and it fails CLOSED (a plan reads not-ended and is refused), never
+    open. Reading the override here means threading a graph through a pure helper
+    the gate calls per endpoint; deliberately not done here.
+    """
+    from . import pipeline as _pipeline
+
+    pipe = _pipeline._pipeline_from_decl(
+        PLAN_PIPELINE_KEY, declared if declared is not None else PLAN_PIPELINE_DECL)
+    stage = pipe.by_id(stage_id) if stage_id else None
+    return {
+        "stageId": stage_id,
+        "slot": stage.slot if stage is not None else slot,
+        "outcome": (stage.outcome if stage is not None else outcome) or None,
+        "has_position": bool(stage_id),
+        "ended": bool(is_closed) or (stage is not None and stage.is_terminal),
+        "unresolvable": bool(stage_id) and stage is None,
+    }
+
+
 def create_plan(sdk, name: str, *, title: str | None = None,
                 at: str | None = None, **props) -> dict:
     """Create a plan Object and put it on the ``scheduled`` stage.
@@ -156,6 +219,13 @@ def create_plan(sdk, name: str, *, title: str | None = None,
     # reverse order a `create_plan(..., objectKind="core:goal")` wrote a
     # core:goal Object and THEN raised the pipeline's kind-binding refusal — a
     # refused create that left a record in the graph behind it.
+    shadowed = sorted(k for k in _STAGE_OWNED_PROPS if k in props)
+    if shadowed:
+        raise ValueError(
+            f"Refused: {', '.join(shadowed)} cannot be set on a plan at CREATION "
+            f"— the stage write owns them. WHAT TO DO: create the plan, then "
+            f"advance it (`record_occurrence` / `settle_plan`), or write the "
+            f"position through the pipeline's own verb.")
     door_props: dict[str, Any] = {**props, "objectKind": PLAN_PIPELINE_KEY}
     if title is not None:
         door_props.setdefault("title", title)
@@ -166,9 +236,17 @@ def create_plan(sdk, name: str, *, title: str | None = None,
         # A create the store dropped (an unwritable name is the documented
         # case, #3590) must not look like a staged plan.
         return node
-    pipeline.advance_stage(
+    move = pipeline.advance_stage(
         sdk, plan_id, PLAN_PIPELINE_KEY, STAGE_SCHEDULED, at=at,
         declared=PLAN_PIPELINE_DECL)
+    if not move.applied:
+        # A plan born with NO position reads as "unknown" to every reader, so a
+        # create that could not stage it must say so rather than return a
+        # success-shaped record.
+        raise ValueError(
+            f"Refused: the plan {plan_id!r} was created but could not be put on "
+            f"{STAGE_SCHEDULED!r} ({move.reason}). WHAT TO DO: inspect the "
+            f"Object's current stage props — a fresh plan carries none.")
     return node
 
 
@@ -196,15 +274,19 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     from . import pipeline
 
     plan_id, cur = _resolve_plan(sdk, plan_ref)
-    # ⛔ TWO inputs, not one (§6): the stage slot OR the durable `isClosed`
-    # marker ends a plan. Reading the slot alone let a marker-closed plan reach
-    # the write, journal an :Event, and then hit the pipeline's terminal guard —
-    # leaving an occurrence the Q5 read then treats as "it happened" while the
-    # stage still says `scheduled`, i.e. a record that answers neither question.
-    if cur.get("slot") == "terminal" or cur.get("isClosed"):
+    # ⛔ The WRITER's question, asked before the write: is this plan ended (marker
+    # or resolved-terminal stage), or on a stage that does not resolve (which the
+    # writer refuses)? Reading the stored `pipelineSlot` prop instead let a plan
+    # ended through the generic door — `update_knowledge(id,
+    # pipelineStageId='held')`, a stale/absent slot prop — get its :Event written
+    # and journaled before the terminal guard refused, so every retry compounded
+    # an occurrence behind a refusal.
+    pos = plan_position(cur.get("stageId"), cur.get("slot"), cur.get("outcome"),
+                        is_closed=bool(cur.get("isClosed")))
+    if pos["ended"] or pos["unresolvable"]:
         raise ValueError(
             f"Refused: the plan {plan_ref!r} is already settled at "
-            f"{cur.get('stageId')!r} (outcome {cur.get('outcome')!r}"
+            f"{pos.get('stageId')!r} (outcome {pos.get('outcome')!r}"
             f"{', closed marker set' if cur.get('isClosed') else ''}). WHAT TO "
             f"DO: a plan ends once. If the occurrence still needs a record, "
             f"write the :Event directly (`create_entity(type='event')`) — the "
@@ -266,13 +348,14 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
             f"call `record_occurrence`, which writes the :Event and settles the "
             f"plan at {STAGE_HELD!r}.")
     plan_id, cur = _resolve_plan(sdk, plan_ref)
-    if cur.get("slot") == "terminal" or cur.get("isClosed"):
-        # Same two inputs as `record_occurrence` (§6): a marker-closed plan is
-        # settled even while its stage still reads non-terminal, and this refusal
-        # is also the only place that NAMES the marker when the stage does not.
+    pos = plan_position(cur.get("stageId"), cur.get("slot"), cur.get("outcome"),
+                        is_closed=bool(cur.get("isClosed")))
+    if pos["ended"] or pos["unresolvable"]:
+        # The same resolved answer `record_occurrence` uses, and the only place
+        # that NAMES the marker when the stage itself does not.
         raise ValueError(
             f"Refused: the plan {plan_ref!r} is already settled at "
-            f"{cur.get('stageId')!r}"
+            f"{pos.get('stageId')!r}"
             f"{' (closed marker set)' if cur.get('isClosed') else ''}. WHAT TO "
             f"DO: a plan ends once; a new plan is a new record.")
     move = pipeline.advance_stage(
@@ -376,15 +459,16 @@ def planned_without_occurrence(graph) -> list[dict]:
         # read does not take the plan's word for it.
         if occurrences:
             continue
+        # ONE resolution per row, through the same helper the two writers use, so
+        # the read cannot answer from a different input than they do: the stored
+        # `pipelineSlot` PROP is not the writer's answer (a plan ended through the
+        # generic door carries a terminal `pipelineStageId` beside a stale slot).
+        pos = plan_position(stage, slot, outcome, is_closed=bool(closed))
         out.append({
             "id": pid,
             "name": name,
-            "stage": stage or STAGE_SCHEDULED,
-            # §6's two inputs, and BOTH are required: a durable `isClosed`
-            # marker ends a record even when no stage resolves (a cleared or
-            # legacy stage), so reading the slot alone answers a closed plan as
-            # "still upcoming" — the opposite of the claim this read makes.
-            "ended": bool(closed) or slot == "terminal",
-            "outcome": outcome or None,
+            "stage": pos["stageId"] or STAGE_SCHEDULED,
+            "ended": pos["ended"],
+            "outcome": pos["outcome"],
         })
     return out

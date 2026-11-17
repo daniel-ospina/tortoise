@@ -969,8 +969,7 @@ def refuse_event_lifecycle_state(props, *, door: str) -> None:
 #: kind and stage declarations, and this module takes them as arguments so the
 #: predicate stays importable from a leaf.
 def endpoint_permits_operator_promotion(
-    status, outdated=False, *, is_plan=False, pipeline_slot=None,
-    is_closed=False,
+    status, outdated=False, *, plan_state=None,
 ) -> bool:
     """True when one operator endpoint lets a draft operator be promoted.
 
@@ -986,30 +985,37 @@ def endpoint_permits_operator_promotion(
       the write door refuses that shape now (#13100), and the reader keeps
       reading it, because a stored fact is not corrected by refusing new writes
       (#2977 — the net stays wider than the door).
-    * **planned, not happened** — a plan (``is_plan``) whose position is a
-      non-terminal STAGE has not occurred yet, so it suppresses exactly as the
-      retired ``:Event`` ``status='scheduled'`` did. Two bounds, both required
-      (the model's own two-input rule, §6: *a record is closed when the durable
-      marker is set OR the resolved stage is terminal*):
+    * **planned, not happened** — a plan whose position is a non-terminal,
+      still-resolving stage has not occurred yet, so it suppresses exactly as the
+      retired ``:Event`` ``status='scheduled'`` did.
 
-      - ``terminal`` is the line — a plan ends ``held`` / ``missed`` /
-        ``cancelled`` and is then a settled record, not a future one;
-      - ``isClosed`` ends it too, even with no resolvable stage (an ending is
-        durable through the marker), and a plan with **no position at all** is
-        NOT evidence of anything: an extractor-minted ``core:plan`` Object was
-        promoted over before this change, and inventing a "not yet" for it would
-        block that operator for ever.
+      ⛔ ``plan_state`` is the dict ``planned_occurrence.plan_position`` returns,
+      i.e. the WRITER's own answer (marker OR resolved-terminal stage OR an
+      unresolvable stage) — never the stored ``pipelineSlot`` prop, which is a
+      cache that a generic-door ending leaves stale. Passing the resolved state
+      is why this predicate takes a dict rather than a slot string: the earlier
+      signature let a settled plan keep suppressing promotion for ever, and let
+      the caller re-derive terminality at the call site (the drift #2901 exists
+      to stop).
 
-      So the arm fires only on a plan that is demonstrably mid-pipeline.
+      Two bounds, so a plan is not suppressed for ever: an ENDED plan (marker or
+      terminal stage) is a settled record, and a plan with **no position at all**
+      is not evidence of anything (an extractor-minted ``core:plan`` Object was
+      promoted over before this change; inventing a "not yet" for it would block
+      that operator). So the arm fires only on a plan that is demonstrably
+      mid-pipeline.
     """
     if is_terminal_status(status, bool(outdated)):
         return False
     if (status or "live") != "live":
         return False
-    # A plan WITH a non-terminal position, and not closed by the marker, has not
-    # happened yet. One expression, so the arm reads as the rule it is.
-    return not (is_plan and pipeline_slot is not None
-                and pipeline_slot != "terminal" and not is_closed)
+    if plan_state is not None:
+        # A plan that HAS a position, is not ended, and still resolves to a stage
+        # has not happened yet. One expression, so the arm reads as the rule is.
+        not_yet = (plan_state["has_position"] and not plan_state["ended"]
+                   and not plan_state["unresolvable"])
+        return not not_yet
+    return True
 
 
 #: The keys an epistemic node's identity may live under, in resolution order

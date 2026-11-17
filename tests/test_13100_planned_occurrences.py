@@ -196,6 +196,55 @@ class TestThePlanPipeline:
         with pytest.raises(ValueError, match="closed marker set"):
             PO.settle_plan(sdk, plan["id"], PO.STAGE_CANCELLED)
 
+    def test_a_plan_ENDED_THROUGH_THE_GENERIC_DOOR_is_refused_before_any_write(
+            self, sdk):
+        """The writer resolves terminality from `pipelineStageId`, not the slot
+        PROP — so the pre-check must ask the writer's question.
+
+        Ending a plan with `update_knowledge(id, pipelineStageId='held')` leaves
+        `pipelineSlot` stale/absent. A pre-check that read the prop thought the
+        plan was still open, wrote and journaled the Event, and only then hit the
+        writer's terminal guard — and every retry compounded another occurrence
+        behind a refusal.
+        """
+        plan = PO.create_plan(sdk, "Ended via the generic door")
+        g = sdk._get_proj().g
+        g.query("MATCH (p:Object {id:$p}) SET p.pipelineStageId='held'",
+                params={"p": plan["id"]})
+        before = PO.planned_without_occurrence(g)
+        assert [r["ended"] for r in before] == [True], before
+        for _ in range(2):  # a retry must not mint a second Event
+            with pytest.raises(ValueError, match="already settled"):
+                PO.record_occurrence(sdk, plan["id"])
+        with pytest.raises(ValueError, match="already settled"):
+            PO.settle_plan(sdk, plan["id"], PO.STAGE_MISSED)
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 0
+
+    def test_the_gate_reads_the_RESOLVED_end_of_a_plan(self, sdk):
+        """R2's other direction: a plan that ENDED must not suppress for ever."""
+        point = sdk.create_point("statement", "a live point")["id"]
+        plan = PO.create_plan(sdk, "Ended via the generic door")
+        op = f"op-ended-{plan['id']}"
+        _operator_over(sdk, (point, plan["id"]), op)
+        sdk._get_proj().g.query(
+            "MATCH (p:Object {id:$p}) SET p.pipelineStageId='missed'",
+            params={"p": plan["id"]})
+        assert op in _promote(sdk, point), (
+            "a plan that resolved to a terminal stage still suppressed promotion")
+
+    def test_create_plan_refuses_a_position_in_its_caller_props(self, sdk):
+        """A create cannot carry its own stage — and must not return a plan
+        with NO position either, which is what parking one used to do."""
+        with pytest.raises(ValueError, match="cannot be set on a plan at CREATION"):
+            PO.create_plan(sdk, "positioned at birth", isClosed=True)
+        with pytest.raises(ValueError, match="cannot be set on a plan at CREATION"):
+            PO.create_plan(sdk, "positioned at birth", pipelineStageId="held")
+        assert sdk._get_proj().g.query(
+            "MATCH (o:Object) WHERE o.name = 'positioned at birth' "
+            "RETURN count(o)").result_set[0][0] == 0
+
     def test_create_plan_cannot_be_mis_kinded_by_a_caller_prop(self, sdk):
         """The kind is the module's decision, not a `**props` override."""
         node = PO.create_plan(sdk, "sneaky", objectKind="core:goal")
