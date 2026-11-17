@@ -46,19 +46,25 @@ same for **stored shapes**, and it states its population and its commands so a l
 every number rather than trust it.
 
 **Every `file:line` below is valid at ONE head: `ccb49741b2ec`** — the branch head this document was
-written and reviewed at (its merge of `origin/main` `c4f6170cc302`). Open them there. On any later head
-they drift **by construction**: a `main` integration that inserts a line above a cited site moves every
-cite below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
+written and reviewed at (its merge of `origin/main` `c4f6170cc302`); the census landed on `main` as the
+squash commit `c06d6289e9`, and `ccb49741b2ec` is reachable as `refs/pull/13095/head` (`git fetch origin
+'refs/pull/13095/head:ccb49741b2ec'`), so every cite below can be opened there. On any later head they
+drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
+below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
 52 of this document's 164 `file:line` pairs no longer name the same line (counted as the unique
 `path.py:NNNN` pairs in this file, each path spelled as written; normalising a bare `sdk.py:` to
 `tortoise/sdk.py:` dedupes them to 151, which is why the as-written spelling is the one quoted), and
 not one of them names a symbol that went away. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
-Most rows do carry a handle — the writer named beside the cite, or the Cypher quoted on it (15 of the
-18 census rows in §1) — and that handle is what makes the line re-derivable. But **three rows carry the
-number and nothing else** (row 10 `residency.py:284`, row 11 `why_snapshot.py:484`, row 14
-`webhook_delivery.py:487`), so those drift silently and no symbol will be there to re-find: for them
-the number IS the citation, and it is stale on any head but this one. Re-derive each cite from the text
+Most rows do carry a handle — the writer named beside the cite, or the Cypher quoted on it (**13 of the
+18 census rows in §1**) — and that handle is what makes the line re-derivable. But **five rows carry the
+number and nothing else**: row 10 (`residency.py:284`), row 11 (`why_snapshot.py:484`), row 14
+(`webhook_delivery.py:487`), row 15 (module names plus `hosted_api:32965` and
+`pack_manifest_store.py:467`, and no writer symbol — the same shape as row 10), and row 18 (which
+declares itself `found, NOT censused` — a GAP, see §7). Those five drift silently and no symbol will be
+there to re-find: for them the number IS the citation, and it is stale on any head but this one. (For
+rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the Cypher — but
+the row's own WRITE cite is not.) Re-derive each cite from the text
 its own row carries, which is the rule §9.1 of `STORAGE-ARCHITECTURE.md` applies to its own cites.
 The **byte** figures do not drift this way: they are re-derivable from the committed JSON arms at any
 head (§1.1, §4).
