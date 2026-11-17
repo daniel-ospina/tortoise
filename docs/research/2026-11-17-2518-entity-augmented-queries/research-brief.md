@@ -40,6 +40,7 @@ shipped posture (OFF / caller-gated).
 ## 0. Preflight — what actually ran
 
 **Search tool (rung resolved):**
+
 - **Rung 1** `mcp__seo-intelligence__perplexity_search` — **not reachable from this agent**: the lane's
   tool surface exposes no MCP client (`mcp_load` is not present), so the rung cannot be loaded.
 - **Rung 2** `web_search` — **not exposed** to this agent either.
@@ -81,7 +82,7 @@ obeyed**. This is named here because the report should not claim a read that did
 | derive | `tortoise/extractor_v2.py::_derive_queries` | one `object` query per extracted entity name, plus `event`/`point` queries from event/point content and story topics. **No `subject` query is emitted**, and the `object` queries are the ones `resolve_entities` is handed. |
 | sanitise | `extractor_v2._sanitise_query_text` → `_candidate_query_text` | strip, drop `word:`, strip punctuation, collapse whitespace, cut to 160. The **stored** and **run** forms are the same string — `_query_key` keys on it. |
 | look up | `extractor_v2._fts_rows` → `sdk.tortoise_fts_query(entity_type="object", limit=3, include_terminal=True, _record_reads=False, _valid_time_rerank=False)` | the fused read. |
-| build the OR union | `tortoise/sparse.py::build_or_query` | `tokenize_sparse_query` → sort by length DESC → cap at `DEFAULT_MAX_OR_TERMS` → join with `|` (RediSearch OR). **Additive tails, in order:** the A4 PRF expansion tail (`expansion_terms`, ≤ 8 terms), the `#8933` identifier aliases + adjacency phrases, and the `#12360` `_`-preserving composite runs (`underscore_run_terms`). Degenerate inputs (empty / stopword-only / single token) fall back to a backslash-escaped **literal**. |
+| build the OR union | `tortoise/sparse.py::build_or_query` | `tokenize_sparse_query` → sort by length DESC → cap at `DEFAULT_MAX_OR_TERMS` → join with `\|` (RediSearch OR). **Additive tails, in order:** the A4 PRF expansion tail (`expansion_terms`, ≤ 8 terms), the `#8933` identifier aliases + adjacency phrases, and the `#12360` `_`-preserving composite runs (`underscore_run_terms`). Degenerate inputs (empty / stopword-only / single token) fall back to a backslash-escaped **literal**. |
 | fuse | `tortoise/search_engine.py::degradation_chain` → `rrf_fusion` | the fts / vector / structural legs run concurrently under one deadline; RRF fuses by rank with `{"vector": 1.5}` and the lexical weight bounded below it. |
 | accumulate | `extractor_v2.search_graph` | **every** derived query's rows land in ONE id-keyed dict — so the candidate set is the union over the derived object queries, never `limit`. |
 | bind | `extractor_v2._find_existing_entity` | normalised-name equality (`_norm`) plus, since `#12295`, the comparison-side fold (`entity_blocking.attach_matches`). |
@@ -100,10 +101,10 @@ aliases/phrases, `#12360` `_` composites). **Nothing from the graph.** No entity
 | the sparse half | `sdk.SDK._entity_key_expansion_pass` | `run_fts_query(..., expansion_terms=aliases)` — **one** extra fts pass; merged additively (expanded rows first, pass-1-only ids appended; no id dropped). |
 | the dense half | `sdk.SDK._entity_key_dense_pass` | **one** extra embed of a composed query (≤ `_ENTITY_DENSE_ALIAS_CHARS` = 240 chars from ≤ `_ENTITY_DENSE_ALIAS_TERMS` = 32 alias terms) → **one** extra vector-leg query, merged additively. Armed separately by `TORTOISE_ENTITY_KEY_DENSE` (default OFF). |
 
-Cost bound, stated as a bound and not a measurement: **per read**, ≤ 1 anchor FTS + 1 batched harvest
-+ ≤ 1 extra fts pass + ≤ 1 extra embed + ≤ 1 extra vector-leg query, all fail-open (every failure
-keeps the original legs byte-identically; the pool is capped before tokenisation). **No new writer
-embeds anything** — the mechanism reads `search_keys`, which E3 (`#1535`) already writes, and
+Cost bound, stated as a bound and not a measurement: **per read**, ≤ 1 anchor FTS + 1 batched
+harvest + ≤ 1 extra fts pass + ≤ 1 extra embed + ≤ 1 extra vector-leg query, all fail-open (every
+failure keeps the original legs byte-identically; the pool is capped before tokenisation). **No new
+writer embeds anything** — the mechanism reads `search_keys`, which E3 (`#1535`) already writes, and
 `aboutObject`, which the capture spine already writes. **No register entry is needed and none was
 made**; no MCP/SDK surface is touched.
 
@@ -191,7 +192,7 @@ level, not between-run.
 
 ### 3.1 ARM 1 (`in_window` / `miss_past_k` / `miss_absent_at_max_k` / `rows_zero`), per k
 
-**HYBRID — the production read, HEAD (`measurement-hybrid.json`)**
+#### HYBRID — the production read, HEAD (`measurement-hybrid.json`)
 
 | k | `in_window` | recall@k | `miss_past_k` | **`miss_absent_at_max_k`** | `rows_zero` | `rank_sum` |
 |---|---|---|---|---|---|---|
@@ -209,7 +210,7 @@ row for every cell** — `in_window` **298 / 299 / 300 / 300**, `miss_absent_at_
 `miss_past_k` **2 / 1 / 0 / 0**, `rank_sum` **331 / 335 / 341 / 341**, and the same per-class cells
 (definite 178→180, ident 90→90, path 30→30). The 0-absent result is not a one-run artefact.
 
-**KEYWORD-ONLY, composite ON (HEAD's lexical shape)**
+#### KEYWORD-ONLY, composite ON (HEAD's lexical shape)
 
 | k | `in_window` | recall@k | `miss_past_k` | **`miss_absent_at_max_k`** | `rows_zero` |
 |---|---|---|---|---|---|
@@ -220,7 +221,7 @@ row for every cell** — `in_window` **298 / 299 / 300 / 300**, `miss_absent_at_
 
 By class at k=3 → k=15: definite **158 → 180**, ident **79 → 90**, path **25 → 30**.
 
-**HYBRID with the composite OFF — the production shape WITHOUT `#12360`**
+#### HYBRID with the composite OFF — the production shape WITHOUT `#12360`
 
 | k | `in_window` | `miss_past_k` | **`miss_absent_at_max_k`** | `rows_zero` |
 |---|---|---|---|---|
@@ -232,7 +233,7 @@ By class at k=3 → k=15: definite **158 → 180**, ident **79 → 90**, path **
 By class at k=3 → k=15: definite **178 → 180** (of 180), ident **40 → 70** (of 90), path **28 → 30**
 (of 30).
 
-**KEYWORD-ONLY, composite OFF — the pre-`#12360` shape the dispatch's baseline was taken on**
+#### KEYWORD-ONLY, composite OFF — the pre-`#12360` shape the dispatch's baseline was taken on
 
 | k | `in_window` | recall@k | `miss_past_k` | **`miss_absent_at_max_k`** | `rows_zero` |
 |---|---|---|---|---|---|
