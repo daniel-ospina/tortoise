@@ -38,6 +38,7 @@ Run (embedded lane; URI-less by design)::
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
 import threading
@@ -50,23 +51,23 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise import embeddings  # noqa: E402
-from tortoise.embeddings import (  # noqa: E402
+from tortoise import embeddings
+from tortoise.embeddings import (
     WRITE_EMBED_BUDGET_S,
     EmbeddingModel,
     encode_for_row,
 )
-from tortoise.projection import (  # noqa: E402
+from tortoise.projection import (
     _PREWIPE_SYNTHETIC_REASON,
     _graph_metadata_write_scope,
     _prewipe_restore_write_scope,
     _prewipe_synthetic_write_scope,
     _replay_write_scope,
 )
-from tortoise.projection.edges import (  # noqa: E402
+from tortoise.projection.edges import (
     _structural_edge_write_scope,
 )
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.sdk import TortoiseSDK
 
 #: How long the simulated cold load takes. Long enough that "blocked on the
 #: load" is unmistakable in a wall-clock assertion, long enough to keep 3-4x
@@ -82,14 +83,14 @@ _DIM = 384
 class _FakeEncoder:
     """A loaded-model stand-in: encodes without torch, deterministically."""
 
-    def encode(self, texts, **kwargs):  # noqa: ANN001, ANN003
+    def encode(self, texts, **kwargs):
         return np.array([[0.1] * _DIM for _ in texts], dtype=np.float32)
 
 
 def _fake_slow_init(load_s: float):
     """``EmbeddingModel.__init__`` that takes ``load_s`` and then succeeds."""
 
-    def _init(self, load_timeout=None):  # noqa: ANN001
+    def _init(self, load_timeout=None):
         time.sleep(load_s)
         self._model = _FakeEncoder()
 
@@ -137,10 +138,11 @@ def sdk(tmp_path):
     try:
         yield sdk
     finally:
-        try:
+        # Teardown must not mask a result (the old `except` carried that reason in a
+        # lint-suppression comment; `contextlib.suppress` is SIM105's shape and says
+        # the same thing).
+        with contextlib.suppress(Exception):
             sdk.close()
-        except Exception:  # noqa: BLE001 — teardown must not mask a result
-            pass
 
 
 # ── the invariant: a create does not wait for the load ────────────────────
@@ -612,7 +614,7 @@ def test_a_projection_fault_reads_as_replay(monkeypatch):
 _COLD_WRITE_PROBE = "DERIVED entity row"
 
 
-def _decline_lines(caplog):  # noqa: ANN001, ANN202
+def _decline_lines(caplog):
     return [r for r in caplog.records
             if r.name == "tortoise.embeddings"
             and _COLD_WRITE_PROBE in r.getMessage()]
@@ -634,7 +636,7 @@ def test_the_cold_decline_is_logged_once_per_process_and_rearmed(cold_embedder, 
     count.
     """
 
-    def _cold_lines(records):  # noqa: ANN001, ANN202
+    def _cold_lines(records):
         return [r for r in records if "still COLD" in r.getMessage()]
 
     with caplog.at_level(logging.WARNING, logger="tortoise.embeddings"):

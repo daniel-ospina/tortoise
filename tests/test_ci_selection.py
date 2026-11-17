@@ -22664,6 +22664,52 @@ def test_rewrite_object_status_suite_runs_on_a_tools_only_change():
     assert "test_12855_outdated_rewrite.py" in r["test_files"], r
 
 
+def test_the_residency_gate_runs_on_a_migration_only_diff():
+    """#13352 review finding (P2): the gate must RUN on the diff that can break it.
+
+    `tests/test_9559_blocked_release_conditions.py` is the only thing that
+    measures whether `postgres_residency_snapshot()` still carries its
+    fail-closed arm (`IF jsonb_array_length(v_audit->'orgs') > 0`) AND its
+    `RAISE WARNING` arm. It was registered in `api` and `core`, and NEITHER
+    reaches a migration-only diff: `supabase/` is a flat NON_PYTHON_PREFIXES
+    entry, so such a diff filters to `changed == []` and takes `select()`'s
+    docs-only early return, which emits tier1 ONLY.
+
+    The split of coverage is exact, which is why this is a finding and not a nit:
+    `schema-drill` executes the SQL through PGlite, so DELETING the guard is
+    data-visible there; the `RAISE WARNING` arm and the `v_written + v_zeroed`
+    accounting are precisely what that harness cannot see (pglite 0.5.4 exposes no
+    notice channel — the suite's own docstring records that, and reviewer round 9
+    measured that deleting the whole warning arm left the suite green). So a
+    corrective migration keeping the guard and dropping the warning merged GREEN
+    on every leg.
+
+    ⛔ The subject is read from disk (`supabase/migrations`), so this row cannot go
+    vacuous on a renamed fixture: it asserts on a REAL migration from the tree, and
+    on the ABSENCE of a surface (which is what puts the diff on the tier1 early
+    return) — so if a SOURCE_PATTERNS row ever starts matching `supabase/`, this
+    pin's premise changed and it says so rather than silently passing.
+    """
+    migrations = sorted((REPO / "supabase" / "migrations").glob("*.sql"))
+    assert migrations, "no migrations under supabase/ — this pin has lost its subject"
+    # The gate's own subject, plus one that is not the object of the exercise: a
+    # migration-only diff must reach the file whichever migration moves.
+    for changed in (migrations[-1].relative_to(REPO).as_posix(),
+                    "supabase/migrations/20990101000001_a_future_correction.sql"):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == [], (
+            f"{changed} is expected to select NO surface — that is what puts a "
+            "migration-only diff on the tier1 early return. If a SOURCE_PATTERNS "
+            "row now matches `supabase/`, re-derive this pin rather than "
+            "deleting it")
+        assert "test_9559_blocked_release_conditions.py" in r["test_files"], (
+            f"a {changed}-only diff must select "
+            "`test_9559_blocked_release_conditions.py` — it is the only leg that "
+            "reads the `RAISE WARNING` arm and the zeroed-row accounting, and "
+            "PGlite cannot see either (#13352 review, the no-op-gate class)")
+
+
 def test_journal_growth_guard_runs_on_a_tool_or_probe_change():
     # #5612: `tests/test_journal_growth.py` (registered `core`) pins the
     # accounting of `tools/journal_growth.py` — the measurement §5.1 recorded as

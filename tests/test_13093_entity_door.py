@@ -295,7 +295,11 @@ def test_SDK_an_EVENT_is_not_hot_and_never_an_empty_answer(armed):
     would ship a silent parity gap (a lost `id`) through the door whose whole
     purpose is honest reads; answering `{}` would claim it does not exist. The
     door abstains.
-    """
+    
+    ⚠️ TODAY-PIN: this row states the state #13353 shipped in, and it is EXPECTED
+    to be updated when #9721 lands. The only acceptable greening is a GROWN
+    union — never a shrunken jurisdiction, and never a label taken back out.
+"""
     armed({"event": [_event_row()]})
     sdk = _sdk_class()(nodes=[])  # cold cache, Event only in the record
 
@@ -310,6 +314,36 @@ def test_SDK_an_EVENT_is_not_hot_and_never_an_empty_answer(armed):
     # The reason names the COVERAGE gap, not a plain record miss: `record-miss`
     # would make this an ESTABLISHED absence (`RECORD_ANSWERED_REASONS`).
     assert out.get("fallbackReason") == rs.FALLBACK_RECORD_LABEL_NOT_SERVED, out
+
+
+def test_a_RECORD_mode_miss_carries_no_fallback_reason_and_counts_nothing(monkeypatch):
+    """A coverage fact is not a fallback, and the wire must agree with the counter.
+
+    ⛔ MEASURED DEFECT THIS PINS (#13353 review cycle 2, finding 2): the `record`
+    arm used to set `fallbackReason: "record-label-not-served"` on a read where
+    NOTHING fell back — no cache branch, no counted reason, the graph handle never
+    opened — so an operator reconciling the wire attribution against
+    `fallback_counts()` saw two different stories for the same read, and
+    `ServedAnswer.fallback_reason`'s own docstring ("the named reason a
+    `prefer`-mode read landed on the cache, or `None` when no fallback happened")
+    was false on that arm.
+    """
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_RECORD)
+    rs.reset_fallback_counts()
+    conn = _TableConn({"object": []})
+    monkeypatch.setattr(rs, "open_record", _opener(conn))
+    sdk = _sdk_class()(nodes=None)
+
+    out = sdk.get_entity("obj-1")
+
+    assert out != {}, "a record-mode miss is not an established absence here (#9721)"
+    assert out.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, out
+    assert "fallbackReason" not in out or out["fallbackReason"] is None, (
+        f"a `record`-mode miss named a fallback that never happened: {out!r}")
+    assert rs.fallback_counts() == {}, (
+        f"a reason was counted for a read that never fell back: {rs.fallback_counts()}")
+    assert sdk.handle_opens == 0, (
+        "record mode must answer without building a graph handle")
 
 
 def test_the_coverage_reason_is_never_read_as_an_established_absence():
@@ -380,39 +414,112 @@ def test_SDK_record_mode_refuses_instead_of_inventing_an_absence(monkeypatch):
         sdk.get_entity("obj-1")
 
 
+@pytest.mark.parametrize("mode", [rs.MODE_OFF, rs.MODE_PREFER, rs.MODE_RECORD])
+def test_an_EMPTY_key_is_absent_in_EVERY_mode_and_opens_NO_store(monkeypatch, mode):
+    """`get_entity("")` must not depend on the mode, and must reach neither store.
+
+    The record's reader refuses an empty key as STRUCTURAL (`read_node`), so an
+    armed `get_entity("")` would answer by raising while `off` answered `{}` —
+    the same id behaving differently on a deployment flag, at a door whose only
+    contract is "the node's properties, or an empty dict". Nothing is named, so
+    nothing is established.
+
+    ⛔ ALL THREE MODES, AND BOTH STORES (#13353 review, findings 2 and 2b). The
+    previous cut armed only `prefer`, and asserted only that the RECORD was not
+    opened — so it stayed green when the guard was moved BELOW the tenant
+    resolution (where a tenant-less `record` deployment then raised) and it could
+    not see the guard delegating to `_get_entity`, which builds a graph handle in
+    the one mode that exists to run with the graph engine stopped, and can return
+    a node for `""` from the store that mode promises not to read.
+    """
+    monkeypatch.setenv(rs.RECORD_SERVE_ENV, mode)
+    rs.reset_fallback_counts()
+    conn = _TableConn()
+    opened = _opener(conn)
+    monkeypatch.setattr(rs, "open_record", opened)
+    sdk = _sdk_class()(nodes=[], tenant=None)
+
+    assert sdk.get_entity("") == {}, (
+        f"an empty key is not a coordinate — it must stay the absent answer in "
+        f"{mode!r}")
+    assert opened.calls == [], (
+        f"the record was opened for a key that names no node ({mode!r})")
+    if mode != rs.MODE_OFF:
+        # `off` is byte-identical to the pre-#13093 call BY CONTRACT (it goes to
+        # the cache accessor and may build the handle — that is what "off" is),
+        # so the no-handle promise is an ARMED-mode promise only.
+        assert sdk.handle_opens == 0, (
+            f"the cache handle was built for an empty key in {mode!r} — `record` "
+            f"mode exists to run with the graph engine stopped, and the cache has "
+            f"no `node_key <> ''` constraint")
+
+
 # ── 4. the coverage rule is CONDITIONAL, not a blanket refusal ─────────────
 
 
 def test_the_abstention_is_a_COVERAGE_gap_not_a_refusal_to_answer(monkeypatch):
-    """With every addressable label served, the SAME miss is an established absence.
+    """With BOTH coverage facts satisfied, the SAME miss is an established absence.
 
-    ⛔ This is what makes the abstention honest rather than convenient: the
-    door answers `{}` the moment nothing is outside its coverage, so the
-    `not-hot` above is caused by #9721's open labels and not by a rule that
-    never yields an answer.
+    ⛔ THE COMPLETION CLAIM MUST BE GREEN *AT* COMPLETION (#13353 review, finding
+    1). This test therefore asserts only the repair side: patch BOTH facts to the
+    state the fix direction names — the union covers the whole jurisdiction, and
+    no address residual is left — and `{}` becomes the answer. It stays green
+    before and after #9721 lands, because it never asserts anything about today.
 
-    ⛔ THE STATE PATCHED IN HERE MUST BE REACHABLE (#13322 review F2). The
-    previous spelling patched `ENTITY_UNION_LABELS` to `tuple(NODE_TABLES)` —
-    six labels including `Session`, which is in NO resolve branch — so it
-    asserted the `{}` verdict in a configuration the door can never occupy, and
-    it hid the fact that the predicate as shipped was `False` forever. The
-    state patched below is the jurisdiction set itself: exactly the tuple #9721
-    landing produces, where the two unserved labels join the union.
+    ⛔ AND THE STATE PATCHED IN HERE MUST BE ONE THE FIX DIRECTION PRODUCES. The
+    previous cut patched the JURISDICTION down to `ENTITY_UNION_LABELS` —
+    "narrow the question until it is satisfied", which no ticket proposes and
+    which hid the fact that the predicate was `False` for every reachable
+    configuration.
     """
     answer = rs.ServedAnswer(read=rs.READ_ENTITY_UNION_BY_ID, coordinate="c",
                              served_from="record", props=None)
-    assert rs.entity_absent_wire(answer) != {}
-    assert rs.entity_coverage_complete() is False, (
-        "Source and Event are addressable by a bare id and are not served — "
-        "coverage cannot be complete while that is true (the `{}` arm must "
-        "stay unreachable rather than be fabricated)")
 
-    monkeypatch.setattr(rs, "ENTITY_UNION_JURISDICTION", rs.ENTITY_UNION_LABELS)
-    assert rs.entity_coverage_complete() is True
+    monkeypatch.setattr(rs, "ENTITY_UNION_LABELS", rs.ENTITY_UNION_JURISDICTION)
+    monkeypatch.setattr(rs, "ENTITY_UNION_ADDRESS_RESIDUALS", {})
+    assert rs.entity_coverage_complete() is True, (
+        "a state that satisfies both declared facts must SATISFY the predicate — "
+        "a completion claim whose completion state is red is not a claim anyone "
+        "can act on")
     assert rs.entity_absent_wire(answer) == {}, (
         "with complete coverage the record's `no row` IS an absence, and the "
         "answer must be the FALSY empty dict (a verifier written as `if out:` "
         "must not read an absence as a success, #12941 review P0-1)")
+
+
+def test_TODAYs_two_blockers_and_the_direction_they_must_move():
+    """TODAY's state, and the repair direction — a change detector, not a rule.
+
+    Kept SEPARATE from the completion claim above on purpose: this row asserts the
+    present gap, so it is expected to be updated when the gap closes.
+
+    ⛔ THE ONLY ACCEPTABLE GREENING IS A GROWN UNION. `#9721` landing adds
+    `Event`/`Source` to `ENTITY_UNION_LABELS`; the retirement of the `Source`
+    residual is the other fact. Taking a label back OUT of the union, or shrinking
+    the jurisdiction to whatever the union serves, would green this row while
+    making the door abstain for a label class for ever — a false PASS on exactly
+    the gate #13093 is about (#13353 review, finding 1).
+
+    ⛔ AND THE PIN IS NOT `KEY_PROPERTY == "id"`. That spelling is the conflation
+    this PR removed ("addressable" reduced to "keyed on id"): it is false for
+    `Event`, which a bare id DOES address.
+    """
+    assert set(rs.ENTITY_UNION_JURISDICTION) - set(rs.ENTITY_UNION_LABELS) == {
+        "Source", "Event"}, (
+        "today's parity gap (#9721) is Event + Source. If it has CLOSED, update "
+        "this row — the union must have GROWN, not the jurisdiction shrunk")
+    assert rs.ENTITY_UNION_ADDRESS_RESIDUALS, (
+        "#9721 landing alone must NOT complete coverage: the cache resolves a "
+        "Source from a bare `id` that the record can only address by url")
+    assert rs.entity_coverage_complete() is False, (
+        "coverage cannot be complete while either blocker stands — the `{}` "
+        "arm must stay unreachable rather than be fabricated")
+
+    answer = rs.ServedAnswer(read=rs.READ_ENTITY_UNION_BY_ID, coordinate="c",
+                             served_from="record", props=None)
+    assert rs.entity_absent_wire(answer) != {}, (
+        "an unestablished absence answered falsy — a verifier written `if out:` "
+        "would read a coverage gap as `the node does not exist`")
 
 
 def test_the_coverage_domain_is_the_cache_resolvers_branch_labels():
@@ -443,40 +550,156 @@ def test_the_coverage_domain_is_the_cache_resolvers_branch_labels():
         "branch — measuring it made the coverage predicate False forever")
 
 
-def test_naming_an_unaddressable_label_is_not_coverage():
-    """Coverage is SERVED, not merely NAMED (#13322 review F2, point 3).
+def test_the_two_coverage_facts_are_SEPARATE_and_Event_is_not_a_residual():
+    """"Fixable by parity" and "fixable only by re-addressing" are different facts.
 
-    `read_entity` skips any label whose record contract key is not the `id` the
-    door is handed, so a future lane adding `Event`/`Source` to
-    `ENTITY_UNION_LABELS` on the belief that #9721 landed would otherwise flip
-    `entity_coverage_complete()` to `True` while the read still served nothing
-    for that label — and the door would answer `{}` for an Event the record
-    holds, which is #13093 itself re-opened by a green suite.
-    """
+    #13322's second review sharpened this on the record and it decides what the
+    "next lane does: a bare id DOES address an Event — `Event.id == eventId` for
+    all current writes, and the record's `node_key` for an Event IS the eventId —
+    so `Event`'s only gap is parity (#9721). A Source is the opposite: the cache
+    resolves it by `id` and by `url`, while the record's key for it is
+    `node_key = url`, so a bare Source *id* names a node the record read would
+    miss. Folding the two into one condition is what let the previous predicate
+    look reachable.
+
+    ⛔ THESE ARE *TODAY'S* DECLARATIONS, AND THE DIRECTION THEY MUST MOVE IS THE
+    ONE THAT GROWS THE UNION. `Event` is not a residual because a bare id DOES
+    address it — `Event.id == eventId` for all current writes, and the record's
+    `node_key` for an Event IS the eventId — so Event's only gap is parity
+    (#9721). A Source is the opposite: the cache resolves it by `id` and by
+    `url`, while the record's key for it is `node_key = url`, so a bare Source
+    *id* names a node the record read would miss. Folding the two into one
+    condition is what let the previous predicate look reachable.
+
+    ⛔ AND THE PIN IS ON THE MECHANISM, NOT ON `KEY_PROPERTY == "id"`: that
+    spelling is the conflation this PR removed, and it would red at the state
+    #9721 produces even though `Event` is genuinely addressable (#13353 review,
+    finding 1).
+    
+    ⚠️ TODAY-PIN: this row states the state #13353 shipped in, and it is EXPECTED
+    to be updated when #9721 lands. The only acceptable greening is a GROWN
+    union — never a shrunken jurisdiction, and never a label taken back out.
+"""
     from tortoise.cache_projection import KEY_PROPERTY
 
-    assert all(KEY_PROPERTY.get(label) == "id"
-               for label in rs.ENTITY_UNION_LABELS), (
-        "every SERVED label must be addressable by a bare id")
-    assert [label for label in rs.ENTITY_UNION_JURISDICTION
-            if KEY_PROPERTY.get(label) != "id"] == ["Source", "Event"], (
-        "the unaddressable labels are Source (url) and Event (eventId) — the "
-        "exact pair condition 2 of entity_coverage_complete excludes")
-    served = set(rs.ENTITY_UNION_LABELS)
-    assert not set(rs.ENTITY_UNION_JURISDICTION) <= served, (
-        "if every addressable label is served, revisit this file's `{}` arm — "
-        "the abstention is caused by THIS gap")
+    assert KEY_PROPERTY.get("Event") == "eventId", (
+        "Event's contract key is the eventId a bare id names — if this moves, "
+        "re-measure whether a bare id still addresses an Event")
+    assert KEY_PROPERTY.get("Source") == "url", (
+        "Source's contract key is url (#5012), the identity a bare id cannot "
+        "be assumed to carry")
+    assert "Event" not in rs.ENTITY_UNION_ADDRESS_RESIDUALS, (
+        "Event is ADDRESSABLE — its gap is parity (#9721). Putting it here "
+        "would duplicate the parity list in the address map and tell the next "
+        "lane the wrong repair")
+    # ⛔ DERIVED, NOT A LITERAL (#13353 review, finding 2): the residual exists
+    # because a label has a cache branch whose property is NOT its record contract
+    # key. Measured off the two owners the rest of the module already reads, so a
+    # resolver change that drops `("Source", "id")` reddens here instead of leaving
+    # coverage False for ever on a stale entry.
+    from tortoise.projection import FalkorProjection
 
-def test_read_entity_skips_a_label_keyed_on_something_other_than_id():
-    """The mechanism condition 2 rests on, measured on the real reader."""
-    conn = _TableConn({"source": [{"url": "url-1", "name": "a source"}]})
-    out = rs.read_entity(conn, org_id=TENANT[0], graph_id=TENANT[1],
-                         id_val="url-1", labels=("Source",))
-    assert out is None, (
-        "read_entity answered for a label keyed `url` — then condition 2 of "
-        f"entity_coverage_complete would be dead weight, got {out!r}")
-    assert conn.table_statements() == [], (
-        "it must not even ask the source table for a key it cannot address")
+    derived = {
+        label for label in rs.ENTITY_UNION_JURISDICTION
+        if {prop for lab, prop in FalkorProjection._RESOLVE_BRANCHES if lab == label}
+        - {KEY_PROPERTY.get(label)}}
+    assert set(rs.ENTITY_UNION_ADDRESS_RESIDUALS) == derived, (
+        f"the residual set drifted from what the resolvers imply: declared "
+        f"{sorted(rs.ENTITY_UNION_ADDRESS_RESIDUALS)}, derived {sorted(derived)}")
+    assert "Source" in derived, (
+        "if the resolver ever stops resolving a Source by `id`, revisit the "
+        "residual AND the docstring that says a bare Source id is unaddressable")
+
+    # ⛔ THE PIN THAT #9721 ALONE DOES NOT COMPLETE COVERAGE: with every label
+    # served, the residual still blocks the absence verdict.
+    from unittest import mock
+
+    with mock.patch.object(rs, "ENTITY_UNION_LABELS", rs.ENTITY_UNION_JURISDICTION):
+        assert rs.entity_coverage_complete() is False, (
+            "with Event+Source served and the Source residual standing, coverage "
+            "must still be False — otherwise the door claims an absence for a "
+            "Source id it never asked about")
+
+
+def test_read_entity_addresses_each_label_by_its_OWN_contract_key():
+    """The reader and the declaration agree STRUCTURALLY, not by accident.
+
+    ⛔ THE PREVIOUS SPELLING SKIPPED ANY LABEL WHOSE KEY WAS NOT THE LITERAL
+    `"id"`. That was two defects in one line: it threw away `Event`, whose
+    record `node_key` IS the eventId a bare id names; and it made the coverage
+    predicate's `KEY_PROPERTY == "id"` test agree with the reader only because
+    both consulted the same accident, so "served" and "readable" were two
+    different questions asked of one flag (#13322 review, finding 1).
+
+    ⛔ AND THE BOUND VALUE IS ASSERTED, NOT JUST THE ROW (#13353 review, finding
+    6): the fake cursor answers each table from its own row list whatever the
+    bind params are, so "the row came back" alone cannot tell `key=id_val` from
+    `key=<some property>`. A wrong address value would have stayed green.
+    """
+    conn = _TableConn({"source": [{"url": "url-1", "name": "a source"}],
+                       "event": [{"event_id": "ev-1", "name": "decided"}]})
+
+    source = rs.read_entity(conn, org_id=TENANT[0], graph_id=TENANT[1],
+                            id_val="url-1", labels=("Source",))
+    assert source is not None and source.get("name") == "a source", (
+        f"a Source is addressed by its own contract key (url) — got {source!r}")
+    assert conn.row_statements()[0][1][-1] == "url-1", (
+        f"the Source row was anchored on {conn.row_statements()[0][1]!r}, not "
+        f"on the bare value the door was handed")
+
+    event = rs.read_entity(conn, org_id=TENANT[0], graph_id=TENANT[1],
+                           id_val="ev-1", labels=("Event",))
+    assert event is not None and event.get("name") == "decided", (
+        "an Event is addressed by its own contract key (eventId) — the bare id "
+        f"IS the eventId, got {event!r}")
+    assert conn.row_statements()[-1][1][-1] == "ev-1", (
+        f"the Event row was anchored on {conn.row_statements()[-1][1]!r}")
+
+
+def test_a_label_with_no_contract_key_RAISES_rather_than_being_skipped(monkeypatch):
+    """A declaration the reader cannot honour is broken, not quietly excluded.
+
+    ⛔ THE ROW HAS TO MAKE THIS GUARD THE ONLY POSSIBLE RAISE. `NODE_TABLES` and
+    `KEY_PROPERTY` have identical key sets today, and `read_node` raises the SAME
+    `RecordServeError` for a label it has no table for — so passing a made-up
+    label proved nothing: with the new guard deleted the row stayed GREEN
+    (#13353 review, finding 5, measured `25 passed`). The state below removes
+    `Session` from `KEY_PROPERTY` only, so the table exists and the key does not
+    — the one shape in which this guard is the sole source of the refusal.
+    """
+    from tortoise import cache_projection
+
+    monkeypatch.delitem(cache_projection.KEY_PROPERTY, "Session")
+    conn = _TableConn()
+    with pytest.raises(rs.RecordServeError, match="declares no contract key"):
+        rs.read_entity(conn, org_id=TENANT[0], graph_id=TENANT[1],
+                       id_val="x", labels=("Session",))
+    assert conn.row_statements() == [], (
+        "the reader asked the record for a label it cannot address")
+
+
+def test_a_FOUND_answer_is_never_turned_into_a_marker():
+    """`entity_absent_wire` is the rule's home; a hit routed through it stays a hit.
+
+    The first cut discarded every property (`id` included), so a read that SAW
+    the node was reported as "nobody could see it". Unreachable at the time (its
+    one caller guards), but it is the module's published home for the rule and a
+    name that invites exactly that call.
+    """
+    found = rs.ServedAnswer(read=rs.READ_ENTITY_UNION_BY_ID, coordinate="c",
+                            served_from="record",
+                            props={"id": "obj-1", "name": "migration-goal"})
+    out = rs.entity_absent_wire(found)
+    assert out.get("id") == "obj-1" and out.get("name") == "migration-goal", (
+        f"a FOUND answer came back as {out!r} — a marker for a node the read saw")
+    assert RESIDENCY_FIELD not in out
+    assert out.get("servedFrom") == "record", (
+        "the hit lost its store attribution — the seam's contract is that "
+        "`servedFrom`/`fallbackReason` appear on EVERY armed response, so an "
+        f"unattributable hit is an invisible answer, got {out!r}")
+    assert "fallbackReason" in out, (
+        "the null `fallbackReason` is emitted deliberately (a stored property of "
+        "that name must not forge an attribution)")
 
 
 
@@ -605,7 +828,11 @@ def test_the_served_labels_are_the_ones_with_measured_parity():
     their fold constants) and `Point` by `point-by-id`'s measured parity; `Event`
     and `Source` are the open #9721 list. A label added here without that
     evidence would serve a silent parity gap through an honesty door.
-    """
+    
+    ⚠️ TODAY-PIN: this row states the state #13353 shipped in, and it is EXPECTED
+    to be updated when #9721 lands. The only acceptable greening is a GROWN
+    union — never a shrunken jurisdiction, and never a label taken back out.
+"""
     from tortoise.cache_projection import FOLD_ON_CREATE_DEFAULTS, KEY_PROPERTY
 
     assert set(rs.ENTITY_UNION_LABELS) == {"Point", "Subject", "Object"}

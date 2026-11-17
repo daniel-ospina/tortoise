@@ -1388,11 +1388,12 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # stacked head whose `search_engine.py` inserts do not all survive to this tree), so §1's locator
     # test was PERMANENTLY RED while the DOCUMENT was right — the mirror of the drift it guards.
     # Re-derived by content at this tree: `grep -n -F 'CALL db.idx.fulltext.queryNodes'
-    # tortoise/search_engine.py` -> 3078 (the statement's Cypher ends at 3086),
-    # `grep -n -F 'def recency_tie_clause('` -> 2708,
+    # tortoise/search_engine.py` -> 3078 (the statement's Cypher spans 3078-3087: the
+    # `"LIMIT $limit"` line is 3086 and the tuple's closing paren is 3087, which `origin/main`
+    # counts IN the span — measured, not picked), `grep -n -F 'def recency_tie_clause('` -> 2708,
     # `grep -n -F 'for rank, (pid, _score) in enumerate(ranked):'` -> 4707.
     ("tortoise/search_engine.py", 3078, "CALL db.idx.fulltext.queryNodes",
-     "`:3078-3086`"),
+     "`:3078-3087`"),
     ("tortoise/search_engine.py", 2708, "def recency_tie_clause(",
      "`search_engine.py:2708`"),
     ("tortoise/search_engine.py", 4707,
