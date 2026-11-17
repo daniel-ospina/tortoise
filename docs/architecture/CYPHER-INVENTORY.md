@@ -74,7 +74,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1311** | **99** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **8,908** | **805** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement, NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it read 8,791 here, which is no tree this tool can print) |
+| every tracked surface (`--all-surface`) | **8,939** | **810** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at `origin/main` **`a218f8867b`**), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 here, none of which reproduces at this tree; the number beside this row now names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -127,9 +127,17 @@ tool's number. A bare `rg … tortoise/` gives 1,630 / 109, the 6 extra occurren
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
 * `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,329** across **141** files, while the tool
-reports 2,342 / 142. The 13-occurrence, one-file gap is the WHOLE-TEXT class: this repo's string
-concatenation leaves `MATCH` and its `(` on two lines, one occurrence to the tool and none to `rg`.
-(A bare case-sensitive `rg` gives 2,060, and `-i` without the exclusion 2,401 — which is why the
+reports 2,342 / 142. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
+ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
+example — a wrapped English sentence in ten (e.g. `oauth.py:1600`'s “limits match” / “(#329): preserve
+None”) and a wrapped Cypher example in three (`projection/__init__.py:1204`,
+`record_projection.py:4777`, `vector_write.py:495`). Enumerated, not inferred: that TWO-LINE predicate
+over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone finds 175, which is why
+the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
+concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose inside the docstring,
+which is why the tool's verb total is an upper bound.
+(A bare case-sensitive `rg` gives 2,063, and `-i` without the exclusion 2,401 — which is why the
 number beside this row was un-reproducible before `#13098`'s review asked for the predicate.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
@@ -406,7 +414,7 @@ reads) and **no** Cypher statement site, so `ast_door_calls` **1569→1571** and
 `non_cypher_door_calls` **258→260** while `sites`/`plain`/`candidates` are unchanged (1311 / 859 /
 578 — the 578 is the `plain` READ half, which is also the migration-candidate count). `files_scanned`
 stays 297 and `files_with_sites` 99: the reader lives in a file that already carries sites. The
-`rg` reconciliation in §1 is re-measured on this tree (1,624 / 2,329 / 1,630 bare / 2,060 / 2,401),
+`rg` reconciliation in §1 is re-measured on this tree (1,624 / 2,329 / 1,630 bare / 2,063 / 2,401),
 Appendix A is regenerated with `--markdown`, and `--check` reports **`25 pinned counts match`**.
 ⚠️ That regeneration is not decorative at this head: `main`'s `#13115` (`9f327e1435`) moved code
 inside files that already carried sites, so the re-cut moved **31 of Appendix A's 1,313 rows** while
@@ -446,6 +454,14 @@ and one in `tortoise/postgres_bytes.py`. This change regenerates Appendix A with
 that head (verified byte-identical to a fresh run) and adds
 `tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` so the next
 main-move cannot repeat it — which is step 1 of the procedure above enforced instead of trusted.
+
+⛔ **And neither of those two carriers covers the numbers this file QUOTES, which is the third place
+the same cut can leave stale.** The pins are 25 scalars and the appendix is `file:line` rows; §0's
+`--all-surface` row (not a pin, deliberately), §1's `rg` cross-check and the prose that explains it
+are neither. Measured at `a218f8867b`, with `--check` printing `25 pinned counts match`: that row
+still said `8,908 / 805` against `8,939 / 810` on this tree, §1's bare case-sensitive count said
+`2,060` against `2,063`, and its stated CAUSE for the 13-occurrence gap was wrong outright — see
+§1. Re-derive the quoted prose too, not just the two carriers that are checked.
 
 <details><summary>the previous cut (kept as history)</summary>
 
