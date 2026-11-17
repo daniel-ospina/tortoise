@@ -7,7 +7,7 @@ correctly refused. This module supplies the two halves:
 
 * the **meter** — :func:`measure_written_rows` reads the stored size of the
   journal rows a caller has JUST written, in the caller's own transaction;
-* the **audit** — :func:`read_per_org_bytes` recomputes the same figure for the
+* the **audit** — :func:`per_org_bytes` recomputes the same figure for the
   whole table, per org, later and independently, and publishes the bytes that
   cannot be attributed per org as a **separate, labelled residual**.
 
@@ -68,11 +68,15 @@ is exactly what #4492 refused. They travel in :attr:`PerOrgPostgresBytes.
 residual` and never touch a per-org number.
 
 ⛔ THIS MEASURES; IT DOES NOT PRICE OR ARM. Nothing here prices, tiers, caps or
-refuses, and ``allowance_gate`` is untouched: arming ``postgres_storage`` needs
-the ``free``/``anon`` included amounts decided first, which is a separate,
-owner-gated change.
+refuses, and nothing here is wired into ``allowance_gate``: arming
+``postgres_storage`` needs the ``free``/``anon`` included amounts decided
+(a separate, owner-gated change) AND a per-org figure the gate can read on a
+write path — this module's audit is not one (a whole-table aggregation with a
+per-row TOAST lookup, per call) and the ledger reader is the window addend.
+Both are the gate's declared release conditions; see
+``allowance_gate.RELEASE_CONDITIONS``.
 
-FAIL-SOFT. :func:`measure_written_rows` and :func:`read_per_org_bytes` are
+FAIL-SOFT. :func:`measure_written_rows` and :func:`per_org_bytes` are
 TOTAL on the live path — never raise, never change a write's outcome; a fault
 is logged and reported as ``None`` / ``ok=False``. ⚠️ SCOPED TO THE METER'S OWN
 FAULTS, and the scope is load-bearing rather than pedantic: the meter's

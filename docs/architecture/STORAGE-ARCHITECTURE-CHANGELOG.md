@@ -2312,3 +2312,21 @@ the landed date, the migration's issue and PR, and the measurements' home are al
   move. They are now symbol-keyed — `projection/entities.py::_persist_extra_props` for the skip set,
   and `record_restore.py::_ask_the_wipe_guard` for the wipe it names (the guard that refuses that
   `MATCH (n) DETACH DELETE n` pre-wipe on a production name), which is the form §13/§13.8 use.
+
+## §9.1's `:Point` passthrough bullet — the deny-set sites are SIX, and `update_point` is a symbol too (`#13083`, 2026-11-17)
+
+**§9.1(b), the same bullet the entry above records.** Two things that correction left unmeasured, both
+re-derived from the tree rather than read back:
+
+- `rg -n '_POINT_DENY' tortoise/` returns **20 hits over 4 files**, and **six** of them are executable:
+  the definition (`projection/entities.py::_POINT_DENY`), the skip-set call, the two warning filters,
+  and `tortoise/consistency.py`'s re-export and reason map. The earlier enumeration ("the four
+  executable ones are the skip-set call, two warning filters and a reason map") left out the
+  definition and the re-export; none of the six derives a `REMOVE`/`DELETE`, so the conclusion is
+  unchanged and the enumeration is now complete.
+- the graph-side clear the bullet names was still cited as a bare `:2337-2338` line range, which rots on
+  the next unrelated move. It is `sdk.py::TortoiseSDK.update_point` now, so the bullet carries no line
+  number at all and both §9.1 guards
+  (`test_section_9_1_cites_symbols_not_lines_and_its_symbols_resolve`,
+  `test_the_design_documents_carry_no_issue_state_or_change_narration`) hold on symbols, which is the
+  form this file uses.

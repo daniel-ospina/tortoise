@@ -45,6 +45,36 @@ ratio the budget is sized against. See §8 for what was taken from outside and w
 same for **stored shapes**, and it states its population and its commands so a later head can re-derive
 every number rather than trust it.
 
+**Every `file:line` below is valid at ONE head: `ccb49741b2ec`** — the branch head this document was
+written and reviewed at (its merge of `origin/main` `c4f6170cc302`); the census landed on `main` as the
+squash commit `c06d6289e9`, and `ccb49741b2ec` is reachable as `refs/pull/13095/head` (`git fetch origin
+'refs/pull/13095/head:ccb49741b2ec'`), so every cite below can be opened there. On any later head they
+drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
+below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
+52 of this document's 164 `file:line` pairs no longer name the same line (counted as the unique
+`path.py:NNNN` pairs in this file, each path spelled as written; normalising **every** bare
+`name.py:` to `tortoise/name.py:` dedupes them to 151 — 13 collisions, 3 of them `sdk.py` — which is why
+the as-written spelling is the one quoted), and
+not one of them names a symbol that went away. ⛔ **That is a fact about the drift, not a licence to
+re-derive from a symbol.**
+Most rows name the writer beside the cite, or quote the Cypher on it, and that handle is what makes the line
+re-derivable. ⛔ **No count of the rows that "carry a handle" is quoted here on purpose**: the figure turns
+on whether a bare module name counts as one, and it has already been read three different ways (15, 14 and
+13 of the 18 rows in §1). What IS checkable is the five rows carrying no re-findable handle at all: rows
+10 (`residency.py:284`), 11 (`why_snapshot.py:484`) and 14 (`webhook_delivery.py:487`) give a number and
+nothing else; row 15 gives bare module names beside `hosted_api:32965` and one bare `pack_manifest_store.py:467`
+— neither cite a re-findable handle; and row 18 declares itself `found, NOT censused` — a GAP, see §7. Those
+five are *at risk* of drifting silently: no symbol will be there to re-find — for them the number IS the
+citation — so an insert above a cited site is undetectable from the row alone. The risk has already begun
+to bite: of the 19 line-numbered cites in these five rows, **10 no longer name the same line at `main`**
+(`55ec2c71b1`, the head the 52 above is counted against) — row 15's `hosted_api:32965`, whose
+`MERGE (p:PackInstall …)` is at `:33067` there, and 9 of row 18's 14 — while rows 10, 11 and 14 and row
+15's `pack_manifest_store.py:467` still do. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
+Cypher — but the row's own WRITE cite is not.) Re-derive each cite from the text
+its own row carries, which is the rule §9.1 of `STORAGE-ARCHITECTURE.md` applies to its own cites.
+The **byte** figures do not drift this way: they are re-derivable from the committed JSON arms at any
+head (§1.1, §4).
+
 ---
 
 ## 1. The population — enumerated from the WRITERS

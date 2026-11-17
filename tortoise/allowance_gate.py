@@ -229,6 +229,8 @@ __all__ = [
     "BLOCKED",
     "DIMENSIONS",
     "HARD_STOP_MULTIPLE",
+    "RELEASE_CHECKED",
+    "RELEASE_CONDITIONS",
     "AllowanceDimension",
     "CapBand",
     "MeterReading",
@@ -259,6 +261,50 @@ AT_CAP_WARNING = "allowance at cap"
 
 #: A configured dimension whose meter does NOT exist is BLOCKED, never faked.
 BLOCKED = "blocked"
+
+#: ── A BLOCK IS A CLAIM ABOUT THE TREE, SO IT CARRIES ITS OWN RELEASE ─────────
+#: Every BLOCKED dimension declares the conditions that would LIFT the block, as
+#: machine-readable tokens (:data:`RELEASE_CONDITIONS` names each one). The point
+#: is that a block stops being an unrevalidated past decision:
+#:
+#: * a condition whose EVIDENCE is satisfied must not still be cited as the
+#:   obstacle — `tests/test_9559_blocked_release_conditions.py` evaluates every
+#:   token against the artifact it names and REDs when a satisfied condition is
+#:   quoted in a live ``blocked_reason``;
+#: * a block whose conditions have ALL fired REDs with "lift it" rather than
+#:   holding a dimension blocked forever on grounds that no longer exist.
+#:
+#: Why this exists: ``postgres_storage``'s block cited *"no per-org byte meter …
+#: BLOCKED until a per-org attribution exists"* and kept saying so after #12762
+#: landed that attribution — the ONE registry (:mod:`cost_dimensions`) declares
+#: it ``MEASURED`` with an explicit ``OVERRIDES:`` of the very sentence the block
+#: repeated. Nothing re-read the block, so five separate lanes re-derived the
+#: same falsified premise. A block is a claim: this makes it a CHECKED claim.
+#:
+#: Tokens are declared here as strings rather than as predicates so production
+#: pays nothing for them: the predicates live in the test that revalidates them
+#: on every PR, and an UNKNOWN token (a typo, a renamed condition) is a hard
+#: failure there rather than a condition that silently never fires.
+RELEASE_CONDITIONS: dict[str, str] = {
+    "per_org_postgres_attribution": (
+        "a per-org Postgres BYTE attribution exists that is a measurement and "
+        "not an allocation (evidence: ``postgres_bytes.PerOrgPostgresBytes.for_org`` "
+        "+ the ``measured`` attribution in ``cost_dimensions``, #12762)"),
+    "postgres_residency_gauge": (
+        "a per-org RESIDENCY gauge this gate can afford on a WRITE PATH exists "
+        "— neither shipped reader is one: the audit is a whole-table "
+        "aggregation with a per-row TOAST lookup plus a second pass over the "
+        "TOAST relation, and the ledger reader is the window ADDEND, not the "
+        "stored footprint"),
+    "storage_included_amounts_confirmed": (
+        "the free/anon included storage amounts are OWNER-CONFIRMED rather than "
+        "the derived defaults of record (``product/pricing.json`` "
+        "``_included_amounts_status``)"),
+    "vector_index_measurable": (
+        "the HNSW vector index is measurable, so a cap MAY be wired to the graph "
+        "reading (evidence: ``graph_storage.PRECISION_NOTE`` no longer forbids "
+        "it)"),
+}
 
 
 class _Absent:
@@ -354,6 +400,13 @@ class AllowanceDimension:
     #: (refuse), which is what keeps a missing reading a refusal for every
     #: dimension whose writer is reliably running.
     absent_is_zero: bool = False
+    #: The conditions that would LIFT :attr:`blocked_reason`, as tokens into
+    #: :data:`RELEASE_CONDITIONS`. Required (non-empty) on every BLOCKED
+    #: dimension and rejected on an unblocked one: a block that cannot name what
+    #: would end it is an opinion, and one that lists conditions it no longer
+    #: waits on is the staleness this field exists to expose. Revalidated by
+    #: ``tests/test_9559_blocked_release_conditions.py``, not by production.
+    release: tuple[str, ...] = ()
     #: Where an ESTIMATED reading may hard-refuse (see :class:`CapBand`).
     cap_band: CapBand = CapBand()
     #: Whether a non-positive allowance means UNARMED rather than "a cap of
@@ -697,14 +750,53 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
     _dimension(
         "postgres_storage", ALLOWANCE_KEYS["postgres_storage"],
         meter=None,
+        # ⛔ THE PER-ORG ATTRIBUTION IS NO LONGER THE OBSTACLE — it was, and this
+        # reason said so long after #12762 landed it. The correction is the point
+        # of ``release`` below: the condition that HAS fired is recorded in
+        # ``per_org_postgres_attribution`` (satisfied, evidence in the test) and
+        # is deliberately NOT quoted here as the current obstacle.
+        #
+        # ⛔ THIS NARROWS THE RECORDED POSITION, AND THE NARROWING IS MARKED.
+        # ``cost_dimensions``, ``postgres_bytes``, ``metering`` and two docs each
+        # recorded that arming waits on ONE thing: the free/anon included
+        # amounts. They are right that that decision is outstanding and
+        # incomplete on what else is — #12762 made the ATTRIBUTION measurable,
+        # and the gate is the consumer that must hold a cap against a figure on
+        # every write, so the FIGURE'S SHAPE is load-bearing too. Without the
+        # second condition, clearing the first arms the dimension with
+        # ``meter=None`` and every gated write answers 500 ("no meter plumbed").
+        #
+        # OVERRIDES: the recorded “postgres_storage is armable once the free/anon
+        # included amounts are decided” (cost_dimensions.py, postgres_bytes.py,
+        # metering.py, docs/ops/postgres-storage-measurement.md,
+        # docs/architecture/CONSUMPTION-MODEL.md) — NARROWED, not reversed: that
+        # decision is still required, AND no per-org RESIDENCY gauge exists that
+        # the gate can read on a write path. If anyone disagrees, the route is a
+        # reopen on #9559, not a quiet edit.
         blocked_reason=(
-            "no per-org byte meter: ``postgres_storage`` measures at DATABASE "
-            "grain (``measure_postgres_storage``; its cost-dimension "
-            "``attribution`` states that a per-org byte split would be an "
-            "ALLOCATION, not a measurement, because Postgres records no per-org "
-            "byte ownership). BLOCKED until a per-org attribution exists — a "
-            "gate that charged this org for the whole database's bytes would "
-            "over-charge every tenant"),
+            "no per-org RESIDENCY GAUGE, and the included amounts are not "
+            "confirmed. The per-org Postgres BYTE ATTRIBUTION this reason used "
+            "to call missing now EXISTS and is MEASURED (#12762 — "
+            "``postgres_bytes.PerOrgPostgresBytes.for_org``; the "
+            "``cost_dimensions`` attribution carries the OVERRIDES of the #4492 "
+            "'there is no per-org attribution' position). Two things still "
+            "block a cap: (1) no per-org figure this gate can read ON A WRITE "
+            "PATH — the audit (``postgres_bytes.per_org_bytes``, RPC "
+            "``postgres_per_org_bytes``) is a whole-table aggregation with a "
+            "per-row TOAST lookup plus a second pass over the TOAST relation, "
+            "and the ledger reader is the window ADDEND, not the org's stored "
+            "footprint (``metering.get_postgres_bytes_written``: 'the ADDEND of "
+            "the window, not the org's total stored footprint'); (2) the "
+            "free/anon included amounts, which the artifact records as DERIVED, "
+            "NOT OWNER-CONFIRMED (``product/pricing.json`` "
+            "``billing.storage._included_amounts_status``). BLOCKED until a "
+            "per-org gauge exists that is affordable per write AND the included "
+            "amounts are confirmed"),
+        release=(
+            "per_org_postgres_attribution",
+            "postgres_residency_gauge",
+            "storage_included_amounts_confirmed",
+        ),
     ),
     _dimension(
         "capture_extraction", ALLOWANCE_KEYS["capture_extraction"],
@@ -730,6 +822,89 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
 #: must not.
 ALLOWANCE_GATED_RESOURCES = frozenset().union(
     *(d.resources for d in DIMENSIONS))
+
+
+# ── the block's own consistency check, at IMPORT ──────────────────────────────
+# Loud at import for the same reason ``_dimension``'s registry resolution is: a
+# block with no stated release, or a release token nobody defined, is a gate that
+# has stopped being revalidatable while still appearing to protect something. This
+# catches the STRUCTURAL half (a missing/unknown token); the SEMANTIC half — "is
+# a quoted obstacle still true?" — is revalidated against the artifacts by
+# ``tests/test_9559_blocked_release_conditions.py``, because a predicate here
+# would import half the tree.
+#
+# It is a FUNCTION, not a bare module-level loop, for a testability reason that is
+# itself the point: a loop can only be tested by grepping the source, and a
+# source grep stays green on `if False:`. A callable can be handed synthetic
+# dimensions, so each arm is proved to RAISE instead of proved to be spelled.
+def _check_release_conditions(
+        dims: Iterable[AllowanceDimension]) -> tuple[Any, ...]:
+    """Refuse a block that cannot be revalidated (#9559 R11). Returns RECORDS.
+
+    Three arms, each a distinct way a ``release`` declaration goes wrong: a block
+    that names nothing that would end it, a condition carried by a dimension that
+    is not blocked, and a token nobody defined (so a typo'd condition can never
+    sit there silently never firing).
+
+    ⛔ ``dims`` has NO default, on purpose: a default of ``()`` makes
+    ``_check_release_conditions()`` a silent no-op, i.e. exactly the inert
+    enforcer this function exists to be the opposite of.
+
+    ⛔ IT RETURNS VALIDATED RECORDS, NOT NAMES — and that is load bearing, not
+    style. An integer result was measured forgeable first (``RELEASE_CHECKED =
+    len(DIMENSIONS)``), so it became a tuple of names; reviewer round 6 then
+    measured the trivial enumeration that defeats the names too:
+    ``RELEASE_CHECKED = tuple(d.dimension for d in DIMENSIONS)`` — a one-line edit
+    that never calls this function — reproduced the published value and stayed
+    GREEN. So each element is now an instance of ``_ValidatedBlock``, a class
+    created INSIDE this call: no other code can name that type, it carries a seal
+    object that exists nowhere else, and every call produces a fresh one. A forger
+    must reconstruct that record shape and stamp, i.e. REIMPLEMENT the function —
+    which is the honest limit of the guard, stated rather than overclaimed.
+    """
+    materialised = tuple(dims)
+
+    # One seal per call, captured by the record class below. Two calls never share
+    # it, so "this value came out of a run" is observable from outside without
+    # exposing anything a module-constant enumeration could reproduce.
+    seal = object()
+
+    class _ValidatedBlock:
+        __slots__ = ("dimension", "release", "seal")
+
+        def __init__(self, d: AllowanceDimension) -> None:
+            self.dimension = d.dimension
+            self.release = tuple(d.release)
+            self.seal = seal
+
+    for d in materialised:
+        if d.blocked and not d.release:
+            raise RuntimeError(
+                f"allowance dimension {d.dimension!r} is BLOCKED with no declared "
+                f"release condition — a block that names nothing that would end "
+                f"it cannot be revalidated (see RELEASE_CONDITIONS)")
+        if not d.blocked and d.release:
+            raise RuntimeError(
+                f"allowance dimension {d.dimension!r} is not BLOCKED but declares "
+                f"release conditions {d.release!r} — those belong to a block, "
+                f"and carrying them on an enforced dimension is the "
+                f"stale-grounds shape this field exists to expose")
+        unknown = [t for t in d.release if t not in RELEASE_CONDITIONS]
+        if unknown:
+            raise RuntimeError(
+                f"allowance dimension {d.dimension!r} declares release "
+                f"condition(s) {unknown!r} that RELEASE_CONDITIONS does not "
+                f"define — a typo'd condition would never be revalidated")
+    return tuple(_ValidatedBlock(d) for d in materialised)
+
+
+#: The declared dimensions the import-time release check VALIDATED, as records. ⛔
+#: Published so the WIRING is testable: delete the call below and this name is
+#: absent (AttributeError in the test), delete the assignment and the module does
+#: not import — so "the check exists" and "the check RUNS" cannot drift apart. A
+#: source-grep test could not tell those apart: `if False:` leaves the text.
+#: Records with a per-call seal, not names, for the reason in the docstring above.
+RELEASE_CHECKED = _check_release_conditions(DIMENSIONS)
 
 
 def carry_allowance_keys(target: dict, source: Mapping[str, Any],

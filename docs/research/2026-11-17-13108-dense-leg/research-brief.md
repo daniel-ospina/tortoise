@@ -56,7 +56,7 @@ reading of the box at the time, not a measurement; the probe's own `windows`/`ar
 
 ## 1. Pass 1 — the internal canon, in my own words
 
-**What the dense leg is.** `run_vector_query` (`search_engine.py:3550`) is the semantic half of a
+**What the dense leg is.** `run_vector_query` (`search_engine.py:3561`) is the semantic half of a
 fused read. It first tries the engine's ANN (`CALL db.idx.vector.queryNodes`, two argument-order
 signatures, `#1359`); if that is unavailable or fails it falls through to an exact brute-force
 scan (`vec.euclideanDistance` over the label, `WHERE n.embedding IS NOT NULL`); both paths hand
@@ -79,9 +79,9 @@ without reading the source.
    The claim that matters is the CODE one, and it is verifiable at `sdk.py`: the encode call
    precedes the chain, so its cost is charged to the caller's thread, not to the leg's budget.
 2. **It is submitted and runs out of budget.** Two budgets, both 500 ms by default: the
-   per-leg driver timeout (`timeout_ms: int = 500` on the VECTOR leg, `search_engine.py:3526`;
-   `:2832` is `run_fts_query`'s — the LEXICAL leg's — and `runner_timeout` in `degradation_chain`
-   is defined at `:4854`, not `:4673`, which is a comment line about `#4210`/`#3019`;
+   per-leg driver timeout (`timeout_ms: int = VECTOR_LEG_BUDGET_MS` = 500, `search_engine.py:3566`;
+   `:2868` is `run_fts_query`'s — the LEXICAL leg's — and `runner_timeout` in `degradation_chain`
+   is defined at `:4939`, not `:4773`, which is a comment line about `#4210`/`#3019`;
    `#13121` round 8 F4) and the collector's
    `as_completed(timeout=0.5)`. A leg **still not done at the post-deadline rescan** is
    recorded `reason="timeout", ran=True, degraded=True` (`#8450`, `#6851`).

@@ -12265,6 +12265,63 @@ HOLDS_ROLE_UNAVAILABLE = (
 )
 
 
+#: The prefixes the product has ever put in front of a TENANT graph name.
+#:
+#: ``team_`` is the pre-#3543 spelling and ``org_`` the current one; no data
+#: migration rewrote the graphs older orgs still have, so both spellings are
+#: live (see ``supabase_control.per_graph_namespace_prefixes``). These are read
+#: ONLY to strip an input back to the bare id — never to mint a name, which is
+#: what makes the composition below idempotent.
+_TENANT_GRAPH_PREFIXES: tuple[str, ...] = ("org_", "team_")
+
+
+def bare_tenant_id(value: str) -> str:
+    """``value`` with every leading tenant-graph prefix removed — the BARE id.
+
+    Why this exists (#13205). The composer below used to concatenate
+    unconditionally (``f"org_{namespace}"``, and ``f"team_{namespace}"`` before
+    #3543), so a caller that handed it a string which ALREADY carried the
+    prefix got a second one. That is not hypothetical: the production instance
+    carried ``team_team_3326a01ea34ae595d84de5d8f9`` — a graph no resolver can
+    ever name again, because every lookup composes ``org_{id}``/``team_{id}``
+    from a bare 26-hex org id. The cost is not cosmetic: a tenant graph is
+    ~1.46 MB of resident RAM (measured by DELETE, not by create — a new graph
+    reuses held pages and reads ~346 KiB), so every such name is a permanent,
+    unreclaimable allocation.
+
+    ⚠️ Stripping REPEATS, so the composition is idempotent in the strong sense:
+    ``team_team_x`` → ``x`` (not ``team_x``), because a single strip would leave
+    the accidental prefix in the middle and mint ``org_team_x`` — a THIRD
+    spelling, still not one any lookup derives. Stripping stops at a value that
+    would become empty (``"org_"`` is a name, not a prefix of anything).
+
+    Not applied to a DISPLAY name: ``org_create`` composes from the org's
+    human-chosen name (``org_{name}``), and a name that happens to begin
+    ``org_`` there is a name, not a double prefix. This helper is for the
+    id / namespace seam, where the input is meant to be the bare 26-hex id.
+    """
+    while True:
+        for prefix in _TENANT_GRAPH_PREFIXES:
+            if value.startswith(prefix) and len(value) > len(prefix):
+                value = value[len(prefix):]
+                break
+        else:
+            return value
+
+
+def canonical_org_graph_name(tenant: str) -> str:
+    """The DEFAULT-graph name of an org, from the bare id OR any spelling of it.
+
+    Idempotent by construction — composing an already-composed name returns it
+    unchanged — which is the property #13205 needs: composing twice must never
+    mint a second prefix. ``bare_tenant_id`` does the stripping, so a caller
+    that already holds ``team_{id}`` (the pre-#3543 spelling, or a stored
+    ``organizations.graph_name``) lands on the same ``org_{id}`` a caller
+    holding the bare id lands on, instead of on ``org_team_{id}``.
+    """
+    return f"org_{bare_tenant_id(tenant)}"
+
+
 def _derive_graph_name(*, namespace: str | None,
                        graph_name: str | None,
                        uri_graph: str | None = None) -> str:
@@ -12281,8 +12338,16 @@ def _derive_graph_name(*, namespace: str | None,
     Precedence is unchanged from ``_get_proj`` (in order): registry control
     plane → explicit ``graph_name`` verbatim → namespace (test_*/
     tortoise_test* → ``{ns}_tortoise``, hyphenated test-* → normalized to
-    ``test_<ns>_tortoise``, otherwise ``org_{ns}``) → the URI's own graph,
-    else ``tortoise``.
+    ``test_<ns>_tortoise``, otherwise ``canonical_org_graph_name(ns)``) → the
+    URI's own graph, else ``tortoise``.
+
+    ⛔ The org arm is NOT a bare concatenation any more (#13205): it goes
+    through :func:`canonical_org_graph_name`, which strips any leading
+    ``org_``/``team_`` before composing, so composing twice cannot mint a
+    second prefix. The measured casualty of the old form was the production
+    graph ``team_team_3326a01ea34ae595d84de5d8f9`` — unmintable-again,
+    unnameable by every resolver, and ~1.46 MB of resident RAM that no delete
+    path could reclaim.
     """
     if namespace == "registry":
         # Control-plane SDK: shared registry main graph.
@@ -12309,8 +12374,12 @@ def _derive_graph_name(*, namespace: str | None,
             # bulk wipe.
             return f"{namespace.replace('-', '_')}_tortoise"
         # Org SDK: isolated org graph (matches provision's org_{org_id}
-        # namespace creation, #7886).
-        return f"org_{namespace}"
+        # namespace creation, #7886). Composed through
+        # `canonical_org_graph_name` so a namespace handed in already carrying
+        # a prefix (``team_{id}``, the pre-#3543 spelling; or a name this seam
+        # itself would produce) cannot mint a SECOND one — the ``team_team_…``
+        # graph #13205 measured.
+        return canonical_org_graph_name(namespace)
     # No namespace: honor the URI's own graph (the conftest session graph for
     # tests). Fixes #7886 regression that hardcoded 'tortoise' and clobbered
     # the test graph.
@@ -32341,17 +32410,13 @@ class TortoiseSDK:
         # above gives the flag, and the one the sibling `:Subject` arm inside
         # the endpoint loop could never provide.
         #
-        # `:Object` used to be deliberately EXEMPT ("its writer does not
-        # validate, it STORES the value"), so refusing it here would have
-        # rejected bundles the writer accepted. #11824 S0 closes that asymmetry:
-        # the Object writer validates against the SAME four-word lifecycle door
-        # as the Subject one, so both are checked here, through the SAME question
-        # (`_status_refusal_reason`) rather than a re-spelt vocabulary — a
-        # divergence between this phase and the writer is exactly the
-        # partial-mutation class. `:Event` is no longer in that sentence either:
-        # since #13100 its door refuses ANY `status` (the terminal half alone was
+        # `:Object` is refused here since #11824 S0: its writer now validates
+        # against the SAME four-word lifecycle door (`_status_refusal_reason`,
+        # shared with `:Subject`), so a Phase 1 skip would reopen the
+        # partial-mutation class. `:Event` is no longer in that sentence: since
+        # #13100 its door refuses ANY `status` (the terminal half alone was
         # #11825's interim boundary), and the arm BELOW mirrors that refusal at
-        # Phase 1 for the same reason.
+        # Phase 1 for the same partial-mutation reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
