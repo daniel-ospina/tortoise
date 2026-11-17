@@ -1049,14 +1049,26 @@ surfaces:
   # fallback, so a `core`-only registration drops this file from every `hosted_api.py`-only
   # diff — MEASURED with the `core` row alone, `select(['tortoise/hosted_api.py'])`
   # resolves `['api','onboarding']` with this file ABSENT, which no `core` entry can fix.
-  # ⛔ This row guarantees SELECTION, not EXECUTION: the arm that motivates it,
-  # `test_the_hosted_list_route_drops_it`, is a method of `TestAClosedObjectIsNeverCurrent`
-  # — one of the FOUR `@_needs_db` classes — so it runs where a FalkorDB is reachable (the
+  # ⛔ This row covers TWO `api` pins, not one — do not read the audit's silence as the pin
+  # going away. `hosted_api.py` is the pin that MOTIVATED the dual registration: its hosted
+  # list-route arm `test_the_hosted_list_route_drops_it` is a method of
+  # `TestAClosedObjectIsNeverCurrent`, one of the FOUR `@_needs_db` classes, so this row
+  # guarantees SELECTION, not EXECUTION — that arm runs where a FalkorDB is reachable (the
   # matrix legs provision one and export `TORTOISE_TEST_DOCKER_PORT`) and SKIPS GREEN
   # anywhere else (#1349's skip-is-green half, the same shape the `core` row below records).
-  # ⛔ Not `mcp_auth.py`: `--surface-audit` reported that co-import only while the row was
-  # `core`-only, and the `test_12592_supersede_door.py` row that still carries the shape is
-  # main-side noise — the behavioural pin here is `hosted_api.py` alone.
+  # The SECOND pin is `tortoise/mcp_auth.py`: the tag-arm fixture binds `_current_org_id` /
+  # `_current_org_limits` / `_transport_mode` from it, and it is an EXACT `api`
+  # SOURCE_PATTERNS match too — MEASURED: `--changed-files tortoise/mcp_auth.py` -> surfaces
+  # `['api']` with this file SELECTED, which it is only because of the row below.
+  # ⛔ `--surface-audit`'s candidate line lists UNCOVERED pins only, so the "`mcp_auth.py`"
+  # text appears there while the file is `core`-only and the line vanishes once the row
+  # exists because the file is no longer a CANDIDATE — not because the pin disappeared. An
+  # earlier cut of this note read that disappearance as evidence the co-import was noise; it
+  # is the opposite, and the audit never said otherwise.
+  # ⛔ `test_12592_supersede_door.py` is NOT noise either: it is a PRE-EXISTING gap of the
+  # same class on main — registered `core` only, imports the same `mcp_auth` names, and NOT
+  # selected on a `mcp_auth.py`-only diff (measured: `selected: False`). Reported, not fixed
+  # here; this row's job is #13034.
   - test_13034_currency_rule_reads_position.py
   # #12477/#2876: the health surfaces must not read green over a failing data plane. Added
   # to `main` by `ea5d476e9b` (#12488) WITHOUT a manifest row, so `--integrity` reported it
