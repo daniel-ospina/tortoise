@@ -29,6 +29,8 @@ production graph.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 from pathlib import Path
 
@@ -427,7 +429,125 @@ def test_a_permanently_refused_row_does_not_hold_the_durability_marker(env):
     assert rep.pending == [], (
         "a pre-write refusal was reported as a possible live-only write: "
         f"{rep.pending!r}")
-    assert tool._read_pending(rep.journal) == [], "the marker must not exist"
+    # ⛔ EXISTS, not just reads-empty: writing an EMPTY marker leaves a file a
+    # later reader has to reason about, and it made this assertion pass over the
+    # residue (review finding, 2026-11-17).
+    assert not tool._pending_path(rep.journal).exists(), \
+        "a pre-write refusal left an empty marker file behind"
+
+
+def test_a_discharged_id_is_REMOVED_from_the_marker(env):
+    """The marker must SHRINK once its row is durably rewritten.
+
+    The per-row writes MERGE (a row is named before its own write), so only an
+    exact write at the end of a run can discharge. Without it an id rewritten in
+    a run that was not entirely clean reads `deprecated` LIVE from then on, never
+    re-enters a later population, and can never be discharged again: the marker
+    is poisoned forever, the preview exits 1 forever, and the repair it prints
+    (`rebuild_all`, then re-run) cannot clear it. Measured on the pre-fix head:
+    three runs, the id stuck on disk, `0 rows` withheld permanently.
+    """
+    sdk, events = env
+    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+
+    real_append = EventLog.append
+
+    def boom(self, event):
+        raise OSError("journal is read-only")
+
+    EventLog.append = boom
+    try:
+        first = tool.run(sdk, execute=True)
+    finally:
+        EventLog.append = real_append
+    assert oid in first.pending, "precondition: the failed run left a marker"
+
+    # The repair the tool itself prescribes: the journal is the truth, so
+    # replaying it restores the legacy word the live write overwrote.
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert [r[0] for r in _legacy_rows(sdk)] == [oid], "precondition: legacy again"
+
+    second = tool.run(sdk, execute=True)
+
+    assert second.rewritten == [oid], second.rewritten
+    assert second.pending == [], (
+        f"a discharged id was kept in the marker: {second.pending!r}")
+    assert not tool._pending_path(second.journal).exists(), (
+        "the marker file survived a fully discharged run: "
+        f"{tool._read_pending(second.journal)!r}")
+    third = tool.run(sdk, execute=False)
+    assert "dead weight" in tool.render(third), (
+        "after a clean discharge the 0-rows reading must be a real measurement")
+    assert third.pending == []
+    assert tool.main(["--db-path", str(env[0]._db_path),
+                      "--event-log-path", str(events / "events.jsonl")]) == 0
+
+
+def test_an_UNREADABLE_marker_refuses_the_PREVIEW_with_exit_2(env):
+    """Both arms refuse an unreadable marker, and the preview says so.
+
+    The refusal is raised inside `run()` BEFORE the read is returned, so a
+    preview-only `main` used to die with a traceback and exit 1 while
+    `--execute` on the same target exited 2 with a `REFUSED` line — the refusal
+    contract, broken on the arm an operator runs FIRST. (Review finding,
+    2026-11-17: the token had no test at all.)
+    """
+    sdk, events = env
+    journal = events / "events.jsonl"
+    Path(str(journal) + ".rewrite-pending").mkdir()   # a directory, not a file
+
+    with pytest.raises(tool.Refused) as raised:
+        tool.run(sdk, execute=False)
+    assert raised.value.reason == tool.REFUSE_PENDING_UNREADABLE
+    assert "live-only" in raised.value.message.lower()
+
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        code = tool.main(["--db-path", str(sdk._db_path),
+                          "--event-log-path", str(journal)])
+    assert code == 2, f"an unreadable marker exited {code} on the PREVIEW arm"
+    assert tool.REFUSE_PENDING_UNREADABLE in err.getvalue(), err.getvalue()
+    assert "Traceback" not in err.getvalue(), err.getvalue()
+
+
+def test_a_PENDING_marker_is_not_reported_as_a_refusal():
+    """The refusal advice must not be printed for a marker-only preview.
+
+    `--execute` does NOT refuse a pending marker (it runs and exits 1), yet the
+    renderer routed it through the `blockers` branch whose text is "`--execute`
+    would REFUSE this target", while suppressing the one remedy that works. One
+    render therefore contradicted itself and hid the actionable instruction.
+    """
+    text = tool.render(tool.Report(total=0, pending=["x"]))
+
+    assert "would REFUSE" not in text, text
+    assert "rebuild_all" in text, "the marker's own remedy must be named"
+    assert "dead weight" not in text
+
+
+def test_an_UNWRITABLE_marker_refuses_that_row_before_its_write(env, monkeypatch):
+    """An unwritable marker must refuse the ROW, not be a best-effort note.
+
+    It is the tool's own measurement guard: skipping it (and writing anyway)
+    leaves a row live-only with no trace, which is precisely the state it exists
+    to make impossible.
+    """
+    sdk, events = env
+    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+
+    real_write = tool._write_pending
+    monkeypatch.setattr(tool, "_write_pending", lambda journal, ids: False)
+    try:
+        rep = tool.run(sdk, execute=True)
+    finally:
+        monkeypatch.setattr(tool, "_write_pending", real_write)
+
+    assert rep.rewritten == [], "a row with no durability marker was written"
+    assert oid in [f.get("id") for f in rep.failures], rep.failures
+    assert tool.REFUSE_PENDING_UNWRITABLE in rep.failures[0]["error"]
+    assert [r[0] for r in _legacy_rows(sdk)] == [oid], "the row must be untouched"
 
 
 def test_the_rewrite_survives_a_rebuild_all(env):

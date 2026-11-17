@@ -158,13 +158,19 @@ EXIT CODES
 ==========
     0   the run completed — a preview, or an execute whose population is now 0
     1   the run did not reach its post-condition: rows remain, a row failed, a
-        record did not land, a row's `id` is bound by more than one node, or the
-        read was truncated / a row is UNADDRESSABLE (no usable `id`). A PREVIEW
-        over such a read exits 1 too — the preview is the measurement that
-        unblocks the sequenced drop, so it must not read as complete.
-    2   refused before touching anything: no journal, an empty or AMBIGUOUS
-        target flag (`--uri` together with `--db-path`); and on `--execute` a
-        TRUNCATED read or an UNADDRESSABLE row (no usable `id`) — both exit 1 on
+        record did not land, a row's `id` is bound by more than one node, a
+        durability marker is PENDING (a previous run may have left rows
+        live-only — the reading is held back until `rebuild_all` + a re-run), or
+        the read was truncated / a row is UNADDRESSABLE (no usable `id`). A
+        PREVIEW over such a read exits 1 too — the preview is the measurement
+        that unblocks the sequenced drop, so it must not read as complete.
+    2   refused before touching anything — on BOTH arms, since a refusal is the
+        same verdict whether or not `--execute` was asked for: no journal, an
+        empty or AMBIGUOUS target flag (`--uri` together with `--db-path`), and a
+        durability marker this run could not READ (permission, or a directory in
+        its place: its ids are unknown, so neither the report nor the 0-rows
+        reading is trustworthy); and on `--execute` a TRUNCATED read or an
+        UNADDRESSABLE row (no usable `id`) — both exit 1 on
         a preview (an incomplete measurement) and 2 on the write arm (nothing is
         written). ⚠️ A FAN-OUT / dual-labelled row is NOT in this set: it is a
         per-ROW refusal (that row is reported by id, the safe rows are still
@@ -298,19 +304,48 @@ def _pending_path(journal: str | None):
 def _write_pending(journal: str | None, ids: list) -> bool:
     """MERGE ``ids`` into the marker; ``False`` when it cannot be written.
 
-    ⛔ MERGE, never replace. The rows a previous run left live-only now read
-    `deprecated` LIVE, so they are absent from the current legacy population: a
-    replace would drop them from the marker, and the clean run that follows would
-    clear it — restoring the false "0 rows" reading this marker exists to
-    prevent (measured: one `--execute` after a failed run was enough).
+    ⛔ MERGE, never replace. A row is named here BEFORE its own write, and the
+    rows a previous run left live-only now read `deprecated` LIVE, so they are
+    absent from the current population: a replace would drop them, and the clean
+    run that follows would clear the marker — restoring the false "0 rows"
+    reading it exists to prevent (measured: one `--execute` after a failed run
+    was enough). Shrinking is :func:`_set_pending`'s job, at the end of a run.
     """
     path = _pending_path(journal)
     if path is None:
         return True
     pending = set(_read_pending(journal) or ())
     pending.update(str(i) for i in ids if i is not None)
+    if not pending:
+        # Nothing to record, and an EMPTY marker file is residue a later reader
+        # would have to reason about — do not create it.
+        return True
     try:
         path.write_text("\n".join(sorted(pending)) + "\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def _set_pending(journal: str | None, ids: list) -> bool:
+    """Write EXACTLY ``ids``, removing the marker when the set is empty.
+
+    ⛔ The per-row writes MERGE (a row is named before its own write), so they
+    can never shrink the set. The end of a run must be able to DISCHARGE: an id
+    durably rewritten in a run that was not entirely clean reads `deprecated`
+    LIVE from then on, so it never re-enters a later run's population and could
+    never be discharged again — the marker would be poisoned forever and the
+    graph permanently unmeasurable (measured: 3 runs, ids stuck on disk).
+    """
+    path = _pending_path(journal)
+    if path is None:
+        return True
+    ids = sorted({str(i) for i in ids if i is not None})
+    try:
+        if not ids:
+            _clear_pending(journal)
+            return True
+        path.write_text("\n".join(ids) + "\n", encoding="utf-8")
     except OSError:
         return False
     return True
@@ -739,13 +774,13 @@ def rewrite(sdk, rep: Report) -> Report:
                 "error": _binding_refusal(rid, nodes_now),
             })
             continue
-        _row_cursor = _run_cursor
         # ⛔ The marker names THIS row before its own write, so a SIGTERM between
         # here and the journal append still leaves a trace. An unwritable marker
         # refuses: it is the tool's own measurement guard, and "best effort"
-        # would make it inert exactly when a write is about to happen.
-        _marker_ids.add(str(rid))
-        if not _write_pending(rep.journal, _marker_ids):
+        # would make it inert exactly when a write is about to happen. The id is
+        # added to the report's set only once that write SUCCEEDS, so the report
+        # never accuses a row that was refused of being live-only.
+        if not _write_pending(rep.journal, set(_marker_ids) | {str(rid)}):
             rep.failures.append({
                 "id": rid,
                 "error": (f"{REFUSE_PENDING_UNWRITABLE}: the durability marker "
@@ -754,6 +789,7 @@ def rewrite(sdk, rep: Report) -> Report:
                           "run would leave it LIVE-ONLY with no trace."),
             })
             continue
+        _marker_ids.add(str(rid))
         try:
             landed = sdk.update_knowledge(rid, status=REWRITE_TO)
         except Exception as exc:
@@ -796,6 +832,7 @@ def rewrite(sdk, rep: Report) -> Report:
         # writing this graph's journal in the same window satisfies a delta gate
         # over OUR failed append — measured, and the row then rebuilt back to
         # `outdated` while the run reported success. So the records appended in
+        # the window are matched to THIS row's identity by `_row_recorded` below.
         # ⛔ The durability verdict is taken AFTER the loop, from ONE journal
         # read (see `_journal_cursor`): per-row `read_after` calls re-parse the
         # whole journal and cost ≈30 ms each at a 535 KiB one.
@@ -851,20 +888,15 @@ def rewrite(sdk, rep: Report) -> Report:
     for row in after.fanout:
         if row.get("id") not in written and row.get("id") not in _listed:
             rep.fanout.append(row)
-    # ⛔ CLEAR THE MARKER ONLY WHEN THIS RUN DISCHARGED IT. A row left live-only
-    # by a PREVIOUS run now reads `deprecated` LIVE, so it is not in this
-    # population and cannot be rewritten here — only a `rebuild_all` (which
-    # restores the legacy word) followed by this tool can discharge it. Any such
-    # id, any failed row, a truncated post-read or a row still carrying a legacy
-    # word keeps the marker, so the next PREVIEW cannot present "0 rows" as a
-    # measurement.
+    # ⛔ DISCHARGE, which the per-row MERGE cannot do. See `_set_pending`.
     _discharged = {str(i) for i in rep.rewritten}
-    _still = sorted(_marker_ids - _discharged)
+    _on_disk = set(_read_pending(rep.journal) or ())
+    _still = sorted((_on_disk | _marker_ids) - _discharged)
     if (rep.failures or rep.truncated or rep.unaddressable or rep.fanout
             or _still
             or any(rep.remaining.get(w, 0) for w in LEGACY_WORDS)):
         rep.pending = _still
-        _write_pending(rep.journal, _still)
+        _set_pending(rep.journal, _still)
     else:
         _clear_pending(rep.journal)
         rep.pending = []
@@ -949,13 +981,23 @@ def render(rep: Report) -> str:
         # fan-out / dual-labelled row is NOT one of those (it is a per-row
         # refusal — the safe rows still get rewritten), so it does not gate this
         # advice; it is named beside them instead.
-        blockers = bool(rep.truncated or rep.unaddressable or rep.pending)
+        blockers = bool(rep.truncated or rep.unaddressable)
         if rep.total == 0 and not rep.truncated and not rep.pending:
             lines.append(
                 "  ⇒ 0 rows carry 'outdated' or 'retracted' on this graph. No rewrite "
                 "is needed, and `assembly._RECALL_OBJECT_EXCLUDED_STATUSES`'s "
                 "`outdated` member is dead weight HERE — the drop is a separate, "
                 "sequenced change (#12855 step 3).")
+        elif rep.pending and not blockers:
+            # ⛔ NOT in `blockers`: a marker is not a refusal (`_refusal` does not
+            # refuse it), so the refusal advice below would claim `--execute`
+            # REFUSES this target when it runs, and would hide the one remedy
+            # that works.
+            lines.append(
+                f"  ⇒ preview only; nothing was written. ⛔ {len(rep.pending)} row(s) "
+                "may be LIVE-ONLY from a previous run (written without a durable "
+                "journal record), so the reading above is NOT a measurement: run "
+                "`rebuild_all` to restore the legacy word, then re-run `--execute`.")
         elif blockers:
             lines.append(
                 "  ⇒ preview only; nothing was written. ⛔ `--execute` would REFUSE "
@@ -1166,19 +1208,23 @@ def main(argv: list[str] | None = None) -> int:
                 "reports no journal for this target. Nothing was written.\n")
             return 2
 
-        preview = run(sdk, execute=False, sample=args.sample)
-        rep = preview
-        if args.execute:
-            # Fail closed BEFORE the first write. The gates themselves live in
-            # `_refusal` (and are re-applied inside `run`), so a non-CLI caller
-            # cannot take a second, unguarded write path.
-            try:
+        # ⛔ ONE handler for BOTH arms. `run` raises `Refused` on the PREVIEW path
+        # too (an unreadable durability marker is judged before the read is
+        # returned), and an uncaught one is a traceback with exit 1 and no
+        # `REFUSED` line — for the same target `--execute` refuses with exit 2.
+        try:
+            preview = run(sdk, execute=False, sample=args.sample)
+            rep = preview
+            if args.execute:
+                # Fail closed BEFORE the first write. The gates themselves live in
+                # `_refusal` (and are re-applied inside `run`), so a non-CLI caller
+                # cannot take a second, unguarded write path.
                 rep = run(sdk, execute=True, sample=args.sample, report=preview)
-            except Refused as refused:
-                sys.stderr.write(
-                    f"rewrite_object_status: REFUSED {refused.reason}: "
-                    f"{refused.message} Nothing was written.\n")
-                return 2
+        except Refused as refused:
+            sys.stderr.write(
+                f"rewrite_object_status: REFUSED {refused.reason}: "
+                f"{refused.message} Nothing was written.\n")
+            return 2
     finally:
         sdk.close()
 
