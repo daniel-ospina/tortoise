@@ -5980,9 +5980,9 @@ _EPIC_CITE_DOCS = {
     # is "numbers rot" was itself the one block in this PR nothing read. ⛔ NINE IS A CELL
     # COUNT, NOT A SENTENCE COUNT: eight are in the `Measured at` sentence and `:1194` is in the sentence
     # BEFORE it on the same markdown line ("…is STAMP-bound (`:1186` is the `corpus = {…}`
-    # line here; the frozen literal is at `:1194`)"). Three are pinned on the two rows
-    # below (`19584`/`19691` here, `sdk.py:10506` on its own row because a row carries ONE
-    # source key), `10533`/`10586` on their OWN `05-verify.md` row (round 6 — NOT by the
+    # line here; the frozen literal is at `:1194`)"). Two are pinned on the rows below
+    # (`19584`/`19691` here), and the `sdk.py` three (`10506`/`10533`/`10586`) sit on their
+    # OWN `05-verify.md` row (round 6 — NOT by the
     # `subject_binding_available` rows that predate this PR: those scope `00-plan.md` and
     # `03-test-design.md`, and a row resolves only against the `doc_label` it names, so they
     # cannot read this document — citing them as coverage is how a dropped row goes unseen),

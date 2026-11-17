@@ -23084,6 +23084,28 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
         "which is why the neither-leg case is the one this comment names — the "
         "rule is stated whole at the #6234 note above.)"
     )
+    # …and the three OTHER subtractive keys `select()` applies to `files`:
+    # `-= carve` (`:4808`), `-= uri_requiring_files(manifest)` (`:4832`),
+    # `-= on_demand_files(manifest)` (`:4839`). Each drops the pin from `test_files`
+    # exactly as `slow_files` does, so each would make the `api_arm` assert below
+    # report "the `api` row is what carries that arm" — the one diagnosis that is
+    # wrong for that mutation, which is why the two checks above exist. These three
+    # close the same gap for the rest of the list; all three are measured ABSENT on
+    # this tree before being asserted, so they are registrations to KEEP rather than
+    # conditions this branch newly satisfies.
+    assert pin not in set(manifest.get("carve_out", ())), (
+        f"{pin} is in `carve_out` — `select()` subtracts it at `:4808`, so the "
+        "pin would leave `test_files` on every surface, not just this one"
+    )
+    assert pin not in uri_requiring_files(manifest), (
+        f"{pin} is in `uri_requiring` — `select()` subtracts it at `:4832`. This "
+        "census needs no live URI, so its presence would be a stale registration "
+        "that silently drops the pin from every selection"
+    )
+    assert pin not in on_demand_files(manifest), (
+        f"{pin} is in `on_demand` — `select()` subtracts it at `:4839`, dropping "
+        "it from the fast pool while the `api`/`core` rows still look load-bearing"
+    )
 
     # The registration itself: `api` is the arm the `hosted_api.py` diff class
     # needs, `core` is the arm that covers the three `core`-classified CONSUMERS.
