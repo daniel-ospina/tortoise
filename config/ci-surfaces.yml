@@ -1027,36 +1027,6 @@ surfaces:
   # through to `core`. A one-surface registration drops this file on either
   # half's own diff — the #1349/#3332 silent-drop class the manifest exists for.
   - test_10602_wait_bound_breach_visible.py
-  # #13034 (second half): `api`, because the file imports `tortoise.hosted_api`
-  # (monkeypatches `_data_sdk_offloaded` / `_read_offload` and drives
-  # `hosted_api.list_points` — `test_the_hosted_list_route_drops_it` asserts the
-  # public list route drops an `isClosed` Point) and `tortoise.mcp_auth`
-  # (`_current_org_id` / `_current_org_limits` / `_transport_mode`, which drive the
-  # whole MCP-tag arm). Neither is in `SHARED_MODULES`, so the `core` row's
-  # `tortoise/sdk.py` argument does NOT cover them; and both ARE `api`
-  # `SOURCE_PATTERNS` entries — `tools/ci_selection.py`'s `api` tuple names
-  # `tortoise/hosted_api.py` and `tortoise/mcp_auth.py` literally — which is the
-  # mechanism that makes `core` insufficient here: a named-surface match REPLACES
-  # the `core` fallback, so on a `hosted_api.py` or `mcp_auth.py` diff `select()`
-  # returns `['api', …]` and a `core`-only registration is not chosen. ⛔ The
-  # DIRECTION is the rule, and an earlier cut of this comment had it inverted: a
-  # module matching NO `SOURCE_PATTERNS` entry is the one that falls through to
-  # `core` (that is what `tortoise/live.py` does in the row above), so "matches no
-  # pattern, therefore register it on a named surface" is the opposite of the rule
-  # and would invite the #1349/#3332 silent drop it claims to fix. MEASURED with
-  # this manifest (in-process `select()`/`integrity()`): `hosted_api.py` →
-  # `['api','onboarding']` and `mcp_auth.py` → `['api']`, both selecting this file;
-  # with the `api` row removed both drop it; with the `core` row removed
-  # `tortoise/live.py` drops it. `integrity()` is `[]` and `duplicate_entries()` is
-  # `[]` in every case (cross-surface dual registration is the deliberate shape).
-  # Same rule as the rows above: a one-surface registration drops this file on the
-  # other half's own diff.
-  # ⚠️ SCOPE, stated so the severity is not overstated: `--surface-audit` reports
-  # the same core-only shape for ~545 further files against these two modules. That
-  # audit is REPORT-ONLY, not a gate, so this is a pre-existing broad residual and
-  # not a novel regression; this row fixes the one file this PR touches, and a
-  # repo-wide sweep is a separate change rather than ride-along scope here.
-  - test_13034_currency_rule_reads_position.py
   # #10749: the health tail must fit INSIDE the transport wait bound. Dual-registered
   # for the same reason as #10602 directly above and #3834 before it: the publish sites
   # live on BOTH halves — `setup_timeout_clamped` / `setup_timeout_clamped_s` on the
@@ -7671,21 +7641,6 @@ surfaces:
   # not `carve_out` either: it builds its own engine (`TortoiseSDK(str(tmp_path
   # / "t12586.db"))`), so it tolerates the URI redirect rather than needing it.
   - test_12586_update_point_promote_flag.py
-  # #13034: "is this still served as current?" — the two-axis terminal predicate
-  # (`isClosed` + the `terminal` pipeline slot, alongside the lifecycle word) and
-  # the five readers that must ask it. `core` here is the surface the file's OWN
-  # diff resolves to (`tortoise/live.py`, `tortoise/pipeline.py` and
-  # `tortoise/derived_invalidation.py` match no `SOURCE_PATTERNS` entry); the `api`
-  # row is the second half, added ABOVE in the `api` block with its own reasoning
-  # (`api` is the surface block that precedes this one, so "below" was wrong in an
-  # earlier cut of this comment; no gate reads comment position, but a reader
-  # following it would look in the wrong block) — ⛔ `core` alone is
-  # NOT sufficient, which the first cut of this comment wrongly claimed.
-  # ⛔ THE ROW IS THE WHOLE FIX for the blocking failure: the file exists in main
-  # and was never classified, so `ci_selection.py --integrity` failed closed on
-  # EVERY PR until it was added (the #1349/#3332 silent-drop class, in its blocking
-  # form — an unclassified file is also a file `select()` never runs).
-  - test_13034_currency_rule_reads_position.py
   - test_uri_env_mutations_declared.py
   # #8066: the served-skill relay ratchet. Its SUBJECT is every
   # `tests/**/*.py`, so it must be registered on every surface such a file can
