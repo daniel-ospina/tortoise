@@ -37,8 +37,15 @@ sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 import record_runner  # noqa: E402
 from record_runner import (  # noqa: E402
-    EXIT_OK, EXIT_REFUSED, EXIT_USAGE,
-    Checkpoint, Journal, RunnerError, batch_slices, build_plan, main,
+    EXIT_OK,
+    EXIT_REFUSED,
+    EXIT_USAGE,
+    Checkpoint,
+    Journal,
+    RunnerError,
+    batch_slices,
+    build_plan,
+    main,
     read_journal,
 )
 
@@ -78,7 +85,9 @@ def test_strict_reading_refuses_mid_file_damage_and_salvage_counts_it(tmp_path):
     good = json.dumps({"type": "IngestStarted", "ts": "2026-01-01T00:00:00Z"})
     journal.write_text(good + "\n{not json\n" + good + "\n", encoding="utf-8")
 
-    with pytest.raises(Exception):
+    # The reader's own class, not a blind `Exception`: a test that accepts any
+    # error also accepts a typo in this test.
+    with pytest.raises(ValueError):
         read_journal(journal)
 
     salvaged = read_journal(journal, salvage=True)
@@ -120,7 +129,9 @@ def test_a_sealed_layout_with_no_manifest_is_REFUSED_not_half_read(tmp_path):
     (tmp_path / journal_segments.ACTIVE_NAME).write_text(
         json.dumps({"type": "IngestStarted"}) + "\n", encoding="utf-8")
 
-    with pytest.raises(Exception) as exc:
+    from tortoise.journal_segments import SegmentSequenceError
+
+    with pytest.raises(SegmentSequenceError) as exc:
         read_journal(tmp_path)
     assert "manifest" in str(exc.value)
 

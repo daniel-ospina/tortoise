@@ -103,12 +103,14 @@ EXIT CODES — `record_allocator_cli`'s contract, so a chain reads one way
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -581,7 +583,7 @@ def apply_batches(*, journal: Journal, org_id: str, graph_id: str,
             result = replay(batch, conn, org_id=org_id, graph_id=graph_id,
                             start_seq=start_seq, allocate=allocate)
             conn.commit()
-        except Exception as exc:  # noqa: BLE001 — every failure is a refusal here
+        except Exception as exc:
             _quietly(conn.rollback)
             raise RunnerError(
                 f"batch {index}/{len(slices)} (seq {planned.start_seq}.."
@@ -610,10 +612,9 @@ def _one_line(exc: BaseException) -> str:
 
 
 def _quietly(fn) -> None:
-    try:
+    """Run a disposal step whose failure must not mask the cause above it."""
+    with contextlib.suppress(Exception):
         fn()
-    except Exception:  # noqa: BLE001 — a failed rollback must not mask the cause
-        pass
 
 
 # ── output ───────────────────────────────────────────────────────────────────
@@ -759,7 +760,6 @@ def cmd_plan(args: argparse.Namespace, *, echo) -> int:
     journal = read_journal(args.journal, salvage=args.salvage)
     start_at = 0
     checkpoint = None
-    cursor = None
     if args.from_checkpoint:
         conn = open_record(args.org_id, dsn=args.dsn, timeout_ms=args.timeout_ms)
         try:
@@ -929,7 +929,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except RunnerError as exc:
         sys.stderr.write(f"record_runner: REFUSED — {exc}\n")
         return EXIT_REFUSED
-    except Exception as exc:  # noqa: BLE001 — a refusal, never a traceback banner
+    except Exception as exc:
         # Includes `RecordProjectionError` (an undeclared record type, a cut-over
         # refusal, a statement that failed) and the driver's own errors: each is
         # a reason this run must not be claimed, so each is a refusal. The
