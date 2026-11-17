@@ -124,7 +124,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: aa8413ca38c747242d5917acb3f4d8a99ce06b8b
+cut_at_commit: fdb6a4e395584c07d640903036c31e0c321413b6
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
