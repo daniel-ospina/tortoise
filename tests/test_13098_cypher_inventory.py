@@ -1001,14 +1001,29 @@ def test_the_seed_refuses_a_foreign_graph_before_it_deletes(monkeypatch):
     ⛔ Calling `_refuse_a_foreign_graph` directly (the test above) stays green if
     the call site is deleted — measured: replacing it with `pass` survived. This
     drives `seed_graph` through a stand-in `falkordb` so a missing call REDDENS.
+
+    ⛔ The stand-in `from_url` takes `**kwargs` because the construction now
+    carries the product's read bound (#13163) — and it ASSERTS the bound rather
+    than accepting it blindly: a stub that swallowed `**kwargs` would leave the
+    seed's socket policy unpinned here, and `socket_timeout` absent from the
+    received kwargs reds this test (the shape the seed had before #13163).
     """
     from types import SimpleNamespace
 
     client = SimpleNamespace(select_graph=lambda name: _FakeGraph({"Point", "Operator"}, []))
+    seen: dict = {}
+
+    def _from_url(url, **kwargs):
+        seen.update(kwargs)
+        return client
+
     monkeypatch.setitem(sys.modules, "falkordb",
-                        SimpleNamespace(FalkorDB=SimpleNamespace(from_url=lambda url: client)))
+                        SimpleNamespace(FalkorDB=SimpleNamespace(from_url=_from_url)))
     with pytest.raises(RuntimeError, match="Operator"):
         harness.seed_graph("docker://:p@127.0.0.1:1", "real-graph")
+    assert seen.get("socket_timeout") is not None, (
+        "the seed's client was constructed with NO read bound (#3065/#8118): "
+        f"from_url received {sorted(seen)}")
 
 
 @pytest.mark.parametrize("axis", [None, "--graph-uri", "--record-dsn"],
