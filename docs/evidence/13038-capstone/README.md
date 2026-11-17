@@ -113,10 +113,12 @@ the ingestion table while scoring nothing, and overwrote `run-{target}.json` /
 `scoreboard-{target}.md` in the packet's own directory. An empty scoreboard is not a result:
 `exit_code` treats an empty tally as a failure too, so that case cannot report success even if the
 shape check were bypassed. For the same reason `run` refuses to publish a board that is **not
-fully judged** into the bundle — whatever the cause (`--judge none`, a reader that failed, an empty
-verdicts map): the rule is keyed on the produced tally (`may_publish`), not on a flag, so a
-partly-`unjudged` board cannot become the baseline. Point `--out` at a scratch directory to inspect
-it. `judge` and `render --write` refuse the bundle outright, and `--verdicts-out` is refused there
+complete** into the bundle — whatever the cause (`--judge none`, a reader that failed, an empty
+verdicts map, or a question left `blocked`): the rule is keyed on the produced tally
+(`may_publish`, which delegates to `exit_code`), not on a flag. ⚠️ `blocked` is refused alongside
+`unjudged`, on purpose: `blocked` means the run could not ask a question, so the board is not a
+baseline a later run can be compared against. Point `--out` at a scratch directory to inspect it;
+a refused run also drops its throwaway graph if `--drop-graph` was given. `judge` and `render --write` refuse the bundle outright, and `--verdicts-out` is refused there
 unless the same invocation is also publishing its board: the baseline comes from ONE complete `run`,
 and every file in this bundle — `run-local.json`, `scoreboard-local.md`, `judge-packet.json`,
 `verdicts-baseline.json` — is written by it or not at all. (A refusal is decided BEFORE the packet is

@@ -1358,3 +1358,83 @@ def test_the_scenario_check_reaches_the_artifact(tmp_path):
         "an unverifiable packet was accepted and the artifact does not say so"
     )
     assert any("scenario" in n.lower() for n in board["header"]["notes"])
+
+
+def test_the_SERVED_row_keeps_the_products_words_verbatim():
+    """`redact=False` at the row projection, pinned through the producer (#13303 cycle 9).
+
+    The credential patterns match ordinary business prose, and this text is what the fresh
+    reader scores — so redacting it here would have the instrument judge an answer it had
+    already altered. Testing `_cut(..., redact=False)` directly only proves the keyword
+    works; it does not prove the projection passes it.
+    """
+    prose = "password rotation policy was superseded"
+    assert cap._served_row({"content": prose})["what"] == prose, (
+        "a served product row was redacted on its way into the judge packet"
+    )
+    assert (
+        cap._served_row({"snippet": "the goal token: quarterly-review was recorded"})["what"]
+        == "the goal token: quarterly-review was recorded"
+    )
+    # a credential-bearing EXCEPTION string still goes through the default
+    assert "hunter2" not in cap._cut("docker://:hunter2@host/db", 160)
+
+
+def test_a_bare_USERNAME_in_a_uri_is_stripped():
+    """`_redact` needs `user:pass@`, so it leaves `https://alice@host` (#13303 cycle 9).
+
+    `_strip_userinfo(text, url)` scrubs the URL'S OWN credentials literally — which is why
+    the url must be passed, and why this cannot be tested with `_redact` alone.
+    """
+    url = "https://alice@api.example.com/v1"
+    assert "alice" not in cap._strip_userinfo(url, url)
+    assert "alice" not in cap._strip_userinfo(
+        "docker://alice@host:6379/db", "docker://alice@host:6379/db"
+    )
+    # the scheme-less fragment `urlopen` actually emits — no scheme and no colon, `_redact` blind
+    assert "s3cr3t-pw" not in cap._strip_userinfo(
+        "nonnumeric port: 's3cr3t-pw@api.example.com'", "https://alice:s3cr3t-pw@api.example.com"
+    )
+    assert cap._strip_userinfo(url, "https://api.example.com/v1") == url
+
+
+def test_a_refused_run_still_drops_the_graph_it_ingested(monkeypatch, tmp_path):
+    """The refusal returns before `--drop-graph` used to run (#13303 cycle 9, P2)."""
+    dropped = []
+
+    class _NoTarget:
+        kind = "local"
+        uri = "docker://<redacted>@127.0.0.1:6379/x"
+        namespace = "fake"
+
+        def __init__(self):
+            self.capabilities = set()
+
+        def node_count(self):
+            return 0
+
+        def provenance(self):
+            return {}
+
+        def drop(self):
+            dropped.append(True)
+            return "dropped"
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    monkeypatch.setattr(cap, "DEFAULT_OUT", bundle)
+    monkeypatch.setattr(cap, "build_target", lambda *a, **k: _NoTarget())
+    rc = cap.main(
+        [
+            "run",
+            "--target",
+            "local",
+            "--judge",
+            "none",
+            "--out",
+            str(bundle),
+            "--drop-graph",
+        ]
+    )
+    assert rc == 1
+    assert dropped == [True], "a refused run left its throwaway graph behind"
