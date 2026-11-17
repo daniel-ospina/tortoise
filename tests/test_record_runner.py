@@ -70,10 +70,17 @@ def test_the_fixture_journal_is_read_by_the_journals_own_reader():
 
 
 def test_a_missing_journal_is_a_refusal_and_not_an_empty_one(tmp_path):
-    """A mistyped path must not read as "nothing to migrate" (the vacuity class)."""
-    with pytest.raises(RunnerError) as exc:
-        read_journal(tmp_path / "nope.jsonl")
-    assert "does not exist" in str(exc.value)
+    """A mistyped path must not read as "nothing to migrate" (the vacuity class).
+
+    ⛔ Two shapes, because they reach the refusal by different routes: with the
+    parent present the sentence is reached anyway, so a test using only that
+    shape cannot see the layout probe raising FIRST (a mistyped path whose
+    parent is also gone escaped as `FileNotFoundError` from `iterdir()`).
+    """
+    for given in (tmp_path / "nope.jsonl", tmp_path / "gone" / "events.jsonl"):
+        with pytest.raises(RunnerError) as exc:
+            read_journal(given)
+        assert "does not exist" in str(exc.value)
 
 
 def test_strict_reading_refuses_mid_file_damage_and_salvage_counts_it(tmp_path):
@@ -314,13 +321,31 @@ def test_apply_refuses_to_write_without_the_plans_number(monkeypatch, capsys):
 
 
 def test_apply_refuses_a_stale_acknowledgement_naming_both_numbers(monkeypatch, capsys):
-    """A journal that grew since the plan means the plan describes a different run."""
-    _patched(monkeypatch, checkpoint=Checkpoint())
+    """A journal that grew since the plan means the plan describes a different run.
+
+    ⛔ This assertion names the GATE'S OWN sentence and proves the fold never
+    ran. Asserting the digits alone is not discriminating: `"7" in err` is
+    satisfied by `#7879` and `"39"` by `seq 1..39` in an UNRELATED downstream
+    refusal, so this test stayed GREEN with the gate deleted (measured: the
+    mismatch branch short-circuited to a no-op → 24 passed).
+    """
+    conn = _patched(monkeypatch, checkpoint=Checkpoint())
+
+    def boom(*a, **k):  # pragma: no cover - the gate must refuse before this
+        raise AssertionError("the fold ran with a rejected acknowledgement")
+    monkeypatch.setattr(_replay_attr(), "replay", boom)
+
     rc = main(["apply", "--org-id", "o", "--graph-id", "g", "--journal", str(FIXTURE),
                "--acknowledge-plan", "7"])
     assert rc == EXIT_REFUSED
     err = capsys.readouterr().err
-    assert "7" in err and "39" in err
+    assert "--acknowledge-plan 7 does not match this run" in err
+    assert "39 event(s) are unconsumed from seq 1" in err
+    # Refused BEFORE anything was written — not after a rolled-back attempt. The
+    # stub records the runner's own `statement_timeout` too, so any post-gate SQL
+    # would show up here.
+    assert conn.committed == 0
+    assert conn.statements == []
 
 
 def test_a_fully_consumed_journal_is_a_no_op_that_says_so(monkeypatch, capsys):
