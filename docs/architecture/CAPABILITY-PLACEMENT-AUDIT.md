@@ -76,7 +76,7 @@ file — `search_engine.py` FTS
 `:3078`, walk `:4587`, operator leg `:6470`, subject probe `:6828-6831` (plus its `Event` leg `:6831`, and
 `subject_binding_available()` at `:6834-6847`), label scan `:4350-4351`, HNSW
 `:4097`, label derivation `:2983`, index note `:3050`; `projection/__init__.py` `("Object", ["name"])`
-`:6830`; `sdk.py`'s second `capture_redactions` writer `:2866`; `audit.py`'s carrier probe `:2444`/`:2455`;
+`:6830`; `sdk.py`'s second `capture_redactions` writer `:2875`; `audit.py`'s carrier probe `:2444`/`:2455`;
 and `mcp_server.py`'s `entity_type` passthrough `:5477` — and the drift figure
 above was re-measured afterwards. ⚠️ **The figure counts the file it is written in, so this revision moved it**:
 it **adds 18** resolved pairs and **drops 1** (the `hosted_api.py` commit-state-load cite superseded by the range beside it), a net **+17**;
@@ -223,8 +223,8 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | `tortoise/sdk.py:15659` | `MATCH (p:Point {id:$id})-[:extractedFrom]->` — provenance walk to the Source anchor | **traversal** |
 | `tortoise/mcp_server.py:11158` / `:11161` | `MATCH (new:Point {id:$n})-[r]->(t)` / `(t)-[r]->(new:Point)` — edge discovery | **adjacency** |
 | `tortoise/projection/edges.py:1888` | `(p:Point {id:$pid})-[:TAGGED]->(t:Tag)` | **traversal** |
-| `tortoise/sdk.py:23931` | `(n:Point {id:$id})-[:TAGGED]->()` | **traversal** |
-| `tortoise/search_engine.py:4587` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
+| `tortoise/sdk.py:23982` | `(n:Point {id:$id})-[:TAGGED]->()` | **traversal** |
+| `tortoise/search_engine.py:4583-4587` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
 | `tortoise/search_engine.py:6470` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg's subquery PREVIEW | **adjacency** |
 | `tortoise/search_engine.py:6524` | `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)` — the operator-expansion leg's COUNT, the statement that follows `:6469` inside the same function | **adjacency** |
 | `tortoise/search_engine.py:6829` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:6828-6831`, consumed only by `subject_binding_available()` at `:6834-6847`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
