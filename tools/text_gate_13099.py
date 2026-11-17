@@ -87,7 +87,15 @@ comparison the decision needs: §6.2 already accepted the vectors moving (#11642
 the open question is only whether the text leg can follow.
 
 A candidate that cannot be installed in our deployment is recorded as a
-**disqualification, not a low score** — it is never scored.
+**disqualification, not a low score** — it is never scored. This is implemented,
+not merely declared: any arm that raises during a run is counted in the class's
+`arm_errors` block, `verdict()` marks it `disqualified` instead of reading an
+empty result list as a quality loss, it is excluded from
+`qualifying_candidates`, and `main()` exits non-zero so a run with a failed arm
+cannot be published as a clean one. (The pre-implementation shape was the wrong
+failure direction: an arm that never ran scored 0.0 on every query, read as
+*"significantly worse"*, and would have produced the decision text "the text
+index stays" for a candidate nobody managed to install.)
 
 FAIRNESS RULES (declared, so the result is auditable)
 -----------------------------------------------------
@@ -116,6 +124,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import random
 import re
@@ -160,6 +169,17 @@ def build_corpus() -> tuple[Any, list[dict], dict[int, list[str]]]:
 def load_committed_queries() -> list[dict]:
     path = REPO / "tests" / "eval" / "retrieval" / "queries" / "oracle_queries.json"
     return json.loads(path.read_text())["queries"]
+
+
+def committed_queries_digest() -> str:
+    """SHA-256 of the committed query FILE, so the figures can be tied to it.
+
+    The comparability of every published number rests on the committed query set
+    being the one that produced it, and a path string does not establish that.
+    `tests/test_text_gate_13099.py` pins this digest; the artifact records it.
+    """
+    path = REPO / "tests" / "eval" / "retrieval" / "queries" / "oracle_queries.json"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def build_query_classes(oracle: Any, points: list[dict],
@@ -528,6 +548,11 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
         "source": "benchmarks/synthetic_corpus.generate_oracle_points",
         "seed": SEED, "n_points": N_POINTS, "n_topics": oracle.n,
         "queries_source": "tests/eval/retrieval/queries/oracle_queries.json",
+        # The path above only NAMES the input; this ties the published figures to
+        # the exact bytes that produced them (the class carrying the committed
+        # qrels is that file, and a silently edited query set would otherwise
+        # move every table in the README with nothing going red).
+        "queries_sha256": committed_queries_digest(),
         "grades": "benchmarks/synthetic_corpus.oracle_grades_for_query",
         "live_by_topic_counts": {str(k): len(v) for k, v in sorted(live_by_topic.items())},
         "baseline_arm": "in_graph_fulltext",
@@ -563,6 +588,7 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
         per_query_ids: dict[str, dict[str, list[str]]] = {a: {} for a in ARM_NAMES}
         pq_by_arm: dict[str, dict[str, dict[str, float]]] = {a: {} for a in ARM_NAMES}
         depths: dict[str, list[int]] = {a: [] for a in ARM_NAMES}
+        arm_errors: dict[str, int] = {}
         labels_by_q: dict[str, dict[str, int]] = {}
 
         for q in qs:
@@ -587,6 +613,7 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
                 except Exception as exc:  # recorded, never silent
                     errors.append({"class": cls, "qid": q["qid"], "arm": name,
                                    "error": f"{type(exc).__name__}: {exc}"})
+                    arm_errors[name] = arm_errors.get(name, 0) + 1
                     lists[name] = []
 
             try:
@@ -594,6 +621,7 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
             except Exception as exc:  # recorded, never silent
                 errors.append({"class": cls, "qid": q["qid"], "arm": "pg_vector",
                                "error": f"{type(exc).__name__}: {exc}"})
+                arm_errors["pg_vector"] = arm_errors.get("pg_vector", 0) + 1
                 vlist = []
 
             # Hybrids — RRF with the VECTOR LEG HELD CONSTANT, so the delta
@@ -606,6 +634,7 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
                 except Exception as exc:  # recorded, never silent
                     errors.append({"class": cls, "qid": q["qid"], "arm": hname,
                                    "error": f"{type(exc).__name__}: {exc}"})
+                    arm_errors[hname] = arm_errors.get(hname, 0) + 1
                     lists[hname] = []
 
             for name in ARM_NAMES:
@@ -690,6 +719,11 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
             "per_query_ids": per_query_ids if full else "omitted (run with --full)",
             "empty_pairs": {a: sum(1 for v in per_query_ids[a].values() if not v)
                             for a in ARM_NAMES},
+            # Arms that RAISED in this class, and how often. A non-zero count is
+            # a DISQUALIFICATION, never a score: `verdict()` reads this block
+            # before it reads any metric, so an uninstallable candidate cannot be
+            # reported as "significantly worse than the baseline".
+            "arm_errors": arm_errors,
         }
 
     artifact = {
@@ -703,14 +737,14 @@ def run(fg_host: str, fg_port: int, pg_dsn: str, out_path: Path,
         "worked_examples": worked,
         "results": results,
         "errors": errors,
-        "verdict": verdict(results),
+        "verdict": verdict(results, errors),
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(artifact, indent=1, sort_keys=False))
     return artifact
 
 
-def verdict(results: dict) -> dict:
+def verdict(results: dict, errors: list[dict] | None = None) -> dict:
     """One line, with the number.
 
     THE DECISION RULE, stated so it cannot be read the wrong way. The question
@@ -721,16 +755,34 @@ def verdict(results: dict) -> dict:
                        the only outcome that disqualifies a candidate.
     ``within_noise``   CI spans 0 — indistinguishable from the baseline.
     ``better``         CI lower > 0 — a statistically significant GAIN.
+    ``disqualified``   the arm RAISED during the run (see `errors` /
+                       `arm_errors`), so its metrics are an empty result list,
+                       not a quality statement. Checked BEFORE the three above:
+                       a candidate that could not be installed must never be
+                       reported as a significant loss.
 
     Treating ``better`` as "not within noise, therefore keep the index" would
     reverse the decision the issue exists to test.
     """
+    # Arms that raised ANYWHERE in the run. Read from the caller's error list AND
+    # from the per-class `arm_errors` block, so a hand-built `results` dict (the
+    # tests) and a real artifact are both handled.
+    disqualified: set[str] = {e["arm"] for e in (errors or []) if e.get("arm")}
+    for blk in results.values():
+        disqualified.update(a for a, n in (blk.get("arm_errors") or {}).items() if n)
+
     headline: dict[str, Any] = {}
     for cls, blk in results.items():
         for arm, row in blk["arms"].items():
             if arm == "in_graph_fulltext":
                 continue
             d = row.get("delta_vs_baseline", {}).get("ndcg@10")
+            if arm in disqualified:
+                status = "disqualified"
+                headline.setdefault(arm, {})[cls] = {
+                    "delta_pts": None, "ci": None, "status": status,
+                    "n": (d or {}).get("n")}
+                continue
             if not d:
                 continue
             if d["upper"] < 0.0:
@@ -747,7 +799,8 @@ def verdict(results: dict) -> dict:
             }
 
     def qualifies(clsmap: dict) -> bool:
-        return bool(clsmap) and all(v["status"] != "worse" for v in clsmap.values())
+        return bool(clsmap) and all(v["status"] not in ("worse", "disqualified")
+                                    for v in clsmap.values())
 
     qualifying = [arm for arm, clsmap in headline.items() if qualifies(clsmap)]
 
@@ -759,17 +812,22 @@ def verdict(results: dict) -> dict:
 
     return {
         "rule": ("a candidate qualifies unless it is significantly WORSE "
-                 "(paired 90% CI upper < 0) on any query class"),
+                 "(paired 90% CI upper < 0) on any query class, or was "
+                 "disqualified by a recorded error"),
         "headline_ndcg@10": headline,
         "qualifying_arms": qualifying,
         "qualifying_candidates": candidates,
         "diagnostic_arms_not_candidates": sorted(not_candidates),
+        "disqualified_arms": sorted(disqualified),
         "decision": (
-            "a Postgres option does not lose to the in-graph leg on any query "
-            "class at nDCG@10: " + ", ".join(candidates)
-            if candidates else
-            "every Postgres option loses significantly on at least one query "
-            "class; the text index stays"
+            ("a Postgres option does not lose to the in-graph leg on any query "
+             "class at nDCG@10: " + ", ".join(candidates)
+             if candidates else
+             "every Postgres option loses significantly on at least one query "
+             "class; the text index stays")
+            + (f" — but {len(disqualified)} arm(s) were DISQUALIFIED by a "
+               f"recorded error and are not scored: {', '.join(sorted(disqualified))}"
+               if disqualified else "")
         ),
     }
 
@@ -793,7 +851,11 @@ def main(argv: list[str] | None = None) -> int:
               reuse=args.reuse, full=args.full)
     print(json.dumps(art["verdict"], indent=1))
     if art["errors"]:
-        print(f"!! {len(art['errors'])} recorded arm error(s) — see artifact.json")
+        # NOT a success: a run with a failed arm cannot support a decision, and
+        # exiting 0 here is what let a disqualified candidate read as a verdict.
+        print(f"!! {len(art['errors'])} recorded arm error(s) — see artifact.json; "
+              "the affected arms are DISQUALIFIED, not scored")
+        return 1
     return 0
 
 

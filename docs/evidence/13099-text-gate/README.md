@@ -41,7 +41,7 @@ not license.
 
 **What it costs to adopt the winner.** `ts_rank` is **Postgres built-in**: no extension, no
 background worker, no restart-level config, a **64 KB** GIN index on this corpus (against **3.1 MB**
-for ParadeDB's BM25 index and **7.6 MB** of FalkorDB RAM for the graph holding the same text). It is
+for ParadeDB's BM25 index and **7.73 MB** of FalkorDB RAM for the graph holding the same text). It is
 the cheapest of the four candidates by a wide margin.
 
 ---
@@ -126,10 +126,11 @@ what lets all three classes reuse the *committed* judgements unchanged.
 merely asserted: **96.46 %** of the 650 scaffold tokens it adds are absent from the corpus token pool
 (`question_class_evidence` in the artifact), and **no candidate prices an unmatched query term** — no
 coordination-level or penalty term exists in `db.idx.fulltext`, in `ts_rank`/`ts_rank_cd`, or in
-`pg_search` BM25. The predicted consequence is visible in the data: its per-arm numbers reproduce the
-keyword class **to six decimals**. It is published for completeness and **must not be counted as
-independent corroboration** in either direction. Anyone reading this record should treat the evidence
-base as **two** classes, not three.
+`pg_search` BM25. The predicted consequence is visible in the data: the four **lexical** arms
+reproduce the keyword class **to six decimals**, and the two hybrid arms move only by the amount the
+question's own wording shifts the (constant-across-hybrids) vector leg — §5.3 prints both. It is
+published for completeness and **must not be counted as independent corroboration** in either
+direction. Anyone reading this record should treat the evidence base as **two** classes, not three.
 
 ⚠️ **The entity-name class is a proxy, and the record says so.** The corpus has no real entity names;
 its nearest stored "name" is a document's own text. What it tests is the exact-lookup surface — and
@@ -174,8 +175,10 @@ for a reason that is **not ranking**.
 ### 5.3 `natural_language_question` (n=100) — reported, but **not evidence** (see §4)
 
 Included so the three-class request is answered in full. Read §4 before using any number in this
-table: the class adds only out-of-vocabulary scaffolding, so these values **duplicate §5.1** and
-carry no independent signal.
+table. The four **lexical** rows are identical to §5.1 to six decimals — that is the degeneracy §4
+measures. The `raw` diagnostic collapses to 0.0 (see below), and the two **hybrid** rows differ from
+§5.1 by ~0.3–0.4 pts at @10 because their vector leg is fed the question text, so the wording does
+reach them. No row here carries independent lexical signal.
 
 | arm | nDCG@10 | nDCG@100 | recall@100 | Δ nDCG@10 | Δ nDCG@100 | Δ recall@100 | returned |
 |---|---|---|---|---|---|---|---|
@@ -243,9 +246,9 @@ Measured from the deployed artifacts (no vendor page was consulted; see §2):
 
 | candidate | extension / dependency | index build (2 000 docs) | index size | background worker / config | licence |
 |---|---|---|---|---|---|
-| **in-graph `db.idx.fulltext`** (baseline) | none — FalkorDB built-in | 0.001 s (created on an already-seeded graph; seeding alone is 1.24 s) | not separately exposed; the whole graph incl. index is **7.58 MB** `used_memory` | none, but the text lives in **RAM at the graph's cost** — the ~$73/GB-month that motivates the migration | FalkorDB |
-| **`ts_rank` / `ts_rank_cd`** | **built-in** (`tsvector`, GIN) | **0.009 s** | **64 KB** GIN (+ 72 KB for the `simple` variant) | **none** — no extension, no preload, no worker | PostgreSQL |
-| **`pg_search` BM25** | `pg_search` **0.26.6**, `requires = 'vector'`, **not relocatable** | **0.023 s** | **3.13 MB** — **48× the GIN index** | **`shared_preload_libraries` change required** (`pg_search,pg_cron,pg_stat_statements` in this image) plus a `paradedb.min_rows_per_worker = 300000` parallel-build threshold | **AGPL-3.0-or-later** |
+| **in-graph `db.idx.fulltext`** (baseline) | none — FalkorDB built-in | 0.001 s (created on an already-seeded graph; seeding alone is 1.174 s, 1.226 s on the repeat run) | not separately exposed; the whole graph incl. index is **7.73 MB** `used_memory` (7.74 MB on the repeat run) | none, but the text lives in **RAM at the graph's cost** — the ~$73/GB-month that motivates the migration | FalkorDB |
+| **`ts_rank` / `ts_rank_cd`** | **built-in** (`tsvector`, GIN) | **0.011 s** (repeat 0.012 s) | **64 KB** GIN (+ 72 KB for the `simple` variant) | **none** — no extension, no preload, no worker | PostgreSQL |
+| **`pg_search` BM25** | `pg_search` **0.26.6**, `requires = 'vector'`, **not relocatable** | **0.026 s** (repeat 0.025 s) | **3.13 MB** — **48× the GIN index** | **`shared_preload_libraries` change required** (`pg_search,pg_cron,pg_stat_statements` in this image) plus a `paradedb.min_rows_per_worker = 300000` parallel-build threshold | **AGPL-3.0-or-later** |
 | **hybrid (RRF)** | needs both legs in one store | — | — | none of its own — RRF is application-side | — |
 
 **Two deployment caveats, stated rather than buried:**
@@ -280,7 +283,8 @@ at the head and significantly ahead at depth; none loses.
 
 ### Limits, stated so the number is not over-read
 
-1. **The corpus is synthetic.** A 131-token pool over 24 topics with a ~7-token vocabulary each is a
+1. **The corpus is synthetic.** A 131-token declared pool (`benchmarks.synthetic_corpus.TOKENS`) over
+   24 topics, ~5.5 core tokens each, is a
    *relative* instrument — it can order candidates and it cannot predict absolute production nDCG.
    It is the repo's committed deterministic corpus, chosen **because** comparability to the recorded
    figures requires it, not because it is representative.
@@ -318,5 +322,10 @@ uv run --with "psycopg[binary]" python tools/text_gate_13099.py run ... --out ..
 ```
 
 `tests/test_text_gate_13099.py` pins the parts that must not drift: the corpus is byte-deterministic,
-the committed queries are reused verbatim, and — the one that matters most — **the decision rule keys
-on the CI's direction**, so a significant *gain* can never be read as a disqualification.
+the committed queries are reused verbatim — **including a SHA-256 of the committed query file**
+(`f39c035c291fb5c369e86b43048190a16b55423f1cdaa9a86983c9e8456dd1c1`), because the tables below are only
+comparable to the query set that produced them and a path string does not establish that; the harness
+records the same digest as `corpus.queries_sha256` from the next run on — and, the one that matters
+most, **the decision rule keys on the CI's direction**, so a significant *gain* can never be read as
+a disqualification. The same file also recomputes every cell of §5 and of §6 from `artifact.json`,
+so the published record cannot drift from the measurement it reports.
