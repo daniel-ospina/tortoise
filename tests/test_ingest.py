@@ -1476,24 +1476,54 @@ def test_sc4_no_network_legacy_branch_still_embeds(tmp_path, monkeypatch):
 
 
 def test_sc4_deprecation_markers_present():
-    """T9 indicator: SDK docstring deprecation markers on the two frozen
-    legacy surfaces record the W3 divergence.
+    """T9 indicator: the W3 divergence is RECORDED on every surface that still exists.
 
-    `index_sessions` LEFT the public surface in #11609 lane C (it is one of the
-    seven SOURCES/MINE/SESSION names retired into the approved containers), so
-    its marker now lives on the private seam that kept the body — `_index_sessions`.
-    The indicator is about the MARKER and the divergence it records, not about
-    which door the marker hangs on, so this reads the seam the retirement
-    documents (`tortoise.sdk_retired`): asserting the public name here would
-    re-open a door the surface wave deliberately closed (#12901).
+    `ingest_corpus` and `_index_sessions` are both still live code (the second is the
+    private frozen path the RETIRED `tortoise_index_sessions` door fronts — its
+    retired-call shim still executes the handler), so both keep their in-code marker
+    AND a replacement that resolves: ``index_directory`` was itself retired by #4282
+    Phase 2 (`#11609`) into ``index_sources_from_directory``, so naming it was a
+    one-hop dead end — the same class the `tortoise_entity_profile`/
+    `tortoise_list_topics` pointer repair fixes in `tool_registry.py`.
+
+    The PUBLIC `index_sessions` name is gone (`#11609` batch 2), which is asserted
+    rather than assumed: `getattr` raising IS the migration being complete, and a
+    silently re-added alias would fail here. Its caller-facing pointer — the one a
+    caller actually reads — is the retired MCP door's, checked below.
     """
     from tortoise.sdk import TortoiseSDK  # noqa: I001
+    from tortoise.tool_registry import RETIRED_USE_INSTEAD
     import inspect
+
+    # every still-live legacy surface carries its marker + a LIVE replacement
     for method_name in ("ingest_corpus", "_index_sessions"):
         doc = inspect.getdoc(getattr(TortoiseSDK, method_name)) or ""
         assert "DEPRECATED" in doc, f"{method_name} missing DEPRECATED marker"
-        assert "index_directory" in doc, \
-            f"{method_name} marker must name the replacement"
+        assert "index_sources_from_directory" in doc, \
+            (f"{method_name} marker must name the LIVE replacement "
+             "(index_directory is itself retired)")
+        assert "``index_directory``" not in doc, \
+            f"{method_name} marker names the retired index_directory"
+
+    # the retired PUBLIC name is gone, and its frozen private path is still served
+    assert not hasattr(TortoiseSDK, "index_sessions"), \
+        "index_sessions is public again — the retirement has been undone"
+
+    # a caller who calls the retired name gets a ONE-hop LIVE pointer — the door is
+    # `tortoise_index_sessions`, NOT the transcript-capture door (#12951 review).
+    ptr = RETIRED_USE_INSTEAD.get("tortoise_index_sessions") or ""
+    assert "tortoise_index_sources_from_directory" in ptr, (
+        f"the retired session-index door must name its live container: {ptr!r}")
+    assert "file_type" in ptr and "agent_session" in ptr, (
+        "the pointer must carry the agent_session discriminator that makes it the "
+        f"same question: {ptr!r}")
+    # ...and the named container is ON the surface, not merely a string in the map:
+    # naming a retired destination is the two-hop class `#12948` F1 recorded.
+    import tortoise.mcp_server as _ms
+    _names = [getattr(c, "name", "")
+              for c in _ms.mcp._local_provider._components.values()]
+    assert "tortoise_index_sources_from_directory" in _names, _names
+
     # the divergence is RECORDED (the flag semantics differ between paths)
     doc = inspect.getdoc(TortoiseSDK.ingest_corpus) or ""
     assert "extract_metadata" in doc and "divergence" in doc.lower(), \
