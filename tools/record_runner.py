@@ -741,12 +741,19 @@ def apply_batches(*, journal: Journal, org_id: str, graph_id: str,
     types: Counter[str] = Counter()
     for index, (offset, length) in enumerate(slices, start=1):
         batch = journal.records[offset:offset + length]
-        start_seq = offset + 1
         # ⛔ THE PLAN PRECEDES THE WRITE, per batch, as well as per run. This is
         # the module's own totality gate reached a second way: `replay` plans the
         # whole batch before executing any of it, and printing that plan first
         # means an operator watching a long backfill sees the batch it is about
         # to apply rather than one it already applied.
+        #
+        # ⛔ `allocate` IS FALSE ON EVERY PATH THAT REACHES THIS FUNCTION (review
+        # P3). `cmd_apply` refuses `--allocate` UNCONDITIONALLY, before the journal
+        # is read, so the only production caller cannot pass True; the parameter is
+        # kept because the write path's contract is what a future allocator-aware
+        # fold would key on, and `plan` still uses the allocator arm. Stated here
+        # because a branch that reads as supported and cannot run is how a
+        # reader concludes the tool can do something it refuses.
         start_seq = 1 if allocate else offset + 1
         planned = plan_batch(batch, start_seq=start_seq, org_id=org_id,
                              graph_id=graph_id, allocate=allocate)
@@ -827,12 +834,16 @@ def _quietly(fn) -> None:
 def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
     """The damage disclosure EVERY verb owes, in one place (review P1, #13210).
 
-    ⛔ `plan` and `apply` published it from the beginning and `status` did not, so
+    ⛔ `plan` published it from the beginning; `status` and `apply` did not, so
     the one verb an operator chains on could say `fully_consumed: true` over a
     read that had SKIPPED a record — the harmonic of `read_journal`'s own promise
     ("salvaging is an explicit, recorded choice and the report says when it was
-    taken"). Factored rather than re-spelled so the three verbs cannot drift, and
-    so a fourth verb inherits it by construction.
+    taken") — and the WRITE verb, whose report is the one an operator keeps, said
+    nothing about a segmented journal at all. Factored rather than re-spelled so
+    the three verbs cannot drift, and so a fourth verb inherits it by
+    construction. `test_every_verb_discloses_the_damage_it_read` is what makes
+    "every" a property rather than a comment: it drives all three renders over one
+    damaged journal.
     """
     if j["corrupt_lines"] is None or j["torn_tails"] is None:
         return ["  ⚠ damage NOT REPORTED: this layout's reader does not "
@@ -933,6 +944,7 @@ def _render_plan(report: PlanReport) -> str:
 def _render_apply(report: ApplyReport) -> str:
     lines = [
         f"journal: {report.journal['path']} — {report.journal['records']} records",
+        *_journal_damage_lines(report.journal),
         f"resumed at seq: {report.start_at + 1} "
         f"(checkpoint before: {report.checkpoint_before})",
     ]
@@ -1013,7 +1025,10 @@ def _parser() -> argparse.ArgumentParser:
         if allocate:
             p.add_argument("--allocate", action="store_true",
                            help="use the ordinal ALLOCATOR (a cut-over graph) "
-                                "instead of the journal's enumeration")
+                                "instead of the journal's enumeration — `plan` "
+                                "only: `apply` REFUSES it, because a historic "
+                                "fold through the counter mints new ordinals for "
+                                "old events")
         p.add_argument("--salvage", action="store_true",
                        help="read a damaged journal, skipping mid-file damage "
                             "(explicitly NOT a completeness claim)")
@@ -1182,7 +1197,20 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
     # warning `plan`/`apply` print has no number to carry. `fully_consumed` is the
     # field a chain gates on, so it takes the same `None` the cut-over and the
     # mismatch arms take, and the damage lines say why.
-    completeness_unknown = journal.salvage or journal.corrupt is None
+    #
+    # ⛔ THE PREDICATE IS THE COUNTERS, NOT THE MODE (PR #13210 review P2/P3).
+    # `--salvage` is how the operator ASKED to read; it is not evidence that
+    # anything was skipped — `--salvage` on a clean journal skips nothing, and
+    # reporting that read as unaccountable ("this read skipped …") is a sentence
+    # the same payload's `corrupt_lines: 0` denies. And keying on `salvage` alone
+    # MISSES the arm this clause exists for: a segmented reader returns
+    # `salvage=<the caller's flag>`, so `status --journal <graph dir>` with no
+    # `--salvage` is `salvage=False, corrupt=None` — damage unmeasurable, and a
+    # `salvage`-only predicate would let it claim `fully_consumed: true` over a
+    # read that cannot see a skipped line.
+    damage_unreported = journal.corrupt is None or journal.torn is None
+    completeness_unknown = (damage_unreported or bool(journal.corrupt)
+                            or bool(journal.torn))
     payload = {
         "verb": "status",
         "org_id": args.org_id,
@@ -1204,6 +1232,9 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
         #: True when this read cannot support a completeness claim at all — the
         #: reason `fully_consumed` is `None`, stated so a caller need not infer it.
         "completeness_unknown": completeness_unknown,
+        #: True when the LAYOUT hides the damage counters, which is the one case
+        #: the report must not describe as damage it saw.
+        "damage_unreported": damage_unreported,
     }
     text = "\n".join([
         f"journal: {journal.path} — {len(journal.records)} records"
@@ -1217,8 +1248,10 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
          "not apply" if allocated
          else f"events remaining: unknown — {mismatch}" if mismatch is not None
          else f"events remaining: {max(0, remaining)}"),
-        *(["complete: UNKNOWN — this read skipped or cannot account for input, "
-           "so it is not a completeness claim"] if completeness_unknown else []),
+        *(["complete: UNKNOWN — this layout's reader reports no damage counters, "
+           "so it cannot account for input"] if damage_unreported
+          else ["complete: UNKNOWN — this read SKIPPED damaged input, so it is "
+                "not a completeness claim"] if completeness_unknown else []),
         "cutover: " + ("none (positions are the journal's)" if cursor is None
                        else f"cursor present (seq {cursor[0]}, mode {cursor[1]})"),
     ])
