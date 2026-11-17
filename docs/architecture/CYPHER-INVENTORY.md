@@ -67,7 +67,6 @@ the box, are:
 |---|---|---|---|
 | product surface (this census) | **1313** | **99** | `tortoise/**/*.py`, test modules excluded |
 | every tracked surface (`--all-surface`) | **9,055** | **820** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
-
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
 with a count that is regenerated and *pinned* (§7), so the next lane does not have to guess which of
@@ -118,8 +117,8 @@ tool's number. A bare `rg … tortoise/` gives 1,631 / 109, the 6 extra occurren
 `tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,625 / 108 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,330** across **142** files, while the tool
-reports 2,343 / 143. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,330** across **143** files, while the tool
+reports 2,343 / 144. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — **nine** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
@@ -142,8 +141,7 @@ exclusion dropped they read **2,063** and **2,333**. The 69-occurrence 2,333→2
 `tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
-The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
-the **= 1,571 on a door-call line** are both counts, not differences.⛔ The **residual** row is
+The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−54** andthe **= 1,571 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
 two measurements have stopped agreeing. It is also the value the first version of this tool silently
@@ -409,25 +407,29 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where these numbers were last cut:** `origin/main` **`9d13dc1bf7`**, forward-merged into the branch
-(which had already taken `34bd33d22a`) — re-derived by RUNNING the tool on the merged tree, never by
-arithmetic on the markers. `main`'s `#13249` converts two `public.graphs` reads from `query` to
-`query_all`, and `query_all` is **not** a `DOORS` entry, so each conversion REMOVES one door call:
-`non_cypher_door_calls` 260→**258** and `ast_door_calls` 1573→**1571** — while
-`sites`/`plain`/`candidates` are unchanged (1313 / 860 / 579; the 579 is the `plain` READ half, which
-is also the migration-candidate count) and `files_scanned` stays 297 with `files_with_sites` 99.
-⛔ **Neither parent's number is the answer, because other PRs moved the same two counters in both
-directions:** the branch's own cut read `1573 / 260` and `main`'s read `1569 / 258`, and this merge
-lands on **1571 / 258** — `main`'s `1569` plus the branch's two `plain`/`read` sites, which is the same
-1571 the branch's `1573` reaches by losing this merge's two door calls. The `rg` reconciliation in §1
-is re-measured on this tree (1,625 / 108 door occurrences; the tool's verb predicate 2,343 lines
-across 144 files; `rg -io '\b(MATCH|MERGE)\s*\('` 2,330 / 143 — one file more than the `#13265`
-cut, because `main` adds a `match(` call at `tortoise/index_catalogue.py:197` that the
-case-insensitive predicate matches and the AST records no statement site for), Appendix A is
-regenerated with `--markdown`, and `--check` reports **`25 pinned counts match`**.
+**Where these numbers were last cut:** `origin/main` **`9d13dc1bf7`**, the last of this branch's
+forward merges (`0774035055`, then `9d13dc1bf7`) — re-derived by RUNNING the tool on the FINAL
+merged tree, never by arithmetic on the markers. `main`'s two commits between them move no census
+scalar, so every number below is the `0774035055` cut's, re-measured here and unchanged. **This cut CORRECTS a pair it inherited stale rather than moving it.** The branch's previous
+cut carried `ast_door_calls` **1573** / `non_cypher_door_calls` **260**, which were the `34bd33d22a`
+tree's two scalars; `main`'s `#13249` (`bf3a7b8e77`) then converted the org purge's two
+`public.graphs` reads from `query` to `query_all`, and `query_all` is **not** a `DOORS` entry
+(`tools/cypher_inventory.py:148`), so each conversion REMOVES one door call and adds no statement
+site. The branch merged that commit (`56142ad8f1`) without re-recording the two scalars, so on this
+merged tree they read **1571 / 258** while every other scalar holds: `sites` **1313** (`plain` **860**
+— read **579**, write **281**), `candidates` **579**, `unresolved` **107**, `partial` **315**,
+`files_scanned` **297**, `files_with_sites` **99**. §1's `rg` reconciliation is re-measured here (door
+**1,625 / 108**, verb **2,343 / 144** whole-text, bare **1,631 / 109**), `--all-surface` reads
+**9,055 / 820**, Appendix A is regenerated with `--markdown`, and `--check` reports **`25 pinned counts
+match`**.
 
-**Where these numbers were last cut:** `origin/main` **`34bd33d22a`**, forward-merged into the branch
-for the third time (`54682177bc`, then `34bd33d22a`) — neither merge moved a count: they add no Cypher
+⛔ **Neither parent's scalar is the answer, and this cut is the measured proof:** this head's parent
+read 1573 / 260 while `main`'s own cut at `bf3a7b8e77` recorded 1569 / 258, and the merged tree reads
+**1571 / 258** — the branch's two Cypher sites (1313 = 1311 + 2) plus `main`'s two removed door calls.
+A lane that carried either parent's figure forward, or reused the branch's pre-merge cut, would have
+written a pin `--check` then accepted. Only running the tool says which tree you are holding.
+
+**The cut before that:** `origin/main` **`34bd33d22a`**, forward-merged into the branchfor the third time (`54682177bc`, then `34bd33d22a`) — neither merge moved a count: they add no Cypher
 statement site, so every scalar is unchanged from the `a218f8867b` cut and only Appendix A's
 `file:line` rows move, which is why Appendix A is regenerated at each merge rather than trusted.
 
@@ -475,8 +477,9 @@ stays 297 and `files_with_sites` 99: the reader lives in a file that already car
 `rg` reconciliation in §1 is re-measured on this tree (1,626 / 2,330 / 1,632 bare / 2,064 / 2,402),
 Appendix A is regenerated with `--markdown`, and `--check` reports **`25 pinned counts match`**.
 
-The paragraph below is `main`'s cut, kept as the record of it.
-
+The paragraph below is `main`'s cut that this merge brings in, kept as the record of it — the branch
+merged it at `56142ad8f1` but never recorded its scalars, which is why the cut above CORRECTS them
+rather than moving them.
 **Where THESE numbers were cut:** `#13249`'s branch, merged with `origin/main` **`bf3a7b8e77`**, and
 re-derived from that merged tree — not by arithmetic on the markers. The branch converts the two
 `public.graphs` reads in the org purge from `query` to `query_all`, and `query_all` is **not** a
@@ -487,51 +490,31 @@ is also the migration-candidate count). `files_scanned` stays 297 and `files_wit
 conversions land in a file that already carries sites. The `rg` reconciliation in §1 is re-measured on
 this tree (1,622 / 2,330 / 1,628 bare / 2,064 / 2,402), Appendix A is regenerated with `--markdown`,
 and `--check` reports **`25 pinned counts match`**.
-⛔ **Neither parent's number is the answer, because other PRs moved the same two counters in both
-directions:** `#9559` (`a218f8867b`) ADDED the two door calls this PR removes, so the merge lands on
-**1569 / 258** — `main`'s **1571 / 260** minus this branch's two — and a lane that carried either
-parent's figure forward (or reused this branch's pre-merge cut) would have written a pin `--check`
-then accepted. Only running the tool says which tree you are holding.
-⚠️ THREE of those five `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as
-the row below and from the same commit: `tortoise/record_writer.py:1723` is a COMMENT line containing
-`MERGE (s:Source {url:$id})`, and this census counts LINES — so the tool reads 2,343 / 143 where it
-read 2,342 / 142, and `rg` reads 2,330 / 142, 2,064 and 2,402 where it read 2,329 / 141, 2,063 and
-2,401. ⛔ The other TWO did NOT move, and the reason is the predicate, not the commit: the DOOR figure
-(`1,624` / `108` at `34bd33d22a`; `1,622` / `108` here, `#13249` having removed two door calls since)
-and the bare-door figure (`1,630` → `1,628` for that same reason) are drawn from a predicate
-`#13265` did not touch — it added **0** door calls and exactly **1** verb occurrence
-(`git show 34bd33d22a -- tortoise/ | grep '^+' | grep -cE '\.(ro_)?(query|execute)\s*\('` → `0`;
-`… | grep -oiE '\b(MATCH|MERGE)\s*\('` → `1`). The 13-occurrence one-file whole-text gap and the
-nine-prose/four-Cypher split are UNCHANGED by it (the added match is single-line, not cross-line).
-⚠️ That regeneration is not decorative at this head. The appendix pins `file:line` COORDINATES and
-`--check` cannot see them — its 25 pins are SCALARS, and an insertion is not a new statement — so
-re-cutting the appendix moves ROWS while every SCALAR stays put. Measured at THIS head against
-`origin/main` **`9cebd72ad7`**: the appendix `main` carried was stale in **709 of its 1,311 rows**,
-over exactly five files — the same 1,311 statements, renumbered:
 
-| file | rows | shift |
-|---|---|---|
-| `tortoise/sdk.py` | 384 | +51 (355 rows), +48 (2), +26 (6), +23 (2), +9 (19) |
-| `tortoise/hosted_api.py` | 240 | +22 (230) |
-| `tortoise/projection/__init__.py` | 92 | +38 (83) |
-| `tortoise/indexer/github_indexer.py` | 11 | +97 (4), +24 (7) |
-| `tortoise/record_projection.py` | 1 | +22 |
-
-reproduced by `git show origin/main:docs/architecture/CYPHER-INVENTORY.md` versus a fresh
-`--markdown` at this tree. It is regenerated HERE because every commit that moved those statements
-has already merged without regenerating them (the rule assigns the refresh to the commit that moves
-the code; none of those commits did it), while
-`tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` is RED at
-`origin/main` today — the generated table is the only artifact in this document that no pin reaches.
-(Two earlier revisions of this paragraph are RETIRED rather than reconciled, because each named a
-unit, a metric or a base it did not measure: "31 of 1,313 rows" — `1,313` is the table's LINE count,
-it is **1,311 rows over 1,313 lines**, of which **1,310** are distinct, the duplicate being the two
-unresolved door calls on `tortoise/session_source_migration.py:235` — with `31` attributed to no
-metric; then "137 of 1,311 rows", measured against an `origin/main` that `#13317` has since
-regenerated; then "one row", measured at `34bd33d22a`, a base seven commits old by the time it was
-read. All three are the same defect — a count taken off the wrong unit, off a base that has since
-moved, or off an unnamed metric — which is why the figure above names its base and its command.)
-
+⚠️ Those five `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as the row
+below and from the same commit: `tortoise/record_writer.py:1723` is a COMMENT line containing
+`MERGE (s:Source {url:$id})`, and this census counts LINES — so AT THAT HEAD the tool read 2,343 / 143
+where it read 2,342 / 142, and `rg` read 2,330 / 142, 2,064 and 2,402 where it read 2,329 / 141, 2,063
+and 2,401. The 13-occurrence one-file whole-text gap and the ten-prose/three-Cypher split are UNCHANGED
+(the added match is single-line, not cross-line), and §1's `record_projection.py:4777` citation is
+corrected to `:4830` because that same commit moved it.
+⚠️ That regeneration is not decorative at this head: `main`'s `#13115` (`9f327e1435`) moved code
+inside files that already carried sites, so re-cutting the appendix moves ROWS while every SCALAR
+stays put. Measured at THIS merged tree against the appendix `origin/main` carried at `34bd33d22a`:
+**787 rows added and 785 dropped** of 1,313 (`git show 34bd33d22a:docs/architecture/CYPHER-INVENTORY.md`
+versus a fresh `--markdown`), because `main` inserted lines above hundreds of statement sites in
+`tortoise/sdk.py` and `tortoise/hosted_api.py` — and **not one of the 25 pins moved**. That is the
+exact `file:line`-versus-SCALAR gap this section describes, caught by regenerating the appendix
+rather than by trusting the pins: `--check` passes on both trees while the appendix's `file:line`
+column is stale on one of them.
+⚠️ Earlier revisions of this sentence are RETIRED rather than reconciled, because each named a unit,
+a metric or a base it did not measure: one said "31 of 1,313 rows" (`1,313` is the table's LINE
+count — the table carries **1,313 rows over 1,315 lines** here — and `31` was attributed to no
+metric), and another said "137 of 1,311 rows", measured against a `origin/main` that `#13317` has
+since regenerated. The counts above are the only ones in this paragraph a reader can reproduce from
+THIS tree (`git show 34bd33d22a:docs/architecture/CYPHER-INVENTORY.md` versus a fresh `--markdown`).
+A count taken off the wrong unit, off a base that has since moved, or off an unnamed metric is the
+defect class this paragraph exists to name.
 **The cut before that, `main`'s own, kept as the record of it** — the PINS by `main`'s
 **`05fe46e94e`**, re-derived at `origin/main` **`b8f56fdec4`**. ⚠️ Both columns below are the CENSUS's
 own measurements at those two commits, not the marker values — the markers `main` carried into the

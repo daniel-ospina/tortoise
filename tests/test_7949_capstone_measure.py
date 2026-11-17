@@ -6284,7 +6284,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # rows below (those were `19519`/`19544`/`19412`/`18952` before this head's
         # re-derivation; the numbers HERE are the live ones, so this comment cannot read as a
         # pointer to a row that no longer exists). Measured at THIS head, not copied: `@app.post("/v1/sessions")` is
-        # `:18987` and `@app.post("/v1/sessions/install-probe")` is `:21542` — the pair the row
+        # `:19481` and `@app.post("/v1/sessions/install-probe")` is `:22036` — the pair the row
         # below pins, each the file's ONLY occurrence of its needle. (Prose here had `:18854`/`:21409`, `#12947`'s head.)
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("19481", ("exact", '@app.post("/v1/sessions")')),
@@ -6379,10 +6379,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #
         # The anchor is `quota_refusal_payload(QuotaExceededError(`, not the bare
         # `quota_refusal_payload(`, because the OLD anchor's `detail=quota_refusal_payload(`
-        # form occurs at THREE lines (`:10576`, `:19473`, `:19535`) — and the bare
-        # call occurs once too (`:10158` is `return quota_refusal_payload(`), at four
-        # lines in all: a `(document, pin)` pair moved together onto `:19535` — the
-        # `CohortCostCapExceeded` arm (`except` at `:19515`), the WRONG refusal — would
+        # form occurs at THREE lines (`:11118`, `:20210`, `:20272`) — and the bare
+        # call occurs once too (`:10700` is `return quota_refusal_payload(`), at four
+        # lines in all: a `(document, pin)` pair moved together onto `:20272` — the
+        # `CohortCostCapExceeded` arm (`except` at `:20252`), the WRONG refusal — would
         # satisfy the bare anchor and stay green on it.
         # The hardened form occurs exactly once in the file, so a re-point onto a
         # sibling arm now reds.
@@ -6533,12 +6533,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # than assumed from one bumped number — and ⛔ RE-DERIVED ONCE MORE at the rebase onto
         # `main` @ `b8f56fdec4`, where the three offsets STILL hold at the new START, so the
         # START is again confirmed by structure rather than by a bumped number:
-        # ⛔ RE-DERIVED AGAIN at the `#13102` merge of `origin/main` `b8f56fdec4` (13 main
+        # ⛔ RE-DERIVED AGAIN at the forward merge of `origin/main` `0774035055` (this merge):
+        # `main`'s `376cbd613d` (`#12943`, the tenant / cache-graph split) inserts 22 lines above
+        # `org_info`, so the span start is now 15202 and the END — the blank line before
+        # `return OrgInfoResponse(` — is 15279 (the call itself is `:15280`). The three offsets
+        # (+29 `nodes_used`, +39 `max_nodes`, +77 END) still hold EXACTLY at the new START, which
+        # is how the figures below were re-derived rather than nudged: `grep -n
+        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15202`,
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15231` (inside the span),
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15241` (inside it), and `:15279` is
+        # the blank line immediately before `return OrgInfoResponse(` at `:15280`.
+        #
+        # The `#13102` merge of `origin/main` `b8f56fdec4` (13 main
         # commits past `97fd713ffb`, which had already moved the span to 14896-14973): the span
-        # start is now 15180 and the END — the blank line before `return OrgInfoResponse(` — is
+        # start was 15180 and the END — the blank line before `return OrgInfoResponse(` — was
         # 15257 (the call itself is `:15258`). The three offsets (+29 `nodes_used`, +39
-        # `max_nodes`, +77 END) still hold EXACTLY at the new START, which is how the figures
-        # below were re-derived rather than nudged. Measured on the merged tree, and re-measured
+        # `max_nodes`, +77 END) held EXACTLY at that START too, which is how those figures
+        # were re-derived rather than nudged. Measured on the merged tree, and re-measured
         # again after the merge resolved — the two sides of the conflict printed the SAME three
         # figures, which is what made keeping them a verification rather than a side-pick:
         # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15180`,
@@ -6673,16 +6684,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "leaves the document asserting two numbers for one `git grep` hit")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:15180-15257`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:15202-15279`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15219` (both needles are the file's only occurrences —
-    # `:15209` and `:15219` — so a later end cannot change the sum). Ends below `:15219` fail
+    # true for any end at or beyond `:15241` (both needles are the file's only occurrences —
+    # `:15231` and `:15241` — so a later end cannot change the sum). Ends below `:15241` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15180`-`:15218` gives a non-empty window that lacks at least the second needle,
-    # and an end below `:15180` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:15202`-`:15240` gives a non-empty window that lacks at least the second needle,
+    # and an end below `:15202` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
