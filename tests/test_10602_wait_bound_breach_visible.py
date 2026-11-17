@@ -1391,3 +1391,40 @@ async def test_a_CANCELLED_request_is_not_a_served_breach(baseline, monkeypatch)
     assert _starved()["total"] == starved_before["total"], (
         "a CANCELLED request was counted as a served-late breach — the caller "
         "got no answer")
+
+
+@pytest.mark.asyncio
+async def test_a_failing_starved_write_cannot_break_the_STARTED_arm(
+        baseline, monkeypatch):
+    """`_count_starved`'s OWN `try/except`, pinned on the arm that has no outer
+    guard.
+
+    The helper-level test cannot reach it (`_count_starved` catches the raise one
+    frame below, measured), and the started arm calls `_count_starved` directly
+    — so without this case the guard is load-bearing and unverified: measured,
+    deleting it turns a served 200 into `RuntimeError("counter exploded")`.
+    """
+    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.05)
+    attempted = []
+
+    def _boom(surface):
+        attempted.append(surface)
+        raise RuntimeError("counter exploded")
+
+    monkeypatch.setattr(monitoring, "record_wait_bound_starved", _boom)
+
+    async def _blocks_then_sends_head_late(scope, receive, send):
+        import time as _time
+        _time.sleep(0.4)          # nothing sent while the budget runs out
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"text/event-stream")]})
+        await asyncio.sleep(0.3)  # the timer fires here: the STARTED arm
+        await send({"type": "http.response.body", "body": b"data: {}\n\n"})
+
+    rec = await _drive(ha.WaitBoundMiddleware(_blocks_then_sends_head_late),
+                       _scope("/v1/thing"))
+
+    assert attempted, "the started arm never reached the write"
+    assert rec.status == 200, (
+        "a counter failure replaced a served response on the started arm — the "
+        "arm has no outer guard, so `_count_starved`'s own is the only one")

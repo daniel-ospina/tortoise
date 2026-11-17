@@ -6349,7 +6349,13 @@ class WaitBoundMiddleware:
             request, the served-answer channel reporting a refusal as a served
             answer. `_WAIT_BOUND_COUNTED_STATE` is the seam's own claim (the
             exactly-once contract) and `_WAIT_BOUND_REFUSED_STATE` this
-            middleware's; either one means nothing was served.
+            middleware's; either one means nothing was served. ⚠️ The REFUSED
+            half is DEFENSIVE ONLY on this path: this middleware writes that flag
+            on the branch that RETURNS the refusal, which cannot reach here — so
+            no test can discriminate it (the COUNTED half is the live one, pinned
+            by `test_a_refusal_substituted_by_the_mcp_seam_is_not_a_starved_
+            breach`). Kept because a future call site on a refusal path would
+            otherwise double-count, and it can only ever abstain.
 
             ⛔ AND IT ABSTAINS WHEN THE RESPONSE HEAD WENT OUT INSIDE THE BOUND.
             The promise this channel reports is "the caller learned SOMETHING

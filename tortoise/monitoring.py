@@ -961,9 +961,9 @@ for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
 #
 # ⚠️ COVERAGE IS NOT SYMMETRIC ACROSS THE TWO SURFACES, and the payload cannot
 # say so per-child, so it is stated here: the `rest` child counts every served-late
-# shape EXCEPT a cancelled-after-head one (exclusion 3, below) and, on a #4055
+# shape EXCEPT a cancelled-after-head one (exclusion 4, below) and, on a #4055
 # cold start, a head emitted after the first budget but BEFORE the re-arm
-# (exclusion 4 — the drain's lateness is not charged to the request; such a
+# (exclusion 3 — the drain's lateness is not charged to the request; such a
 # caller is reported by neither channel). The `mcp` child
 # counts a `mcp`-labelled request the same way — a PRE-SSE stall whose head
 # MISSED the budget IS counted as `mcp` (pinned by
