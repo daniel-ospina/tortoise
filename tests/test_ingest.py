@@ -1519,10 +1519,14 @@ def test_sc4_deprecation_markers_present():
         f"same question: {ptr!r}")
     # ...and the named container is ON the surface, not merely a string in the map:
     # naming a retired destination is the two-hop class `#12948` F1 recorded.
+    # ⛔ Read it through `mcp_server._local_tool_component`, never by reaching into
+    # the provider's `_components` here: that helper OWNS the "is this name
+    # registered" question (and its `getattr` guards), so an upstream fastmcp layout
+    # change degrades to "not registered" there instead of an AttributeError in this
+    # test — and a second inline copy would be a second owner of that knowledge.
     import tortoise.mcp_server as _ms
-    _names = [getattr(c, "name", "")
-              for c in _ms.mcp._local_provider._components.values()]
-    assert "tortoise_index_sources_from_directory" in _names, _names
+    assert _ms._local_tool_component("tortoise_index_sources_from_directory") is not None, \
+        "the pointer names a container that is NOT on the registered surface"
 
     # the divergence is RECORDED (the flag semantics differ between paths)
     doc = inspect.getdoc(TortoiseSDK.ingest_corpus) or ""
