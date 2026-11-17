@@ -1643,27 +1643,34 @@ def test_the_armed_door_refuses_a_record_whose_position_is_unproven(
 
 # ── (3a) concurrency: allocation order IS commit order ─────────────────────
 
-def _blocked_lock_waiters(conn) -> int:
-    """How many backends are WAITING for a lock right now.
+def _blocked_lock_waiters(conn, pid: int) -> list[int]:
+    """Which backends are blocking `pid` RIGHT NOW — PostgreSQL's own answer.
 
-    ⛔ THIS IS THE HANDSHAKE (#13043 review P2-5). The leg used to assert
-    `result.empty()` after a fixed `sleep(1.0)`, which measures "B has had time to
-    block" — and the review MEASURED that the leg passes with the counter's row
-    lock removed: no block, no result, an empty queue. `pg_locks` with `granted =
-    false` is evidence that a backend is ACTUALLY WAITING, which is the fact the
-    assertion is about, so a lock-free allocator reds here instead of passing.
+    ⛔ THIS IS THE HANDSHAKE (#13043 review P2-5), and it must be PER BACKEND
+    (#13043 review finding 3). The leg used to assert `result.empty()` after a
+    fixed `sleep(1.0)`, which measures "B has had time to block" — and the review
+    MEASURED that it passes with the counter's row lock removed. The replacement
+    was `SELECT count(*) FROM pg_locks WHERE NOT granted`, which is `pg_locks`'s
+    CLUSTER-WIDE view: any waiter anywhere — a peer lane's backend on the shared
+    docker lane, an unrelated relation lock — satisfied it, while the assertion
+    built on it claims the counter's row.
+
+    `pg_blocking_pids(pid)` answers about THIS session only, and PostgreSQL
+    documents that a row-lock wait surfaces here as a wait on the HOLDING
+    TRANSACTION — so the predicate survives the detail that a filter on
+    `relation = 'public.record_cursor'::regclass` would miss.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM pg_locks WHERE NOT granted")
+        cur.execute("SELECT pg_blocking_pids(%s)", (pid,))
         row = cur.fetchone()
-    return int(row[0]) if row else 0
+    return [int(p) for p in (row[0] or [])] if row else []
 
 
-def _wait_for_a_blocked_writer(conn, timeout: float = 30.0) -> bool:
-    """Poll until ANOTHER backend is waiting on a lock (B is blocked)."""
+def _wait_for_a_blocked_writer(conn, pid: int, timeout: float = 30.0) -> bool:
+    """Poll until `pid` is waiting on a lock held by another backend."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _blocked_lock_waiters(conn):
+        if _blocked_lock_waiters(conn, pid):
             return True
         time.sleep(0.05)
     return False
@@ -1687,9 +1694,14 @@ def test_two_writers_allocate_in_commit_order(schema, tenant, app):
 
     result: queue.Queue = queue.Queue()
     started = threading.Event()
+    #: B's OWN backend pid, published by the thread before it allocates — the id
+    #: the handshake below asks about. Pre-fix the predicate was a CLUSTER-WIDE
+    #: count, so a peer lane's waiter could satisfy it (#13043 finding 3).
+    pids: list[int] = []
 
     def writer_b() -> None:
         conn = _app_conn()
+        pids.append(conn.get_backend_pid())
         try:
             started.set()
             block = ra.execute_allocation(conn, statement, org_id=org,
@@ -1701,19 +1713,21 @@ def test_two_writers_allocate_in_commit_order(schema, tenant, app):
         finally:
             conn.close()
 
-    # ⛔ NON-VACUITY OF THE HANDHSHAKE ITSELF: nothing is waiting yet, so the
-    # detector must answer "no". A predicate that always returned True would
-    # make the assertion below meaningless.
-    assert _blocked_lock_waiters(app) == 0, (
+    # ⛔ NON-VACUITY OF THE HANDSHAKE ITSELF: nothing is waiting yet, so the
+    # detector must answer "no" — for THIS backend, which is what the assertion
+    # below is about.
+    assert _blocked_lock_waiters(app, app.get_backend_pid()) == [], (
         "a lock waiter exists before writer B started — this connection cannot "
         "be used to observe B's block")
 
     thread = threading.Thread(target=writer_b, daemon=True)
     thread.start()
     assert started.wait(timeout=30), "writer B never started"
+    assert pids, "writer B never published its backend pid"
     # B is BLOCKED: it cannot take the counter's row lock until A commits. This
-    # waits for EVIDENCE of the wait, not for a duration.
-    assert _wait_for_a_blocked_writer(app), (
+    # waits for EVIDENCE about B — `pg_blocking_pids(B)` — not for a duration and
+    # not for a waiter somewhere in the cluster.
+    assert _wait_for_a_blocked_writer(app, pids[0]), (
         "no backend ever waited on the counter's row lock — the second writer "
         "was not blocked, so allocation order is not commit order (this is what "
         "a fixed sleep could not see: with the row lock removed B simply runs)")
@@ -1763,7 +1777,8 @@ def test_the_blocked_writer_detector_does_not_fire_without_contention(
     # The counter is PER GRAPH, so the free graph's first allocation is 1 — the
     # point is that it ran to completion with nothing waiting.
     assert block.first_seq == 1
-    assert _wait_for_a_blocked_writer(app, timeout=0.5) is False, (
+    assert _wait_for_a_blocked_writer(app, app.get_backend_pid(),
+                                      timeout=0.5) is False, (
         "the detector reported a waiter with no contention — it would make "
         "P2-5's handshake pass on a lock-free allocator")
 

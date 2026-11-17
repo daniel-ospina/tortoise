@@ -432,6 +432,12 @@ def test_a_cut_over_graph_with_the_flag_off_is_refused_BEFORE_any_append(
     every batch. The refusal must therefore happen at CONSTRUCTION: after the
     first `emit` it is too late to be cheap, because the events are already
     appended and the counter falls further behind with every one.
+
+    ⛔ AND THE REMEDY MUST BE ONE THAT CAN RUN (#13043 review finding E). It used
+    to end "or `halt` the graph and re-seed it if this backfill must run on the
+    enumerated arm" — which CANNOT restore the enumerated arm: the refusal fires
+    on the ROW, `halt` keeps the counter and `seed` only overwrites its number,
+    so the row survives and the operator lands back on the same refusal.
     """
     monkeypatch.setattr(copy_mod, "_cutover_state",
                         lambda *_a, **_k: (11, "active"))
@@ -439,9 +445,15 @@ def test_a_cut_over_graph_with_the_flag_off_is_refused_BEFORE_any_append(
                        match="TORTOISE_RECORD_ALLOCATE is OFF") as excinfo:
         copy_mod._refuse_a_miscalibrated_cutover(
             "dsn", "org", "graph", allocate=False)
-    assert "halt" in str(excinfo.value) and "re-seed" in str(excinfo.value), (
-        "the refusal does not name the way back for an operator who cannot set "
-        f"the flag: {excinfo.value}")
+    message = str(excinfo.value)
+    assert "TORTOISE_RECORD_ALLOCATE=1" in message, (
+        f"the refusal does not name the switch that fixes it: {message}")
+    assert "verb in this tree removes a counter row" in message, (
+        "the refusal offers a remedy without saying there is none for the "
+        f"enumerated arm: {message}")
+    assert not ("halt" in message and "re-seed" in message), (
+        "the refusal still offers `halt` + re-seed as a way back to the "
+        "enumerated arm, which the ROW-gated refusal makes impossible")
 
 
 def test_the_flag_on_with_no_counter_row_is_refused_before_any_append(
@@ -489,13 +501,79 @@ def test_the_preflight_asks_the_graph_and_answers_from_it(monkeypatch) -> None:
 
 
 def test_an_unreadable_record_is_not_a_cutover_verdict(monkeypatch) -> None:
-    """A dead DSN must not be reported as "this graph is not cut over"."""
+    """A dead DSN must not be reported as "this graph is not cut over".
+
+    ⛔ AND THE LEG MUST ASSERT SOMETHING (#13043 review, P3): it used to call the
+    pre-flight and check nothing at all, so a wrong exception swallowed here — or
+    a refusal raised here — passed it.
+    """
     def _boom(dsn, org, graph):
         raise RuntimeError("could not connect")
 
     monkeypatch.setattr(copy_mod, "_cutover_state", _boom)
-    copy_mod._refuse_a_miscalibrated_cutover("dsn", "org", "graph",
-                                             allocate=True)
+    assert copy_mod._refuse_a_miscalibrated_cutover(
+        "dsn", "org", "graph", allocate=True) is None, (
+        "an unreadable record was turned into a cutover VERDICT — the write "
+        "seam owns that failure and fails closed with a precise message")
+
+
+def test_a_missing_driver_is_UNKNOWN_not_a_not_cut_over_verdict(monkeypatch) -> None:
+    """⛔ FINDING 5: `_cutover_state` answered `None` with no `psycopg2`.
+
+    `None` is this module's verdict for "this graph is NOT cut over", so the
+    flag-on arm raised "this graph has NO record_cursor row" about a graph no
+    driver ever reached — a false statement about the graph, which is what the
+    function's own docstring promises not to produce.
+    """
+    assert copy_mod._cutover_state is not None
+    monkeypatch.setattr(copy_mod, "_cutover_state",
+                        lambda *_a, **_k: copy_mod.UNKNOWN_CUTOVER_STATE)
+    assert copy_mod._refuse_a_miscalibrated_cutover(
+        "dsn", "org", "graph", allocate=True) is None, (
+        "an UNKNOWN reading was reported as `not cut over`")
+    # …and the real function's no-driver branch returns that sentinel, not None:
+    import builtins
+    real_import = builtins.__import__
+
+    def _no_psycopg2(name, *a, **k):
+        if name == "psycopg2":
+            raise ImportError("no driver here")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_psycopg2)
+    assert copy_mod._cutover_state("dsn", "org", "graph") is copy_mod.UNKNOWN_CUTOVER_STATE
+
+
+def test_the_cutover_preflight_runs_BEFORE_the_first_append(
+        monkeypatch, tmp_path) -> None:
+    """⛔ THE CALL SITE, NOT THE HELPER (#13043 review finding C).
+
+    Deleting `_refuse_a_miscalibrated_cutover(...)` from `_journal_emit` left
+    EVERY test in this file green: the four refusal legs call the helper
+    directly, and the two `_journal_emit` legs both pass the (cut over, flag on)
+    pair the pre-flight waves through. So the docstring's claim — "checked before
+    the first journal append … with no journal lines written at all" — had no
+    test where it has to hold.
+
+    MEASURED here: the journal append is the REAL `EventLog`, so "nothing was
+    written" is a byte comparison of the file rather than an assertion about a
+    fake that cannot write. A tree with the call deleted reaches the append and
+    the assertion fails.
+    """
+    import tortoise.record_writer as rw
+
+    path = _journal(tmp_path)
+    before = Path(path).read_bytes()
+    monkeypatch.setattr(copy_mod, "_cutover_state",
+                        lambda *_a, **_k: (11, "active"))
+    monkeypatch.setattr(rw, "record_live_allocate", lambda: False)
+    monkeypatch.setattr(rw, "RecordWriter", lambda **kwargs: "writer")
+    with pytest.raises(copy_mod.CopyRefused,
+                       match="TORTOISE_RECORD_ALLOCATE is OFF"):
+        copy_mod._journal_emit(path, "dsn", "org", "graph")
+    assert Path(path).read_bytes() == before, (
+        "the pre-flight ran AFTER a journal line was appended — on a real run "
+        "that is a counter left behind the journal")
 
 
 def test_contiguous_positions_anchor_the_rows_at_the_first_one(

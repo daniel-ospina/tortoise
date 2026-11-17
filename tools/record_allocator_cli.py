@@ -101,16 +101,12 @@ import os
 from pathlib import Path
 from typing import Any
 
-#: The arming variable the seam itself reads — one name, so an operator cannot
-#: seed one record and arm another. (Kept as the DSN default only; see
-#: :func:`_record_env_contract` for why it is not copied here.)
-
 #: The arming variable the seam itself reads — imported, never copied (#13043
 #: review P2-2): a second spelling of one name is how an operator seeds one
 #: record and arms another. Imported LAZILY inside :func:`_record_env_contract`
 #: because this module must run on a box with no `psycopg2` and no tortoise
 #: import cost until a verb actually needs the record.
-def _record_env_contract() -> tuple[str, str, str]:
+def _record_env_contract() -> tuple[str, str]:
     """``(dsn_env, allocate_env)`` — the seam's own names, one copy each."""
     from tortoise.record_writer import RECORD_ALLOCATE_ENV, RECORD_DSN_ENV
 
@@ -350,52 +346,99 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     Such a graph has lost nothing yet; it becomes visible — and actionable — at
     its first append.
 
-    ⛔ THE FLOOR IS NOT `row_max`. For a born-uncut graph the journal's own count
-    is the floor, and a `row_max` that is LOWER than it (lines whose rows were
-    refused) seeds the counter BEHIND the journal, which does not heal: it
-    wedges every later armed write. So each entry carries the journal's
-    enumeration where the tool can count it, and says plainly when it cannot.
+    ⛔ THE FLOOR IS NOT `max_seq`. For a born-uncut graph the journal's own
+    COUNT is the floor, and a `max_seq` that is LOWER than it (lines whose rows
+    were refused) seeds the counter BEHIND the journal, which does not heal: it
+    wedges every later armed write. So each entry carries `journal_max_seq`,
+    named for the aggregate it actually ran (`MAX(seq)`), and this verb never
+    claims that number is the count: the count is reported only where an
+    enumeration really exists — an operator's `--enumerated-floor` or a
+    `--journal` this tool counted itself — and `floor_is_the_journals_count`
+    answers `None` (UNKNOWN, with `floor_source` saying why) everywhere else
+    (#13043 review findings B and 4).
     """
     from tortoise import record_allocator as ra
 
-    # ⛔ SCOPE FIRST, or the query returns zero rows and this verb reports "no
-    # born-uncut graphs" for an org that has them (#13043 P1-1, measured in
-    # `test_sweep_finds_a_born_uncut_graph_and_not_the_cut_over_one`).
+    # ⛔ NO ROLLBACK BETWEEN THE SCOPE AND THE PER-GRAPH READ (#13043 review
+    # finding B, MEASURED). `ra.scope_tenant` sets `set_config('app.current_org_id',
+    # %s, true)` — TRANSACTION-LOCAL to PostgreSQL — and `journal_event_app_tenant`
+    # filters on `current_setting('app.current_org_id', true)`. A `conn.rollback()`
+    # here ENDS that transaction, the GUC goes with it, and every per-graph
+    # `JOURNAL_MAX_SQL` then answers `COALESCE(MAX(seq), 0)` = **0** under a NULL
+    # predicate: a pre-flight that fabricates the one datum it exists to report.
+    # The single `conn.rollback()` at the end of this function is the read-only
+    # cleanup, AFTER every scoped read.
     ra.scope_tenant(conn, args.org_id)
     with conn.cursor() as cur:
         cur.execute(ra.UNCUT_GRAPHS_SQL, (args.org_id,))
         graphs = [row[0] for row in cur.fetchall()]
-    conn.rollback()
+    if args.floor is not None and len(graphs) != 1:
+        # ⛔ THE FLOOR IS PER GRAPH, AND THIS VERB USED TO HAND IT TO ALL OF THEM
+        # (#13043 review finding 4). The comment below already claimed it was
+        # never applied to more than one graph; now the claim is enforced.
+        conn.rollback()
+        raise ValueError(
+            f"sweep found {len(graphs)} born-uncut graph(s) for {args.org_id}, "
+            "so a single --enumerated-floor/--journal cannot be attributed to "
+            "one of them — the floor is PER GRAPH. Re-run `sweep` without it, "
+            "then `seed` each graph with ITS OWN journal")
     entries: list[dict[str, Any]] = []
     for graph_id in graphs:
         with conn.cursor() as cur:
             cur.execute(ra.JOURNAL_MAX_SQL, (args.org_id, graph_id))
             row = cur.fetchone()
+        # ⛔ `journal_max_seq` IS `MAX(seq)` AND NOTHING ELSE. It had been called
+        # `journal_row_max`, beside a `floor_is_the_journals_count: True` literal,
+        # which asserts the two are the same quantity — false whenever the seq
+        # axis has a gap or a tail, which `_cmd_status` treats as a real state in
+        # both directions (#13043 review findings B and 4).
         entry: dict[str, Any] = {
             "graph_id": graph_id,
-            "journal_row_max": int(row[0]) if row else 0,
+            "journal_max_seq": int(row[0]) if row else 0,
             "seed_command": (
                 f"record_allocator_cli.py seed --org-id {args.org_id} "
                 f"--graph-id {graph_id} --journal <that graph's journal path>"),
         }
         if args.floor is not None:
-            # Only meaningful for ONE graph (the seed's floor is per graph); the
-            # operator passes it deliberately when a sweep reports a single
-            # candidate, and this verb never applies it to more than that.
+            # Reachable only for a SINGLE graph (the refusal above), and it is a
+            # COUNT: either the journal's own enumeration (`--journal`, counted
+            # by `_journal_floor`) or the operator's stated count.
             entry["enumerated_floor"] = args.floor
+            entry["floor_source"] = (
+                "journal" if args.journal is not None else "operator")
+            entry["floor_is_the_journals_count"] = (
+                args.floor == entry["journal_max_seq"])
+        else:
+            entry["enumerated_floor"] = None
+            entry["floor_source"] = None
+            entry["floor_is_the_journals_count"] = None
         entries.append(entry)
     conn.rollback()
-    return {
+    payload: dict[str, Any] = {
         "org_id": args.org_id,
         "command": "sweep",
         "uncut_graphs": entries,
         "count": len(entries),
-        "floor_is_the_journals_count": True,
+        # ⛔ NOT A LITERAL `True` (#13043 review finding 4): with no enumeration
+        # for a graph this verb has not been handed, the honest answer is
+        # UNKNOWN. A pre-flight whose whole purpose is that a false CLEAN is the
+        # worst answer it can give must not assert the one thing it did not read.
+        "floor_is_the_journals_count": (
+            None if not entries else entries[0]["floor_is_the_journals_count"]),
         "cannot_see": (
             "a graph that has never been written (no journal_event row) — the "
             "record role has no grant on public.graphs; such a graph has lost "
             "nothing yet"),
     }
+    if payload["floor_is_the_journals_count"] is None:
+        # The NUMBER beside the flag is `MAX(seq)`, and nothing here counted the
+        # journal — so the reason is stated rather than left to be inferred from
+        # a `null`.
+        payload["floor_is_the_journals_count_reason"] = (
+            "unknown: `sweep` reads MAX(seq), not the journal's enumeration — "
+            "pass --journal <that graph's path> (or --enumerated-floor N) to "
+            "have the count reported beside it")
+    return payload
 
 
 def _cmd_transition(conn: Any, args: argparse.Namespace) -> dict[str, Any]:

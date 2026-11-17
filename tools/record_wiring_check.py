@@ -694,17 +694,27 @@ def the_door_reads_the_allocate_flag(
     the counter's number in the row, are both satisfied by a test harness. The
     flag is what makes the LIVE path allocate, and nothing static asserted it.
 
-    Four facts, each independently falsifiable — deleting any one of them is the
-    shape a reviewer measured:
+    Four facts about the flag's PLUMBING, plus a fifth about its FORWARDING —
+    each independently falsifiable, and deleting any one of them is the shape a
+    reviewer measured:
 
     1. ``RECORD_ALLOCATE_ENV`` is a module-level STRING constant;
     2. it is exported in ``__all__`` (an operator's tooling reads it by name);
     3. ``record_live_allocate`` calls the env parser (``*env_flag``) with THAT
        name as its first argument — a helper that returned a constant would pass
        a call-count check and is the defect;
-    4. ``write_live_record`` assigns ``allocate`` from a call to
+    4. ``write_live_record`` assigns a name from a call to
        ``record_live_allocate`` in ITS OWN scope. A helper nobody calls on the
-       door's path is the same as no helper.
+       door's path is the same as no helper;
+    5. ⛔ THE BINDING MUST REACH THE WRITE (#13043 review V2, MEASURED). Fact 4
+       is satisfied by a name that is bound and then DISCARDED: keeping
+       ``allocate = allocate or record_live_allocate()`` and changing the
+       door's ``write_records(…, allocate=allocate)`` to ``allocate=False``
+       left this gate printing `record wiring — WIRED`. The class the gate
+       exists to catch — a switch that does nothing — was restored while the
+       gate stayed green, which is a FALSE PASS (category A). So the door's
+       ``write_records`` call must forward one of the names fact 4 proved is
+       bound from the flag.
 
     Read from SOURCE (`ast`), not by importing: the point is that the code that
     ships carries the wiring, and an import would execute the tree under test.
@@ -777,16 +787,45 @@ def the_door_reads_the_allocate_flag(
     if door is None:
         problems.append(f"{rel}: `write_live_record` is gone")
     else:
-        bound = False
-        for value in _assignments_in(door, "allocate"):
-            for _scope, call in _calls_by_scope(value):
-                if (_call_name(call) or "").endswith("record_live_allocate"):
-                    bound = True
-        if not bound:
+        # The names the door binds FROM THE FLAG, in its own scope.
+        flag_names: set[str] = set()
+        for name, values in _assigned_targets_in(door).items():
+            for value in values:
+                if any((_call_name(call) or "").endswith(
+                        "record_live_allocate")
+                       for _scope, call in _calls_by_scope(value)):
+                    flag_names.add(name)
+        if not flag_names:
             problems.append(
-                f"{rel}: `write_live_record` never binds `allocate` from "
+                f"{rel}: `write_live_record` never binds a name from "
                 "`record_live_allocate()` — the flag is read nowhere on the "
                 "door's path, so the switch does nothing")
+        else:
+            # FACT 5 — the binding must REACH THE WRITE (#13043 review V2). A
+            # name that is bound and then discarded satisfies every fact above
+            # and is the same outcome as no flag at all.
+            forwarded = False
+            for scope, call in _calls_by_scope(door):
+                if scope is not door:
+                    continue
+                if not (_call_name(call) or "").endswith("write_records"):
+                    continue
+                keyword = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+                value = keyword.get("allocate")
+                if value is None:
+                    continue
+                referenced = {node.id for node in ast.walk(value)
+                              if isinstance(node, ast.Name)}
+                if referenced & flag_names:
+                    forwarded = True
+            if not forwarded:
+                bound_names = ", ".join(sorted(flag_names))
+                problems.append(
+                    f"{rel}: `write_live_record` binds {{{bound_names}}} from "
+                    "`record_live_allocate()` but never FORWARDS it to its "
+                    "`write_records(...)` call — a bound-and-discarded flag is "
+                    "a switch that does nothing, which is the same defect as a "
+                    "flag that is read nowhere (pass `allocate=<that name>`)")
     return problems
 
 
@@ -897,16 +936,16 @@ def _is_journal_append(value: ast.expr) -> bool:
     return False
 
 
-def _assignments_in(scope: ast.AST, name: str) -> list[ast.expr]:
-    """Every value assigned to `name` in `scope`'s OWN body.
+def _assigned_targets_in(scope: ast.AST) -> dict[str, list[ast.expr]]:
+    """`{name: [value, …]}` for every simple assignment in `scope`'s OWN body.
 
-    Scoped rather than `ast.walk(scope)`, for the reason `_calls_by_scope`
-    exists: `ast.walk` enters a NESTED function, so a helper that happens to do
-    `seq = log.append(record)` made an outer `seq = self._counter + 1` read as
-    "the append's result" — and the gate printed `WIRED` for a door that
-    computes its own number (#9307 review I1).
+    The many-names form of :func:`_assignments_in`, needed by the wiring gate's
+    FORWARDING fact (#13043 review V2): the name a door binds the flag to is not
+    necessarily `allocate`, so the rule cannot hard-code one name to look for.
+    Same scoping reason as its sibling: a nested function's bindings are not this
+    scope's.
     """
-    found: list[ast.expr] = []
+    found: dict[str, list[ast.expr]] = {}
 
     def visit(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
@@ -919,14 +958,26 @@ def _assignments_in(scope: ast.AST, name: str) -> list[ast.expr]:
                 value, targets = child.value, [child.target]
             else:
                 value, targets = None, []
-            if value is not None and any(
-                    isinstance(t, ast.Name) and t.id == name
-                    for t in targets):
-                found.append(value)
+            if value is not None:
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        found.setdefault(target.id, []).append(value)
             visit(child)
 
     visit(scope)
     return found
+
+
+def _assignments_in(scope: ast.AST, name: str) -> list[ast.expr]:
+    """Every value assigned to `name` in `scope`'s OWN body.
+
+    Scoped rather than `ast.walk(scope)`, for the reason `_calls_by_scope`
+    exists: `ast.walk` enters a NESTED function, so a helper that happens to do
+    `seq = log.append(record)` made an outer `seq = self._counter + 1` read as
+    "the append's result" — and the gate printed `WIRED` for a door that
+    computes its own number (#9307 review I1).
+    """
+    return _assigned_targets_in(scope).get(name, [])
 
 
 def _calls_by_scope(tree: ast.AST) -> list[tuple[ast.AST, ast.Call]]:

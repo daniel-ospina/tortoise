@@ -2917,6 +2917,18 @@ def write_live_record(record: Mapping[str, Any], *,
                     # anywhere recording it. The rollback is the half that keeps
                     # the position from being BURNED, so a failure here is the
                     # one thing this branch must not swallow silently.
+                    #
+                    # ⚠️ UNASSERTED, and named so a later reader does not take
+                    # it for coverage (#12894 review cycle 2 mutation table):
+                    # this arm is reachable only when `rollback()` ITSELF raises,
+                    # which no fake in the suite produces — the DB legs drive a
+                    # real connection that rolls back cleanly. Added rather than
+                    # dropped because the cost of the log line is nil and the
+                    # alternative (a silent `suppress`) makes the WARNING below
+                    # assert something nobody checked. A test for it needs a
+                    # connection double that raises on `rollback`; that is a
+                    # fake the seam does not otherwise accept, so it is recorded
+                    # here instead of invented.
                     try:
                         connection.rollback()
                     except Exception as rollback_exc:  # noqa: BLE001

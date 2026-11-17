@@ -75,14 +75,18 @@ def test_the_acknowledgement_is_only_a_gate_not_a_DSN_bypass(monkeypatch) -> Non
         "an acknowledged `arm` with no DSN should fail on the DSN, not on the gate")
 
 
-def test_every_graph_scoped_verb_still_requires_a_graph_id() -> None:
+def test_every_graph_scoped_verb_still_requires_a_graph_id(monkeypatch) -> None:
     """`sweep` is org-scoped; nothing else may run with `--graph-id` omitted."""
+    monkeypatch.delenv(cli._record_env_contract()[0], raising=False)
     for verb in ("status", "seed", "arm", "halt", "reopen"):
         with pytest.raises(SystemExit) as excinfo:
             cli.main([verb, "--org-id", "o", "--enumerated-floor", "0"])
         assert excinfo.value.code == cli.EXIT_USAGE
-    # …and `sweep` does not require one: it reached the DSN check and returned
-    # its own exit code rather than argparse's usage error.
+    # …and `sweep` does not require one. ⛔ THE DSN IS UNSET HERE (#13043 review
+    # V3): without the `delenv` above, the assertion was decided by the AMBIENT
+    # environment — on a box with `TORTOISE_RECORD_DSN` exported `sweep` reaches
+    # `_connect` for real and can answer EXIT_OK, so the row tested the shell
+    # rather than the code.
     assert cli.main(["sweep", "--org-id", "o"]) == cli.EXIT_USAGE
 
 
@@ -215,10 +219,153 @@ def test_sweep_finds_a_born_uncut_graph_and_not_the_cut_over_one() -> None:
 
     assert [entry["graph_id"] for entry in payload["uncut_graphs"]] == [uncut], (
         f"the sweep did not isolate the born-uncut graph: {payload}")
-    assert payload["floor_is_the_journals_count"] is True
+    # ⛔ THE NUMBER ITSELF (#13043 review finding B, MEASURED): the per-graph read
+    # ran AFTER a `conn.rollback()` had ended the transaction that carried the
+    # transaction-local tenant GUC, so every entry reported `0` for a journal
+    # holding one line. Asserting only the graph LIST — which is what this leg
+    # did — left the fabricated floor in place.
+    assert payload["uncut_graphs"][0]["journal_max_seq"] == 1, (
+        f"the sweep fabricated the journal's max seq: {payload['uncut_graphs']}")
+    assert payload["floor_is_the_journals_count"] is None, (
+        "the sweep claimed its MAX(seq) IS the journal's enumeration — no "
+        f"enumeration was read: {payload}")
+    assert "floor_is_the_journals_count_reason" in payload, (
+        "the sweep answered `null` to the floor question without saying why")
     assert "cannot_see" in payload, (
         "the sweep does not state what it cannot see — a graph with no journal "
         "row is invisible, and silence reads as coverage")
+
+
+# ── the sweep's readings, driven on a fake (the DB leg above SKIPS everywhere
+#    except `test-record-postgres`, so the properties it protects need a home
+#    that runs on every lane) ───────────────────────────────────────────────
+
+class _SweepCursor:
+    """Answers the sweep's two queries and RECORDS when each one ran."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self._rows: list[tuple] = []
+
+    def execute(self, sql, params=None):
+        if "set_config" in sql:
+            self._rows = []                 # the GUC write itself returns nothing used
+        elif "pg_roles" in sql:            # the scope READ-BACK: (tenant, bypassing)
+            self._rows = [(self.conn.org, False)]
+        elif "IS NULL" in sql:            # UNCUT_GRAPHS_SQL
+            self._rows = [(g,) for g in self.conn.graphs]
+            self.conn.rollbacks_at_uncut_read = self.conn.rollbacks
+        else:                             # JOURNAL_MAX_SQL
+            self.conn.max_reads.append((params[1], self.conn.rollbacks))
+            self._rows = [(self.conn.max_seq,)]
+
+    def fetchone(self):
+        return self._rows[0]
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _SweepConn:
+    closed = False
+
+    def __init__(self, graphs, max_seq=1, org="o"):
+        self.graphs, self.max_seq, self.org = graphs, max_seq, org
+        self.rollbacks = 0
+        self.rollbacks_at_uncut_read: int | None = None
+        self.max_reads: list[tuple] = []
+
+    def cursor(self):
+        return _SweepCursor(self)
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+def _sweep(args, conn):
+    return cli._cmd_sweep(conn, args)
+
+
+def test_the_sweep_keeps_the_tenant_guc_alive_until_the_per_graph_read() -> None:
+    """⛔ FINDING B, DB-FREE: the tenant GUC is TRANSACTION-LOCAL.
+
+    `set_config('app.current_org_id', %s, true)` applies "only until the current
+    transaction ends, whether it commits or rolls back" (PostgreSQL `SET`
+    reference), and `journal_event_app_tenant` filters on
+    `current_setting('app.current_org_id', true)`. So a `conn.rollback()` BETWEEN
+    the scope and the per-graph `MAX(seq)` read makes every entry report `0` —
+    the pre-flight fabricating the one datum it exists to report.
+
+    The mutant this reds: re-adding `conn.rollback()` after the graph list is
+    read (the shipped shape before this fix).
+    """
+    conn = _SweepConn(["g-a", "g-b"], max_seq=7)
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": None,
+                                    "journal": None})(), conn)
+    assert [e["journal_max_seq"] for e in payload["uncut_graphs"]] == [7, 7]
+    assert all(read[1] == 0 for read in conn.max_reads), (
+        "a rollback ran between the tenant scope and the per-graph read — the "
+        f"transaction-local GUC is gone there, so MAX(seq) answers 0: {conn.max_reads}")
+
+
+def test_the_sweep_does_not_assert_a_floor_it_never_counted() -> None:
+    """FINDING 4: `floor_is_the_journals_count: True` was a LITERAL.
+
+    The number beside it is `MAX(seq)`, which the verb's own docstring says is
+    NOT the floor; it differs whenever the seq axis has a gap. No enumeration
+    was read, so the only honest answer is `None` + the reason.
+    """
+    conn = _SweepConn(["g"], max_seq=5)
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": None,
+                                    "journal": None})(), conn)
+    entry = payload["uncut_graphs"][0]
+    assert entry["journal_max_seq"] == 5, (
+        "the entry is not labelled as the MAX(seq) it actually read")
+    assert "journal_row_max" not in entry, (
+        "the entry still calls MAX(seq) the journal's row max")
+    assert entry["floor_is_the_journals_count"] is None
+    assert payload["floor_is_the_journals_count"] is None
+    assert payload["floor_is_the_journals_count_reason"]
+
+
+def test_the_sweep_reports_the_count_only_when_it_has_one() -> None:
+    """Non-vacuity for the row above: with an enumeration it DOES answer."""
+    conn = _SweepConn(["g"], max_seq=5)
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": 5,
+                                    "journal": "j.jsonl"})(), conn)
+    entry = payload["uncut_graphs"][0]
+    assert entry["enumerated_floor"] == 5 and entry["floor_source"] == "journal"
+    assert entry["floor_is_the_journals_count"] is True
+    # …and a MAX(seq) that DISAGREES with the count is reported as a disagreement,
+    # which is the whole reason the claim cannot be a literal.
+    conn = _SweepConn(["g"], max_seq=9)
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": 5,
+                                    "journal": "j.jsonl"})(), conn)
+    assert payload["uncut_graphs"][0]["floor_is_the_journals_count"] is False
+
+
+def test_the_sweep_refuses_a_floor_it_cannot_attribute_to_one_graph() -> None:
+    """FINDING 4, second half: `--enumerated-floor` was attached to EVERY entry.
+
+    The comment beside it already claimed the verb "never applies it to more
+    than" one graph, and the code applied it to all of them — and to none when
+    the sweep found nothing. A floor is PER GRAPH, so a multi-graph sweep with
+    one cannot be answered.
+    """
+    conn = _SweepConn(["g-a", "g-b"], max_seq=1)
+    with pytest.raises(ValueError, match="PER GRAPH"):
+        _sweep(type("A", (), {"org_id": "o", "floor": 3,
+                              "journal": None})(), conn)
+    # Zero graphs is the same defect: a floor for a graph that was not found.
+    with pytest.raises(ValueError, match="PER GRAPH"):
+        _sweep(type("A", (), {"org_id": "o", "floor": 3,
+                              "journal": None})(), _SweepConn([], max_seq=1))
 
 
 # ── P2-12: the wiring gate must SEE the flag read ─────────────────────────
@@ -250,6 +397,14 @@ _MUTATIONS = {
     "door-never-binds-it": (
         "    allocate = allocate or record_live_allocate()",
         "    allocate = allocate"),
+    # ⛔ FINDING V2, the FALSE PASS a reviewer MEASURED: the binding is kept and
+    # only the FORWARDING is dropped, so `allocate=allocate` becomes
+    # `allocate=False` at the door's `write_records(...)` call. Before this
+    # mutant was added, the gate answered `[]` (WIRED) for it — a switch that
+    # does nothing, certified.
+    "door-binds-it-but-never-forwards-it": (
+        "                              allocate=allocate)",
+        "                              allocate=False)"),
     "constant-deleted": (
         'RECORD_ALLOCATE_ENV = "TORTOISE_RECORD_ALLOCATE"',
         'DEFAULT_ALLOCATE_ENV = "TORTOISE_RECORD_ALLOCATE"'),

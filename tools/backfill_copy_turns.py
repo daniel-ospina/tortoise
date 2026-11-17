@@ -908,24 +908,41 @@ def _stamp_record_only_tier(conn: object, org_id: str, graph_id: str,
     return stamped
 
 
+#: The verdict `_cutover_state` returns when it could not LOOK — no driver, or a
+#: record it could not read. It is deliberately NOT `None`, which this module
+#: defines as "this graph is not cut over": the two states have opposite
+#: consequences (`#13043 review finding 5`), and conflating them made the pre-flight
+#: report "this graph has NO record_cursor row" about a graph it never read.
+UNKNOWN_CUTOVER_STATE = object()
+
+
 def _cutover_state(dsn: str, org_id: str, graph_id: str):
     """The graph's counter row — ``(seq, mode)`` — or ``None`` if it is uncut.
+
+    A third answer exists and is not `None`: :data:`UNKNOWN_CUTOVER_STATE` means
+    the record could not be READ (no driver), so no verdict about the graph was
+    reached. Callers must treat it as "cannot answer", never as "not cut over".
 
     Split out from :func:`_refuse_a_miscalibrated_cutover` so a test can answer
     it without a Postgres (the tool's other tests drive a fake seam), and so the
     ONE reading the refusal needs is taken in ONE place.
 
     Read-only and rolled back. A record that cannot be reached is NOT this
-    function's refusal: the write seam owns that (and fails closed itself), so a
-    driver error here is re-raised wrapped for the caller's own error class.
+    function's refusal — the write seam owns that and fails closed itself — so a
+    driver error raised while connecting or reading propagates UNWRAPPED to the
+    caller, whose bare `except Exception` is where "unreadable is not a verdict"
+    is enforced. (It used to say "re-raised wrapped for the caller's own error
+    class", which was never true.)
     """
     try:
         import psycopg2
     except ImportError:  # pragma: no cover - environment, not logic
-        # No driver ⇒ the write seam will refuse with its own (import-time)
-        # message; pre-flighting here would replace a precise failure with a
-        # vague one.
-        return None
+        # ⛔ NOT `None` (#13043 review finding 5): `None` is this module's verdict
+        # for "not cut over", so returning it here made the pre-flight raise "this
+        # graph has NO record_cursor row" about a graph no driver ever reached.
+        # The write seam will refuse with its own (import-time) message, which is
+        # the precise failure; pre-flighting must not replace it with a guess.
+        return UNKNOWN_CUTOVER_STATE
     from tortoise import record_allocator as ra
 
     conn = psycopg2.connect(dsn)
@@ -967,6 +984,11 @@ def _refuse_a_miscalibrated_cutover(dsn: str, org_id: str, graph_id: str, *,
         state = _cutover_state(dsn, org_id, graph_id)
     except Exception:  # noqa: BLE001 — see "AN UNREADABLE RECORD" above
         return
+    if state is UNKNOWN_CUTOVER_STATE:
+        # The record could not be LOOKED at (no driver). `None` would have been
+        # this module's "not cut over" verdict, which is the one thing this
+        # branch must not say (#13043 review finding 5).
+        return
     if state is None:
         if allocate:
             raise CopyRefused(
@@ -987,8 +1009,13 @@ def _refuse_a_miscalibrated_cutover(dsn: str, org_id: str, graph_id: str, *,
             "for every session batch — AFTER the events were appended, leaving "
             "the counter behind the journal with no counter action to close the "
             "gap. Set TORTOISE_RECORD_ALLOCATE=1 for this run (the same flag "
-            "that arms the live door), or `halt` the graph and re-seed it if "
-            "this backfill must run on the enumerated arm")
+            "that arms the live door). ⛔ `halt` + `seed` DOES NOT RESTORE THE "
+            "ENUMERATED ARM: the refusal fires on the ROW (`_refuse_an_"
+            "enumerated_replay`), `halt` keeps the counter and `seed` only "
+            "overwrites its number, so the row survives and this lane stays "
+            "refused. No verb in this tree removes a counter row; if this "
+            "backfill must run on the enumerated arm, it has to run against a "
+            "graph that was never cut over")
     if mode != "active":
         raise CopyRefused(
             f"{org_id}/{graph_id}: TORTOISE_RECORD_ALLOCATE is set but the "
