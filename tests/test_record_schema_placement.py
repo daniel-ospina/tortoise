@@ -1877,9 +1877,10 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
 #: ⛔ AND WHY THE BODY IS NOT A WINDOW EITHER (round 3 of the same review). Taking
 #: "the text up to the next header, capped at 400" looked right and was not: the
 #: closest pair of declarations in this tree is **2,038** characters apart
-#: (measured gaps: 2,244 · 2,091 · 3,168 · 2,038 · 6,581 · 3,938 · 44,793 ·
-#: 109,490), so the CAP bound on every declaration in the tree and the "body" was
-#: a 400-character slice of whatever followed the constraint. Substring-testing
+#: (measured at this head over 87 files / 9 declarations: 2,200 · 2,048 · 3,123 ·
+#: 2,038 · 6,536 · 3,895 · 44,747 · 109,441 · 148,124), so the CAP bound on EVERY
+#: declaration in the tree and the "body" was a 400-character slice of whatever
+#: followed the constraint. Substring-testing
 #: that slice for `'embedding'` let MIGRATION PROSE satisfy the pin: a new
 #: migration shrinking the ban to `ARRAY['status']` and then saying, in a comment
 #: within the window, "the 'embedding' column is written by the projection" left
@@ -1891,10 +1892,30 @@ def test_the_carve_out_names_are_absent_from_the_sql(table, col):
 #: names. Prose cannot answer that question, and neither can truncation: a body
 #: that refuses by some expression this pattern does not understand yields NO
 #: names and fails the pin loudly instead of passing on a stray quote.
+#:
+#: ⛔ AND THE NAMES SEARCH IS ANCHORED TO THE CHECK'S OWN EXPRESSION (round 3 P1 of
+#: the same review, still open at round 4 as N4). A bare `ARRAY[…]` search over
+#: the span took the FIRST such literal ANYWHERE in it — and the LAST
+#: declaration's span runs to EOF (109,441 characters at this head), so a comment
+#: citing the literals to explain the history (this repo's own header style, and a
+#: comment is a WORSE answerer than prose because its `ARRAY['embedding']` is
+#: well-formed) was read as the ban. Measured counter-example: an in-force ban
+#: rewritten to `'{status}'::text[]` followed by `-- Was ARRAY['embedding'], now
+#: ARRAY['status']` reported `{embedding}` over a ban that refuses only `status` —
+#: a FALSE PASS, which is the direction this whole block exists to close. So the
+#: search starts at the declaration's own `NOT (props ?|` and stops at that
+#: statement's `;`: text outside the CHECK can no longer answer, and a CHECK
+#: spelled in a form this pattern does not understand still yields NO names.
+#: (Canonical read is `pg_get_constraintdef()` over `pg_constraint` — the live
+#: `chk_*_props_no_derived` pgTAP arm, which this DB-free parse cannot replace;
+#: PostgreSQL explicitly does not guarantee a CHECK reduces to a value list, which
+#: is why an unreadable CHECK must fail LOUD here rather than guess.)
 _PROPS_BAN_PIN_HEADER_RE = re.compile(
     r"(ADD\s+)?CONSTRAINT\s+chk_(\w+)_props_no_derived\s+CHECK\b",
     re.I,
 )
+#: The CHECK's OWN expression — the anchor the names search may not leave.
+_PROPS_BAN_EXPR_RE = re.compile(r"\(\s*NOT\s*\(\s*props\s*\?\|", re.I)
 #: The refused-name list: `NOT (props ?| ARRAY['embedding', 'status'])`.
 _PROPS_BAN_NAMES_RE = re.compile(r"ARRAY\s*\[([^\]]*)\]", re.I)
 #: Only for the diagnostic snippet attached to a finding; NOT read by any pin.
@@ -1913,7 +1934,10 @@ def props_ban_pins(text: str) -> dict[str, list[tuple[bool, frozenset[str], str]
       `CREATE TABLE` body;
     * `refused_names` — the property names the CHECK's `ARRAY[…]` literal names.
       THIS is what the pins assert on; a text window is not, because prose and
-      truncation both pollute one (see the block comment above);
+      truncation both pollute one (see the block comment above). Read ONLY from
+      the CHECK's own `NOT (props ?| …)` expression up to that statement's `;`,
+      so text outside the CHECK cannot answer and a CHECK this pattern cannot
+      parse yields the EMPTY set (a loud failure, never a passing guess);
     * `snippet` — the following text, capped, for failure messages only.
     """
     headers = list(_PROPS_BAN_PIN_HEADER_RE.finditer(text))
@@ -1922,9 +1946,14 @@ def props_ban_pins(text: str) -> dict[str, list[tuple[bool, frozenset[str], str]
         stop = (headers[index + 1].start() if index + 1 < len(headers)
                 else len(text))
         span = text[match.end():stop]
-        array = _PROPS_BAN_NAMES_RE.search(span)
-        names = (frozenset(_PROPERTY_NAME_RE.findall(array.group(1)))
-                 if array else frozenset())
+        names: frozenset[str] = frozenset()
+        anchor = _PROPS_BAN_EXPR_RE.search(span)
+        if anchor is not None:
+            semicolon = span.find(";", anchor.end())
+            array = _PROPS_BAN_NAMES_RE.search(
+                span, anchor.end(), len(span) if semicolon < 0 else semicolon)
+            if array is not None:
+                names = frozenset(_PROPERTY_NAME_RE.findall(array.group(1)))
         pins.setdefault(match.group(2), []).append(
             (bool(match.group(1)), names, span[:_PROPS_BAN_SNIPPET_CHARS]))
     return pins
@@ -1966,8 +1995,9 @@ def test_the_13220_embedding_columns_EXIST_and_their_props_ban_STANDS(table, col
     # ⛔ AND COMPARE ITS REFUSED NAMES, NEVER A TEXT WINDOW. A window is satisfied
     # by migration PROSE: this pin passed over a ban shrunk to `ARRAY['status']`
     # once a comment mentioning 'embedding' sat within 400 characters of it
-    # (review of #13265, round 3 — measured, 2 failed before the name-based read,
-    # 3 passed after the window). `props_ban_pins` parses the `ARRAY[…]` literal
+    # (review of #13265, round 3 — measured: with the text window in force the
+    # shrunk ban read as GREEN; the name-based read reds it). `props_ban_pins`
+    # parses the `ARRAY[…]` literal
     # for exactly this reason, and a body it cannot read yields NO names, so the
     # assertion fails loudly instead of passing on a stray quote.
     # ⛔ AND READ IT FROM THE WHOLE MIGRATIONS DIRECTORY, not this file's
@@ -2010,8 +2040,10 @@ def test_a_redeclaration_that_FOLLOWS_another_closely_is_STILL_READ():
     constraint the database no longer had — F8's failure one level down, where
     the READ SET is right and the PARSER drops it.
 
-    The count is asserted as well as the last body, so a regression that
-    re-narrows the window to some other fixed width reds here.
+    TWO discriminators, because either alone is defeatable: the COUNT reds a
+    regression that re-narrows the read to some fixed width (a declaration then
+    hides inside its predecessor's slice, as it did under `CHECK\b(.{0,400})`),
+    and the LAST NAME SET reds a read of the wrong declaration.
     """
     text = (
         "ALTER TABLE public.object ADD CONSTRAINT chk_object_props_no_derived\n"
@@ -2045,6 +2077,49 @@ def test_a_redeclaration_that_FOLLOWS_another_closely_is_STILL_READ():
         f"pin — the read is still a text window: {sorted(rescued)}")
 
 
+def test_the_props_ban_pin_reads_the_CHECKS_own_expression_not_the_tail():
+    """An UNANCHORED `ARRAY[…]` search is answerable by text outside the CHECK.
+
+    ⛔ MEASURED (review of #13265, round 3 P1, still open at round 4 as N4).
+    `_PROPS_BAN_NAMES_RE.search(span)` took the FIRST `ARRAY[…]` anywhere in the
+    span, and the LAST declaration's span runs to EOF (109,441 characters at this
+    head), so the documented promise — "a body that refuses by some expression
+    this pattern does not understand yields NO names and fails the pin loudly
+    instead of passing on a stray quote" — held only while nothing downstream of
+    it contained an `ARRAY[…]`. That is exactly what a migration header does, and
+    in a COMMENT it is worse than prose: `ARRAY['embedding']` is well-formed, so
+    the names regex reads it as the ban.
+
+    The text below is an in-force ban narrowed to a NON-`ARRAY` spelling and then
+    explained in a comment. The ban refuses `status` ONLY; the comment names
+    `embedding`. An unanchored read reports `{embedding}` — certifying a ban the
+    database does not have, which is the false PASS this whole block exists to
+    close. The anchored read sees no `ARRAY[…]` inside the CHECK's own expression
+    and reports NO names, so the pin fails loudly.
+
+    The second half is the over-narrowing guard: a literal that IS inside the
+    expression must still be read, so "no names" cannot become the answer to
+    every question.
+    """
+    text = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| '{status}'::text[]));\n"
+        "-- Was ARRAY['embedding'], now ARRAY['status']: the column is written by\n"
+        "-- the projection and never by a payload.\n")
+    names = props_ban_pins(text)["subject"][-1][1]
+    assert "embedding" not in names, (
+        "the ARRAY[…] search ran PAST the CHECK's own expression and read a "
+        f"trailing comment as the ban: {sorted(names)}")
+
+    shrunk = (
+        "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
+        "  CHECK (NOT (props ?| ARRAY['status']::text[]));\n"
+        "-- was ARRAY['embedding'] before this migration\n")
+    assert props_ban_pins(shrunk)["subject"][-1][1] == frozenset({"status"}), (
+        "the anchor over-narrowed: the literal INSIDE the CHECK's own expression "
+        "must still be read")
+
+
 def test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table_one():
     """F8's own non-vacuity pin: the LAST declaration read is the one in force.
 
@@ -2068,12 +2143,13 @@ def test_the_props_ban_pin_reads_the_IN_FORCE_redeclaration_not_the_create_table
     assert is_redecl, (
         "the LAST chk_subject_props_no_derived is an in-`CREATE TABLE` declaration "
         "— the Oct-14 FORWARD re-declaration is the one in force, so the pin is "
-        f"reading the wrong definition again: {body!r}")
+        f"reading the wrong definition again: {snippet!r}")
     assert {"embedding", "status"} <= names, (
         "the LAST chk_subject_props_no_derived does not refuse BOTH names — the "
         "in-force Oct-14 re-declaration refuses `embedding` and `status`, and the "
         "Oct-12 one it superseded refused only `embedding`. Either the pin is "
-        f"reading the superseded definition again or the ban was shrunk: {body!r}")
+        "reading the superseded definition again or the ban was shrunk: "
+        f"names read {sorted(names)}, declaration starts {snippet!r}")
     # …and the subject ban has TWO declarations to choose between, which is why
     # `[-1]` had to stop meaning "the Oct-12 one". Object stays single-declared.
     assert len(pins["subject"]) >= 2 and len(pins["object"]) >= 1

@@ -150,7 +150,7 @@ def point_rows(tenant):
 
 @pytest.fixture(autouse=True)
 def _clean_tenant(schema):
-    """Every test starts from a known tenant, and leaves none behind.
+    """Every test starts from a known RECORD tenant, and leaves no record ROWS behind.
 
     ⛔ THE SWEEP RUNS BEFORE **AND AFTER** THE TEST. Only the leading half was
     here, so the docstring promised a teardown the fixture did not do: #13220's
@@ -158,6 +158,14 @@ def _clean_tenant(schema):
     virgin `pgvector/pgvector:pg16` (review of #13265 P2) — and
     `test-record-postgres` runs these files in ONE container, so a row that
     survives here is ambient state the next file can pass on.
+
+    ⛔ SCOPED TO ROWS, NOT TO THE TENANT — the `tenant` fixture (:98) INSERTs
+    `public.organizations` / `public.graphs` and those deliberately SURVIVE every
+    test: the sweep below deletes records only, and the two parent rows are the
+    keys every seeded table FKs to. They are bounded (`ON CONFLICT (id) DO
+    NOTHING`), so this is not growth — but an absolute "leaves none behind"
+    claimed more than the sweep does, which is the same claim-vs-code class as the
+    `rollback` below (review of #13265, round 4 N3).
 
     ⛔ `object`/`subject` are swept because that test writes them (the tuple only
     ever named the two tables the point tests used).
