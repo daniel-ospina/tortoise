@@ -77,6 +77,133 @@ def _decode(messages: list) -> dict:
     return json.loads(messages[-1]["body"].decode())
 
 
+def _fts_query_fn():
+    """``ast.FunctionDef`` for ``tortoise_fts_query`` in ``tortoise/sdk.py``.
+
+    Both store-window pins parse the same function; parsing it in one place keeps
+    them from drifting into different notions of what the read path IS.
+    """
+    tree = ast.parse(_SDK.read_text(encoding="utf-8"))
+    return next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "tortoise_fts_query")
+
+
+def _mentions_store(node) -> bool:
+    """Does ``node`` contain a reference that can reach FalkorDB?
+
+    Two shapes, both live in ``tortoise_fts_query`` today::
+
+        _decorate_fallback_hits(snap_hits, graph)   # the `graph` handle
+        points = self.query(kind=kind, ...)         # a handle-based call
+
+    The first cut of the terminal pin matched only the ``graph`` handle, which
+    left the second shape a silent blind spot (round-9 review P3: a mutant that
+    inserted ``self.query(kind="Point")`` between a terminal mark and its return
+    left every pin GREEN). Matching the ATTRIBUTE name ``query`` — on ANY base,
+    so ``self.query(...)`` and ``graph.query(...)`` are both caught — closes it.
+
+    ⛔ THIS IS SHARED BY BOTH store-window pins (round-10 review P3, #13174).
+    The fusion pin below was written with a literal ``"graph.query(" in window``
+    test, so the same defect re-introduced through ``self.query(...)`` inside the
+    fusion window was invisible to it while its sibling pin caught that spelling.
+    One detector for both pins, or the next hand-based spelling gets a pass in
+    exactly one of them.
+
+    NOT covered, and stated so a green run is not read as complete: an alias
+    binding (``g = graph``) and a store call made inside a callee the span merely
+    hands a handle to — a name-based walk can resolve neither.
+    """
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id == "graph":
+            return True
+        if isinstance(child, ast.Attribute):
+            if isinstance(child.value, ast.Name) and child.value.id == "graph":
+                return True
+            # `self.query(...)` / `graph.query(...)` — a store round trip however
+            # the handle was obtained.
+            if child.attr == "query":
+                return True
+    return False
+
+
+def _mark_args_name(stmt) -> str | None:
+    """The stage NAME of a ``_mark_read_stage(STAGE_X)`` statement, else None."""
+    if (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Call)
+        and isinstance(stmt.value.func, ast.Name)
+        and stmt.value.func.id == "_mark_read_stage"
+        and stmt.value.args
+        and isinstance(stmt.value.args[0], ast.Name)
+    ):
+        return stmt.value.args[0].id
+    return None
+
+
+def _enclosing_path(root, target):
+    """``[(block, index, container)]`` from OUTERMOST down to ``target``.
+
+    ``container`` is the statement holding the block (``None`` for the outermost
+    entry), which is what lets a caller walk back OUT through the blocks a
+    statement is nested in.
+    """
+    path: list = []
+
+    def walk(node, prefix):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            for i, stmt in enumerate(block):
+                if stmt is target:
+                    path.extend([*prefix, (block, i, None)])
+                    return True
+                if walk(stmt, [*prefix, (block, i, stmt)]):
+                    return True
+        return False
+
+    walk(root, [])
+    return path
+
+
+def _span_until_next_mark(fn, mark_name: str) -> list:
+    """Statements that run AFTER ``_mark_read_stage(<mark_name>)``, up to but not
+    including the next ``_mark_read_stage(...)`` in PROGRAM ORDER.
+
+    Program order crosses block boundaries: the fusion mark sits inside an
+    ``if`` arm whose block ENDS while ``fusion`` is still open, and the mark that
+    closes it is a sibling of that ``if``. A same-block scan would therefore see
+    a whitespace-only window and read as green — the round-4 blindness, one layer
+    down. So the walk continues in each ENCLOSING block after the statement that
+    contains the mark.
+
+    Deliberately NOT a full control-flow model, and stated so a green run is not
+    read as more than it is: a ``_mark_read_stage`` nested inside a deeper block
+    does not terminate the span (the span keeps going, so the failure mode is
+    MORE store calls in the window, never fewer), and statements reachable only
+    through a branch are not descended into.
+    """
+    sites = [n for n in ast.walk(fn) if _mark_args_name(n) == mark_name]
+    assert len(sites) == 1, (
+        f"expected exactly one `_mark_read_stage({mark_name})` in tortoise_fts_query, "
+        f"found {len(sites)} — this pin cannot say which window is the stage"
+    )
+    path = _enclosing_path(fn, sites[0])
+    assert path, "the mark site must be reachable from the function node"
+
+    after: list = list(path[-1][0][path[-1][1] + 1:])
+    for depth in range(len(path) - 2, -1, -1):
+        block, index, _container = path[depth]
+        after.extend(block[index + 1:])
+
+    span: list = []
+    for stmt in after:
+        if _mark_args_name(stmt) is not None:
+            return span
+        span.append(stmt)
+    return span
+
+
 # ── 1. the shared-mutable-object property (the load-bearing one) ────────────
 
 def test_a_mark_inside_a_copied_context_reaches_the_transport_seam():
@@ -268,16 +395,32 @@ def test_fusion_brackets_only_the_rrf_call_and_no_graph_round_trip():
     a breach inside the ``exclude_status`` query published ``stage=fusion`` with
     ``retrieval`` already closed and healthy — the operator rules out the graph
     and blames the CPU. The window is pinned structurally: between the fusion
-    mark and the next mark it must contain ``rrf_fusion(`` and NO ``graph.query(``.
+    mark and the next mark it must contain ``rrf_fusion(`` and NO store round
+    trip.
+
+    ⛔ THE WINDOW IS AST-SHAPED AND USES THE SHARED DETECTOR (round-10 review P3,
+    #13174). It was a string window with a literal ``"graph.query(" in window``
+    test, so the same defect re-introduced through ``self.query(...)`` — a live
+    spelling in this very function, ``sdk.py:43880`` — stayed GREEN. The sibling
+    terminal pin was hardened against exactly that spelling in round 9; this one
+    was not. Both now go through ``_mentions_store``, so a hand-based call cannot
+    be invisible to one pin and caught by the other.
     """
-    source = _SDK.read_text(encoding="utf-8")
-    start = source.index("_mark_read_stage(STAGE_FUSION)")
-    nxt = source.index("_mark_read_stage(", start + 1)
-    window = source[start:nxt]
-    assert "rrf_fusion(" in window, "fusion must bracket the RRF call itself"
-    assert "graph.query(" not in window, (
-        "a graph round trip sits inside the fusion window — a breach there would "
-        "be published as 'the CPU fusion is stuck'"
+    fn = _fts_query_fn()
+    span = _span_until_next_mark(fn, "STAGE_FUSION")
+    assert span, (
+        "nothing runs between the fusion mark and the next mark — the RRF call "
+        "itself is not bracketed by `fusion` any more"
+    )
+    assert any(
+        isinstance(n, ast.Name) and n.id == "rrf_fusion"
+        for stmt in span for n in ast.walk(stmt)
+    ), "fusion must bracket the RRF call itself"
+    offenders = [stmt.lineno for stmt in span if _mentions_store(stmt)]
+    assert not offenders, (
+        f"a store round trip runs with `fusion` already open at line(s) {offenders} "
+        "— a breach there would be published as 'the CPU fusion is stuck' while "
+        "`retrieval` reads closed and healthy"
     )
 
 
@@ -372,49 +515,17 @@ def test_the_terminal_mark_never_covers_a_graph_round_trip():
     ``self.query(...)`` — so the SAME defect re-introduced through a handle-based
     call would have stayed green. Both shapes are now recognised: a mutant that
     inserts ``self.query(kind="Point")`` between a terminal mark and its return
-    is GREEN under the graph-only test and RED under this one. NOT covered, and
-    stated so this is not read as complete: an alias binding (``g = graph``) and
-    a store call made inside a callee the span merely hands ``graph`` to — a
-    name-based walk can resolve neither.
+    is GREEN under the graph-only test and RED under this one. The detector is
+    now ``_mentions_store`` at module scope — the SIBLING fusion pin uses the
+    same one (round-10 review P3, #13174), so the two cannot disagree about what
+    a store round trip is — and the shapes it still cannot resolve are stated
+    there, once.
     """
     found, fn = _post_retrieval_returns()  # reuse the parse, ignore the returns
     assert found, "tortoise_fts_query must parse for this pin to mean anything"
 
     def is_terminal_mark(stmt):
-        return (
-            isinstance(stmt, ast.Expr)
-            and isinstance(stmt.value, ast.Call)
-            and isinstance(stmt.value.func, ast.Name)
-            and stmt.value.func.id == "_mark_read_stage"
-            and stmt.value.args
-            and isinstance(stmt.value.args[0], ast.Name)
-            and stmt.value.args[0].id == "STAGE_RESPONSE"
-        )
-
-    def mentions_store(expr):
-        """Any reference in ``expr`` that can reach the store.
-
-        Two shapes, both live in ``tortoise_fts_query`` today::
-
-            _decorate_fallback_hits(snap_hits, graph)   # the `graph` handle
-            points = self.query(kind=kind, ...)         # a handle-based call
-
-        The first cut matched only the ``graph`` handle, which left the second
-        shape a silent blind spot (round-9 review P3) — see the pin's docstring
-        for the mutant that demonstrates it and for what this still cannot see.
-        """
-        for node in ast.walk(expr):
-            if isinstance(node, ast.Name) and node.id == "graph":
-                return True
-            if isinstance(node, ast.Attribute):
-                if isinstance(node.value, ast.Name) and node.value.id == "graph":
-                    return True
-                # `self.query(...)` / `graph.query(...)` — a store round trip
-                # however the handle was obtained. Matching the ATTRIBUTE name
-                # (not just a `graph` base) is what closes the P3 gap.
-                if node.attr == "query":
-                    return True
-        return False
+        return _mark_args_name(stmt) == "STAGE_RESPONSE"
 
     checked = 0
     block_closing = []
@@ -448,7 +559,7 @@ def test_the_terminal_mark_never_covers_a_graph_round_trip():
                 span = block[i + 1: (exit_at + 1 if exit_at is not None else len(block))]
                 if isinstance(nxt, ast.Return):
                     checked += 1  # the population guard counts the export arms
-                if any(mentions_store(s) for s in span):
+                if any(_mentions_store(s) for s in span):
                     offenders.append(nxt.lineno)
     assert checked >= 4, (
         f"only {checked} terminal-mark-then-return sites found — this pin is only "
