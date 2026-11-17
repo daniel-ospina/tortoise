@@ -43,6 +43,18 @@ reaches the door (``record_vector.record_statement_ms``: two bounded statements
 per read, a third each) and why the second pin below drives the real collector
 instead of calling `run_vector_query` directly — the direct call has no deadline,
 so it cannot see this class at all.
+
+⛔ AND THE DIVIDED-OFF RESERVE IS HANDED OVER (#11691 review P2). Dividing buys
+the graph branch a third, but `run_vector_query` originally gave the graph
+branches ``timeout=timeout_ms`` — the WHOLE budget, restarted from after the
+record leg had already spent its share — so the fallback could end at ~666 ms of
+a 500 ms read and be discarded as a ``timeout`` anyway. The fall-through path now
+passes :func:`search_engine.remaining_read_ms` (what is left, measured from just
+before the record leg was called, floored at 1 ms so an exhausted read is not
+handed ``timeout=0``, which drivers read as NO TIMEOUT). Pin:
+``test_the_graph_branch_is_handed_what_is_left_of_the_read``, with
+``test_a_graph_only_read_keeps_the_whole_budget`` as its control — the narrowing
+is scoped to the record fall-through and must not shave the pre-#11642 path.
 """
 from __future__ import annotations
 
@@ -326,6 +338,101 @@ def test_the_same_leg_unbounded_costs_the_door_bound(monkeypatch, armed):
     assert state.get("over_budget") == DOOR_MS, (
         f"an un-budgeted read must still get the door's {DOOR_MS} ms, got "
         f"{state.get('applied_ms')}")
+
+
+# ── the reserve is HANDED OVER, not just left on the clock ─────────────────
+
+def test_the_graph_branch_is_handed_what_is_left_of_the_read(monkeypatch, armed):
+    """The fallback's budget is the REMAINDER, not the whole read again.
+
+    PR #13133 review P2. The division of the read's budget into thirds buys the
+    graph branch a reserve, but a reserve nobody spends is not a bound: pre-fix
+    `run_vector_query` gave the graph branches ``timeout=timeout_ms`` — the
+    WHOLE budget, measured from AFTER the record leg had already spent its share
+    — so a leg cancelled at 166 ms of a 500 ms read could run to ~666 ms, past
+    the collector's 500 ms deadline, and the fused read then recorded
+    ``reason="timeout"`` and DISCARDED the rows it had: exactly the outcome the
+    division exists to prevent.
+
+    RED if the remainder stops being threaded: the graph branch is handed
+    ``BUDGET_MS`` and the first assertion fails (500 is not <= 334). RED if the
+    floor is dropped from :func:`search_engine.remaining_read_ms`: the third pin
+    below reads ``0`` for an exhausted read.
+    """
+    state: dict = {"statements": []}
+    _wire_record_door(monkeypatch, state)
+    searcher = record_vector.searcher(carried=armed, timeout_ms=BUDGET_MS)
+    assert searcher is not None, "the leg must be armed for this pin to mean anything"
+
+    graph = _FakeGraph()
+    trace: list[dict] = []
+    hits = run_vector_query(
+        graph, [0.5] * 384, limit=5, timeout_ms=BUDGET_MS,
+        is_embedded=True, leg_trace=trace, pg_vector=searcher)
+
+    assert graph.query_calls, "the graph branch was never consulted — nothing to pin"
+    handed = [call[2]["timeout"] for call in graph.query_calls]
+    # ARITHMETIC, not the wall clock: the leg slept its own share before it was
+    # cancelled, so elapsed >= LEG_STATEMENT_MS and what is left can be at most
+    # the other two thirds of the read.
+    assert max(handed) <= BUDGET_MS - LEG_STATEMENT_MS, (
+        f"the graph branch was handed {handed} ms of a {BUDGET_MS} ms read AFTER "
+        f"the record leg had already spent {state.get('applied_ms')} ms of it — "
+        f"the reserve is not being handed over, so the fallback can outlive the "
+        f"read and the collector discards its rows as `timeout`")
+    assert min(handed) >= 1, (
+        f"a graph branch was handed timeout={min(handed)}: 0 means NO TIMEOUT "
+        f"to the driver, which is the unbounded leg this change exists to close")
+
+    # The fallback still ANSWERS, and still NAMES itself — the bound must not be
+    # bought by turning a slow read into an empty one.
+    assert [pid for pid, _score in hits] == [graph.ID], (
+        f"the bounded graph branch lost its answer: {hits}")
+    mechanisms = [e.get(search_engine.VECTOR_MECHANISM_KEY)
+                  for e in trace if e.get("leg") == "vector"]
+    assert MECHANISM_SCAN_FALLBACK in mechanisms, (
+        f"the fallback must stay named (#4999), got {mechanisms}")
+
+
+def test_a_graph_only_read_keeps_the_whole_budget(monkeypatch):
+    """The control: with NO record leg, the graph branch is unchanged.
+
+    The narrowing is scoped to the RECORD fall-through. A box with no searcher
+    armed (every caller before #11642, and any box whose record is not armed)
+    must be byte-identical — same ``timeout`` on every graph query as before this
+    change, no substituted remainder. Without this pin, shaving the budget on
+    the graph-only path would look like the same fix and quietly shorten every
+    existing dense read.
+    """
+    graph = _FakeGraph()
+    trace: list[dict] = []
+    run_vector_query(
+        graph, [0.5] * 384, limit=5, timeout_ms=BUDGET_MS,
+        is_embedded=True, leg_trace=trace)
+
+    assert graph.query_calls, "the graph branch was never consulted — nothing to pin"
+    handed = {call[2]["timeout"] for call in graph.query_calls}
+    assert handed == {BUDGET_MS}, (
+        f"a graph-only read was handed {sorted(handed)} instead of its own "
+        f"{BUDGET_MS} ms budget — the remainder must narrow the RECORD fallback "
+        f"only, never the pre-#11642 path")
+
+
+def test_the_remaining_budget_floors_at_one_and_never_widens():
+    """`remaining_read_ms`'s two edge rules, on their own (no sleep).
+
+    ``0`` is not a small timeout, it is NO TIMEOUT — the trap
+    `record_vector.record_statement_ms` floors its quotient for, in the other
+    leg. And the remainder may only ever TIGHTEN: a caller that hands a future
+    timestamp gets the read's own budget back, never more than it asked for.
+    """
+    assert search_engine.remaining_read_ms(time.monotonic(), BUDGET_MS) <= BUDGET_MS
+    # An exhausted read: the whole budget already spent.
+    assert search_engine.remaining_read_ms(time.monotonic() - 10.0, BUDGET_MS) == 1
+    # A budget smaller than the elapsed time is still floored, never ``0``.
+    assert search_engine.remaining_read_ms(time.monotonic() - 10.0, 5) == 1
+    # A future start (a caller error) cannot WIDEN the budget.
+    assert search_engine.remaining_read_ms(time.monotonic() + 10.0, BUDGET_MS) == BUDGET_MS
 
 
 # ── the door's rule, on its own ────────────────────────────────────────────
