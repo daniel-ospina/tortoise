@@ -7491,7 +7491,10 @@ surfaces:
   # the five readers that must ask it. `core` here is the surface the file's OWN
   # diff resolves to (`tortoise/live.py`, `tortoise/pipeline.py` and
   # `tortoise/derived_invalidation.py` match no `SOURCE_PATTERNS` entry); the `api`
-  # row is the second half, added below with its own reasoning — ⛔ `core` alone is
+  # row is the second half, added ABOVE in the `api` block with its own reasoning
+  # (`api` is the surface block that precedes this one, so "below" was wrong in an
+  # earlier cut of this comment; no gate reads comment position, but a reader
+  # following it would look in the wrong block) — ⛔ `core` alone is
   # NOT sufficient, which the first cut of this comment wrongly claimed.
   # ⛔ THE ROW IS THE WHOLE FIX for the blocking failure: the file exists in main
   # and was never classified, so `ci_selection.py --integrity` failed closed on

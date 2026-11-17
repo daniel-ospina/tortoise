@@ -315,6 +315,8 @@ def test_every_return_after_the_retrieval_mark_reaches_the_terminal_stage():
             "block — a breach there would be blamed on a stage that had already "
             "returned"
         )
+
+
 def test_the_terminal_mark_never_covers_a_graph_round_trip():
     """#10893 review F4: ``response`` claims "every marked stage finished … the
     work is done, the answer is late" — so it must not cover a graph fetch, or
@@ -352,6 +354,17 @@ def test_the_terminal_mark_never_covers_a_graph_round_trip():
     just as surely as the round-3 shape did. Round 4's string window happened to
     catch it; the AST rewrite must not trade one blind spot for another, so the
     whole mark-to-exit span is walked.
+
+    ⛔ A MARK THAT CLOSES ITS BLOCK IS NOT A COVERED SITE, AND IS NOT SILENTLY
+    SKIPPED. When a ``STAGE_RESPONSE`` mark is the LAST statement of a block,
+    execution continues in the ENCLOSING block with ``response`` still open, so
+    the time it covers is real — this pin just does not model that shape (the
+    span it walks has no next statement to start from). A bare ``continue``
+    would make that a blind spot of exactly the family the rounds above closed:
+    a shape the pin cannot see, reading as ``green``. So the sites are counted
+    and asserted empty, naming their lines — no site has that shape today (all
+    six mark-then-leave), and if one appears this reddens for a human to extend
+    the walk instead of under-covering it.
     """
     found, fn = _post_retrieval_returns()  # reuse the parse, ignore the returns
     assert found, "tortoise_fts_query must parse for this pin to mean anything"
@@ -377,6 +390,7 @@ def test_the_terminal_mark_never_covers_a_graph_round_trip():
         return False
 
     checked = 0
+    block_closing = []
     offenders = []
     for node in ast.walk(fn):
         for field in ("body", "orelse", "finalbody"):
@@ -388,7 +402,12 @@ def test_the_terminal_mark_never_covers_a_graph_round_trip():
                     continue
                 nxt = block[i + 1] if i + 1 < len(block) else None
                 if nxt is None:
-                    continue  # a mark that closes the block covers no time
+                    # Last statement of its block: the mark DOES cover time (the
+                    # enclosing block keeps running with `response` open), but
+                    # this pin has no span to walk from here. Record the site and
+                    # redden below rather than skipping it silently.
+                    block_closing.append(stmt.lineno)
+                    continue
                 # Every statement between the mark and the block's EXIT runs with
                 # `response` open — the exit's argument list included, because a
                 # `return`'s expression is evaluated after the mark. `exit_at`
@@ -407,6 +426,12 @@ def test_the_terminal_mark_never_covers_a_graph_round_trip():
     assert checked >= 4, (
         f"only {checked} terminal-mark-then-return sites found — this pin is only "
         "meaningful while the degraded arms exist"
+    )
+    assert not block_closing, (
+        f"the STAGE_RESPONSE mark at line(s) {block_closing} is the LAST statement "
+        "of its block — `response` stays open in the enclosing block, so this pin "
+        "cannot see the span that follows. Extend the walk to the enclosing "
+        "block's exit instead of letting the site be skipped"
     )
     assert not offenders, (
         f"the block exiting at line(s) {offenders} runs a graph round trip with "
