@@ -943,6 +943,99 @@ for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
     WAIT_BOUND_BREACH_COUNT.labels(surface=_surface)
 
 
+# ── the SAME bound breached WITH NO REFUSAL: the STARVED channel (residual of #10602) ──
+# A bound breach has two possible outcomes and only ONE of them was observable:
+#
+#   * the deadline fires while the dispatch is still running -> a legible 504 /
+#     `-32009` refusal, counted in `WAIT_BOUND_BREACH_COUNT` above;
+#   * NO refusal is substituted and the caller is SERVED the handler's own
+#     result (or its exception) after the bound — typically because the loop was
+#     blocked, also when the deadline fired and lost the race to a handler that
+#     had already finished. Nothing was refused, so nothing in the channel above
+#     recorded it.
+#
+# ⚠️ The counter is about the OUTCOME (served, not refused), not about whether a
+# timer callback ran: the `except TimeoutError: if task.done()` arm counts a
+# deadline that DID fire. Do not restate it as "the deadline could not fire" —
+# that is false for a measured shape.
+#
+# ⚠️ COVERAGE IS NOT SYMMETRIC ACROSS THE TWO SURFACES, and the payload cannot
+# say so per-child, so it is stated here: the `rest` child counts every served-late
+# shape EXCEPT a cancelled-after-head one (exclusion 3, below). The `mcp` child
+# counts a `mcp`-labelled request the same way — a PRE-SSE stall whose head
+# MISSED the budget IS counted as `mcp` (pinned by
+# `test_a_head_that_misses_the_bound_is_counted`) — but a streamable-HTTP tool
+# call sends its SSE head BEFORE the tool is dispatched, so by the head-in-time
+# abstention below (the promise is about when the caller learns something) the
+# USUAL starved tool call looks "served in time". The seam that does know the tool
+# took 20 s passes no `on_starved` yet. So `mcp: 0` must NOT be read as "no
+# starved MCP breach": read `loop_blocks` for a blocked loop and follow the seam
+# wiring as the tracked residual. Stating the asymmetry is the minimum; the wiring is a change
+# to a seam with its own pinned call shape, not a tweak to this counter.
+#
+# ⛔ THREE exclusions make it "served late" rather than "took a while". Two are in
+# `WaitBoundMiddleware._count_starved`: (1) a refusal was already SUBSTITUTED —
+# the MCP seam refuses by returning its `-32009` result rather than raising, so
+# the seam's own claim flag is what keeps a refusal from being reported as a
+# served answer; (2) the response HEAD reached the caller inside the bound — the
+# promise is about when the caller learns something, so a long-lived SSE stream
+# (`GET /mcp`) that closes much later is not a breach. A head that goes out AFTER
+# the budget that governed the answer (the re-armed one, when #4055 extended it)
+# IS counted: that caller really did wait, and nothing could be refused any more.
+# The third is on the arm itself: (3) THE REQUEST WAS CANCELLED after a head was
+# emitted — the caller took no answer, so that arm raises before counting and the
+# class is reported by NEITHER channel. A deliberate gap, not an oversight: a
+# deploy cancels every in-flight stream, and booking that as breaches would be
+# indistinguishable from a loop-block episode on this very channel.
+#
+# ⛔ WHY THAT IS A DEFECT AND NOT PEDANTRY (measured 2026-11-17, live sha
+# `55ec2c71b165`): a client was answered a **401 at 20.27 s** against a 10 s
+# bound. `wait_bound_breaches.total` did not move because that counter is written
+# ONLY on the refusal path — no refusal was substituted, so nothing incremented it
+# (it is not filtered by status: `record_wait_bound_breach` takes no status at
+# all). SEPARATELY, the refusal SHARE (`refusals`, `wait_bound_breach_window()`)
+# was blind too: a 401 is in `_WAIT_BOUND_NON_DATA_STATUSES`, which filters the
+# ATTEMPT counter that forms the share's denominator. And the return path of
+# `mcp_auth.await_under_wait_bound` counted nothing at all, which is what this
+# channel adds.
+# The same shape reproduces deterministically on a private lane: a 0.05 s bound,
+# a handler that blocks the loop 0.4 s and then answers 401 -> `total 0`,
+# `attempts 0`, `share null`, and `wait_bound_breaches` unchanged. So the ONE
+# field an operator reads to answer "is the bound being honoured?" reports a
+# clean zero over a request that breached it 2x (the private-lane repro breaches
+# it 8x). That is a false PASS of the
+# instrument on the product's own promise.
+#
+# ⛔ A SEPARATE COUNTER, and it is NOT the breach counter with a new label: the
+# breach counter's meaning is "refused", which the runbook and `/health` state,
+# and `_WAIT_BOUND_NON_DATA_STATUSES`-class reasoning depends on that being the
+# only meaning. A starved answer is the opposite outcome of the same breach —
+# the caller was SERVED — so folding them together would make `total` untruthful
+# in exactly the incident where the distinction is the diagnosis.
+#
+# ⛔ AND IT NEVER FEEDS THE #12477 WINDOW / VERDICT, deliberately. The window is
+# a REFUSAL share, and its verdict 503s a deployment (and feeds the Fly check).
+# A served-but-late answer is not a refusal, and widening the ladder to include
+# it is a change to #12477's decision, not to this instrument — the operator
+# reading is "the bound is being breached without anyone being refused", which
+# is the loop-block/`#3718` class, already verdict-bearing on its own terms
+# (`loop_blocks`). If that decision is ever revisited it belongs in #12477's
+# home, with the false-red it measured (a healthy deployment failing its own
+# deploy gate) in front of whoever revisits it.
+WAIT_BOUND_STARVED_COUNT = Counter(
+    "tortoise_wait_bound_starved_total",
+    "Requests served the handler's own result (or its exception) AFTER the "
+    "transport wait bound, with no response head inside that bound and no "
+    "refusal substituted — residual of #10602",
+    ["surface"],
+)
+# Same absent-vs-zero rule as the family above: both children exist at import,
+# so a `0` on `/metrics` means "no starved breach was measured", never "this
+# build cannot see them".
+for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
+    WAIT_BOUND_STARVED_COUNT.labels(surface=_surface)
+
+
 # ── #12477: the SAME channel, read as a WINDOW instead of a lifetime total ──
 # The counter above is cumulative since process start, and `status` deliberately
 # does not derive from it: a total that never resets would pin a deployment
@@ -2326,11 +2419,7 @@ def record_wait_bound_breach(surface: str, *, windowed: bool = True) -> None:
     Cheap and synchronous on purpose (a single labelled counter increment, no
     I/O), so the refusal path does not pay for its own observation.
     """
-    if surface not in _WAIT_BOUND_SURFACES:
-        raise ValueError(
-            f"#10602: unknown wait-bound surface {surface!r}; the label set is "
-            f"bounded to {_WAIT_BOUND_SURFACES} so the health report's "
-            f"zero-padding cannot omit a counted surface")
+    _require_wait_bound_surface(surface, "#10602: wait-bound breach count")
     WAIT_BOUND_BREACH_COUNT.labels(surface=surface).inc()
     # #12477: the same breach, stamped so a LIVENESS check can tell "refused a
     # moment ago" from "refused an hour ago". One write, one decision — the
@@ -2359,6 +2448,107 @@ def record_wait_bound_breach(surface: str, *, windowed: bool = True) -> None:
         logger.warning(
             "#12477: wait-bound breach stamp failed for %s", surface,
             exc_info=True)
+
+
+def _require_wait_bound_surface(surface: str, channel: str) -> None:
+    """Refuse a surface outside the bounded label set — ONE guard, both writers.
+
+    Same contract `record_wait_bound_breach` states at length: an unknown value
+    is a PROGRAMMING error, not data — the two-literal label set is what makes
+    the import-time child initialisation legal and what lets `/health` zero-pad a
+    map that is guaranteed to cover everything the counter can hold. Both
+    writers call THIS, so the refusal cannot diverge between the refusal channel
+    and the answered one.
+    """
+    if surface not in _WAIT_BOUND_SURFACES:
+        raise ValueError(
+            f"{channel}: unknown wait-bound surface {surface!r}; the label set "
+            f"is bounded to {_WAIT_BOUND_SURFACES} so the health report's "
+            f"zero-padding cannot omit a counted surface")
+
+
+def record_wait_bound_starved(surface: str) -> None:
+    """Count one request the wait bound was breached on and then SERVED.
+
+    The sibling of :func:`record_wait_bound_breach`, for the OTHER outcome of
+    the same breach: no refusal was substituted and the caller was handed the
+    handler's own result (or its exception) after the bound, with no response
+    head inside that bound (a head that MISSED it is counted — see the second
+    exclusion below). ⛔ Do NOT describe this as "the deadline could not fire":
+    a deadline that fires and loses the race to an already-finished handler is one
+    shape of it (``except TimeoutError: if task.done()`` in
+    ``mcp_auth.await_under_wait_bound`` counts it too, pinned by
+    ``test_the_timeout_race_arm_is_counted``). The counter reports the OUTCOME
+    (served, not refused), not whether a timer callback ran.
+
+    ⛔ THREE EXCLUSIONS make it "served late" rather than "took a while":
+
+    * a refusal was already substituted for this request (the MCP seam refuses
+      by RETURNING its ``-32009`` result, so an outer boundary sees an ordinary
+      late return for a refused caller);
+    * the response HEAD reached the caller inside the bound — the promise is
+      about when the caller learns something, so a long-lived SSE stream that
+      closes much later is not a breach;
+    * the request was CANCELLED after a head was emitted (client disconnect,
+      server shutdown). The caller took no answer, so the middleware raises
+      before counting and this class is reported by NEITHER channel — a
+      deliberate gap, because a deploy cancels every in-flight stream and booking
+      that as breaches would be indistinguishable from a loop-block episode on
+      this channel.
+
+    Neither SERVED-LATE shape this counter reports is visible in the refusal
+    channel: the answer may be a 401, which ``_WAIT_BOUND_NON_DATA_STATUSES``
+    keeps out of the share's denominator, and a return from
+    ``await_under_wait_bound`` is not a refusal at all. (Exclusion 1 is the
+    opposite case BY DESIGN — the refusal channel already counted it, which is
+    why this one abstains; exclusion 3 is reported by neither.)
+    Consequence measured on the live deployment (sha `55ec2c71b165`): a caller
+    was answered a 401 at 20.27 s against a 10 s bound while
+    `wait_bound_breaches.total` stayed 0 — the field an operator reads to answer
+    "is the bound honoured?" reporting a clean zero over a 2x breach.
+
+    ⛔ CUMULATIVE ONLY — this write NEVER stamps the #12477 window. The window is
+    a REFUSAL share whose verdict 503s a deployment; a served-but-late answer is
+    not a refusal, and adding it there would widen a recorded decision (#12477)
+    that measured its false-red in both directions. The reading this channel
+    supplies is the loop-block/`#3718` class, which already has its own verdict
+    surface (`loop_blocks`).
+
+    ⛔ NOT a refusal either, and the fix must never become one: refusing a
+    computed 401 after 20 s would hand the client a `Retry-After` for an auth
+    failure it must not retry. The caller is served; the observation was what was
+    missing.
+
+    Cheap and synchronous (one labelled increment, no I/O), and callers wrap it —
+    measurement must never become a new failure mode of the request it measures.
+    """
+    _require_wait_bound_surface(surface, "wait-bound starved count")
+    WAIT_BOUND_STARVED_COUNT.labels(surface=surface).inc()
+
+
+def wait_bound_starved_counts() -> dict:
+    """In-process snapshot of ``WAIT_BOUND_STARVED_COUNT``.
+
+    Same contract as :func:`wait_bound_breach_counts`, deliberately — the two
+    read side by side in one `/health` body and a shape difference between them
+    is how a dashboard binds to a field that only exists on one:
+    ``{"total": N, "by_surface": {"mcp": n, "rest": n}, "error": None}`` on a
+    successful read (every surface present at ``0``), and
+    ``{"total": None, "by_surface": None, "error": "…"}`` when the family is
+    unreadable — never a zeroed failure, because an unread counter and a
+    measured zero are different facts (#9548 review P2, #3253).
+    """
+    by_surface = dict.fromkeys(_WAIT_BOUND_SURFACES, 0)
+    try:
+        by_surface.update(_collect_by_label(WAIT_BOUND_STARVED_COUNT, "surface"))
+    except Exception as exc:
+        logger.warning(
+            "wait-bound starved counts unreadable: %r", exc)
+        return {"total": None, "by_surface": None,
+                "error": f"wait_bound_starved unreadable: "
+                         f"{type(exc).__name__}"}
+    return {"total": sum(by_surface.values()), "by_surface": by_surface,
+            "error": None}
 
 
 def record_health_setup_clamp() -> None:
@@ -7614,6 +7804,14 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # It does NOT feed `status`: `degraded` stays reserved for an observed
         # probe failure (see `metrics`'s own note), so this is additive only.
         "wait_bound_breaches": wait_bound_breach_counts(),
+        # The OTHER outcome of the same breach: NO refusal was substituted and
+        # the caller was SERVED the handler's own result after the bound — the
+        # timer may have fired and lost the race to a finished handler, or never
+        # have fired at all. Invisible to the refusal channel above by
+        # construction, and measured as a 401 at 20.27 s against a 10 s bound
+        # with `wait_bound_breaches` flat. Additive only, and NOT part of the
+        # #12477 window/verdict (see `record_wait_bound_starved`).
+        "wait_bound_starved": wait_bound_starved_counts(),
         # #10749: the counts above go FLAT when the clamp does its job (a clamped probe no longer
         # breaches the bound), so the refusal channel cannot report "health is degraded to
         # unknown". This is that channel's positive pair: how many health probes came back

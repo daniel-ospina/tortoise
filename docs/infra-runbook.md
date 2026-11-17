@@ -966,6 +966,119 @@ curl -sS https://api.premiselabs.co/health | jq '{breaches: .wait_bound_breaches
   exposition (`generate_latest`), so the scrapable form is the family
   `tortoise_health_setup_clamped_total` (see the same warning for `wait_bound_breaches` above).
 
+### 4.1.1b The OTHER half of the same breach — `wait_bound_starved`
+
+**A breach has two outcomes and only one of them was visible.** The
+`wait_bound_breaches` counter in §4.1.1 counts requests the bound **refused**. The
+other outcome is the one where **no refusal was substituted** and the caller was
+**served the handler's own answer, late** — usually because the event loop was
+held by synchronous work (the `#10845` / `#4625` class: a blocking
+FalkorDB/Redis connect, the registry build on `/v1/register`). The timer may have
+fired and lost the race to a finished handler, or never have fired at all: the
+field reports the OUTCOME, not whether a callback ran.
+
+**Measured on 2026-11-17 (live sha `55ec2c71b165`):** a client was answered a
+**401 at 20.27 s against the 10 s bound**, and `wait_bound_breaches.total` sat at
+`0` throughout. Two separate blind spots, each deliberate on its own:
+
+- the refusal counter is written only on the refusal path — a return from
+  `mcp_auth.await_under_wait_bound` is not a breach decision point, so no
+  refusal was substituted and nothing incremented it; and
+- the refusal **share** (`refusals` on this body) was blind as well, because it
+  divides by the ATTEMPT count and a `401` is in
+  `_WAIT_BOUND_NON_DATA_STATUSES`, so it is not even in that denominator (an
+  unauthenticated client must not be able to dilute the ratio).
+
+So the field this section tells you to read for "is the bound honoured?" reported
+a clean zero over a request that breached it by 2x. That is a **false PASS of the
+instrument**, which is why the answered half now has its own channel:
+
+```json
+"wait_bound_starved": {"total": 0, "by_surface": {"mcp": 0, "rest": 0}, "error": null}
+```
+
+Same shape, same zero-padding and same `null`-never-`0` rule as
+`wait_bound_breaches` — read them together and they are the two halves of one
+question:
+
+| field | what it means |
+|---|---|
+| `wait_bound_breaches` | the bound fired and the caller was **refused** (`-32009` / 504) |
+| `wait_bound_starved` | no refusal was substituted and the caller was **served the handler's own result — or its exception (a late 500, or a committed head followed by the thrown error) — after the bound** — usually a blocked loop (the `#3718` class), also the case where the deadline fired but the handler had already finished |
+
+⛔ **What this field is NOT (each a decision, not an omission) — and the one thing it does see:**
+
+- **It never feeds `status`** — same rule as its sibling.
+- **It never feeds the `refusals` window** (#12477). That window is a *refusal*
+  share whose verdict 503s a deployment, and it measured its false-red in both
+  directions; a served-but-late answer is not a refusal. Widening that ladder is
+  a change to #12477's recorded decision, not to this instrument. The loop-block
+  evidence it corroborates already has its own verdict-bearing surface here:
+  `loop_blocks`.
+- **It is not a refusal waiting to be written.** Never "fix" a starved breach by
+  refusing after the fact: refusing a computed `401` 20 s in would hand the
+  client a `Retry-After` for an auth failure it must not retry.
+- **It does not count an exchange whose response HEAD reached the caller inside
+  the bound.** The promise is about when the caller learns *something*, so a
+  long-lived SSE stream that closes much later is not a breach — and `GET /mcp`
+  is exactly that (fastmcp sends the headers immediately and holds the stream for
+  the session's life), so counting on close would add one false `starved` per
+  session. Both timing variants are pinned
+  (`test_an_in_time_response_head_is_not_a_breach_however_late_the_body`). The
+  comparison is against the budget the answer was actually served under — a cold
+  start that #4055 RE-ARMS is measured against the re-armed budget, not against
+  the original arrival. A response that has sent nothing when its budget expires
+  is **refused** when the timer wins; when the loop was held instead, the same
+  request is served late and IS what this field counts — the two outcomes of one
+  breach, **unless the caller cancels first, which is counted in neither**
+  (a deploy cancels every in-flight stream; booking that as breaches would read
+  like a loop-block episode).
+
+- ⚠️ **Coverage is NOT symmetric across the two children, so `mcp: 0` does not
+  mean "no starved MCP breach".** The `rest` child counts every served-late shape
+  except a cancelled one (see the cancellation note above) **and, on a #4055 cold
+  start, a head emitted after the first budget but BEFORE the re-arm** (that
+  lateness belongs to the drain, so such a caller is reported by neither
+  channel). The `mcp` child
+  counts a `mcp`-labelled exchange the same way — **a pre-SSE stall whose head
+  MISSED the budget IS counted as `mcp`** — but a streamable-HTTP tool call sends
+  its SSE head *before* the tool is dispatched, so by this section's own head
+  rule a tool call whose SSE head was already on the wire looks "served in
+  time", and the dispatch seam — which does know the tool took 20 s — does not
+  report here yet. For a starved MCP tool call, read
+  `loop_blocks` (the blocked-loop evidence) and treat the seam wiring as the
+  tracked residual.
+
+- **It is not a refusal the MCP seam already sent in-band.** The dispatch seam
+  refuses by RETURNING its `-32009` result rather than raising, so the outer
+  boundary sees an ordinary late return for a request the caller was just
+  refused; counted naively that is `breach +1, starved +1` for ONE request, and
+  the served-answer channel reporting a refusal as a served answer. The seam's
+  own claim flag is the abstention (measured and pinned).
+- **It DOES see the re-armed cold-setup arm.** A cold start is exempt from the
+  FIRST budget by decision (#4055): the one-time embedder load is drained outside
+  it and the bound is re-armed for the request's own work. That first arm's
+  lateness is designed and is not counted; the re-armed arm's is measured from
+  the moment it was re-armed, so a request whose own work starves the loop inside
+  the extended budget IS counted (an earlier revision muted the whole call once
+  the exemption fired and lost a measured 10x breach — pinned by
+  `test_a_starved_answer_inside_the_REARMED_cold_setup_budget_is_counted`).
+
+A rising `wait_bound_starved` with `wait_bound_breaches` flat is the signature of
+a **blocked event loop** on the data plane, not of a slow plane — check
+`loop_blocks` beside it and read #4625/#3718 for the off-loop direction. It is
+also why a deployment can look "healthy but slow": the bound is not being
+enforced, it is being starved.
+
+```bash
+curl -sS https://api.premiselabs.co/health \
+  | jq '{refused: .wait_bound_breaches.total, answered_late: .wait_bound_starved.total, loop_blocks: (.loop_blocks.episodes // .loop_blocks)}'
+```
+
+On `serve_health`'s `/metrics` the series is
+`tortoise_wait_bound_starved_total{surface="mcp"|"rest"}`, both children declared
+at import for the same absent-vs-zero reason.
+
 ### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
 
 **Symptom.** A customer pays for a higher tier and is enforced at a lower one.
