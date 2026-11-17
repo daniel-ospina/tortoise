@@ -106,11 +106,23 @@ agreement the harness never tested. Both names are in the job output.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first, and the operator would get an
+# unattributed traceback instead of this sentence (the `tools/` entry-point
+# contract; `tests/test_entry_point_python_guard.py` pins it for the corpus).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/cypher_diff_harness.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/cypher_diff_harness.py`"
+    )
+
 import argparse
 import json
 import os
 import subprocess
-import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -354,7 +366,15 @@ def seed_graph(graph_uri: str, graph_name: str) -> dict[str, Any]:
     """Seed the corpus into a real FalkorDB graph. Returns the lane it used."""
     from falkordb import FalkorDB  # local import: a missing driver must read as 2
 
-    client = FalkorDB.from_url(_redis_url(graph_uri))
+    from tortoise.projection import _bounded_server_socket_kwargs
+
+    # #3065/#8118: a harness is not exempt from the read bound. `from_url` hands
+    # `socket_timeout=None` to redis-py, so a stalled engine parks the seed in
+    # `recv()` with no error — and this tool's exit codes cannot tell that apart
+    # from `2 = could not run`. The bound comes from the product's ONE resolution
+    # point, so the `TORTOISE_DB_SOCKET_*` knobs reach this client too.
+    client = FalkorDB.from_url(_redis_url(graph_uri),
+                               **_bounded_server_socket_kwargs())
     graph = client.select_graph(graph_name)
     _refuse_a_foreign_graph(graph, graph_name)
     graph.query("MATCH (n:Point) DETACH DELETE n")
@@ -529,7 +549,13 @@ def bootstrap_record(dsn: str) -> int:
 def run_cypher(graph_uri: str, graph_name: str, cypher: str, params: dict) -> tuple[list[tuple], list[str]]:
     from falkordb import FalkorDB
 
-    graph = FalkorDB.from_url(_redis_url(graph_uri)).select_graph(graph_name)
+    from tortoise.projection import _bounded_server_socket_kwargs
+
+    # #3065/#8118 — the same bound as `seed_graph`, on the path that produces the
+    # VERDICT: an unbounded `recv()` here would hang the diff itself rather than
+    # answer it, and a harness that never returns is not `1 = different`.
+    graph = FalkorDB.from_url(_redis_url(graph_uri),
+                              **_bounded_server_socket_kwargs()).select_graph(graph_name)
     res = graph.query(cypher, params)
     return [tuple(r) for r in res.result_set], [c[1] if len(c) > 1 else str(c[0]) for c in (res.header or [])]
 
@@ -969,7 +995,12 @@ def bench(graph_uri: str, graph_name: str, dsn: str, candidate: Candidate,
 
     from falkordb import FalkorDB
 
-    graph = FalkorDB.from_url(_redis_url(graph_uri)).select_graph(graph_name)
+    from tortoise.projection import _bounded_server_socket_kwargs
+
+    # #3065/#8118 — the bench arm seeds padding through the same unbounded
+    # constructor, so it needs the same bound as the two paths above.
+    graph = FalkorDB.from_url(_redis_url(graph_uri),
+                              **_bounded_server_socket_kwargs()).select_graph(graph_name)
     padding = {f"p-pad-{i:05d}" for i in range(max(0, rows - len(CORPUS)))}
     for pid in padding:
         graph.query(
