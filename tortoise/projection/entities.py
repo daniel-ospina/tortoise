@@ -5863,11 +5863,11 @@ class _EntityHandlers:
         """
         index = _status_fold_index()
         from tortoise.status_folds import (
-            builtin_fold_reopens,
-            builtin_fold_stage,
             BUILTIN_CONNECTOR_PIPELINE,
             BUILTIN_CONNECTOR_PIPELINE_KEY,
             FOLD_AXIS_STAGE,
+            builtin_fold_reopens,
+            builtin_fold_stage,
         )
 
         excluded = _terminal_object_statuses()
@@ -6207,16 +6207,17 @@ class _EntityHandlers:
         if status is not None and status in excluded:
             return False
         kind_text = None if object_kind is None else str(object_kind).lower()
-        if kinds is not None:
-            if kind_text is None or kind_text not in kinds:
-                return False
-        elif declared_kinds is not None:
-            # The built-in arm's ownership guard, verbatim in behaviour: apply
-            # when the kind is absent, non-string, or NOT a state-declaring
-            # kind. A non-string can never be a declared kind, which is why
-            # the coercion above is exact.
-            if object_kind is not None and kind_text in declared_kinds:
-                return False
+        if kinds is not None and (kind_text is None or kind_text not in kinds):
+            return False
+        # The built-in arm's ownership guard, verbatim in behaviour: apply when
+        # the kind is absent, non-string, or NOT a state-declaring kind. A
+        # non-string can never be a declared kind, which is why the coercion
+        # above is exact. (The two arms are mutually exclusive at every call
+        # site — a caller passes one of `kinds`/`declared_kinds` — and both
+        # refuse the same way, so they share one body.)
+        if (declared_kinds is not None and object_kind is not None
+                and kind_text in declared_kinds):
+            return False
         cur = {
             "stageId": stage_id,
             "pipelineKey": cur_key,

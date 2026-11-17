@@ -1693,3 +1693,58 @@ def test_the_id_less_refusal_prescribes_no_unperformable_route(env):
         f"the re-create route is the one that works and must be named: {text!r}")
     assert "_sanitize_props" in text, (
         f"the message must say WHY no SDK door can stamp the id: {text!r}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #11824 S0 review (P2) — an echo of a LEGACY terminal word is entailed
+# ══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("retire", ["retracted", "archived"])
+def test_an_echo_of_a_legacy_terminal_word_is_an_entailed_write(env, retire):
+    """The read-modify-write shape a generic tenant PUT sends over a dead row.
+
+    #11824 S0 put the lifecycle door on this arm, and the door NORMALISES a
+    declared synonym (`retracted` / `archived` -> `deprecated`) while the row
+    still HOLDS the legacy word — `retract_point`'s CAS writes
+    `status='retracted'` (a stated residual of this slice), and `archived` is a
+    pre-#11824 stored word (no backfill, #11824 §1).
+
+    So a caller that fetches the point and PUTs it back with its own status
+    arrived at the declared-transition loop as `retracted` -> `deprecated`: the
+    loop called that a TRANSITION, `_ALLOWED_TRANSITIONS['retracted']` is empty
+    (terminal), and the door refused a write that changes nothing. The
+    entailment test ABOVE the loop had already (correctly) said "not a
+    transition", so the SAME call was judged both ways — and the terminal guard
+    had been disarmed on the strength of that first judgement.
+
+    Mutant that reddens: compare spellings again (`str.__eq__(_stored, _status)`
+    and `_ALLOWED_TRANSITIONS.get(_stored)`) instead of reading both sides
+    through `_lifecycle_meaning`; both params then raise
+    `update_entity refused the status transition … is terminal`.
+
+    ⚠️ The echo CANONICALISES the stored word (`retracted` -> `deprecated`),
+    which is the one-way read delta the model states: nothing may be minted as
+    `retracted`, and the meaning is unchanged. The row must stay DEAD either
+    way — that is what this asserts alongside the acceptance.
+    """
+    sdk, _ = env
+    if retire == "retracted":
+        pid = _live(sdk, "a claim retired by the shipped verb")
+        sdk.retract_point(pid)              # the CAS writes 'retracted'
+    else:
+        pid = _live(sdk, "a claim a pre-fix writer archived")
+        _force_status(sdk, pid, "archived")
+    assert _row(sdk, pid)["status"] == retire
+
+    sdk.update_knowledge(pid, status=retire, description="a note")
+
+    after = _row(sdk, pid)
+    assert after["status"] == "deprecated", (
+        "the echo must be STORED as the canonical word it means: "
+        + repr(after))
+    assert after["outdated"] is False, after
+
+    # …and the point is still DEAD: the echo is not a resurrection.
+    with pytest.raises(ValueError, match=r"terminal|dead"):
+        sdk.update_knowledge(pid, status="live")
+    assert _row(sdk, pid)["status"] == "deprecated"

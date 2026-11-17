@@ -464,7 +464,7 @@ def _admitted_kind_forms(namespaced_kind: str) -> list[str]:
     return forms
 
 
-def _portfolio_declared_states() -> "tuple[dict[str, frozenset[str]], frozenset[str]]":
+def _portfolio_declared_states() -> tuple[dict[str, frozenset[str]], frozenset[str]]:
     """``({case-folded kind spelling: declared states}, migrated spellings)``.
 
     Read from the registry at call time (never a hardcoded copy — that is the

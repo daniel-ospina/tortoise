@@ -70,6 +70,8 @@ from typing import NamedTuple
 
 from .pipeline import (
     CORE_WORK_ITEM_PIPELINE as _CORE_WORK_ITEM_PIPELINE,
+)
+from .pipeline import (
     CORE_WORK_ITEM_PIPELINE_KEY as _CORE_WORK_ITEM_PIPELINE_KEY,
 )
 
@@ -575,8 +577,13 @@ class StatusFoldIndex:
     inert for every event the pipeline emits — the #2729 review P1.
     """
 
-    __slots__ = ("by_event", "kind_forms", "lifecycle_kinds",
-                 "statuses_by_kind", "pipelines_by_kind")
+    __slots__ = (
+        "by_event",
+        "kind_forms",
+        "lifecycle_kinds",
+        "pipelines_by_kind",
+        "statuses_by_kind",
+    )
 
     def __init__(self) -> None:
         #: case-folded event kind (``ns:local`` OR bare ``local``) →

@@ -977,7 +977,41 @@ def _resolve_object(graph, ref: str) -> tuple[str, dict] | None:
         "pipelineKey": r[5], "objectKind": r[6], "isClosed": r[7]}
 
 
+def _binds_core_work_item(cur: dict, pipeline_key: str) -> bool:
+    """True when the CORE default work-item pipeline may bind this Object.
+
+    The kind binding (``advance_stage``'s first guard) is that a pipeline key
+    equals the Object's namespaced ``objectKind`` (#2767). The CORE default is
+    the ONE legitimate exception, and it is an exception the built-in connector
+    fold CREATES: ``status_folds.BUILTIN_CONNECTOR_FOLDS`` fires on an Object of
+    ANY kind that declares no lifecycle of its own, so it stamps
+    ``pipelineStageKey='core:workitem'`` on e.g. a ``dev:issue`` (pinned by
+    ``tests/test_cache_projection.py::_assert_folded_stage``).
+
+    ⛔ WITHOUT THIS, THE DOCUMENTED REOPEN ROUTE DID NOT EXIST (#11824 S0
+    review, P2). ``advance_stage(<id>, 'core:workitem', …, reopen=True)`` is
+    what ``lifecycle_vocabulary``'s ``completed`` repair and
+    ``status_folds``' terminal-slot note both prescribe as the way back from a
+    terminal STAGE, and it raised twice: the kind binding refused (the kind is
+    ``dev:issue``, not ``core:workitem``) and, one line later,
+    ``effective_pipeline`` returned an EMPTY pipeline because no pack declares
+    ``core:workitem``. So the population the built-in folds retired had no
+    performable route back at all — for ``pm:cardCompleted``, which has no
+    reopening fold (only ``github.issue.reopened`` exists), a mistaken close was
+    permanent.
+
+    The exemption is deliberately NARROW — it grants nothing to a pipeline key
+    the row is not already ON. ``cur['pipelineKey']`` must ALREADY be the core
+    default, i.e. the row was placed there by a fold, so this cannot be used to
+    stamp an arbitrary kind onto the core pipeline (nor the core pipeline onto an
+    arbitrary Object), which is the vector the kind binding exists to stop.
+    """
+    return (pipeline_key == CORE_WORK_ITEM_PIPELINE_KEY
+            and cur.get("pipelineKey") == CORE_WORK_ITEM_PIPELINE_KEY)
+
+
 def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
+
                   at: str | None = None, source: str = "", reopen: bool = False,
                   correction: bool = False, reason: str = "",
                   declared: dict | None = None) -> StageMove:
@@ -992,7 +1026,14 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
     - **kind binding** — the pipeline key must equal the Object's namespaced
       ``objectKind`` (#2767), so no Object can be advanced through a pipeline
       that is not its own; an Object with no namespaced kind cannot be bound
-      to any pipeline and is refused.
+      to any pipeline and is refused. The ONE exception is the CORE default
+      work-item pipeline (``_binds_core_work_item``): a row a built-in
+      connector fold already stamped with ``pipelineStageKey='core:workitem'``
+      may be advanced through it, because no pack declares that key and the
+      fold fires on Objects of any kind — without it the terminal stage those
+      folds write could never be reopened, which is the recoverability the
+      design claims (§4.1: the SLOT carries the meaning, and a terminal stage
+      can be reopened).
     - **unresolvable current stage** — an Object whose stored stage does not
       resolve in the effective pipeline is refused, never advanced: skipping
       the guards is the resurrection vector. The refusal has no public
@@ -1036,10 +1077,21 @@ def advance_stage(sdk, object_ref: str, pipeline_key: str, stage_ref: str, *,
         raise ValueError(
             f"{object_ref!r} carries no namespaced objectKind, so no pipeline "
             f"can be bound to it (refusing {pipeline_key!r})")
-    if kind != pipeline_key:
+    if kind != pipeline_key and not _binds_core_work_item(cur, pipeline_key):
         raise ValueError(
             f"pipeline {pipeline_key!r} does not apply to {object_ref!r}: its "
             f"kind is {kind!r} (a pipeline keys on the namespaced kind)")
+
+    # The CORE default is declared HERE rather than in a pack (design §4.2: *"a
+    # core kind has no pipeline until a default is declared for it"*), so a
+    # caller could not have resolved it through ``declared_pipeline_for`` and
+    # the lookup below would have returned an empty pipeline — the second half
+    # of the "no route back" defect ``_binds_core_work_item`` documents. An
+    # explicit ``declared`` (and a graph override, read first inside
+    # ``effective_pipeline``) still wins, so a tenant that copied the pipeline
+    # on write, or renamed its stages, keeps that declaration.
+    if declared is None and pipeline_key == CORE_WORK_ITEM_PIPELINE_KEY:
+        declared = CORE_WORK_ITEM_PIPELINE
 
     pipe = effective_pipeline(graph, pipeline_key, declared=declared)
     if not pipe.stages:

@@ -1315,6 +1315,39 @@ class TestTheBundleValidationDoor:
                           "objectKind": "policy", "status": "superseded"}],
         }) == []
 
+    @pytest.mark.parametrize("label", ["object", "subject"])
+    def test_a_null_status_item_is_not_a_phase_1_violation(self, sdk, label):
+        """`status: null` is the DELETE sentinel, not a word (#11824 S0 review P2).
+
+        Both write doors this Phase-1 arm exists to agree with exempt `None`
+        (`create_entity`: `if _lifecycle_value is not None`; `_update_entity`:
+        `if _np_status is not None`), because `_sanitize_props` documents `None`
+        as the removal form — and this PR's own
+        `test_an_explicit_None_is_still_the_documented_status_DELETE` proves
+        `create_entity("object", …, status=None)` stores.
+
+        The arm asked the vocabulary question about EVERY item that DECLARES a
+        status, and a `null` DOES declare it, so this bundle was refused with a
+        message claiming the writer "refuses it mid-write" — false for this
+        value, and over-rejection is the direction this arm's own history says
+        was fixed once already. Mutant that reddens: delete the
+        `if own_status is None: continue` arm in `sdk._validate_bundle`.
+        """
+        item = {"ref": "n1", "type": label, "name": "NullStatusItem",
+                "status": None}
+        if label == "object":
+            item["objectKind"] = "policy"
+        else:
+            item["subjectKind"] = "organization"
+        assert sdk._validate_bundle({"entities": [item]}) == [], (
+            "a `status: null` item was refused at Phase 1 although both write "
+            "doors store it as a property DELETE")
+        # CONTROL: the arm still REFUSES what the doors refuse, so the
+        # exemption is the delete sentinel and not the whole axis.
+        assert sdk._validate_bundle({"entities": [dict(item, status="banana")]}), (
+            "the arm stopped refusing an undeclared word — the exemption is "
+            "wider than the delete sentinel")
+
     @pytest.mark.parametrize("status", [42, 3.5, True])
     def test_a_persistable_non_string_status_is_a_phase_1_violation(
             self, sdk, status):

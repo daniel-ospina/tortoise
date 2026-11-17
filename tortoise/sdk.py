@@ -68,6 +68,7 @@ from .commit_ops import SUBJECT_TERMINAL_STATUSES as _SUBJECT_TERMINAL_STATUSES
 # every `status` door below, so the Point, Object and Subject arms cannot
 # disagree about what a value means.
 from .lifecycle_vocabulary import (
+    LIFECYCLE_STATUS_SYNONYMS as _LIFECYCLE_STATUS_SYNONYMS,
     LIFECYCLE_STATUS_VALUES as _LIFECYCLE_STATUS_VALUES,
     read_caller_status as _read_caller_status,
     status_refusal_reason as _status_refusal_reason,
@@ -4726,6 +4727,36 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "archived": frozenset(),
 }
 
+
+def _lifecycle_meaning(word: str) -> str:
+    """The lifecycle word a stored/echoed spelling MEANS (#11824 S0).
+
+    ONE home for "read a word by its meaning, not its spelling", so the three
+    places that compare a caller's status with a STORED one cannot drift:
+
+    * the Point arm's entailment test (``_status_entailed``, which disarms the
+      terminal guard), and
+    * the Point arm's declared-transition loop (which asks
+      ``_ALLOWED_TRANSITIONS``).
+
+    WHY IT IS NEEDED. `lifecycle_vocabulary.read_caller_status` normalises a
+    declared SYNONYM on the way in — ``archived``/``retracted`` are not words a
+    caller gets to mint, they are spellings of ``deprecated`` — while the graph
+    still HOLDS them (``retract_point``'s CAS writes ``status='retracted'``, a
+    residual of this slice, and ``archived`` is a pre-#11824 stored word). A
+    generic tenant PUT echoes the row it just read, so without this the echo
+    ``stored 'retracted' + caller 'retracted'`` arrived at the comparison as
+    ``'retracted' != 'deprecated'``: the entailment test above it said "this is
+    not a transition" (so the terminal guard was correctly disarmed) and the
+    loop then said "this IS a transition, and ``retracted`` declares none" —
+    the SAME call judged both ways, refusing a read-modify-write that writes
+    what the row already holds.
+
+    One-way, like ``LIFECYCLE_STATUS_SYNONYMS`` itself: a stored word is never
+    rewritten by this helper, it is only READ as the meaning it carries.
+    """
+    return _LIFECYCLE_STATUS_SYNONYMS.get(word, word)
+
 # Event types that write to the :GraphEvent store (#432). Other types
 # (e.g. PointRevised) only write to the JSONL event log (#548).
 #
@@ -8831,11 +8862,12 @@ def _item_declared_status(item: dict, depth: int = 1) -> tuple[bool, object]:
     but collapses "absent" and "explicitly ``None``" onto ``None``. Those are
     different to the entity writers: an absent ``status`` stores NOTHING — the
     fold seeds ``status=$st`` so the property stays absent, which reads live
-    (``live._terminal_excluded``; #9974 R1) — while an explicit ``None`` is
-    VALIDATED and refused on the Subject door
-    (``create_entity(type='subject', status=None)`` raises ``Invalid status
-    None``). Phase 1 cannot claim writer agreement without the distinction, so
-    it is kept here (#7925 review P3).
+    (``live._terminal_excluded``; #9974 R1) — while an explicit ``None`` is the
+    DELETE sentinel (``_sanitize_props``) that both knowledge doors carry
+    through untouched (#11824 S0), so it removes the property instead of
+    minting one. Phase 1 cannot claim writer agreement without the distinction,
+    so it is kept here (#7925 review P3) — and it is why the vocabulary arm
+    above SKIPS a ``None`` value rather than asking the door about it.
     """
     return _item_prop_at_depth(item, "status", depth)
 
@@ -30712,6 +30744,18 @@ class TortoiseSDK:
                 item, _item_flatten_depth(item, "entities"))
             if not _declares_status:
                 continue
+            # ⛔ AN EXPLICIT ``None`` IS THE DELETE SENTINEL, NOT A WORD
+            # (#11824 S0 review, P2). Both write doors this arm exists to agree
+            # with exempt it (`create_entity`: `if _lifecycle_value is not None`,
+            # `_update_entity`: `if _np_status is not None`), because
+            # `_sanitize_props` documents ``None`` as the removal form. Asking
+            # the vocabulary question here refused the WHOLE bundle for a
+            # `status: null` item the writer stores happily — and the refusal
+            # text accused the writer of "refusing it mid-write", which is
+            # false for this value. Over-rejection is the direction this arm's
+            # own history says was fixed once already.
+            if own_status is None:
+                continue
             _status_refusal = _status_refusal_reason(
                 own_status, kind=f":{_item_label}")
             if _status_refusal is None:
@@ -51123,14 +51167,23 @@ class TortoiseSDK:
             # IS entailed here (measured — `__str__` is never consulted, calls=0),
             # and what catches it is the write arm's own normalisation
             # (`_status = str.__str__(_status)`), not this test (#12907 cycle 4).
+            # ⛔ BOTH SIDES ARE COMPARED BY MEANING, not by spelling either
+            # (#11824 S0 review, P2). The door normalises a declared synonym
+            # (``retracted``/``archived`` -> ``deprecated``) while the row still
+            # HOLDS the legacy word, so a raw spelling compare reported an echo
+            # of the row's own status as a CHANGE — the terminal guard asked and
+            # refused, and (on a a live row) the transition loop below refused
+            # the same call for the opposite reason. ``_lifecycle_meaning`` is
+            # the ONE reader of that mapping, so this test and the loop cannot
+            # disagree about what the caller asked for.
             _pt_statuses_exact = (
-                tuple(str.__str__(_stored_status)
+                tuple(_lifecycle_meaning(str.__str__(_stored_status))
                       for _stored_status in _pt_statuses)
                 if all(issubclass(type(_stored_status), str)
                        for _stored_status in _pt_statuses) else None)
             _rendered_status = _lifecycle_rendered.get("status")
             _rendered_status_exact = (
-                str.__str__(_rendered_status)
+                _lifecycle_meaning(str.__str__(_rendered_status))
                 if issubclass(type(_rendered_status), str) else None)
             _status_entailed = (
                 "status" in _lifecycle_rendered
@@ -51391,9 +51444,24 @@ class TortoiseSDK:
                     if not issubclass(type(_stored), str):
                         continue
                     _stored = str.__str__(_stored)
-                    if str.__eq__(_stored, _status) is True:
+                    # ⛔ AN ECHO IS JUDGED BY MEANING (#11824 S0 review, P2).
+                    # `retract_point`'s CAS still stores `retracted` (a stated
+                    # residual), and `archived` is a pre-#11824 stored word;
+                    # the door hands this loop the CANONICAL word for either
+                    # (`deprecated`). Comparing spellings made the row's own
+                    # status look like a transition INTO `deprecated` — refused
+                    # with "`retracted` is terminal" — so a tenant PUT that
+                    # echoes the status it just read failed on every point the
+                    # shipped `retract_point` had retired. The stored side is
+                    # therefore read through the same mapping the door writes
+                    # through: a stored `retracted`/`archived` IS `deprecated`,
+                    # and `_ALLOWED_TRANSITIONS` is consulted for THAT meaning
+                    # (both keys already declare the same empty outgoing set, so
+                    # the terminal answer is unchanged — only the echo is).
+                    _stored_meaning = _lifecycle_meaning(_stored)
+                    if str.__eq__(_stored_meaning, _status) is True:
                         continue
-                    _declared = _ALLOWED_TRANSITIONS.get(_stored)
+                    _declared = _ALLOWED_TRANSITIONS.get(_stored_meaning)
                     if _declared is None or _status in _declared:
                         continue
                     _declared_text = ", ".join(
@@ -52029,8 +52097,17 @@ class TortoiseSDK:
             ).result_set[0][0]
             if _subj_hits:
                 _status = _subject_status_rendered["status"]
-                if (not isinstance(_status, str)
-                        or _status not in _SUBJECT_STATUS_VALUES):
+                # ⛔ ONE FIELD, ONE ANSWER: an explicit ``None`` is the DELETE
+                # sentinel on this door too (#11824 S0 review, P3). The family
+                # write door above exempts it (`if _np_status is not None`) and
+                # the create door exempts it, so refusing it HERE made
+                # `create_entity('subject', status=None)` succeed while
+                # `update_entity(<subject>, status=None)` raised the pre-S0
+                # text — the same value with two different outcomes in one
+                # slice whose own comment claims they agree.
+                if (_status is not None
+                        and (not isinstance(_status, str)
+                             or _status not in _SUBJECT_STATUS_VALUES)):
                     raise ValueError(
                         f"Invalid status {_status!r} for a :Subject. "
                         f"Must be one of: "

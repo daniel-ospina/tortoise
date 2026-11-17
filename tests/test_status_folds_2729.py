@@ -408,7 +408,7 @@ class TestBuiltinParity:
             assert target in stages, (event, target)
         for closing in ("pm:cardCompleted", "github.issue.closed"):
             assert stages[BUILTIN_CONNECTOR_FOLDS[closing]]["slot"] == "terminal"
-        assert BUILTIN_CONNECTOR_REOPENS == frozenset({"github.issue.reopened"})
+        assert frozenset({"github.issue.reopened"}) == BUILTIN_CONNECTOR_REOPENS
 
     def test_builtin_lookup_helper_agrees(self):
         for event, stage in BUILTIN_CONNECTOR_FOLDS.items():

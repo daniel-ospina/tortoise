@@ -577,6 +577,74 @@ class TestStageAdvance:
         finally:
             sdk.close()
 
+    def test_the_CORE_default_work_item_pipeline_binds_a_row_a_fold_stamped(
+            self, tmp_path):
+        """The recoverability the model claims, made PERFORMABLE (#11824 S0 P2).
+
+        `status_folds.BUILTIN_CONNECTOR_FOLDS` targets
+        `pipeline.CORE_WORK_ITEM_PIPELINE` on an Object of ANY kind that declares
+        no lifecycle, so a `dev:issue` card carries
+        `pipelineStageKey='core:workitem'` and, after a close, a TERMINAL stage
+        plus `isClosed`. The model's documented way back from a terminal STAGE
+        (design §4.1; `lifecycle_vocabulary`'s `completed` repair;
+        `status_folds`' terminal-slot note) is
+        `advance_stage(..., reopen=True)` — and it raised TWICE: the kind binding
+        refused (`dev:issue` != `core:workitem`) and `effective_pipeline`
+        returned an EMPTY pipeline, because no pack declares `core:workitem`.
+        `pm:cardCompleted` has no reopening fold (only `github.issue.reopened`),
+        so a mistaken close was permanent.
+
+        Mutants that redden: drop `_binds_core_work_item` from the kind binding
+        (`does not apply`), or drop the `declared = CORE_WORK_ITEM_PIPELINE`
+        resolution (`no pipeline is configured for 'core:workitem'`).
+        """
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            sdk.create_entity("object", "the card", objectKind="dev:issue")
+            sdk.create_event("done", "pm:cardCompleted", object="the card")
+            cur = P.current_stage(g, "the card")
+            assert (cur["stageId"], cur["pipelineKey"], cur["isClosed"]) == (
+                "done", P.CORE_WORK_ITEM_PIPELINE_KEY, True), cur
+
+            move = P.advance_stage(
+                sdk, "the card", P.CORE_WORK_ITEM_PIPELINE_KEY, "todo",
+                reopen=True)
+            assert move.applied, move.reason
+            after = P.current_stage(g, "the card")
+            assert (after["stageId"], after["isClosed"]) == ("todo", False), after
+        finally:
+            sdk.close()
+
+    def test_the_CORE_default_exemption_grants_nothing_to_a_foreign_row(
+            self, tmp_path):
+        """The exemption is NARROW: only a row ALREADY on the core pipeline.
+
+        Widening the kind binding is only safe if it cannot be used to stamp the
+        core pipeline onto an arbitrary Object — that is the vector #2767's
+        binding exists to stop. A row whose `pipelineStageKey` is absent (never
+        folded) or names another pipeline is refused exactly as before.
+        """
+        sdk = _mk_sdk(tmp_path)
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("never-folded", objectKind="dev:thing")
+            with pytest.raises(ValueError, match="does not apply"):
+                P.advance_stage(sdk, "never-folded",
+                                P.CORE_WORK_ITEM_PIPELINE_KEY, "todo")
+            assert P.current_stage(g, "never-folded")["stageId"] is None
+            g.query(
+                "MATCH (o:Object {name:'never-folded'}) "
+                "SET o.pipelineStageId='stg_won', o.pipelineSlot='terminal', "
+                "    o.pipelineStageKey=$k",
+                params={"k": KEY})
+            with pytest.raises(ValueError, match="does not apply"):
+                P.advance_stage(sdk, "never-folded",
+                                P.CORE_WORK_ITEM_PIPELINE_KEY, "todo",
+                                reopen=True)
+        finally:
+            sdk.close()
+
     def test_an_object_without_a_namespaced_kind_cannot_be_advanced(
             self, tmp_path):
         """The kind binding is not conditional. An Object carrying no

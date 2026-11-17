@@ -28,15 +28,16 @@ from .entity_resolver import (  # #12120: the merge hop (entity grouping) + the 
     normalize_entity_name,
 )
 from .exceptions import UnaddressableClaimError  # #9754 per-item refusal
-from .live import (
-    epistemic_disjunction,  # #7902 epistemic-label traversal clause
-    is_terminal_status,  # #2498 shared terminal vocabulary
-)
+
 # #11824 S0: the ONE lifecycle write vocabulary — the Subject set below is the
 # same closed four words every knowledge kind uses, imported so the family
 # declarations cannot drift from the door that writes them.
 from .lifecycle_vocabulary import (
     LIFECYCLE_STATUS_VALUES as _LIFECYCLE_STATUS_VALUES,
+)
+from .live import (
+    epistemic_disjunction,  # #7902 epistemic-label traversal clause
+    is_terminal_status,  # #2498 shared terminal vocabulary
 )
 
 _logger = logging.getLogger(__name__)

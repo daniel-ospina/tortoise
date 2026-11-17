@@ -178,7 +178,7 @@ def _render(value: object) -> str:
     """
     try:
         return repr(value)
-    except Exception:  # noqa: BLE001 — a hostile __repr__ must not escape
+    except Exception:
         return f"<{type(value).__name__} whose repr() raised>"
 
 
@@ -253,13 +253,12 @@ def read_caller_status(value: object, *, kind: str = "",
         ) from None
     token = str.__str__(value).strip().lower()
     if token in LIFECYCLE_STATUS_SET:
-        if token != str.__str__(value):
-            # A re-spelling of a legal word: same meaning, stored canonically,
-            # reported to nobody (AX §1). Counted, because the ratio of
-            # re-spellings to clean writes is the measurement that says whether
-            # callers are guessing at the vocabulary.
-            if count:
-                STATUS_WRITE_OUTCOMES["normalised"] += 1
+        # A re-spelling of a legal word: same meaning, stored canonically,
+        # reported to nobody (AX §1). Counted, because the ratio of
+        # re-spellings to clean writes is the measurement that says whether
+        # callers are guessing at the vocabulary.
+        if token != str.__str__(value) and count:
+            STATUS_WRITE_OUTCOMES["normalised"] += 1
         return token
     synonym = LIFECYCLE_STATUS_SYNONYMS.get(token)
     if synonym is not None:

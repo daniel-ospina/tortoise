@@ -791,6 +791,51 @@ class TestWorkItemFold:
         finally:
             sdk.close()
 
+    def test_a_folded_close_ends_the_work_item_for_READERS(self):
+        """The READER-side consequence of putting the folds on the POSITION axis.
+
+        #13034's recorded decision (`live._terminal_excluded`, design §6) reads
+        BOTH axes: a stage in the `terminal` slot is an ending exactly like a
+        terminal lifecycle word. Moving the closing folds onto `done` therefore
+        makes a closed card ENDED for every reader — where pre-S0
+        `status='completed'` was never in `commit_ops.OBJECT_TERMINAL_STATUSES`
+        and the card stayed CURRENT in `recall_state` and on the four search
+        legs.
+
+        That IS the intent (`status_folds` §4.1: the SLOT carries the meaning,
+        a terminal stage is the ending, and unlike a lifecycle word it stays
+        reopenable), and this row is what makes it a decision rather than an
+        undisclosed side effect: the ending must be a FILTER over a reachable
+        row, never a deletion, which is why the `include_superseded` leg is
+        asserted too.
+        """
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "the card", objectKind="dev:issue")
+
+            def _served(include_superseded: bool = False) -> set[str]:
+                return {
+                    o["content"] for o in sdk.recall_state(
+                        kind="dev:issue", limit=10, object_centric=True,
+                        include_superseded=include_superseded)
+                    if o.get("entity_type") == "object"}
+
+            assert "the card" in _served(), (
+                "the fixture must be served as CURRENT before the fold, or this "
+                "row would pass on an unrelated exclusion")
+
+            sdk.create_event("done", "pm:cardCompleted", object="the card")
+
+            assert "the card" not in _served(), (
+                "a card folded to the TERMINAL stage `done` is still served as "
+                "current state — either the fold did not apply, or the reader "
+                "rule stopped reading the position axis (#13034)")
+            assert "the card" in _served(include_superseded=True), (
+                "the ending must be a FILTER, not a deletion: "
+                "`include_superseded` still reaches the closed card")
+        finally:
+            sdk.close()
+
     def test_github_issue_open_and_close(self):
         sdk = _fresh_sdk()
         try:
@@ -1421,7 +1466,7 @@ class TestLifecycleCarrierCoherence:
             # itself the resurrection. The ROW assertion below is the invariant
             # both doors must keep.
             with pytest.raises(ValueError,
-                               match="was refused|refused the status transition"):
+                               match=r"was refused|refused the status transition"):
                 sdk.update_knowledge(oid, status=target)
             assert _carrier_row(sdk, "Object", "delta") == before, (
                 "a refused resurrection moved the row: " +
@@ -1640,7 +1685,7 @@ class TestLifecycleCarrierCoherence:
             # AX §1). What must not happen is the row going CURRENT.
             sdk.update_knowledge(oid, status=_PlainSub("archived"))
             after = _carrier_row(sdk, "Object", "eta")
-            assert after == (before[0], "deprecated") + tuple(before[2:]), (
+            assert after == (before[0], "deprecated", *tuple(before[2:])), (
                 "a plain `str` subclass re-asserting the dead word did not land "
                 "as the canonical synonym: " + repr(after))
         finally:
@@ -1689,7 +1734,7 @@ class TestLifecycleCarrierCoherence:
             # Either way the composed shape can no longer reach the row, which is
             # a STRONGER result than the allowance's `str` requirement.
             with pytest.raises(ValueError,
-                               match="was refused|refused the status transition"):
+                               match=r"was refused|refused the status transition"):
                 sdk.update_knowledge(oid, status=target,
                                   supersededBy=None, supersededAt=None)
             assert _carrier_row(sdk, "Object", "zeta") == before, (
@@ -1765,6 +1810,27 @@ class TestLifecycleCarrierCoherence:
             # non-string non-None value is still refused as a status.
             with pytest.raises(ValueError, match="was refused"):
                 sdk.update_knowledge(oid, status=["live"])
+
+            # ⛔ ONE FIELD, ONE ANSWER (#11824 S0 review, P3): the leftover
+            # #1423 `:Subject` block BELOW the family door kept refusing `None`
+            # with the pre-S0 text, so `create_entity('subject', status=None)`
+            # succeeded (the family door exempts it) while
+            # `update_entity(<subject>, status=None)` raised — and the Object
+            # arm accepted the same value. All three must agree, which is what
+            # this leg pins; the mutant is deleting the `_status is not None`
+            # conjunct in that block.
+            sid = _make_carrier_entity(sdk, "Subject", "tau")
+            sdk.update_knowledge(sid, status="live")
+            assert _carrier_row(sdk, "Subject", "tau")[1] == "live"
+            sdk.update_knowledge(sid, status=None)
+            assert _carrier_row(sdk, "Subject", "tau")[1] is None, (
+                "the :Subject door must answer `None` the way the :Object door "
+                "and the create door do — as a property DELETE")
+            # …and a non-`str` is still REFUSED on this door (whichever of the
+            # two arms answers — since S0 the rendered word reaches the shared
+            # lifecycle door first, so the refusal is that door's).
+            with pytest.raises(ValueError, match=r"was refused"):
+                sdk.update_knowledge(sid, status=["live"])
         finally:
             sdk.close()
 
