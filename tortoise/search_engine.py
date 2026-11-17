@@ -580,7 +580,7 @@ _ZERO_HEX_LITERAL = re.compile(
 _ZERO_LITERAL = re.compile(r"\s*[+-]?0*(?:\.0*)?(?:[eE][+-]?[0-9]+)?\Z",
                            re.ASCII)
 #: `re.ASCII` is load-bearing on both patterns: without it `\s` matches Unicode
-#: spaces that `float()` skips and `strtof` does not — `"\u00a00.7"` (a value
+#: spaces that `float()` skips and `strtof` does not — `" 0.7"` (a value
 #: pasted out of a spreadsheet) was 0.7 in Python and null to the store, the same
 #: twin split this grammar exists to prevent — and `[0-9]`/`\d` stay Latin,
 #: which is what the store parses.
@@ -4184,10 +4184,10 @@ def run_vector_query(
                           "'embedding', $limit, vecf32($query_vec)) YIELD node "
                           f"RETURN node.{id_field} LIMIT 1"),
                 }
-                # \u26d4 BOUNDED BY WHAT IS LEFT OF THE READ (#11691 / round-2 review):
+                # ⛔ BOUNDED BY WHAT IS LEFT OF THE READ (#11691 / round-2 review):
                 # this probe runs AFTER the index attempt, so a full `timeout_ms`
                 # here lets a zero-row answer spend the leg's whole budget and
-                # then another one \u2014 and the collector discards rows past its
+                # then another one — and the collector discards rows past its
                 # own deadline, so the recovery this path exists for is lost
                 # exactly when the index is slow. Same idiom as the fall-through
                 # scan below.

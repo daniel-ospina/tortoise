@@ -112,12 +112,12 @@ class _CohortGraph:
     """A graph double that answers the INDEX query, the PROBE and the SCAN apart.
 
     THREE populations, because the #8429 decision has three inputs and the defect
-    is their DIFFERENCE: the index query (filtered \u2014 the answer the leg returns),
-    the k=1 probe (``LIMIT 1`` \u2014 the engine's raw cohort, asked only on the
+    is their DIFFERENCE: the index query (filtered — the answer the leg returns),
+    the k=1 probe (``LIMIT 1`` — the engine's raw cohort, asked only on the
     zero-row path) and the scan (which reads both stored shapes). ``probe_rows``
     defaults to ``index_rows``, i.e. "the engine yielded exactly what the read's
     own predicate let through"; a caller that sets it can express the state the
-    probe exists for \u2014 a POPULATED cohort whose rows the predicate excluded.
+    probe exists for — a POPULATED cohort whose rows the predicate excluded.
     """
 
     def __init__(self, index_rows, scan_rows, probe_rows=None):
@@ -172,7 +172,7 @@ def test_a_post_filter_empty_answer_does_not_scan_or_claim_the_gap():
     POST-filter rows on purpose), so it can return zero rows while the engine
     holds a full cohort. Without the probe this state was indistinguishable from
     the verbatim-node gap: the leg would have paid a FULL LABEL SCAN on every
-    such read and reported `scan_fallback` \u2014 "the index did not answer" \u2014 for
+    such read and reported `scan_fallback` — "the index did not answer" — for
     an index that answered and was then filtered, which is the exact cost
     `#13108` removed, on the regime where it was measured.
 
@@ -191,10 +191,10 @@ def test_a_post_filter_empty_answer_does_not_scan_or_claim_the_gap():
                             leg_trace=trace)
 
     assert hits == [], (
-        "the leg returned a row its index answer did not contain \u2014 the scan ran "
+        "the leg returned a row its index answer did not contain — the scan ran "
         "on a cohort the probe says is POPULATED (#8429 review F2)")
     assert not any("vec.euclideanDistance" in q for q in graph.queries), (
-        "a full label scan was paid on a filtered-to-empty index answer \u2014 the "
+        "a full label scan was paid on a filtered-to-empty index answer — the "
         "exact cost #13108 removed (#8429 review F2)")
     assert any("LIMIT 1" in q for q in graph.queries), (
         "premise: the zero-row path asks the engine about its raw cohort")
@@ -336,12 +336,17 @@ def _raw_index_ids(graph, vec, limit: int = 10) -> list:
     return []
 
 
-def _index_leg(sdk, query, limit=10):
+def _index_leg(sdk, query, limit=10, want: str = MECHANISM_INDEX):
     """One dense read through the index lane, with its trace entry.
 
     Retries until the store actually uses the INDEX: the engine's index build is
     asynchronous, and a read taken before it settles does not answer from the
     index, so it would certify nothing.
+
+    ``want`` is the mechanism the caller is ABOUT to assert (round-3 review): a
+    call that expects ``MECHANISM_SCAN_FALLBACK`` would otherwise never satisfy an
+    ``MECHANISM_INDEX`` predicate and would burn the whole settle deadline before
+    returning the very answer it was waiting to see.
 
     ⛔ THE RETRY KEYS ON ``MECHANISM_INDEX``, NOT ON ``"scan"`` (#13290 review
     F3, the same finding in four reviews). ``index_attempted`` is set ``True`` on
@@ -364,8 +369,7 @@ def _index_leg(sdk, query, limit=10):
         hits = run_vector_query(sdk._get_proj().g, query, limit=limit,
                                is_embedded=False, leg_trace=trace)
         entry = next(e for e in trace if e["leg"] == "vector")
-        if (entry.get("mechanism") == MECHANISM_INDEX
-                or time.monotonic() > deadline):
+        if entry.get("mechanism") == want or time.monotonic() > deadline:
             return dict(hits), entry
         time.sleep(_INDEX_SETTLE_POLL_S)
 
@@ -410,7 +414,7 @@ def test_a_verbatim_embedding_is_reachable_on_an_indexed_store():
             "(#8429). If the index now yields it, the cohort gap itself was "
             "closed at the WRITE boundary and this pin must be redone.")
 
-        hits, entry = _index_leg(sdk, near)
+        hits, entry = _index_leg(sdk, near, want=MECHANISM_SCAN_FALLBACK)
         assert "cohort-typed" in hits, (
             "the verbatim node is invisible to the dense leg on an indexed "
             "store — the HNSW index holds Vectorf32 values only, so the leg "
