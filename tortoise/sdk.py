@@ -343,6 +343,43 @@ GOAL_STATE_VALUES = frozenset({
     "guideline",   # directional, no pass/fail (owner ruling #6792)
 })
 
+
+def validate_goal_state(value: object) -> object:
+    """THE closed-vocabulary guard for a goal's achievement state (#13110).
+
+    One home for the rule, so every door refuses an unknown word with the SAME
+    sentence and the SAME set instead of each restating it:
+
+      * the SDK/props boundary (``_sanitize_props``, reached by ``create_point``,
+        ``create_object``/``create_entity``, ``update_point``, ``update_entity``)
+        — the fail-closed backstop every write passes;
+      * the REST door (``hosted_api.CreateObjectRequest.valid_goal_state``) —
+        which must refuse BEFORE submitting the write, because the route's
+        blanket ``except Exception`` maps a ValueError raised inside
+        ``sdk.create_object`` to a 500 that names nothing;
+      * the MCP door (``tortoise_create_object(goalState=...)``), through the
+        same ``_sanitize_props`` backstop.
+
+    ``None`` is LEGAL and is returned unchanged: it is the explicit "no
+    achievement state". Measured (#13110) — on the CREATE fold a ``None`` is a
+    no-op that PRESERVES a stored state (so an idempotent re-create cannot wipe
+    one, the #9572 clobber class), while the UPDATE door (``update_knowledge``)
+    clears it. Both are the SDK's contract; this function does not change it.
+
+    Sits beside ``GOAL_STATE_VALUES`` on purpose: the set and its rule are one
+    object, so a widening edit cannot update one and miss the other.
+    """
+    if value is None:
+        return value
+    if not isinstance(value, str) or value not in GOAL_STATE_VALUES:
+        raise ValueError(
+            f"Invalid goalState {value!r}. A goal's achievement "
+            f"state is a closed vocabulary: {sorted(GOAL_STATE_VALUES)}. "
+            "(Lifecycle is the separate `status` field — goalState is not "
+            "draft/live/retracted/archived.)"
+        )
+    return value
+
 # #7856 defect 2: the objective map's TOP node was a `goal` POINT created
 # without an explicit status, so it defaulted to `draft`. A draft point that
 # is only ever a TARGET is EP-inert — `create_operator` promotes only the
@@ -8009,15 +8046,14 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # here — it is the documented no-SDK-guarantee path (see `api.py`
     # `add_point`), so the vocabulary is enforced at the SDK/MCP boundary, not
     # at the projection choke point that live writes and replay share.
-    if "goalState" in props and props["goalState"] is not None:
-        _goal_state = props["goalState"]
-        if not isinstance(_goal_state, str) or _goal_state not in GOAL_STATE_VALUES:
-            raise ValueError(
-                f"Invalid goalState {_goal_state!r}. A goal's achievement "
-                f"state is a closed vocabulary: {sorted(GOAL_STATE_VALUES)}. "
-                "(Lifecycle is the separate `status` field — goalState is not "
-                "draft/live/retracted/archived.)"
-            )
+    #
+    # #13110: the RULE lives in `validate_goal_state` (module level, above) so
+    # the REST door can refuse an unknown word with the SAME sentence and the
+    # SAME set BEFORE the write is submitted — otherwise its blanket
+    # `except Exception` turned this ValueError into a 500 and the client never
+    # learned the vocabulary. One home, three doors.
+    if "goalState" in props:
+        validate_goal_state(props["goalState"])
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
     return props

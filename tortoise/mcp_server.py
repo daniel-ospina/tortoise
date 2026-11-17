@@ -6965,12 +6965,38 @@ def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> d
         return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_subject, "points"), name, subjectKind, **(props or {}))
 
-def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dict:
-    """Create an Object node (product, customer, skill, etc.)."""
+def tortoise_create_object(name: str, objectKind: str,
+                          goalState: str | None = None,
+                          props: Any = None) -> dict:
+    """Create an Object node (product, customer, skill, etc.).
+
+    ``goalState`` (#1310/#7856) is the goal's ACHIEVEMENT state — a closed
+    vocabulary, a SEPARATE axis from the lifecycle ``status`` (ONTOLOGY §4.3).
+    It is declared here, not just accepted through ``props``: the ``props`` bag
+    is an untyped ``Any`` with no description in the served schema, so before
+    this an agent reading ``tools/list`` had no way to learn the field EXISTS
+    and reached for ``goalState=`` as a top-level keyword — which failed with
+    ``unexpected keyword argument`` even though the value was reachable the
+    whole time through ``props`` (measured, #13110). Declaring it makes the
+    enum a first-class part of the advertised contract (AIP-126) without
+    adding a tool or a public SDK method: the SDK's ``create_object`` already
+    takes it through ``**props``, so this is a parameter on an existing door.
+
+    An unknown word is refused by the SDK's one guard
+    (``sdk.validate_goal_state``, reached via ``_sanitize_props``) and the
+    refusal names the whole closed set. ``None`` is legal and is NOT forwarded
+    when the caller omits it — a re-create must not wipe a stored state (the
+    #9572 clobber class).
+    """
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
+    # #13110: an explicitly-passed goalState wins over a props copy of the same
+    # key (the named parameter is the declared channel); the SDK's guard then
+    # validates whichever value won, so an unknown word is refused either way.
+    if goalState is not None:
+        props = {**(props or {}), "goalState": goalState}
     return _safe(_quota_gated(_get_org_sdk().create_object, "points"), name, objectKind, **(props or {}))
 
 def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:

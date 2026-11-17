@@ -260,6 +260,7 @@ from tortoise.sdk import (
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk._capture_session)
+    validate_goal_state,  # #13110: the ONE goal-achievement guard (REST refuses before the write)
 )
 from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
     redact_error,
@@ -13474,6 +13475,35 @@ class CreateObjectRequest(BaseModel):
     # caller NAMES — there is no 'live' default to splat over since #9974 R1)
     # — the onboarding STATE seed passes in_progress.
     status: str | None = None
+    # #13110: ``goalState`` is a SEPARATE axis from ``status`` (ONTOLOGY §4.3,
+    # #7856) and was reachable only from Python: pydantic's default
+    # ``extra='ignore'`` DROPPED it here, so ``POST /v1/objects
+    # {"goalState": "unmet"}`` answered 200 with the value silently gone —
+    # and an INVALID word was dropped just as silently, so the door failed in
+    # the worst direction (no error, no vocabulary). Same class, same fix shape
+    # as #4032 on the points door (``confidence``/``authoredBy``).
+    goalState: str | None = None
+
+    @field_validator("goalState")
+    @classmethod
+    def valid_goal_state(cls, v: str | None) -> str | None:
+        """Refuse an unknown word HERE, naming the closed set.
+
+        The guard is the SDK's own (``sdk.validate_goal_state``, the same one
+        ``_sanitize_props`` runs) — never a second copy of the vocabulary:
+        this door only decides WHEN it runs, not WHAT it accepts.
+
+        It MUST run at the door. Left to the SDK, the ValueError is raised
+        inside ``sdk.create_object`` and caught by this route's blanket
+        ``except Exception``, which answers a bare 500 — a status that names
+        nothing and tells the client nothing (measured on today's tree: the
+        same request was 200 with the field dropped; with the field declared
+        but unvalidated it would be 500). A pydantic validator turns it into
+        FastAPI's 422, whose body carries the SDK's own sentence and therefore
+        the whole closed set.
+        """
+        validate_goal_state(v)  # raises ValueError → 422 naming the set
+        return v
 
 
 @app.post("/v1/objects")
@@ -13513,6 +13543,20 @@ async def create_object(body: CreateObjectRequest, request: Request,
             props["status"] = body.status
         if _okind is not None:
             props["objectKind"] = _okind
+        # #13110: forward ``goalState`` only when the caller NAMED the field.
+        # `model_fields_set` is what makes that distinction, and it is
+        # load-bearing in BOTH directions:
+        #   * ABSENT on an idempotent re-create (this door is MERGE-by-name) must
+        #     not be forwarded at all — a forwarded default here would wipe a
+        #     stored achievement state on every repeat call, which is the #9572
+        #     clobber class documented on `objectKind` above;
+        #   * an EXPLICIT ``null`` is a named value and IS forwarded: the SDK's
+        #     fold treats it as "no achievement state" on create (measured — it
+        #     preserves rather than clearing) and as a CLEAR on the update door.
+        # Passing it through unchanged is what keeps this door's semantics the
+        # SDK's, instead of inventing a second set here.
+        if "goalState" in body.model_fields_set:
+            props["goalState"] = body.goalState
         # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
         # worker thread so THIS pinned call cannot freeze the single event loop
         # while it runs. Same asyncio.to_thread pattern as /v1/search;

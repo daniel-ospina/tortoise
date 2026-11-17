@@ -1826,8 +1826,19 @@ rows:
   cluster_canonical: tortoise_create_entity
   cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
 - name: tortoise_create_object
-  served_from: tortoise/mcp_server.py:8ca97c0d6bfe296d
-  served_attributes: a0b97014d5bd1404
+  # #13110: `goalState` was added as a DECLARED parameter (a closed-vocabulary
+  # field on the existing tool — no tool or public SDK method was added or
+  # removed, and `counts:`/`high_water_counts:` are unchanged). Both cells below
+  # are re-stamped BY HAND to the values the code derives, the same way #12547
+  # re-stamped `served_from` for `tortoise_query`: `served_from` is the
+  # `_code_digest` of the handler's CODE OBJECT (any edit inside the body moves
+  # it) and `served_attributes` hashes the handler's `__defaults__` and
+  # `__annotations__` — which a new parameter changes (#4192). Neither cell is
+  # an approval: the manifest's own header says a green run is a consistency
+  # result, never consent, and the approval gate for the tool surface is the
+  # "add/remove a tool or public SDK method" rule (AGENTS.md), which this is not.
+  served_from: tortoise/mcp_server.py:969907ca4c036542
+  served_attributes: 440e7a55b08e94ff
   family: graph
   family_rank: 2
   served: http
