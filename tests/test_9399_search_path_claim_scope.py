@@ -377,7 +377,23 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
     # …and it must be USED, not merely defined: the claim is that ranking reads
     # the edge *through* the alternation, so a dead constant would leave the
     # document's justification false while the assertion above stayed green.
-    assert '"|".join(ABOUT_EDGE_TYPES)' in ranking, (
+    # ⛔ THE BEHAVIOUR, NOT THE SPELLING (#13387): `8ba6de4438` (#13124) composed
+    # the alternation with extra predicates — `"|".join(tuple(extra_preds) +
+    # tuple(ABOUT_EDGE_TYPES))` — while still joining the constant, and a literal
+    # `'"|".join(ABOUT_EDGE_TYPES)'` substring then refused a CORRECT tree and
+    # reddened `main`. What this asserts is that the constant reaches a
+    # `"|".join(`, in either shape: a dead constant (joined nowhere) still
+    # reddens it, which is the failure the assertion exists to catch.
+    # STATED LIMIT, unchanged in kind: this is a shape test on the source text,
+    # so a comment line naming both would satisfy it. `ranking.py` has exactly
+    # one such line, and the quote grep above already refuses the constant's
+    # value going missing.
+    joined = [
+        line
+        for line in ranking.splitlines()
+        if '"|".join(' in line and "ABOUT_EDGE_TYPES" in line
+    ]
+    assert joined, (
         "`ABOUT_EDGE_TYPES` is no longer joined into a Cypher alternation, so "
         "`ranking.py` no longer reads the edge THROUGH it — the reason the claim "
         "gives for a literal grep missing these reads no longer holds"
