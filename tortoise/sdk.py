@@ -6422,18 +6422,16 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 f"replaced it — so the successor is part of the ending, not "
                 f"an optional extra.\n"
                 f"Two ways to fix it, either is accepted:\n"
-                # ⛔ #13065 review ROUND 22, finding 1 (P2): the column is
-                # NAME-keyed — ONTOLOGY §4.2/§4.3 *"successor NAME (stored
-                # verbatim)"* — and every reader of it resolves a NAME
-                # (`assembly._probe_visible_successors` matches
-                # `o.name IN $names`). This prescription said `<successor id>`,
-                # which no read surface can resolve: the same defect
+                # ⛔ The column is NAME-keyed — ONTOLOGY §4.2/§4.3 *"successor
+                # NAME (stored verbatim)"* — and every reader of it resolves a
+                # NAME: `assembly._probe_visible_successors` is that probe, and
+                # it is keyed on the successor's NAME. Prescribing an id here
+                # would name a value no read surface can resolve — the defect
                 # `_supersede_entity` names in its own docstring (*"storing an id
                 # here would write a pointer no read surface can resolve, i.e.
                 # the same defect as storing none"*). The text is CALLER-facing,
-                # so it says what the caller needs (the value the field reads,
-                # and the verb that turns an id into one) and nothing about this
-                # review.
+                # so it says what the caller needs: the value the field reads,
+                # and the verb that turns an id into one.
                 f"  1. name the successor — `supersededBy=<successor name>` on "
                 f"an Object (or Subject) goal (that column stores the "
                 f"successor's NAME, which is what every reader of it resolves, "
