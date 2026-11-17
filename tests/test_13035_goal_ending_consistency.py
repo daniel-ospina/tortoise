@@ -53,6 +53,7 @@ from tortoise.sdk import (
     GOAL_ENDING_STATES,
     GOAL_LIVE_STATES,
     GOAL_STATE_VALUES,
+    _rebind_guarded_words,
 )
 
 REPO = Path(__file__).resolve().parent.parent
@@ -1469,8 +1470,25 @@ class _RenderingLie(str):
         return self._renders_as
 
 
-class _LiveRenderingLie(_RenderingLie):
-    _renders_as = "live"
+class _EqualityLie(str):
+    """A `str` whose CONTENT is honest and whose `__eq__` lies.
+
+    #13065 review ROUND 16, finding 1 (P2). Rebinding the stored value closed the
+    RENDERING gap, but the guard's verdicts are read from the same map and two of
+    them are **equality tests** — `_status_words_for_goal_ending`'s
+    `ending == 'superseded'` and the successor arm's `goal_state == 'superseded'`.
+    A `str` subclass may override `__eq__`, so a value whose content IS a spelling
+    of `superseded` could answer "no" and be filed as `superseded` while naming
+    nobody — the one pair the guard's second arm exists to refuse.
+    """
+
+    def __eq__(self, other):
+        return False
+
+    def __ne__(self, other):
+        return True
+
+    __hash__ = str.__hash__
 
 
 def test_a_goalState_whose_RENDERING_lies_cannot_split_the_pair(sdk):
@@ -1513,12 +1531,77 @@ def test_a_goalState_whose_RENDERING_lies_cannot_split_the_pair(sdk):
                                 goalState=_RenderingLie("active"))
     assert sdk.get_entity(created["id"])["goalState"] == "active"
 
-    # (3) and on the OTHER axis: a `status` whose rendering claims an ending while
-    # its content is a live word must not end the row either
-    sdk.update_knowledge(goal["id"], status=_LiveRenderingLie("live"))
+    # (3) the OTHER half of the same class of gap: the rebinding must rewrite the
+    # guard's OWN verdict map too, not just the values it sends. Asserted directly
+    # because on most doors `_update_entity`'s no-promote arm also rebinds
+    # `status` (#12906), so a door-level assertion would pass for two reasons and
+    # discriminate neither. #13065 review round 16, finding 2 (P3).
+    props = {"status": _RenderingLie("live", ),
+             "goalState": _RenderingLie("active")}
+    rendered = {"status": props["status"], "goalState": props["goalState"]}
+    _rebind_guarded_words(props, rendered)
+    assert (props["status"], props["goalState"]) == ("live", "active"), props
+    assert type(props["status"]) is str and type(props["goalState"]) is str, (
+        "the stored value is still a subclass whose RENDERING can differ from what "
+        f"was graded: {type(props['status'])!r}")
+    assert (rendered["status"], rendered["goalState"]) == ("live", "active"), (
+        "the guard's verdict map still holds the caller's object, so its verdicts "
+        f"can consult an override: {rendered!r}")
+
+
+def test_an_EQUALITY_lie_cannot_forge_a_superseded_ending(sdk):
+    """#13065 review ROUND 16, finding 1 (P2) — the verdicts are equality tests.
+
+    MEASURED on the reviewed head, each row with a plain-`str` control:
+
+    ``update_knowledge(goal, status='superseded', supersededBy='succ',
+    goalState=<content 'abandoned', __eq__ -> False>)``
+        control REFUSED ("The two endings are not interchangeable…"), subclass
+        LANDED as ``status='superseded', goalState='abandoned'``;
+    ``update_knowledge(goal, status='archived', goalState=<content 'superseded',
+    __eq__ -> False>)``
+        control REFUSED, subclass LANDED as ``goalState='superseded'`` with
+        **``supersededBy=None``** — a stored ``superseded`` ending naming no
+        successor, which is the exact pair the second arm refuses.
+
+    Same through the create door. The fix normalises the verdict map, so every
+    later read compares base content.
+    """
+    goal = _goal(sdk, tag="equality-lie", goalState="active")
+
+    # (1) a `superseded` status against a goalState whose content is an ABANDONED
+    # word: the two endings disagree, and the lie must not hide it
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], status="superseded",
+                             supersededBy="succ-1",
+                             goalState=_EqualityLie("abandoned"))
+    assert "not interchangeable" in str(exc.value), str(exc.value)
+
+    # ...the plain-str control, so the assertion above is not just "this door
+    # refuses everything"
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], status="superseded",
+                             supersededBy="succ-1", goalState="abandoned")
+    assert "not interchangeable" in str(exc.value), str(exc.value)
+
+    # (2) the sharper consequence: a `superseded` goalState against a NON-superseded
+    # status names no successor, so it must be refused rather than stored bare
+    with pytest.raises(ValueError) as exc:
+        sdk.update_knowledge(goal["id"], status="archived",
+                             goalState=_EqualityLie("superseded"))
+    assert "successor" in str(exc.value).lower(), str(exc.value)
+
+    # ...and the create door
+    with pytest.raises(ValueError) as exc:
+        sdk.create_object("CI is fast [equality-lie-create]", objectKind="goal",
+                          status="archived",
+                          goalState=_EqualityLie("superseded"))
+    assert "successor" in str(exc.value).lower(), str(exc.value)
+
+    # the row is untouched by the four refusals
     node = sdk.get_entity(goal["id"])
-    assert node.get("status") == "live", (
-        f"the status RENDERING was stored ({node.get('status')!r}) over content 'live'")
+    assert node["goalState"] == "active"
+    assert node.get("supersededBy") is None, node
 
 
 def test_the_family_Supersede_verb_aligns_a_GOALs_achievement_word(sdk):

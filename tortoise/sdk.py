@@ -6552,6 +6552,17 @@ def _rebind_guarded_words(props: dict, rendered: dict) -> None:
     value that is not genuinely ``str`` is left alone — the guard's own refusals
     own that shape, and rewriting it would be a type change nobody asked for.
 
+    ``rendered`` is rewritten as well, and that half is not cosmetic: the guard's
+    own VERDICTS are read from it, and the two that dispatch past the content are
+    **equality tests** — ``_status_words_for_goal_ending``'s ``ending == 'superseded'``
+    and the successor arm's ``goal_state == 'superseded'``. ``str`` subclass may
+    override ``__eq__``, so a value whose CONTENT is an ``abandoned`` word could
+    answer "no" and be filed as ``superseded`` — MEASURED (#13065 round 16,
+    finding 1 P2): ``update_knowledge(goal, status='archived', goalState=<content
+    'superseded', __eq__-> False>)`` stored ``goalState='superseded'`` with
+    ``supersededBy=None``, i.e. the ending the guard's second arm exists to refuse.
+    Rebinding the map makes every later read compare BASE CONTENT.
+
     Behaviour-neutral for every honest value, including a plain ``str`` subclass:
     its content is what the store holds today.
     """
@@ -6559,6 +6570,7 @@ def _rebind_guarded_words(props: dict, rendered: dict) -> None:
         word = rendered.get(name)
         if not issubclass(type(word), str):
             continue
+        rendered[name] = str.__str__(word)
         for key in keys_rendering_as(props, {name}):
             if issubclass(type(props[key]), str):
                 props[key] = str.__str__(props[key])
