@@ -2810,18 +2810,36 @@ def get_graph_storage_reading(org_id: str) -> dict:
       must not be refused over our own bookkeeping state).
     * ``"unreported"`` — a row EXISTS but carries no ``measured_at``. The
       writer deposited a figure that cannot be aged, so the reading is not
-      usable: the gate refuses on it.
+      usable — and the GATE decides what follows, not this reader (below).
     * ``"read_error"`` — the store refused the query. Degraded, not absent.
     * ``"period_error"`` — the billing window itself was unresolvable.
 
-    The last two are OUR faults and they stay refusals: choosing "serve instead"
-    needs a ruling (a cap that serves past our fault is a cap that can be evaded
-    during an outage), which is the reconciliation ``allowance_gate
-    ._extraction_tokens`` records for the identical seam.
+    ⛔ WHAT THE GATE DOES WITH A REASON IS THE DIMENSION'S DECLARATION, NOT A
+    POLICY OF THIS READER (``#13102`` review F4 corrects this docstring, which
+    still stated the PRE-fix refusal policy for every fault reason). The shipped
+    rule, in the two places it lives:
+
+    * ``capture_extraction`` declares nothing (``unmeasured_is_unarmed`` is
+      ``False`` by default), so ``allowance_gate._extraction_tokens`` still
+      REFUSES on an unusable reading. Unchanged by #13084.
+    * ``graph_storage`` declares ``unmeasured_is_unarmed=True``, so
+      ``allowance_gate._reading`` SERVES the write and records the fact
+      (``_served_unmeasured``: a per-``(dimension, reason)`` counter, a throttled
+      log line, and — for the reason set ``_OPERATOR_FAULT_REASONS`` names, i.e.
+      exactly these OUR-fault ones — a durable ``ALLOWANCE_CAP_UNENFORCEABLE``
+      incident). That is the #3981 ruling taken: a paying org is never refused
+      over our own bookkeeping state, and the unenforced cap is LOUD and
+      COUNTED instead of silent. It is under-enforcement, disclosed by the
+      dimension rather than by an omission here.
+
+    So: this function names the reason, and the DIMENSION decides. A future
+    dimension inherits whichever behaviour its declaration asks for, and a
+    reader must never reintroduce a refusal by deciding one itself.
 
     ⛔ NEVER RAISES (#923): a failed read degrades to the zero view and NAMES why
-    in ``unmeasured_reason``. The gate, not this reader, turns a named fault into
-    a refusal; a reader that raised would 500 a read path that must not fail.
+    in ``unmeasured_reason``. Nothing here raises on a fault, so ONE reader serves
+    both the refusing dimension and the serving one; a reader that raised would
+    500 a read path that must not fail.
     """
     zeros: dict = {
         "graph_storage_mb": 0.0,

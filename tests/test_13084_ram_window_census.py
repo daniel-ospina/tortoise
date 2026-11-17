@@ -114,18 +114,26 @@ class _RestoreProbeClient:
     """
 
     def __init__(self, *, restore_error: Exception | None = None,
-                 payload: object = b"PAYLOAD") -> None:
+                 payload: object = b"PAYLOAD",
+                 dump_error: Exception | None = None,
+                 list_error: Exception | None = None) -> None:
         self.calls: list[tuple] = []
         self._restore_error = restore_error
         self._payload = payload
+        self._dump_error = dump_error
+        self._list_error = list_error
         self.closed = False
 
     def execute_command(self, *args):
         self.calls.append(args)
+        if self._list_error is not None:
+            raise self._list_error
         return [b"g"]  # GRAPH.LIST -> the graph exists
 
     def dump(self, graph):
         self.calls.append(("DUMP", graph))
+        if self._dump_error is not None:
+            raise self._dump_error
         return self._payload
 
     def delete(self, graph):  # recorded, then asserted ABSENT
@@ -271,6 +279,73 @@ def test_a_decoded_payload_is_refused_before_anything_is_written(monkeypatch,
     verbs = [c[0] for c in client.calls]
     assert "RESTORE" not in verbs and "DEL" not in verbs, client.calls
     assert "not bytes" in report["cold_restore"]["error"]
+
+
+def test_a_transport_failure_on_DUMP_is_unmeasurable_and_never_a_traceback(
+        monkeypatch, capsys):
+    """#13102 review F2: a transport error is a READING, not exit 1.
+
+    Pre-fix, `client.dump(graph)` sat OUTSIDE every handler (`_restore_probe`
+    provided only a `finally:`), so a `ConnectionError`/timeout escaped `main()`
+    as a traceback with exit 1 — a status this tool never answers with (0/2/3)
+    and the opposite of its own contract ("reported as a MEASUREMENT that could
+    not be taken … never as a traceback"). The double raises, which is the only
+    way the suite can see the shipped path: `main()` inspects the section's
+    `error` key and cannot observe an exception at all.
+    """
+    client = _RestoreProbeClient(dump_error=ConnectionError("socket closed"))
+    rc, report = _probe(monkeypatch, client, capsys)
+
+    assert rc == census.EXIT_UNMEASURABLE
+    cold = report["cold_restore"]
+    assert "socket closed" in cold["error"], cold
+    assert "unchanged" in cold["error"], cold
+    verbs = [c[0] for c in client.calls]
+    assert "RESTORE" not in verbs and "DEL" not in verbs, client.calls
+    assert client.closed
+
+
+def test_a_transport_failure_on_GRAPH_LIST_is_unmeasurable_too(
+        monkeypatch, capsys):
+    """The other un-handled read (#13102 review F2), and the step is NAMED."""
+    client = _RestoreProbeClient(list_error=TimeoutError("timed out"))
+    rc, report = _probe(monkeypatch, client, capsys)
+
+    assert rc == census.EXIT_UNMEASURABLE
+    cold = report["cold_restore"]
+    assert "GRAPH.LIST" in cold["error"], cold
+    assert "timed out" in cold["error"], cold
+    # it failed before the DUMP, so nothing was even read for a payload
+    assert [c[0] for c in client.calls] == ["GRAPH.LIST"], client.calls
+
+
+def test_an_unreachable_instance_is_unmeasurable_not_a_traceback(monkeypatch,
+                                                                capsys):
+    """The CONNECT and the URI resolution are inside a handler too (#13102 F2).
+
+    A malformed `--graph-uri` or a missing driver raised out of `_endpoint` /
+    `_connection` — both called outside `try:` pre-fix.
+    """
+    monkeypatch.setattr(census, "_endpoint",
+                        lambda _uri: type("EP", (), {"graph_name": None})())
+
+    def _boom(_ep):
+        raise OSError("no route to host")
+
+    monkeypatch.setattr(census, "_connection", _boom)
+    rc = census.main(["--restore-probe", "--graph-uri", "docker://h:1/g",
+                      "--graph", "g", "--confirm-graph", "g", "--json"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert rc == census.EXIT_UNMEASURABLE
+    assert "no route to host" in report["cold_restore"]["error"], report
+
+    monkeypatch.setattr(census, "_endpoint", _boom)
+    rc = census.main(["--restore-probe", "--graph-uri", "not-a-uri",
+                      "--graph", "g", "--confirm-graph", "g", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert rc == census.EXIT_UNMEASURABLE
+    assert "no route to host" in report["cold_restore"]["error"], report
 
 
 def test_the_help_text_does_not_advertise_the_DEL_the_probe_removed(capsys):
