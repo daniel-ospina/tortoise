@@ -391,7 +391,41 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where these numbers were last cut:** `origin/main` **`97fd713ffb`** — `sites` 1306→1308, `plain`
+**Where these numbers were last cut:** the PINS by `main`'s **`05fe46e94e`**, re-derived at
+`origin/main` **`b8f56fdec4`**. ⚠️ Both columns below are the CENSUS's own measurements at those two
+commits, not the marker values — the markers `main` carried into the re-cut were themselves stale,
+which is why the two sets differ:
+
+| what | measured at `534f3e1bee` (parent of the re-cut) | measured at `b8f56fdec4` |
+|---|---|---|
+| `sites` | 1309 (its marker said **1308**) | 1311 |
+| `files` | 98 | 99 |
+| `shape_plain` | 857 (its marker said **856**) | 859 |
+| `ast_door_calls` | 1567 (its marker said **1565**) | 1569 |
+| `files_scanned` | 297 | 297 (unchanged) |
+
+`tools/cypher_inventory.py --check` was **RC=1** at `534f3e1bee` on six counts, so `05fe46e94e`
+corrected six, not three: the three rows above (their stale markers in parentheses) **plus**
+`candidates` (575→576), `shape_plain_read` (575→576) and `non_cypher_door_calls` (257→258).
+(`files` 98→99 did NOT drift: the population stayed at 297 scanned files, and `tortoise/api.py`
+gained its FIRST statement site inside `#12910`'s own diff — a file newly carrying sites, not a
+count that was wrong.) Re-derived by running the tool at both commits and diffing the sets of
+carrying files; nothing here is arithmetic on the marker values.
+
+⛔ **Appendix A, however, was NOT re-cut by that commit, and this is the defect that keeps
+recurring here:** the pins are 25 SCALARS, so an insertion inside a file that already carries
+sites moves the `file:line` rows and moves no count. Measured at `b8f56fdec4`: `--check` prints
+`25 pinned counts match` while **6 appendix rows name lines that no longer carry their statement** —
+five in `tortoise/metering.py` (`measure_write_ops`, `_record_graph_storage_reading_locked`,
+`get_graph_storage_reading`, `record_postgres_bytes_written`, and the reading writer below them)
+and one in `tortoise/postgres_bytes.py`. This change regenerates Appendix A with `--markdown` at
+that head (verified byte-identical to a fresh run) and adds
+`tests/test_13098_cypher_inventory.py::test_the_doc_appendix_is_the_tools_own_output` so the next
+main-move cannot repeat it — which is step 1 of the procedure above enforced instead of trusted.
+
+<details><summary>the previous cut (kept as history)</summary>
+
+`origin/main` **`97fd713ffb`** — `sites` 1306→1308, `plain`
 854→856 (read 573→575; the 281 write half is unchanged), `candidates` 573→575, `files_scanned`
 296→297, `ast_door_calls` 1563→1565, the `rg` reconciliation in §1 re-measured on this tree, and
 Appendix A regenerated with `--markdown`.
@@ -403,7 +437,9 @@ the pin it inherited (`1302` + its own four) instead of re-deriving from the mer
 measured on `7c1df6e7d6` — stayed absorbed only on paper. Measured, not inferred: `--json` at
 `7c1df6e7d6` reports 1304 sites with 0 in `tortoise/planned_occurrence.py`; at `97fd713ffb` it reports
 1308 with that one file carrying exactly 4, and `tortoise/projection/entities.py` reads 54 at BOTH.
-The numbers above are re-derived from `97fd713ffb`'s tree; this PR adds no statement site of its own.
+The numbers above are re-derived from `97fd713ffb`'s tree; that PR added no statement site of its own.
+
+</details>
 
 `.github/workflows/cypher-diff.yml` runs the **differential harness steps first and this census step
 LAST**, deliberately: a base-drift pin must still red the job (the doc's numbers are then wrong), but
@@ -958,11 +994,11 @@ the order was fixed (`#13098` review F8).
 | `tortoise/metering.py:2126` | `get_cohort_spend_usd` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord) WHERE m.org_id IN $ids AND m.period_start <…` |
 | `tortoise/metering.py:2218` | `get_current_usage` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
 | `tortoise/metering.py:2235` | `get_current_usage` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id: $tid}) RETURN t.tier` |
-| `tortoise/metering.py:2462` | `measure_write_ops` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
-| `tortoise/metering.py:2701` | `_record_graph_storage_reading_locked` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
-| `tortoise/metering.py:2801` | `get_graph_storage_reading` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
-| `tortoise/metering.py:2913` | `record_postgres_bytes_written` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
-| `tortoise/metering.py:2966` | `get_postgres_bytes_written` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
+| `tortoise/metering.py:2469` | `measure_write_ops` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
+| `tortoise/metering.py:2708` | `_record_graph_storage_reading_locked` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
+| `tortoise/metering.py:2808` | `get_graph_storage_reading` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
+| `tortoise/metering.py:2922` | `record_postgres_bytes_written` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) SET m…` |
+| `tortoise/metering.py:2975` | `get_postgres_bytes_written` | plain | read | candidate:SQL-shaped | `MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) RETUR…` |
 | `tortoise/migrate_db.py:77` | `_count_nodes` | plain | read | candidate:SQL-shaped | `MATCH (n) RETURN count(n)` |
 | `tortoise/migrate_kinds.py:296` | `relabel_legacy_documents` | plain | read | candidate:SQL-shaped | `MATCH (n:Document) RETURN ID(n), n.id, n.url, n.ingestedAt, n.create…` |
 | `tortoise/migrate_kinds.py:309` | `relabel_legacy_documents` | plain | read | candidate:SQL-shaped | `MATCH (n:Document:Source) RETURN ID(n)` |
@@ -1037,7 +1073,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/planned_occurrence.py:468` | `create_plan` | plain | read | candidate:SQL-shaped | `MATCH (o:Object {id:$o}) RETURN properties(o)` |
 | `tortoise/planned_occurrence.py:850` | `_resolve_plan` | plain | read | candidate:SQL-shaped | `MATCH (o:Object {id:$o}) RETURN o.objectKind, o.status, coalesce(o.o…` |
 | `tortoise/planned_occurrence.py:924` | `planned_without_occurrence` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH (p:Object) WHERE p.objectKind IN $kinds OPTIONAL MATCH (e:Even…` |
-| `tortoise/postgres_bytes.py:332` | `_meter_statement` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/postgres_bytes.py:336` | `_meter_statement` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/projection/__init__.py:1913` | `read_config_reset` | plain | read | candidate:SQL-shaped | `MATCH (n:Meta {key:$key}) RETURN properties(n)` |
 | `tortoise/projection/__init__.py:1933` | `set_config_reset_marker` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (n:Meta {key:$key}) SET n += $props` |
 | `tortoise/projection/__init__.py:1951` | `clear_config_reset` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (n:Meta {key:$key}) DETACH DELETE n` |
