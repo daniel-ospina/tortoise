@@ -855,7 +855,7 @@ rules are arguable here.
 
 ### 6.4 `:Source.embedding` on a non-episodic Source — **decided 2026-11-17, cited not reopened**
 
-- **The decision:** a `:Source` gets a summary vector, **in Postgres** (`STORAGE-ARCHITECTURE.md` §14.3 **V2**, owner
+- **The decision:** a `:Source` is **to get** a summary vector, **in Postgres** (`STORAGE-ARCHITECTURE.md` §14.3 **V2**, owner
   2026-11-17, `#13220`). The demand question below no longer decides whether — it sizes what the vector is worth.
 - **The remaining DESIGN question:** *which text* a `:Source` with no session narrative embeds — named as V2's one open
   choice in `STORAGE-ARCHITECTURE.md` §14.3 and `SEARCH-ARCHITECTURE.md`. The demand measurement below still informs it;
