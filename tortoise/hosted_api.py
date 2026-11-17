@@ -34594,10 +34594,9 @@ def _org_graph_names(org_id: str, graph_name: str | None = None) -> list[str]:
             # silently capped at the deployment's `max_rows` (1000) and cannot
             # report its own truncation, so an org owning more graphs than one
             # page — which is reachable: `max_graphs_per_team` is `null`, i.e.
-            # UNLIMITED, on pro and team (free/solo/anon cap at 1/2/1 — #10743
-            # states exactly that table, and its title is "`max_graphs` is None
-            # … for 3 tiers of 5") — would have its tail of custom graphs
-            # dropped from the
+            # UNLIMITED, on pro and team, and ONLY those two (free/solo/anon
+            # cap at 1/2/1; #10743 measures that table) — would have its tail
+            # of custom graphs dropped from the
             # deprovision list, and `purge_org_control_plane` would then delete
             # the rows that named them: unnameable, unreapable, permanently
             # resident. Exactly the partial erasure this function's raise exists
