@@ -64,9 +64,12 @@ on whether a bare module name counts as one, and it has already been read three 
 10 (`residency.py:284`), 11 (`why_snapshot.py:484`) and 14 (`webhook_delivery.py:487`) give a number and
 nothing else; row 15 gives bare module names beside `hosted_api:32965` and one bare `pack_manifest_store.py:467`
 — neither cite a re-findable handle; and row 18 declares itself `found, NOT censused` — a GAP, see §7. Those
-five drift silently and
-no symbol will be there to re-find: for them the number IS the citation, and it is stale on any head but
-this one. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
+five are *at risk* of drifting silently: no symbol will be there to re-find — for them the number IS the
+citation — so an insert above a cited site is undetectable from the row alone. The risk has already begun
+to bite: of the 19 line-numbered cites in these five rows, **10 no longer name the same line at `main`**
+(`55ec2c71b1`, the head the 52 above is counted against) — row 15's `hosted_api:32965`, whose
+`MERGE (p:PackInstall …)` is at `:33067` there, and 9 of row 18's 14 — while rows 10, 11 and 14 and row
+15's `pack_manifest_store.py:467` still do. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
 Cypher — but the row's own WRITE cite is not.) Re-derive each cite from the text
 its own row carries, which is the rule §9.1 of `STORAGE-ARCHITECTURE.md` applies to its own cites.
 The **byte** figures do not drift this way: they are re-derivable from the committed JSON arms at any
