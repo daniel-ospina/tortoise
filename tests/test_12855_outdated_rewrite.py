@@ -382,8 +382,14 @@ def test_a_second_run_finds_nothing_and_appends_nothing(env):
 
 def test_a_row_carrying_a_supersession_carrier_is_reported(env):
     """A row with BOTH a legacy word and a successor carrier is a shape the tool
-    must not decide about silently: it is counted in the preview, and the
-    carrier is left alone."""
+    must not decide about silently: it is counted in the preview, and the WRITE
+    leaves the carrier alone.
+
+    ⚠️ The carrier assertion is made on an EXECUTE run on purpose. Asserting
+    `rewritten == []` on a PREVIEW measured nothing at all: `run` returns before
+    `rewrite` whenever `execute` is false, so that assertion held for every
+    preview ever taken (review finding, 2026-11-17).
+    """
     sdk, _events = env
     oid = sdk.create_object("carried", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
@@ -392,12 +398,17 @@ def test_a_row_carrying_a_supersession_carrier_is_reported(env):
         "SET n.supersededAt = '2026-01-01T00:00:00Z'",
         params={"id": oid})
 
-    rep = tool.run(sdk, execute=False)
+    preview = tool.run(sdk, execute=False)
+    assert [r["id"] for r in preview.carriers] == [oid]
+    assert preview.by_word["outdated"] == 1
 
-    assert [r["id"] for r in rep.carriers] == [oid]
-    assert rep.by_word["outdated"] == 1
-    # The carrier is part of the report, never the write's business.
-    assert rep.rewritten == []
+    rep = tool.run(sdk, execute=True)
+
+    assert rep.rewritten == [oid], rep.failures
+    row = sdk.get_entity(oid)
+    assert row.get("status") == tool.REWRITE_TO, "the status IS rewritten"
+    assert row.get("supersededBy") == "succ-1", "the carrier is NOT touched"
+    assert row.get("supersededAt") == "2026-01-01T00:00:00Z"
 
 
 def test_the_legacy_outdated_FLAG_is_reported_and_not_rewritten(env):
@@ -478,3 +489,68 @@ def test_an_empty_target_flag_is_refused_not_treated_as_absent(monkeypatch):
     different store while the operator believes they named one."""
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     assert tool.main(["--db-path", ""]) == 2
+
+
+# ══ the refusals are not a CLI-only courtesy ═════════════════════════════
+
+
+def test_run_execute_raises_the_refusal_instead_of_half_writing(env, monkeypatch):
+    """`run(execute=True)` is the layer every writing test drives, and it is the
+    layer a non-CLI caller reaches.
+
+    With the gates only in `main`, that call rewrote the addressable rows and
+    left the rest behind — the partial rewrite the refusal text names — and no
+    suite could see it (review finding, 2026-11-17). Asserted by EFFECT: the
+    refusal IS raised and the population is untouched.
+    """
+    sdk, _events = env
+    _seed(sdk)
+    real_collect = tool.collect
+
+    def short_read(proj, *, sample=20):
+        rep = real_collect(proj, sample=sample)
+        rep.truncated = True
+        return rep
+
+    monkeypatch.setattr(tool, "collect", short_read)
+
+    with pytest.raises(tool.Refused) as refused:
+        tool.run(sdk, execute=True)
+
+    assert refused.value.reason == tool.REFUSE_TRUNCATED
+    monkeypatch.undo()
+    assert len(_legacy_rows(sdk)) == 3, "nothing may be written before the refusal"
+
+
+# ══ the CLI's SUCCESS arm — exit 0, which nothing used to exercise ═══════
+
+
+def test_main_execute_rewrites_the_population_and_exits_zero(tmp_path, monkeypatch):
+    """`--execute` on a rewritable graph exits 0 and leaves no legacy row.
+
+    Before this test only the exit-2 arms of `main` were driven, so the arm an
+    operator actually runs — and the exit code the documented contract promises
+    for it — was never measured.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
+    db = tmp_path / "exec.db"
+    events = tmp_path / "events"
+    events.mkdir()
+    journal = events / "events.jsonl"
+
+    sdk = TortoiseSDK(str(db), event_log_path=str(journal))
+    ids = _seed(sdk)
+    sdk.close()
+
+    argv = ["--db-path", str(db), "--event-log-path", str(journal)]
+    assert tool.main(argv) == 0, "the preview is a success, population or not"
+    assert tool.main(argv + ["--execute", "--json"]) == 0
+
+    sdk = TortoiseSDK(str(db), event_log_path=str(journal))
+    try:
+        assert _legacy_rows(sdk) == []
+        for name in ("old-1", "old-2", "gone-1"):
+            assert _status(sdk, ids[name]) == tool.REWRITE_TO, name
+    finally:
+        sdk.close()

@@ -134,7 +134,14 @@ EXIT CODES
         cannot rewrite it) or its `id` is bound by more than one node. A PREVIEW
         over such a read exits 1 too — the preview is the measurement that
         unblocks the sequenced drop, so it must not read as complete.
-    2   refused before touching anything (no journal, empty target flag)
+    2   refused before touching anything: no journal, an empty target flag; and
+        on `--execute` a TRUNCATED read or an UNADDRESSABLE row (no `id`) — both
+        exit 1 on a preview (an incomplete measurement) and 2 on the write arm
+        (nothing is written). ⚠️ A FAN-OUT / dual-labelled row is NOT in this
+        set: it is a per-ROW refusal (that row is reported by id, the safe rows
+        are still rewritten, exit 1), because refusing the whole run would mean
+        the tool could never make progress on a graph holding one such row —
+        which is exactly the canonical instance.
 """
 
 from __future__ import annotations
@@ -444,14 +451,19 @@ def rewrite(sdk, rep: Report) -> Report:
                     "REFUSED (dual-labelled): this :Object also carries "
                     f"{', '.join(':' + lbl for lbl in foreign)} — "
                     "update_knowledge dispatches on the label, so the write "
-                    "takes that family's arm and this row's status is never "
-                    "written. That arm either ECHOES a stored synonym back "
-                    "(the row keeps its word, #11824 S0) or REFUSES a dead "
-                    "claim (a claim is answered by minting a successor, never "
-                    "by re-stamping it — #2498); neither lands the rewrite, "
-                    "so the row is reported here instead of being counted as "
-                    "rewritten. Mint a successor, or correct the label, and "
-                    "re-run."),
+                    "takes that family's arm. On the POINT arm that arm either "
+                    "ECHOES a stored synonym back (the row keeps its word, "
+                    "#11824 S0) or REFUSES a dead claim (a claim is answered "
+                    "by minting a successor, never by re-stamping it — "
+                    "#2498), so the rewrite never lands. On the SUBJECT arm the "
+                    "caller's word IS written and stored (measured 2026-11-17) "
+                    "— the refusal there is this tool's SCOPE, not a "
+                    "limitation: it rewrites a row that is an `:Object` and "
+                    "nothing else, because a node that is also a `:Subject` "
+                    "carries a lifecycle another family owns (#12855 keeps "
+                    "their words). Either way the row is reported here rather "
+                    "than written. Mint a successor, or correct the label, "
+                    "and re-run."),
             })
             continue
         if not _is_clean_object_row(row.get("nodes") or []):
@@ -613,6 +625,48 @@ def _empty_flag(args) -> str | None:
     return None
 
 
+class Refused(Exception):
+    """A pre-write refusal: nothing was written, and `main` exits 2.
+
+    Raised from :func:`run` — the layer a suite drives — as well as answered by
+    `main`, because a refusal reachable ONLY from the CLI is a refusal any other
+    caller walks straight past, half-writing the population the refusal exists
+    to protect.
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(f"{reason}: {message}")
+        self.reason = reason
+        self.message = message
+
+
+def _refusal(rep: Report) -> Refused | None:
+    """The fail-closed pre-write gates, judged on the population to be written.
+
+    Both mean "this run cannot reach the population it claims", and a partial
+    rewrite of such a graph is the shape that leaves the `assembly` member
+    load-bearing for HIDDEN rows — so both refuse BEFORE the first write.
+
+    ⛔ `fanout` is deliberately NOT one of them. A row whose `id` is bound by a
+    `:Point`/`:Subject` sibling is refused PER ROW (it is reported by id, and the
+    safe rows are still rewritten), because promoting it to a whole-run refusal
+    would leave the tool unable to rewrite anything on a graph holding one such
+    row — the canonical instance is exactly that shape.
+    """
+    if rep.truncated:
+        return Refused(
+            REFUSE_TRUNCATED,
+            "the paged read fell short of the store's own count, so this run does "
+            "not know the population.")
+    if rep.unaddressable:
+        return Refused(
+            REFUSE_UNADDRESSABLE,
+            f"{len(rep.unaddressable)} :Object row(s) carry a legacy status word "
+            "but no `id`, so the SDK cannot rewrite them; a partial rewrite would "
+            "leave the filter member load-bearing.")
+    return None
+
+
 def run(sdk, *, execute: bool = False, sample: int = 20,
         report: Report | None = None) -> Report:
     """Collect, and (only when `execute`) rewrite. The testable core.
@@ -633,6 +687,13 @@ def run(sdk, *, execute: bool = False, sample: int = 20,
     rep.journal = str(getattr(log, "path", None)) if log is not None else None
     if not execute:
         return rep
+    # ⛔ THE REFUSALS ARE MADE HERE, not only in `main`. `main` answers them with
+    # exit 2; a caller that reaches `run(execute=True)` directly gets the SAME
+    # gate as an exception, so there is no second, unguarded write path — the
+    # shape that half-wrote a graph in review (2026-11-17).
+    refusal = _refusal(rep)
+    if refusal is not None:
+        raise refusal
     return rewrite(sdk, rep)
 
 
@@ -708,34 +769,18 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         preview = run(sdk, execute=False, sample=args.sample)
+        rep = preview
         if args.execute:
-            # Fail closed BEFORE the first write: an unaddressable row and a
-            # truncated read both mean "this run cannot reach the population it
-            # claims", and a partial rewrite of such a graph is the shape that
-            # leaves the `assembly` member load-bearing for hidden rows.
-            if preview.truncated:
+            # Fail closed BEFORE the first write. The gates themselves live in
+            # `_refusal` (and are re-applied inside `run`), so a non-CLI caller
+            # cannot take a second, unguarded write path.
+            try:
+                rep = run(sdk, execute=True, sample=args.sample, report=preview)
+            except Refused as refused:
                 sys.stderr.write(
-                    f"rewrite_object_status: REFUSED {REFUSE_TRUNCATED}: the paged "
-                    "read fell short of the store's own count, so this run does "
-                    "not know the population. Nothing was written.\n")
+                    f"rewrite_object_status: REFUSED {refused.reason}: "
+                    f"{refused.message} Nothing was written.\n")
                 return 2
-            if preview.unaddressable:
-                sys.stderr.write(
-                    f"rewrite_object_status: REFUSED {REFUSE_UNADDRESSABLE}: "
-                    f"{len(preview.unaddressable)} :Object row(s) carry a legacy "
-                    "status word but no `id`, so the SDK cannot rewrite them; a "
-                    "partial rewrite would leave the filter member load-bearing. "
-                    "Nothing was written.\n")
-                return 2
-            if preview.fanout:
-                sys.stderr.write(
-                    f"rewrite_object_status: REFUSED {REFUSE_FANOUT}: "
-                    f"{len(preview.fanout)} row(s) have an `id` bound by more "
-                    "than one node, or by a node carrying a :Point/:Subject "
-                    "label; writing one would restamp that sibling (#12855). "
-                    "Nothing was written.\n")
-                return 2
-        rep = run(sdk, execute=args.execute, sample=args.sample, report=preview)
     finally:
         sdk.close()
 
