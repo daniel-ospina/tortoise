@@ -103,7 +103,8 @@
 --     are the READ rows) and `record_plan` (`cache_projection.py`) takes neither
 --     records nor `derived`. `replay`'s only production call sites
 --     at this head are `tortoise/record_writer.py` (the live seam) and
---     `tools/record_runner.py:769` (no `derived=`), neither of which is on the
+--     `tools/record_runner.py::apply_batches`'s `replay(...)` (`:784`, no
+--     `derived=`), neither of which is on the
 --     restore path. The recompute therefore belongs where the vector is actually
 --     DROPPED — the record→node read, `node_from_row` / `_props_from_row`, which
 --     is the function `refused_props_names()` makes drop `embedding`; and the
@@ -154,8 +155,9 @@
 -- this paragraph claimed the opposite and was wrong:
 --
 --   * `record_projection.replay()` does NOT, on its own. `derived=` is a
---     KEYWORD DEFAULTING TO `None`, and `tools/record_runner.py:769` (the
---     `record_runner` bulk/backfill fold, #13210) calls `replay(batch, conn,
+--     KEYWORD DEFAULTING TO `None`, and `tools/record_runner.py::apply_batches`
+--     (the `record_runner` bulk/backfill fold, #13210 — cited by SYMBOL because
+--     the ordinal has drifted twice) calls `replay(batch, conn,`
 --     org_id=…, graph_id=…, start_seq=…, allocate=…)` without it. ⛔ THE SCOPE,
 --     stated exactly because an earlier cut of this paragraph over-claimed it:
 --     a `record_runner` re-fold leaves the vector ALONE on rows that already
