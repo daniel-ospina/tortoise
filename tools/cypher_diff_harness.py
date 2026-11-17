@@ -1,0 +1,771 @@
+#!/usr/bin/env python3
+"""cypher-diff-harness — prove a Cypher read and its SQL form are the SAME answer (#13098).
+
+WHAT THIS IS
+============
+`#13082`'s rule is *"do not flip a query until the diff is empty on a corpus that
+exercises its edge cases"*. This is that diff. For one candidate statement it:
+
+1. seeds ONE corpus into **both** stores — a real FalkorDB lane (the product's
+   graph) and a real Postgres record (the product's own `supabase/migrations`
+   schema) — so the two forms answer over the **same tenant data**;
+2. runs the **Cypher** form against the graph and the **SQL** form against the
+   record;
+3. diffs **rows · order · null handling · row shape**, and prints the graph lane
+   and the record DSN it used.
+
+Exit codes are the verdict, and there is no third one: **0 = equal**, **1 =
+different**, **2 = could not run** (no lane, no DSN, a missing corpus edge case,
+an unexpected error). `2` is never a pass — a harness that cannot run must not
+read as agreement.
+
+WHAT "THE SAME" MEANS — the comparison rule, in one home
+========================================================
+The repo already has this argument in code for the record↔cache pair
+(`record_serve.parity_difference`, whose rule is: equal on every field both sides
+can claim, every absence EXPLAINED by a declaration, and the comparison fails in
+both directions so neither a dropped nor an invented field hides). This harness
+holds the same posture and adds the two things a *query* diff needs beyond a
+field diff:
+
+* **ORDER is compared when the statement declares an order.** A statement with
+  `ORDER BY` is compared as a SEQUENCE; without one, as a MULTISET (row order is
+  not part of the answer, and asserting it would red on a legitimate planner
+  difference). The declaration is the candidate's `ordered` flag — never
+  inferred from whatever the two engines happened to return.
+* **NULL handling is compared at the RESULT level, and it is three-way.** A
+  property absent on a node and a column that is SQL NULL are the SAME answer
+  (`null`); an empty string, `0`, `false` and `'None'` are each DIFFERENT from
+  it. Engines disagree here in practice — Postgres `ORDER BY x DESC` places NULLs
+  FIRST by default, which is a real porting defect this harness catches (the
+  `null-order` mutation below is exactly it) — so collapsing nullness into
+  "falsy" would erase the class the harness exists to see.
+* **ROW SHAPE is compared as the declared column list**, so an extra or missing
+  column is a difference even when every value matches (a projection drift is not
+  a value difference and must not be absorbed by a zip).
+
+Value normalization, stated so it is not mistaken for tolerance: `Decimal` (the
+record's numeric type) and `float` compare by numeric value AND by type family;
+JSONB columns and graph property maps compare structurally; a list keeps its
+order. A type family change (int vs str, bool vs int) is a DIFFERENCE — the
+kinds of silent coercion a migration actually produces.
+
+THE CORPUS IS AN ARGUMENT, NOT A CONVENIENCE
+============================================
+Every candidate declares the edge cases it cares about, and the harness REFUSES
+(exit 2) if the seeded store did not actually contain one of them — the
+`#13099`/`#11859` lesson: a pin that cannot fail for the thing it names is not a
+pin. The shared corpus is:
+
+| id | what it is | which edge case |
+|---|---|---|
+| `p-normal` | a plain point | the ordinary case |
+| `p-operator` | `is_operator = true` | a FILTER that must exclude it |
+| `p-null-content` | no `content` | NULL property |
+| `p-null-created` | no `created_at` | NULL in an ORDER BY |
+| `p-unicode` | emoji + a `|` + a trailing space | encoding / a digest that must not be mangled |
+| `p-retired` | `valid_to` set | a retracted row (`#11827`'s retire columns) |
+| (absent tenant) | no rows for `org-other` | the EMPTY result |
+
+USAGE
+=====
+    # 0 = equal · 1 = different · 2 = could not run
+    uv run python tools/cypher_diff_harness.py \
+        --graph-uri "docker://:pw@127.0.0.1:16404" \
+        --record-dsn "postgresql://postgres:s3cret@127.0.0.1:15499/cypher_diff" \
+        --candidate point-by-id
+
+    # prove the harness can FAIL: inject a real porting defect
+    … --candidate point-listing --mutate null-order     # exit 1, names the rows
+
+    # a real record DSN from the product's own migrations (no external Postgres):
+    docker run -d --name cypher-diff-record -p 15499:5432 \
+        -e POSTGRES_PASSWORD=s3cret -e POSTGRES_DB=cypher_diff pgvector/pgvector:pg16
+    … --record-dsn postgresql://postgres:s3cret@127.0.0.1:15499/cypher_diff \
+      --bootstrap-record          # applies supabase/migrations/*.sql in filename order
+
+CI: `.github/workflows/cypher-diff.yml` starts a FalkorDB service and a
+`pgvector/pgvector:pg16` service, bootstraps the record from the committed
+migrations, and runs each candidate TWICE — plain (must exit 0) and with
+`--mutate null-order` (must exit 1). Both names are in the job output.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Callable, Iterable, Sequence
+
+ROOT = Path(__file__).resolve().parent.parent
+
+#: The tenant the corpus is seeded under. Two values on purpose: `GRAPH`/`ORG`
+#: pair for the seeded tenant, and a second tenant with NO rows for the empty
+#: result (`EMPTY_ORG`).
+TENANT = {"org_id": "org-diff", "graph_id": "graph-diff"}
+EMPTY_TENANT = {"org_id": "org-diff-empty", "graph_id": "graph-diff-empty"}
+
+#: Retired rows: the record's retire columns (#11827) are `valid_to`/`expired_at`;
+#: the cache answers a point by id regardless, so a corpus row that carries
+#: `valid_to` is the "deleted/retracted" edge case at RESULT level.
+CORPUS: tuple[dict[str, Any], ...] = (
+    {"id": "p-normal", "content": "a plain claim", "created_at": "2026-01-01T00:00:00Z", "is_operator": False},
+    {"id": "p-operator", "content": "an operator point", "created_at": "2026-01-02T00:00:00Z", "is_operator": True},
+    {"id": "p-null-content", "content": None, "created_at": "2026-01-03T00:00:00Z", "is_operator": False},
+    {"id": "p-null-created", "content": "no created_at", "created_at": None, "is_operator": False},
+    {"id": "p-unicode", "content": "emoji 🐢 | pipe, trailing space ", "created_at": "2026-01-05T00:00:00Z", "is_operator": False},
+    {"id": "p-retired", "content": "a retracted claim", "created_at": "2026-01-06T00:00:00Z",
+     "is_operator": False, "valid_to": "2026-02-01T00:00:00Z"},
+)
+
+
+# --------------------------------------------------------------------------- #
+# candidates — a Cypher form, its SQL form, and what it promises
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Candidate:
+    """One migration candidate, both forms, and the edges it must be tested on."""
+
+    name: str
+    cypher: str
+    sql: str
+    columns: tuple[str, ...]
+    ordered: bool
+    #: names of corpus rows this candidate's corpus must contain (refused if absent)
+    requires: tuple[str, ...] = ()
+    notes: str = ""
+    #: extra SQL predicate the `--mutate` flag can bend, per mutation name
+    mutations: dict[str, str] = field(default_factory=dict)
+
+
+CANDIDATES: dict[str, Candidate] = {
+    "point-by-id": Candidate(
+        name="point-by-id",
+        cypher=(
+            "MATCH (n:Point {id:$id}) "
+            "RETURN n.id AS id, n.content AS content, n.point_kind AS point_kind"
+        ),
+        sql=(
+            "SELECT id, content, point_kind FROM public.point "
+            "WHERE org_id = %(org_id)s AND graph_id = %(graph_id)s AND id = %(id)s"
+        ),
+        columns=("id", "content", "point_kind"),
+        ordered=False,
+        requires=("p-null-content",),
+        mutations={
+            # a projection that silently drops the null-content row is the classic
+            # "no answer reads as an absence" defect (§17.3)
+            "drop-null": " AND content IS NOT NULL",
+        },
+        notes=(
+            "The anchored read behind GET /v1/points/{id} — `record_serve`'s "
+            "`point-by-id` coordinate. Both forms are anchored on the same id."
+        ),
+    ),
+    "point-listing": Candidate(
+        name="point-listing",
+        cypher=(
+            "MATCH (n:Point) WHERE n.is_operator = false "
+            "RETURN n.id AS id, n.content AS content, n.created_at AS created_at "
+            "ORDER BY n.created_at DESC LIMIT 10"
+        ),
+        # ⛔ MEASURED, and it is the reason this candidate exists: the graph
+        # places a NULL `created_at` FIRST under DESC, and Postgres' own default
+        # for DESC is also NULLS FIRST — so the forms AGREE only while nobody
+        # "tidies" the clause. A port that defensively writes `NULLS LAST`
+        # changes the row ORDER while every value still matches, which a
+        # value-only diff cannot see. That is the `null-order` mutation below.
+        sql=(
+            "SELECT id, content, created_at FROM public.point "
+            "WHERE org_id = %(org_id)s AND graph_id = %(graph_id)s "
+            "AND is_operator = false "
+            "ORDER BY created_at DESC LIMIT 10"
+        ),
+        columns=("id", "content", "created_at"),
+        ordered=True,
+        requires=("p-null-created", "p-retired"),
+        mutations={
+            "null-order": "",  # mutated in `_mutated`: NULLS LAST is appended
+            "drop-row": " AND id <> 'p-retired'",
+        },
+        notes=(
+            "An unfiltered-edge listing (`plain` shape in the inventory): filter, "
+            "order, limit. Exercises NULL placement in ORDER BY, which is where "
+            "the two engines disagree by DEFAULT."
+        ),
+    ),
+}
+
+#: The mutations that rewrite the SQL rather than append a predicate.
+NULLS_FIRST_SQL = None  # computed per candidate in `_mutated`
+
+
+def _mutated(candidate: Candidate, mutation: str | None) -> str:
+    """The SQL form with a deliberate porting defect injected."""
+    if mutation is None:
+        return candidate.sql
+    if mutation == "null-order":
+        # The well-intentioned "defensive" clause a hand-port adds — and it
+        # reverses the null placement the graph answers with.
+        if "ORDER BY created_at DESC" not in candidate.sql:
+            raise KeyError(f"{candidate.name} has no `ORDER BY created_at DESC` — the "
+                           "null-order mutation would change nothing, so it is refused "
+                           "rather than reported as a mutation that found no difference")
+        return candidate.sql.replace("ORDER BY created_at DESC",
+                                     "ORDER BY created_at DESC NULLS LAST")
+    if mutation in candidate.mutations:
+        extra = candidate.mutations[mutation]
+        # append before ORDER BY when the statement has one
+        if " ORDER BY " in candidate.sql:
+            head, tail = candidate.sql.split(" ORDER BY ", 1)
+            return f"{head}{extra} ORDER BY {tail}"
+        return candidate.sql + extra
+    raise KeyError(f"{candidate.name} has no mutation {mutation!r}; "
+                   f"declared: {sorted(candidate.mutations) + ['null-order']}")
+
+
+# --------------------------------------------------------------------------- #
+# seeding — ONE corpus, both stores
+# --------------------------------------------------------------------------- #
+def _redis_url(graph_uri: str) -> str:
+    """The repo spells a lane `docker://:pw@host:port` (its own seam); the driver
+    speaks `redis://`. Translated here, once — a caller passing either form works."""
+    if graph_uri.startswith("docker://"):
+        return "redis://" + graph_uri[len("docker://"):]
+    return graph_uri
+
+
+def seed_graph(graph_uri: str, graph_name: str) -> dict[str, Any]:
+    """Seed the corpus into a real FalkorDB graph. Returns the lane it used."""
+    from falkordb import FalkorDB  # local import: a missing driver must read as 2
+
+    client = FalkorDB.from_url(_redis_url(graph_uri))
+    graph = client.select_graph(graph_name)
+    graph.query("MATCH (n:Point) DETACH DELETE n")
+    for row in CORPUS:
+        props = {k: v for k, v in row.items() if v is not None}
+        assigns = ", ".join(f"n.{k} = ${k}" for k in props)
+        graph.query(f"MERGE (n:Point {{id:$id}}) SET {assigns}", props)
+    # the EMPTY tenant seeds nothing, on purpose: the empty result must come from
+    # a query, not from a missing fixture
+    total = graph.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
+    return {"graph": graph_name, "points": int(total)}
+
+
+def seed_record(dsn: str) -> dict[str, Any]:
+    """Seed the same corpus into the record's own schema."""
+    import psycopg2
+    import psycopg2.extras
+
+    conn = psycopg2.connect(dsn, connect_timeout=10)
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM information_schema.tables "
+                        "WHERE table_schema = 'public' AND table_name = 'point'")
+            if cur.fetchone()[0] == 0:
+                raise RuntimeError(
+                    "the record DSN has no public.point — bootstrap it with the "
+                    "committed migrations (`--bootstrap-record`, which applies "
+                    "supabase/migrations/*.sql in filename order)"
+                )
+            # The tenant chain is REAL, not stubbed: `organizations` → `graphs` →
+            # `node_identity` → `point`, exactly as the product's write path
+            # settles it. A harness that bypassed the invariants would compare
+            # forms over data the product could never store.
+            for tenant in (TENANT, EMPTY_TENANT):
+                cur.execute(
+                    "INSERT INTO public.organizations (id, name, graph_name) "
+                    "VALUES (%(org_id)s, %(org_id)s, %(graph_id)s) ON CONFLICT (id) DO NOTHING",
+                    tenant,
+                )
+                cur.execute(
+                    "INSERT INTO public.graphs "
+                    "(id, org_id, name, kind, namespace, status, created_at, purged_residual) "
+                    "VALUES (%(graph_id)s, %(org_id)s, %(graph_id)s, 'tenant', %(graph_id)s, "
+                    "'active', now(), false) ON CONFLICT (id) DO NOTHING",
+                    tenant,
+                )
+            cur.execute("DELETE FROM public.point WHERE org_id IN (%s, %s)",
+                        (TENANT["org_id"], EMPTY_TENANT["org_id"]))
+            # `public.point` carries a FOREIGN KEY onto `public.node_identity` — the
+            # record's real identity contract (the coordinate a `fetch-record`
+            # repair is handed), so the corpus mints it the way the product does.
+            cur.execute("DELETE FROM public.node_identity WHERE org_id IN (%s, %s)",
+                        (TENANT["org_id"], EMPTY_TENANT["org_id"]))
+            for row in CORPUS:
+                cur.execute(
+                    "INSERT INTO public.node_identity "
+                    "(org_id, graph_id, node_label, node_key) "
+                    "VALUES (%(org_id)s, %(graph_id)s, 'Point', %(node_key)s)",
+                    {**TENANT, "node_key": row["id"]},
+                )
+            for row in CORPUS:
+                keys = ["org_id", "graph_id", "node_key", *row.keys()]
+                values = [TENANT["org_id"], TENANT["graph_id"], row["id"], *row.values()]
+                cols = ", ".join(keys)
+                marks = ", ".join(f"%({k})s" for k in keys)
+                cur.execute(
+                    f"INSERT INTO public.point ({cols}) VALUES ({marks})",
+                    dict(zip(keys, values)),
+                )
+            cur.execute("SELECT count(*) FROM public.point WHERE org_id = %s",
+                        (TENANT["org_id"],))
+            total = cur.fetchone()[0]
+    finally:
+        conn.close()
+    return {"points": int(total)}
+
+
+def bootstrap_record(dsn: str) -> int:
+    """Apply the product's own migrations to a fresh Postgres — a REAL record DSN.
+
+    The full migration set is applied in filename order with `ON_ERROR_STOP=0`
+    per file and every failure REPORTED: the record schema builds on the
+    control-plane schema (roles `anon`/`authenticated`/`service_role`, `public.
+    graphs`, `public.node_identity`), so a partial apply is expected on a bare
+    server and must be visible rather than silent.
+    """
+    migrations = sorted((ROOT / "supabase" / "migrations").glob("*.sql"))
+    failures: list[str] = []
+    for path in migrations:
+        proc = subprocess.run(
+            ["psql", dsn, "-q", "-v", "ON_ERROR_STOP=1", "-f", str(path)],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            first = (proc.stderr or "").strip().splitlines()
+            failures.append(f"{path.name}: {first[0] if first else 'failed'}")
+    print(f"bootstrapped {len(migrations) - len(failures)}/{len(migrations)} migrations")
+    for failure in failures[:20]:
+        print(f"  FAILED {failure}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# execution
+# --------------------------------------------------------------------------- #
+def run_cypher(graph_uri: str, graph_name: str, cypher: str, params: dict) -> tuple[list[tuple], list[str]]:
+    from falkordb import FalkorDB
+
+    graph = FalkorDB.from_url(_redis_url(graph_uri)).select_graph(graph_name)
+    res = graph.query(cypher, params)
+    return [tuple(r) for r in res.result_set], [c[1] if len(c) > 1 else str(c[0]) for c in (res.header or [])]
+
+
+def run_sql(dsn: str, sql: str, params: dict) -> tuple[list[tuple], list[str]]:
+    import psycopg2
+
+    conn = psycopg2.connect(dsn, connect_timeout=10)
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = [tuple(r) for r in cur.fetchall()]
+            cols = [d[0] for d in (cur.description or [])]
+    finally:
+        conn.close()
+    return rows, cols
+
+
+# --------------------------------------------------------------------------- #
+# the diff
+# --------------------------------------------------------------------------- #
+def _family(value: Any) -> str:
+    """The value's scalar FAMILY — the unit row-shape comparison uses."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, Decimal)) and not isinstance(value, bool):
+        return "number"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, (list, tuple)):
+        return "list"
+    if isinstance(value, dict):
+        return "dict"
+    return type(value).__name__
+
+
+def _norm(value: Any) -> Any:
+    """Normalize for VALUE comparison only — never for the family check."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (list, tuple)):
+        return [_norm(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _norm(v) for k, v in sorted(value.items())}
+    return value
+
+
+def _canon(row: Sequence[Any]) -> str:
+    return json.dumps([_norm(v) for v in row], sort_keys=True, default=str)
+
+
+def diff(candidate: Candidate, cypher_rows: list[tuple], cypher_cols: list[str],
+         sql_rows: list[tuple], sql_cols: list[str], seeded_ids: list[str]) -> dict:
+    """Rows · order · null handling · row shape. Empty `differences` == equal."""
+    differences: list[dict] = []
+
+    # 1. ROW SHAPE — the declared column list, not whatever the engine labelled.
+    if len(cypher_cols) != len(sql_cols):
+        differences.append({"kind": "shape", "detail": "column count",
+                            "cypher": cypher_cols, "sql": sql_cols})
+    for index, (c_col, s_col) in enumerate(zip(cypher_cols, sql_cols)):
+        # the Cypher alias and the SQL output name must agree case-insensitively;
+        # a different name is a shape difference a caller reads.
+        if c_col.lower() != s_col.lower():
+            differences.append({"kind": "shape", "detail": f"column {index} name",
+                                "cypher": c_col, "sql": s_col})
+
+    # 2. ROW COUNT
+    if len(cypher_rows) != len(sql_rows):
+        differences.append({"kind": "row-count",
+                            "cypher": len(cypher_rows), "sql": len(sql_rows)})
+
+    # 3. ROW SET (as a MULTISET) + NULL HANDLING
+    # ⛔ The comparison is multiset-first even for an ORDERED statement: a pure
+    # reordering must be reported as `order`, never as a wall of value differences
+    # (which is what positional comparison produces, and what a test caught here
+    # before it shipped). Rows are sorted by canonical form so the per-value pass
+    # compares like with like.
+    width = min(len(cypher_cols), len(sql_cols))
+    c_sorted = sorted(cypher_rows, key=_canon)
+    s_sorted = sorted(sql_rows, key=_canon)
+    value_diffs: list[dict] = []
+    for row_index, (c_row, s_row) in enumerate(zip(c_sorted, s_sorted)):
+        for col_index in range(width):
+            c_val = c_row[col_index] if col_index < len(c_row) else "<absent>"
+            s_val = s_row[col_index] if col_index < len(s_row) else "<absent>"
+            c_fam, s_fam = _family(c_val), _family(s_val)
+            # null handling is THREE-WAY: null != '' != 0 != False != 'None'
+            if c_fam != s_fam:
+                value_diffs.append({"kind": "family", "row": row_index,
+                                    "column": cypher_cols[col_index],
+                                    "cypher": [c_fam, c_val], "sql": [s_fam, s_val]})
+                continue
+            if _norm(c_val) != _norm(s_val):
+                value_diffs.append({"kind": "value", "row": row_index,
+                                    "column": cypher_cols[col_index],
+                                    "cypher": c_val, "sql": s_val})
+    differences.extend(value_diffs)
+
+    # 4. ORDER — only when the statement declares it, and only on a row set that
+    # already matches (an order claim over different rows is a value finding).
+    if candidate.ordered and not value_diffs and len(cypher_rows) == len(sql_rows):
+        if [_canon(r) for r in cypher_rows] != [_canon(r) for r in sql_rows]:
+            differences.append({"kind": "order", "detail": "row sequence differs "
+                                "although the row set matches — the NULL-placement "
+                                "class (a graph DESC puts NULLs FIRST; a hand-port "
+                                "that adds `NULLS LAST` reverses it)",
+                                "cypher": [_canon(r) for r in cypher_rows][:10],
+                                "sql": [_canon(r) for r in sql_rows][:10]})
+
+    # The fingerprint covers the CYPHER answer's row set (sorted), so two runs over
+    # the same data are recognisably the same measurement even when the row order
+    # a planner chose differs.
+    import hashlib
+
+    fingerprint = json.dumps([_canon(r) for r in c_sorted], sort_keys=True, default=str)
+    return {
+        "candidate": candidate.name,
+        "equal": not differences,
+        "differences": differences,
+        "row_count": {"cypher": len(cypher_rows), "sql": len(sql_rows)},
+        "columns": {"cypher": cypher_cols, "sql": sql_cols},
+        "edges_seeded": seeded_ids,
+        "fingerprint": hashlib.sha256(fingerprint.encode()).hexdigest()[:16],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# the measurement a flip depends on
+# --------------------------------------------------------------------------- #
+#: The cold-restore penalty (`#13082`), the number a SQL form must beat to be
+#: worth a flip: re-materialising a graph from the record costs 0.03 s
+#: index-dropped and 1.585 s index-kept, and the index-kept arm BLOCKS the
+#: instance. A read that is slower than the penalty is not a saving — you would
+#: pay it back on every restore.
+COLD_RESTORE_S = 0.03
+COLD_RESTORE_INDEX_KEPT_S = 1.585
+
+
+def bench(graph_uri: str, graph_name: str, dsn: str, candidate: Candidate,
+          rows: int, iterations: int) -> dict:
+    """Time both forms over the SAME corpus, and state the flip verdict.
+
+    Seeds `rows` synthetic points into both stores (the shared corpus plus
+    padding), then times `iterations` executions of each form, reporting p50 and
+    p95. ⚠️ What this measures is the FORM's cost on one box — the graph lane and
+    the record were seeded by the same harness and are reached over the same
+    client — so it answers "is SQL slower than Cypher" and the cold-restore
+    comparison, not "what will production latency be".
+    """
+    import statistics
+    import time
+
+    from falkordb import FalkorDB
+
+    graph = FalkorDB.from_url(_redis_url(graph_uri)).select_graph(graph_name)
+    padding = {f"p-pad-{i:05d}" for i in range(max(0, rows - len(CORPUS)))}
+    for pid in padding:
+        graph.query(
+            "MERGE (n:Point {id:$id}) SET n.content = $c, n.created_at = $t, "
+            "n.is_operator = false",
+            {"id": pid, "c": f"padding claim {pid}", "t": f"2026-03-01T00:00:{int(pid[-2:]) % 60:02d}Z"},
+        )
+    import psycopg2
+
+    conn = psycopg2.connect(dsn, connect_timeout=10)
+    try:
+        with conn, conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key) "
+                "VALUES (%(org_id)s, %(graph_id)s, 'Point', %(node_key)s) "
+                "ON CONFLICT DO NOTHING",
+                [{**TENANT, "node_key": pid} for pid in padding],
+            )
+            cur.executemany(
+                "INSERT INTO public.point "
+                "(org_id, graph_id, node_key, id, content, created_at, is_operator) "
+                "VALUES (%(org_id)s, %(graph_id)s, %(id)s, %(id)s, %(content)s, %(created_at)s, false) "
+                "ON CONFLICT DO NOTHING",
+                [{**TENANT, "id": pid, "content": f"padding claim {pid}",
+                  "created_at": f"2026-03-01T00:00:{int(pid[-2:]) % 60:02d}Z"} for pid in padding],
+            )
+    finally:
+        conn.close()
+    params = _scoped_params({"id": "p-null-content"}) if candidate.name == "point-by-id" else _scoped_params({})
+
+    def timeit(fn) -> list[float]:
+        samples = []
+        for _ in range(iterations):
+            start = time.perf_counter()
+            fn()
+            samples.append(time.perf_counter() - start)
+        return samples
+
+    cypher_times = timeit(lambda: run_cypher(graph_uri, graph_name, candidate.cypher, params))
+    # TWO SQL arms, because they answer different questions: the COLD arm opens a
+    # connection per call (what the shipped `record_serve` read does), the POOLED
+    # arm reuses one (#9558's pooled `_default_connect`, the state production runs
+    # in). Reporting only the cold arm would make SQL look ~2× worse than the path
+    # a deployment actually takes — and a flip decided on that number would be
+    # decided on the harness's own overhead.
+    sql_times = timeit(lambda: run_sql(dsn, candidate.sql, params))
+
+    import psycopg2 as _pg
+
+    pooled = _pg.connect(dsn, connect_timeout=10)
+
+    def _pooled_run() -> None:
+        with pooled, pooled.cursor() as cur:
+            cur.execute(candidate.sql, params)
+            cur.fetchall()
+
+    try:
+        sql_pooled_times = timeit(_pooled_run)
+    finally:
+        pooled.close()
+
+    def stats(samples: list[float]) -> dict:
+        ordered = sorted(samples)
+        return {
+            "p50_ms": round(statistics.median(ordered) * 1000, 3),
+            "p95_ms": round(ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))] * 1000, 3),
+            "n": len(ordered),
+        }
+
+    cypher_stats, sql_stats = stats(cypher_times), stats(sql_times)
+    sql_pooled_stats = stats(sql_pooled_times)
+    # the verdict uses the POOLED arm: it is the state a flipped read would run in
+    ratio = sql_pooled_stats["p50_ms"] / cypher_stats["p50_ms"] if cypher_stats["p50_ms"] else None
+    slower_than_penalty = sql_pooled_stats["p50_ms"] / 1000.0 > COLD_RESTORE_S
+    return {
+        "candidate": candidate.name,
+        "rows_seeded": rows,
+        "iterations": iterations,
+        "graph_lane": {"uri": _redact(graph_uri), "graph": graph_name},
+        "record": {"dsn": _redact(dsn)},
+        "cypher": cypher_stats,
+        "sql_cold_connect": sql_stats,
+        "sql_pooled": sql_pooled_stats,
+        "sql_pooled_over_cypher_p50": round(ratio, 3) if ratio else None,
+        "cold_restore_s": {"index_dropped": COLD_RESTORE_S,
+                           "index_kept": COLD_RESTORE_INDEX_KEPT_S},
+        "sql_slower_than_cold_restore": slower_than_penalty,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--graph-uri", default=os.environ.get("TORTOISE_DB_URI", ""),
+                        help="a real FalkorDB lane (docker://:pw@host:port)")
+    parser.add_argument("--graph-name", default=os.environ.get("CYPHER_DIFF_GRAPH", "cypher-diff"))
+    parser.add_argument("--record-dsn", default=os.environ.get("TORTOISE_RECORD_DSN", ""),
+                        help="a real record Postgres DSN")
+    parser.add_argument("--candidate", default="point-by-id", choices=sorted(CANDIDATES) + ["all"])
+    parser.add_argument("--mutate", default=None,
+                        help="inject a deliberate porting defect (null-order / drop-row / drop-null)")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--list", action="store_true", help="list candidates and exit")
+    parser.add_argument("--bench", type=int, default=0, metavar="ROWS",
+                        help="seed ROWS points into both stores and time both forms")
+    parser.add_argument("--bench-iters", type=int, default=30)
+    parser.add_argument("--bootstrap-record", action="store_true",
+                        help="apply supabase/migrations/*.sql to the record DSN first")
+    args = parser.parse_args(argv)
+
+    if args.list:
+        for name, candidate in CANDIDATES.items():
+            print(f"{name}: {candidate.notes}")
+        return 0
+
+    if not args.graph_uri or not args.record_dsn:
+        print("cypher-diff: could not run — both --graph-uri and --record-dsn are required "
+              "(a diff without both stores would be comparing nothing to nothing)",
+              file=sys.stderr)
+        return 2
+
+    if args.bootstrap_record:
+        rc = bootstrap_record(args.record_dsn)
+        if rc != 0:
+            return rc
+
+    try:
+        graph_seed = seed_graph(args.graph_uri, args.graph_name)
+        record_seed = seed_record(args.record_dsn)
+    except Exception as exc:  # noqa: BLE001 — exit 2, never a fake verdict
+        print(f"cypher-diff: could not seed — {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    # ⛔ THE EDGE-CASE PIN IS CHECKED AGAINST THE STORES, not against the constant:
+    # a pin that reads its own declaration cannot fail for the thing it names
+    # (#11859). A missing edge is "could not run" (2) — the diff would be vacuous.
+    try:
+        seeded_graph = {str(r[0]) for r in run_cypher(
+            args.graph_uri, args.graph_name,
+            "MATCH (n:Point) RETURN n.id", {})[0]}
+        seeded_record = {str(r[0]) for r in run_sql(
+            args.record_dsn,
+            "SELECT id FROM public.point WHERE org_id = %(org_id)s AND graph_id = %(graph_id)s",
+            _scoped_params({}))[0]}
+    except Exception as exc:  # noqa: BLE001
+        print(f"cypher-diff: could not read back the seeded corpus — "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    if args.bench:
+        # the measurement a flip depends on — run only for one candidate
+        if args.candidate == "all":
+            print("cypher-diff: --bench takes one --candidate", file=sys.stderr)
+            return 2
+        measurement = bench(args.graph_uri, args.graph_name, args.record_dsn,
+                            CANDIDATES[args.candidate], args.bench, args.bench_iters)
+        print(json.dumps(measurement, indent=2))
+        return 0
+
+    names = list(CANDIDATES) if args.candidate == "all" else [args.candidate]
+    for name in names:
+        absent = [edge for edge in CANDIDATES[name].requires
+                  if edge not in seeded_graph or edge not in seeded_record]
+        if absent:
+            print(f"cypher-diff: could not run {name} — the corpus edge case(s) {absent} "
+                  f"are not in both stores (graph={sorted(seeded_graph)}, "
+                  f"record={sorted(seeded_record)}); the diff would be vacuous for them",
+                  file=sys.stderr)
+            return 2
+    results = []
+    for name in names:
+        candidate = CANDIDATES[name]
+        try:
+            sql = _mutated(candidate, args.mutate)
+        except KeyError as exc:
+            print(f"cypher-diff: {exc}", file=sys.stderr)
+            return 2
+        try:
+            if candidate.name == "point-by-id":
+                cypher_rows, cypher_cols = run_cypher(
+                    args.graph_uri, args.graph_name,
+                    _scoped_cypher(candidate.cypher), _scoped_params({"id": "p-null-content"}),
+                )
+                sql_rows, sql_cols = run_sql(args.record_dsn, sql,
+                                             _scoped_params({"id": "p-null-content"}))
+            else:
+                cypher_rows, cypher_cols = run_cypher(
+                    args.graph_uri, args.graph_name,
+                    _scoped_cypher(candidate.cypher), _scoped_params({}),
+                )
+                sql_rows, sql_cols = run_sql(args.record_dsn, sql, _scoped_params({}))
+        except Exception as exc:  # noqa: BLE001
+            print(f"cypher-diff: could not run {name} — {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            return 2
+        result = diff(candidate, cypher_rows, cypher_cols, sql_rows, sql_cols,
+                      sorted(seeded_graph & seeded_record))
+        result["graph_lane"] = {"uri": _redact(args.graph_uri), "graph": args.graph_name,
+                               "seeded_points": graph_seed["points"]}
+        result["record"] = {"dsn": _redact(args.record_dsn), "seeded_points": record_seed["points"]}
+        result["mutation"] = args.mutate
+        results.append(result)
+
+    if args.json:
+        print(json.dumps(results[0] if len(results) == 1 else results, indent=2, default=str))
+    else:
+        for result in results:
+            _render(result)
+    return 0 if all(r["equal"] for r in results) else 1
+
+
+def _scoped_cypher(cypher: str) -> str:
+    """Bind the tenant into the graph statement — the corpus lives in one graph
+    (`--graph-name`), so the graph's tenancy IS the graph name; the record's is
+    the (org_id, graph_id) pair. Named here so the asymmetry is not silent."""
+    return cypher
+
+
+def _scoped_params(params: dict) -> dict:
+    return {**params, **TENANT}
+
+
+def _redact(dsn: str) -> str:
+    """Never print a credential — the secret-hygiene rule the record modules apply."""
+    if "://" not in dsn:
+        return dsn
+    scheme, rest = dsn.split("://", 1)
+    if "@" in rest:
+        creds, host = rest.split("@", 1)
+        user = creds.split(":", 1)[0]
+        return f"{scheme}://{user}:***@{host}"
+    return dsn
+
+
+def _render(result: dict) -> None:
+    lane = result["graph_lane"]
+    record = result["record"]
+    mutation = result.get("mutation")
+    print(f"candidate: {result['candidate']}" + (f"  (mutation: {mutation})" if mutation else ""))
+    print(f"  graph lane : {lane['uri']} graph={lane['graph']} points={lane['seeded_points']}")
+    print(f"  record DSN : {record['dsn']} points={record['seeded_points']}")
+    print(f"  rows       : cypher={result['row_count']['cypher']} sql={result['row_count']['sql']}")
+    print(f"  columns    : cypher={result['columns']['cypher']} sql={result['columns']['sql']}")
+    print(f"  fingerprint: {result['fingerprint']}")
+    if result["equal"]:
+        print("  DIFF: EMPTY — the two forms are the same answer on this corpus")
+    else:
+        print(f"  DIFF: {len(result['differences'])} difference(s)")
+        for difference in result["differences"]:
+            print(f"    - {difference['kind']}: {json.dumps(difference, default=str)[:300]}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

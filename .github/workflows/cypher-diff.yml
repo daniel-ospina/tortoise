@@ -1,0 +1,77 @@
+# The differential harness, in CI (#13098).
+#
+# ⛔ WHY THIS JOB EXISTS AND WHY IT RUNS TWICE. A harness that has only ever
+# printed "diff empty" has not been proven — the collision guard's vacuous test
+# is the precedent (`#13098`'s acceptance). So the second step runs the SAME
+# candidate with a deliberate porting defect injected and REQUIRES a non-empty
+# diff. A run where the mutation also comes back empty fails the job, because
+# that is the harness lying rather than the SQL being right.
+#
+# The two backends are named in the job output by the harness itself: a real
+# FalkorDB service and a real record Postgres, bootstrapped from the product's
+# own `supabase/migrations/*.sql` — not a stub schema.
+name: cypher-diff
+
+on:
+  pull_request:
+    paths:
+      - "tortoise/**"
+      - "supabase/migrations/**"
+      - "tools/cypher_diff_harness.py"
+      - "tools/cypher_inventory.py"
+      - "docs/architecture/CYPHER-INVENTORY.md"
+      - "tests/test_13098_cypher_inventory.py"
+      - ".github/workflows/cypher-diff.yml"
+  workflow_dispatch:
+
+jobs:
+  differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      graph:
+        image: falkordb/falkordb:latest
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 5s --health-retries 20
+      record:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: s3cret
+          POSTGRES_DB: cypher_diff
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    env:
+      GRAPH_URI: "docker://:@127.0.0.1:6379"
+      RECORD_DSN: "postgresql://postgres:s3cret@127.0.0.1:5432/cypher_diff"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: install (every extra named)
+        run: uv sync --extra embeddings --extra parity --extra postgres
+      - name: bootstrap the record from the product's own migrations
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      - name: census pins match the doc
+        run: uv run python tools/cypher_inventory.py --check
+      - name: agreement run (must be EMPTY, exit 0)
+        run: |
+          for c in point-by-id point-listing; do
+            uv run python tools/cypher_diff_harness.py \
+              --graph-uri "$GRAPH_URI" --record-dsn "$RECORD_DSN" \
+              --bootstrap-record --candidate "$c"
+          done
+      - name: mismatch run (must report a DIFFERENCE, exit 1)
+        run: |
+          set +e
+          uv run python tools/cypher_diff_harness.py \
+            --graph-uri "$GRAPH_URI" --record-dsn "$RECORD_DSN" \
+            --candidate point-listing --mutate null-order
+          rc=$?
+          set -e
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::the mutated run returned $rc; the harness must report a difference (1). A 0 here means the harness cannot fail."
+            exit 1
+          fi
