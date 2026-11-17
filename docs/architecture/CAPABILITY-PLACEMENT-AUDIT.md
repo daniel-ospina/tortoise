@@ -51,14 +51,14 @@ squash commit `c06d6289e9`, and `ccb49741b2ec` is reachable as `refs/pull/13095/
 'refs/pull/13095/head:ccb49741b2ec'`), so every cite below can be opened there. On any later head they
 drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
 below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
-**107 of this document's 214** `file:line` pairs name a different line at `534f3e1bee` (counted as the
+**108 of this document's 215** `file:line` pairs name a different line at `534f3e1bee` (counted as the
 unique `path.py:NNNN` pairs in this file after resolving **every** written path to the module it names
 (a bare `name.py:` is `tortoise/name.py` when that file exists, and the one file of that name
 otherwise — `edges.py` is `tortoise/projection/edges.py`, `propagation.py` is
-`tortoise/projection/propagation.py`; a range cite counts once, by its **start** line), which dedupes the 230 as-written spellings to 214 — 16
+`tortoise/projection/propagation.py`; a range cite counts once, by its **start** line), which dedupes the 231 as-written spellings to 215 — 16
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
 text), and **none of
-the 214 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
+the 215 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 ⚠️ **The pin promise was RE-CHECKED, not assumed, in the `#13083` follow-up — and it did not hold.**
 Sixteen superseded line-addresses did not open on the line their row quotes at `ccb49741b2ec`. ⚠️ **The
@@ -79,12 +79,12 @@ file — `search_engine.py` FTS
 `:6830`; `sdk.py`'s second `capture_redactions` writer `:2705`; `audit.py`'s carrier probe `:2445`/`:2456`;
 and `mcp_server.py`'s `entity_type` passthrough `:5475` — and the drift figure
 above was re-measured afterwards. ⚠️ **The figure counts the file it is written in, so this revision moved it**:
-it contributes **16** resolved pairs, **9** of which drift — 98 (the `main` copy) + 9 = **107** — and every one of
-the 16 was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds.
+it contributes **17** resolved pairs, **10** of which drift — 98 (the `main` copy) + 10 = **108** — and every one of
+the 17 was opened at `ccb49741b2ec` before it was written, which is the standard the rest of this header holds.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of §0) instead of enumerated here.
-⛔ **The `:3524` address that §2.4 retracts is NOT counted**, because it is a **comment line**: it is spelled
+⛔ **The `:3524` address in `sdk.py` that §2.4 retracts is NOT counted**, because it is a **comment line**: it is spelled
 bare, not as a `path.py:NNNN` pair. A cite that cannot be opened on the line its row quotes is worse than
 no cite: the handle beside it then reads as corroboration of a line nobody read.
 
@@ -109,7 +109,7 @@ nothing else; row 15 gives bare module names beside `hosted_api.py:32965` and on
 five are *at risk* of drifting silently: no symbol will be there to re-find — for them the number IS the
 citation — so an insert above a cited site is undetectable from the row alone. The risk has already begun
 to bite: of the line-numbered cites in these five rows, **ten no longer name the same line at `main`**
-(counted at `534f3e1bee`, the same head the 107-of-214 figure above is measured at) — row 15's `hosted_api.py:32965`, whose
+(counted at `534f3e1bee`, the same head the 108-of-215 figure above is measured at) — row 15's `hosted_api.py:32965`, whose
 `MERGE (p:PackInstall …)` is at `:33539` there, and 9 of row 18's 16 — while rows 10, 11 and 14 and row
 15's `pack_manifest_store.py:467` still do. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
 Cypher — but the row's own WRITE cite is not.) Re-derive each cite from the text
@@ -384,8 +384,8 @@ MIXED set, and precision here is the point — it is not one claim:
   (`hosted_api.py:23938-23970`) — and of the session-detail **point lookup** (`sdk.py:52227-52251`, no walk in
   the statement at all); **`actor_user_id`** is a sibling in that same LIST row (`hosted_api.py:23958`) and in the
   session-detail endpoint's OWN point lookup, which has no `CONTAINS` walk either
-  (`hosted_api.py:24316-24335`, `RETURN s.harness` at `:24319`), a filter
-  in the endpoint's own conditions (`:49836`, `s.actor_user_id = $uid`) and carries its own `:Session` index
+  (`hosted_api.py:24316-24335`, `s.turn_count, s.actor_user_id, s.harness,` at `:24319`), a filter
+  in the **LIST** endpoint's own conditions (`hosted_api.py:49836`, `s.actor_user_id = $uid`) and carries its own `:Session` index
   (`projection/__init__.py:21185`) — sibling, filter, index, and no walk, so `none` like its neighbours;
   `entity_links_attempted` is a sibling column of the entity-link walk
   (`session_schema.py:916-917`); `value_nodes_created` and `value_nodes_held` are BOTH named by the commit-path
