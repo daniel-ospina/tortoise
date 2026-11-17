@@ -3430,8 +3430,13 @@ try {
   // journal would re-stamp the whole table to 0 bytes with a fresh instant. Every
   // org would then compare as 0 against any cap, and the reader's `unreported`
   // refusal — which exists for exactly this — could never fire, because the table
-  // never empties and nothing ever goes stale. Measured before the guard: 28 rows
-  // zeroed in a single call, one of them still holding two journal rows.
+  // never empties and nothing ever goes stale. Measured before the guard: 28
+  // residency rows zeroed in a single call while `journal_event` held **0** rows,
+  // one of the zeroed rows (`9559-gauge-a`) still carrying `rows = 2` from its last
+  // real measurement — that COLUMN, not a live journal row, is the figure the
+  // fleet-wide zero overwrites. (The case is DEFINED by `orgs = '[]'`, which the
+  // audit returns only when `journal_event` is empty, so no zeroed row can hold
+  // journal rows.)
   //
   // The guard leaves the rows UNTOUCHED when the audit reports nobody, so they age
   // out under the gate's bound and the gate REFUSES (fail-closed, which is this

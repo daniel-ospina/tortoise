@@ -49,8 +49,16 @@
 --     table to 0 bytes with a FRESH instant. Every org would then compare as 0
 --     against any cap, and the reader's `unreported` refusal — which exists for
 --     exactly this — could never fire, because the table never empties and
---     nothing ever goes stale. Measured on PGlite: 28 rows zeroed in one call,
---     one of them still holding two journal rows.
+--     nothing ever goes stale. Measured on PGlite with the guard replaced by
+--     `IF TRUE`: 28 residency rows zeroed in one call while `journal_event`
+--     held **0** rows — and `9559-gauge-a`, whose zeroed row still carried
+--     `rows = 2` from its LAST REAL measurement, is what makes it visible: the
+--     zero overwrote a true figure with a value no audit produced. ⛔ The case is
+--     DEFINED by `orgs = '[]'`, which `postgres_per_org_bytes()` can only return
+--     when `journal_event` holds no rows, so NO zeroed row can be holding live
+--     journal rows — an earlier revision of this sentence said "one of them still
+--     holding two journal rows", which conflates the residency COLUMN with the
+--     journal TABLE.
 --
 --     When the audit reports NOTHING while rows exist, the two readings — "the
 --     journal really is empty" and "the audit could not see it" — are
