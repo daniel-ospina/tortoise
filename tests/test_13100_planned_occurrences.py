@@ -931,7 +931,13 @@ class TestThePlanPipeline:
                   "RETURN count(*)")
         with pytest.raises(ValueError, match="already settled") as exc:
             PO.record_occurrence(sdk, "Retired plan")
-        assert "archived" in str(exc.value)
+        # ⛔ The word the refusal quotes is the one the RECORD holds, and since
+        # `#11824` S0 the synonyms are normalised on write: `archived` and
+        # `retracted` are STORED as `deprecated` (`lifecycle_vocabulary`), so
+        # asserting the input spelling pinned the writer's old vocabulary rather
+        # than this gate. The claim here is that the gate FIRED and named the
+        # status it decided on.
+        assert "deprecated" in str(exc.value), exc.value
         with pytest.raises(ValueError, match="already settled"):
             PO.settle_plan(sdk, "Retired plan", PO.STAGE_CANCELLED)
         assert sdk._get_proj().g.query(

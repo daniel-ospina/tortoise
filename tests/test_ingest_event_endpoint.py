@@ -708,16 +708,12 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     *"a status must be a plain string, and dict is not one"*, so Phase 1 refusing
     it is WRITER AGREEMENT rather than over-rejection.
 
-    The `:Event` half inverted for the stronger reason: #13100 makes an `:Event`
-    carry NO lifecycle at all (its door refuses every non-`None` `status`, of any
-    value or type), so the exemption the old assertion pinned is gone and a
-    bundle-local Event declaration must be refused at Phase 1 too — otherwise
-    Phase 1 calls a bundle clean that step 3 raises on AFTER the point items
-    committed, the #2422/#7925 partial-mutation class.
-
-    What the test still proves — and why it is not simply "reject every non-str"
-    — is that the refusal is the WRITER's answer mirrored at Phase 1 (asserted
-    against the writer beside it), not an independent rule that could drift.
+    The `:Event` half proves the other direction, and it CHANGED with this diff:
+    since `#13100` an Event has no lifecycle at ALL (#11825), so a declared
+    `status` is REFUSED there rather than dropped, and the bundle must NOT stay
+    accepted. The arm is therefore not "reject every non-`str`" — it is "an
+    `:Event` carries no lifecycle, whatever the value or its type"; the
+    documented clear route stays `status: None`.
     """
     # The WRITER's answer for the same value — the authority Phase 1 mirrors.
     with pytest.raises(ValueError, match="must be a plain string"):
@@ -727,8 +723,9 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
         "entities": [{"ref": "o1", "type": "object", "name": "Alpha",
                       "status": {"a": 1}},
                      {"ref": "o2", "type": "object", "name": "Beta"},
-                     # The `:Event` half — since #13100 it has no lifecycle at
-                     # all, so this declaration is refused at Phase 1 too.
+                     # The `:Event` half of the contrast — since #13100 an Event
+                     # has no lifecycle at ALL, so any declaration is refused,
+                     # a non-persistable one included.
                      {"ref": "e1", "type": "event", "name": "Happened",
                       "eventKind": "sessionCaptured", "status": {"a": 1}}],
         "connections": [{"from": "o1", "to": "o2", "operator": "IMPL"}],
@@ -742,15 +739,17 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 0
 
-    # …and the Event's declaration alone is refused for the SAME reason, so the
-    # arm cannot pass by leaning on the Object violation beside it.
+    # …and the Event's declaration ALONE is refused too, so this isolates the
+    # Event arm from the :Object one above (S0's version of this test asserted
+    # the opposite here — a DROPPED value on an accepted bundle — which is
+    # #11825's TERMINAL-half boundary that #13100 replaced with the whole axis).
     event_only = {"entities": [
         {"ref": "o", "type": "object", "name": "Solo"},
         {"ref": "e1", "type": "event", "name": "OnlyEvent",
          "eventKind": "sessionCaptured", "status": {"a": 1}},
     ]}
-    event_msgs = [v["message"] for v in sdk._validate_bundle(event_only)]
-    assert any(":Event" in m for m in event_msgs), event_msgs
+    ev_msgs = [v["message"] for v in sdk._validate_bundle(event_only)]
+    assert any("declares status" in m and ":Event" in m for m in ev_msgs), ev_msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(event_only)
     assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 0

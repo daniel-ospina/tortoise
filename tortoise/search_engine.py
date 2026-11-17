@@ -3696,7 +3696,7 @@ def run_vector_query(
     every such read: measured **34.78 ms p50 for an ``:Object`` dense read, of
     which 20.17 ms is the two refused round trips** — 58.0 % of the leg spent
     producing a known error (``fix-1000-paired-at-rest.json``: the 20.17 is
-    ``index_attempt[0].elapsed_ms``, 10.18 + 9.97, against that same artifact's
+    ``index_attempt[0].elapsed_ms`` measured AROUND the pair — its attempts sum to 20.15, so quote 20.17 and never 10.18 + 9.97 — against that same artifact's
     ``arms["object[nohint]@c1"].latency_ms.p50``). The scan that follows is
     UNCHANGED, and
     the read is still recorded :data:`MECHANISM_SCAN_FALLBACK` — `#4999`'s "an
@@ -4043,8 +4043,8 @@ def run_vector_query(
     # every dense read to a scan. The behavioural half is None in exactly that
     # lane. Both are equal in every other lane.
     # ⚠️ RESIDUAL, disclosed rather than compared away (#13121 round 14): the
-    # inventory is filled ONLY by `_ensure_indexes` / `_create_vector_index_api`
-    # (projection/__init__.py:21668, :21724) — the only in-process re-measure is
+    # inventory is filled ONLY by `_record_vector_index_inventory`, reached from
+    # `_ensure_vector_index_api` / `_create_vector_index_api` (projection/__init__.py:21668, :21724) that `_ensure_indexes` (`:20949`) drives on every projection construction; the only in-process re-measure is
     # the destructive `rebuild_from_record`. So a long-lived projection (an SDK
     # session, the MCP server) that outlives an OUT-OF-BAND
     # `CREATE VECTOR INDEX` — precisely the remedy the `#4997` notice
