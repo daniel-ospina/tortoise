@@ -555,19 +555,18 @@ class TestTheLoaderContract:
             "max_postgres_storage_bytes": None, "max_graph_storage_mb": 0}
 
     def test_the_storage_keys_are_NOT_in_tier_limits(self):
-        """⛔ THE ANTI-ARMING INVARIANT. `allowance_gate.enforce_allowances`
-        arms on key PRESENCE (`if dim.limit_key not in limits: continue`), and
-        BOTH storage dimensions are BLOCKED there — `postgres_storage` has a
-        per-org ATTRIBUTION but no per-org GAUGE the gate can read on a write
-        path (and its included amounts are unconfirmed), while `graph_storage`'s
-        own contract forbids capping on a figure that under-reports the HNSW
-        index 8.5x-21.7x. The
+        """⛔ THE ANTI-SECOND-SEAM INVARIANT. `allowance_gate.enforce_allowances`
+        arms on key PRESENCE (`if dim.limit_key not in limits: continue`), so
+        ANY limits dict that carries a storage key arms that dimension. The
         `tier_limits()` dict is what callers hand around as "the org's limits",
         so a storage key in it would arm `graph_storage` on a path that never
         passed `quota._arm_graph_storage` — the ONE seam `#13084` built, which
         carries the tier number from the artifact AND the estimate rule with it —
-        and would arm `postgres_storage`, still BLOCKED for want of a per-org
-        byte meter, answering HTTP 500 on every gated write.
+        and would arm `postgres_storage`, still BLOCKED — its `blocked_reason`
+        and `release` tokens name the obstacle and what would lift it, and
+        `test_9559_blocked_release_conditions.py` re-checks them, so this
+        sentence does not repeat a reason that has already gone stale once —
+        answering HTTP 500 on every gated write.
 
         Mutation this REDs: moving either storage key into `tier_limits()`'s
         return dict "for symmetry" with the other limits.
