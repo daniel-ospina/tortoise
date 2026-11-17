@@ -442,6 +442,50 @@ directions (a *measured* 0.5 keeps its 0.5).
   nobody "fixes" it later: `get_confidence` and `search` disagree for an ABSENT claim by design, and
   #2206's agreement indicator holds only for the population that has a belief.
 
+### 6.4 The noun's rank signal — entity rows are scored on their CLAIMS, on identity, and never on a point's signals
+
+`GraphRanker._fetch_signals` dispatched on `entity_type` with two branches until `#12184`: `event` got
+event signals and **everything else got point signals**. So `rerank(..., entity_type="object")` — and
+`"subject"`, `"source"`, `"document"` — silently scored entity ids with a point's signals. `StateRanker`
+had the same shape in its own dispatch (only `object` was routed; every other label fell to points).
+Nothing raised, and the output was plausible, which is what made it a defect rather than a bug report: a
+point's signal is its **own** persisted belief and its **operator** edges; an entity has neither, so every
+entity row answered `confidence: null` / `degree: 0` and the graph term was a CONSTANT. A constant is not a
+neutral default — it is the claim "the graph does not distinguish these rows", made by a read that never
+looked at the edges that could.
+
+**The decision (this section is the record `#12184` asks for).** A noun's rank signal is, in this order:
+
+| signal | what it reads | why it is the entity's and not a point's |
+|---|---|---|
+| **identity** | exact equality under `entity_resolver.normalize_entity_name` between the row's identity surface (its `content` — see below) and the query | the entity's whole surface IS its name (a Point's is `content` too, which is why the term is entity-only). ⚠️ The ranker reads `SearchResult.to_dict()`, which carries **no `name` key**, so the compared surface is `content` (`_entity_row_name` falls through to it) — and `content` is filled by the SDK's own entity fetch: from `n.name` for Object/Subject, and from **`n.title`** for `source`/`document` (`sdk.py`'s `entity_data` branches). So on a source/document row the term compares the TITLE — RARE (the query must equal the whole title) but LIVE, not inert: when it fires, that row sorts ahead of every scored row. `_searchText`, the column the Source fulltext index is declared on, is a DIFFERENT column and is never read by this term. Equality here is the identity ladder's own rung-1 verdict, so it is a categorical ORDER DIMENSION ahead of the score — never a tuned weight, and never a fuzzy similarity (a second similarity constant is a REFUSED row, `#11901` §7). |
+| **degree** | INBOUND claim count — `about*` edges into the entity (`extractedFrom` too, for a `:Source`) | a Point's degree is its operator connectivity; an entity's is its USE. "How much the graph refers to this" is the structural signal a point read cannot produce. The `about*` family is `ABOUT_EDGE_TYPES` (`aboutSubject`, `aboutObject`, `aboutAction`, `aboutEvent`, `aboutPoint`, `aboutDocument` — the same six `sdk._ABOUT_TYPES` mirrors), plus `extractedFrom` for a `:Source`. `aboutSource` is NOT in that family, so a Source's degree counts the claims extracted FROM it and its `aboutDocument` in-edges, never its `aboutSource` ones. ⚠️ That is a BOUNDARY, not an oversight to tidy away here: `ONTOLOGY.md` §3.9 lists `aboutSource` among the `about*` predicates, so the two lists are not the same list, and widening this family would move the point and event arms with it. |
+| **confidence** | the MEAN persisted belief of those inbound claims | an entity has no belief of its own; what the graph knows about it is what its claims say. `null` + `ep_state: "absent"` when none carries one (§6.3) — the term then does not participate, and keeps its weight rather than taking the whole boost. |
+| **recency** | the row's `createdAt`/`startedAt` | unchanged, shared with points. |
+
+**The dispatch is now total and refuses.** `signal_family_for()` maps every label in
+`security.VALID_ENTITY_TYPES` (`operator` → point is a routing DECLARATION — an operator IS a `:Point`),
+and any other label raises `UnsupportedEntitySignals` **before** the defensive `except` that answers
+`None`. The difference matters: `None` means "the read did not answer" and the caller ranks with neutral
+defaults; a refusal means the caller asked for a ranking that cannot exist. `StateRanker` routes through
+the same function, so the two rankers cannot drift apart again.
+
+**Disclosure, because "ranked" and "answered" are different facts.** `signals_read` says the read
+answered; `signals_informative` says the answer DISTINGUISHED the rows. An entity read that answers
+`(degree 0, confidence null)` for every row sets the second to `false` and logs — the order is then
+relevance-only, and the caller can say so instead of presenting a constant as a graph judgement. A read
+that answers **no rows at all** is the SAME verdict (`false`): the gate is the request, not the row
+count, because "no answer" distinguishes the rows even less than a flat one. `null` is reserved for the
+cases with no subject: a label with no entity signal set, no projection to read, or a read that RAISED.
+
+**What this does NOT decide.** It does not put the entity signals on the DEFAULT noun path: they reach
+`order_by="graph"` and any caller that constructs `GraphRanker(..., entity_type=...)`; the capture prior
+(`extractor_v2._fts_rows`) still reads the fused relevance order. Wiring an entity pass into that
+pre-truncation seam is a separate, measured change (`#12184`'s measured arms:
+`docs/research/2026-11-17-12184-entity-rank/`), and the eval graph is a NAME CORPUS with no claims, so it
+measures the identity dimension only — its graph terms are inert there **by construction** and the artifact
+says so (`signals_informative: false`).
+
 ---
 
 ## 7. The window — what the graph holds once it must be bounded

@@ -573,6 +573,32 @@ response_fields:
     structural term alone and no confidence entered its score. Present so the ORDER can be explained without re-deriving
     it from confidence being null'
   unchanged_when_off: NO — additive key on an existing payload. Not flag-gated
+- response: tortoise_search
+  field: graph_ranking.identity_match
+  emitted_when: 'order_by="graph" ONLY, and ONLY for an ENTITY row — i.e. entity_type in {object, subject,
+    source, document}; a point/event/operator row emits neither this key nor graph_ranking.signal_family.
+    true when the row''s identity surface equals the query under entity_resolver.normalize_entity_name (NFKC
+    → casefold → drop a leading article → non-word runs to space, the #12047 fold the match ladder itself
+    uses), false otherwise. It is a CATEGORICAL order dimension, not a tuned weight: rows with it true sort
+    ahead of every scored row (#12184, the #2598 draft shape), and it is deliberately BOOLEAN — a second
+    fuzzy similarity constant is a REFUSED row (#11901 §7). The surface compared is `content` as the search
+    row carries it (SearchResult.to_dict has no `name`), and the SDK''s own entity fetch fills that column:
+    from n.name for Object/Subject, and from n.title for source/document — so those two row types are compared
+    on their TITLE. The term is therefore RARE there (the query must equal the whole title) but LIVE, not
+    inert: when it fires, that row sorts ahead of every scored row. `_searchText` — the column the Source
+    fulltext index is declared on — is a DIFFERENT column and is never the surface compared here. Absent from
+    a point/event row by design — a claim has no identity property'
+  unchanged_when_off: NO — additive key on an existing payload (present only on entity rows). Not flag-gated
+- response: tortoise_search
+  field: graph_ranking.signal_family
+  emitted_when: '"entity" on every row of an entity_type in {object, subject, source, document} read — the
+    name of the signal set that produced graph_ranking.graph_boost, so an order built on an entity''s INBOUND
+    CLAIMS (degree = claim count, confidence = mean claim belief) is visible instead of looking like the point
+    family''s own-belief/operator-connectivity score. Absent for entity_type point/event/operator: those keep
+    the point and event families, which are named by the existing payload shape rather than by this key. This
+    is the field the pre-#12184 payload could not express at all — the same constant boost was emitted whichever
+    family had (not) answered'
+  unchanged_when_off: NO — additive key on an existing payload (present only on entity rows). Not flag-gated
 - response: tortoise_recall
   field: recall_ranking.draft
   emitted_when: 'the row is a Point with status `draft` — present only when true (the #1353 D8 / #2294 additive
