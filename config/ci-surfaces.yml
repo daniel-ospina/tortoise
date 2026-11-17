@@ -352,8 +352,8 @@ surfaces:
   - test_12941_read_your_writes.py    # #12941: dual: core
   # #13034: the terminal-currency CENSUS — no module outside `live.py` may
   # re-spell a terminal-status predicate, and no converted consumer may drop
-  # the shared answer. DUAL-REGISTERED with `core` (the row that existed was
-  # `core`-only until the #13074 review measured this), and BOTH arms are
+  # the shared answer. DUAL-REGISTERED with `core`: UNLISTED on `main` (integrity
+  # named it drift), and `core` ALONE missed the hosted door — so BOTH arms are
   # load-bearing: the census's own `_CENSUS_MODULES` names
   # `tortoise/hosted_api.py` as one of its six consumers
   # (`tests/test_13034_currency_rule_reads_position.py` `:606-611`), and the

@@ -22971,8 +22971,8 @@ def test_the_health_honesty_suite_is_selected_on_BOTH_halves_of_its_module_pair(
 def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
     """#13074 review P1: the census must RUN on the file it converted.
 
-    `tests/test_13034_currency_rule_reads_position.py` was registered `core`
-    ONLY. Its cross-cutting guard is a repo-wide census over `_CENSUS_MODULES`
+    `tests/test_13034_currency_rule_reads_position.py` was UNLISTED on `main`;
+    `core` ALONE missed it. Its cross-cutting guard is a census over `_CENSUS_MODULES`
     (`:606-611`), which names `tortoise/hosted_api.py` as one of its six
     consumers — the file #13034 converted — and whose presence arm (`:708-722`,
     literal at `:714`) asserts `"tortoise/hosted_api.py": "_terminal_excluded"`
