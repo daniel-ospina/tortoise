@@ -2699,6 +2699,7 @@ surfaces:
   # After the deletion the file keeps main's two rows; `--integrity` and
   # `duplicate_entries()` are both green here.
   - test_13100_planned_occurrences.py
+  - test_13220_record_label_embeddings.py
   # #13034's `test_13034_currency_rule_reads_position.py` is registered on `core`
   # FURTHER DOWN this file, in the block the main-red repair (#13139 / #13144)
   # added with its own rationale. This branch registered it here first; the
