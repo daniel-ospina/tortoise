@@ -2072,6 +2072,7 @@
     "tool_sha256": null,
     "tool_uncommitted": true
   },
+  "refusal_kinds": [],
   "refusals": [],
   "schema": "paired-expansion-ab-2518.artifact.v1",
   "snapshot": {

@@ -577,6 +577,9 @@
     "tool_sha256": null,
     "tool_uncommitted": true
   },
+  "refusal_kinds": [
+    "structurally_blind"
+  ],
   "refusals": [
     "EVERY arm is structurally blind to the lever \u2014 no arm read the leg the expansion arms (`entity_type == 'point'`), so no verdict on 'does it help or hurt' can be drawn from this run"
   ],

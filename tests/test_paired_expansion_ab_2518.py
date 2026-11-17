@@ -658,6 +658,11 @@ def test_the_brief_quotes_the_digests_and_the_loads_its_artifacts_hold():
         assert art["provenance"]["git_head"] == art["git_head"]
         assert "tool_sha256" in art["provenance"]
         assert art["provenance"]["git_head_note"]
+        # F7: the published refusals carry their CLASS, so a reader can tell which
+        # ones `--allow-mixed-modes` would excuse
+        assert len(art["refusal_kinds"]) == len(art["refusals"])
+    assert ctrl["refusal_kinds"] == [P.STRUCTURAL_REFUSAL]
+    assert head["refusal_kinds"] == [] and head["refusals"] == []
 
 
 def test_the_docs_index_row_repeats_only_what_the_evidence_carries():
