@@ -3360,6 +3360,18 @@ try {
       + `every gated write`);
     process.exit(1);
   }
+  // ⛔ THE PRE-STATE MUST BE A DISTINCT INSTANT, or the `measured_at` assertion
+  // below cannot vary. MEASURED (this lane): with the row left at the previous
+  // refresh's stamp, DELETING `measured_at = v_at` from the zeroing `UPDATE` left
+  // the suite GREEN — both refreshes land inside the SAME millisecond and
+  // `Date.parse` compares at ms resolution, so the carried-over stamp equalled
+  // this refresh's `captured_at` by coincidence and the assertion could never
+  // fire. Pinning the pre-state two hours back makes a carried-over stamp
+  // detectable at ANY clock resolution, and it is the truthful description of the
+  // state being fixed: the org's figure is as old as its last real measurement.
+  await db.exec(`UPDATE public.org_postgres_residency
+     SET measured_at = pg_catalog.now() - interval '2 hours'
+     WHERE org_id = '9559-gauge-b'`);
   // ── #9559 (review round 8, finding 1, P1): an org the audit STOPS reporting ──
   // `postgres_per_org_bytes()` groups `journal_event` BY `org_id`, so an org whose
   // journal rows are gone but whose ORGANIZATION survives drops out of the audit's
