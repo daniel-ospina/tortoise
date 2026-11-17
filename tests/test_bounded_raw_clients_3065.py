@@ -758,11 +758,7 @@ _EXPECTED_TOOL_SITES = {
     "tools/graph_write_repair.py": 2,            # per-DB scan client + the repair client
     "tools/longmem_eval/server_posture.py": 1,   # pre-existing, already resolver-bound
     "tools/ram_window_census.py": 2,            # #13084's INFO/DUMP handle + the RESTORE probe's client (both `**_bounded_server_socket_kwargs()`)
-    # ⚠️ `tools/text_gate_13099.py` is on `origin/main` and was UNBOUNDED (2 sites)
-    # — a red that predates this PR and blocks this guard for the whole tree, so
-    # this row had to land with the bound. Not #13084's defect; see the PR's own
-    # comment (the main checkout's copy is fixed by the same commit).
-    "tools/text_gate_13099.py": 2,               # #13099's seed client + the Arms measurement handle (both `**_bounded_server_socket_kwargs()`)
+    "tools/text_gate_13099.py": 2,              # #13107's seed client + the arms' measurement client (both `**_bounded_server_socket_kwargs()`)
 }
 
 
