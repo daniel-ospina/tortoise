@@ -697,14 +697,19 @@ def _arm_graph_storage(limits: dict, tier: str) -> dict:
     Arming a reversible write-refusal at them is this slice's decision (#13082);
     the figures are the artifact's to revise without a code change here.
 
-    ⛔ ``free``/``anon`` ARE LEFT UNARMED, and that is a correctness fix, not an
-    omission. The artifact carries ``0`` for their hot window because the owner
-    has not set those tiers; the gate's rule is ``used >= allowance``, so a 0
-    would refuse EVERY gated write — including the very first byte — on a tier
-    that still grants a graph. An unset amount is omitted here (absent key =
-    unconfigured = unlimited, and the dimension keeps being metered by its own
-    writer); the gate declares the same rule defensively as
-    ``zero_means_unarmed``.
+    ⛔ ``free``/``anon`` ARE LEFT UNARMED, and that is a deliberate DEPARTURE
+    from a recorded figure, not an omission and not an unpopulated one. The
+    artifact carries ``0`` for their hot window as a STATED amount
+    (``billing.storage._included_amounts_status``: *"Free/anon are the
+    exception: hot capacity 0 is stated by the decision record"*, and
+    ``docs/architecture/SEARCH-ARCHITECTURE.md`` §8 tabulates their window
+    target as 0). It cannot be armed as a cap: the gate's rule is
+    ``used >= allowance``, so a 0 would refuse EVERY gated write — including the
+    very first byte — on a tier that still grants a graph. The amount is
+    therefore omitted here (absent key = unconfigured = unlimited, and the
+    dimension keeps being metered by its own writer), and the gate declares the
+    same rule defensively as ``zero_means_unarmed`` (an EXACT zero only; a
+    negative is a fault and refuses).
     """
     from tortoise.pricing import storage_dimensions, storage_limits
 

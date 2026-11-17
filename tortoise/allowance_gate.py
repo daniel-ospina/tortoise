@@ -16,8 +16,14 @@ owner's, and since ``#13084`` **one dimension is ARMED on every live path**:
 102 MB, team 615 MB. The other two dimensions remain UNCONFIGURED
 (``postgres_storage`` is BLOCKED on a per-org byte meter; ``capture_extraction``
 has no resolved allowance), and ``free``/``anon`` are **deliberately unarmed**
-because the owner has not set their hot window and the artifact's ``0`` for them
-is an UNSET sentinel, not a cap of zero (see ``zero_means_unarmed``). An unarmed
+— a RECORDED DEPARTURE from the artifact, which carries ``0`` for them **by
+decision** (``billing.storage._included_amounts_status``: *"Free/anon are the
+exception: hot capacity 0 is **stated by the decision record**"*;
+``docs/architecture/SEARCH-ARCHITECTURE.md`` §8 tabulates their window target as
+``0``). A ``0`` cannot be armed as a cap: the gate refuses at
+``used >= allowance``, so it would refuse the FIRST byte on a tier that still
+grants a graph — hence ``zero_means_unarmed`` (only an exact ``0`` is the
+unarmed sentinel; a negative is a fault, not an unset amount). An unarmed
 dimension refuses nothing and keeps being metered — the ordering the storage
 architecture requires (*"the meter must be wired into the gate before any
 allowance is configured"*) — ``docs/architecture/STORAGE-ARCHITECTURE.md``,
@@ -631,12 +637,21 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
         # serves. Refusing a new write is reversible; dropping a graph to make
         # room is not.
         cap_band=CapBand(warn_at=1.0, refuse_at=HARD_STOP_MULTIPLE),
-        # ⛔ A ZERO INCLUDED AMOUNT IS NOT A CAP OF ZERO. The artifact records
-        # ``max_graph_storage_mb: 0`` for free/anon — the owner has not set those
-        # two tiers' hot window. ``used >= 0`` is true at EVERY reading, so
-        # arming it would refuse every gated write, including the very first
-        # byte, on a tier that still grants a graph. An unset amount is UNARMED:
-        # it refuses nothing, and the dimension keeps being metered by its writer.
+        # ⛔ A ZERO INCLUDED AMOUNT IS NOT A CAP OF ZERO — AND IT IS NOT AN UNSET
+        # VALUE EITHER (#13102 F3). The artifact records
+        # ``max_graph_storage_mb: 0`` for free/anon as a STATED amount
+        # (``billing.storage._included_amounts_status``: *"Free/anon are the
+        # exception: hot capacity 0 is stated by the decision record"*, and
+        # ``SEARCH-ARCHITECTURE.md`` §8 tabulates their window target as 0), so
+        # leaving the dimension UNARMED here is a deliberate DEPARTURE from that
+        # recorded 0 — not a data gap, and not "the owner has not set it" (an
+        # earlier version of this comment said exactly that, which its own cited
+        # artifact refutes). The reason is arithmetic: ``used >= 0`` is true at
+        # EVERY reading, so arming it would refuse EVERY gated write, including
+        # the very first byte, on a tier that still grants a graph. An unarmed
+        # amount refuses nothing, and the dimension keeps being metered by its
+        # writer. ``zero_means_unarmed`` covers an EXACT zero only: a negative
+        # figure is a fault and still refuses.
         zero_means_unarmed=True,
         # ⛔ "NO ROW YET" IS AN ANSWER, NOT A REFUSAL — and this bit is what
         # makes arming survivable at all (#13102). The gauge's ONLY production

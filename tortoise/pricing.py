@@ -171,8 +171,14 @@ def storage_limits(tier: str) -> dict:
     (Supabase and registry), so the gate compares the meter against the tier's
     hot-window number on every gated write: **solo 77 / pro 102 / team 615**
     decimal MB, with the exact 1.5x hard stop at 115.5 / 153 / 922.5. ``free``/``anon``
-    carry ``0`` and are therefore UNARMED (``zero_means_unarmed``: an unset
-    amount is not a cap of zero). ``postgres_storage`` is the ONE dimension that
+    carry ``0`` — a STATED amount, by decision
+    (``_included_amounts_status``: *"hot capacity 0 is stated by the decision
+    record"*; ``SEARCH-ARCHITECTURE.md`` §8's window target is 0) — and are
+    deliberately left UNARMED, departing from that recorded 0 because the gate
+    refuses at ``used >= allowance``: a 0 cap would refuse the first byte on a
+    tier that still grants a graph. ``zero_means_unarmed`` is that departure, and
+    it covers an EXACT zero only (a negative is a fault).
+    ``postgres_storage`` is the ONE dimension that
     is still **BLOCKED** — it has no per-org byte meter, and a per-org split
     would be an ALLOCATION, not a measurement — so its key is carried here for
     the money arithmetic and refuses (fail closed) if it is ever configured.

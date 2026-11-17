@@ -82,12 +82,16 @@ def test_solo_pro_team_are_armed_at_the_derived_tier_numbers():
 
 
 def test_free_and_anon_are_UNARMED_and_say_so():
-    """The owner has not set those tiers' hot window, and a 0 cap is a landmine.
+    """The artifact's ``0`` for those tiers is a RECORDED amount, and arming it is a landmine.
 
-    ``enforce_allowances`` refuses at ``used >= allowance``, so emitting the
-    artifact's ``0`` would refuse EVERY gated write — including a tenant's very
-    first byte — on tiers that still grant a graph. The unset amount must arrive
-    as an ABSENT key (unarmed), never as a zero cap.
+    ``product/pricing.json`` states it (`_included_amounts_status`: *"hot
+    capacity 0 is stated by the decision record"*), and §8 of
+    `SEARCH-ARCHITECTURE.md` tabulates their window target as 0 — so the
+    dimension being UNARMED is a deliberate departure from a recorded figure,
+    not an unpopulated artifact. ``enforce_allowances`` refuses at
+    ``used >= allowance``, so emitting the ``0`` would refuse EVERY gated write —
+    including a tenant's very first byte — on tiers that still grant a graph.
+    The amount must arrive as an ABSENT key (unarmed), never as a zero cap.
     """
     for tier in ("free", "anon"):
         limits = _arm_graph_storage({"org_id": ORG, "tier": tier}, tier)
@@ -98,7 +102,7 @@ def test_free_and_anon_are_UNARMED_and_say_so():
 
 
 def test_a_NEGATIVE_artifact_amount_REFUSES_rather_than_reading_as_unset(monkeypatch):
-    """A negative is a corrupt figure, not the artifact's ``0`` unset sentinel.
+    """A negative is a corrupt figure, not the artifact's ``0`` unarmed sentinel.
 
     Reading ``<= 0`` as unarmed left a PAID tier silently UNCAPPED, while the
     money path raises ``ValueError`` on the same value — one corrupt input, two
