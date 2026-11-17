@@ -396,6 +396,73 @@ GOAL_LIVE_STATES = GOAL_STATE_VALUES - GOAL_ENDING_STATES
 #: enforcing the wider one is a trap for the next reader, and the axis table in
 #: this module's header now says what the code does.
 
+
+def validate_goal_state(value: object) -> object:
+    """THE closed-vocabulary guard for a goal's achievement state (#13110).
+
+    One home for the rule, so every door that can carry the field refuses an
+    unknown word with the SAME sentence and the SAME set instead of each
+    restating it:
+
+      * the SDK/props boundary (``_sanitize_props``, reached by ``create_point``,
+        ``create_object``/``create_entity``, ``update_point``, ``update_entity``)
+        — the fail-closed backstop every write passes, and the ONLY guard the
+        door code calls rather than re-implements;
+      * the REST create doors that declare the field
+        (``hosted_api.CreateObjectRequest.valid_goal_state``,
+        ``CreatePointRequest.valid_goal_state``) — which must refuse BEFORE
+        submitting the write, because those routes' blanket ``except Exception``
+        maps a ValueError raised inside the SDK to a 500 that names nothing;
+      * the MCP doors that declare it (``tortoise_create_entity``,
+        ``tortoise_create_object``, ``tortoise_create_point``), through the same
+        ``_sanitize_props`` backstop.
+
+    ``None`` is LEGAL and is returned unchanged: it is the explicit "no
+    achievement state". ⛔ ``None``'s effect on a re-write is the FOLD's, not
+    this function's, and the two folds DIFFER — measured (#13110): the Object/
+    entity fold PRESERVES a stored state on a ``None`` (so an idempotent re-create
+    cannot wipe one, the #9572 clobber class), while the Point dedup fold
+    (``create_point`` → ``update_point(pid, **props)``) DELETES the property.
+    ``create_point`` therefore POPS a ``None`` before the fold (same rule as
+    ``mentions``, #11239), and ``update_knowledge(…, goalState=None)`` is the
+    documented clear. A create door never clears.
+
+    The word test is ``_is_lifecycle_word`` — TYPE-FIRST, so a ``str`` SUBCLASS
+    that cannot hash gets this refusal rather than ``TypeError`` (#13065 review
+    round 16, finding 4) — and it answers against the SIX-word set #13035 left:
+    ``guideline`` was removed by owner ruling (2026-11-16), and its removal gets
+    its own hint below rather than a bare "not in the list".
+
+    ⛔ The ``status``/``goalState`` AGREEMENT rule is NOT here:
+    ``_refuse_inconsistent_goal_ending`` compares TWO fields, where this function
+    reads one word. Keeping them apart is what lets the REST doors share this
+    sentence without also inheriting a two-field contract they cannot see.
+
+    Sits beside ``GOAL_STATE_VALUES`` on purpose: the set and its rule are one
+    object, so a widening edit cannot update one and miss the other.
+    """
+    if value is None:
+        return value
+    if not _is_lifecycle_word(value, GOAL_STATE_VALUES):
+        _hint = ""
+        if value == "guideline":
+            _hint = (
+                " `guideline` was REMOVED from this vocabulary (#13035, "
+                "owner ruling 2026-11-16): whether a goal is directional "
+                "is a question about priority, not about outcome, so it "
+                "was never an achievement state. Record the priority "
+                "elsewhere — the four live words ("
+                f"{sorted(GOAL_LIVE_STATES)}) and the two endings "
+                f"({sorted(GOAL_ENDING_STATES)}) are the whole set."
+            )
+        raise ValueError(
+            f"Invalid goalState {value!r}. A goal's achievement "
+            f"state is a closed vocabulary: {sorted(GOAL_STATE_VALUES)}. "
+            "(Lifecycle is the separate `status` field — goalState is not "
+            "draft/live/retracted/archived.)" + _hint
+        )
+    return value
+
 # #7856 defect 2: the objective map's TOP node was a `goal` POINT created
 # without an explicit status, so it defaulted to `draft`. A draft point that
 # is only ever a TARGET is EP-inert — `create_operator` promotes only the
@@ -9168,6 +9235,12 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # `add_point`), so the vocabulary is enforced at the SDK/MCP boundary, not
     # at the projection choke point that live writes and replay share.
     #
+    # #13110: the RULE lives in `validate_goal_state` (module level, above) so
+    # the REST door can refuse an unknown word with the SAME sentence and the
+    # SAME set BEFORE the write is submitted — otherwise its blanket
+    # `except Exception` turned this ValueError into a 500 and the client never
+    # learned the vocabulary. One home, three doors.
+    #
     # ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT (#13065 review ROUND 8, finding 1,
     # P2). `"goalState" in props` hashes the LITERAL name while the live
     # transport files a key by `str(key)`, so a `str`-subclass key rendering as
@@ -9181,35 +9254,15 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # :func:`lifecycle_props_by_rendering` (the renderer UNION, first-wins) — the
     # same fix the two ending guards took, applied to the gate they all sit
     # behind.
+    #
+    # The WORD TEST and the SENTENCE stay in `validate_goal_state`, which is the
+    # one home the REST and MCP doors share; duplicating either here is how
+    # #13110's blanket `except Exception` turned the refusal into a message-less
+    # 500 on `/v1/objects` and `/v1/points`.
     _vocab_goal = lifecycle_props_by_rendering(props, ("goalState",)).get(
         "goalState")
     if _vocab_goal is not None:
-        _goal_state = _vocab_goal
-        # ⛔ #13065 review round 16, finding 4 (P3): this membership test HASHED
-        # the value, so a `goalState` that is an unhashable `str` SUBCLASS raised
-        # `TypeError: unhashable type` where the doors document `ValueError` —
-        # and it runs BEFORE the guard, so the type-safe helper the module
-        # already has never got the chance. `_is_lifecycle_word` is type-first
-        # for exactly this class; a non-`str` and a subclass that cannot hash
-        # both answer `False` here and get the documented refusal.
-        if not _is_lifecycle_word(_goal_state, GOAL_STATE_VALUES):
-            _hint = ""
-            if _goal_state == "guideline":
-                _hint = (
-                    " `guideline` was REMOVED from this vocabulary (#13035, "
-                    "owner ruling 2026-11-16): whether a goal is directional "
-                    "is a question about priority, not about outcome, so it "
-                    "was never an achievement state. Record the priority "
-                    "elsewhere — the four live words ("
-                    f"{sorted(GOAL_LIVE_STATES)}) and the two endings "
-                    f"({sorted(GOAL_ENDING_STATES)}) are the whole set."
-                )
-            raise ValueError(
-                f"Invalid goalState {_goal_state!r}. A goal's achievement "
-                f"state is a closed vocabulary: {sorted(GOAL_STATE_VALUES)}. "
-                "(Lifecycle is the separate `status` field — goalState is not "
-                "draft/live/retracted/archived.)" + _hint
-            )
+        validate_goal_state(_vocab_goal)
     # #13035: the two fields must AGREE about whether the goal has ended. This
     # is the fail-closed boundary every SDK write surface shares, so a caller
     # cannot mint a goal that `derived_invalidation` retires (it reads
@@ -16599,6 +16652,25 @@ class TortoiseSDK:
         # than forwarded.
         if props.get("mentions") is None:
             props.pop("mentions", None)
+        # #13110 (review round 3): the SAME rule for the goal's achievement
+        # state, and the same measured failure. A CREATE must not DELETE: an
+        # explicit ``goalState=None`` reaches the dedup fold's
+        # ``self.update_point(pid, **props)`` below, where a `None` in a generic
+        # prop REMOVES the property — measured: `create_point(goalState=None,
+        # dedup=True)` on an existing ``met`` goal left ``p.goalState`` UNSET,
+        # while ``create_object(goalState=None)`` on the Object twin PRESERVED
+        # it. ⚠️ WHAT THIS POP COVERS, exactly (round 4 review): the MCP ``props``
+        # bag, a direct SDK call, and the nested-``props`` flatten — NOT the MCP
+        # ``goalState=`` parameter, which the three tool bodies already guard
+        # with ``if goalState is not None`` before it reaches here. The two REST
+        # routes guard the same way. So this is the ONE place that covers every
+        # channel the guards cannot see; it is not the only place a guard sits,
+        # and it is not redundant — removing it re-opens the ``props`` bag and
+        # the SDK call (measured: that leg of
+        # ``test_no_create_channel_can_erase_a_stored_goal_state`` fails).
+        # `update_knowledge(…, goalState=None)` is the documented clear.
+        if props.get("goalState") is None:
+            props.pop("goalState", None)
         # #10122: a `name` the index does not hold is a stored-but-unfindable
         # identifier — advise here, at the door that accepted it (after the
         # flatten, so the coverage check sees the stored `search_keys` form).
