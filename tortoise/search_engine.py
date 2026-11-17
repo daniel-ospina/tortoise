@@ -4503,11 +4503,11 @@ def run_vector_query(
         unreadable = False
         if embedded > 0:
             try:
-                _readable_probe = f"{stored_embedding_vector_expr('n', query_dim=len(query_vec))}"
                 probe_rows = graph.query(
                     f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
-                    f"AND {_readable_probe} IS NOT NULL "
-                    "RETURN 1 LIMIT 1", timeout=_graph_timeout_ms).result_set
+                    f"AND {stored_embedding_vector_expr('n', query_dim=len(query_vec))} "
+                    "IS NOT NULL RETURN 1 LIMIT 1",
+                    timeout=_graph_timeout_ms).result_set
                 # An EMPTY result set is the positive proof that no row is
                 # readable at this width — the one state this reason names.
                 unreadable = not probe_rows
