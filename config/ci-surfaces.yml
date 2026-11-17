@@ -1032,12 +1032,25 @@ surfaces:
   # `hosted_api.list_points` — `test_the_hosted_list_route_drops_it` asserts the
   # public list route drops an `isClosed` Point) and `tortoise.mcp_auth`
   # (`_current_org_id` / `_current_org_limits` / `_transport_mode`, which drive the
-  # whole MCP-tag arm). Neither module is in `SHARED_MODULES` and neither matches a
-  # `SOURCE_PATTERNS` entry, so the `core` row's `tortoise/sdk.py` reasoning does
-  # NOT cover them: on a `hosted_api.py` or `mcp_auth.py` diff, `select()` returned
-  # `['api', …]` and this file was NOT chosen — verified with the row absent, and
-  # with it present `select()` returns the file for both. Same rule as the rows
-  # above: a one-surface registration drops this file on the other half's own diff.
+  # whole MCP-tag arm). Neither is in `SHARED_MODULES`, so the `core` row's
+  # `tortoise/sdk.py` argument does NOT cover them; and both ARE `api`
+  # `SOURCE_PATTERNS` entries — `tools/ci_selection.py`'s `api` tuple names
+  # `tortoise/hosted_api.py` and `tortoise/mcp_auth.py` literally — which is the
+  # mechanism that makes `core` insufficient here: a named-surface match REPLACES
+  # the `core` fallback, so on a `hosted_api.py` or `mcp_auth.py` diff `select()`
+  # returns `['api', …]` and a `core`-only registration is not chosen. ⛔ The
+  # DIRECTION is the rule, and an earlier cut of this comment had it inverted: a
+  # module matching NO `SOURCE_PATTERNS` entry is the one that falls through to
+  # `core` (that is what `tortoise/live.py` does in the row above), so "matches no
+  # pattern, therefore register it on a named surface" is the opposite of the rule
+  # and would invite the #1349/#3332 silent drop it claims to fix. MEASURED with
+  # this manifest (in-process `select()`/`integrity()`): `hosted_api.py` →
+  # `['api','onboarding']` and `mcp_auth.py` → `['api']`, both selecting this file;
+  # with the `api` row removed both drop it; with the `core` row removed
+  # `tortoise/live.py` drops it. `integrity()` is `[]` and `duplicate_entries()` is
+  # `[]` in every case (cross-surface dual registration is the deliberate shape).
+  # Same rule as the rows above: a one-surface registration drops this file on the
+  # other half's own diff.
   # ⚠️ SCOPE, stated so the severity is not overstated: `--surface-audit` reports
   # the same core-only shape for ~545 further files against these two modules. That
   # audit is REPORT-ONLY, not a gate, so this is a pre-existing broad residual and
