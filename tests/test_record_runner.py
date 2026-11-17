@@ -521,6 +521,97 @@ def test_a_LEGITIMATE_bound_still_runs_bounded(monkeypatch, capsys):
         assert rc == EXIT_OK, (flag, rc)
 
 
+def test_status_DISCLOSES_a_salvage_read_and_withdraws_the_completion_claim(
+        monkeypatch, capsys):
+    """⛔ P1 (PR #13210): `status` published 3 of the 6 journal keys, and asserted completion.
+
+    `plan`/`apply` publish `salvage`/`corrupt_lines`/`torn_tails` and warn that a
+    SKIPPED line SHIFTS every later position; `status` dropped all three and
+    computed `fully_consumed` from `len(journal.records)`, so a **salvaged** read
+    could report `fully_consumed: true` over a record that is missing the skipped
+    record's mutation — the exact harm `read_journal`'s docstring promises the
+    report will disclose. Measured before the fix on a 3-record journal with one
+    corrupt line: `status` printed `events remaining: 0` / no damage line, and
+    `fully_consumed: True`.
+    """
+    journal = Journal(path=FIXTURE,
+                      records=[{"type": "IngestStarted"},
+                               {"type": "PointAdded"},
+                               {"type": "PointAdded"}],
+                      segmented=False, salvage=True, corrupt=1, torn=0)
+    monkeypatch.setattr(record_runner, "read_journal", lambda *a, **k: journal)
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=3, present=3))
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(FIXTURE), "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["journal"]["salvage"] is True
+    assert payload["journal"]["corrupt_lines"] == 1
+    assert payload["journal"]["torn_tails"] == 0
+    # the field a chain gates on: unknown, never True, over a skipped line
+    assert payload["fully_consumed"] is None
+    assert payload["completeness_unknown"] is True
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "SALVAGE" in out
+    assert "damaged input: 1 mid-file line(s)" in out
+    assert "NOT a completeness claim" in out
+    assert "complete: UNKNOWN" in out
+
+
+def test_status_on_a_SEGMENTED_layout_cannot_claim_completion(monkeypatch, capsys):
+    """The worse arm: a segmented reader ALWAYS salvages and returns no counters.
+
+    `corrupt is None` means NOT REPORTED, so there is not even a number to print —
+    which is why `fully_consumed` must be `None` here and the text must say the
+    damage is unreportable rather than print a reassuring zero.
+    """
+    journal = Journal(path=FIXTURE,
+                      records=[{"type": "IngestStarted"}, {"type": "PointAdded"}],
+                      segmented=True, salvage=True, corrupt=None, torn=None)
+    monkeypatch.setattr(record_runner, "read_journal", lambda *a, **k: journal)
+    _patched(monkeypatch, checkpoint=Checkpoint(high_seq=2, present=2))
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(FIXTURE), "--json"])
+    assert rc == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["journal"]["corrupt_lines"] is None
+    assert payload["journal"]["torn_tails"] is None
+    assert payload["fully_consumed"] is None
+    assert payload["completeness_unknown"] is True
+
+    rc = main(["status", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(FIXTURE)])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "damage NOT REPORTED" in out
+    assert "complete: UNKNOWN" in out
+
+
+def test_plan_allocate_does_not_hand_over_an_acknowledgement(monkeypatch, capsys):
+    """⛔ P2 (PR #13210): the only unguarded arm of the acknowledgement block.
+
+    `apply --allocate` is refused UNCONDITIONALLY, so printing
+    `--acknowledge-plan N` on this arm hands the operator a guaranteed refusal —
+    the same defect the cut-over and plan-did-not-read arms already suppress.
+    Before the fix (measured with a stubbed record, cursor=None):
+    `to apply this plan:  --acknowledge-plan 39`, rc 0.
+    """
+    rc = main(["plan", "--org-id", "o", "--graph-id", "g",
+               "--journal", str(FIXTURE), "--allocate"])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "--acknowledge-plan" not in out
+    assert "`apply` refuses `--allocate`" in out
+    # the PLAN itself is still produced and useful — only the instruction is gone
+    assert "batch 1" in out and "TOTAL: 39 events" in out
+
+
 def test_status_does_not_accept_a_bound_it_cannot_apply(monkeypatch, capsys):
     """`status` runs no batch, so a bound there was accepted and IGNORED.
 

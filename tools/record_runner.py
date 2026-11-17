@@ -594,6 +594,10 @@ class PlanReport:
     totals: dict[str, Any] = field(default_factory=dict)
     #: True when the run was GIVEN a record (a DSN), whether or not it read one.
     record_armed: bool = False
+    #: True when this plan was made on the ALLOCATION arm. `apply` refuses
+    #: `--allocate` unconditionally, so this flag is what stops the renderer from
+    #: handing over an acknowledgement number for a run that cannot exist.
+    allocate: bool = False
     #: The run's own write accounting. A planner never touches it; that it is
     #: empty is a MEASUREMENT, and a renderer that ignored it would be caught.
     executed: WriteLedger = field(default_factory=WriteLedger)
@@ -610,6 +614,7 @@ class PlanReport:
             "events_to_consume": self.events_to_consume,
             "batches": self.batches,
             "totals": self.totals,
+            "allocate": self.allocate,
             # The falsifier, MEASURED by the tool's own accounting rather than
             # printed as a constant — see `WriteLedger`.
             "rows_written": self.executed.rows_written,
@@ -654,6 +659,7 @@ def build_plan(*, journal: Journal, org_id: str, graph_id: str,
     return PlanReport(
         org_id=org_id, graph_id=graph_id, start_at=start_at,
         events_to_consume=events_total, batches=batches,
+        allocate=allocate,
         journal={"path": str(journal.path), "records": len(journal.records),
                  "segmented": journal.segmented, "salvage": journal.salvage,
                  "corrupt_lines": journal.corrupt, "torn_tails": journal.torn},
@@ -818,6 +824,29 @@ def _quietly(fn) -> None:
 # ── output ───────────────────────────────────────────────────────────────────
 
 
+def _journal_damage_lines(j: dict[str, Any]) -> list[str]:
+    """The damage disclosure EVERY verb owes, in one place (review P1, #13210).
+
+    ⛔ `plan` and `apply` published it from the beginning and `status` did not, so
+    the one verb an operator chains on could say `fully_consumed: true` over a
+    read that had SKIPPED a record — the harmonic of `read_journal`'s own promise
+    ("salvaging is an explicit, recorded choice and the report says when it was
+    taken"). Factored rather than re-spelled so the three verbs cannot drift, and
+    so a fourth verb inherits it by construction.
+    """
+    if j["corrupt_lines"] is None or j["torn_tails"] is None:
+        return ["  ⚠ damage NOT REPORTED: this layout's reader does not "
+                "return its damage counters, and it reads every segment in "
+                "SALVAGE mode — so a skipped mid-file line would have "
+                "SHIFTED the enumeration and this run cannot see it"]
+    if j["corrupt_lines"] or j["torn_tails"]:
+        return [f"  ⚠ damaged input: {j['corrupt_lines']} mid-file line(s), "
+                f"{j['torn_tails']} torn tail fragment(s) — a SKIPPED line "
+                f"SHIFTS every later record's position, so this is NOT a "
+                f"completeness claim"]
+    return []
+
+
 def _render_plan(report: PlanReport) -> str:
     j = report.journal
     lines = [
@@ -825,16 +854,7 @@ def _render_plan(report: PlanReport) -> str:
         f" ({'segmented' if j['segmented'] else 'single file'}"
         f"{', SALVAGE' if j['salvage'] else ''})",
     ]
-    if j["corrupt_lines"] is None or j["torn_tails"] is None:
-        lines.append("  ⚠ damage NOT REPORTED: this layout's reader does not "
-                     "return its damage counters, and it reads every segment in "
-                     "SALVAGE mode — so a skipped mid-file line would have "
-                     "SHIFTED the enumeration and this run cannot see it")
-    elif j["corrupt_lines"] or j["torn_tails"]:
-        lines.append(f"  ⚠ damaged input: {j['corrupt_lines']} mid-file line(s), "
-                     f"{j['torn_tails']} torn tail fragment(s) — a SKIPPED line "
-                     f"SHIFTS every later record's position, so this is NOT a "
-                     f"completeness claim")
+    lines.extend(_journal_damage_lines(j))
     if report.checkpoint is None:
         # ⛔ TWO DIFFERENT FACTS, and telling them apart is the point: "no record
         # is armed" has no remedy in this tool, while "you did not ask" has a
@@ -873,7 +893,20 @@ def _render_plan(report: PlanReport) -> str:
                  "(the plan path opens no connection unless asked for the checkpoint)")
     if report.events_to_consume:
         lines.append("")
-        if report.cursor is not None:
+        if report.allocate:
+            # ⛔ DON'T HAND OVER A NUMBER `apply` REFUSES UNCONDITIONALLY (review
+            # P2). The two arms below suppress the acknowledgement for runs that
+            # cannot write HERE; the allocate arm is the same defect and was the
+            # one arm left unguarded — `apply --allocate` is refused ALWAYS, not
+            # conditionally, so the number was a guaranteed refusal. The plan
+            # itself is legitimate and useful (it is how an operator sees what a
+            # cut-over seed will allocate), so the sentence keeps the plan and
+            # drops only the instruction.
+            lines.append("no acknowledgement is handed over: `apply` refuses "
+                         "`--allocate` — a historic fold is the enumerator's, "
+                         "while a cut-over graph's history is the allocator's "
+                         "seed floor")
+        elif report.cursor is not None:
             # ⛔ DON'T HAND OVER A NUMBER ON AN ARM THAT CANNOT WRITE (review P2).
             # The cutover verdict above already says an enumerated replay is
             # REFUSED here, so this number is one `apply` can only answer with
@@ -1141,22 +1174,42 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
                     f"they are not the same journal")
     else:
         remaining = len(journal.records) - (cp.next_seq - 1)
+    # ⛔ A READ WHOSE COMPLETENESS IS UNKNOWN CANNOT COMPLETE ANYTHING (review P1).
+    # `salvage` means a mid-file line was SKIPPED, and a skipped line SHIFTS every
+    # later position — so `remaining` can reach 0 while the record is missing that
+    # record's mutation. The segmented layout is worse: its reader always salvages
+    # and returns no counters at all (`corrupt is None`), so even the `--salvage`
+    # warning `plan`/`apply` print has no number to carry. `fully_consumed` is the
+    # field a chain gates on, so it takes the same `None` the cut-over and the
+    # mismatch arms take, and the damage lines say why.
+    completeness_unknown = journal.salvage or journal.corrupt is None
     payload = {
         "verb": "status",
         "org_id": args.org_id,
         "graph_id": args.graph_id,
+        # the same six keys `plan` publishes — `status` used to drop the three
+        # that make a damaged read visible.
         "journal": {"path": str(journal.path), "records": len(journal.records),
-                    "segmented": journal.segmented},
+                    "segmented": journal.segmented,
+                    "salvage": journal.salvage,
+                    "corrupt_lines": journal.corrupt,
+                    "torn_tails": journal.torn},
         "checkpoint": {"high_seq": cp.high_seq, "present": cp.present,
                        "first_gap": cp.first_gap, "next_seq": cp.next_seq,
                        "min_seq": cp.min_seq, "contiguous": cp.contiguous},
         "cursor": None if cursor is None else {"seq": cursor[0], "mode": cursor[1]},
         "events_remaining": None if remaining is None else max(0, remaining),
-        "fully_consumed": (None if remaining is None
+        "fully_consumed": (None if remaining is None or completeness_unknown
                            else (remaining <= 0 and cp.contiguous)),
+        #: True when this read cannot support a completeness claim at all — the
+        #: reason `fully_consumed` is `None`, stated so a caller need not infer it.
+        "completeness_unknown": completeness_unknown,
     }
     text = "\n".join([
-        f"journal: {journal.path} — {len(journal.records)} records",
+        f"journal: {journal.path} — {len(journal.records)} records"
+        f" ({'segmented' if journal.segmented else 'single file'}"
+        f"{', SALVAGE' if journal.salvage else ''})",
+        *_journal_damage_lines(payload["journal"]),
         f"record: present {cp.present}, high {cp.high_seq}, first gap "
         f"{cp.first_gap} → resume at seq {cp.next_seq}",
         ("events remaining: unknown — this graph is CUT OVER, so its record's "
@@ -1164,6 +1217,8 @@ def cmd_status(args: argparse.Namespace, *, echo) -> int:
          "not apply" if allocated
          else f"events remaining: unknown — {mismatch}" if mismatch is not None
          else f"events remaining: {max(0, remaining)}"),
+        *(["complete: UNKNOWN — this read skipped or cannot account for input, "
+           "so it is not a completeness claim"] if completeness_unknown else []),
         "cutover: " + ("none (positions are the journal's)" if cursor is None
                        else f"cursor present (seq {cursor[0]}, mode {cursor[1]})"),
     ])
