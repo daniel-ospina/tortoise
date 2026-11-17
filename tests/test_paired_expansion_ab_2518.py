@@ -18,6 +18,7 @@ carries:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
@@ -451,7 +452,9 @@ def test_freeze_and_snapshot_cannot_select_two_corpora_at_once(tmp_path, capsys)
     never ran. The artifact then attested *"this corpus, byte for byte"* over a
     corpus the run did not measure — the exact fail-open the tool's docstring
     promises to refuse (`#13267` F2). `argparse`'s mutually exclusive group
-    refuses the composition BEFORE any copy happens.
+    refuses the composition BEFORE any copy happens — and `run()` refuses it too,
+    for a caller that built the Namespace itself, which is the one path argparse
+    never sees.
     """
     src = tmp_path / "live"
     _write_corpus(src, names=["the road bike repairs"])
@@ -465,6 +468,11 @@ def test_freeze_and_snapshot_cannot_select_two_corpora_at_once(tmp_path, capsys)
     # corpus the run then did not read
     assert not (tmp_path / "snap").exists()
     assert not (tmp_path / "elsewhere").exists()
+    # ⛔ and the INVARIANT holds at the layer that reads the corpus, not only at
+    # the parser: a directly-built Namespace must fail closed
+    with pytest.raises(P.Refused, match=r"--freeze and --snapshot both select"):
+        P.run(argparse.Namespace(freeze=str(tmp_path / "snap"),
+                                 snapshot=str(tmp_path / "elsewhere")))
 
 
 def test_the_dense_switch_refusal_fires_before_any_database_is_needed(
@@ -809,6 +817,16 @@ def test_the_briefs_call_site_citation_resolves_at_the_merge_target():
     predicate = 'entity_key_expansion and entity_type == "point"'
     assert sdk.count(predicate) >= 2, (
         "the object arm is gated out only if BOTH halves sit behind the predicate")
+    # ⛔ counting occurrences is not enough — the predicate could appear twice and
+    # arm nothing. The structural claim needs ONE gate that hands the query to
+    # BOTH halves, so the window after the gate is checked for both call sites.
+    lines = sdk.splitlines()
+    armed = [i for i, ln in enumerate(lines) if predicate in ln
+             and "_entity_key_expansion_pass" in "\n".join(lines[i:i + 40])
+             and "_entity_key_dense_pass" in "\n".join(lines[i:i + 40])]
+    assert armed, (
+        "no single gate both arms the sparse half and the dense half — the "
+        "object arm being gated out needs re-deriving before the brief says so")
     assert "def tortoise_fts_query(" in sdk, (
         "the predicate lives in TortoiseSDK.tortoise_fts_query — cite a symbol "
         "that resolves, not `sdk.SDK.search_graph`")

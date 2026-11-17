@@ -973,6 +973,20 @@ def _load() -> dict:
 
 # ── the run ──────────────────────────────────────────────────────────────────
 def run(args: argparse.Namespace) -> int:
+    # ⛔ ONE input source, enforced HERE too — `main()`'s mutually exclusive group
+    # only covers the argv path, and `run()` is the layer that actually chooses
+    # which bytes the arms read. With both set, the digest/file-list came from the
+    # `--freeze` target while `read_records` read the `--snapshot` directory on
+    # which `verify_snapshot` never ran: an artifact attesting "this corpus, byte
+    # for byte" over a corpus the run never measured (`#13267` F2). A directly
+    # built Namespace must fail closed, not compose.
+    if args.freeze and args.snapshot:
+        raise Refused(
+            "--freeze and --snapshot both select the corpus, and exactly one may: "
+            "the manifest would otherwise attest the frozen copy while the arms "
+            "read the reused snapshot. Pass one (they are mutually exclusive in "
+            "`main()`).")
+
     from tortoise.sdk import _entity_key_dense_enabled
 
     # ⛔ BEFORE anything else: the dense half would be a SECOND, conflated lever.
@@ -1002,7 +1016,9 @@ def run(args: argparse.Namespace) -> int:
                           "frozen copy) is required — arms must not read the "
                           "live directory")
         manifest = verify_snapshot(Path(args.snapshot))
-    snapshot_path = Path(args.snapshot or args.freeze)
+    # Exactly one of the two is set (argparse's group + the guard at the top of
+    # `run`), so this is the same directory the manifest above attests.
+    snapshot_path = Path(args.freeze if args.freeze else args.snapshot)
     snap_digest = manifest["digest"]
 
     _input: dict = {}

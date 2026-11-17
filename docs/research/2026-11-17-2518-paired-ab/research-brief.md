@@ -315,6 +315,15 @@ drawn `population-300.json` was never committed — so `items.name_digest` can b
 (it equals `population.names_sha256`) but the names behind it cannot be re-derived here. The artifacts say
 so rather than implying otherwise.
 
+⛔ **And two fields in these three files are ANNOTATIONS, not run output.** The control's
+`identity_measured: false` + its `identity_note`, and all three files'
+`construction_unrecorded: {fields: [query_chars, key_tokens, min_query_tokens]}` (their runs predate those
+fields) were added by hand beside the run. They mean "this run did not record/measure it", which is a fact
+about THESE FILES — no version of the tool emitted them (`#13267` review 5, F5). The tool emits
+`identity_measured` itself now, and the suite's artifact-shape helper holds for a tool-produced artifact
+as well as these three, so a correct re-generation is not punished by the pins that document the older
+shape.
+
 The tool records, in the artifact's own `provenance` block, the sha256 of its own bytes and whether those
 bytes were committed (`tool_sha256` / `tool_uncommitted`) — because `git_head` alone does **not** identify
 the producing code (`#13267` F4): these three artifacts record `9b537d875a` while carrying `mde_note` and a
