@@ -146,7 +146,7 @@ marked **none**.
 | `tortoise/sdk.py:21978` | `(n:Point {id:$id})-[:TAGGED]->()` | **traversal** |
 | `tortoise/search_engine.py:4422-4426` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
 | `tortoise/search_engine.py:6297` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg | **adjacency** |
-| `tortoise/search_engine.py:6656` | `(n:Point)-[r:aboutSubject]->(:Subject)` — typed-degree prior | **adjacency** |
+| `tortoise/search_engine.py:6656` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:6655-6658`, consumed only by `subject_binding_available()` at `:6661-6674`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
 | `tortoise/search_engine.py:3039` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
 | `tortoise/search_engine.py:4350-4352` | `run_structural_query`'s `MATCH (n:{label}) WHERE …` — a plain label scan, no pattern | **none** |
 | `tortoise/search_engine.py:3938` | `CALL db.idx.vector.queryNodes('Point', 'embedding', $limit, vecf32($query_vec))` — the HNSW leg | **vector index** |
@@ -322,10 +322,10 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 
 | shape | readers (`file:line`) | capability |
 |---|---|---|
-| `:GraphEventMeta` | `event_store.py:557`, `:657`; `hosted_backup.py:842`; `sdk.py:13761`; `webhook_delivery.py:1052` (the head fallback) (reads); `:491`/`:738` are the `MERGE` and `:1103` a `SET` **RMW** that advance or restore the watermark | **none** |
+| `:GraphEventMeta` | `event_store.py:557`, `:657`; `hosted_backup.py:842`; `sdk.py:13761`; `webhook_delivery.py:1052` (the head fallback) (reads); `event_store.py:491`/`:738` are the `MERGE`s and `event_store.py:1103` a `MATCH … SET m.first_seq` **RMW** that advance or restore the watermark (⚠️ written with the file on every cite — a bare `:491` after `webhook_delivery.py:1052` is that file's `rid` params line, a `:738` there is a deadline loop and a `:1103` a docstring) | **none** |
 | `:EpMeta` | `sdk.py:36069`; `ep.py:473` | **none** |
 | `:Meta` | `residency.py:244`, `:292`; `sdk.py:55647` (reads); `:298` is a `DETACH DELETE` scoped by an IDENTITY key only (`MATCH (n:Meta {key:$key})`) — see the criterion note under this table | **none** |
-| `:WhySnapshot` | `why_snapshot.py:237` (read); `:303`/`:350` are the retention `DELETE` prunes — scoped by TIME, not by a node property the statement must know | **none** |
+| `:WhySnapshot` | `why_snapshot.py:237` (read); `:303-304` is `_drop` — `MATCH (w:WhySnapshot) WHERE w.point_id IN $ids DELETE w`, ORPHAN cleanup scoped by IDS THE CALLER ALREADY HOLDS (not retention, and not time-scoped); `:350-351` is the retention prune — `WHERE w.assembled_at < $cutoff WITH w LIMIT 5000 DELETE w` (time-scoped) | **none** |
 | `:CommitRecord` | `hosted_api.py:22228-22232` (the live commit path's read — it consumes `x.value_nodes_declared` as a predicate); `commit_idempotency.py:57` (read), `:65` — `MATCH … SET r.status=$status RETURN r.session_id, r.status, r.write_ops_billed, r.written_at, r.value_nodes_declared`, a **read-modify-write** (`CommitRecordStore.update` consumes all five returned columns, so `RMW` is the right word — an earlier draft called it read-free, which was wrong), and `:194` — the idempotency `DELETE`, whose `WHERE r.status = 'partial' AND coalesce(r.write_ops_billed, 0) = 0 AND r.value_nodes_declared IS NULL` **consumes three node properties as predicates**, so by this table's own criterion it is a reader (an earlier draft called it "not a read"); `hosted_api.py:21691-21692` (`MATCH (r:CommitRecord …)` then `SET r.telemetry=$t, r.budget_warn=$warn`) and `:23760-23761` (`SET r.write_ops_billed=1`, a LITERAL — not a parameter) have **no `RETURN`** and assign parameters/literals, so they read nothing of the node and are WRITERS (§1 row 13). ⚠️ Three drafts of this row called writers readers, then over-corrected `:65` to read-free, then called `:194` read-free; the table now separates read / RMW / predicate-consuming DELETE / writer, site by site | **none** |
 | `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`); `:502` is the `MAX_RECEIPTS` `DETACH DELETE`, `:487` the CREATE — see the criterion note under this table | **none** |
 | `:Batch` | `mining.py:94`, `:178`; `projection/__init__.py:14295` | **none** |
@@ -347,12 +347,17 @@ does not pretend otherwise: they are listed because the census is complete, not 
 `DELETE`/`DETACH DELETE` is a **reader** when its `WHERE` (or its `MATCH` map) has to evaluate **node content** —
 `commit_idempotency.py:194`'s `r.status = 'partial' AND coalesce(r.write_ops_billed,0)=0 AND
 r.value_nodes_declared IS NULL` is the model — and it is **not** a reader when it is scoped by an **identity key or
-a clock** the caller already holds (`residency.py:298`'s `{key:$key}`, `why_snapshot.py:303`/`:350`'s
-`assembled_at < $cutoff`, `webhook_delivery.py:502`'s `ORDER BY r.ts DESC, r.receipt_id DESC` + `LIMIT`). §2.6's
+a clock** the caller already holds (`residency.py:298`'s `{key:$key}`, `why_snapshot.py:303-304`'s
+`point_id IN $ids`, `why_snapshot.py:350-351`'s `assembled_at < $cutoff` + `LIMIT 5000`). §2.6's
 `event_store.py:1029`/`:1053` are listed as readers because `:1053` **orders by `n.seq`** (a property the statement
 must read to choose its victims) even though `:1029`'s `ts < $cutoff` does not — so that row is the one genuinely
-borderline case, and it is capability `none` either way. Four drafts read these sites as a mix of "reader" and
-"not a read" because the rule was never written down; it is written down here.
+borderline case, and it is capability `none` either way. ⚠️ **`webhook_delivery.py:502-504` is the test of the rule,
+not an exception to it**: `MATCH (r:DeliveryReceipt {sub_id:$sid}) WITH r ORDER BY r.ts DESC, r.receipt_id DESC SKIP
+$keep DETACH DELETE r` **does** choose its victims by two node properties — the very test that makes `:1053` a
+reader — and it is exempt only because its `MATCH` map pins the subscription identity. What it does NOT contain is
+a `LIMIT`; `SKIP $keep` keeps the newest `$keep` and deletes the rest, which an earlier draft of this note
+got backwards. Four drafts read these sites as a mix of "reader" and "not a read" because the rule was never
+written down; it is written down here, with its own hardest case named.
 
 ---
 

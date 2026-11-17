@@ -35,8 +35,10 @@ columns come from here, and this is the home for the method, the arms and — mo
 
 Fixed and synthetic: 6 sessions × 10 turns × 1,500 characters with a deterministic 384-dim `float32`
 vector per turn (the production embedding width), **plus** one public capture through
-`sdk._capture_session` (mock extractor, hermetic) and one of each of `Source`/`Event`/`Object`/`Subject`
-created through their SDK doors. Same ids, same texts, same vectors in both arms — reproducible on any
+`sdk._capture_session` (mock extractor, hermetic), one of each of `Source`/`Event`/`Object`/`Subject`
+created through their SDK doors, **and one standalone `:Point`** via
+`sdk.create_point("statement", …)` (`probe_shape_bytes.py:286`) — which is why the audit reconciles
+§1 row 1's `:Point` count of 66 as "60 turn points + claims". Same ids, same texts, same vectors in both arms — reproducible on any
 machine, and never a snapshot of tenant data.
 
 Record **unarmed** in both arms, so a capture's turns land as NODES. That is deliberate: the fallback
