@@ -133,11 +133,13 @@ def test_the_hard_stop_is_1_5x_the_cap_and_refuses_with_a_usable_message():
     assert "Upgrade your plan" in message
     assert "reduce what you hold resident" in message
     # the structured payload carries the figures the gate COMPARED — including
-    # the FRACTIONAL one: `int(115.5)` used to reach the payload as 115, i.e.
-    # half a MB below the number that actually fired the refusal (#13102 P3).
+    # the FRACTIONAL ones: `int(115.5)` used to reach the payload as 115, AND
+    # `limit` reported the 1.0x cap (77) while the gate refused at the 1.5x hard
+    # stop (115.5), so a machine reader saw `{used: 115.5, limit: 77}` and had to
+    # recover the real threshold from the prose (#13102 payload findings).
     assert caught.value.resource == "graph_storage"
-    assert caught.value.limit == 77
     assert caught.value.used == 115.5
+    assert caught.value.limit == 115.5
     assert caught.value.estimated is True  # never presented as exact
 
 

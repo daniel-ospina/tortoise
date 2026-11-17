@@ -1107,19 +1107,27 @@ def enforce_allowances(
                 "allowance exceeded: team=%s dimension=%s used=%s limit=%s "
                 "hard_stop=%s", org_id, dim.dimension, used, allowance,
                 refuse_at)
-            # ⛔ THE PAYLOAD CARRIES THE VALUE THE GATE COMPARED (#13102 round 5,
-            # P3). ``quota.py`` documents that every field "must be the ones THIS
+            # ⛔ THE PAYLOAD CARRIES THE VALUES THE GATE COMPARED (#13102).
+            # ``quota.py`` documents that every field "must be the ones THIS
             # gate compared", and a banded dimension compares at the HARD STOP —
-            # e.g. ``used >= 115.5`` — while ``int(used)`` floored the reported
-            # figure to 115, i.e. 0.5 MB BELOW the number that fired the
-            # refusal, in the payload a dashboard/billing reader consumes.
-            # Integral readings keep their int type, so the token dimensions'
-            # payloads stay byte-identical.
+            # ``used >= 115.5`` — while ``int(used)`` floored the reported figure
+            # to 115, i.e. 0.5 MB BELOW the number that fired the refusal, in the
+            # payload a dashboard/billing reader consumes. ``limit`` had the same
+            # defect one step over: it reported the 1.0x CAP (77) while the
+            # threshold compared was the 1.5x stop (115.5), so a machine reader
+            # saw ``{used: 115.5, limit: 77}`` — a tenant "150 % over limit" — and
+            # could recover the real threshold only from the prose. Both fields
+            # now carry what was compared; the CAP is still named in the message
+            # ("77 MB ... hard stop 115.5"), which is where a human reads it.
+            # Integral values keep their int type, so every unbanded dimension's
+            # payload is byte-identical to before.
             payload_used = int(used) if used.is_integer() else used
+            payload_limit = (int(refuse_at) if float(refuse_at).is_integer()
+                             else refuse_at)
             raise QuotaExceededError(
                 with_limit_contact(f"{head}{note}"),
                 resource=dim.dimension, used=payload_used,
-                limit=int(allowance),
+                limit=payload_limit,
                 # Omitted (None) when the figure is exact, so `quota.py`'s
                 # documented payload shape holds: only an ESTIMATE is labelled.
                 estimated=True if reading.estimated else None,
