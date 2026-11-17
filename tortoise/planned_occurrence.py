@@ -297,10 +297,12 @@ def create_plan(sdk, name: str, *, title: str | None = None,
     an existing LIVE holder, and only the second SUCCEEDS without writing:
 
     * **live, open and POSITION-LESS** (the extractor-minted `core:plan`): the
-      call falls through the re-mention and STAGES the record — "created" is not
-      true of a plan with no position, and a position-less plan is exactly the
-      shape the promotion gate is bounded on, so returning it would leave the
-      suppression OFF;
+      call falls through the re-mention and ATTEMPTS to stage the record —
+      "created" is not true of a plan with no position, and a position-less plan
+      is exactly the shape the promotion gate is bounded on, so returning it would
+      leave the suppression OFF. (If the effective pipeline will not apply the
+      move the record stays unstaged and the call raises; see the no-position
+      refusal below.)
     * **live, open, positioned, and of the BINDABLE spelling**: a no-op success,
       nothing re-staged, because that is exactly what was asked for. This is the
       only arm that succeeds without writing;
@@ -310,11 +312,11 @@ def create_plan(sdk, name: str, *, title: str | None = None,
       success here would hand the caller a plan whose next write refuses;
     * **a still-LIVE holder at a TERMINAL stage**: RAISES, naming the stage it is
       at and the route to a new record;
-    * **a still-LIVE holder whose position does not RESOLVE** (a drifted stage id,
-      a cleared or foreign `pipelineStageKey`): RAISES through
-      `_unresolvable_message`, which prescribes the BINDING repair and says the
-      plan is still open — deliberately NOT "a new name", which would be a no-op
-      for that caller's actual problem.
+    * **a still-LIVE holder whose position does not RESOLVE** — a drifted stage
+      id, or a cleared/foreign `pipelineStageKey`: RAISES through
+      `_unresolvable_message`, whose ONE home picks the remedy for the input that
+      actually failed (a declared stage id, or the pipeline binding). It is
+      deliberately not "a new name": a new name repairs neither input;
 
     ⛔ A holder that is ENDED but no longer LIVE is NOT in those arms: the
     re-mention resolve is LIVE-only (``live_only=True``), so a plan settled
