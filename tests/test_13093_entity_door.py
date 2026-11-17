@@ -715,12 +715,30 @@ _EVENT_KEY_RENAME_RE = re.compile(
 #: DIES — measured before this pattern existed, both shapes below left the reader
 #: answering the HISTORICAL expression while the record enforced nothing, the same
 #: false-green class the reader exists for.
+#: The record table this premise lives on, as DDL spells it — schema-qualified or
+#: not, and with EITHER part double-quoted (`"public"."event"` is the same table
+#: as `public.event`; measured before this atom existed, the quoted spelling left
+#: the row GREEN on a constraint the record no longer enforced).
+_EVENT_KEY_TABLE_RE = r'(?:"?public"?\s*\.\s*)?"?event"?(?![A-Za-z0-9_$])'
+
 _EVENT_KEY_OWNER_GONE_RE = re.compile(
-    r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:public\.)?\"?event\"?"
-    r"(?![A-Za-z0-9_$])"
-    r"|ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:public\.)?\"?event\"?"
-    r"(?![A-Za-z0-9_$])[^;]*?DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?\"?node_key\"?"
-    r"(?![A-Za-z0-9_$])",
+    r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?" + _EVENT_KEY_TABLE_RE
+    + r"|ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?"
+    + _EVENT_KEY_TABLE_RE
+    + r'[^;]*?DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?"?node_key"?(?![A-Za-z0-9_$])',
+    re.IGNORECASE | re.DOTALL)
+
+#: A statement that MOVES the premise's owner without touching the constraint —
+#: the table renamed, or the pinned `node_key` column renamed. Neither is a drop,
+#: so `None` would be wrong too: the right answer is "the premise moved, re-derive
+#: it", which is the raise the constraint-rename arm already produces. The repo
+#: has precedent for exactly this spelling of a re-key
+#: (`20260915000001_tenancy_team_to_org.sql:50-51`).
+_EVENT_KEY_OWNER_MOVE_RE = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?"
+    + _EVENT_KEY_TABLE_RE
+    + r'\s*RENAME\s+(?:TO\s+(?P<table>\S+?)'
+    + r'|COLUMN\s+"?node_key"?\s+TO\s+(?P<column>\S+?))(?=[\s;,]|$)',
     re.IGNORECASE | re.DOTALL)
 
 
@@ -840,11 +858,12 @@ def _effective_event_node_key_check(sql: str) -> str | None:
     for the rest of the file, which can make a COMMENTED-OUT statement read as
     DDL (measured: false red). No record migration does either today.
 
-    ⚠️ It DOES model the premise dying without a `DROP CONSTRAINT` — the table
-    dropped, or `node_key` dropped (which cascades the CHECK) — because both read
-    as a drop, not as "unchanged". It does NOT model a `DROP SCHEMA` or a
-    `SET SCHEMA` move of the table, which would move the premise's owner without
-    touching these statements at all.
+    ⚠️ It DOES model the premise dying or MOVING without a `DROP CONSTRAINT`: the
+    table dropped, `node_key` dropped (which cascades the CHECK), the table or the
+    column RENAMEd (a raise, like a constraint rename), and a `CREATE TABLE` that
+    re-declares the constraint as its last element. It does NOT model a
+    `DROP SCHEMA` or a `SET SCHEMA` move of the table, which would move the
+    premise's owner without touching any of those statements.
 
     ⚠️ "LAST" MEANS LAST IN `RECORD_MIGRATIONS`, WHICH IS HAND-MAINTAINED LIST
     ORDER AND NOT FILE-NAME SORTED (measured: the list is not `sorted()` — two
@@ -875,6 +894,10 @@ def _effective_event_node_key_check(sql: str) -> str | None:
         events.append((match.start(), "decl", match.group("expr")))
     for match in _EVENT_KEY_OWNER_GONE_RE.finditer(sql):
         events.append((match.start(), "drop", None))
+    for match in _EVENT_KEY_OWNER_MOVE_RE.finditer(sql):
+        moved = match.group("table") or f"column node_key -> {match.group('column')}"
+        events.append((match.start(), "rename", f"table event -> {moved}"
+                       if match.group("table") else moved))
     for match in _EVENT_KEY_RENAME_RE.finditer(sql):
         old = match.group("old").strip('"').lower()
         new = match.group("new").strip('"').lower()
@@ -902,6 +925,19 @@ def _effective_event_node_key_check(sql: str) -> str | None:
             expr = None
             continue
         assert body is not None  # `decl` always captures its expression
+        # ⛔ TRUNCATE AT THE FIRST BALANCED CLOSE. When a `CREATE TABLE` declares
+        # this constraint as its LAST element, the body alternative has to run
+        # past the CHECK's own closing paren to reach the `,`/`;` terminator and
+        # swallows the TABLE's `)` too — measured as a false red on an unchanged
+        # expression. A balance check, not a tighter body, because the same
+        # tolerance is what lets a nested-paren expression read correctly.
+        depth = 0
+        for idx, ch in enumerate(body):
+            depth += ch == "("
+            depth -= ch == ")"
+            if depth == 0:
+                body = body[:idx + 1]
+                break
         normalised = " ".join(body.split()).lower()
         normalised = re.sub(r"\(\s+", "(", normalised)
         expr = re.sub(r"\s+\)", ")", normalised)
@@ -1081,10 +1117,36 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
     #     before this arm existed: both shapes left the row GREEN on the historical
     #     expression while the record enforced nothing.
     for gone in ("\nDROP TABLE public.event;\n",
-                 "\nALTER TABLE public.event DROP COLUMN node_key CASCADE;\n"):
+                 "\nALTER TABLE public.event DROP COLUMN node_key CASCADE;\n",
+                 # ⛔ a QUOTED, schema-qualified name is the SAME table; measured
+                 # before the table atom accepted quotes, this left the row green.
+                 '\nDROP TABLE "public"."event";\n',
+                 '\nALTER TABLE "public"."event" DROP COLUMN node_key CASCADE;\n'):
         assert _effective_event_node_key_check(landed + gone) is None, (
             f"`{gone.strip()}` removes the constraint without naming it, and the "
             "reader still reported an expression the record no longer enforces")
+
+    # 1h. A MOVE IS NOT A DROP: renaming the table or the pinned column moves the
+    #     premise's owner, so the reader must RAISE (as it does for a constraint
+    #     rename), never answer the historical expression and never `None`. The
+    #     repo writes re-keys this way (`20260915000001_tenancy_team_to_org.sql:50-51`).
+    for moved in ("\nALTER TABLE public.event RENAME TO event_v2;\n",
+                  "\nALTER TABLE public.event RENAME COLUMN node_key TO key;\n"):
+        with pytest.raises(AssertionError, match="RENAMEs"):
+            _effective_event_node_key_check(landed + moved)
+
+    # 1i. A `CREATE TABLE` that declares the constraint as its LAST element: the
+    #     body must stop at its OWN balanced close, not swallow the table's `)`.
+    #     Measured before the truncation: the expression came back as
+    #     `(node_key = event_id))` — a false red on an unchanged declaration.
+    recreated = landed + (
+        "\nCREATE TABLE public.event (\n    event_id text NOT NULL,\n"
+        "    node_key text NOT NULL,\n"
+        f"    CONSTRAINT {_EVENT_KEY_CONSTRAINT} "
+        f"    {re_keyed_sql});\n")
+    assert _effective_event_node_key_check(recreated) == re_keyed_expr, (
+        "a re-declaration whose CHECK is the LAST element of the CREATE TABLE "
+        "was read with the table's closing paren attached")
 
     # 2. A forward DROP with no re-declaration. The constraint is GONE, so no
     #    expression is enforced and the premise is not merely different — it is
