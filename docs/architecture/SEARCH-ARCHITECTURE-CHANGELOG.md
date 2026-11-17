@@ -268,7 +268,7 @@ structures — five total — on provisioned RAM with no eviction (`STORAGE-ARCH
 **The record's mechanism is an `embedding_vec` column plus a pgvector index on the table that owns the
 rows — the shape `public.point`/`public.source`/`public.event` already carry** — which is the whole
 reason §12.1c's per-label argument, about
-permanently resident structures on the most expensive resource we have, does not transfer to them. **The second distinction is the KEEP ruling, and it has moved — twice in one day.** Indexing
+permanently resident structures on the most expensive resource we have, does not transfer to them. **The second distinction is the KEEP ruling, and it has moved once since it was made.** Indexing
 `:Object`/`:Subject` in Postgres is **compatible** with the 2026-11-10 ruling that forbids removing their
 graph-side embeddings; ⛔ **but that ruling was itself SUPERSEDED for the GRAPH COPY on 2026-11-17**
 (owner, `#11395` comment `6956793300`, with its `OVERRIDES:` line): the graph copy **may** be removed and

@@ -2405,9 +2405,9 @@ they were, and the census pointer is unchanged: a per-label count still needs `t
 
 **The work it orders is `#13220`'s, not this entry's:** the `object`/`subject` embedding columns and the
 writer for all four labels, `record_vector.LABEL_SERVED` extended so the dense leg answers from the
-record, the graph-side retirement of `:Event`/`:Source` — and of `:Object`/`:Subject` only once the record
-holds and indexes them, record first and graph removal second, in a later release — and the arming,
-which is downstream of `#11691` and `#13082` P0-b rather than parallel to them. ⚠️ **Sites in code and tooling
+record, the graph-side retirement of `:Event`/`:Source` and of `:Object`/`:Subject` — each only once the
+record serves it, record first and graph removal second, in a later release, never the other way round —
+and the arming, which is downstream of `#11691` and `#13082` P0-b rather than parallel to them. ⚠️ **Sites in code and tooling
 still state V3 as open-or-not-earned, and they are named rather than edited here (this change is
 documentation-only).** *Group 1 — still says V3 is open:* `projection._record_vector_index_inventory`'s
 warning text (*"Whether those labels get an index is §14.3 V3 of STORAGE-ARCHITECTURE.md"*) and its
