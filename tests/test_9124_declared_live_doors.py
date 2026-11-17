@@ -461,7 +461,8 @@ _UNRESOLVED = {
     # — it never calls it, and neither function calls any other writer).
     # That second claim is pinned against the CENSUS's own handle surface —
     # "write OR not-proven-read", because that surface also keys a function whose
-    # mutating call it could not RESOLVE (45 of its 83 entries are that shape),
+    # mutating call it could not RESOLVE (most entries are that shape — do not
+    # copy a count here; `len(_census_writer_names())` is the one authority),
     # so calling it "the list of writing functions" overstates it; the names this
     # file has already proven READ are subtracted — and not against a
     # hand-written list of method names: a check that
@@ -2625,8 +2626,10 @@ def _calibration_read_offenders(functions, readers=_CALIBRATION_READERS,
     hand-built function instead of asserting against a copy of it.
 
     `writers` is `_census_writer_names()` — "write **OR** not-proven-read", NOT
-    "the names the census proves a write": 45 of its 83 entries are functions
-    the census could not settle, so the offender message this set drives may not
+    "the names the census proves a write": most of its entries are functions the
+    census could not settle (⛔ no count is restated here — the set itself is the
+    authority, and a number printed beside it goes stale silently), so the
+    offender message this set drives may not
     claim the census PROVES a write (see that function's docstring for the full
     polarity, and `test_the_census_writer_set_states_its_own_polarity` for the
     pin). `None` means "ask the census", which is what the real pin does.

@@ -153,6 +153,9 @@ N_POINTS = 2000
 SEED = 42
 LIMIT = 100          # nDCG@100 / recall@100 need a 100-deep list
 GRAPH_NAME = "tg13099"
+# The docker memory probe's bound. A wedged daemon must cost a RECORDED
+# `mem["error"]`, never the run — and never a test that calls `seed_graph`.
+PROBE_TIMEOUT_S = 10
 RRF_K = 60           # search_engine.rrf_fusion's default (Cormack et al. 2009)
 BOOTSTRAP_N = 2000
 ALPHA = 0.10         # 90% CI, the #1144 pre-registered level
@@ -356,13 +359,21 @@ def seed_graph(fg_host: str, fg_port: int, points: list[dict]) -> dict:
     mem = None
     try:
         import subprocess
+        # #3065/#8118, the same class as the client bound above: a docker
+        # daemon that is wedged parks these calls too, and a MEMORY READING is
+        # never a reason to lose a measurement run. `timeout=` turns that into
+        # `TimeoutExpired`, which the `except` below RECORDS (`mem["error"]`)
+        # instead of hanging the tool — and instead of hanging a test that
+        # exercises this function.
         name = subprocess.run(
             ['docker', 'ps', '--filter', f'publish={fg_port}', '--format', '{{.Names}}'],
-            capture_output=True, text=True, check=False).stdout.strip().splitlines()
+            capture_output=True, text=True, check=False,
+            timeout=PROBE_TIMEOUT_S).stdout.strip().splitlines()
         if name:
             out = subprocess.run(
                 ['docker', 'exec', name[0], 'redis-cli', 'INFO', 'memory'],
-                capture_output=True, text=True, check=False).stdout
+                capture_output=True, text=True, check=False,
+                timeout=PROBE_TIMEOUT_S).stdout
             mem = {ln.split(':')[0]: ln.split(':', 1)[1]
                    for ln in out.splitlines()
                    if ln.startswith(('used_memory_human', 'used_memory_dataset',

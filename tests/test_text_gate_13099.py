@@ -846,9 +846,18 @@ def test_a_tokenizer_fallback_is_recorded_once_per_query_text(monkeypatch):
 # exists to not have. The suppress is therefore narrowed to the ABSENT-graph
 # class, via the product's own classifier (`projection.is_missing_graph_error`).
 #
-# Both arms below fail on the pre-fix text: the first because the timeout was
-# suppressed and the seed continued, the second because the narrow handler is
-# what keeps an absent graph from aborting a first run.
+# The pair pins the CLASS BOUNDARY from both sides — it is NOT "both fail on the
+# pre-fix text", which an earlier version of this comment claimed and which is
+# false: a blanket `suppress(Exception)` excused the absent-graph family too, so
+# the second arm passed there. Measured, each mutant in a scratch worktree at
+# the same base:
+#   * pre-fix text (`with contextlib.suppress(Exception): g.delete()`) -> the
+#     TIMEOUT arm reds (1 failed, 23 passed): the seed runs over a graph the
+#     failed reset left populated.
+#   * no handler at all (bare `g.delete()`) -> the ABSENT-GRAPH arm reds
+#     (1 failed, 23 passed): a first run against a graph that was never created
+#     would abort, which is the over-correction this arm exists to stop.
+# Too wide reds the first; too narrow reds the second.
 
 
 class _FakeGraph:
@@ -921,3 +930,30 @@ def test_an_absent_graph_is_excused_so_a_first_run_still_seeds(monkeypatch):
     assert graph.deletes == 1
     assert seeded == [[{"id": "p1"}, {"id": "p2"}]], "the seed must still run"
     assert out["points"] == 2
+
+
+def test_a_wedged_docker_daemon_costs_a_recorded_error_not_the_run(monkeypatch):
+    """The memory probe is BOUNDED: a hang there must not cost the measurement.
+
+    `seed_graph` shells out to `docker ps` / `docker exec … redis-cli INFO memory`
+    for the graph's memory figure — a SIDE READING, not the seed. Without a
+    `timeout=` a wedged daemon parks the call forever, which loses the run and
+    hangs this suite (the arm above reaches that code for real). Measured on the
+    pre-fix text: `subprocess.run` raised `TimeoutExpired` and `seed_graph`
+    propagated it, so the seed's own result was lost to a memory reading.
+    """
+    import subprocess
+
+    graph = _FakeGraph(None)
+    _patch_seed(monkeypatch, graph)
+
+    def _hang(*args, **kwargs):
+        assert kwargs.get("timeout"), "the docker probe must carry a bound"
+        raise subprocess.TimeoutExpired(cmd="docker", timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", _hang)
+
+    out = seed_graph("127.0.0.1", 6379, [{"id": "p1"}])
+
+    assert out["points"] == 1, "the seed's own result survives a failed memory probe"
+    assert "TimeoutExpired" in out["graph_memory_usage"]["error"], out
