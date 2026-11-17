@@ -5,8 +5,10 @@ carries:
 
 * **The statistics** are pure and hermetic: the exact McNemar tail, the MDE
   solvers, the bootstrap, the correlation. They are pinned to values computed by
-  hand (and, for the MDE, to the arithmetic `#13118` quoted: ~755 per arm for
-  5 pp at @15 — reproduced here from the formula rather than trusted).
+  hand (and, for the MDE, against an earlier estimate of ~755 per arm for 5 pp at
+  @15 — ⛔ quoted, and published nowhere this repo can point to: not in `#13118`'s
+  body, its comments, or its artifacts. What is pinned is the DERIVATION, which
+  is what replaces the quote).
 * **The frozen corpus and the drawn sample** are file-level: a snapshot must
   verify byte-for-byte, a tampered copy must be REFUSED, and the population file
   must be refused the moment it was drawn against a different corpus. These are
@@ -72,11 +74,14 @@ def test_detectable_effect_shrinks_with_n_and_grows_with_discordance():
 
 
 def test_the_briefs_sample_size_arithmetic_reproduces_from_the_formula():
-    """`#13118` published "~755 per arm to detect 5 pp, ~2,100 for 3 pp".
+    """An earlier estimate said "~755 per arm to detect 5 pp, ~2,100 for 3 pp".
 
-    Those were quoted, not derived. Reproducing them from the independent-design
-    formula is what makes the "n=300 cannot resolve 3 pp" statement evidence
-    rather than assertion.
+    ⛔ That estimate is *quoted, not derived*, and it is published nowhere this
+    repo can point to — not in `#13118`'s body, its comments, or its artifacts
+    (`#13267` review 3). So this does not "reproduce" a source; it DERIVES the
+    figures from the independent-design formula, which is what makes the "n=300
+    cannot resolve 3 pp" statement evidence rather than assertion. The bounds are
+    wide because the point is the order of magnitude, not the last digit.
     """
     mde_at_15 = P.independent_effect(300, 0.865)   # the @15 rate regime
     assert mde_at_15 == pytest.approx(0.078, abs=0.002)

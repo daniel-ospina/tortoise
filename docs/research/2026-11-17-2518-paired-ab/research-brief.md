@@ -36,7 +36,8 @@ in it"*:
 At 300 per arm the @15 delta is 3.0 pp at SE 2.8 pp (**z = 1.08**), the @3 delta 1.3 pp (**z = 0.37**).
 Neither is distinguishable from noise, and the tool now **reproduces the sample sizes those figures
 implied** from the formula rather than trusting them: with p̄ ≈ 0.865 and n = 300 an independent design
-resolves **7.82 pp**; 5 pp needs **~734 per arm** and 3 pp **~2,037 per arm** (the brief's "~755 / ~2,100").
+resolves **7.82 pp**; 5 pp needs **~734 per arm** and 3 pp **~2,037 per arm** (an earlier estimate of
+"~755 / ~2,100" — quoted, not derived, and published nowhere this repo can point to).
 
 ⛔ **And the comparison was worse than underpowered — it was structurally blind, which the call site
 fixes and this control reproduces as a gate, not as a measured effect.** `entity_key_expansion` arms only
@@ -226,8 +227,9 @@ it was unmeasured before).
 
 ⚠️ **The seed rows are 0/0, and these artifacts do not settle WHY.** `seed_at_top1` (0 → 0) is a
 **top-1** count: it says no item's seed was rank 1 in either arm, and it says **nothing** about ranks
-1–29. The artifact records no per-item `seed_rank` at all (`per_item` carries only `off_rank`/`on_rank`),
-so its four zeroes (`seed_at_top1` 0 → 0, `seed_lost_from_window` 0, `seed_demoted_but_kept` 0,
+1–29. The artifact records no per-item `seed_rank` at all (`per_item` carries `off_rank`/`on_rank` plus the
+**two provenance counts**, `provenance_off`/`provenance_on` — four keys, none of them a seed rank), so its
+four zeroes (`seed_at_top1` 0 → 0, `seed_lost_from_window` 0, `seed_demoted_but_kept` 0,
 `seed_rank_shift_sum` 0) are equally consistent with *"the seed never entered the 30-wide window"* and
 with *"it entered at an unchanged rank in both arms"*. The one labelled harm signal is therefore
 **unrecorded at this scale — not measured absent**, and this brief does not claim to have measured its
@@ -264,7 +266,8 @@ with no interval and no test attached. ⚠️ The 5 is `seed_lost_from_window` 3
 | **the corpus snapshot exists with its digest and file list; both arms read it** | **MET** | `corpus-snapshot-manifest.json`: digest `18ab6174e440f7b38dbd49b00b519409cedaacef58647f2cf29532b825f325d0`, **23 files**, 14,225 lines, 78,571,361 bytes, per-file sha256/bytes/lines. `verify_snapshot` re-derives and **refuses** on any byte change (pinned by `test_a_tampered_snapshot_is_refused_never_renamed`). |
 | **the same sampled items are used in both arms** | **MET** (structural + digest) | One `--population-file` (`population-300.json`, seed 20261117) is read by both arms in ONE process — the pairing is a property of that construction, not a predicate to assert. The discriminating record is **`items.name_digest = 06373b442bc93182…`, equal to `population.names_sha256`** in both point artifacts. ⛔ `items.id_digest` (`4d6899d3…`) is a function of the sample SIZE and settles nothing — the `ids_match_all_arms` predicate this row used to cite was `True` for every reachable input (`#13267` F6) and is now a `pairing` block that says so. A population drawn against another snapshot is **refused** (pinned). |
 | **the result is paired, with the test named and its p-value** | **MET** | McNemar exact two-sided per k: **p = 0.0625** (@3), **0.0313** (@5), **0.00024** (@10), **0.00002** (@15); paired bootstrap CI (2,000 resamples, seed 20261117) reported beside each. |
-| **the detectable effect size for n is stated before the conclusion** | **MET** | MDE @ n=300: **2.08 / 2.28 / 3.35 / 3.84 pp** for k = 3/5/10/15 — the MDE **rises** with k. The winner rule is the MDE one applied to every row: k = 10 (+4.33 against 3.35) and k = 15 (+5.67 against 3.84) clear their own MDE; k = 3 (+1.67 < 2.08) and k = 5 (+2.00 < 2.28, p = 0.0313) do **not**, and neither is reported as a win. The published comparison's independent MDE at p̄=0.865 is **7.82 pp** ⇒ ~734/arm for 5 pp and **~2,037/arm** for 3 pp — the brief's ~755/~2,100, reproduced from the formula. |
+| **the detectable effect size for n is stated before the conclusion** | **MET** | MDE @ n=300: **2.08 / 2.28 / 3.35 / 3.84 pp** for k = 3/5/10/15 — the MDE **rises** with k. The winner rule is the MDE one applied to every row: k = 10 (+4.33 against 3.35) and k = 15 (+5.67 against 3.84) clear their own MDE; k = 3 (+1.67 < 2.08) and k = 5 (+2.00 < 2.28, p = 0.0313) do **not**, and neither is reported as a win. The published comparison's independent MDE at p̄=0.865 is **7.82 pp** ⇒ ~734/arm for 5 pp and **~2,037/arm** for 3 pp, which replaces an earlier estimate of ~755/~2,100 (quoted
+rather than derived, and published nowhere this repo can point to). |
 | **`window_modes` recorded per arm; any contamination named** | **MET** | `keyword_only` 300/300 in both arms (no embedder on this box) ⇒ uniform, no contamination, and **not** reported as a hybrid measurement. `load 13.09 → 12.55` (Δ −0.54) across both arms in one process — the artifact's own `environment` block, not a transcription (`#13267` F3: an earlier revision quoted a trace that appears in NO committed artifact, and the load moves between runs, so a trace is only ever valid for the artifact it came from — the pin in `tests/test_paired_expansion_ab_2518.py` compares this number against the artifact); `repeat` of the OFF side returned identical outcomes for all 300 items. |
 | **⛔ no retrieval behaviour changed** | **MET** | `git diff --name-only origin/main...HEAD` touches exactly these paths: `tools/paired_expansion_ab_2518.py`, `tests/test_paired_expansion_ab_2518.py`, `MEMORY.md`, `config/ci-surfaces.yml`, `docs/00_index.md`, and the brief plus its four artifacts under `docs/research/2026-11-17-2518-paired-ab/`. No change to `tortoise/`, no index, no `TOOL_REGISTRY`, no public SDK method; the tool **refuses** when `TORTOISE_ENTITY_KEY_DENSE` is armed. ⛔ The **`git diff --stat` insertion/deletion tally is deliberately not quoted**, and neither is a total file count: both move whenever the evidence itself is committed and whenever `main` is merged in, so a quoted tally is stale on the very next commit while the touched-path set is not — the previous revision of this cell quoted one, and the head already prints a different number. The **path set is the falsifier**, because that is what "no retrieval behaviour changed" means, and it is reproducible with the command at the head of this cell; a tally that cannot be reproduced is not a falsifier. (`#13267` F3, three generations on: a 3-file list the tree does not produce, then a `--stat` tally that went stale on the next commit, now the set itself — the pin in `tests/test_paired_expansion_ab_2518.py` keeps this cell to the path set.) |
 
@@ -299,8 +302,8 @@ with no interval and no test attached. ⚠️ The 5 is `seed_lost_from_window` 3
    it was `None == None` (`#13267` F1, and this restatement was `#13267` F4).
 2. **On the leg the lever arms, it helps on its own class** (+5.67 pp @15, p = 2 × 10⁻⁵) and **its cost is
    a re-rank of the same size** (+1.67 pp gain against 5 of 300 items whose seed moved in the short-query
-   arm — 3 out of the k-window, 2 demoted but kept). At k = 15 the benefit is resolvable and the cost is
-   not; at k = 3 neither is.
+   arm — 3 out of the k-window, 2 demoted but kept). **In the headline arm** the k = 15 benefit is
+   resolvable while the cost is not; **in the short-query arm neither is** (1.67 pp against a 2.08 pp MDE).
 3. **Do not arm it on this evidence.** `entity_key_expansion` stays caller-gated `False`; the honest
    summary is *"the mechanism works on its class and its displacement cost is unquantified at production
    scale"*, not *"it helps"*. A decision to arm it needs the harm side measured on items whose relevance
