@@ -13143,13 +13143,19 @@ class FalkorProjection(
         elif t == "PointsMerged":
             # #331 (review r2): `or []` also covers "merge_ids": null.
             # #12943: an empty set issues NO statement, so it is not a landed
-            # write.
-            if not ev.get("merge_ids"):
+            # write. ⚠️ TRUTHINESS IS NOT THE TEST (review cycle 3, ISSUE 2,
+            # residual): `_delete` is gated on `isinstance(mid, str)`, so a
+            # NON-EMPTY `merge_ids` whose entries are all unusable issues no
+            # statement either — measured on `{"merge_ids": [None, 7]}`, which
+            # left `{'embedded:…|tortoise': 1}` in the registry while the loop
+            # deleted nothing. Normalise to the ids that can actually be
+            # deleted FIRST, then decide.
+            _mids = [mid for mid in (ev.get("merge_ids") or [])
+                     if isinstance(mid, str)]     # #331 (review r4): str-only ids
+            if not _mids:
                 _skip()
-            for mid in ev.get("merge_ids") or []:
-                # #331 (review r4): str-only ids.
-                if isinstance(mid, str):
-                    self._delete(mid)
+            for mid in _mids:
+                self._delete(mid)
         elif t == "EntityMutated":
             # #3299: replay the write-surface mutation record. Chronological
             # dispatch (rebuild()/backup/consistency) — journal order is the

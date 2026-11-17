@@ -1051,6 +1051,51 @@ def test_apply_still_RETURNS_the_fold_result(monkeypatch, tmp_path):
         sdk.close()
 
 
+def test_apply_returns_the_PRE_WRITE_row_create_source_actually_decides_on(
+        monkeypatch, tmp_path):
+    """`is not None` is not the contract — the ROW is (#12943 review c3, ISSUE 1).
+
+    `_create_source` does not test for a result; it reads
+    `apply_result.result_set[0][0]` — "the node's properties AS THE STATEMENT
+    FOUND THEM" (`_upsert_source`'s docstring, #5024 P1-A) — and a null row is
+    the CREATE shape. So a wrapper that forwards a `QueryResult` with a null or
+    empty row passes the sibling test above while leaving both #3644 arms
+    unreachable: the row is what decides CREATE vs `SourceVersioned` vs no-op.
+    Pre-fix (any discard, and equally a forwarded-but-empty result) this is RED.
+    """
+    _drop_uri(monkeypatch)
+
+    url = "https://example.test/pre-write-row"
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        first = proj.apply({"event_id": "ev-pw-1", "type": "SourceCreated",
+                            "url": url, "sourceKind": "document",
+                            "title": "v0", "contentHash": "h-0"})
+        second = proj.apply({"event_id": "ev-pw-2", "type": "SourceCreated",
+                             "url": url, "sourceKind": "document",
+                             "title": "v1", "contentHash": "h-1"})
+        assert first is not None and first.result_set, (
+            "the CREATE write must still report a row (its `previousProps` is "
+            "null, which is the CREATE discriminator)")
+        assert first.result_set[0][0] is None, (
+            "a first write found NO node — a non-null row here would tell "
+            f"`create_source` a node already existed: {first.result_set!r}")
+        assert second is not None and second.result_set, (
+            "the SECOND write's row was dropped — `create_source` cannot see "
+            "the pre-write state and takes the CREATE arm again (#3644)")
+        previous = second.result_set[0][0]
+        assert previous is not None, (
+            "a re-write of an existing Source must report the props the "
+            "statement FOUND; a null row is the CREATE shape, so the "
+            "`SourceVersioned` arm becomes unreachable")
+        assert previous.get("contentHash") == "h-0", (
+            "`previousProps` must be the PRE-write hash — it is the value the "
+            f"journal arm is chosen from — got {previous!r}")
+    finally:
+        sdk.close()
+
+
 def test_apply_keeps_the_signature_the_replay_engines_introspect(
         monkeypatch, tmp_path):
     """The journal-context keywords are a CONTRACT, not cosmetics.
@@ -1084,6 +1129,11 @@ def test_apply_keeps_the_signature_the_replay_engines_introspect(
 
 @pytest.mark.parametrize("event", [
     {"type": "PointsMerged"},                            # no merge_ids
+    # Review cycle 3, ISSUE 2 — the residual the truthiness test leaves: a
+    # NON-EMPTY `merge_ids` whose entries are all unusable issues no statement
+    # either (`_delete` is gated on `isinstance(mid, str)`), so the fold writes
+    # nothing and must not be counted.
+    {"type": "PointsMerged", "merge_ids": [None, 7]},
     {"type": "ObjectSuperseded", "id": "no-such-object"},  # matched nothing
     {"type": "PointPromoted", "point": {"id": "\x00bad"}},  # unwritable id
     # ── review cycle 4, P2: the DELEGATED folds that report their own
