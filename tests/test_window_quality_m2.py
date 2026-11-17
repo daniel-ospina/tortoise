@@ -831,8 +831,19 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-def _scope_bound(text: str, anchor: str, marker: str, window: int = 120) -> bool:
-    """Is `marker` stated as part of the SAME claim as `anchor`?
+# A marker is a literal, a compiled regex, or a tuple/set of either.
+Marker = str | re.Pattern | tuple | set | list
+
+
+def _marker_hit(tail: str, marker: Marker) -> bool:
+    """Does ANY acceptable spelling of `marker` occur in this forward tail?"""
+    alternatives = (marker,) if isinstance(marker, (str, re.Pattern)) else tuple(marker)
+    return any((alt.search(tail) if isinstance(alt, re.Pattern) else alt in tail)
+               for alt in alternatives)
+
+
+def _scope_bound(text: str, anchor: str, marker: Marker, window: int = 120) -> bool:
+    """Is `marker` stated as part of the SAME claim at EVERY `anchor` occurrence?
 
     ⛔ A section-wide `marker in text` is not a scope check. Measured: `:Object`-only
     occurs TWICE in §9.1, so replacing `that equality is `:Object`-only` with `that
@@ -840,13 +851,24 @@ def _scope_bound(text: str, anchor: str, marker: str, window: int = 120) -> bool
     occurrence — the false universal shipped green (#13126 review P1-1, second
     attempt). "Also present elsewhere" is not "present here": the marker has to sit
     inside the sentence that makes the claim.
+
+    ⛔ …so reading ONE occurrence is the same defect from the other side: an anchor
+    stated TWICE is only bound if BOTH statements carry the marker, and the first
+    one is not privileged (#13126 round 12, F2). This reads every occurrence.
+
+    ⛔ `marker` may be a regex or a tuple/set of alternatives, because a REQUIRED
+    token that pins one exact phrase refuses a re-wording that keeps the claim's
+    direction — `equal to the eviction on` -> `matches the eviction on` was a FALSE
+    RED (#13126 round 12, F5). Direction is pinned by the forbidden side; `required`
+    pins that the claim is still being MADE, so a row with several correct wordings
+    names them.
     """
     flat = _flat(text)
-    i = flat.find(anchor)
-    if i < 0:
+    occurrences = list(re.finditer(re.escape(anchor), flat))
+    if not occurrences:
         return False
-    j = flat.find(marker, i)
-    return 0 <= j - i <= window
+    return all(_marker_hit(flat[o.start():o.start() + window], marker)
+               for o in occurrences)
 
 
 def test_the_object_only_scope_is_stated_wherever_the_identity_is(artifact):
@@ -1978,46 +2000,112 @@ def test_the_measured_findings_are_stated_and_cannot_be_inverted_green(artifact)
     assert not found, f"a measured finding is stated INVERTED: {found}"
 
 
-def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
-    """Each claim that decides something is bound WHERE IT IS MADE, with a direction.
+def _claim_docs() -> dict[str, str]:
+    """The three documents whose decision-carrying claims the ledger binds."""
+    return {"readme": _flat(README.read_text(encoding="utf-8")),
+            "arch": _flat(ARCH.read_text(encoding="utf-8")),
+            "changelog": _flat(CHANGELOG.read_text(encoding="utf-8"))}
 
-    ⛔ An enumerated list of NOMINATED clauses is a whack-a-mole guard: rounds 7-9
-    each closed the clauses the previous round named and the next round found the
-    sentences that were not on the list (#13126 rounds 7, 8, 9 — 5, 11 and 22
-    inversions respectively, every one measured GREEN before it was pinned). The
-    durable shape is a LEDGER: one row per decision-carrying claim, each bound by
-    ADJACENCY (anchor + a required token near it + a forbidden inverted spelling),
-    so an inversion reds at the claim site and a re-wording that keeps the
-    direction passes. Adding a claim to the record means adding a row here; the
-    docstring of this module's binder says the same thing about figures.
 
-    The rows are the claims a reader acts on: whether anything compensates,
-    whether the loss is labelled, whether the candidate leg is record-served,
-    whether route 1 is an adoption or a reopen, and which leg decides.
+# A negation or a dismissal immediately before a forbidden spelling means the record
+# is naming the inverted wording in order to REJECT it — that is the claim's own
+# direction, not an inversion of it. Modelled on NegEx's preceding-cue rule (the
+# cheap, dependency-free standard for exactly this problem, and the reason clinical
+# NLP does not red on "no increase"): a bounded look-back, cut at the sentence
+# boundary so a negation in the PREVIOUS sentence cannot launder this one.
+_NEGATION_CUE = re.compile(
+    r"(?:\bnot\b|\bnever\b|\bno\b|\bnone\b|\bneither\b|\bnor\b|\bcannot\b|"
+    r"\bwithout\b|n['\u2019]t\b|\brather than\b|\binstead of\b|\bas opposed to\b)",
+    re.IGNORECASE)
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_NEGATION_CUE_WINDOW = 32
+
+
+def _dismissed(window: str, pos: int) -> bool:
+    """Is the spelling at `pos` negated or dismissed by a cue just before it?"""
+    clause = _SENTENCE_END.split(window[max(0, pos - _NEGATION_CUE_WINDOW):pos])[-1]
+    return bool(_NEGATION_CUE.search(clause))
+
+
+def _inversions(doc: str, anchor: str, spellings, radius: int = 400) -> list[str]:
+    """Every ASSERTED inverted spelling within `radius` of EVERY anchor occurrence.
+
+    ⛔ The scan read `doc[first_occurrence:+400]` — one window, FORWARD. An
+    inversion placed immediately BEFORE the anchor was never in the window at all,
+    so `A code path emits them today. … **no code path emits** …` stayed green
+    (#13126 round 12, F2). Symmetric around every occurrence now.
+
+    ⛔ …and a bare substring match refused the document the right to state the very
+    distinction the ledger exists to protect: `the snapshot tier was **not
+    reached**` and `the loss is **not smaller than the eviction**` were FALSE REDS
+    (#13126 round 12, N1/F3). A hit that is itself negated is not an assertion of
+    the inverted claim, so it is passed over.
     """
-    readme = _flat(README.read_text(encoding="utf-8"))
-    arch = _flat(ARCH.read_text(encoding="utf-8"))
-    changelog = _flat(CHANGELOG.read_text(encoding="utf-8"))
-    pt = _arms(artifact, "point")
+    found: list[str] = []
+    for occurrence in re.finditer(re.escape(anchor), doc):
+        lo = max(0, occurrence.start() - radius)
+        window = doc[lo:occurrence.end() + radius]
+        for spelling in spellings:
+            hits = (list(spelling.finditer(window)) if isinstance(spelling, re.Pattern)
+                    else list(re.finditer(re.escape(spelling), window, re.IGNORECASE)))
+            for hit in hits:
+                if _dismissed(window, hit.start()):
+                    continue
+                found.append(f"claim inverted at the site: {anchor!r} now reads "
+                             f"{hit.group(0)!r}")
+    # one message per distinct defect, not one per occurrence of it
+    return list(dict.fromkeys(found))
 
-    # the facts, re-derived: the loss is the eviction, nothing compensates, and the
-    # candidate leg is NOT record-served.
-    assert pt["tail@0.5"]["found_deep_of_demoted"] == 0.0
-    assert (pt["tail@0.5"]["resident_share"] - pt["tail@0.5"]["found_deep"]) > 0
-    import tortoise.record_serve as record_serve
-    assert getattr(record_serve.ANCHORED_READS["whole-graph"], "status",
-                   record_serve.ANCHORED_READS["whole-graph"]) in (
-        record_serve.NOT_SERVED, "not-served")
-    # ⛔ The header's "a `fallback` entry **ran**" is the artifact's OWN datum and
-    # nothing more: `retrieval.legs_seen.fallback` is a boolean OR over
-    # `entry["ran"]`, so the sentence cannot outlive the fact. Bound here as well as
-    # in the ledger below, because a prose claim is only as strong as the datum it
-    # reports (#13126 round 9, finding 1).
-    assert artifact["retrieval"]["legs_seen"]["fallback"] is True
 
-    rows = [
+def _ledger_violations(rows) -> list[str]:
+    """Every way the ledger fails for these rows — empty means every claim is bound.
+
+    Takes the rows rather than reading the documents itself so a MUTATED document
+    can be run through the identical ledger; see
+    `test_the_claim_ledger_refuses_inversions_and_spares_correct_english`.
+    """
+    bad: list[str] = []
+    for doc, anchor, required, forbidden in rows:
+        spellings = ((forbidden,) if isinstance(forbidden, (str, re.Pattern))
+                     else tuple(forbidden))
+        # ⛔ A `required` that is a substring of its own anchor satisfies itself: the
+        # direction half of five rows was vacuous, so only the anchor check was
+        # load-bearing (#13126 round 12, F4). Such a row states `None` — the anchor
+        # IS the claim and the forbidden side carries the direction — or it names
+        # the real predicate.
+        if isinstance(required, str) and required in anchor:
+            bad.append(f"vacuous row: required {required!r} is inside its own anchor "
+                       f"{anchor!r} — state None (anchor-only) or the actual predicate")
+        for spelling in spellings:
+            literal = spelling.pattern if isinstance(spelling, re.Pattern) else spelling
+            if literal.lower() in anchor.lower():
+                bad.append(f"vacuous row: forbidden {literal!r} is inside its own "
+                           f"anchor {anchor!r} — the anchor itself would red")
+        if required is not None and not _scope_bound(doc, anchor, required, window=200):
+            bad.append(f"claim lost its direction: {anchor!r} no longer says "
+                       f"{required!r} nearby")
+        bad.extend(_inversions(doc, anchor, spellings))
+    return bad
+
+
+def _decision_claim_rows(docs: dict[str, str]) -> list[tuple]:
+    """The ledger: one row per decision-carrying claim in the three documents.
+
+    Shape: `(document, anchor, required near the anchor, what it must NOT say)`.
+    `required` is `None` when the anchor is the whole claim (an anti-vacuity token
+    that merely re-stated the anchor would prove nothing), and may be a regex or a
+    tuple of alternatives when several wordings keep the same direction.
+    """
+    readme, arch, changelog = docs["readme"], docs["arch"], docs["changelog"]
+    return [
         # (document, anchor, required near the anchor, what it must NOT say)
-        (readme, "the measured answer is", "equal to the eviction on", "smaller than the eviction"),
+        # ⛔ `equal to the eviction on` pinned ONE wording, so the direction-
+        # preserving `matches the eviction on` was a FALSE RED (#13126 round 12,
+        # F5). The alternatives are the spellings that keep the direction.
+        (readme, "the measured answer is",
+         ("equal to the eviction", "matches the eviction", "equals the eviction",
+          "the same as the eviction"),
+         "smaller than the eviction"),
         (readme, "the measured answer is", "the eviction plus the claim leg's",
          "no more than the claim leg"),
         # ⛔ The first cut bound `passes neither` + `` `read_status_out` `` and left
@@ -2027,18 +2115,23 @@ def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
         (readme, "passes neither", "nor `_truncation_out`",
          ("passes both", "the `_truncation_out` flag")),
         (readme, "`TORTOISE_RESIDENCY` is", "**unarmed**", "`TORTOISE_RESIDENCY` is **armed**"),
-        (readme, "appear in no module of the tree", "appear in no module", "appear in several modules"),
+        # anchor-only: the anchor IS the claim ("appear in no module of the tree");
+        # re-stating part of it as `required` proved nothing (#13126 round 12, F4).
+        (readme, "appear in no module of the tree", None, "appear in several modules"),
         (readme, "Q2 —", "is violated", "is satisfied"),
         (arch, "Q2 (", "is violated", "is satisfied"),
         (arch, "The leg that decides it is the", "text leg", "The leg that decides it is the vector leg"),
-        (arch, "the record does not serve set-shaped reads", "does not serve", "does serve set-shaped"),
-        (changelog, "the record does not serve set-shaped reads", "does not serve",
+        # anchor-only, both sites: `does not serve` is inside the anchor text.
+        (arch, "the record does not serve set-shaped reads", None, "does serve set-shaped"),
+        (changelog, "the record does not serve set-shaped reads", None,
          "does serve set-shaped"),
         (arch, "the index cannot mint an id", "nothing to materialise",
          "can mint an id for"),
         (arch, "contradicts §6.2's decision item 2", "reopen", "aligns with §6.2"),
-        (readme, "**contradicts a recorded decision**", "**reopen**", "consistent with a recorded decision"),
-        (readme, "says that read does not exist", "does not exist", "says that read now exists"),
+        (readme, "**contradicts a recorded decision**", "**reopen**",
+         "consistent with a recorded decision"),
+        # anchor-only: `does not exist` is inside the anchor text.
+        (readme, "says that read does not exist", None, "says that read now exists"),
         (arch, "a record-served set read", "the record does not have", "the record already has"),
         (readme, "It does not say the *vector* leg is bounded", "it is not",
          "does say the *vector* leg is bounded"),
@@ -2049,13 +2142,18 @@ def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
          "no decision beyond this measurement"),
         (arch, "so arming additionally needs", "no measurement can make",
          "needs no further decision"),
-        # whether §7 is reopened — the sentence the adoption-vs-reopen reading turns on
+        # whether §7 is reopened — the sentence the adoption-vs-reopen reading turns on.
+        # ⛔ The inversion is itself a NEGATION (`NOT reopened`), so it is spelled INTO
+        # the forbidden literal: the cue rule below suppresses a forbidden hit that is
+        # negated RELATIVE to it, and the `not` here is inside the phrase, so a CAPS
+        # `NOT reopened` still reds (#13126 round 11, re-measured round 12).
         (arch, "§7 is therefore", "reopened", "not reopened"),
         # "no static order is a lever" — dissolving it re-opens tuning-then-arm
         (arch, "No static eviction policy is a lever", "and recency is UNTESTED",
          "A static eviction policy is a lever"),
-        # the §9.1 sibling of the README's "appear in no module" row
-        (arch, "and **no code path emits**", "no code path emits", "a code path emits"),
+        # anchor-only: `no code path emits` is inside the anchor text. It now reds an
+        # inversion placed BEFORE the anchor, which the forward-only window missed.
+        (arch, "and **no code path emits**", None, "a code path emits"),
         # ⛔ The header's FIRST clause — the one that states WHAT THE RUN DID — was
         # left unbound by the rewrite that corrected its word (c21ac8c56751): the pin
         # MOVED to the SECOND clause ("records only that some fallback entry ran, not
@@ -2067,29 +2165,144 @@ def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
         # `ran=True` for `no_fallback_applicable` with `count=0` on a read that
         # returned nothing, which the `:Object` arms' own `empty` rates entail, so the
         # snapshot tier need never be reached for `legs_seen.fallback` to be true.
-        # One row, both rejected spellings — the tuple shape round 10 introduced,
-        # because a claim inverted by either word is the same defect.
-        (readme, "and a `fallback` entry", "**ran**", ("reached", "serving")),
+        # One row, both rejected spellings, because a claim inverted by either word is
+        # the same defect. `**executed**` is the same claim in another word (#13126
+        # round 12, F5): the direction lives in `forbidden`, not in this token.
+        (readme, "and a `fallback` entry", ("**ran**", "**executed**", "**fired**"),
+         ("reached", "serving")),
     ]
-    bad = []
-    for doc, anchor, required, forbidden in rows:
-        if not _scope_bound(doc, anchor, required, window=200):
-            bad.append(f"claim lost its direction: {anchor!r} no longer says {required!r} nearby")
-        # the inverted spelling must not appear anywhere near the anchor either
-        i = doc.find(anchor)
-        window_text = doc[i:i + 400] if i >= 0 else ""
-        # ⛔ a claim can be inverted by more than one phrasing, and pinning only the
-        # first leaves the others free (#13126 round 10: `passes both … and
-        # _truncation_out` and `… and the _truncation_out flag` were both green
-        # against a row that forbade one). A row may name a TUPLE of them.
-        spellings = (forbidden,) if isinstance(forbidden, str) else forbidden
-        for spelling in spellings:
-            # ⛔ case-insensitive: §9.1 negates in CAPS, so `not reopened` missed
-            # `**NOT reopened**` (#13126 round 11).
-            if spelling.lower() in window_text.lower():
-                bad.append(f"claim inverted at the site: {anchor!r} now reads "
-                           f"{spelling!r}")
+
+
+def test_every_decision_carrying_claim_is_bound_to_its_direction(artifact):
+    """Each claim that decides something is bound WHERE IT IS MADE, with a direction.
+
+    ⛔ An enumerated list of NOMINATED clauses is a whack-a-mole guard: rounds 7-9
+    each closed the clauses the previous round named and the next round found the
+    sentences that were not on the list (#13126 rounds 7, 8, 9 — 5, 11 and 22
+    inversions respectively, every one measured GREEN before it was pinned). The
+    durable shape is a LEDGER: one row per decision-carrying claim, each bound by
+    ADJACENCY (anchor + a required token near it + a forbidden inverted spelling),
+    so an inversion reds at the claim site. Adding a claim to the record means
+    adding a row here; the docstring of this module's binder says the same thing
+    about figures.
+
+    ⛔ The DIRECTION lives in `forbidden`, and a forbidden hit is read as an
+    inversion only when it is asserted (a negated or dismissed hit is the record
+    stating the distinction, not losing it). `required` is the anti-vacuity half —
+    is the claim still being MADE — so it accepts a regex or a tuple of the wordings
+    that keep the claim, and a row whose anchor is the whole claim states `None`
+    rather than re-stating part of its own anchor (#13126 round 12, F4/F5).
+    `test_the_claim_ledger_refuses_inversions_and_spares_correct_english` mutates a
+    document per class and pins both verdicts, so this is measured, not promised.
+
+    The rows are the claims a reader acts on: whether anything compensates,
+    whether the loss is labelled, whether the candidate leg is record-served,
+    whether route 1 is an adoption or a reopen, and which leg decides.
+    """
+    docs = _claim_docs()
+    pt = _arms(artifact, "point")
+
+    # the facts, re-derived: the loss is the eviction, nothing compensates, and the
+    # candidate leg is NOT record-served.
+    assert pt["tail@0.5"]["found_deep_of_demoted"] == 0.0
+    assert (pt["tail@0.5"]["resident_share"] - pt["tail@0.5"]["found_deep"]) > 0
+    import tortoise.record_serve as record_serve
+    assert getattr(record_serve.ANCHORED_READS["whole-graph"], "status",
+                   record_serve.ANCHORED_READS["whole-graph"]) in (
+        record_serve.NOT_SERVED, "not-served")
+    # ⛔ F6: the header's datum `retrieval.legs_seen.fallback` is bound by the
+    # WHOLE-DICT equality in `test_every_quoted_figure_is_bound_to_its_own_arm`
+    # (`legs == {"fallback": True, …}`), so a standalone assert here could never fail
+    # alone — it was DELETED rather than left as a pin that proves nothing (#13126
+    # round 12, F6). What this test owes that datum is the PROSE binding: the
+    # `and a `fallback` entry` row below, which reds if the sentence outlives it.
+
+    bad = _ledger_violations(_decision_claim_rows(docs))
     assert not bad, "\n  ".join(bad)
+
+
+def test_the_claim_ledger_refuses_inversions_and_spares_correct_english():
+    """The ledger's own matcher, measured against the mutants round 12 named.
+
+    ⛔ Every finding of that round was a defect of the GUARD rather than of the
+    record: the scan read ONE window, FORWARD of the FIRST occurrence, and compared
+    it as a BARE SUBSTRING. So it both MISSED real inversions (F2) and REFUSED
+    correct edits (F3, F5, N1) — and N1 was the sharper one, because it forbade the
+    record from stating the very distinction the row exists to protect.
+
+    A guard nobody mutates is the defect the ledger was built to remove, so each row
+    below is a document edit and the verdict it must produce. The "green" rows are
+    the new half: they were RED before this repair.
+    """
+    base = _claim_docs()
+    assert not _ledger_violations(_decision_claim_rows(base)), (
+        "the unmutated record must pass its own ledger")
+
+    mutants = [
+        # ── catches: an inversion before the anchor, in the row's own window ──
+        ("F2 assertion BEFORE the anchor", "arch",
+         "and **no code path emits**",
+         "A code path emits them today. and **no code path emits**",
+         True),
+        ("F2 assertion before the anchor, without a full stop", "arch",
+         "and **no code path emits**",
+         "**a code path emits** §7's two reason strings, and **no code path emits**",
+         True),
+        ("rejected leg wording at the site", "readme",
+         "and a `fallback` entry **ran**",
+         "and a `fallback` entry **reached**",
+         True),
+        ("CAPS NEGATION is not dismissed", "arch",
+         "§7 is therefore **reopened**",
+         "§7 is therefore **NOT reopened**",
+         True),
+        ("asserted inversion of the verdict", "readme",
+         "the loss is **equal to the eviction on `:Object`",
+         "the loss is **smaller than the eviction on `:Object`",
+         True),
+        # ── spares: correct English the bare-substring scan refused ───────────
+        ("N1 legit 'not reached'", "readme",
+         "Finding 6 says what the tier qualifies)",
+         "Finding 6 says what the tier qualifies; the snapshot tier was **not "
+         "reached**)",
+         False),
+        ("F3 legit dismissal", "readme",
+         "the loss is **equal to the eviction on `:Object`",
+         "the loss is **not smaller than the eviction**, and it is **equal to the "
+         "eviction on `:Object`",
+         False),
+        ("F5 direction-preserving rewording", "readme",
+         "equal to the eviction on `:Object`",
+         "matches the eviction on `:Object`",
+         False),
+        ("F5 same claim, another word", "readme",
+         "and a `fallback` entry **ran**",
+         "and a `fallback` entry **executed**",
+         False),
+        # ── spares: a negation in the PREVIOUS sentence must not launder this one ──
+        ("cue does not cross the sentence boundary", "readme",
+         "the loss is **equal to the eviction on `:Object`",
+         "That is not the accepted bound. the loss is **smaller than the eviction "
+         "on `:Object`",
+         True),
+    ]
+    for label, key, old, new, should_red in mutants:
+        mutated = dict(base)
+        assert old in mutated[key], f"mutant anchor drifted from the record: {label}"
+        mutated[key] = mutated[key].replace(old, new, 1)
+        assert new in mutated[key], f"mutant did not apply: {label}"
+        violations = _ledger_violations(_decision_claim_rows(mutated))
+        if should_red:
+            assert violations, f"the ledger stayed GREEN on an inversion: {label}"
+        else:
+            assert not violations, (
+                f"the ledger refused correct English ({label}): {violations}")
+
+    # F4: a `required` that re-states its own anchor is refused outright, so the
+    # vacuous class cannot come back as a new row.
+    vacuous = _ledger_violations([(base["readme"], "appear in no module of the tree",
+                                   "appear in no module", "appear in several modules")])
+    assert vacuous and "vacuous row" in vacuous[0], vacuous
 
 
 def test_the_arming_decision_is_stated_and_cannot_be_inverted_green(artifact):
