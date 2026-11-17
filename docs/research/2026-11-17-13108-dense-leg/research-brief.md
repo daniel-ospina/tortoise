@@ -81,7 +81,7 @@ without reading the source.
 2. **It is submitted and runs out of budget.** Two budgets, both 500 ms by default: the
    per-leg driver timeout (`timeout_ms: int = 500` on the VECTOR leg, `search_engine.py:3526`;
    `:2832` is `run_fts_query`'s — the LEXICAL leg's — and `runner_timeout` in `degradation_chain`
-   is defined at `:4839`, not `:4673`, which is a comment line about `#4210`/`#3019`;
+   is defined at `:4854`, not `:4673`, which is a comment line about `#4210`/`#3019`;
    `#13121` round 8 F4) and the collector's
    `as_completed(timeout=0.5)`. A leg **still not done at the post-deadline rescan** is
    recorded `reason="timeout", ran=True, degraded=True` (`#8450`, `#6851`).
@@ -220,8 +220,9 @@ are refused for `:Object` while the same call answers on `:Point` (`signature B`
 
 Each refused round trip costs **≈10 ms** on this box, so an unindexed dense read pays **≈20 ms
 before the scan starts** — 58.0 % of the **34.78 ms** paired read at 1,000 nodes (§3.4; both figures
-from `fix-1000-paired-at-rest.json`, `index_attempt[0].elapsed_ms` = 10.18 + 9.97 against
-`arms["object[nohint]@c1"].latency_ms.p50`).
+from `fix-1000-paired-at-rest.json`: `index_attempt[0].elapsed_ms` is **20.17** — the pair's own
+timing, whose two attempts read 10.18 and 9.97 ms separately, so the total is the artifact's field
+and NOT their sum (20.15); the denominator is `arms["object[nohint]@c1"].latency_ms.p50`).
 
 ### 3.2 Latency, at rest and under load (1,000-node label)
 
@@ -314,7 +315,7 @@ on one population under one load.
 | component | measured |
 |---|---|
 | the `:Object` PRE-FIX read (`nohint` — inventory forced to None) | **34.78 ms** — `arms["object[nohint]@c1"].latency_ms.p50` in `fix-1000-paired-at-rest.json`; this is the total the two rows below decompose, and what §3.1's 58.0 % is a share OF |
-| two refused `queryNodes` round trips | **20.17–20.28 ms** (`index_attempt[0].elapsed_ms`: 10.18 + 9.97 in `fix-1000-paired-at-rest.json`; 10.19 + 10.06 in `probe-1000-at-rest-and-concurrent.json`) |
+| two refused `queryNodes` round trips | **20.17–20.28 ms** (`index_attempt[0].elapsed_ms` — 20.17 in `fix-1000-paired-at-rest.json`, 20.28 in `probe-1000-at-rest-and-concurrent.json`; each is the pair's own timing, so it is NOT the sum of its attempts, which read 10.18 + 9.97 = 20.15 and 10.19 + 10.06 = 20.25) |
 | the scan itself (`vec.euclideanDistance` over 1,000 rows + sort) | **13.26 ms** — the `hint` arm of `fix-1000-paired-at-rest.json` (`object[hint]@c1` p50), which is the same read with ONLY those two attempts removed |
 | the indexed control, same corpus, `nohint` (inventory forced to None = pre-#13108) | **20.88 ms** |
 | the indexed control, same corpus, `hint` (inventory supplied — the shipped path) | **21.00 ms** — a 0.12 ms difference, i.e. the hint is a no-op for an indexed label, as it must be |

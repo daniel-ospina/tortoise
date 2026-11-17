@@ -3331,7 +3331,7 @@ surfaces:
   # `python3 tools/ci_selection.py --integrity` exits 1 with
   # `manifest drift: ['test_13108_dense_leg_index_skip.py']` (measured at
   # `7ec7e65be5`, the head that added the file unregistered), and `fast_pool()` is
-  # manifest-derived, so the nine pins would run in NO leg.
+  # manifest-derived, so these pins would run in NO leg.
   - test_13108_dense_leg_index_skip.py
   # #10687: `tools/attest_census.py` owns its own suite — the hermetic arms pin the
   # RESTORE/RE-REVIEW partition (repair separated from fabrication), the 0/2-never-1

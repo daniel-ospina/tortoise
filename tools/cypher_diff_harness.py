@@ -106,11 +106,23 @@ agreement the harness never tested. Both names are in the job output.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first, and the operator would get an
+# unattributed traceback instead of this sentence (the `tools/` entry-point
+# contract; `tests/test_entry_point_python_guard.py` pins it for the corpus).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/cypher_diff_harness.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/cypher_diff_harness.py`"
+    )
+
 import argparse
 import json
 import os
 import subprocess
-import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal

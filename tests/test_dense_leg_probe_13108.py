@@ -2,7 +2,7 @@
 
 `#13108` reopens `STORAGE-ARCHITECTURE.md` §14.3 **V3** ("should `:Object` carry a
 vector index?") on a measurement, so the probe is the deliverable and the numbers
-it prints are the evidence. `tools/dense_leg_probe_13108.py:143` said those numbers
+it prints are the evidence. `tools/dense_leg_probe_13108.py:150` said those numbers
 were *"pinned by the tests"* while the PR that added it added no test at all
 (`#13121` review F4) — every assertion it made about `percentile`, `summarise`,
 `over_budget` and the `None`-not-`0` rule had no row to redden, so any mutation of
