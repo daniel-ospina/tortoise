@@ -2089,13 +2089,17 @@ class TestLifecycleCarrierCoherence:
 # a bare traceback from a door that promises an actionable refusal, and a row no
 # status write could address.
 #
-# ⛔ WHAT THIS IS *NOT*: a vocabulary. §4.3 declares `status`'s TYPE as `string`
-# and leaves the WORD SET open per kind ("pack-declared kinds validate against
-# their own declared words"), which `#10371` records as a constraint rather than
-# a to-do — `packs/venture` stores `active`/`invested`/`paused`. So the doors
-# refuse a NON-STRING and NOTHING ELSE; `status='banana'` must keep storing.
-# `:Subject` (`#1423`) and `:Point` (`POINT_STATUS_VALUES`) keep their own closed
-# vocabularies and are pinned here as unchanged neighbours.
+# ⛔ WHAT THIS IS *NOT*: a vocabulary. §4.3 declares `status`'s TYPE as `string`,
+# and THIS class pins the type half only. ⚠️ The sentence that used to follow —
+# "the doors refuse a NON-STRING and NOTHING ELSE; `status='banana'` must keep
+# storing" — is FALSE at this head: `#11824` S0 closed the word set for every
+# knowledge kind, so `banana` is refused by name (a pack's own words are its
+# pipeline STAGES, design §4.2 / the `OVERRIDES` (2) reversal on #11824). The
+# vocabulary half is pinned by
+# `test_an_undeclared_STRING_status_is_REFUSED_now_the_door_closed`; keeping the
+# two apart is what stops a future reader from widening one to fix the other.
+# `:Subject` (`#1423`) and `:Point` (`POINT_STATUS_VALUES`) keep their own
+# closed vocabularies and are pinned here as unchanged neighbours.
 class TestNonScalarStatus12869:
     """#12869 — a non-string `status` is refused at the door, and a row that
     already HOLDS one is refused rather than raised at."""
@@ -2991,12 +2995,14 @@ class TestNonScalarStatus12869:
         set: `None`/`123` short-circuited at the (then-present) target-side skip
         and returned, and `'live'` was the only case in the issue text.
 
-        FALSIFIABLE BY: reverting the stored-side `_np_foreign` block reds the
-        first two arms — `'live'` as `TypeError: unhashable type: 'list'`, and
-        `None` as ACCEPTED (the write would land, which is the fail-open reading
-        this test refuses). The third arm stays green on that revert, because the
-        TYPE check catches it first — which is what proves the two refusals are
-        independent and ordered.
+        FALSIFIABLE BY: neutralising the stored-side `_np_foreign` block reds the
+        first two arms — measured as `DID NOT RAISE` for the `'live'` target (the
+        write is then silently ACCEPTED, which is the fail-open reading this test
+        refuses; the `isinstance(s, str)` conjunct in the dead-set comprehension
+        also keeps the `TypeError` from coming back, so the traceback is NOT what
+        reds it), and as ACCEPTED for `None`. The third arm stays green on that
+        revert, because the TYPE check catches it first — which is what proves the
+        two refusals are independent and ordered.
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869s.db"))
         try:
@@ -3287,15 +3293,20 @@ class TestNonScalarStatus12869:
             assert "repr-boom" not in str(ei.value)
             assert _carrier_row(sdk, "Object", "rr-enc") is None
 
-            # (b) `_refuse_non_string_object_status`, the AMBIGUITY arm — the
-            #     TARGET operand (its `{target!r}` is the whole message).
-            #     ⛔ THIS ARM MUST ENTER THROUGH THE **CREATE** DOOR. The update
-            #     door never reaches this raise: `update_entity` asks the same
-            #     ambiguity question EARLIER and raises with an
-            #     already-safe `_np_safe_repr(id_val)`, so an update-door arm
-            #     here is VACUOUS — it passes with this site reverted to the raw
-            #     `!r` (MEASURED, and that is how a first cut of this test was
-            #     caught passing for the wrong reason).
+            # (b) the AMBIGUITY refusal's TARGET operand, on the door that
+            #     actually answers it: `create_entity`'s INLINE arm.
+            #     ⛔ THIS ARM DOES **NOT** PIN
+            #     `_refuse_non_string_object_status`'s ambiguity raise, and an
+            #     earlier cut of this comment said it did. MEASURED (#13248 round
+            #     4): reverting that helper's `{_refusal_repr(target)}` to the raw
+            #     `{target!r}` leaves this arm GREEN, while reverting the INLINE
+            #     site's `{_refusal_repr(name)}` reds it — because the inline check
+            #     asks the same question first and answers for both the `object`
+            #     and the routed-subject spellings. The helper's branch is
+            #     unreachable from all three callers at this head (see its own
+            #     comment), so nothing here can pin it; what THIS arm pins is the
+            #     refusal a caller actually receives, and that a hostile `__repr__`
+            #     cannot replace it.
             with pytest.raises(ValueError) as ei:
                 sdk.create_object(RaisingReprStr("rr-amb"), "core:strategy",
                                   **{"status": None,
@@ -3303,6 +3314,9 @@ class TestNonScalarStatus12869:
             assert "RaisingReprStr" in str(ei.value), (
                 "the ambiguity refusal did not use `_refusal_repr` on its "
                 "target: " + str(ei.value))
+            assert "CONFLICTING status write" in str(ei.value), (
+                "the refusal that answered was not the ambiguity guard: "
+                + str(ei.value))
             assert "id-repr-boom" not in str(ei.value)
             assert _carrier_row(sdk, "Object", "rr-amb") is None, (
                 "a refused conflicting create left a node behind")
@@ -3380,14 +3394,15 @@ class TestNonScalarStatus12869:
             #     cannot_poison_a_SUBJECT_row` depends on exactly that), but
             #     `**{"status": None, <KHash>"status": …}` makes the KIND GUARD
             #     abstain (`subject_only_prop_abstention`), so `t` stays
-            #     `"object"` and the Object create door's own guard
-            #     (`_refuse_non_string_object_status`, which renders its target
-            #     safely) raises FIRST — an object-declared arm with THIS
-            #     payload would pin that site and pass with this one reverted
-            #     (MEASURED: its message is the object door's "which value
-            #     lands"). A subject-legal payload (`status='live'` + a second
-            #     rendering key) DOES route and reach this raise — that claim is
-            #     the SECOND half of this arm, executed rather than asserted.
+            #     `"object"` and the Object create door's own guard raises FIRST.
+            #     ⚠️ AND AT THIS HEAD THAT GUARD IS `create_entity`'s INLINE
+            #     ambiguity arm, which answers for BOTH spellings with the SAME
+            #     message (#13248 round 4 MEASURED: an object-declared
+            #     `core:organization` payload and a non-routed `core:strategy` one
+            #     return the identical `create_entity refused a CONFLICTING status
+            #     write for …`), so the old "object door says 'which value lands'"
+            #     discriminator no longer exists and the second half below is
+            #     pinned as behaviour, not as routing.
             with pytest.raises(ValueError) as ei:
                 sdk.create_subject(RaisingReprStr("rr-subj-amb"),
                                    "core:organization",
@@ -3410,42 +3425,33 @@ class TestNonScalarStatus12869:
             assert _carrier_row(sdk, "Subject", "rr-subj-amb") is None, (
                 "a refused Subject create left a node behind")
 
-            #     …and the ROUTED entry reaches the SAME raise, which is the
-            #     sentence above as an executable pin. `_kind_layer_note` sends
-            #     an object-declared create to the Subject layer when the
-            #     first-wins status is subject-legal, so this arm proves the
-            #     entry a `create_object(type='object')` caller actually takes —
-            #     not one the `create_subject` arm could stand in for. Reverting
-            #     the site to `!r` reds it (`RuntimeError: id-repr-boom`,
-            #     MEASURED) and DELETING the `raise` reds it `DID NOT RAISE`
-            #     (MEASURED), so the routed entry cannot silently drift back to
-            #     the Object door's guard — which is the vacuous shape this note
-            #     warns about, arriving from the other side.
+            #     …and an OBJECT-DECLARED create reaches the SAME refusal. ⛔ BUT
+            #     NOT "the routed entry, not the object door" — that
+            #     discrimination is GONE and saying otherwise is a false claim,
+            #     MEASURED (#13248 round 4): the object-declared payload and the
+            #     non-routed `core:strategy` payload return the IDENTICAL message
+            #     (`create_entity refused a CONFLICTING status write for …`,
+            #     containing "which word lands" and NOT "create_entity(type"), so
+            #     swapping the kind in this arm cannot red it and the old
+            #     "`which word lands`" discriminator matches BOTH sides. The
+            #     reason is ordering, not wording: `create_entity` asks the
+            #     ambiguity question INLINE before the kind guard routes, so the
+            #     Subject layer's own raise is no longer reachable with this
+            #     payload. What survives here is what matters to a caller — an
+            #     object-declared two-key create is refused, names the operand,
+            #     and writes NOTHING on either layer — and the arm is kept for
+            #     that, with the routing claim retired rather than left to rot.
             with pytest.raises(ValueError) as ei:
                 sdk.create_object(RaisingReprStr("rr-subj-route"),
                                   "core:organization",
                                   **{"status": "live",
                                      KHash("status"): "archived"})
             assert "RaisingReprStr" in str(ei.value), (
-                "the ROUTED Subject-door refusal did not use `_refusal_repr` "
-                "on its name: " + str(ei.value))
+                "the refusal did not use `_refusal_repr` on its name: "
+                + str(ei.value))
             assert "id-repr-boom" not in str(ei.value)
-            # ⛔ WHICH raise, not just SOME raise (#12910 review, P3). Every
-            # assertion above also holds on the OBJECT door's refusal — it
-            # renders the same operand through `_refusal_repr` and writes
-            # nothing — so on its own this arm cannot tell a routing
-            # regression from the routed entry. The two messages differ by one
-            # word and one door label: the Subject arm says "which WORD lands",
-            # the Object door says "which VALUE lands" behind
-            # `create_entity(type='object') ...`. MEASURED on a non-routed
-            # payload (`core:strategy`): the object door's message satisfies
-            # every assertion above, which is how the vacuous version was
-            # caught.
-            assert "which word lands" in str(ei.value), (
-                "the routed create did not reach the SUBJECT arm's raise "
-                "(the object door says 'which value lands'): " + str(ei.value))
-            assert "create_entity(type" not in str(ei.value), (
-                "the routed create raised the OBJECT door's refusal: "
+            assert "CONFLICTING status write" in str(ei.value), (
+                "the refusal that answered was not the ambiguity guard: "
                 + str(ei.value))
             for _lbl in ("Subject", "Object"):
                 assert _carrier_row(sdk, _lbl, "rr-subj-route") is None, (

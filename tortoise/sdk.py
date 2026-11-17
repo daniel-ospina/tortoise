@@ -10209,10 +10209,10 @@ def _status_is_stored_unhashable(value: object) -> bool:
 
     :func:`_status_is_evaluable` alone over-refuses: a NON-persistable value is
     DROPPED by the writers, so the node never carries it and the direct-edge
-    check never sees it (pinned at this head by
+    check never sees it (pinned by
     ``test_direct_route_object_and_event_status_values_are_refused_in_phase_1_like_the_writer``
-    in ``tests/test_ingest_event_endpoint.py`` — the name this comment used to
-    cite, ``…_not_over_rejected``, is the arm ``#13100`` INVERTED).
+    in ``tests/test_ingest_event_endpoint.py``). The name this comment used to cite,
+    ``…_not_over_rejected``, is the arm ``#13100`` INVERTED — read the new one.
     Only a PERSISTABLE unhashable value — an array — lands on the node.
 
     Note the two clauses are independent: ``bytes`` passes
@@ -10428,9 +10428,9 @@ def _refuse_non_string_object_status(props, *, door: str, target: object,
     if lands is not None and not lands():
         return                                      # ON CREATE only: not stored
     # ⛔ BEFORE reading the value: two keys rendering as `status` make the read
-    # below (FIRST-wins) and the write (LAST-wins) different keys, so ANY value
-    # this function concludes about is not the value that lands. Measured: a
-    # `None` first key hid a `['live']` second key at the create door.
+    # below (FIRST-wins) and the write (LAST-wins) different keys. ⚠️ NO CALLER
+    # REACHES THIS BRANCH at this head (#13248 r4: `create_entity` asks it inline
+    # first; `add_object` refuses the key shape) — 4th-door defence only.
     if _status_write_is_ambiguous(props):
         raise ValueError(
             f"{door} refused a CONFLICTING status write for {_refusal_repr(target)}: more "
@@ -24390,11 +24390,11 @@ class TortoiseSDK:
         # `refuse_event_lifecycle_state(props, ...)`, the PROPS-AWARE predicate
         # that reads the caller's DECLARED keys; this arm is
         # label-only, so firing it for that door answered for the LABEL rather
-        # than the declaration — #11825's arm here (
-        # ``…_still_lands_on_a_multi_label_event``)
-        # required the prop lane, and #13100 has since retracted that allowance
-        # at the DOOR, which is the site that owns the question — so that arm was
-        # INVERTED and now reads
+        # than the declaration — #11825's arm here (previously
+        # ``…_still_lands_on_a_multi_label_event``) required the prop lane, and
+        # #13100 has since retracted that allowance at the DOOR, which is the
+        # site that owns the question — so that arm was INVERTED, and its name
+        # now reads
         # ``test_a_non_terminal_update_is_refused_on_a_multi_label_event``. The
         # arm below is gated on a SECOND question, defaulted on for
         # the doors that only ever write a terminal value, and switched off by the
@@ -53825,14 +53825,14 @@ class TortoiseSDK:
                 # the backfill's business, not this guard's.
                 _np_stored = tuple(_np_row[1] or ())
                 # ── #12869: the OBJECT family's one declared constraint ──────
-                # §4.3 declares `status` as a STRING, and this family
-                # deliberately has NO closed word set — `#10371` keeps the
-                # vocabulary half OPEN because "pack-declared kinds validate
-                # against their own declared words" (§4.3, exercised by
-                # `packs/venture`). That leaves exactly ONE thing undeclared for
-                # EVERY Object kind: a NON-STRING. `['live']` / `123` / `True`
-                # are not words under any kind, so refusing them is not a
-                # vocabulary narrowing — arbitrary STRINGS stay accepted.
+                # §4.3 declares `status` as a STRING; this guard is about the TYPE.
+                # ⛔ ITS ORIGINAL JUSTIFICATION IS RETIRED: it said this family has
+                # NO closed word set, so arbitrary STRINGS stay accepted (#10371).
+                # `#11824` S0 CLOSED that — every knowledge kind now validates
+                # against ONE four-word set, and a pack's own words moved to the
+                # STAGE axis (design §4.2, the `OVERRIDES` (2) reversal recorded on
+                # #11824), which the sibling arm
+                # `test_an_undeclared_STRING_status_is_REFUSED_now_the_door_closed`
                 # The `:Subject` and `:Point` families already refuse a
                 # non-string downstream (the `#1423` guard below, and
                 # `POINT_STATUS_VALUES` in the Point arm), which is why this
@@ -54832,9 +54832,9 @@ class TortoiseSDK:
             # Subject twin records for its own door (`create_entity`'s subject
             # arm validates too, and says why).
             # §4.3 declares the property's type as `string`, so a NON-STRING is
-            # the one value undeclared for every Object kind; arbitrary STRINGS
-            # still ride the open vocabulary. `None` stays legal and is a no-op
-            # here (an absent status reads live, `#9974` R1).
+            # the one value undeclared for every kind: ⛔ NOT "open vocabulary" —
+            # S0 refuses an undeclared word, so a `str` is graded upstream. `None`
+            # is legal here (an absent status reads live, `#9974` R1).
             # ⛔ THE PRESENCE TEST IS SHAPE-INDEPENDENT (`lifecycle_props_by_
             # rendering`), the same one the update door's guard uses: a `str`
             # SUBCLASS key that overrides `__hash__` is missed by
@@ -54853,10 +54853,10 @@ class TortoiseSDK:
             # fires ONLY where the value would LAND.
             # ⚠️ AT THIS DOOR THAT SCOPE IS NOW UNOBSERVABLE, and the comment is
             # not allowed to imply otherwise: `#11824` S0's TYPE check, run
-            # INLINE by `create_entity` thirty lines above (`_read_caller_status`,
-            # not `_validate_bundle` — `create_object` never enters the bundle
-            # door, which returns an ingest VIOLATION rather than raising),
-            # refuses EVERY
+            # INLINE by `create_entity` (its `_read_caller_status` call), not by
+            # `_validate_bundle` — `create_object` never enters the bundle door,
+            # which returns an ingest VIOLATION rather than raising — refuses EVERY
+            # declared non-`str`
             # declared non-`str` before this writer arm runs — mint, MERGE and
             # ADOPT alike — so this arm's `lands` thunk never gets to answer
             # for one. MEASURED at this head: `create_object(name, kind,
