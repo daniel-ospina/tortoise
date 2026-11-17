@@ -1298,11 +1298,14 @@ def test_the_index_row_calls_displacement_churn_not_harm():
     row = next((ln for ln in index.splitlines()
                 if "#2518" in ln and "PAIRED A/B" in ln), None)
     assert row, "the docs index carries the #2518 paired-A/B row"
-    assert "the harm side is measured, not argued" not in row, (
+    # ⛔ casefold: the first version of this pin compared lowercase only and the
+    # row opens "The harm side...", so the mutant it exists to kill passed.
+    low = row.lower()
+    assert "the harm side is measured, not argued" not in low, (
         "displacement is churn — the artifact says so in its own `note` field")
-    assert "churn, not harm" in row, (
+    assert "churn, not harm" in low, (
         "the index row must label the displacement figure as churn")
-    assert "displaced" in row and "727" in row, (
+    assert "displaced" in low and "727" in row, (
         "the displacement figure is still the one the row publishes")
 
 
