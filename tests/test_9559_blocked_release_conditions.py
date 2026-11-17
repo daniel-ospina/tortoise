@@ -845,7 +845,13 @@ def test_the_two_artifacts_that_named_the_missing_gauge_now_name_it():
         "authoritative record cannot schedule what it never mentions")
     assert "org_postgres_residency" in flat_ops, (
         "the ops doc does not name the snapshot table the gate reads")
-    assert "neither the audit nor the ledger addend is one" not in flat_ops, (
+    # ⛔ CASEFOLDED, for round 2's reason applied to this guard too (round 3
+    # measured it as still lowercase-only): a fingerprint is matched against
+    # prose, and prose starts sentences with a capital. A sentence-initial
+    # "Neither the audit nor the ledger addend is one." restates the retired
+    # position and was invisible here while the round-2 matchers were fixed.
+    assert "neither the audit nor the ledger addend is one".casefold() not in (
+        flat_ops.casefold()), (
         "the ops doc still states the RETIRED position (that no affordable "
         "per-org figure exists) — #9559 wired one, and this is the artifact the "
         "gate's OVERRIDES line cites as the record")
@@ -853,8 +859,11 @@ def test_the_two_artifacts_that_named_the_missing_gauge_now_name_it():
     sibling = (_REPO / "tests" / "test_allowance_gate.py").read_text(
         encoding="utf-8")
     flat_sib = " ".join(sibling.split())
-    assert "no per-org RESIDENCY gauge" not in flat_sib.replace(
-        "no per-org RESIDENCY gauge existed", ""), (
+    # The one allowed form is the HISTORICAL "… existed"; casefold both sides so
+    # an exemption cannot be defeated by a capital and the fingerprint cannot be
+    # hidden by one.
+    assert "no per-org RESIDENCY gauge".casefold() not in flat_sib.casefold().replace(
+        "no per-org residency gauge existed", ""), (
         "tests/test_allowance_gate.py still asserts the gauge is missing as "
         "current (only the HISTORICAL form \"no per-org RESIDENCY gauge "
         "existed\" is allowed) — a docstring is what the next lane reads before "
