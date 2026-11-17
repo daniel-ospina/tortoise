@@ -923,6 +923,51 @@ def read_all_segments(graph_dir: str | Path, *, salvage: bool = False) -> list[d
     So a skipped line is a REFUSAL here unless the caller passes
     ``salvage=True``, which is the deliberate "I know this journal is damaged,
     give me what parses" choice and explicitly not a completeness claim.
+
+    ⚠ **THE COUNTS ARE NOT IN THIS RETURN VALUE — use
+    :func:`read_all_segments_reporting_damage`** when the caller must RENDER what
+    the read tolerated. See that function for why that matters.
+    """
+    records, _damaged, _torn = read_all_segments_reporting_damage(
+        graph_dir, salvage=salvage)
+    return records
+
+
+def read_all_segments_reporting_damage(
+        graph_dir: str | Path, *, salvage: bool = False,
+) -> tuple[list[dict], int, int]:
+    """``(records, mid-file damaged lines, torn fragments)`` over every segment.
+
+    The same read, the same refusals and the same order as
+    :func:`read_all_segments` — the ONE difference is that its two damage
+    counters stop being internal.
+
+    ⛔ **WHY THE COUNTERS LEAVE THIS FUNCTION (review F2, #13275).** They were
+    computed here and then discarded (``damaged``/``torn`` built the refusal and
+    the warning, and only ``records`` was returned), so every caller downstream
+    had to guess — and ``tools/record_runner.read_journal`` guessed
+    ``corrupt=None, torn=None``, i.e. *"this layout's reader does not return its
+    damage counters"*, for **every** segmented layout. Every graph directory IS a
+    segmented layout, so a documented ``status --journal <graph dir>`` could not
+    tell a pristine journal from a salvaged one: it withdrew the completion claim
+    on both (#13269), and its render then asserted that a skipped mid-file line
+    "would have SHIFTED the enumeration and this run cannot see it" — one line
+    above a reader that had just counted it, and that REFUSES it unless asked to
+    salvage.
+
+    An UNREPORTED counter is a defect in the REPORTING, never a state of the
+    journal. The two classes stay separate because they are different defects and
+    they bear differently on a completeness claim:
+
+    * **mid-file damage** (second element) is a record the journal HELD and lost
+      — counted only in salvage mode, because strict mode refuses instead. A
+      skipped line shifts every later position, so it voids a completeness claim.
+    * **a torn fragment** (third element) was never a complete record (a SIGKILL
+      mid-append, or a fragment sealed by the following append — ``log.py``'s
+      ``_keep_torn``), so the sequence of complete records is unshifted and a
+      completeness claim survives it. What a dropped fragment CAN do is revive
+      removed state, which is the replay's #3316 check
+      (``torn_tail_revival_records``), not this reader's.
     """
     layout = discover(graph_dir)
     verify(layout)
@@ -931,6 +976,8 @@ def read_all_segments(graph_dir: str | Path, *, salvage: bool = False) -> list[d
     records: list[dict] = []
     damaged: list[str] = []
     torn: list[str] = []
+    damaged_count = 0
+    torn_count = 0
     for seg in layout.segments:
         if seg.disposition != "present" or not seg.on_disk:
             continue
@@ -943,8 +990,10 @@ def read_all_segments(graph_dir: str | Path, *, salvage: bool = False) -> list[d
         # make the reader unusable after any killed process — the contract
         # `tortoise/log.py::read_for_replay` documents.
         if getattr(log, "corrupt_line_count", 0):
+            damaged_count += int(log.corrupt_line_count)
             damaged.append(f"{seg.name}: {log.corrupt_line_count} mid-file line(s)")
         if getattr(log, "torn_trailing_count", 0):
+            torn_count += int(log.torn_trailing_count)
             torn.append(f"{seg.name}: {log.torn_trailing_count} torn tail fragment(s)")
     if damaged and not salvage:
         raise JournalLayoutError(
@@ -955,7 +1004,7 @@ def read_all_segments(graph_dir: str | Path, *, salvage: bool = False) -> list[d
         _LOGGER.warning(
             "journal %s: reading across a torn tail (%s) — those fragments were "
             "never complete records", layout.directory, "; ".join(torn))
-    return records
+    return records, damaged_count, torn_count
 
 
 # --------------------------------------------------------------------------
