@@ -1092,7 +1092,14 @@ surfaces:
   # text appears there while the file is `core`-only and the line vanishes once the row
   # exists because the file is no longer a CANDIDATE — not because the pin disappeared. An
   # earlier cut of this note read that disappearance as evidence the co-import was noise; it
-  # is the opposite, and the audit never said otherwise.
+  # is the opposite, and the audit never said otherwise. ⛔ Reproduce it from a FULL checkout,
+  # not an extracted subset of one: the audit resolves an import pin only where the referenced
+  # file exists on disk, so a tree holding `tests/` + `config/` but NOT `tortoise/` resolves no
+  # `from tortoise.…` import at all and prints the INVERSE of these lines — MEASURED at this
+  # head, the `api` summary reads `177 additions` from the repo root and `4` from the same
+  # extraction without `tortoise/`, where this file's candidate line is
+  # `(shared: tests/_live_utils.py)  ⚠ no api pin resolved — … confirm before removing`. A
+  # removal candidate in such a run is the ABSENT SOURCE TREE, not an unregistered arm.
   # ⛔ `test_12592_supersede_door.py` is NOT noise either: it is a PRE-EXISTING gap of the
   # same class on main — registered `core` only, imports the same `mcp_auth` names, and NOT
   # selected on a `mcp_auth.py`-only diff (measured: `selected: False`). Reported as a
@@ -5249,7 +5256,10 @@ surfaces:
   # unregistered arm of the same #1349/#3332 class — pre-existing rather than introduced
   # here (the audit lists 233 such files on that surface), and deliberately NOT closed by
   # this PR, whose scope is the `manifest-integrity` red. Named rather than left to be read
-  # as covered.
+  # as covered. (Both `--surface-audit` readings here assume the full-checkout precondition
+  # stated on the `api` row above: an extraction without `tortoise/` resolves no import pins
+  # and prints none of this — measured, that run lists the file ONLY as an `api` no-pin
+  # removal candidate, in neither additions list.)
   # ⛔ NOT hermetic, contrary to a first reading of it: its own header says "Lane: needs a
   # live FalkorDB" and the four live classes are `skipif(not FALKORDB_AVAILABLE)` — they SKIP
   # where the `TORTOISE_TEST_DOCKER_PORT` seam has no server behind it (measured with the seam
