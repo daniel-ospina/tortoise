@@ -64,10 +64,14 @@ def test_the_doc_appendix_is_the_tools_own_output():
     new statement) so EVERY gate in this suite stays green over a table whose
     whole purpose is to be a resolvable index.
 
-    Measured twice on `#13223`: 644 of 1,309 rows wrong after `#13116`
-    (`hosted_api.py` +131, `sdk.py` net +72), and 6 more after `#13214` moved
-    `tortoise/metering.py` by +7 and `tortoise/postgres_bytes.py` by +4 — while
-    `--check` was RC=0 both times.
+    Measured twice on `#13223`, with the counts re-derived rather than carried:
+    after `#13116` (`hosted_api.py` +131, `sdk.py` net +72) the appendix differed
+    from the tool in **1,127 of its 1,308 data rows**, and it also lagged a site
+    (1,308 data rows against the tool's 1,309); after `#13214` moved
+    `tortoise/metering.py` by a net **+9** (the three rows in `measure_write_ops`
+    shift +7 and the two below them +9) and `tortoise/postgres_bytes.py` by +4,
+    exactly **6** rows were stale. `--check` printed `25 pinned counts match`
+    through the second of those, at `b8f56fdec4`.
 
     Why a byte comparison rather than sampling: the appendix is `--markdown`'s
     output verbatim (`tools/cypher_inventory.py`, one row per site, sorted by

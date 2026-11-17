@@ -755,11 +755,17 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     # ⛔ ZERO mutation on BOTH halves of this bundle, not only the Event: the
     # Object PRECEDES the refused Event in this bundle's entity list, so a Phase 1
     # that refused LATE — validation moved behind the first write — leaves
-    # `Object 'Solo'` behind (count 1) and then dies mid-write on
-    # `ValueError: Refused: status={'a': 1} is not writable on an :Event`. That is
-    # the #2422/#7925 partial-mutation class. The same LATE mutant is already caught
-    # by the `'Alpha'` count in the mixed bundle above; this arm is the one that
-    # still catches it when the `:Event` refusal is the bundle's ONLY violation.
+    # `Object 'Solo'` behind (count 1) and then dies mid-write on the refusal
+    # `Refused: `status={'a': 1}` is not writable on an :Event (direct)` —
+    # `tortoise/live.py:1056-1058`; the `ValueError:` some tracebacks show is the
+    # caller's wrapper, not part of the message. That is the #2422/#7925
+    # partial-mutation class. This arm exists because it is the only bundle here
+    # where the `:Event` refusal is the bundle's SOLE violation: in the mixed
+    # bundle above the status-declaring entity is an `Object` (`Alpha`), so a LATE
+    # mutant there trips `create_entity`'s own `ValueError: ... must be a plain
+    # string` and the `pytest.raises(BundleValidationError)` block reds before any
+    # count is read — that bundle's count is NOT the catcher, and nothing would
+    # measure zero mutation for THIS shape without this arm.
     assert _count(sdk, "MATCH (n:Object {name:'Solo'}) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 0
 
