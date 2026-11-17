@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 
@@ -135,11 +136,14 @@ class TestNoDoublePrefix:
 # ── 2. deleting an org deprovisions ALL of its graphs ────────────────────────
 
 class TestDeprovisionOnDelete:
-    def _fake_cp(self, rows, graphs=None):
+    def _fake_cp(self, rows, graphs=None, complete=True):
         """A control plane returning the given organization + graphs rows.
 
-        ``query`` answers by table, so the test drives the REAL enumerator rather
-        than a monkeypatched one — the safety filter is the thing under test.
+        ``query``/``query_all`` answer by table, so the test drives the REAL
+        enumerator rather than a monkeypatched one — the safety filter is the
+        thing under test. ``graphs`` is read through ``query_all`` (a single
+        page is silently capped at `max_rows`, so a truncated walk must be
+        refused rather than silently dropping the tail of the deprovision list).
         """
         class _CP:
             def query(self, table, **kw):
@@ -148,6 +152,38 @@ class TestDeprovisionOnDelete:
                 if table == "graphs":
                     return graphs or []
                 return []
+
+            def query_all(self, table, **kw):
+                # Mirror the real seam's precondition (``supabase_control.
+                # query_all`` raises when the cursor column is not selected):
+                # this diff makes `_org_graph_names` DEPEND on it by changing
+                # ``select=["namespace"]`` to ``select=["id", "namespace"]``,
+                # so dropping ``id`` again must red here, not ship a walk the
+                # real store refuses.
+                assert kw.get("cursor") == "id", kw.get("cursor")
+                assert "id" in (kw.get("select") or []), kw.get("select")
+                # ⛔ DELEGATED — `FakeControlPlane._certifiable` is the ONE statement
+                # of the certificate, and it now mirrors BOTH of production's
+                # branches (an empty page certifies; a non-empty one needs at least
+                # one cursor). Restating it here is what produced the inverse of this
+                # PR's bug: the line used to be `all(...)`, which refused a MIXED page
+                # (the real walk advances from its cursored rows), so
+                # `_org_graph_names` raised and the org could NEVER be purged.
+                #
+                # This line has now been wrong in BOTH directions, which is why all
+                # three arms are pinned: `test_a_MIXED_page_still_certifies_…`,
+                # `test_a_page_with_NO_cursor_anywhere_is_REFUSED`, and the
+                # pre-existing empty-page arm in
+                # `test_a_legacy_stored_name_is_dropped_alongside_the_canonical_one`.
+                # The SHARED double's own three arms are pinned separately by
+                # `TestTheSharedDoubleDerivesItsCertificate` (#13249 round 14).
+                # `complete` still lets a test SAY "this walk was truncated"
+                # (`test_a_truncated_graphs_walk_…`).
+                from tests.fake_control_plane import FakeControlPlane
+
+                rows = graphs or []
+                certified = FakeControlPlane._certifiable(rows, None, "id")
+                return rows, bool(complete and certified)
         return _CP()
 
     def test_every_graph_the_org_owns_is_in_the_deprovision_list(self, monkeypatch):
@@ -161,7 +197,7 @@ class TestDeprovisionOnDelete:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: self._fake_cp(
                                 [{"id": "o1", "graph_name": "org_o1"}],
-                                graphs=[{"org_id": "o1", "namespace": "org_o1_g_abc"}]))
+                                graphs=[{"id": "g_abc", "org_id": "o1", "namespace": "org_o1_g_abc"}]))
         names = ha._org_graph_names("o1", "org_o1")
         assert "team_o1" in names            # pre-#3543 spelling, still on disk
         assert "org_o1_g_abc" in names       # the custom graph: the actual leak
@@ -188,8 +224,8 @@ class TestDeprovisionOnDelete:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: self._fake_cp(
                                 [{"id": "o1", "graph_name": "team_o1"}],
-                                graphs=[{"org_id": "o1", "namespace": "org_o1_g_1"},
-                                        {"org_id": "o1", "namespace": "org_o1_g_2"}]))
+                                graphs=[{"id": "g_1", "org_id": "o1", "namespace": "org_o1_g_1"},
+                                        {"id": "g_2", "org_id": "o1", "namespace": "org_o1_g_2"}]))
         names = ha._org_graph_names("o1", "team_o1")
         assert names[-1] == "org_o1", names
         assert names.count("org_o1") == 1, names
@@ -206,9 +242,9 @@ class TestDeprovisionOnDelete:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: self._fake_cp(
                                 [{"id": "o1", "graph_name": "org_o1"}],
-                                graphs=[{"org_id": "o1", "namespace": "org_o2"},
-                                        {"org_id": "o1", "namespace": "org_o1x_g_1"},
-                                        {"org_id": "o1", "namespace": None}]))
+                                graphs=[{"id": "g_a", "org_id": "o1", "namespace": "org_o2"},
+                                        {"id": "g_b", "org_id": "o1", "namespace": "org_o1x_g_1"},
+                                        {"id": "g_c", "org_id": "o1", "namespace": None}]))
         names = ha._org_graph_names("o1", "org_o1")
         assert names == ["team_o1", "org_o1"], names
 
@@ -223,6 +259,225 @@ class TestDeprovisionOnDelete:
                             lambda: self._fake_cp(
                                 [{"id": "o1", "graph_name": "team_o1"}]))
         assert ha._org_graph_names("o1", "team_o1") == ["team_o1", "org_o1"]
+    def test_a_truncated_graphs_walk_REFUSES_rather_than_dropping_the_tail(self, monkeypatch):
+        """⛔ A single page is silently capped at the deployment's `max_rows`, so
+        an org owning more graphs than one page (reachable: `max_graphs_per_team`
+        is `null` — unlimited — on pro and team, #10743) would lose the TAIL of its custom graphs from the
+        deprovision list — and `purge_org_control_plane` would then delete the
+        rows that named them, making them unnameable and unreapable forever
+        (#13205 review round 6). The walk is `query_all`, and an uncertified one
+        raises so the org row survives as the retry anchor."""
+        from tortoise import hosted_api as ha
+
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: self._fake_cp(
+                                [{"id": "o1", "graph_name": "org_o1"}],
+                                graphs=[{"id": "g_1", "namespace": "org_o1_g_1"}],
+                                complete=False))
+        with pytest.raises(RuntimeError, match="could not be certified complete"):
+            ha._org_graph_names("o1", "org_o1")
+
+    def test_a_MIXED_page_still_certifies_so_the_org_CAN_be_purged(self, monkeypatch):
+        """⛔ The certificate must be as LENIENT as production, not stricter
+        (#13205 review round 13).
+
+        The real walk's rule is ``advanceable = [c for c in cursors if c]; if not
+        advanceable: break`` — so a page carrying at least ONE cursored row still
+        ADVANCES, and the uncursored rows stay in ``rows``. Requiring EVERY row to
+        carry one (an ``all(...)`` certifier) reports such a page as truncated,
+        ``_org_graph_names`` raises, and the purge aborts — the INVERSE of the
+        leak this PR exists to fix: an org that can never be purged at all.
+
+        Both graphs still get dropped, because ownership is decided by
+        ``namespace``; the uncursored row only declines to help the walk ADVANCE,
+        it does not make itself undroppable."""
+        from tortoise import hosted_api as ha
+
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: self._fake_cp(
+                                [{"id": "o1", "graph_name": "org_o1"}],
+                                graphs=[{"id": "g_1", "namespace": "org_o1_g_1"},
+                                        # no `id`: production keeps this row and
+                                        # still advances from its sibling.
+                                        {"namespace": "org_o1_g_2"}]))
+        names = ha._org_graph_names("o1", "org_o1")
+        assert "org_o1_g_1" in names, names
+        assert "org_o1_g_2" in names, names
+        assert names[-1] == "org_o1", names
+
+    def test_a_page_with_NO_cursor_anywhere_is_REFUSED(self, monkeypatch):
+        """The OTHER half of the same rule (#13205 review round 13), so the
+        certificate cannot drift either way.
+
+        A NON-empty page where not one row carries a cursor leaves
+        ``advanceable`` empty, so the real walk breaks with ``exhausted`` False and
+        CANNOT certify. That is what makes the whole walk refuse rather than
+        drop the graphs it happened to see — the direction the derived certificate
+        was originally introduced for (three deprovision fixtures shipped rows
+        carrying only ``namespace`` and were green because the double certified
+        unconditionally)."""
+        from tortoise import hosted_api as ha
+
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: self._fake_cp(
+                                [{"id": "o1", "graph_name": "org_o1"}],
+                                graphs=[{"namespace": "org_o1_g_1"},
+                                        {"namespace": "org_o1_g_2"}]))
+        with pytest.raises(RuntimeError, match="could not be certified complete"):
+            ha._org_graph_names("o1", "org_o1")
+
+    def test_the_acl_user_walk_reads_EVERY_page_of_graphs(self, monkeypatch):
+        """⛔ Review round 7: `_drop_org_acl_users` read ONE PostgREST page.
+
+        `query` is capped at the deployment's `max_rows` (1000) and cannot report
+        its own truncation, so an org past one page (reachable:
+        `max_graphs_per_team` is `null` on pro and team, #10743) keeps the TAIL of its gids — and a gid names
+        a GLOBAL `tenant_<gid>` ACL user, i.e. a LIVE CREDENTIAL, in the very
+        purge that then deletes the graphs and the rows naming them. The walk is
+        `query_all` (cursor in `select`), which is what drops the second page's
+        user here — the class `_org_graph_names` refuses one function up, one step
+        earlier in the same purge.
+
+        Mutant: restore `rows = cp.query("graphs", select=["id"], ...)` — `g_2`
+        is never enumerated and this reds on `dropped`.
+        """
+        from tortoise import hosted_api as ha
+
+        dropped: list[str] = []
+        monkeypatch.setattr(ha, "_acl_user_drop_hook", dropped.append)
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+
+        class _CP:
+            """Page 1 only through `query`; the WHOLE set through `query_all`."""
+
+            def query(self, table, **kw):
+                return [{"id": "g_1"}] if table == "graphs" else []
+
+            def query_all(self, table, **kw):
+                assert kw.get("cursor") == "id", "the walk must key on `id`"
+                assert "id" in (kw.get("select") or []), kw.get("select")
+                return [{"id": "g_1"}, {"id": "g_2"}], True
+
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: _CP())
+        ha._drop_org_acl_users("o1")
+        assert dropped == ["g_1", "g_2"], (
+            "the tail of the org's gids was never enumerated — their live ACL "
+            "users outlive the purge that deletes the graphs")
+
+    def test_an_uncertified_acl_walk_DROPS_what_it_saw_and_says_SO(self, monkeypatch, caplog):
+        """The policy is best-effort — recorded by C4 in `e2131c6847`, "Best-effort per
+        graph (a committed purge never fails on a drop)" — so an uncertified walk
+        must NOT raise. It must be LOUD instead: the ids it saw are a LOWER
+        BOUND, and the credential on any graph past it outlives every way to name
+        it (the operator can only drop it by hand if the bound is announced).
+
+        Mutant: delete the `if not complete:` block — the drop still happens, so
+        this reds on the LOG assertion, which is why the assertion is the log and
+        not the exception: making this raise would reverse that policy (`e2131c6847`),
+        which is a docstring review finding, NOT a decision stated on #2113 (see the
+        function's own docstring).
+        """
+        from tortoise import hosted_api as ha
+
+        dropped: list[str] = []
+        monkeypatch.setattr(ha, "_acl_user_drop_hook", dropped.append)
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+
+        class _CP:
+            def query(self, table, **kw):
+                return []
+
+            def query_all(self, table, **kw):
+                return [{"id": "g_1"}], False
+
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: _CP())
+        caplog.set_level(logging.WARNING, logger="tortoise.hosted_api")
+        ha._drop_org_acl_users("o1")           # must NOT raise (`e2131c6847`)
+        assert dropped == ["g_1"], dropped     # best-effort still drops what it saw
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "LOWER BOUND" in text and "o1" in text, text
+
+    def test_a_seam_without_query_all_is_ANNOUNCED_not_silent(self, monkeypatch, caplog):
+        """⛔ THE FAILURE MODE THE DELETED `getattr` SEAM INTRODUCED (#13205
+        review round 9, finding 2). Both reads of this table now use ONE bare
+        `query_all` shape — deliberately not a `getattr` fallback. A seam that
+        predates the walk therefore raises `AttributeError` into the best-effort
+        handler below, which logs and returns having dropped NO user.
+
+        Continuing is correct per the policy C4 recorded in `e2131c6847` ("Best-effort
+        per graph (a committed purge never fails on a drop)"), but only while it
+        is ANNOUNCED: `tenant_<gid>` users are GLOBAL state that nothing else
+        names, so the operator can only drop them by hand if the failure is said
+        out loud. `test_a_seam_double_without_query_all_still_enumerates` pinned
+        the old fallback until it was deleted with the seam; this pins the log
+        that replaced it, which is all that stands between the removal and
+        silence.
+
+        Mutant: delete the `_logger.warning` in the handler (keep the `return`)
+        — reds on the log assertion here, while the sweep still does not raise
+        (`e2131c6847`; not a decision stated on #2113).
+        """
+        from tortoise import hosted_api as ha
+
+        dropped: list[str] = []
+        monkeypatch.setattr(ha, "_acl_user_drop_hook", dropped.append)
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+
+        class _NoWalker:
+            """A control-plane seam from BEFORE the `query_all` walk: `query` only."""
+
+            def query(self, table, **kw):
+                return []
+
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: _NoWalker())
+        caplog.set_level(logging.WARNING, logger="tortoise.hosted_api")
+        ha._drop_org_acl_users("o1")       # must NOT raise (`e2131c6847`)
+        assert dropped == [], dropped      # nothing was named, nothing dropped
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "ACL-user enumeration failed" in text and "o1" in text, text
+        assert "query_all" in text, text   # names the seam that cannot walk
+
+    def test_a_FAILED_acl_enumeration_is_ANNOUNCED_and_not_silent(self, monkeypatch, caplog):
+        """⛔ The `except` arm is a fail-open that #13287 owns, and it is the
+        WORSE of the two: `query_all` RAISES on an outage by contract, so this arm
+        returns with `ids == []` and the caller still drops EVERY graph and
+        cascades the naming rows. It cannot refuse (`e2131c6847`, best-effort), so the
+        least it must do is SAY so — and it never reaches the `LOWER BOUND`
+        warning below, so without a sentence of its own the total loss of every
+        `tenant_<gid>` credential is completely silent.
+
+        Mutant: restore the bare `"team ACL-user enumeration failed … : %s"`
+        message — this reds on the missing clause.
+        """
+        from tortoise import hosted_api as ha
+
+        class _Broken:
+            def query_all(self, *a, **k):
+                raise RuntimeError("postgrest 503 on the graphs walk")
+
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: _Broken())
+        caplog.set_level(logging.WARNING, logger="tortoise.hosted_api")
+        assert ha._drop_org_acl_users("o1") is None   # must not raise (`e2131c6847`)
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "NOT blocked" in text, text
+        assert "tenant_*" in text and "13287" in text, text
+
+
     def test_an_unreadable_enumeration_REFUSES_rather_than_erasing_a_subset(self, monkeypatch):
         """⛔ A failure to ask is not an answer (review round 4, P1).
 
@@ -236,15 +491,31 @@ class TestDeprovisionOnDelete:
         from tortoise import hosted_api as ha
 
         class _Broken:
-            def query(self, *a, **k):
+            # ⛔ `query_all`, NOT `query`: `_org_graph_names` walks now, so a
+            # `query`-only double raised `AttributeError` ("no attribute
+            # 'query_all'"), and this test still PASSED — on the wrapper text alone
+            # (`pytest.raises(RuntimeError, match="refusing…")` matched a
+            # `RuntimeError` whose `__cause__` was that `AttributeError`). So the
+            # store-OUTAGE arm its own docstring names was left unpinned, measured:
+            # a mutant that swallows only `RuntimeError` inside the walk and degrades
+            # to the derived names keeps the suite green (838 passed) with the old
+            # double, and reds here ("DID NOT RAISE") with this one — while the
+            # mutant's return value, `['team_o1','org_o1']`, is exactly the partial
+            # erasure. NOT redundant with
+            # ``test_a_seam_without_query_all_is_ANNOUNCED_not_silent``, which pins
+            # the OTHER function's non-raising announcement (`dropped == []`).
+            def query_all(self, *a, **k):
                 raise RuntimeError("postgrest down")
 
         monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
                             lambda: True)
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: _Broken())
-        with pytest.raises(RuntimeError, match="refusing to deprovision a SUBSET"):
+        with pytest.raises(RuntimeError, match="refusing to deprovision a SUBSET") as exc:
             ha._org_graph_names("o1", "org_o1")
+        assert "postgrest down" in str(exc.value), (
+            "the refusal must carry the STORE's error — an AttributeError here "
+            "would mean the double is dead again")
 
     def test_a_failed_enumeration_keeps_the_org_row_as_the_retry_anchor(self, monkeypatch):
         """The #926 anchor, end to end: the sweep logs and skips the org, so the
@@ -335,6 +606,150 @@ class TestDeprovisionOnDelete:
         dropped.clear()
         ha._drop_org_graphs_strict("o1", "org_o1")
         assert dropped == ["team_o1", "org_o1"]
+
+
+# ── 2c. the SHARED double derives its certificate — pinned here, because nothing else did ──
+
+
+class TestTheSharedDoubleDerivesItsCertificate:
+    """``FakeControlPlane.query_all`` must DERIVE ``complete``, never assert it.
+
+    ⛔ This is the one arm of the shared double that no test exercised: replacing
+    ``_certifiable``'s body with ``return True`` reddened **nothing** — 566 tests
+    passed across the six suites that use this fake — while the same edit on the
+    test-local ``_CP`` reds three deprovision rows. A double that certifies
+    unconditionally is the exact shape of wrongness this PR removes:
+    ``_org_graph_names`` REFUSES an uncertified walk, so a fake that always
+    certifies makes a walk production would refuse look green.
+
+    The arms below are four edges of the real rule (``supabase_control``):
+    ``advanceable = [c for c in cursors if c]; if not advanceable: break`` — a
+    page with NO cursor cannot advance; a page with one can, and keeping its
+    uncursored rows is what production does; an ordinary page certifies; and
+    ``if any(a >= b for a, b in itertools.pairwise(advanceable)): break`` — a
+    page that is NOT STRICTLY ASCENDING cannot certify either, because the server
+    may have ignored ``order`` and a later cursor would step OVER rows that were
+    never served. That fourth edge was missing until review round 17: the double
+    certified a duplicated page while the store refuses it, which is the LOOSE
+    direction and the one that matters to a purge.
+    """
+
+    @staticmethod
+    def _cp(rows):
+        from tests.fake_control_plane import FakeControlPlane
+        return FakeControlPlane({"graphs": rows})
+
+    def test_a_page_with_NO_cursor_value_anywhere_is_REFUSED_the_certificate(self):
+        cp = self._cp([{"namespace": "org_1"}, {"namespace": "org_2"}])
+        rows, complete = cp.query_all(
+            "graphs", select=["id", "namespace"], cursor="id")
+        assert len(rows) == 2, "the rows are still RETURNED — only the certificate is withheld"
+        assert complete is False, (
+            "the shared double CERTIFIED a page carrying no cursor value at "
+            "all: production's walk cannot advance from it (`advanceable` is "
+            "empty), so `_org_graph_names` refuses. This certificate must be "
+            "derived from the rows, not asserted")
+
+    def test_a_page_with_AT_LEAST_ONE_cursor_value_still_advances_and_certifies(self):
+        cp = self._cp([{"id": "g1", "namespace": "org_1"},
+                       {"namespace": "org_2"}])
+        rows, complete = cp.query_all(
+            "graphs", select=["id", "namespace"], cursor="id")
+        assert len(rows) == 2, "production KEEPS the uncursored rows it saw"
+        assert complete is True, (
+            "a MIXED page is not refused by production — it advances from its "
+            "cursored rows. Certifying only wholly-cursored pages would be "
+            "STRICTER than the real store and would refuse walks it completes")
+
+    def test_an_ordinary_walk_is_certified(self):
+        cp = self._cp([{"id": "g1", "namespace": "org_1"},
+                       {"id": "g2", "namespace": "org_2"}])
+        rows, complete = cp.query_all(
+            "graphs", select=["id", "namespace"], cursor="id")
+        assert len(rows) == 2
+        assert complete is True, (
+            "the derivation must certify an ordinary walk — otherwise the "
+            "refusal arms would be satisfied by a double that refuses everything")
+
+    def test_a_page_that_is_NOT_STRICTLY_ASCENDING_is_REFUSED_the_certificate(self):
+        """⛔ Production refuses a page that is not STRICTLY ascending on the
+        cursor: ``if any(a >= b for a, b in itertools.pairwise(advanceable)):
+        break``. A server that ignored ``order`` would have the walk step OVER
+        rows that were never served and STILL end on an empty page, reporting a
+        COMPLETE walk over a subset. Omitting the gate is the LOOSE direction —
+        the double certifies what the store refuses — so it is pinned on the
+        predicate itself.
+
+        ⛔ THE PREDICATE, NOT ``query_all``, ON PURPOSE: ``query_all`` reads
+        through ``query_with_total(order=cursor)``, and this fake HONOURS
+        ``order`` by sorting — so a descending fixture arrives ascending and the
+        shape can never reach ``_certifiable`` that way. The duplicate stays
+        reachable through ``query_all`` and is asserted that way too.
+
+        Mutant: delete the ``pairwise`` check from ``_certifiable`` — this reds
+        while every other arm in this class stays green.
+        """
+        from tests.fake_control_plane import FakeControlPlane
+
+        certifiable = FakeControlPlane._certifiable
+        assert certifiable([{"id": "g1"}, {"id": "g1"}], None, "id") is False, (
+            "a DUPLICATE cursor must not certify — the real walk breaks on "
+            "`a >= b` and never certifies")
+        assert certifiable([{"id": "g2"}, {"id": "g1"}], None, "id") is False, (
+            "a DESCENDING page must not certify, for the same reason")
+        assert certifiable([{"id": "g1"}, {"id": "g2"}], None, "id") is True, (
+            "…while a strictly ascending page still does, so the gate cannot be "
+            "satisfied by refusing everything")
+
+    def test_a_DUPLICATE_cursor_is_REFUSED_through_query_all_too(self):
+        """The reachable shape of the same gate: a duplicated page."""
+        cp = self._cp([{"id": "g1", "namespace": "org_1"},
+                       {"id": "g1", "namespace": "org_2"}])
+        _rows, complete = cp.query_all(
+            "graphs", select=["id", "namespace"], cursor="id")
+        assert complete is False, (
+            "the double certified a page with a REPEATED cursor; the real walk "
+            "breaks on `a >= b`, so `_org_graph_names` would refuse the purge "
+            "while this double called it green")
+
+    def test_the_STATED_TOTAL_gate_counts_DISTINCT_CURSOR_VALUES(self):
+        """Gate 3 of the real certificate, which nothing exercised.
+
+        Production ends with ``complete = exhausted and (total is None or
+        len(seen) >= total)``, and ``seen`` is a SET OF CURSOR VALUES — not rows.
+        Measured: replacing the gate with ``return True`` left 554 tests green
+        across the six suites that use this fake, because the only call that
+        supplies a stated total in the whole corpus does so in a direction the
+        gate cannot refuse. That is the same "false PASS in the double that
+        decides a purge" class the earlier rounds fixed on the other two gates,
+        so all three rows are pinned here — unmet total, the distinct-cursor rule
+        (a DUPLICATE cannot satisfy a total of 2), and the met-total control that
+        stops the gate being satisfied by refusing everything.
+        """
+        from tests.fake_control_plane import FakeControlPlane
+
+        certifiable = FakeControlPlane._certifiable
+        assert certifiable([{"id": "g1"}], 2, "id") is False, (
+            "one row against a stated total of 2 must not certify — the walk did "
+            "not meet the total the server stated")
+        assert certifiable([{"id": "g1"}, {"id": "g1"}], 2, "id") is False, (
+            "the total counts DISTINCT CURSOR VALUES, not rows: two rows carrying "
+            "the same gid are one seen row, so a total of 2 is not met")
+        assert certifiable([{"id": "g1"}, {"id": "g2"}], 2, "id") is True, (
+            "…and a met total still certifies, so the gate cannot be satisfied by "
+            "refusing everything")
+
+    def test_an_EMPTY_page_is_the_end_of_the_walk_and_CERTIFIES(self):
+        cp = self._cp([])
+        rows, complete = cp.query_all(
+            "graphs", select=["id", "namespace"], cursor="id")
+        assert rows == []
+        assert complete is True, (
+            "an EMPTY page is the sound end-of-walk signal (production: `if not "
+            "page: exhausted = True; break`), so it CERTIFIES. Refusing it is "
+            "STRICTER than the store, and `_org_graph_names` RAISES on an "
+            "uncertified walk — so an org owning no custom graphs could never be "
+            "purged at all")
 
 
 # ── 3. the reaper: safe by construction ──────────────────────────────────────

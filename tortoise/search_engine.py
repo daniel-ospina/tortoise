@@ -2895,7 +2895,10 @@ def run_fts_query(
     Falls back gracefully if index doesn't exist or query fails.
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
     'source', or 'operator'. Document FTS searches the _searchText index
-    (#125) which concatenates title+summary+topics.
+    (#125) — the field the write path fills PER DOOR: a source writer passes
+    `sdk._source_search_text` (the `title` when it has one, else the captured
+    topic lexicon, else the `summary`), while the document fold concatenates
+    title + summary + topics (`projection.entities._build_search_text`).
     Returns n.url for source and document (the :Source canonical key, #448 — a
     document IS a :Source), n.eventId for event, n.id for all other entity
     types.

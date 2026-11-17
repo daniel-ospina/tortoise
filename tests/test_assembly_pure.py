@@ -2373,9 +2373,20 @@ def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
     # member would flip such a legacy successor from recall-excluded (NAME-ONLY)
     # to a verified link. Removing a value from a reader before the stored
     # population is rewritten is the inverted order this slice exists to avoid.
-    # The drop is the stored-rows rewrite's (#12855) and is S4's acceptance —
-    # S0's own acceptance is that NOTHING is dropped from any filter here. So the
-    # pin is UNCHANGED by S0, and it still fails if the member is dropped early.
+    #
+    # ⛔ THIS PIN MOVES WITH THE MEMBER, AND THE MOVE IS SEQUENCED (owner
+    # decision on #12855, 2026-11-16: *rewrite the stored rows once*).
+    # `tools/rewrite_object_status.py` rewrites every stored `outdated` (and any
+    # stored `retracted`) Object status to `deprecated` through the SDK's
+    # journaled update path, and the member is dropped — with this assertion
+    # restated as the bare canonical set — once that has run on the target (its
+    # preview is the measurement: 0 rows, WHERE the target has no dual-labelled
+    # `:Point`/`:Object` row — such a row is refused by design and resolved by
+    # hand first, see `tortoise/assembly.py`). That is #12855's acceptance and S4's,
+    # not S0's; the write-door half of the precondition is already met by S0.
+    # Until the rewrite has run, asserting the WIDER set is what keeps a silent
+    # drop from shipping ahead of it — so the pin is UNCHANGED here, and it
+    # still fails if the member is dropped early.
     assert set(_RECALL_OBJECT_EXCLUDED_STATUSES) == \
         set(OBJECT_TERMINAL_STATUSES) | {"outdated"}
 
