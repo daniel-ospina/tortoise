@@ -200,7 +200,7 @@ def test_a_truncated_POST_read_is_reported_not_certified(env, monkeypatch):
     graph it could not see. (Mutation-tested: deleting the fold left this suite
     green before this test existed.)
     """
-    sdk, _events = env
+    sdk, events = env
     _seed(sdk)
 
     real_collect = tool.collect
@@ -218,7 +218,16 @@ def test_a_truncated_POST_read_is_reported_not_certified(env, monkeypatch):
     rep = tool.run(sdk, execute=True)
 
     assert rep.truncated is True, "a truncated post-read must not be reported clean"
-    assert tool.main(["--db-path", str(env[0]._db_path), "--execute"]) in (1, 2)
+    # Reset the counter: `main` takes its own preview read first (call 1, clean)
+    # and only its POST read is truncated (call 2). Carrying the counter over
+    # from the run above would make the PREVIEW truncated and measure the exit-2
+    # refusal instead of the post-condition.
+    calls["n"] = 0
+    # Exact, not `in (1, 2)`: a sloppy set hides which refusal answered. The
+    # write arm has a journal here, so this must be the post-condition's 1.
+    assert tool.main(["--db-path", str(env[0]._db_path),
+                      "--event-log-path", str(events / "events.jsonl"),
+                      "--execute"]) == 1
 
 
 def test_a_fanout_that_clears_before_the_write_is_written_not_refused(env):
@@ -395,6 +404,30 @@ def test_a_second_execute_cannot_erase_a_previous_failure_marker(env):
         f"pending={second.pending!r}")
     assert "dead weight" not in tool.render(second)
     assert second.total == 0
+
+
+def test_a_permanently_refused_row_does_not_hold_the_durability_marker(env):
+    """A row refused BEFORE any write must never blame a live-only write.
+
+    Such a row is not in the marker's population (nothing was written for it), so
+    it must not keep the marker alive forever — otherwise the shape the tool
+    itself calls "the only legacy row on the canonical instance" would make the
+    graph permanently unmeasurable while the report accused it of leaving a row
+    LIVE-ONLY.
+    """
+    sdk, _events = env
+    oid = sdk.create_object("dual", objectKind="test:widget")["id"]
+    _mint_legacy(sdk, oid, "outdated")
+    sdk._get_proj().g.query(
+        "MATCH (n:Object {id:$id}) SET n:Point", params={"id": oid})
+
+    rep = tool.run(sdk, execute=True)
+
+    assert [f.get("id") for f in rep.failures] == [oid], rep.failures
+    assert rep.pending == [], (
+        "a pre-write refusal was reported as a possible live-only write: "
+        f"{rep.pending!r}")
+    assert tool._read_pending(rep.journal) == [], "the marker must not exist"
 
 
 def test_the_rewrite_survives_a_rebuild_all(env):

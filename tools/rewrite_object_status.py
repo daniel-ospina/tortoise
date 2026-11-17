@@ -44,10 +44,16 @@ ONE derivation the deployed lane uses.
 SDK's `_journal_entity_mutation` is best-effort (it returns `False` when the
 append raises) and `_update_entity` does not inspect that return — so a failed
 append leaves a **live-only** write that the next `rebuild_all` reverts, with no
-exception anywhere. This tool therefore takes `EventLog.position()` **around
-each write** and FAILS that row when the journal did not grow by its record; the
-row is not counted as rewritten and the run exits 1. A batch-level delta cannot
-attribute a missing record to a row, which is why the probe is per write.
+exception anywhere. This tool therefore takes an end-of-log CURSOR before the
+run and, after it, reads the records appended since — requiring THIS row's own
+`EntityMutated{label: Object, id: rid, state.status: deprecated}` among them — and
+FAILS that row when it is absent; the row is not counted as rewritten and the
+run exits 1. ⛔ The proof is IDENTITY-based on purpose: an earlier version used a
+`EventLog.position()` delta, and `position()` is diagnostics, not evidence
+(``tortoise/log.py``: "under concurrency the number it names belongs to a peer's
+record") — a peer's record satisfied the delta over our failed append, and the
+row rebuilt back to `outdated` while the run reported success. A count, a delta
+or "any `EntityMutated`" cannot attribute a missing record to a row.
 
 WHY PREVIEW IS THE DEFAULT
 ==========================
@@ -58,7 +64,10 @@ are different questions and are counted separately), the ids, and the rows this
 tool deliberately does NOT touch. A preview that reports **0 / 0** is a real
 result: it means no stored row needs the `assembly` member, and the member is
 dead weight on that graph (measured per graph — it is not a claim about any
-other).
+other). ⛔ UNLESS a durability marker is present (a previous run left rows
+LIVE-ONLY) or the read was truncated: those are printed, the 0/0 sentence is
+withheld, and the preview exits 1 — a read it could not complete is not a
+measurement.
 
 WHAT IT REWRITES, AND WHAT IT DELIBERATELY DOES NOT
 ==================================================
@@ -693,15 +702,15 @@ def rewrite(sdk, rep: Report) -> Report:
     # run that discharges it clears it (end of this function). An unwritable
     # marker refuses: it is the tool's own measurement guard, and "best effort"
     # would make it inert exactly when a write is about to happen.
-    _planned = sorted(set(rep.pending or ())
-                      | {str(r.get("id")) for r in rep.rows
-                         if r.get("id") is not None})
-    if not _write_pending(rep.journal, _planned):
-        rep.executed = False
-        raise Refused(REFUSE_PENDING_UNWRITABLE, (
-            f"the durability marker {_pending_path(rep.journal)} could not be "
-            "written, so a failed or killed run would leave rows LIVE-ONLY with "
-            "no trace and the next preview would read a false 0 rows."))
+    # ⛔ THE MARKER IS WRITTEN PER WRITE, INCREMENTALLY. Writing it once for the
+    # whole planned population would include rows refused BEFORE any write (a
+    # dual-labelled row), which no `--execute` can ever discharge — the marker
+    # would then never clear and the graph could never be measured, while the
+    # report blamed those rows for a live-only write they never had. Each id is
+    # added immediately before its OWN write and merged into any marker a
+    # previous failed run left (those rows read clean LIVE now, so they are not
+    # in this population and must not be dropped).
+    _marker_ids = set(rep.pending or ())
     # ⛔ ONE journal cursor for the whole run (see `_journal_cursor`).
     _run_cursor = _journal_cursor(log)
     _written_ok: list = []
@@ -731,6 +740,20 @@ def rewrite(sdk, rep: Report) -> Report:
             })
             continue
         _row_cursor = _run_cursor
+        # ⛔ The marker names THIS row before its own write, so a SIGTERM between
+        # here and the journal append still leaves a trace. An unwritable marker
+        # refuses: it is the tool's own measurement guard, and "best effort"
+        # would make it inert exactly when a write is about to happen.
+        _marker_ids.add(str(rid))
+        if not _write_pending(rep.journal, _marker_ids):
+            rep.failures.append({
+                "id": rid,
+                "error": (f"{REFUSE_PENDING_UNWRITABLE}: the durability marker "
+                          f"{_pending_path(rep.journal)} could not be written, "
+                          "so this row is NOT being written — a failed or killed "
+                          "run would leave it LIVE-ONLY with no trace."),
+            })
+            continue
         try:
             landed = sdk.update_knowledge(rid, status=REWRITE_TO)
         except Exception as exc:
@@ -836,7 +859,7 @@ def rewrite(sdk, rep: Report) -> Report:
     # word keeps the marker, so the next PREVIEW cannot present "0 rows" as a
     # measurement.
     _discharged = {str(i) for i in rep.rewritten}
-    _still = [i for i in _planned if i not in _discharged]
+    _still = sorted(_marker_ids - _discharged)
     if (rep.failures or rep.truncated or rep.unaddressable or rep.fanout
             or _still
             or any(rep.remaining.get(w, 0) for w in LEGACY_WORDS)):
