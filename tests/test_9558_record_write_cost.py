@@ -803,10 +803,11 @@ def test_an_idle_handle_whose_peer_hung_up_is_discarded_at_borrow(monkeypatch):
 
     FALSIFIER: delete the `_socket_has_pending_input` /
     `_verify_pending_input` pair from `_take_idle_connection` and this reds on
-    the FIRST assertion (the corpse is handed out). Since that ends the test, the
-    other two are covered by
+    the FIRST assertion (the corpse is handed out) — the mutant therefore never
+    reaches the two after it, which are covered instead by
     `test_a_discarded_candidate_is_replaced_by_a_fresh_connect` (exactly one
-    fresh connect) and by the close-is-called assertion here.
+    fresh connect) and the `socket_is_quiet` pin (no statement issued), so this
+    test reds for ONE assertion's worth of evidence, not three.
     """
     made = _fake_driver(monkeypatch)
     corpse = SocketFakeStatusConnection(IDLE, peer_alive=False)
@@ -844,6 +845,40 @@ def test_an_idle_handle_whose_socket_is_quiet_is_reused_with_no_round_trip():
     assert live.commands == [], (
         "a borrow of a QUIET handle issued a statement — that is a server round "
         "trip on every write borrow, the cost #9558 removed")
+
+
+def test_the_readiness_probe_has_no_fd_ceiling(monkeypatch):
+    """The probe must not be inert on a high fd — `select.select` silently was.
+
+    `select.select` REFUSES an fd at or above `FD_SETSIZE` (1024): measured on
+    this host, `select.select([1060], [], [], 0)` raises `ValueError:
+    filedescriptor out of range in select()`. Wrapped in the probe's
+    `except Exception: return False`, that turns into "nothing is known to be
+    pending" for EVERY borrow on such a handle — the corpse is lent unchanged and
+    #12822 is open again, with no counter, no warning and no log (fresh-context
+    review, cycle 3: an A-class fail-open, and the population it hits is a
+    long-lived API process, which is the deployment that reported the counter).
+
+    fds above 1023 cannot be forced here without clobbering a sibling test's fd,
+    so this pins the MECHANISM instead: make `select.select` raise exactly what it
+    raises past `FD_SETSIZE` and require the probe to answer correctly anyway,
+    i.e. to go through `select.poll`, which has no fd ceiling.
+
+    FALSIFIER: put `select.select` back in `_socket_has_pending_input` and the
+    assertion reds (False for a socket that has pending input).
+    """
+
+    def _past_fd_setsize(*args, **kwargs):
+        raise ValueError("filedescriptor out of range in select()")
+
+    monkeypatch.setattr(rw.select, "select", _past_fd_setsize, raising=False)
+    live = SocketFakeStatusConnection(IDLE)
+    live.pending_input(b"NOTIFY record, 'a peer spoke'")
+    assert rw._socket_has_pending_input(live) is True, (
+        "the readiness probe answered 'nothing pending' where `select.select` "
+        "would have raised — on a high fd it is inert, so a dead parked handle "
+        "is lent and its record is lost to write_failed, silently")
+    live.close()
 
 
 def test_a_readable_handle_is_verified_by_the_server_and_kept():

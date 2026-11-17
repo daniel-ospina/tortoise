@@ -2857,10 +2857,15 @@ def test_a_parked_handle_whose_backend_died_costs_a_reconnect_not_a_record(
         # reviewer: 1 passed on four consecutive runs) while claiming to be the
         # falsifier for that exact revert. `select` on the fd is the same
         # readiness fact with no side effect, so the mutant is measured against
-        # the real predicate.
+        # the real predicate. It is `select.poll` rather than `select.select`
+        # because the latter REFUSES an fd at or above `FD_SETSIZE` (1024): a
+        # long-lived process would raise here, and the production probe would
+        # have read "nothing pending" for every such handle (cycle-3 finding).
+        poller = select.poll()
+        poller.register(parked.fileno(), select.POLLIN)
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
-            if select.select([parked.fileno()], [], [], 0)[0]:
+            if poller.poll(0):
                 break
             time.sleep(0.02)
         else:

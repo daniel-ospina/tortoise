@@ -1198,9 +1198,21 @@ def _socket_has_pending_input(conn: Any) -> bool:
     asks the SERVER when this says yes (:func:`_verify_pending_input`).
 
     Anything this cannot ask — a fake handle with no `fileno`, a driver that is
-    not socket-backed, an unselectable fd — is answered ``False`` ("nothing is
-    known to be pending"), so this can only ever ADD a verification and never
-    invent a discard.
+    not socket-backed, an fd the poller refuses — is answered ``False`` ("nothing
+    is known to be pending").
+
+    ⛔ THE TWO DIRECTIONS ARE NOT SYMMETRIC, so both are named. A ``False`` answer
+    can only ever ADD a verification and never invent a discard — but it is also
+    SILENT about the check not happening, and on a long-lived API process that is
+    the normal case rather than an edge one: fds climb past 1023, and
+    ``select.select`` REFUSES an fd at or above ``FD_SETSIZE`` (measured:
+    ``select.select([1060], ...)`` raises ``ValueError: filedescriptor out of
+    range in select()``, whose ``except`` would have turned every borrow into
+    "nothing pending" — the corpse lent unchanged and #12822 open again, with no
+    counter and no log to show for it). Hence :func:`select.poll`, which has no
+    fd ceiling, is registered for ``POLLIN`` only, returns the same readiness and
+    consumes no byte. Where ``poll`` does not exist (Windows) this answers
+    ``False``: the pre-fix behaviour, never a wrong record.
 
     Measured cost, 20 000 calls on an idle fd: **1.7 µs/call**, and it sends
     nothing.
@@ -1212,10 +1224,14 @@ def _socket_has_pending_input(conn: Any) -> bool:
     if not isinstance(fileno, int) or fileno < 0:
         return False
     try:
-        readable, _, _ = select.select([fileno], [], [], 0)
+        poller = select.poll()
+        poller.register(fileno, select.POLLIN)
     except Exception:
         return False
-    return bool(readable)
+    try:
+        return bool(poller.poll(0))
+    except Exception:
+        return False
 
 
 def _verify_pending_input(conn: Any) -> bool:
@@ -2720,15 +2736,17 @@ def write_live_record(record: Mapping[str, Any], *,
     record — N records used to cost N × 10 s inside one ``capture_session`` call,
     which is a wedged capture, not a degraded one.
 
-    ⚠️ RESIDUAL, stated rather than implied: the death is proven at BORROW, so
-    TWO windows remain, and neither is silent — both still count ONE
-    ``write_failed`` record (healed by replay, unless the graph is cut over):
-    a death that lands between the borrow and the first statement, and a peer
-    that VANISHES without closing (a partition, a blackholed route): a socket
-    that never learns of the death has no pending input to verify, so nothing
-    local can see it. The local probe decides the first window; only a round
-    trip on every borrow could decide the second, which is the price this door
-    still declines. The handle is DISCARDED the moment a death IS seen (see
+    ⚠️ RESIDUAL, stated rather than implied: the death is proven at BORROW, which
+    closes the window where a handle sat dead while PARKED — and only that one.
+    TWO windows open AFTER the borrow remain, and neither is silent — both still
+    count ONE ``write_failed`` record (healed by replay, unless the graph is cut
+    over): a death that lands between the borrow and the first statement, and a
+    peer that VANISHES without closing (a partition, a blackholed route): a
+    socket that never learns of the death has no pending input to verify. ⛔ THE
+    PROBE DECIDES NEITHER: it has already run when the first of them begins, and
+    closing that one needs a RETRY the door does not do (the failure is counted
+    and refused), while no check that PRECEDES the write can close the second.
+    The handle is DISCARDED the moment a death IS seen (see
     :func:`_take_idle_connection`), so the cost is one record per DEATH rather
     than one per following record.
 
@@ -2736,7 +2754,7 @@ def write_live_record(record: Mapping[str, Any], *,
     its own reasoning was right about the option it considered: *"a health query
     per acquire would remove it entirely at the price of a round trip on every
     record, which is not worth it"*. The option it did NOT consider is the one
-    taken here — read the LOCAL SOCKET first (``select`` readiness, measured
+    taken here — read the LOCAL SOCKET first (readiness probe, measured
     **1.7 µs**, no round trip) and ask the server ONCE only when that read finds
     something pending, which is where the round trip belongs: it is then a
     question about a specific handle, not a tax on every record. The
