@@ -1006,7 +1006,17 @@ surfaces:
   # used to justify the api entry: it matches no SOURCE_PATTERNS rule and an
   # unmapped-path change already fails closed to the full matrix.)
   - test_transport_wait_bound.py
-  # #10602: the wait-bound BREACH channel — `wait_bound_breaches` on the health
+  # #10893: the STAGE ATTRIBUTION on a breached wait budget — `read_stage` /
+  # `read_stages_ms` on the breach row, `data.stage` on the refusal, and the
+  # closed vocabulary in `tortoise/read_stages.py`. Dual-registered `api` +
+  # `core` for the reason every row around it is: the seams and the refusal
+  # builders live in `tortoise/hosted_api.py` (an EXACT `api` SOURCE_PATTERNS
+  # match that REPLACES the `core` fallback) and in `tortoise/mcp_server.py`,
+  # while the read-path marks sit in `tortoise/sdk.py` and the timeline module
+  # matches no SOURCE_PATTERN and therefore falls through to `core`. A
+  # one-surface registration drops this file on one of the two halves' own
+  # diffs — the #1349/#3332 silent-drop class the manifest exists for.
+  - test_10893_read_stage_attribution.py
   # surface, so a `-32009` refusal is observable in-process instead of only in
   # the best-effort analytics sink. Dual-registered for the same reason as its
   # sibling above and as the health guards below: the emit sites and the
@@ -5085,6 +5095,7 @@ surfaces:
   # CI has no safety suite.
   - test_container_reaper.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
+  - test_10893_read_stage_attribution.py  # #10893: the stage attribution a breach publishes — `read_stages.py` matches no SOURCE_PATTERN (→ `core`), the seams are in `hosted_api.py`/`mcp_server.py` (→ `api`) and the marks are in `sdk.py` (dual: api)
   - test_10602_wait_bound_breach_visible.py  # #10602: the breach channel itself — `wait_bound_breaches` on `/health`, the counter family in `tortoise/monitoring.py` (which selects `core`) plus the two emit sites in `hosted_api.py`/`mcp_server.py` (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is

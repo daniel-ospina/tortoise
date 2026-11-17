@@ -148,6 +148,19 @@ from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verd
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
+# #10893: the read-stage timeline, so a breached wait budget can NAME the stage it
+# died in. `mark` is a NO-OP when no timeline is bound (every CLI, unit test and
+# in-process SDK user), so the hot read path pays one ContextVar read per
+# boundary — see `tortoise/read_stages.py`.
+from .read_stages import (
+    STAGE_EMBED_ENCODE,
+    STAGE_EMBED_GET,
+    STAGE_EP_ANNOTATION,
+    STAGE_FUSION,
+    STAGE_RESPONSE,
+    STAGE_RETRIEVAL,
+)  # noqa: F401 — STAGE_* are the closed vocabulary the marks below use
+from .read_stages import mark as _mark_read_stage
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -42695,6 +42708,16 @@ class TortoiseSDK:
         if strategies.get("vector") and query and query.strip():
             from .embeddings import EmbeddingModel
             from .exceptions import EmbedderUnavailableError
+            # #10893: stage marks for the wait-bound breach. `mark` is a NO-OP
+            # when no timeline is bound (every CLI/test/SDK-user process), so
+            # this costs one ContextVar read per boundary — see
+            # `tortoise/read_stages.py` for why the instrument must not be able
+            # to look like the latency it measures.
+            # ⛔ `embed_get` and `embed_encode` are SEPARATE stages on purpose: a
+            # COLD LOAD (~57 s measured) is setup the #4055 exemption already
+            # excuses, while an ENCODE is work this request owns. Collapsing
+            # them is how the two got argued as one thing on #10893.
+            _mark_read_stage(STAGE_EMBED_GET)
             model = None
             try:
                 model = EmbeddingModel.get()
@@ -42708,6 +42731,7 @@ class TortoiseSDK:
                 # ``no_embedder`` term names — carry the recorded cause.
                 _vec_reason = EmbeddingModel.absent_reason()
             else:
+                _mark_read_stage(STAGE_EMBED_ENCODE)
                 try:
                     query_vec = model.encode([_dense_query])[0].tolist()
                 except Exception:  # noqa: BLE001, RUF100
@@ -42847,6 +42871,12 @@ class TortoiseSDK:
             tuple(expanded_kinds)
             if leg_trace is not None and query_vec is not None
             and expanded_kinds else None)
+        # #10893: ONE stage for all three retrieval legs plus the expansion
+        # passes below that re-ask the store. The legs run in PARALLEL under a
+        # per-leg deadline, so a per-leg sum would exceed the stage that
+        # contains it; per-leg detail already has its own channel (`leg_trace`,
+        # a different question).
+        _mark_read_stage(STAGE_RETRIEVAL)
         raw_results = degradation_chain(
             graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
@@ -43342,6 +43372,7 @@ class TortoiseSDK:
                 # order by itself.
                 from tortoise.search_engine import clamp_lexical_fusion_weight
                 fusion_weights = clamp_lexical_fusion_weight(fusion_weights)
+            _mark_read_stage(STAGE_FUSION)
             fused = rrf_fusion(
                 ranked_lists,
                 strategy_names=list(raw_results.keys()),
@@ -44152,6 +44183,9 @@ class TortoiseSDK:
         result_ids = result_ids[:limit]
 
         # 6. EP annotation (Point only)
+        # #10893: the decoration read is the LAST graph round trip on this path
+        # and the one a breach never used to be able to name.
+        _mark_read_stage(STAGE_EP_ANNOTATION)
         ep_breakdowns = annotate_ep_batch(graph, result_ids) if entity_type == "point" else {}
 
         # 7. Fetch entity content in BATCH (not N+1)
@@ -44773,6 +44807,10 @@ class TortoiseSDK:
         from .ranking import annotate_belief_order as _belief_label
         # `answered` is only meaningful on the confidence path, which is the
         # only one that reads (`read` stays None on the relevance path).
+        # #10893: TERMINAL stage. A breach that lands here says "the read is
+        # DONE and the answer is late" — the one attribution that points at
+        # response assembly or a blocked loop rather than at any retrieval step.
+        _mark_read_stage(STAGE_RESPONSE)
         return _with_read_status(_belief_label(
             out, consulted=belief_consulted,
             answered=answered if order_by == "confidence" else None))
