@@ -75,7 +75,12 @@ lane is the population a `record_only` move would remove from.
 4. **Nine shape-groups are declared UNEXERCISED rather than counted as zero**: `:Meta`, `:WhySnapshot`,
    `:Tag`, `:ContextSubscription`, `:CommitRecord`, `:DeliveryReceipt`, `:OnboardingState`/`:OnboardingStep`,
    `:PackManifest`, and the
-   `:Batch`/`:PipelineStage`/`:PackInstall`/`:PackSelection` group. The corpus does not create them, so this
+   `:Batch`/`:PipelineStage`/`:PackInstall`/`:PackSelection` group. These are the audit's §1 rows **10–17** — the
+   same 13 labels, presented here as nine groups because `:PackManifest` is split out of the audit's row 15
+   (it has its own reader set at `pack_manifest_store.py:524`, `:539`, `export.py:133`). ⚠️ The retired
+   `:Document` label is **not** in this list: it is in the audit's *not-censused* row (18), because a
+   post-D10 graph has relabelled it to `:Source` and it therefore has no placement verdict to leave unexercised.
+   The corpus does not create any of these, so this
    document has no measurement of them — which is a gap in the evidence, not a claim that they are free.
    (`:Tag` is `graph`-verdicted in the audit; it is unexercised **here**, which is a coverage gap, not a
    `record_only` verdict.)

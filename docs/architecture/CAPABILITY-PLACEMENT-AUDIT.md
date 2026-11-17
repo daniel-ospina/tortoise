@@ -51,7 +51,7 @@ every number rather than trust it.
 
 The population is not the ontology's wish list; it is what a writer **actually puts on a node**. ⚠️ **The claim
 is scoped, not 'everything in the database':** it covers the **memory substrate** (rows 1–6) plus every
-**graph-only bookkeeping label reached from the code paths this audit read** (rows 7–18). It is **not** a census
+**graph-only bookkeeping label reached from the code paths this audit read** (rows 7–17). It is **not** a census
 of the registry / tenancy / metering substrate — and the labels found but NOT censused are listed in row 18
 rather than silently omitted.
 
@@ -86,15 +86,26 @@ bookkeeping with **no record table** (relevant in §5.2).
 | 15 | `:Batch`, `:PipelineStage`, `:PackInstall`, `:PackSelection`, `:PackManifest` | `mining.py`, `pipeline.py`, `pack_state.py`, `hosted_api:32965`, `pack_manifest_store.py:467` | — | 0 (not exercised) |
 | 16 | `:ContextSubscription` (webhook registration) | `webhook_delivery.py:406` (`CREATE (s:ContextSubscription {…})`) | — | 0 (not exercised) |
 | 17 | `:OnboardingState` / `:OnboardingStep` | `onboarding/state.py:317` (`MERGE (n:OnboardingState {org_id})`), `:322`/`:929` (`MERGE (s:OnboardingStep {org_id, step_id})`), `:324`/`:934` (`MERGE (n)-[:COMPLETED_STEP]->(s)`) | — (`COMPLETED_STEP` is an EDGE type, not a record table — `NODE_TABLES` has six labels and onboarding is not one of them) | 0 (not exercised) |
-| 18 | `:Document` (pre-D10 legacy) | `migrate_kinds.py:89` (`_LEGACY_DOCUMENT_LABEL`), reached at `:297` (`MATCH (n:{_LEGACY_DOCUMENT_LABEL}) RETURN …`) and `:430-437` (the `SET n:Source` relabel) | — | 0 (not exercised) |
-| 19 | **found, NOT censused** — `:Pipeline` (`pipeline.py:525`), `:MeteringRecord` (`metering.py:108`, `:840`, `:1146`, `:1608`), `:MeteringUnmeteredIncrement` (`metering.py:616`), `:WebhookEvent` (`hosted_api.py:47787`), and the tenancy/registry labels `:Team` (`sdk.py:46612`), `:Membership` (`:47262`), `:APIKey` (`:47409`), `:TeamMeta` (`:46671`), `:Graph` (`:46753`), `:SignupToken` (`hosted_api.py:34901`), `:Invitation` (`hosted_api.py:30343`) | sdk / metering / pipeline | — | **not censused — a GAP, see §7** |
+| 18 | **found, NOT censused** — `:Pipeline` (`pipeline.py:525`), `:MeteringRecord` (`metering.py:108`, `:840`, `:1146`, `:1608`), `:MeteringUnmeteredIncrement` (`metering.py:616`), `:WebhookEvent` (`hosted_api.py:47787`), the tenancy/registry labels `:Team` (`sdk.py:46612`), `:Membership` (`:47262`), `:APIKey` (`:47409`), `:TeamMeta` (`:46671`), `:Graph` (`:46753`), `:SignupToken` (`hosted_api.py:34901`), `:Invitation` (`hosted_api.py:30343`), and the **retired** `:Document` | sdk / metering / pipeline / migration | — | **not censused — a GAP, see §7** |
 
-⛔ **Row 19 is a real gap, labelled as one.** This audit read the memory-substrate writers and the bookkeeping
+⚠️ **`:Document` is in this row because it is a MIGRATION STATE, not a live shape — and its readers are still
+named, so nothing is hidden behind the omission.** Post-D10 a document **is** a `:Source`
+(`projection/edges.py:834-843`), so the label only exists on a graph that has not yet run the relabel. Its only
+readers are that migration's own whole-node property read (`migrate_kinds.py:296-300`, `MATCH
+(n:{_LEGACY_DOCUMENT_LABEL}) RETURN ID(n), n.id, n.url, …` — capability **`none`**) and the deprecated-alias
+acceptance at `projection/edges.py:2965-2966`; its only writers are the relabel itself (`migrate_kinds.py:430-437`,
+`SET n:Source … REMOVE n:Document`) and its enumerator at `:297`. **No placement verdict is available on it**: the
+label is removed by the migration, so "what may be resident" is not a question that has an answer — the population
+question is "has this graph been relabelled yet", which is `#5140`'s. ⛔ An earlier draft gave it its own censused
+row (the first `:Document` row, immediately before this one) while giving it no §2 reader census and no §3 verdict,
+which made the population statement claim a census it never received.
+
+⛔ **Row 18 is a real gap, labelled as one.** This audit read the memory-substrate writers and the bookkeeping
 labels on their paths; it did **not** classify the billing / tenancy / pipeline substrate. **No placement
 decision on `:Pipeline` or `:MeteringRecord` may be made from this document.** (`:Pipeline` is named
 explicitly because the same module writes the censused `:PipelineStage`.)
 
-Rows 10–18 are declared **not exercised by the instrument** rather than counted as zero-cost — a shape
+Rows 10–17 are declared **not exercised by the instrument** rather than counted as zero-cost — a shape
 the corpus does not create is a shape this document has *not* measured, and saying so is the difference
 between a census and a guess.
 
@@ -306,7 +317,7 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 | `:EpMeta` | `sdk.py:36069`; `ep.py:473` | **none** |
 | `:Meta` | `residency.py:244`, `:292`; `sdk.py:55647` (reads); `:298` is a `DETACH DELETE`, not a read | **none** |
 | `:WhySnapshot` | `why_snapshot.py:237` (read); `:303`/`:350` are the retention `DELETE` prunes, not reads | **none** |
-| `:CommitRecord` | `hosted_api.py:22228-2232` (the live commit path's read — it consumes `x.value_nodes_declared` as a predicate); `commit_idempotency.py:57` (read), `:65` — `MATCH … SET r.status=$status RETURN r.session_id, r.status, r.write_ops_billed, r.written_at, r.value_nodes_declared`, a **read-modify-write** (`CommitRecordStore.update` consumes all five returned columns, so `RMW` is the right word — an earlier draft called it read-free, which was wrong), and `:194` — the idempotency `DELETE`, whose `WHERE r.status = 'partial' AND coalesce(r.write_ops_billed, 0) = 0 AND r.value_nodes_declared IS NULL` **consumes three node properties as predicates**, so by this table's own criterion it is a reader (an earlier draft called it "not a read"); `hosted_api.py:21691` (`SET r.telemetry=$t, r.budget_warn=$warn`) and `:23760` (`SET r.write_ops_billed=1`, a LITERAL — not a parameter) have **no `RETURN`** and assign parameters/literals, so they read nothing of the node and are WRITERS (§1 row 13). ⚠️ Three drafts of this row called writers readers, then over-corrected `:65` to read-free, then called `:194` read-free; the table now separates read / RMW / predicate-consuming DELETE / writer, site by site | **none** |
+| `:CommitRecord` | `hosted_api.py:22228-22232` (the live commit path's read — it consumes `x.value_nodes_declared` as a predicate); `commit_idempotency.py:57` (read), `:65` — `MATCH … SET r.status=$status RETURN r.session_id, r.status, r.write_ops_billed, r.written_at, r.value_nodes_declared`, a **read-modify-write** (`CommitRecordStore.update` consumes all five returned columns, so `RMW` is the right word — an earlier draft called it read-free, which was wrong), and `:194` — the idempotency `DELETE`, whose `WHERE r.status = 'partial' AND coalesce(r.write_ops_billed, 0) = 0 AND r.value_nodes_declared IS NULL` **consumes three node properties as predicates**, so by this table's own criterion it is a reader (an earlier draft called it "not a read"); `hosted_api.py:21691` (`SET r.telemetry=$t, r.budget_warn=$warn`) and `:23760` (`SET r.write_ops_billed=1`, a LITERAL — not a parameter) have **no `RETURN`** and assign parameters/literals, so they read nothing of the node and are WRITERS (§1 row 13). ⚠️ Three drafts of this row called writers readers, then over-corrected `:65` to read-free, then called `:194` read-free; the table now separates read / RMW / predicate-consuming DELETE / writer, site by site | **none** |
 | `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`); `:502` is the `MAX_RECEIPTS` `DETACH DELETE`, `:487` the CREATE — neither is a reader | **none** |
 | `:Batch` | `mining.py:94`, `:178`; `projection/__init__.py:14295` | **none** |
 | `:PipelineStage` | `pipeline.py:349` (read); `:685`/`:731`/`:754-756` are `SET` statements — writes with no read of the node, not `RMW` and not reads | **none** |
@@ -332,7 +343,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 
 | # | shape | readers (summary) | needs graph? | verdict | one-line reason |
 |---|---|---|---|---|---|
-| 1 | `:Point` core (`id`, content, `pointKind`, `status`) | §2.1, 14 readers | **yes** — EP walk, `IMPL`/`NAND`/`TAGGED`/`extractedFrom` adjacency, FTS, HNSW | **graph** | the belief walk *is* the product; four of the five capabilities read it |
+| 1 | `:Point` core (`id`, content, `pointKind`, `status`) | §2.1, 16 readers | **yes** — EP walk, `IMPL`/`NAND`/`TAGGED`/`extractedFrom` adjacency, FTS, HNSW | **graph** | the belief walk *is* the product; four of the five capabilities read it |
 | 2 | `:Point.ep_*`, `baseline_set`, `confidence` | `propagation.py:81,86`; `sdk.py:38073` | **yes** — EP state | **graph** | there is no EP in SQL without building one |
 | 3 | `:Point.embedding` | vector leg (HNSW) | **yes** — vector index | **graph** | the index lives in the engine (§12.1) |
 | 4 | `:Source` identity + `_searchText` | §2.2 | **yes** — `references`/`extractedFrom`, FTS | **graph** | §9.4 ① makes the link load-bearing |
@@ -354,7 +365,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 read `prompt-side Point.aboutEntities, mentions` with a **`graph`** verdict whose reader was "`search_engine`
 flattening" — a reader with no `file:line` that does not exist. Two defects there: (a) `aboutEntities` is not
 a node property — `projection/entities.py:2423` lists **`about_entities`, `aboutEntities`** under *"structural
-/ edge-carried — never node props via passthrough"* (the snake entry at `:1812` sits in `_META_KEYS` as
+/ edge-carried — never node props via passthrough"* (the snake entry at `:1808` sits in `_META_KEYS` as
 *"handled as graph edges"*), and the edge it becomes is `aboutSubject`, already censused at §2.5, so the row
 double-counted a censused shape; (b) `mentions` **is** stored (`projection/entities.py:1206`,
 `_POINT_JSON_RECORD_PROPS`), but nothing needs a graph capability to read it, and the embedding text is
@@ -630,8 +641,8 @@ changes nothing.
   **`NOT_PLANNED`** on 2026-11-06, so there is no shipped purge tooling to point at. The legacy copies this
   document declines to fold-delete therefore remain, which is a *stronger* reason for the §5.1 refusal, not a
   weaker one.
-- ⛔ **It is NOT a census of the whole database.** Row 19 of §1 lists the labels found but **not censused**
-  (`:Pipeline`, the metering substrate, the tenancy/registry labels). Those get no reader census and no
+- ⛔ **It is NOT a census of the whole database.** Row 18 of §1 lists the labels found but **not censused**
+  (`:Pipeline`, the metering substrate, the tenancy/registry labels, the retired `:Document`). Those get no reader census and no
   verdict here, and a placement decision on them must not be made from this document. That is a **gap**, not
   a scope choice dressed as one.
 
