@@ -22,6 +22,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -332,6 +333,29 @@ def test_displacement_counts_ids_the_merged_pass_moved_out():
     assert out["abs_rank_shift_of_kept"] == 3  # x 0->1 (1), z 2->0 (2)
 
 
+def test_hits_at_counts_only_ranks_inside_the_window():
+    """⛔ `rank < k` is the ONLY place a recorded rank becomes a hit (`#13267` F2).
+
+    Every `off_hits`/`on_hits` pair, hence every `b`/`c`, every exact McNemar tail
+    and every MDE in every committed artifact, is a function of this one
+    comparison — and before this test nothing exercised it: the mutant
+    `rank < k` → `rank <= k` stayed green across the whole suite (every hermetic
+    fixture set `"rank": None`, so the conversion only ever ran on the skipped
+    live arm). Ranks are 0-based, so a window of `k` holds ranks `0..k-1`: `k-1`
+    is IN, `k` is OUT, and `None` (an item the arm never returned) is OUT.
+    """
+    per_item = {"r0": {"rank": 0}, "r4": {"rank": 4}, "r5": {"rank": 5},
+                "r6": {"rank": 6}, "absent": {"rank": None}}
+    order = ["r0", "r4", "r5", "r6", "absent"]
+    assert P._hits_at(per_item, order, k=5) == [1, 1, 0, 0, 0]
+    # the boundary, spelled out k-1 / k / k+1
+    assert P._hits_at(per_item, ["r4"], k=5) == [1]
+    assert P._hits_at(per_item, ["r5"], k=5) == [0]
+    assert P._hits_at(per_item, ["r6"], k=5) == [0]
+    # a k of 1 keeps the top slot only, so a rank of 1 is already outside it
+    assert P._hits_at(per_item, ["r0", "r4"], k=1) == [1, 0]
+
+
 # ── 2b. "did the lever fire" — a comparison, not a constant ─────────────────
 
 def test_read_delta_compares_the_recorded_ranked_lists():
@@ -617,6 +641,37 @@ def test_the_object_arms_blindness_is_a_measured_identity_and_the_point_arms_nul
     assert P.INERT_REFUSAL not in fired["refusal_kinds"]
 
 
+def test_the_object_arm_stops_being_blind_once_its_two_reads_differ(
+        _no_embedder_probe):
+    """⛔ `structurally_blind` must be MEASURED, not read off the arm's name.
+
+    `structurally_blind = (arm != "point" and len(fired) == 0)` →
+    `(arm != "point")` stayed green across the whole suite (`#13267` F3), because
+    every `_build_fake_artifact` call passed `object_off is object_on` (and the
+    committed control only exercises the identical case). Under that mutant an
+    object arm whose two switch states differ on EVERY item still publishes "the
+    two switch states produced the SAME ranked list for all N items" — the exact
+    claim the code comment above that line warns is "a claim about the arm's
+    NAME". A measured identity must stop being reported when the reads differ.
+    """
+    same = {"item-000000": ["a"], "item-000001": ["b"]}
+    diverged, _ = _build_fake_artifact(
+        point_off=same, point_on=same, object_off=same,
+        object_on={"item-000000": ["a", "z"], "item-000001": ["b"]})
+    obj = diverged["arms"]["object"]
+    assert obj["structurally_blind"] is False, (
+        "the two reads differ on one item, so the identity is not structural")
+    assert obj["expansion_fired_items"] == 1
+    assert obj["expansion_identical_items"] == 1
+    assert obj["ranked_lists_compared"] == 2
+    assert obj["why"] == ""
+    assert P.STRUCTURAL_REFUSAL not in diverged["refusal_kinds"]
+    # …and the blind claim still holds where it IS an identity
+    blind, _ = _build_fake_artifact(point_off=same, point_on=same,
+                                   object_off=same, object_on=same)
+    assert blind["arms"]["object"]["structurally_blind"] is True
+
+
 # ── 2d. the brief against its own artifacts (the documented figures) ─────────
 
 _DOCS = (Path(__file__).resolve().parent.parent
@@ -776,6 +831,326 @@ def test_the_docs_index_row_repeats_only_what_the_evidence_carries():
     assert head["items"]["name_digest"][:8] in row
     for transposed in ("10.36", "10.27"):
         assert transposed not in row
+
+
+# ── 2e. the published RESULT figures, recomputed cell by cell ────────────────
+#
+# ⛔ `#13267` F1: the artifacts' identity / provenance / refusal fields were
+# pinned; their RESULTS were not, and neither was the brief's copy of them. The
+# measured survivors (each `32 passed, 1 skipped`, exit 0) were
+# `"on_hits": 17 -> 3`, `"mcnemar_exact_p": 1.5e-05 -> 0.5`,
+# `"seed_lost_from_window": 3 -> 0`, `17/300 -> 3/300`, `2.08 pp -> 0.20 pp` and
+# `727 / 900 -> 700 / 900`. So a pin that only compares the brief against the
+# artifact is not enough — a CONSISTENT re-staling of both stays green. Two
+# independent checks close it:
+#
+#  1. the artifact's own per-item rank pairs must PRODUCE every per-`k` cell
+#     (the tool's formulas, not the recorded summary);
+#  2. the brief's tables must repeat those cells, in the cell the reader sees.
+#
+# The sibling row in `config/ci-surfaces.yml` (`test_window_quality_m2.py`)
+# already describes this pattern as "recomputed CELL BY CELL".
+
+
+def _same_cell(recorded, recomputed) -> bool:
+    """NaN-aware equality — the control publishes `NaN` MDEs as a called shot."""
+    if isinstance(recorded, float) and isinstance(recomputed, float):
+        if math.isnan(recorded) and math.isnan(recomputed):
+            return True
+        return math.isclose(recorded, recomputed, rel_tol=0, abs_tol=1e-12)
+    return recorded == recomputed
+
+
+def _recomputed_entry(block: dict, k: int) -> dict:
+    """The `analyze` entry the artifact's OWN recorded per-item ranks produce.
+
+    `per_item[i]["off_rank"]`/`["on_rank"]` are the target's rank in each arm's
+    read — the same quantity `_hits_at` converts — so this is a re-derivation, not
+    a re-read of the summary. The bootstrap is seeded and over items in the
+    artifact's own order, so its interval reproduces exactly too.
+    """
+    rows = block["per_item"].values()
+    off = [1 if (r["off_rank"] is not None and r["off_rank"] < k) else 0
+           for r in rows]
+    on = [1 if (r["on_rank"] is not None and r["on_rank"] < k) else 0
+          for r in rows]
+    recorded = block["per_k"][f"k={k}"]
+    return P.analyze(off, on, ks=(k,),
+                     bootstrap=recorded["bootstrap"]["resamples"],
+                     seed=recorded["bootstrap"]["seed"])
+
+
+_RESULT_CELLS = ("n", "off_hits", "on_hits", "discordant_miss_to_hit",
+                 "discordant_hit_to_miss", "mcnemar_exact_p", "mde_paired",
+                 "mde_independent", "off_recall", "on_recall")
+
+
+def test_every_published_result_cell_recomputes_from_the_artifacts_own_rows():
+    """⛔ F1: not one published RESULT figure was pinned.
+
+    Every cell below is recomputed from the 300 (60) rank pairs the artifact
+    records per item, using the tool's own `analyze` — so a re-staled summary reds
+    even when `b`, `p` and the recall are moved TOGETHER to stay self-consistent
+    (measured: `17/300` with `b=17, p=1.53e-05` re-staled to `3/300, b=3, p=0.5`
+    passed the whole suite). `off_topk_displacement` and `seed_effect` cannot be
+    re-derived (the artifact records neither the ranked lists' ids nor the seed
+    ranks), so they are held to the invariants they must satisfy and pinned
+    against the brief in the next test.
+    """
+    for name in _ARTIFACTS:
+        art = _artifact(name)
+        for arm, block in art["arms"].items():
+            assert block["per_item"], f"{name}/{arm} records no per-item rows"
+            for key in sorted(block["per_k"]):
+                k = int(key.split("=")[1])
+                entry = block["per_k"][key]
+                recomputed = _recomputed_entry(block, k)
+                for cell in _RESULT_CELLS:
+                    assert _same_cell(entry[cell], recomputed[cell]), (
+                        f"{name}/{arm}/{key}: recorded {cell}={entry[cell]!r} "
+                        f"but the artifact's own per-item ranks produce "
+                        f"{recomputed[cell]!r}")
+                assert entry["bootstrap"]["ci95"] == \
+                    recomputed["bootstrap"]["ci95"], (
+                        f"{name}/{arm}/{key}: the seeded bootstrap interval does "
+                        "not reproduce from the recorded rows")
+                assert entry["bootstrap"]["delta"] == \
+                    recomputed["bootstrap"]["delta"], (
+                        f"{name}/{arm}/{key}: the recorded bootstrap delta is not "
+                        "`(on_hits - off_hits) / n`")
+                disp = entry.get("off_topk_displacement")
+                if disp is not None:
+                    n = recomputed["n"]
+                    assert disp["items_with_off_topk"] == n
+                    assert 0 <= disp["displaced_ids"] <= n * k
+                    assert 0 <= disp["off_top1_kept_in_window"] <= n
+                    assert "CHURN" in disp["note"]
+                seed = entry.get("seed_effect")
+                if seed is not None:
+                    n = recomputed["n"]
+                    for field in ("seed_at_top1_off", "seed_at_top1_on",
+                                  "seed_lost_from_window",
+                                  "seed_demoted_but_kept"):
+                        assert 0 <= seed[field] <= n, (
+                            f"{name}/{arm}/{key}: {field}={seed[field]!r} is not "
+                            f"a count of {n} items")
+
+
+# ── the brief's own tables, parsed as a reader sees them ────────────────────
+
+def _tables(text: str) -> list[tuple[list[str], list[list[str]]]]:
+    """Every markdown table in `text` as (header, rows), rule row dropped."""
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("|"):
+            current.append(line)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    out = []
+    for block in blocks:
+        rows = [[c.strip() for c in ln.strip().strip("|").split("|")]
+                for ln in block]
+        body = [r for r in rows[1:]
+                if not all(c and set(c) <= set("-: ") for c in r)]
+        out.append((rows[0], body))
+    return out
+
+
+def _table(text: str, *needles: str) -> tuple[list[str], list[list[str]]]:
+    for header, body in _tables(text):
+        flat = " ".join(header)
+        if all(nd in flat for nd in needles) and body:
+            return header, body
+    raise AssertionError(f"the brief carries no table with header(s) {needles!r}")
+
+
+def _col(header: list[str], *needles: str) -> int:
+    for i, cell in enumerate(header):
+        if all(nd in cell for nd in needles):
+            return i
+    raise AssertionError(f"no column matching {needles!r} in {header!r}")
+
+
+def _row(rows: list[list[str]], needle: str) -> list[str]:
+    for row in rows:
+        if needle in row[0]:
+            return row
+    raise AssertionError(f"no row labelled {needle!r}")
+
+
+def _plain(cell: str) -> str:
+    return cell.replace("**", "").replace("`", "").replace(",", "").strip()
+
+
+_NUMBER = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+
+def _printed(cell: str) -> list[tuple[float, float]]:
+    """Every number a cell PRINTS, with the tolerance its own digits allow.
+
+    10^-decimals, not half of it: the brief both rounds (`0.03125` → `0.0313`) and
+    truncates (`0.000244140625` → `0.00024`), so the honest bound on "the printed
+    value is the artifact's value" is one unit in the last printed place. A
+    re-staled figure moves by whole orders of magnitude, not by one digit.
+    """
+    out = []
+    for match in _NUMBER.finditer(_plain(cell)):
+        token = match.group(0)
+        decimals = len(token.split(".")[1]) if "." in token else 0
+        out.append((float(token), 10.0 ** -decimals if decimals else 1.0))
+    assert out, f"no number in {cell!r}"
+    return out
+
+
+def _assert_prints(cell: str, value: float, where: str) -> None:
+    printed, tol = _printed(cell)[0]
+    assert abs(printed - value) <= tol + 1e-12, (
+        f"{where}: the brief prints {_plain(cell)!r} but its artifact holds "
+        f"{value!r}")
+
+
+def _assert_prints_all(cell: str, values: list[float], where: str) -> None:
+    printed = _printed(cell)
+    assert len(printed) == len(values), (
+        f"{where}: the brief prints {len(printed)} number(s) for "
+        f"{len(values)} recorded value(s): {_plain(cell)!r}")
+    for (shown, tol), value in zip(printed, values, strict=True):
+        assert abs(shown - value) <= tol + 1e-12, (
+            f"{where}: the brief prints {_plain(cell)!r} but its artifact "
+            f"holds {values!r}")
+
+
+def _fraction(cell: str) -> tuple[int, int]:
+    match = re.search(r"(\d+)\s*/\s*(\d+)", _plain(cell))
+    assert match, f"no `a/b` fraction in {cell!r}"
+    return int(match.group(1)), int(match.group(2))
+
+
+def test_the_briefs_result_tables_repeat_their_artifacts_cell_by_cell():
+    """⛔ F1, the prose half: a figure re-staled in the BRIEF reds here.
+
+    Measured survivors before this test (artifact and brief each mutated alone,
+    both left green): `17/300` → `3/300` and → `99/300` in §4, `2.08 pp` →
+    `0.20 pp` in the MDE column, `727 / 900` → `700 / 900` in §4.1, `293 of 300`
+    → `1 of 300`, and `seed lost from window` `3` → `0` in the short-query table.
+    Each cell below is compared against the artifact it claims to quote, in the
+    cell position a reader reads it in — not against a substring of the file.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    head = _artifact("paired-point-300.json")
+    short = _artifact("paired-point-300-short-query.json")
+    n = head["population"]["sample"]
+
+    # ── §4, the headline table ─────────────────────────────────────────────
+    header, rows = _table(brief, "OFF hits", "McNemar")
+    assert len(rows) == len(head["arms"]["point"]["per_k"]), (
+        "the headline table must carry one row per published k")
+    for row in rows:
+        k = int(_plain(row[0]))
+        where = f"brief §4 k={k}"
+        cell = head["arms"]["point"]["per_k"][f"k={k}"]
+        assert _fraction(row[_col(header, "OFF hits")]) == (cell["off_hits"], n)
+        assert _fraction(row[_col(header, "ON hits")]) == (cell["on_hits"], n), where
+        assert int(_plain(row[_col(header, "b (")])) == \
+            cell["discordant_miss_to_hit"], where
+        assert int(_plain(row[_col(header, "c (")])) == \
+            cell["discordant_hit_to_miss"], where
+        _assert_prints(row[_col(header, "McNemar")], cell["mcnemar_exact_p"],
+                       where + " p")
+        _assert_prints(row[_col(header, "paired Δ")],
+                       (cell["on_hits"] - cell["off_hits"]) / n * 100,
+                       where + " Δ")
+        _assert_prints_all(row[_col(header, "CI")],
+                           [v * 100 for v in cell["bootstrap"]["ci95"]],
+                           where + " CI")
+        _assert_prints(row[_col(header, "MDE")], cell["mde_paired"] * 100,
+                       where + " MDE")
+
+    # ── §5, the falsifier that repeats the tails in prose ──────────────────
+    tails = re.findall(r"([0-9.]+)\*\* \(@([0-9]+)\)", brief)
+    assert tails, "the falsifier table is where the exact tails are published"
+    for shown, k in tails:
+        cell = head["arms"]["point"]["per_k"][f"k={k}"]
+        _assert_prints(shown, cell["mcnemar_exact_p"], f"brief §5 p @{k}")
+
+    # ── §4.1, the harm table (only the ks it publishes) ────────────────────
+    header, rows = _table(brief, "measure")
+    kcols = {k: _col(header, f"k = {k}") for k in (3, 15)}
+    displaced = _row(rows, "displaced")
+    kept = _row(rows, "top-1 survived")
+    lost = _row(rows, "lost from the window")
+    demoted = _row(rows, "demoted but kept")
+    for k, column in kcols.items():
+        where = f"brief §4.1 k={k}"
+        cell = head["arms"]["point"]["per_k"][f"k={k}"]
+        disp = cell["off_topk_displacement"]
+        shown = _printed(displaced[column])
+        assert (int(shown[0][0]), int(shown[1][0])) == (
+            disp["displaced_ids"], disp["items_with_off_topk"] * k), where
+        _assert_prints(str(shown[2][0]) + " %",
+                       disp["displaced_ids"] / (disp["items_with_off_topk"] * k) * 100,
+                       where + " %")
+        assert _fraction(kept[column]) == (disp["off_top1_kept_in_window"],
+                                           disp["items_with_off_topk"]), where
+        seed = cell["seed_effect"]
+        assert int(_plain(lost[column])) == seed["seed_lost_from_window"], where
+        assert int(_plain(demoted[column])) == seed["seed_demoted_but_kept"], where
+
+    # ── §4.1, the robustness arm's table ────────────────────────────────────
+    n_short = short["population"]["sample"]
+    header, rows = _table(brief, "seed lost from window", "seed demoted")
+    assert rows, "the short-query arm is where the harm side is measurable"
+    for row in rows:
+        k = int(_plain(row[0]))
+        where = f"brief §4.1 short-query k={k}"
+        cell = short["arms"]["point"]["per_k"][f"k={k}"]
+        assert _fraction(row[_col(header, "OFF")]) == (cell["off_hits"], n_short), where
+        assert _fraction(row[_col(header, "ON")]) == (cell["on_hits"], n_short), where
+        assert int(_plain(row[_col(header, "b")])) == \
+            cell["discordant_miss_to_hit"], where
+        assert int(_plain(row[_col(header, "c")])) == \
+            cell["discordant_hit_to_miss"], where
+        _assert_prints(row[_col(header, "p")], cell["mcnemar_exact_p"], where + " p")
+        _assert_prints(row[_col(header, "Δ")],
+                       (cell["on_hits"] - cell["off_hits"]) / n_short * 100,
+                       where + " Δ")
+        _assert_prints(row[_col(header, "MDE")], cell["mde_paired"] * 100,
+                       where + " MDE")
+        seed = cell["seed_effect"]
+        assert int(_plain(row[_col(header, "seed lost")])) == \
+            seed["seed_lost_from_window"], where
+        assert int(_plain(row[_col(header, "seed demoted")])) == \
+            seed["seed_demoted_but_kept"], where
+
+    # ── the count of items the expansion fired on, in prose ────────────────
+    fired = re.search(r"fired on \*\*(\d+) of (\d+)\*\*", brief)
+    assert fired, "the brief states how many items the expansion fired on"
+    assert (int(fired.group(1)), int(fired.group(2))) == (
+        head["arms"]["point"]["expansion_fired_items"], n), (
+            "the headline arm's firing count and sample size, not a re-staled pair")
+
+
+def test_the_brief_parsers_are_not_vacuous():
+    """The pins above can only kill a mutant if they actually read the cells.
+
+    A table parser that silently returned no rows, or a `_printed` that found no
+    number, would make every assertion above vacuous — the failure mode these
+    pins exist to close, one level up.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    header, rows = _table(brief, "OFF hits", "McNemar")
+    assert [int(_plain(r[0])) for r in rows] == [3, 5, 10, 15]
+    assert _fraction(rows[0][_col(header, "ON hits")]) == (5, 300)
+    assert _col(header, "McNemar") != _col(header, "MDE")
+    # every brief result cell parses to at least one number, and `_printed`
+    # carries the printed precision rather than a fixed tolerance
+    assert _printed("**0.00024**")[0] == (0.00024, 1e-05)
+    assert _printed("[+0.33, +3.33]") == [(0.33, 0.01), (3.33, 0.01)]
+    assert _printed("**3,350 / 4,500 (74.4 %)**")[:2] == [(3350.0, 1.0), (4500.0, 1.0)]
 
 
 def test_a_regenerated_artifact_satisfies_the_same_doc_pins(_no_embedder_probe):
