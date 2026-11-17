@@ -1350,6 +1350,36 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
         r'^os\.environ\.pop\(\s*"TORTOISE_DB_URI",\s*None\)$'],
+    # ── test_13098_cypher_inventory.py — DELIBERATE_URI, one SET site ──────
+    # `:1036` in
+    # `test_the_store_targets_are_named_never_inherited_from_the_environment`:
+    #     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379")
+    # PERMITTED, and deliberately so: the ambient URI IS this test's input. The
+    # case is parametrised per axis (#13098 review F13) and its whole point is
+    # that the differential harness must REFUSE an inherited target — it returns
+    # 2 ("could not run") BEFORE either store is touched, with `seed_graph` and
+    # `seed_record` stubbed to fail loudly. An URI that is never read cannot flip
+    # a lane, which is the vacuity vector this register exists to catch; here the
+    # mutation is what makes the refusal observable at all. `monkeypatch.setenv`
+    # also RESTORES at teardown, and the restoration guard skips fixture-param
+    # sites entirely because pytest undoes them (:2159), so nothing leaks here.
+    #
+    # ⛔ ONE SITE, LITERAL-ANCHORED. #13140 (`6652917489`) landed with this site
+    # untriaged — the leg is red at main tip `745c71c2` on a SEVENTH site while
+    # the six `test_13034` sites above were being triaged, which is #12631's
+    # class landing again. (Measured locally: base 1 failed/31 passed, with this
+    # row 32 passed; the last hosted run that COMPLETED, 44063643634 on
+    # `3d437429e9`, printed the six — the tip's own leg is still queued, so the
+    # seven-site red is a tree measurement, not yet a printed CI run.) The dict
+    # KEY is what scopes a declaration to one module
+    # (`_is_declared` looks up the `tests/`-relative key and there is deliberately
+    # no bare-name fallback — that was removed as cross-file laundering); WITHIN
+    # this module the `^`…`$` literal anchor is what narrows it to the one
+    # measured target, so a changed literal, a trailing-comma rewrite, or a
+    # COMMENTED-OUT copy of the spelling reds instead of riding along.
+    "test_13098_cypher_inventory.py": [
+        r'^monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"\s*,\s*'
+        r'"docker://:pw@127\.0\.0\.1:6379"\s*\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
