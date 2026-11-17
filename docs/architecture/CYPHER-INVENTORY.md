@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1311** | **99** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **8,994** | **813** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,964 here, none of which reproduces at this tree; the number beside this row names the tree it does) |
+| every tracked surface (`--all-surface`) | **9,040** | **818** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,964 / 8,994 here, none of which reproduces at this tree; the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -97,11 +97,11 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,622 occurrences of the door predicate across 108 files
-2,343 occurrences of the verb predicate across 143 files   (upper-bound shape, see below)
+1,623 occurrences of the door predicate across 108 files
+2,343 occurrences of the verb predicate across 144 files   (upper-bound shape, see below)
 
-1,622  regex door-pattern occurrences
-  −53  occurrences on a line carrying NO door call (comments and docstrings)
+1,623  regex door-pattern occurrences
+  −54  occurrences on a line carrying NO door call (comments and docstrings)
 = 1,569  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
 = 1,569  AST door calls
@@ -113,25 +113,28 @@ The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 297 files>` → **1,622** across **108** files: exactly the
-tool's number. A bare `rg … tortoise/` gives 1,628 / 109, the 6 extra occurrences living in
-`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,622 / 108 on this tree, because
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 297 files>` → **1,623** across **108** files: exactly the
+tool's number. A bare `rg … tortoise/` gives 1,629 / 109, the 6 extra occurrences living in
+`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,623 / 108 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,330** across **142** files, while the tool
-reports 2,343 / 143. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,330** across **143** files, while the tool
+reports 2,343 / 144. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
-example — **nine** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
-“(#329): preserve None”) and **four** are wrapped Cypher EXAMPLES (`projection/__init__.py`,
-`record_projection.py` ×2, `vector_write.py`). Enumerated, not inferred — and ⛔ **BY COMMAND, never by
+example — **ten** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
+“(#329): preserve None”, and `record_projection.py`'s “an INLINE property MATCH / (`(s:Session
+{id:$sid})`)”, whose parenthesis OPENS a parenthetical rather than continuing a statement) and
+**three** are wrapped Cypher EXAMPLES (`projection/__init__.py`, `record_projection.py`,
+`vector_write.py`), where the predicate's `(` is the next clause of the SAME statement. Enumerated,
+not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone finds 175, which is why
+predicate over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone finds 176, which is why
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
-concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose inside the docstring,
-which is why the tool's verb total is an upper bound.
+concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
+example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,064, and `-i` without the exclusion 2,402 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
 number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 297
@@ -142,7 +145,7 @@ exclusion dropped they read **2,063** and **2,333**. The 69-occurrence 2,333→2
 `tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
-The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−53** and
+The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−54** and
 the **= 1,569 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
@@ -417,7 +420,9 @@ statement site: `ast_door_calls` **1571→1569** and `non_cypher_door_calls` **2
 `sites`/`plain`/`candidates` are unchanged (1311 / 859 / 578 — the 578 is the `plain` READ half, which
 is also the migration-candidate count). `files_scanned` stays 297 and `files_with_sites` 99: both
 conversions land in a file that already carries sites. The `rg` reconciliation in §1 is re-measured on
-this tree (1,622 / 2,330 / 1,628 bare / 2,064 / 2,402), Appendix A is regenerated with `--markdown`,
+this tree (1,622 / 2,330 / 1,628 bare / 2,064 / 2,402 — measured at THAT tree: `bf3a7b8e77` reads
+1,624 / 1,630 bare, and this branch's two conversions are what take it to 1,622 / 1,628. §1 carries the
+figures at the head you are reading, which later commits have moved by one), Appendix A is regenerated with `--markdown`,
 and `--check` reports **`25 pinned counts match`**.
 ⛔ **Neither parent's number is the answer, because other PRs moved the same two counters in both
 directions:** `#9559` (`a218f8867b`) ADDED the two door calls this PR removes, so the merge lands on
@@ -434,7 +439,7 @@ and the bare-door figure (`1,630` → `1,628` for that same reason) are drawn fr
 `#13265` did not touch — it added **0** door calls and exactly **1** verb occurrence
 (`git show 34bd33d22a -- tortoise/ | grep '^+' | grep -cE '\.(ro_)?(query|execute)\s*\('` → `0`;
 `… | grep -oiE '\b(MATCH|MERGE)\s*\('` → `1`). The 13-occurrence one-file whole-text gap and the
-nine-prose/four-Cypher split are UNCHANGED by it (the added match is single-line, not cross-line).
+ten-prose/three-Cypher split are UNCHANGED by it (the added match is single-line, not cross-line).
 ⚠️ That regeneration is not decorative at this head. The appendix pins `file:line` COORDINATES and
 `--check` cannot see them — its 25 pins are SCALARS, and an insertion is not a new statement — so
 re-cutting the appendix moves ROWS while every SCALAR stays put. Measured at THIS head against
