@@ -91,7 +91,20 @@ def test_the_doc_appendix_is_the_tools_own_output():
     stale = [(i, a, b) for i, (a, b) in enumerate(zip(head_rows, tool_rows, strict=False))
              if a != b]
     shown = "\n".join(
-        f"  row {i}: doc  {a[:96]}\n          tool {b[:96]}" for i, a, b in stale[:5])
+        f"  row {i}: doc  {a[:96]}\n          tool {b[:96]}" for i, a, b in stale[:10])
+    if len(stale) > 10:
+        shown += f"\n  … and {len(stale) - 10} more differing row(s)"
+    if not shown:
+        # No COMMON row differs, so the difference is in length (a truncation or a
+        # tail insertion) or in trailing bytes only. ⛔ These three cases are stated
+        # SEPARATELY: an earlier cut printed "same length, differs only in trailing
+        # bytes" unconditionally, which contradicted the row counts printed directly
+        # above it on a truncation (measured: doc=1310 tool=1313 printed that line).
+        if len(head_rows) != len(tool_rows):
+            shown = (f"  no shared row differs — the appendix is the wrong LENGTH "
+                     f"(doc={len(head_rows)}, tool={len(tool_rows)} rows)")
+        else:
+            shown = "  same row count and every shared row matches — differs only in trailing bytes"
     raise AssertionError(
         "Appendix A is not the census tool's own output — it is DERIVED from the\n"
         "tree, so regenerate it at THIS head rather than editing rows by hand:\n"
@@ -101,7 +114,7 @@ def test_the_doc_appendix_is_the_tools_own_output():
         "pins cannot see it, because counts do not move when code moves within a\n"
         "file that already carries sites (measured on #13223, twice).\n"
         f"rows: doc={len(head_rows)} tool={len(tool_rows)}; "
-        f"{len(stale)} row(s) differ.\n" + (shown or "  (same length, differs only in trailing bytes)"))
+        f"{len(stale)} row(s) differ.\n" + shown)
 
 
 def test_the_doc_appendix_row_count_is_the_census_site_count():
