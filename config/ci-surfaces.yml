@@ -8508,26 +8508,6 @@ surfaces:
   # `TORTOISE_TEST_CARVE_OUT=1` (the shared `sdk_factory` fixture is URI-aware),
   # so it needs no `carve_out:` row and no `TEST_NO_REDIRECT_STEMS` entry.
   - test_13035_goal_ending_consistency.py
-  # #13034: the SIBLING half of the same design-doc section (design §6 of
-  # `docs/plans/2026-11-15-state-lifecycle-and-pipelines.md`) — *"is this still
-  # served as current?"* reads TWO sources (the lifecycle word AND the position
-  # axis: `isClosed`, the `terminal` pipeline slot), and five consumers had to
-  # start using the one predicate.
-  # ⛔ THIS ROW IS A DRIFT REPAIR, not part of #13035's diff: the file landed on
-  # `origin/main` without a `ci-surfaces.yml` row, so `tools/ci_selection.py
-  # --integrity` reddened on EVERY branch that ran it (measured on this box:
-  # `❌ manifest drift: ['test_13034_currency_rule_reads_position.py']`, and the
-  # same absence is true of `origin/main` itself — the file exists there and the
-  # manifest there has no row for it). Without the row the file is never
-  # selected by any surface, i.e. #13034's own acceptance is invisible to CI.
-  # `core` for the same measured reason the #11822/#11926/#13035 rows above give:
-  # the rule lives in `tortoise/live.py` + `tortoise/pipeline.py`, which no
-  # `SOURCE_PATTERNS` row names, while its consumers span the SDK — the files
-  # that can break it are the ones the `tortoise/` fallback resolves to THIS
-  # surface. Runs on the docker lane AND under `TORTOISE_TEST_CARVE_OUT=1` (the
-  # shared `sdk_factory` fixture is URI-aware), so it needs no `carve_out:` row
-  # and no `TEST_NO_REDIRECT_STEMS` entry.
-  - test_13034_currency_rule_reads_position.py
   # #12363: the PUBLISHED artifact's observability — the one reading the repo
   # never took. `tortoise-graph` 0.2.0 (uploaded 2026-08-08) ships a wheel whose
   # first documented command (`tortoise init`) exits 1 on a clean machine with
@@ -13675,13 +13655,6 @@ durations:
   # --refresh-durations` replaces it from the first push-to-main junit sweep
   # that includes the file.
   test_13035_goal_ending_consistency.py: 14.0
-  # #13034 drift repair (see the `core` row's comment): the duration must EXIST
-  # because `core` is a fast pool and `--integrity`'s `duration_coverage_issues`
-  # floor is measured against that pool. MEASURED whole file on this box at high
-  # load (`test_lane.py run -- tests/test_13034_currency_rule_reads_position.py
-  # -q` -> `113 passed in 144.49s`); `tools/ci_timing.py --refresh-durations`
-  # replaces it from the first push-to-main junit sweep that includes the file.
-  test_13034_currency_rule_reads_position.py: 144.0
   test_7902_write_path_label_widening.py: 8.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 7.4
   test_7925_route_parity.py: 2.3  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 61.0
   test_7951_delete_resurrection.py: 16.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 15.5
