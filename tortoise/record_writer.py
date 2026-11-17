@@ -204,6 +204,7 @@ import contextvars
 import hashlib
 import logging
 import os
+import select
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -224,6 +225,7 @@ __all__ = [
     "NON_DURABLE_JOURNAL_REFUSAL",
     "POSITION_ORDINAL_SOURCE",
     "POSITION_UNPROVEN_WARN_SECONDS",
+    "RECORD_ALLOCATE_ENV",
     "RECORD_DSN_ENV",
     "RECORD_GRAPH_ENV",
     "RECORD_ORG_ENV",
@@ -240,6 +242,7 @@ __all__ = [
     "live_write_refusal",
     "record_dsn",
     "record_holds_turns",
+    "record_live_allocate",
     "record_tenant",
     "record_tenant_effective",
     "record_tenant_for",
@@ -1167,6 +1170,122 @@ def _transaction_statuses() -> tuple[int, int]:
     )
 
 
+#: The ONE statement a borrowed handle is asked when its socket has input
+#: pending. Not a health check on every borrow — see
+#: :func:`_verify_pending_input` for why it is paid only in that window.
+PENDING_INPUT_PROBE_SQL = "SELECT 1"
+
+
+def _socket_has_pending_input(conn: Any) -> bool:
+    """Is there unread input on this handle's socket? **Locally, no round trip.**
+
+    The question `closed` and `transaction_status` cannot answer: both are
+    CLIENT-side caches, and psycopg2 only refreshes them when a statement touches
+    the socket. Measured on PG16 + psycopg2 2.9.13: a handle parked while its
+    backend was alive still reports `closed=0, transaction_status=IDLE` after
+    `pg_terminate_backend`, so the pool lent it out, the door's FIRST statement
+    raised ``OperationalError: server closed the connection unexpectedly``, and
+    one record was lost and counted ``write_failed`` (#12822's production
+    counter, ~0.6 % of writes on the hosted deployment).
+
+    A parked IDLE handle has nothing outstanding — psycopg2 consumes the whole
+    reply, notices included, before the caller sees a result — so unread input
+    means the peer spoke unasked, and only two things can have done that: it
+    ENDED the connection, or it SENT something (a `NOTIFY` to a session that
+    `LISTEN`s leaves a perfectly healthy handle readable). This function reports
+    only the readiness, because a local read cannot tell those two apart:
+    PostgreSQL's own shutdown sends a FATAL ErrorResponse before the FIN, so the
+    first byte pending on a dead connection is ``'E'``, not EOF (measured) —
+    sniffing it would be a second, silent copy of the wire format. The caller
+    asks the SERVER when this says yes (:func:`_verify_pending_input`).
+
+    Anything this cannot ask — a fake handle with no `fileno`, a driver that is
+    not socket-backed, an fd the poller refuses — is answered ``False`` ("nothing
+    is known to be pending").
+
+    ⛔ THE TWO DIRECTIONS ARE NOT SYMMETRIC, and this function's own caller makes
+    the difference load-bearing: ``True`` is what ADDS the verification
+    (``if _socket_has_pending_input(...) and not _verify_pending_input(...)``),
+    while ``False`` SKIPS it. ``False`` can never invent a discard — the caller
+    reads it as "nothing is known" — but skipping is exactly the fail-open this
+    module must not have quietly, and on a long-lived API process the case that
+    produces it is the normal one rather than an edge one: fds climb past 1023,
+    and ``select.select`` REFUSES an fd at or above ``FD_SETSIZE`` (measured:
+    ``select.select([1060], ...)`` raises ``ValueError: filedescriptor out of
+    range in select()``, whose ``except`` would have turned every borrow into
+    "nothing pending" — the corpse lent unchanged and #12822 open again, with no
+    counter and no log to show for it). Hence :func:`select.poll`, which has no
+    fd ceiling, is registered for ``POLLIN`` only, returns the same readiness and
+    consumes no byte. Where ``poll`` does not exist (Windows) this answers
+    ``False``: the pre-fix behaviour, never a wrong record.
+
+    Measured cost, 20 000 calls on an idle fd: **~1–2 µs/call** (1.7 µs on the
+    host this was developed against, 0.9 µs on a reviewer's), and it sends
+    nothing. A single-digit-microsecond claim, not a portable constant.
+    """
+    try:
+        fileno = conn.fileno()
+    except Exception:
+        return False
+    if not isinstance(fileno, int) or fileno < 0:
+        return False
+    try:
+        poller = select.poll()
+        poller.register(fileno, select.POLLIN)
+    except Exception:
+        return False
+    try:
+        return bool(poller.poll(0))
+    except Exception:
+        return False
+
+
+def _verify_pending_input(conn: Any) -> bool:
+    """Ask the server, ONCE, whether a handle with pending input is still usable.
+
+    ⛔ THE ROUND TRIP IS PAID ONLY IN THIS WINDOW, and that placement is the whole
+    design. A parked handle normally has a quiet socket, so the common borrow path
+    pays single-digit microseconds and nothing else; this runs only when the
+    readiness read found
+    input, which happens once per peer death and once per notification. That is
+    what makes it affordable to be CERTAIN: the alternative the module rejected
+    ("a health query per acquire … a round trip on every record") is exactly the
+    cost this avoids.
+
+    What it does on a HEALTHY handle is answer the pending input and leave the
+    handle as it was parked: the probe statement consumes whatever the peer sent,
+    and the `rollback()` clears the transaction the probe opened, so a NOTIFY that
+    a `LISTEN`ing session is entitled to stays delivered (measured: the
+    notification is still in `conn.notifies`) and the next borrower's transaction
+    starts clean. A statement that fails — the connection is gone, however the
+    driver words it — returns ``False`` and the caller DISCARDS the handle: the
+    next record gets a fresh connect instead of inheriting a corpse.
+
+    ⚠️ THE PAIR COSTS **TWO** ROUND TRIPS, and the honest price is stated rather
+    than hidden: the probe's own statement, then the `rollback()` that clears the
+    transaction it opened (measured on two hosts, shipped driver: **0.43–1.3 ms**
+    for the pair, against single-digit µs for a `rollback()` on an already-IDLE
+    handle). It is paid ONCE PER EVENT — a death or a notification — never per
+    record, which is what makes certainty affordable here; the common borrow
+    (quiet socket) pays no round trip at all. ⛔ The rollback is NOT dropped to
+    make this read as one round trip: `_reset_parked_transaction` would clear the
+    same transaction a line later in today's only caller, and depending on the
+    caller's next line is how a helper becomes a landmine for the next one.
+    """
+    try:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(PENDING_INPUT_PROBE_SQL)
+            cursor.fetchone()
+        finally:
+            with contextlib.suppress(Exception):
+                cursor.close()
+        conn.rollback()
+        return True
+    except Exception:
+        return False
+
+
 def _connection_is_reusable(conn: Any) -> bool:
     """Is this idle handle still attached to a live server connection?
 
@@ -1174,6 +1293,15 @@ def _connection_is_reusable(conn: Any) -> bool:
     `transaction_status == UNKNOWN` (psycopg2 has not, but the protocol says the
     link is gone). Neither touches the network — see :func:`_park_connection` for
     why the pool does not poke the server on every acquire.
+
+    ⛔ IT IS DELIBERATELY NOT THE WHOLE ANSWER ON THE BORROW PATH. Both fields are
+    client-side caches that psycopg2 refreshes only when a statement touches the
+    socket, so a handle parked IDLE whose peer died passes this and is a CORPSE
+    (#12822). :func:`_take_idle_connection` therefore follows it with
+    :func:`_socket_has_pending_input` + :func:`_verify_pending_input`, which ask
+    the socket and then — only if there is anything to ask about — the server.
+    The split matters at RELEASE (`_park_connection`), where a round trip is
+    forbidden: there the two local fields are all that may be paid.
 
     A handle that cannot even report its status — or a process where the driver
     cannot be imported — is NOT reusable, which fails towards the old
@@ -1223,11 +1351,22 @@ def _take_idle_connection(dsn: str) -> Any | None:
     be reset — is DISCARDED here rather than returned, so one record pays for a
     server restart and the next acquire connects fresh.
 
-    Every blocking step (the reset, and the discard's Terminate packet) happens
-    OUTSIDE the lock, one candidate at a time: `close()` is a socket write that
-    can block on a full send buffer, and holding the pool lock across it would
-    stall every other borrower and every release for that DSN behind one dead
-    handle.
+    ⛔ THE IDLE CASE IS THE ONE THAT LOST RECORDS (#12822). `closed` and
+    `transaction_status` cannot see a peer that hung up while the handle was
+    parked, so the borrow also reads the SOCKET (:func:`_socket_has_pending_input`,
+    ~1-2 µs, one `poll(0)` syscall, no round trip) and, only when something is
+    pending, asks the SERVER (:func:`_verify_pending_input`: one `SELECT 1` and
+    its rollback, i.e. two round trips, measured 0.43–1.3 ms). Quiet socket ⇒ NO
+    round trip; pending input ⇒ that verification, which is either a death found
+    or a notification delivered to a handle that then stays in service. Paying
+    it on EVERY borrow instead would be the "health query per acquire" this
+    module rejected, and skipping it is what let a corpse through.
+
+    Every blocking step (the verification, the reset, and the discard's Terminate
+    packet) happens OUTSIDE the lock, one candidate at a time: `close()` is a
+    socket write that can block on a full send buffer, and holding the pool lock
+    across it would stall every other borrower and every release for that DSN
+    behind one dead handle.
     """
     key = _pool_key(dsn)
     while True:
@@ -1237,6 +1376,14 @@ def _take_idle_connection(dsn: str) -> Any | None:
         if candidate is None:
             return None
         if _connection_is_reusable(candidate):
+            # A quiet socket is the normal case and costs nothing beyond the
+            # readiness read; pending input means the peer spoke, and only the
+            # server can say whether it spoke to end us or to notify us.
+            if _socket_has_pending_input(candidate) and not \
+                    _verify_pending_input(candidate):
+                with contextlib.suppress(Exception):
+                    candidate.close()
+                continue
             try:
                 _reset_parked_transaction(candidate)
             except Exception:
@@ -1480,9 +1627,17 @@ def _park_connection(key: str, conn: Any) -> None:
     an earlier version of this docstring asserted one answer for both and was
     wrong (#9558 review cycle 3, P1):
 
-    * the WRITE door's happy path parks IDLE, so the death is found at USE — one
-      ``write_failed`` per dead handle, healed by replay (the record's repair
-      story), and the breaker is NOT tripped because the record is reachable;
+    * the WRITE door's happy path parks IDLE, so nothing here touches its socket
+      and the reset below is a no-op for it. That door used to find the death at
+      USE — one lost record per dead handle, counted ``write_failed`` and healed
+      by replay, with the breaker correctly not tripped because the record is
+      reachable. ⛔ THE POOL NO LONGER ACCEPTS THAT COST: measured in production
+      at 8 lost writes / 1292 attempts (~0.6 %) for one hosted deployment, the
+      `write_failed` counter is what flipped `record.degraded` to true. The
+      BORROW path now reads the socket and, when anything is pending, asks the
+      server once (:func:`_take_idle_connection`), so the dead handle is
+      discarded before the door opens and the record is WRITTEN on a fresh
+      connect rather than lost and replayed (#12822);
     * the READ door parks INTRANS, so ``_reset_parked_transaction`` touches the
       socket BEFORE the door opens and discards the handle — the fresh connect is
       then paid by the pool, not by the caller as a ``RecordUnavailable``.
@@ -1574,6 +1729,7 @@ class RecordWriter:
         conn: Any | None = None,
         position: bool = True,
         allocate: bool = False,
+        carried_positions: bool = False,
     ) -> RecordWrite:
         """Apply `records` to the record, on a transaction the CALLER owns.
 
@@ -1604,6 +1760,19 @@ class RecordWriter:
             graph's cursor must exist in mode `active`
             (:mod:`tortoise.record_allocator`); a `seeded`/`halted`/absent
             cursor raises `CursorNotActive` rather than inventing a number.
+        :param carried_positions: **which shape this batch is** (#13043 review
+            P1-3), passed straight through to
+            :func:`record_projection.replay`. ``False`` (the default, and what
+            every production caller wants) means a **journal-sourced** batch:
+            `first_seq` enumerates, and a top-level ``seq`` property on a record
+            is IGNORED rather than trusted — that property is residue from the
+            pre-reservation SDK or a `:Session` copy, and reading it made one
+            legacy line refuse its own record's live write AND the only repair
+            for it. ``True`` means a **record-sourced** batch (rows read from
+            `public.journal_event`, whose ``seq`` is a column): the carried
+            number is READ and a disagreement with the enumeration is a refusal.
+            ⛔ Do not set this to describe what the records happen to CONTAIN;
+            it describes where they CAME FROM.
 
         :raises RecordWriteError: the record was ARMED and the write did not
             happen (malformed DSN, unreachable record, totality refusal, or a
@@ -1665,6 +1834,7 @@ class RecordWriter:
             report = record_projection.replay(
                 records, target, org_id=org_id, graph_id=graph_id,
                 start_seq=first_seq, position=position, allocate=allocate,
+                carried_positions=carried_positions,
             )
         except Exception as exc:
             # Totality (an undeclared/refused record type raises before the
@@ -1873,6 +2043,7 @@ def write_records(
     position: bool = True,
     allocate: bool = False,
     writer: RecordWriter | None = None,
+    carried_positions: bool = False,
 ) -> RecordWrite:
     """One-call form of :meth:`RecordWriter.write` — the chokepoint's entry point.
 
@@ -1883,11 +2054,14 @@ def write_records(
     have to invent one.
 
     ``allocate`` is passed through unchanged: #12894's allocator is a property
-    of the WRITE, not of this convenience wrapper.
+    of the WRITE, not of this convenience wrapper. ``carried_positions`` is
+    passed through for the same reason — it describes the batch's ORIGIN
+    (journal or record), not this call (#13043 review P1-3).
     """
     return (writer or RecordWriter()).write(
         records, org_id=org_id, graph_id=graph_id, first_seq=first_seq,
         conn=conn, position=position, allocate=allocate,
+        carried_positions=carried_positions,
     )
 
 
@@ -2520,7 +2694,9 @@ def write_live_record(record: Mapping[str, Any], *,
     (its docstring is explicit: "the row — not the mode — is the fact"), so an
     enumerated replay heals nothing on any graph that has one, WHATEVER
     ``allocate`` was on the write that failed. There the repair is an allocating
-    replay (``replay(allocate=True)``) or the allocator's operator path (see the
+    replay (``replay(allocate=True)`` — ⛔ a CODE CALL, not a CLI verb: nothing
+    outside `tests/` invokes it, so an operator cannot run it from this tree's
+    tools; #13043 review P2-9) or the allocator's operator path (see the
     ``position_unverifiable`` arm below). That
     contract is enforced, not just intended: every counter call goes through
     :func:`_count_write_failure`, which suppresses its own failures.
@@ -2588,13 +2764,40 @@ def write_live_record(record: Mapping[str, Any], *,
     record — N records used to cost N × 10 s inside one ``capture_session`` call,
     which is a wedged capture, not a degraded one.
 
-    ⚠️ RESIDUAL, stated rather than implied: a connection parked in the pool
-    whose server went away is not noticed until it is used, so a server restart
-    costs at most ONE ``write_failed`` record per dead handle (healed by replay —
-    the record's own repair story) instead of zero. The handle is DISCARDED at
-    release (see `_park_connection`), so the cost does not recur; a health query
+    ⚠️ RESIDUAL, stated rather than implied: the death is proven at BORROW, which
+    closes the window where a handle sat dead while PARKED — and only that one.
+    TWO windows open AFTER the borrow remain, and neither is silent — both still
+    count ONE ``write_failed`` record (healed by replay, unless the graph is cut
+    over): a death that lands between the borrow and the first statement, and a
+    peer that VANISHES without closing (a partition, a blackholed route): a
+    socket that never learns of the death has no pending input to verify. ⛔ THE
+    PROBE DECIDES NEITHER: it has already run when the first of them begins, and
+    closing that one needs a RETRY the door does not do (the failure is counted
+    and refused), while no check that PRECEDES the write can close the second.
+    The handle is DISCARDED the moment a death IS seen (see
+    :func:`_take_idle_connection`), so the cost is one record per DEATH rather
+    than one per following record.
+
+    ⛔ THE PARAGRAPH THIS REPLACES ACCEPTED ONE LOST RECORD PER DEAD HANDLE, and
+    its own reasoning was right about the option it considered: *"a health query
     per acquire would remove it entirely at the price of a round trip on every
-    record, which is not worth it for a FOLLOW-tier perf item.
+    record, which is not worth it"*. The option it did NOT consider is the one
+    taken here — read the LOCAL SOCKET first (readiness probe, measured
+    **~1–2 µs**, no round trip) and ask the server ONCE only when that read finds
+    something pending, which is where the round trip belongs: it is then a
+    question about a specific handle, not a tax on every record. The
+    measurement that made this worth doing: the hosted deployment lost 8 record
+    writes out of 1292 attempts (~0.6 %) to this exact path, monotonically, and
+    the ``write_failed`` counter is what flipped `record.degraded`; a pooler's
+    idle timeout, a failover or an operator restart is enough to produce it,
+    and on a CUT-OVER graph the enumerated replay that is supposed to heal it is
+    REFUSED (#12822). The lane measurement: 400 writes with the parked backends
+    terminated from outside, **18 lost before this change and 0 after** (one
+    command, both runs). The PIN is narrower and says so: `tests/test_9078…::
+    test_a_parked_handle_whose_backend_died_costs_a_reconnect_not_a_record`
+    writes TWICE around a real `pg_terminate_backend` and asserts the second one
+    is APPLIED with both rows present and the counter unmoved — it proves the
+    mechanism, and it is not the source of the 400-write figures above.
 
     ``seq`` is the record's OWN journal position — what `EventLog.append`
     returned (#9190). It is a fact of the journal, never an allocator: the replay
@@ -2737,9 +2940,18 @@ def write_live_record(record: Mapping[str, Any], *,
         return _refused(refusal, seq)
     assert tenant is not None  # the verdict only clears with a resolved pair
     # ⛔ THE SWITCH (#12894). Read AFTER the refusals above, so an unarmed or
-    # refused write is byte-identical whatever the flag says. An explicit
-    # `allocate=True` from a caller still means what it said — the flag can only
-    # turn the arm ON, never override a caller's decision.
+    # refused write is byte-identical whatever the flag says.
+    #
+    # ⚠️ AND IT **CAN** OVERRIDE A CALLER'S `allocate=False` (#13043 review P2-6).
+    # The sentence here used to say the flag "can only turn the arm ON, never
+    # override a caller's decision", which is false of the line below it: `or`
+    # short-circuits on TRUTHY, so `allocate=False` falls through to the flag and
+    # an ON deployment allocates whatever the caller passed. That is deliberate —
+    # the flag describes the DEPLOYMENT (one graph cut over ⇒ every writer on it
+    # allocates) and a per-call veto would let one caller write an enumerated row
+    # onto a counter-issued graph, which is the split the cutover invariant exists
+    # to prevent. A caller that must stay enumerated halts the GRAPH, it does not
+    # pass `False` here.
     allocate = allocate or record_live_allocate()
     org_id, graph_id = tenant
     connection: Any | None = None
@@ -2773,7 +2985,9 @@ def write_live_record(record: Mapping[str, Any], *,
             "the journal consumed a position the counter did not — so EVERY "
             "later armed write refuses for the same reason until the gap is "
             "closed (an ARMED replay of the missing record closes it one record "
-            "at a time, once the caller commits). For the whole gap the remedy "
+            "at a time, once the caller commits — but that is a CODE call "
+            "(`record_projection`'s `replay(..., allocate=True)`); there is no "
+            "CLI verb for it in this tree). For the whole gap the remedy "
             "is the allocator's operator path: `halt` -> "
             "`seed --journal` -> `reopen` -> `arm`; record=%s %s",
             RECORD_ALLOCATE_ENV, record.get("type"), _record_identity(record),
@@ -2876,8 +3090,38 @@ def write_live_record(record: Mapping[str, Any], *,
             allocated_first = write.first_seq
             if allocated_first != seq:
                 if connection is not None:
-                    with contextlib.suppress(Exception):
+                    # ⛔ LOG THE SUPPRESSED EXCEPTION (#13043 review P2-7). The
+                    # WARNING below asserts, as a FACT, that the allocation was
+                    # rolled back — and a `suppress(Exception)` around the
+                    # rollback could make that sentence false with nothing
+                    # anywhere recording it. The rollback is the half that keeps
+                    # the position from being BURNED, so a failure here is the
+                    # one thing this branch must not swallow silently.
+                    #
+                    # ⚠️ UNASSERTED, and named so a later reader does not take
+                    # it for coverage (#12894 review cycle 2 mutation table):
+                    # this arm is reachable only when `rollback()` ITSELF raises,
+                    # which no fake in the suite produces — the DB legs drive a
+                    # real connection that rolls back cleanly. Added rather than
+                    # dropped because the cost of the log line is nil and the
+                    # alternative (a silent `suppress`) makes the WARNING below
+                    # assert something nobody checked. A test for it needs a
+                    # connection double that raises on `rollback`; that is a
+                    # fake the seam does not otherwise accept, so it is recorded
+                    # here instead of invented.
+                    try:
                         connection.rollback()
+                    except Exception as rollback_exc:  # noqa: BLE001, RUF100
+                        _logger.warning(
+                            "the divergence guard could NOT roll the allocation "
+                            "back (%s: %s) — the counter may be one ahead of "
+                            "the rows. `record_allocator_cli.py status` reads "
+                            "both sides; a counter that is ahead is the state "
+                            "that EATS rows, so halt the graph before "
+                            "continuing",
+                            type(rollback_exc).__name__,
+                            _bounded_cause(rollback_exc),
+                        )
                 _count_write_failure("write_failed")
                 _logger.warning(
                     "the record write was REFUSED (position_divergence) — the "
@@ -3022,10 +3266,12 @@ def write_live_record(record: Mapping[str, Any], *,
             "row (cut over), in which case an enumerated replay is refused — "
             "and the remedy is the one the refusal below names for the row's "
             "MODE, not a chain that assumes `active`: `replay(allocate=True)` "
-            "needs mode='active', `halt` is scoped to 'active', `reopen` to "
+            "needs mode='active' (and is a CODE call — no CLI verb ships), "
+            "`halt` is scoped to 'active', `reopen` to "
             "'halted'. Run `record_allocator_cli.py status` for the mode"
             if not allocate else
-            "repair it with an ALLOCATING replay (`replay(allocate=True)`), not "
+            "repair it with an ALLOCATING replay (`replay(allocate=True)`, a "
+            "CODE call — no CLI verb ships), not "
             "a plain one, which a cut-over graph refuses",
             record.get("type"), _record_identity(record), exc,
         )

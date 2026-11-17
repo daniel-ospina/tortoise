@@ -1476,24 +1476,145 @@ def test_sc4_no_network_legacy_branch_still_embeds(tmp_path, monkeypatch):
 
 
 def test_sc4_deprecation_markers_present():
-    """T9 indicator: SDK docstring deprecation markers on the two frozen
-    legacy surfaces record the W3 divergence.
+    """T9 indicator: the W3 divergence is RECORDED on every surface that still exists.
 
-    `index_sessions` LEFT the public surface in #11609 lane C (it is one of the
-    seven SOURCES/MINE/SESSION names retired into the approved containers), so
-    its marker now lives on the private seam that kept the body — `_index_sessions`.
-    The indicator is about the MARKER and the divergence it records, not about
-    which door the marker hangs on, so this reads the seam the retirement
-    documents (`tortoise.sdk_retired`): asserting the public name here would
-    re-open a door the surface wave deliberately closed (#12901).
+    `ingest_corpus` and `_index_sessions` are both still live code (the second is the
+    private frozen path the RETIRED `tortoise_index_sessions` door fronts — its
+    retired-call shim still executes the handler), so both keep their in-code marker
+    AND a replacement that resolves: ``index_directory`` was itself retired by #4282
+    Phase 2 (`#11609`) into ``index_sources_from_directory``, so naming it was a
+    one-hop dead end — the same class the `tortoise_entity_profile`/
+    `tortoise_list_topics` pointer repair fixes in `tool_registry.py`.
+
+    The PUBLIC `index_sessions` name is gone (`#11609` batch 2), which is asserted
+    rather than assumed: `getattr` raising IS the migration being complete, and a
+    silently re-added alias would fail here. Its caller-facing pointer — the one a
+    caller actually reads — is the retired MCP door's, checked below.
     """
     from tortoise.sdk import TortoiseSDK  # noqa: I001
+    from tortoise.tool_registry import RETIRED_USE_INSTEAD
     import inspect
+    import re
+
+    # every still-live legacy surface carries its marker + a LIVE replacement
     for method_name in ("ingest_corpus", "_index_sessions"):
         doc = inspect.getdoc(getattr(TortoiseSDK, method_name)) or ""
         assert "DEPRECATED" in doc, f"{method_name} missing DEPRECATED marker"
-        assert "index_directory" in doc, \
-            f"{method_name} marker must name the replacement"
+        assert "index_sources_from_directory" in doc, \
+            (f"{method_name} marker must name the LIVE replacement "
+             "(index_directory is itself retired)")
+        # ⛔ The negative arm runs TWICE, and the second run is what closes the
+        # cross-paragraph escape (round 5 of #13085's review).
+        #
+        # The paragraph-scoped arm below is the one with the PRECISE message: it reads
+        # the DEPRECATED paragraph WHOLE, so it is blind neither to a directive that
+        # WRAPS across physical lines (`sdk.py:41302-41303`, `:55250-55251`) nor to an
+        # offer placed above or below the token.
+        #
+        # But a paragraph-scoped arm FAILS OPEN when the offer arrives in a SEPARATE
+        # paragraph. The shape that demonstrates it must keep the POSITIVE arm above
+        # satisfied — with the live name absent, the call reds there first and the
+        # escape is not observable at all. Measured (in-memory `__doc__` swap, real
+        # test function, no file edited):
+        #
+        #   "DEPRECATED — see the note below (epic #900).\n"
+        #   "The live path is index_sources_from_directory.\n\n"
+        #   "Use ``index_directory`` if the container is unavailable.\n"
+        #
+        # stayed GREEN at `5bc0f67f8d` — the head that carried the paragraph arm ALONE —
+        # and REDS from `7476af3597` on, when the blanket arm was added; it reds on that
+        # blanket arm and never reaches the scoped one. The word-delimited form this head
+        # uses reds the same shape the same way. That is the very defect this test exists
+        # to catch, so the blanket ban is not redundant belt-and-braces: it is the arm
+        # that catches it.
+        #
+        # The blanket ban is cheap HERE because it is measured, not assumed: at this
+        # head both in-scope docstrings carry ZERO occurrences of the retired name
+        # (`ingest_corpus` and `_index_sessions` are legacy surfaces that have nothing
+        # to record about what absorbed their old pointer — the live replacement is
+        # named in the same breath). If one later needs to RECORD the absorbed name,
+        # that red is intentional and instructive: this test's subject is a marker that
+        # OFFERS a live replacement, so such history belongs on the docstring of the
+        # method that absorbs it, not on these two.
+        #
+        # ⛔ Neither arm may match a SUBSTRING: `_index_directory` and
+        # `_index_directory_locked` are LIVE (`sdk.py:53928`, `:54038`), and the live
+        # `index_sources_from_directory` docstring itself says "See `_index_directory`
+        # for the return envelope" (`sdk.py:57204-57205`). A bare `in` therefore reds a
+        # perfectly good marker and calls it the retired name — measured. Both arms
+        # match a word-DELIMITED occurrence so the private seam may be named.
+        #
+        # Residual, one-sided on purpose: the paragraph arm keys on the word DEPRECATED,
+        # so a paragraph that merely MENTIONS it while recording history also reds —
+        # keep such history out of these two docstrings (the blanket ban says so).
+        retired = re.compile(r"(?<!\w)index_directory(?!\w)")
+        offending = [p.strip() for p in re.split(r"\n\s*\n", doc)
+                     if "DEPRECATED" in p and retired.search(p)]
+        assert not offending, (
+            f"{method_name}'s DEPRECATED paragraph offers the retired index_directory: "
+            f"{offending!r}")
+        # ...and the blanket ban catches the offer that arrives in a SEPARATE paragraph,
+        # which the scoped arm above provably misses (see the block comment).
+        assert not retired.search(doc), (
+            f"{method_name} names the retired ``index_directory`` anywhere in its "
+            "docstring — the live replacement is index_sources_from_directory, and "
+            "that is the only name this marker may offer (the private "
+            "_index_directory seam is still nameable)")
+
+    # the retired PUBLIC name is gone, and its frozen private path is still served
+    assert not hasattr(TortoiseSDK, "index_sessions"), \
+        "index_sessions is public again — the retirement has been undone"
+
+    # a caller who calls the retired name gets a ONE-hop LIVE pointer — the door is
+    # `tortoise_index_sessions`, NOT the transcript-capture door (#12951 review).
+    ptr = RETIRED_USE_INSTEAD.get("tortoise_index_sessions") or ""
+    assert "tortoise_index_sources_from_directory" in ptr, (
+        f"the retired session-index door must name its live container: {ptr!r}")
+    # ⛔ Match the CALL's keyword form, not the words' PRESENCE (round-7 review of
+    # #13085): `"file_type" in ptr and "agent_session" in ptr` is satisfied by prose —
+    # `tortoise_index_sources_from_directory(directory)  # file_type, agent_session`
+    # passes it with NO arguments at all, and `file_type` then defaults to `"auto"`,
+    # which is a different selection than agent-session-only (`sdk.py:57191-57194`:
+    # `file_type` is the discriminator the members collapse onto). Measured GREEN that
+    # way, so the arm asserted the words, not the question.
+    assert re.search(r"file_type\s*=\s*(['\"])agent_session\1", ptr), (
+        "the pointer must pass file_type=\"agent_session\" as an ARGUMENT — the "
+        "discriminator is what makes it the same question, and naming the words is "
+        f"not passing them: {ptr!r}")
+    # ...and the named container is ON the surface, not merely a string in the map:
+    # naming a retired destination is the two-hop class `#12948` F1 recorded.
+    # ⛔ Read it through `mcp_server._local_tool_component`, never by reaching into
+    # the provider's `_components` here: that helper OWNS the "is this name
+    # registered" question (and its `getattr` guards), so an upstream fastmcp layout
+    # change degrades to "not registered" there instead of an AttributeError in this
+    # test — and a second inline copy would be a second owner of that knowledge.
+    # ⛔ Read the name INSIDE the pointer, never a literal (round-4 review of #13085):
+    # a literal made this arm unable to see the pointer at all — a map re-pointed at
+    # an unregistered LOOK-ALIKE that still carries the live name as a substring
+    # (`…_v2(directory, file_type="agent_session")`) satisfied the two substring
+    # asserts above AND this one, so the arm was green over exactly the surface
+    # question it exists to answer.
+    # ⛔ …and PIN the target while resolving it (round-6 review of #13085). Resolving
+    # alone only asks "is the callee SOME registered tool": a pointer to a DIFFERENT
+    # registered container that merely carries the live name as decoration —
+    # `tortoise_manage_sources(directory, file_type="agent_session")  # tortoise_index_sources_from_directory`
+    # — resolves and stayed green. (Quote the arguments, not `(…)`: without them the
+    # pointer fails the discriminator arm above and never reaches this one, so the
+    # elided form is not the shape that escaped — round-7 review.) It was also
+    # measurably WEAKER than the literal it replaced,
+    # because it stopped asserting the live container is on the surface whenever the
+    # pointer was decorated. Two independent facts, so two assertions: the pointer must
+    # name the live container, AND that container must be registered.
+    import tortoise.mcp_server as _ms
+    live_container = "tortoise_index_sources_from_directory"
+    pointed = ptr.split("(", 1)[0].strip()
+    assert pointed == live_container, (
+        f"the retired session-index door points at {pointed!r}, not the live "
+        f"{live_container!r} — a pointer may carry a discriminator, not a different door")
+    assert _ms._local_tool_component(live_container) is not None, (
+        f"{live_container!r} is NOT on the registered surface, so the pointer's "
+        "destination resolves nowhere")
+
     # the divergence is RECORDED (the flag semantics differ between paths)
     doc = inspect.getdoc(TortoiseSDK.ingest_corpus) or ""
     assert "extract_metadata" in doc and "divergence" in doc.lower(), \
