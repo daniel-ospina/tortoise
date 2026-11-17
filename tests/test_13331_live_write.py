@@ -22,6 +22,7 @@ import types
 import pytest
 
 from tortoise import live_write
+from tortoise.reconciliation import ReconciliationReport
 from tortoise.record_projection import JournalCoverage
 from tortoise.record_reconcile import (
     EXIT_CLEAN,
@@ -35,9 +36,7 @@ from tortoise.record_reconcile import (
     log_result,
     reconcile_record_and_cache,
 )
-from tortoise.reconciliation import ReconciliationReport
 from tortoise.residency import ResidencyDeclaration
-
 
 # ── helpers ────────────────────────────────────────────────────────────────
 

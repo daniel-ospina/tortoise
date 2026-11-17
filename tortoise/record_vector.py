@@ -491,13 +491,24 @@ _READINESS: dict[tuple[str, str, str, str], tuple[float, bool]] = {}
 _READINESS_LOCK = threading.Lock()
 
 
-def _readiness_key(scope: _Scope, record_dsn: str | None) -> tuple[str, str, str, str]:
+def _readiness_key(scope: _Scope, record_dsn: str | None) -> tuple[str, str, str, str] | None:
+    """The cache key, or ``None`` when the DSN cannot be resolved.
+
+    ⛔ A MALFORMED DSN IS "NOT READY", not an exception into the search path.
+    `searcher` resolves the DSN before calling this, so the arm is unreachable
+    from there — but this function is also reachable from the public
+    :func:`journal_ready`, and the read path's rule is that a check which cannot
+    run keeps the graph branch (it never turns a search into a 500).
+    """
     # The DSN is keyed by its FINGERPRINT, never by value (#2903/#2796): this
     # dict is process-global and a raw DSN is secret material.
     from .record_writer import dsn_fingerprint
     from .record_writer import record_dsn as _resolve
 
-    dsn = _resolve(record_dsn) or ""
+    try:
+        dsn = _resolve(record_dsn) or ""
+    except Exception:
+        return None
     return (dsn_fingerprint(dsn) if dsn else "", scope.org_id,
             scope.graph_id, os.environ.get(RECORD_JOURNAL_ENV, ""))
 
@@ -585,6 +596,8 @@ def journal_ready(scope: _Scope, *, record_dsn: str | None = None,
         return False
     clock = time.monotonic() if now is None else now
     key = _readiness_key(scope, record_dsn)
+    if key is None:
+        return False
     with _READINESS_LOCK:
         cached = _READINESS.get(key)
     if cached is not None and clock - cached[0] < READINESS_TTL_SECONDS:

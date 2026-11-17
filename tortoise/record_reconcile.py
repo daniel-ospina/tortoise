@@ -714,6 +714,12 @@ class RecordReconcileResult:
         vacuous green this module refuses everywhere else: the operator is told
         the record holds every journal position when the count that would have
         shown a lag never ran.
+
+        ⚠️ AND WHEN BOTH ARE TRUE AT ONCE the order is: a MEASURED lag
+        (``unprojected_journal > 0``) outranks an empty cache comparison. The
+        cache side compared nothing, which is still true — but the journal leg
+        DID answer, and a measured disagreement must not be reported as "no
+        verdict", the reading that lets a lagging record sit unnoticed.
         """
         if self.divergent > 0:
             return VERDICT_DIVERGENT

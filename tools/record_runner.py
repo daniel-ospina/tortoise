@@ -314,31 +314,15 @@ class Checkpoint:
         return self.first_gap is None
 
 
-#: One scan, three facts: the high-water mark, the row count, and the LOW edge.
-#: ⛔ It no longer computes `lead()` — that column was never read here (the outer
-#: query is an aggregate over `seq` alone), so every `status`/`apply` paid a full
-#: sort of the graph's rows for a window function whose result was discarded, and
-#: `_FIRST_GAP_SQL` then paid the SAME sort again. `min(seq)` costs nothing on the
-#: same scan and is a fact the gap decision cannot do without.
-_CHECKPOINT_SQL = """
-SELECT coalesce(max(seq), 0) AS high,
-       count(*) AS present,
-       coalesce(min(seq), 0) AS low
-FROM public.journal_event
-WHERE org_id = %s AND graph_id = %s
-"""
-
-_FIRST_GAP_SQL = """
-WITH paged AS (
-    SELECT seq, lead(seq) OVER (ORDER BY seq) AS nxt
-    FROM public.journal_event
-    WHERE org_id = %s AND graph_id = %s
-)
-SELECT min(seq) + 1 AS gap
-FROM paged
-WHERE nxt IS NOT NULL AND nxt <> seq + 1
-"""
-
+#: ⛔ THE COVERAGE READ HAS ONE HOME (#13331). These two statements used to be
+#: declared HERE — this tool was the first reader of `journal_event`'s positions —
+#: but `record_reconcile` and the dense leg's per-tenant gate now ask the same two
+#: questions, and a second declaration is how two tools come to disagree about
+#: "how far has the record consumed". The SQL and the refusal on an unreadable
+#: aggregate live in `tortoise.record_projection.journal_coverage`; this tool keeps
+#: only what is ITS own: the LOW-EDGE rule below (a record whose rows start above
+#: 1 has consumed none of the prefix) and the `allocated` exemption that rule
+#: needs on a graph whose ordinals are issued.
 _CURSOR_SQL = """
 SELECT seq, mode FROM public.record_cursor WHERE org_id = %s AND graph_id = %s
 """
@@ -389,29 +373,19 @@ def read_checkpoint(conn: Any, org_id: str, graph_id: str, *,
     not short of anything. The caller states which arm it is on; this function
     does not guess.
     """
-    from tortoise.record_projection import scope_connection
+    from tortoise.record_projection import journal_coverage
 
-    cursor = scope_connection(conn, org_id)
-    cursor.execute(_CHECKPOINT_SQL, (org_id, graph_id))
-    row = cursor.fetchone()
-    if not row:
-        raise RunnerError(
-            "the record's checkpoint read returned no row — an aggregate over "
-            "an empty set always returns one, so this is not 'empty', it is "
-            "unreadable; refusing rather than reporting 0")
-    if isinstance(row, Mapping):
-        high, present, low = row["high"], row["present"], row["low"]
-    else:
-        high, present, low = row[0], row[1], row[2]
-    high, present, low = int(high or 0), int(present or 0), int(low or 0)
+    # ⛔ ONE READER, AND IT SCOPES THE CONNECTION ITSELF (#13331). This function
+    # used to declare its own pair of aggregates; `journal_coverage` is the one
+    # declaration now (the verb, the dense leg's gate and this tool all read
+    # `journal_event` the same way), and it installs the §R6 tenant GUC + role
+    # gate through `scope_connection` before its first SELECT — so calling that
+    # again here would be a second round trip for the same answer.
+    cov = journal_coverage(conn, org_id=org_id, graph_id=graph_id)
+    high, present, low = cov.high_seq, cov.present, cov.min_seq
     if present == 0:
         return Checkpoint(high_seq=0, present=0, first_gap=None, min_seq=0)
-    cursor.execute(_FIRST_GAP_SQL, (org_id, graph_id))
-    gap_row = cursor.fetchone()
-    gap = None
-    if gap_row:
-        raw = gap_row["gap"] if isinstance(gap_row, Mapping) else gap_row[0]
-        gap = int(raw) if raw is not None else None
+    gap = cov.first_gap
     if gap is None and not allocated and low > 1:
         # The record holds rows, and the lowest is above 1: the journal's PREFIX
         # was never folded. Resume at 1 — the unconsumed prefix is the whole job.
