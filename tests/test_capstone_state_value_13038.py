@@ -26,6 +26,7 @@ would make the instrument a rubber stamp — the one thing #13038 forbids.
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -1438,3 +1439,65 @@ def test_a_refused_run_still_drops_the_graph_it_ingested(monkeypatch, tmp_path):
     )
     assert rc == 1
     assert dropped == [True], "a refused run left its throwaway graph behind"
+
+
+def test_search_projects_through_the_served_row_helper():
+    """`_served_row` must be the LIVE projection, not a helper beside a duplicate copy.
+
+    The previous pin called the helper directly, so restoring the inline copy in `search()`
+    and dropping `redact=False` there — the exact defect this instrument must not have —
+    left every pin green (#13303 cycle 11).
+    """
+    src = inspect.getsource(cap.LocalTarget.search)
+    assert "_served_row(" in src, "search() built its rows inline again, bypassing the helper"
+    assert "redact=False" not in src.replace("_served_row(r)", ""), (
+        "search() redacts product rows inline again"
+    )
+
+
+def test_every_post_ingestion_refusal_drops_the_graph(monkeypatch, tmp_path):
+    """All four refusal gates route through ONE path, so `--drop-graph` cannot be skipped."""
+    dropped = []
+
+    class _NoTarget:
+        kind = "local"
+        uri = "docker://<redacted>@127.0.0.1:6379/x"
+        namespace = "fake"
+
+        def __init__(self):
+            self.capabilities = set()
+
+        def node_count(self):
+            return 0
+
+        def provenance(self):
+            return {}
+
+        def drop(self):
+            dropped.append(True)
+            return "dropped"
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    monkeypatch.setattr(cap, "DEFAULT_OUT", bundle)
+    monkeypatch.setattr(cap, "build_target", lambda *a, **k: _NoTarget())
+
+    # the sibling gate: a --verdicts-out that names a directory
+    rc = cap.main(
+        [
+            "run",
+            "--target",
+            "local",
+            "--judge",
+            "none",
+            "--out",
+            str(tmp_path / "scratch"),
+            "--verdicts-out",
+            str(tmp_path),
+            "--drop-graph",
+        ]
+    )
+    assert rc == 1
+    assert dropped == [True], (
+        "a run refused at the --verdicts-out gate left its throwaway graph behind"
+    )
