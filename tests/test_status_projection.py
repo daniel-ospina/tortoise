@@ -3057,15 +3057,28 @@ class TestNonScalarStatus12869:
 
             # (b) `_refuse_non_string_object_status`, the AMBIGUITY arm — the
             #     TARGET operand (its `{target!r}` is the whole message).
-            sdk.create_object("rr-amb", "core:strategy", status="live")
-            amb_id = _carrier_row(sdk, "Object", "rr-amb")[0]
+            #     ⛔ THIS ARM MUST ENTER THROUGH THE **CREATE** DOOR. The update
+            #     door never reaches this raise: `update_entity` asks the same
+            #     ambiguity question EARLIER and raises with an
+            #     already-safe `_np_safe_repr(id_val)`, so an update-door arm
+            #     here is VACUOUS — it passes with this site reverted to the raw
+            #     `!r` (MEASURED, and that is how a first cut of this test was
+            #     caught passing for the wrong reason).
             with pytest.raises(ValueError) as ei:
-                sdk.update_knowledge(RaisingReprStr(amb_id),
-                                     **{"status": "live",
-                                        KHash("status"): ["live"]})
+                sdk.create_object(RaisingReprStr("rr-amb"), "core:strategy",
+                                  **{"status": None,
+                                     KHash("status"): ["live"]})
             assert "RaisingReprStr" in str(ei.value), (
                 "the ambiguity refusal did not use `_refusal_repr` on its "
                 "target: " + str(ei.value))
+            assert "id-repr-boom" not in str(ei.value)
+            assert _carrier_row(sdk, "Object", "rr-amb") is None, (
+                "a refused conflicting create left a node behind")
+
+            # …and the same raise's message is unchanged for an ordinary `str`
+            # target (no over-correction: the helper still renders real ids).
+            sdk.create_object("rr-amb2", "core:strategy", status="live")
+            amb_id = _carrier_row(sdk, "Object", "rr-amb2")[0]
 
             # (c) `_refuse_non_string_object_status`, the TYPE arm — the SAME
             #     target operand, reached with a value that is a plain `list`
@@ -3075,7 +3088,7 @@ class TestNonScalarStatus12869:
             assert "RaisingReprStr" in str(ei.value), (
                 "the type refusal did not use `_refusal_repr` on its target: "
                 + str(ei.value))
-            assert _carrier_row(sdk, "Object", "rr-amb")[1] == "live", (
+            assert _carrier_row(sdk, "Object", "rr-amb2")[1] == "live", (
                 "a refused status write changed the row")
 
             # …and the VALUE operand of that same raise, which needs a target
